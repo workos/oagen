@@ -3793,9 +3793,12 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * inherits `ApiSpec.servers` — nothing usable is declared at either level
  * (`servers: []` and all-unusable entries included, since `extractServerList`
  * already reads both as undeclared), or the winning list restates the
- * document's. Precedence is applied before the comparison, so an operation
- * that restates the document's servers under a Path Item that diverges
- * inherits, not the Path Item's.
+ * document's — a restatement whose URLs differ only in scheme or host case,
+ * a default port or a `/` after a bare authority included, since
+ * `serverListsEqual` compares URLs through `normalizeServerUrl`. Precedence
+ * is applied before the comparison, so an operation that restates the
+ * document's servers under a Path Item that diverges inherits, not the Path
+ * Item's.
  *
  * OpenAPI's default server is one thing however it is spelled (#291): a list
  * that means it — no servers, `servers: []`, or nothing but `/`, by

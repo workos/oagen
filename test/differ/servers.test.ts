@@ -502,6 +502,177 @@ describe('diffServers', () => {
       expect(changes.map((c) => c.classification)).toEqual(['additive', 'additive']);
     });
   });
+
+  describe('URL spelling (issue #293)', () => {
+    const pets = server('https://pets.example.com');
+
+    it("reports nothing for a host that only changed case, the issue's case", () => {
+      expect(diffServers(spec([pets]), spec([server('https://PETS.example.com')]))).toEqual([]);
+    });
+
+    it('reports nothing for a scheme that only changed case', () => {
+      expect(diffServers(spec([pets]), spec([server('HTTPS://pets.example.com')]))).toEqual([]);
+    });
+
+    it("reports nothing for the scheme's default port written or dropped, or an empty port", () => {
+      expect(diffServers(spec([pets]), spec([server('https://pets.example.com:443')]))).toEqual([]);
+      expect(diffServers(spec([server('https://pets.example.com:443')]), spec([pets]))).toEqual([]);
+      expect(diffServers(spec([pets]), spec([server('https://pets.example.com:')]))).toEqual([]);
+      expect(
+        diffServers(spec([server('http://pets.example.com:80')]), spec([server('http://pets.example.com')])),
+      ).toEqual([]);
+    });
+
+    it('reports nothing for a `/` added after a bare authority', () => {
+      expect(diffServers(spec([pets]), spec([server('https://pets.example.com/')]))).toEqual([]);
+    });
+
+    it('reports nothing for a percent-encoded octet whose hex digits changed case', () => {
+      expect(
+        diffServers(spec([server('https://pets.example.com/%7eapi')]), spec([server('https://pets.example.com/~api')])),
+      ).toEqual([]);
+    });
+
+    it('still reports a path that changed case, as a moved baseUrl plus a removal and an addition', () => {
+      expect(
+        diffServers(spec([server('https://pets.example.com/v1')]), spec([server('https://pets.example.com/V1')])),
+      ).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://pets.example.com/v1',
+          newBaseUrl: 'https://pets.example.com/V1',
+          classification: 'breaking',
+        },
+        { kind: 'server-added', url: 'https://pets.example.com/V1', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://pets.example.com/v1', classification: 'breaking' },
+      ]);
+    });
+
+    it('still reports a trailing `/` added to a path, and a port that is not the default', () => {
+      expect(
+        diffServers(spec([server('https://pets.example.com/v1')]), spec([server('https://pets.example.com/v1/')])),
+      ).toHaveLength(3);
+      expect(diffServers(spec([pets]), spec([server('https://pets.example.com:8443')]))).toHaveLength(3);
+    });
+
+    it('still tells a template from what it resolves to, and a placeholder from one in another case', () => {
+      expect(diffServers(spec([regional]), spec([server('https://eu.api.example.com')]))).toHaveLength(2);
+      const folded = server('https://{Region}.api.example.com', { Region: { default: 'eu', enum: ['eu', 'us'] } });
+      expect(diffServers(spec([regional]), spec([folded]))).toHaveLength(2);
+    });
+
+    it('compares variable defaults and enum values as written', () => {
+      const upper = server('https://{region}.api.example.com', { region: { default: 'EU', enum: ['EU', 'us'] } });
+      expect(diffServers(spec([regional]), spec([upper])).map((c) => c.kind)).toEqual(['server-modified']);
+    });
+
+    it('reports a server matched across spellings with the new spelling, and its variable changes', () => {
+      const old = server('https://{region}.api.example.com', { region: { default: 'eu', enum: ['eu', 'us'] } });
+      const next = server('HTTPS://{region}.api.example.com', { region: { default: 'eu', enum: ['eu'] } });
+      expect(diffServers(spec([old]), spec([next]))).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'HTTPS://{region}.api.example.com',
+          variableChanges: [
+            { kind: 'variable-enum-value-removed', variableName: 'region', value: 'us', classification: 'breaking' },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('reports an added or removed server as written in the document that declares it', () => {
+      const changes = diffServers(
+        spec([pets, server('https://OLD.example.com')]),
+        spec([server('https://PETS.example.com'), server('https://New.example.com')]),
+      );
+      expect(changes).toEqual([
+        { kind: 'server-added', url: 'https://New.example.com', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://OLD.example.com', classification: 'breaking' },
+      ]);
+    });
+
+    it('matches a template declared more than once as a multiset across spellings', () => {
+      const url = 'https://{region}.api.example.com';
+      const old = [server(url, { region: { default: 'eu' } }), server(url, { region: { default: 'us' } })];
+      const next = [
+        server('HTTPS://{region}.api.example.com', { region: { default: 'us' } }),
+        server('Https://{region}.api.example.com', { region: { default: 'eu' } }),
+      ];
+      // Identical variables pair each entry with its twin, so only the first
+      // entry's move is reported.
+      expect(diffServers(spec(old), spec(next))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://eu.api.example.com',
+          newBaseUrl: 'HTTPS://us.api.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('pairs same-template servers by their resolved URL across spellings', () => {
+      const old = [
+        server('https://{region}.api.example.com', { region: { default: 'eu' }, port: { default: '443' } }),
+        server('https://{region}.api.example.com', { region: { default: 'ap' }, port: { default: '443' } }),
+      ];
+      const next = [
+        server('HTTPS://{region}.api.example.com', { region: { default: 'ap' }, port: { default: '8443' } }),
+        server('HTTPS://{region}.api.example.com', { region: { default: 'eu' }, port: { default: '9443' } }),
+      ];
+      // `baseUrl` is the first entry resolved: eu vs ap, a move. The pairs are
+      // found by resolved URL (host case aside) and each reports its own port.
+      const changes = diffServers(spec(old), spec(next));
+      expect(changes.map((c) => c.kind)).toEqual(['base-url-changed', 'server-modified', 'server-modified']);
+      expect(
+        changes.slice(1).map((c) => (c.kind === 'server-modified' ? c.variableChanges[0]?.newDefault : c)),
+      ).toEqual(['8443', '9443']);
+    });
+
+    it('still reports a `/` added after a placeholder that supplies the path, on a non-first server too (Greptile)', () => {
+      const basePath = { basePath: { default: '/v1' } };
+      const templated = server('https://api.example.com{basePath}', basePath);
+      const slashed = server('https://api.example.com{basePath}/', basePath);
+      // Resolved: `/v1` vs `/v1/`. As servers[0] the move is reported on baseUrl
+      // too; after the first it is still a removal plus an addition.
+      expect(diffServers(spec([templated]), spec([slashed])).map((c) => c.kind)).toEqual([
+        'base-url-changed',
+        'server-added',
+        'server-removed',
+      ]);
+      expect(diffServers(spec([staging, templated]), spec([staging, slashed]))).toEqual([
+        { kind: 'server-added', url: 'https://api.example.com{basePath}/', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://api.example.com{basePath}', classification: 'breaking' },
+      ]);
+    });
+
+    it('still reports a port dropped after a placeholder that may supply a path, on a non-first server (Greptile)', () => {
+      const host = { host: { default: 'api.example.com/v1' } };
+      const withPort = server('https://{host}:443/v2', host);
+      const without = server('https://{host}/v2', host);
+      // Resolved: `/v1:443/v2` vs `/v1/v2`. After a placeholder the authority
+      // is kept as written, so these are two templates.
+      expect(diffServers(spec([staging, withPort]), spec([staging, without]))).toEqual([
+        { kind: 'server-added', url: 'https://{host}/v2', classification: 'additive' },
+        { kind: 'server-removed', url: 'https://{host}:443/v2', classification: 'breaking' },
+      ]);
+      // The same two spellings with no placeholder are one server.
+      expect(
+        diffServers(
+          spec([staging, server('https://api.example.com:443/v2')]),
+          spec([staging, server('https://api.example.com/v2')]),
+        ),
+      ).toEqual([]);
+    });
+
+    it('reports nothing for a baseUrl that only changed spelling while the template did not', () => {
+      // The variable default moved from `EU` to `eu`: the resolved URL's host only
+      // changed case, which is no move, while the default is reported as written.
+      const old = server('https://{region}.api.example.com', { region: { default: 'EU' } });
+      const next = server('https://{region}.api.example.com', { region: { default: 'eu' } });
+      expect(diffServers(spec([old]), spec([next])).map((c) => c.kind)).toEqual(['server-modified']);
+    });
+  });
 });
 
 describe('diffSpecs — servers', () => {
@@ -593,6 +764,23 @@ describe('diffSpecs — servers', () => {
         parseSpec(resolve(fixtures, 'servers-before.json')),
       ]);
       expect(diffSpecs(a, b).changes).toEqual([]);
+    });
+  });
+
+  describe("the issue's documents (#293)", () => {
+    it('reports nothing for a host that only changed case, and keeps both URLs as written', async () => {
+      const [before, after] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-pets.json')),
+        parseSpec(resolve(fixtures, 'servers-pets-host-case.json')),
+      ]);
+      expect(before.baseUrl).toBe('https://pets.example.com');
+      expect(after.baseUrl).toBe('https://PETS.example.com');
+      expect(after.servers).toEqual([{ url: 'https://PETS.example.com', description: undefined }]);
+
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([]);
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0, behaviorChanges: 0 });
+      expect(diffSpecs(after, before).changes).toEqual([]);
     });
   });
 });

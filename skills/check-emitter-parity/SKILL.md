@@ -90,7 +90,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — API-level description for the root client class doc comment
 - `externalDocs` — The document's link to fuller documentation (`url`, optional `description`), for a `@see`-style doc tag
-- `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults)
+- `servers` — Server entries (url, description, variables with default/enum/description; `resolveServerUrl` fills a template's defaults, `normalizeServerUrl` gives the RFC 3986 form two spellings of one URL share)
 - `webhooks` — Requests the API sends to its users (OpenAPI 3.1 `webhooks`), each with a payload type, the headers it carries, and the `summary`, `description` and `externalDocs` an operation has
 
 #### Service
