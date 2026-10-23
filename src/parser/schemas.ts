@@ -4121,6 +4121,18 @@ export function schemaToTypeRef(
   // that cannot take them reported, and then one classification decides
   // which keyword types the schema — the same one the inline-model
   // extractors dispatch on, so the models they build are the ones referenced.
+  // A schema no branch below types is `unknown` — decided by
+  // `typesAsUnknown`, the one answer a reader that must know before typing
+  // asks (`bodyIsTyped`, for the primary response) — with a warning for a
+  // shape the parser does not read; an empty `{}` describes nothing on
+  // purpose and is not reported.
+  if (typesAsUnknown(schema)) {
+    if (contextName && !describesNothing(schema)) {
+      console.warn(`[oagen] Warning: Unknown schema shape treated as unknown (context: ${contextName})`);
+    }
+    return { kind: 'primitive', type: 'unknown' };
+  }
+
   warnOnUncarriedProperties(schema, contextName, parentModelName);
   schema = foldSiblingProperties(schema);
   const inlineKind = classifyInlineSchema(schema);
@@ -4453,24 +4465,31 @@ export function schemaToTypeRef(
   }
 
   // Handle primitives
-  const primitiveMap: Record<string, 'string' | 'integer' | 'number' | 'boolean'> = {
-    string: 'string',
-    integer: 'integer',
-    number: 'number',
-    boolean: 'boolean',
-  };
-
   const typeStr = Array.isArray(schema.type) ? schema.type[0] : schema.type;
-  if (typeStr && primitiveMap[typeStr]) {
+  if (typeStr && PRIMITIVE_TYPES[typeStr]) {
     return {
       kind: 'primitive',
-      type: primitiveMap[typeStr],
+      type: PRIMITIVE_TYPES[typeStr],
       ...(schema.format ? { format: schema.format } : {}),
     };
   }
 
-  // Empty schema {} → unknown
-  if (
+  // Unreachable: every shape no branch above types was answered at the top
+  // (`typesAsUnknown` holds exactly for those).
+  return { kind: 'primitive', type: 'unknown' };
+}
+
+/** The `type` keywords `schemaToTypeRef` reads as a primitive, and the primitive each becomes. */
+const PRIMITIVE_TYPES: Record<string, 'string' | 'integer' | 'number' | 'boolean'> = {
+  string: 'string',
+  integer: 'integer',
+  number: 'number',
+  boolean: 'boolean',
+};
+
+/** An empty schema — `{}`, or one with annotations only: none of the keywords that type a schema. */
+function describesNothing(schema: SchemaObject): boolean {
+  return (
     !schema.type &&
     !schema.$ref &&
     !schema.oneOf &&
@@ -4479,15 +4498,42 @@ export function schemaToTypeRef(
     !schema.enum &&
     !schema.properties &&
     !schema.items
-  ) {
-    return { kind: 'primitive', type: 'unknown' };
-  }
+  );
+}
 
-  // Fallback: treat unknown schemas as unknown
-  if (contextName) {
-    console.warn(`[oagen] Warning: Unknown schema shape treated as unknown (context: ${contextName})`);
+/**
+ * Whether `schemaToTypeRef` types `schema` as the bare `unknown` primitive,
+ * decided without typing it — the one answer, which `schemaToTypeRef`
+ * itself returns on, so a reader that must know before a body is typed
+ * (`bodyIsTyped`, choosing the primary response) never disagrees with the
+ * type it then gets. It holds for a schema no branch of `schemaToTypeRef`
+ * types: no `$ref`; no type list except one naming a single type without
+ * `null` (an empty list is `nullable<unknown>`, `null` beside one type is
+ * nullable, several types are a union); no `nullable: true` beside a
+ * `type`; then, once sibling properties are folded into a typing
+ * composition (`foldSiblingProperties`), a classification of `other`
+ * (`classifyInlineSchema`: no composition, union, `const`, `enum`, array,
+ * object or map) with no primitive `type` — `{}`, `{ nullable: true }`, a
+ * `type` no rule knows, `type: 'array'` without `items`, a bare
+ * `additionalProperties` without `type: 'object'` — or a lone `allOf`
+ * member read as the schema itself (`readInlineAllOf`: `'unwrapped'`)
+ * that is such a schema. Warns about nothing.
+ */
+export function typesAsUnknown(schema: SchemaObject): boolean {
+  if (schema.$ref) return false;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
   }
-  return { kind: 'primitive', type: 'unknown' };
+  if (schema.nullable && schema.type) return false;
+  const folded = foldSiblingProperties(schema);
+  const kind = classifyInlineSchema(folded);
+  if (kind === 'allOf' && folded.allOf) {
+    return readInlineAllOf(folded.allOf, folded) === 'unwrapped' && typesAsUnknown(folded.allOf[0]);
+  }
+  if (kind !== 'other') return false;
+  const typeStr = Array.isArray(folded.type) ? folded.type[0] : folded.type;
+  return !(typeStr && PRIMITIVE_TYPES[typeStr]);
 }
 
 import {

@@ -9,13 +9,14 @@ import type {
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import {
+  classifyInlineSchema,
   isArraySchema,
   isInlineObjectSchema,
   nullableUnionBranch,
   resolveComponentSchemaRef,
   unwrapNullableSchema,
 } from './schemas.js';
-import { combineDeclarations } from './inline-models.js';
+import { combineDeclarations, readInlineAllOf } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -324,9 +325,48 @@ function classifyEndField(
         ? 'totalCount'
         : undefined;
   if (!kind) return undefined;
-  const resolved = resolveBareSchema(schema, componentSchemas);
-  const fits = kind === 'hasMore' ? hasType(resolved, 'boolean') : isNumeric(resolved);
-  return fits ? kind : undefined;
+  return endFieldFits(kind, resolveBareSchema(schema, componentSchemas)) ? kind : undefined;
+}
+
+/**
+ * Whether a stop field's bare schema (`resolveBareSchema`) has the type its
+ * kind is tested against: a `boolean` for `hasMore`, an `integer` or
+ * `number` for `totalPages` and `totalCount`, under a type list too. The one
+ * test for a field detection names and for one an override names.
+ */
+function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObject): boolean {
+  return kind === 'hasMore' ? hasType(schema, 'boolean') : isNumeric(schema);
+}
+
+/**
+ * Why an explicit `endOfIteration` cannot be read from a body whose
+ * properties are `properties`, or `undefined` when it can. `properties` is
+ * the map a detected stop field is read from — the body's own and every
+ * `allOf` member's, through `$ref`s and nullable wrappers, as
+ * `detectEndOfIteration` receives it — so an override and detection look at
+ * one map: a field detection would read is one an override may name, and a
+ * field it would not see is not there for an override either. `end.path` is
+ * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
+ * through `$ref`s, `allOf` members and nullable wrappers at every further
+ * segment), and the field it lands on must fit `end.kind` by the test
+ * detection applies to a field it names (`endFieldFits`), under
+ * `resolveBareSchema` as a detected one is. With no `properties` — an
+ * operation whose primary response declares no body — the path resolves to
+ * nothing.
+ *
+ * The text is the reason alone; the caller names the override's source and
+ * the operation, and says what it does about it.
+ */
+export function endOfIterationProblem(
+  end: PaginationEndOfIteration,
+  properties: Record<string, SchemaObject | undefined> | undefined,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  const target = properties && resolveSchemaPath({ properties }, end.path, componentSchemas);
+  if (!target) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
+  if (endFieldFits(end.kind, resolveBareSchema(target, componentSchemas))) return undefined;
+  const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
+  return `endOfIteration path "${end.path}" is not ${expected} field, as kind "${end.kind}" requires`;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -338,13 +378,27 @@ function isNumeric(schema: SchemaObject): boolean {
 }
 
 /**
- * The schema under every `$ref` and nullable wrapper: a `$ref` is followed
- * to its component, a nullable wrapper — an OAS 3.1 type list naming
- * `'null'`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
- * variant — is stripped by `unwrapNullableSchema`, the one definition the
- * model side unwraps by, and the two alternate until the schema is neither,
- * so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with `Tags: { type:
- * ['array', 'null'], items }` reaches the array. A `$ref` met a second time
+ * The schema under every `$ref`, nullable wrapper and lone `allOf` member:
+ * a `$ref` is followed to its component; a nullable wrapper — an OAS 3.1
+ * type list naming `'null'`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf`
+ * with one non-null variant — is stripped by `unwrapNullableSchema`, the
+ * one definition the model side unwraps by; and an `allOf` with one member
+ * that is what types the schema (`classifyInlineSchema`: a `$ref` member,
+ * or an inline member with a type of its own — not an `allOf` of bare
+ * limits beside the schema's own `type`) is read as that member exactly
+ * when `schemaToTypeRef` types the schema as it (`readInlineAllOf`:
+ * `'unwrapped'` or `'reference'`; a `required` beside a lone `$ref`
+ * member makes the schema the merged model, which is left as written), so
+ * `has_more: { allOf: [{ $ref: Flag }], description }` with `Flag: { type:
+ * boolean }` is a boolean here as it is in the IR. The three alternate
+ * until the schema is
+ * none of them, so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with
+ * `Tags: { type: ['array', 'null'], items }` reaches the array. Sibling
+ * `properties` are folded into the `allOf` by the unwrap
+ * (`foldSiblingProperties`), so a member with properties beside it is
+ * never alone, and an `allOf` of several members is left as written for
+ * the readers that merge them (`objectProperties`,
+ * `collectObjectProperties`). A `$ref` met a second time
  * (`Flag: { oneOf: [{ $ref: Flag }, { type: 'null' }] }`) ends the walk on
  * the reference instead of looping on it, as `resolveSchemaKeyword` and
  * `objectProperties` stop; so does a `$ref` with no component map or to no
@@ -364,7 +418,12 @@ export function resolveBareSchema(
     return resolved ? resolveBareSchema(resolved, componentSchemas, seen) : schema;
   }
   const bare = unwrapNullableSchema(schema);
-  return bare.$ref ? resolveBareSchema(bare, componentSchemas, seen) : bare;
+  if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
+  const lone =
+    bare.allOf?.length === 1 && classifyInlineSchema(bare) === 'allOf' && readInlineAllOf(bare.allOf, bare) !== 'merged'
+      ? bare.allOf[0]
+      : undefined;
+  return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
 }
 
 function isNullSchema(schema: SchemaObject): boolean {
@@ -661,9 +720,14 @@ export function resolvePaginationOverride(
  * parameter in use (default: `derivePageStart` on the IR parameter alone).
  *
  * Returns `detected` unchanged when there is no override or it is unusable —
- * no strategy or no `param` from any source, a resolved `param`/`limitParam`
- * the operation does not declare as a query parameter — after an `[oagen]
- * Warning:` naming the problem. `strategy: 'none'` yields `undefined`.
+ * no strategy or no `param` from any source, a `pageStart` under a strategy
+ * other than `page`, a resolved `param`/`limitParam` the operation does not
+ * declare as a query parameter, one parameter resolved as both — after an
+ * `[oagen] Warning:` naming the problem (`resolveOverrideParams`). An
+ * explicit `endOfIteration` is checked against the primary response before
+ * this is reached (`endOfIterationProblem`, asked by `extractResponses`), so
+ * one that arrives here resolves and fits. `strategy: 'none'` yields
+ * `undefined`.
  */
 export function applyPaginationOverride(
   detected: PaginationMeta | undefined,
@@ -722,9 +786,13 @@ export function applyPaginationOverride(
 /**
  * The strategy, `param` and `limitParam` an override resolves to against
  * what was detected, or the reason it cannot apply (the text of the warning
- * `applyPaginationOverride` emits). Shared with `buildOperation`, which asks
- * before classification whether an override will be usable, so an override
- * that will be rejected never changes how the response is read.
+ * `applyPaginationOverride` emits): no strategy from any source, a
+ * `pageStart` under a strategy other than `page`, no `param` from any
+ * source, a resolved `param` or `limitParam` the operation does not declare
+ * as a query parameter, or one query parameter resolved as both. Shared with
+ * `buildOperation`, which asks before classification whether an override
+ * will be usable, so an override that will be rejected never changes how
+ * the response is read.
  */
 export function resolveOverrideParams(
   detected: PaginationMeta | undefined,
@@ -733,6 +801,14 @@ export function resolveOverrideParams(
 ): { strategy: PaginationStrategy; param: string; limitParam?: string } | { problem: string } {
   const strategy = merged.strategy === 'none' ? undefined : (merged.strategy ?? detected?.strategy);
   if (!strategy) return { problem: ' sets no strategy and none was detected — ignoring the override' };
+  // A first page number means nothing to an iterator that does not count
+  // pages, so one set for another strategy is a contradiction, not a field
+  // to drop quietly.
+  if (merged.pageStart !== undefined && strategy !== 'page') {
+    return {
+      problem: `: pageStart ${merged.pageStart} applies to the "page" strategy only, not to "${strategy}" — ignoring the override`,
+    };
+  }
   const param = merged.param ?? declaredParamFor(strategy, queryParams) ?? detected?.param;
   if (!param) {
     return {
@@ -751,6 +827,13 @@ export function resolveOverrideParams(
       return { problem: `: ${key} "${name}" is not a query parameter of the operation — ignoring the override` };
     }
   }
+  // The two are checked against each other as resolved, so `{ param:
+  // 'limit' }` next to a detected `limitParam: 'limit'` is caught as surely
+  // as an override that names the same parameter twice: one parameter
+  // cannot carry both the page and the page size.
+  if (param === limitParam) {
+    return { problem: `: param and limitParam both name "${param}" — ignoring the override` };
+  }
   return { strategy, param, ...(limitParam !== undefined && { limitParam }) };
 }
 
@@ -768,10 +851,14 @@ function declaredParamFor(strategy: PaginationStrategy, queryParams: Parameter[]
 }
 
 /**
- * Check one override object. Returns the typed hint with only the keys the
- * author set, or `undefined` after a warning when any field is malformed. An
- * unknown key is reported and skipped without invalidating the rest, and a
- * key set to `undefined` counts as absent.
+ * Check one override object's shape. Returns the typed hint with only the
+ * keys the author set, or `undefined` after a warning when any field is
+ * malformed. An unknown key is reported and skipped without invalidating the
+ * rest, and a key set to `undefined` counts as absent. What the fields say
+ * about the operation — whether the parameters are declared, the `dataPath`
+ * reaches an array, the `endOfIteration` resolves to a field of the fitting
+ * type — is checked later, against the operation (`resolveOverrideParams`,
+ * `endOfIterationProblem`).
  */
 export function validatePaginationHint(raw: unknown, source: string, opLabel: string): PaginationHint | undefined {
   const where = `${source} on ${opLabel}`;
@@ -826,6 +913,7 @@ export function validatePaginationHint(raw: unknown, source: string, opLabel: st
   return out;
 }
 
+/** The shape alone: a known `kind` and a non-empty `path`. Whether the path resolves is `endOfIterationProblem`'s question. */
 function validateEndOfIteration(value: unknown): PaginationEndOfIteration | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const { kind, path } = value as { kind?: unknown; path?: unknown };
