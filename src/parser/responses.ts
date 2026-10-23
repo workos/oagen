@@ -1,6 +1,9 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
 import { toPascalCase, singularize } from '../utils/naming.js';
 import {
+  arraySchemaOf,
+  collectObjectProperties,
+  declaresNull,
   detectEndOfIteration,
   endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
@@ -18,15 +21,14 @@ import {
   foldSiblingProperties,
   isArrayComponentRef,
   isArraySchema,
-  isInlineObjectSchema,
   collapsedNullableBranch,
-  nullableUnionBranch,
-  unwrapNullableSchema,
   warnOnUncarriedProperties,
+  withWrapperDocs,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
   collectProperties,
+  combineDeclarations,
   extractInlineModelsFromProperties,
   mergeAllOfMembers,
   mergedObjectSchema,
@@ -241,7 +243,7 @@ export function classifyAndExtractResponse(
  * explicit `dataPath`, read beside the array the path names — the one
  * reader for every kept wrapper, whatever wraps it. The wrapper's
  * properties are collected exactly as a recognized envelope's are
- * (`collectEnvelopeProperties`, which reads the body and every `allOf`
+ * (`collectObjectProperties`, which reads the body and every `allOf`
  * member, however deep, through `resolveBareSchema` — the resolver the path
  * walk uses — so a `$ref` body, a nullable wrapper around the body or
  * around any member, and a `$ref` chain to one all reach the same object
@@ -257,7 +259,7 @@ function bodyEndOfIteration(
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration | undefined {
-  const { properties } = collectEnvelopeProperties(schema, componentSchemas);
+  const { properties } = collectObjectProperties(schema, componentSchemas);
   return detectEndOfIteration(properties, dataPath, componentSchemas);
 }
 
@@ -265,7 +267,7 @@ function bodyEndOfIteration(
  * Why an explicit `endOfIteration` cannot be read from `schema`, or
  * `undefined` when it can: the override's counterpart of
  * `bodyEndOfIteration`, over the very property map that reader collects
- * (`collectEnvelopeProperties`), so a field detection would read is one an
+ * (`collectObjectProperties`), so a field detection would read is one an
  * override may name and a field it would not see is not there for an
  * override either; `endOfIterationProblem` then walks the path and tests
  * the type. `schema` is the body as written — a `$ref`, an `allOf`, a
@@ -277,7 +279,7 @@ export function bodyEndOfIterationProblem(
   schema: SchemaObject | undefined,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  const properties = schema && collectEnvelopeProperties(schema, componentSchemas).properties;
+  const properties = schema && collectObjectProperties(schema, componentSchemas).properties;
   return endOfIterationProblem(end, properties, componentSchemas);
 }
 
@@ -362,10 +364,18 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
 
   if (propSources.length === 0) return { isEnvelope: false, dataPath: null };
 
-  // Merge all properties into a single view
-  const mergedProps: Record<string, SchemaObject | undefined> = {};
+  // Merge all properties into a single view. A name two members declare is
+  // settled as every `allOf` merge settles it (`combineDeclarations`): the
+  // first declaration that declares a type, a typeless one only annotating
+  // it, so `data: { type: 'array' }` beside a later `data: { description }`
+  // is still the array detection looks for.
+  const mergedProps: Record<string, SchemaObject> = {};
   for (const source of propSources) {
-    Object.assign(mergedProps, source);
+    for (const [key, prop] of Object.entries(source)) {
+      if (!prop) continue;
+      const existing = mergedProps[key];
+      mergedProps[key] = existing ? combineDeclarations(existing, prop) : prop;
+    }
   }
 
   // Find array properties — typed, `items` with no `type`, or either under a
@@ -427,7 +437,7 @@ function extractListResponse(
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
-  const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
+  const { properties, required } = collectObjectProperties(schema, componentSchemas);
 
   const dataProp = properties[dataPath];
   // The property's own text, as `buildFieldFromSchema` keeps it for every
@@ -539,27 +549,6 @@ export function resolveDataPathFromSchema(
 }
 
 /**
- * The array schema `schema` is, once a nullable wrapper of any spelling is
- * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
- * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
- * written with or without `items` beside it — and `undefined` when it is
- * not an array: `unwrapNullableSchema`, the one definition the model side
- * unwraps by, then `isArraySchema`, the one test every site makes. So a
- * list envelope's data array, an array response body and an `allOf`-merged
- * array property are arrays here whatever wrapper they wear, as
- * `schemaToTypeRef` types them `nullable<array<…>>`. A `$ref` is a reference
- * and is not looked through: a `$ref` to an array component is typed as the
- * array the component declares by `schemaToTypeRef` itself, with the items
- * the component pass built (`isArrayComponentRef` says whether a property
- * is one), and the explicit `dataPath` walk (`resolveBareSchema`) is the one
- * place any other reference is followed.
- */
-function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
-  const bare = unwrapNullableSchema(schema);
-  return isArraySchema(bare) ? bare : undefined;
-}
-
-/**
  * Type an array's items and materialize every model they reference, as a
  * field named `itemName` under no parent: `schemaToTypeRef` names the
  * reference and `extractInlineModelsFromProperties` builds the models, and
@@ -627,129 +616,6 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
     .join('');
   const own = singularize(toPascalCase(segments[segments.length - 1]));
   return contextName.replace(/Response$/, '') + parents + own;
-}
-
-/**
- * Every property the envelope declares, merged across its `allOf` members,
- * with the `required` lists that go with them.
- *
- * Every node the walk meets — the body, then each `allOf` member, however
- * deep — is read through `resolveBareSchema`, the resolver the explicit
- * `dataPath` walk reads the document with: a `$ref` is followed to its
- * component and a nullable wrapper of any spelling (a type list naming
- * `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
- * variant) is stripped, however the two alternate. So fields an envelope
- * inherits from a shared base (`trace_id` on every response, say) are not
- * silently dropped whether the member is written `$ref: Base`, `{ oneOf: [{
- * $ref: Base }, { type: 'null' }] }`, a `$ref` to such a wrapper, or an
- * `allOf` nested inside one — and a stop field declared in any of them is
- * read. The one place the walk resolves a node, so the companions and the
- * stop field are read from the same shape, at every level, that the path
- * walk reaches the data array through. One `seen` runs through the whole
- * walk: the `$ref` strings `resolveBareSchema` records as it follows them,
- * handed to every call the walk makes, so a reference reached inside a
- * wrapper is as seen as one written on the member; and, for an inline
- * node, the schema object itself. No node is entered twice, under whatever
- * wrapper or at whatever depth it reappears, so a component that reaches
- * itself (`Base.allOf` holding `{ oneOf: [{ $ref: Base }, { type: 'null'
- * }] }`, or `{ $ref: Base }` outright), two components that reach each
- * other, and a document whose objects form a cycle are each read once and
- * end the walk where they repeat. An `allOf` member's own `properties`
- * beside its `allOf` are folded in as its first member
- * (`foldSiblingProperties`, through `unwrapNullableSchema`). A property
- * declared by more than one member keeps both declarations' shape when both
- * are inline objects — `pagination.next` from one member and
- * `pagination.total` from another both belong to the response — and
- * otherwise takes the later declaration. (Envelope detection reads the
- * members' own `properties`; a `oneOf`/`anyOf` member with more than one
- * non-null variant declares none, so it contributes nothing here. A body
- * that is not an envelope is merged by `mergeAllOfMembers`, which reads such
- * a member's variants.)
- */
-function collectEnvelopeProperties(
-  schema: SchemaObject,
-  componentSchemas?: Record<string, SchemaObject>,
-): { properties: Record<string, SchemaObject>; required: string[] } {
-  const properties: Record<string, SchemaObject> = {};
-  const required: string[] = [];
-  const seenRefs = new Set<string>();
-  const seenNodes = new WeakSet<SchemaObject>();
-
-  const visit = (s: SchemaObject): void => {
-    if (seenNodes.has(s)) return;
-    seenNodes.add(s);
-    const bare = resolveBareSchema(s, componentSchemas, seenRefs);
-    // A reference the walk has followed already, or one nothing resolves:
-    // the walk ends on it, as the resolver did.
-    if (bare.$ref) return;
-    for (const sub of bare.allOf ?? []) visit(sub);
-    for (const [key, prop] of Object.entries(bare.properties ?? {})) {
-      if (!prop) continue;
-      const existing = properties[key];
-      properties[key] = existing ? mergePropertyDeclarations(existing, prop) : prop;
-    }
-    if (bare.required) required.push(...bare.required);
-  };
-  visit(schema);
-
-  return { properties, required };
-}
-
-/**
- * Combine two `allOf` declarations of one property. Inline objects merge their
- * fields. Two arrays, each under a nullable wrapper of any spelling or none
- * (`arraySchemaOf`), merge as the bare arrays they wrap, so the `items` land
- * in the one array that is then read, whichever declaration wore the wrapper:
- * the later declaration's keywords over the earlier's, the later `items` when
- * it narrows them and the earlier `items` when the later declaration only
- * constrains the array (`minItems: 1`) or allows any item (`items: {}`), so
- * `data: User[]` is not downgraded to `string[]` or `unknown[]`; the result
- * is `type: ['array', 'null']` when either declaration admits `null`, else
- * `type: 'array'`, and carries the later `description`, else the earlier.
- * Anything else takes the later declaration.
- */
-function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
-  if (isInlineObjectSchema(earlier) && isInlineObjectSchema(later)) {
-    return {
-      ...earlier,
-      ...later,
-      properties: { ...earlier.properties, ...later.properties },
-      required: [...(earlier.required ?? []), ...(later.required ?? [])],
-    };
-  }
-  const earlierArray = arraySchemaOf(earlier);
-  const laterArray = earlierArray && arraySchemaOf(later);
-  if (earlierArray && laterArray) {
-    const narrows = laterArray.items !== undefined && Object.keys(laterArray.items).length > 0;
-    const items = narrows ? laterArray.items : earlierArray.items;
-    const description = later.description ?? earlier.description;
-    const { nullable: _earlierFlag, ...earlierBare } = earlierArray;
-    const { nullable: _laterFlag, ...laterBare } = laterArray;
-    return {
-      ...earlierBare,
-      ...laterBare,
-      ...(items !== undefined && { items }),
-      ...(description !== undefined && { description }),
-      type: declaresNull(earlier) || declaresNull(later) ? ['array', 'null'] : 'array',
-    };
-  }
-  return later;
-}
-
-/**
- * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
- * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
- * `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to
- * one non-null variant (`nullableUnionBranch`). The one test for the places
- * the response path builds an array TypeRef itself (`nullableIf`) or merges
- * two array declarations (`mergePropertyDeclarations`).
- */
-function declaresNull(schema: SchemaObject): boolean {
-  return (
-    (Array.isArray(schema.type) && schema.type.includes('null')) ||
-    (schema.nullable === true && schema.type !== undefined) ||
-    nullableUnionBranch(schema) !== undefined
-  );
 }
 
 /**
@@ -913,11 +779,25 @@ function extractWrappedResource(
   };
 }
 
+/**
+ * `wrapper` is the single-member `allOf` wrapper the body was unwrapped
+ * from, when it was (the `'unwrapped'` reading below): the schema the
+ * document wrote for the body, whose `description` and link the type built
+ * from the member takes, as `schemaToTypeRef` gives the same wrapper on a
+ * field or a parameter (`withWrapperDocs`). It reaches only the one site
+ * that types the member itself, the fall-through at the end, so an inline
+ * enum body under the wrapper lifts with the wrapper's text; a model built
+ * from an object member keeps the member's own `description`, as a field's
+ * does. Through nested wrappers the outermost text wins, then the next, then
+ * the member's own: each level composes its own wrapper with the one handed
+ * down before passing it on.
+ */
 function extractDirectResource(
   schema: SchemaObject,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
   settle?: ItemSettlement,
+  wrapper?: SchemaObject,
 ): ResponseExtractionResult {
   const inlineModels: Model[] = [];
 
@@ -946,10 +826,13 @@ function extractDirectResource(
   // a copy of the component under its own name); a ref no component answers
   // is that reference too. A second `$ref`, or a `required` beside the
   // `$ref`, makes the body the merge below, as it makes a field (every
-  // component's properties and every `required` kept). A lone member is
-  // the body itself, carrying the wrapper's limits, flag and link
-  // (`unwrappedAllOfMember`), read by the branches of this function as if
-  // written in its place. Every other
+  // component's properties and every `required` kept). A lone member with
+  // nothing added to it is the body itself, carrying the wrapper's limits,
+  // flag and link (`unwrappedAllOfMember`), read by the branches of this
+  // function as if written in its place, and the type built from it takes
+  // the wrapper's text and link too (`wrapper`, see above); a `required`
+  // beside a lone object member makes the body the merge too, so `name`
+  // stays required. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
@@ -966,7 +849,8 @@ function extractDirectResource(
     }
     if (reading === 'unwrapped') {
       const member = unwrappedAllOfMember(schema, schema.allOf[0]!);
-      return extractDirectResource(member, contextName, componentSchemas, settle);
+      const outer = wrapper ? withWrapperDocs(schema, wrapper) : schema;
+      return extractDirectResource(member, contextName, componentSchemas, settle, outer);
     }
     const merged = mergeAllOfMembers(schema, componentSchemas);
     const mergedRefFields = merged.resolvedRefs.length > 0;
@@ -1060,8 +944,13 @@ function extractDirectResource(
     known.add(model.name);
     inlineModels.push(model);
   }
+  // The one site that types the unwrapped member itself: it carries the
+  // wrapper's text and link, as the type builder gives the same wrapper on
+  // a field (`withWrapperDocs`), so an inline enum lifted here documents
+  // itself by the wrapper. The models materialized above are built from the
+  // member as written.
   return {
-    response: schemaToTypeRef(schema, contextName),
+    response: schemaToTypeRef(wrapper ? withWrapperDocs(schema, wrapper) : schema, contextName),
     inlineModels,
     isPaginated: false,
   };

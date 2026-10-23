@@ -350,4 +350,60 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     envelope.allOf!.unshift({ oneOf: [envelope, { type: 'null' }] });
     expectRead(classifyAndExtractResponse(envelope, 'ListPetsResponse'));
   });
+
+  it('types a companion two members declare as every allOf merge does: by the first typing declaration, annotated by a typeless one (Greptile)', () => {
+    const data = { type: 'array', items: { type: 'string' } };
+    const typed: SchemaObject = { type: 'object', properties: { data, has_more: { type: 'boolean' } } };
+    const doc: SchemaObject = { type: 'object', properties: { has_more: { description: 'More pages' } } };
+    // Whichever member is read first, `has_more` stays a boolean and ends the iteration.
+    for (const members of [
+      [typed, doc],
+      [doc, typed],
+    ]) {
+      const result = classifyAndExtractResponse({ allOf: members }, 'ListPetsResponse');
+      expect(result.envelopeFields).toEqual([
+        { name: 'has_more', type: { kind: 'primitive', type: 'boolean' }, required: false, description: 'More pages' },
+      ]);
+      expect(result.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+    }
+    // Greptile's case: the component's own boolean beside its `allOf`, which
+    // the walk folds in first, keeps its type against a member's description.
+    // Nothing beside `data` marks an envelope, so the body is a wrapper the
+    // explicit `dataPath` keeps, and its stop field is read from the fold.
+    const Base: SchemaObject = {
+      properties: { has_more: { type: 'boolean' } },
+      allOf: [{ type: 'object', properties: { has_more: { description: 'More pages' } } }],
+    };
+    const viaRef = classifyAndExtractResponse(
+      { allOf: [{ $ref: '#/components/schemas/Base' }, { type: 'object', properties: { data } }] },
+      'ListPetsResponse',
+      { Base },
+      { dataPathOverride: 'data' },
+    );
+    expect(viaRef.isPaginated).toBe(false);
+    expect(viaRef.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+    expect(viaRef.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+  });
+
+  it('still recognizes the envelope when a later member only describes the data array (Greptile)', () => {
+    const typed: SchemaObject = {
+      type: 'object',
+      properties: {
+        data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+        has_more: { type: 'boolean' },
+      },
+    };
+    const described: SchemaObject = { type: 'object', properties: { data: { description: 'The pets' } } };
+    for (const members of [
+      [typed, described],
+      [described, typed],
+    ]) {
+      const result = classifyAndExtractResponse({ allOf: members }, 'ListPetsResponse');
+      expect(result.isPaginated).toBe(true);
+      expect(result.dataPath).toBe('data');
+      expect(result.dataDescription).toBe('The pets');
+      expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'Pet' } });
+      expect(result.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+    }
+  });
 });

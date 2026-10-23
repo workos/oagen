@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collectEnumRefs, collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
-import type { ApiSpec, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #309: an iterator is driven only by a query parameter the operation
@@ -69,7 +69,11 @@ describe('a list envelope on an operation without a paging parameter (issue #309
 
   const warnings = (): string[] => warn.mock.calls.map((call: unknown[]) => String(call[0]));
 
-  /** Every model and enum reference, from operations and model fields alike, resolves, and every model is referenced. */
+  /**
+   * Every model and enum reference, from operations and model fields alike,
+   * resolves; every model is referenced; and every `discriminator.mapping`
+   * target names a variant of its union.
+   */
   function expectSound(ir: ApiSpec): void {
     const modelNames = new Set(ir.models.map((m) => m.name));
     const enumNames = new Set(ir.enums.map((e) => e.name));
@@ -79,15 +83,29 @@ describe('a list envelope on an operation without a paging parameter (issue #309
       ...ir.models.flatMap((m) => m.fields.map((f) => f.type)),
     ];
     const unresolved: string[] = [];
+    const inconsistentMappings: string[] = [];
+    const visit = (ref: TypeRef): void => {
+      if (ref.kind === 'union') {
+        const variantNames = new Set(ref.variants.flatMap((variant) => collectModelRefs(variant)));
+        for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
+          if (!variantNames.has(target)) inconsistentMappings.push(`${value} → ${target}`);
+        }
+        for (const variant of ref.variants) visit(variant);
+      } else if (ref.kind === 'array') visit(ref.items);
+      else if (ref.kind === 'nullable') visit(ref.inner);
+      else if (ref.kind === 'map') visit(ref.valueType);
+    };
     for (const ref of refs) {
       for (const name of collectModelRefs(ref)) {
         referenced.add(name);
         if (!modelNames.has(name)) unresolved.push(name);
       }
       for (const name of collectEnumRefs(ref)) if (!enumNames.has(name)) unresolved.push(name);
+      visit(ref);
     }
     expect(unresolved).toEqual([]);
     expect([...modelNames].filter((name) => !referenced.has(name))).toEqual([]);
+    expect(inconsistentMappings).toEqual([]);
   }
 
   /** The operation has no iterator, and its response is the envelope as a plain model with exactly `fields`. */
@@ -466,6 +484,87 @@ describe('a list envelope on an operation without a paging parameter (issue #309
       expect(op.response).toEqual({ kind: 'model', name: 'Pet' });
       expect(op.pagination).toBeUndefined();
       expect(ir.models.find((m) => m.name === 'Pet')?.fields.map((f) => f.name)).toEqual(['object', 'name']);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+  });
+
+  describe('a kept envelope on a later status code keeps its own shape (Greptile, round 2)', () => {
+    const plainId = {
+      description: 'ok',
+      content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+    };
+    const envelopeAt = (description: string) => ({
+      description,
+      content: { 'application/json': { schema: totalPagesEnvelope } },
+    });
+    const withResponses = (responses: Record<string, unknown>, parameters: unknown[] = []) => {
+      const doc = petsSpec(parameters, totalPagesEnvelope);
+      doc.paths['/pets'].get.responses = responses as (typeof doc.paths)['/pets']['get']['responses'];
+      return doc;
+    };
+    const fieldsOf = (ir: ApiSpec, model: string) => ir.models.find((m) => m.name === model)?.fields.map((f) => f.name);
+
+    it("Greptile's case: a 200 { id } and a 201 kept envelope are two models, the 201 keeping data and total_pages", async () => {
+      const ir = await parseJson(withResponses({ '200': plainId, '201': envelopeAt('created') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, { kind: 'model', name: 'ListPetsResponse' }],
+        [201, { kind: 'model', name: 'ListPetsResponse201' }],
+      ]);
+      expect(fieldsOf(ir, 'ListPetsResponse')).toEqual(['id']);
+      expect(fieldsOf(ir, 'ListPetsResponse201')).toEqual(['data', 'total_pages']);
+      // The warning concerns the primary body, which is no envelope here.
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('identical kept envelopes on a 200 and a 201 share one model', async () => {
+      const ir = await parseJson(withResponses({ '200': envelopeAt('ok'), '201': envelopeAt('created') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.successResponses?.map((r) => r.type)).toEqual([
+        { kind: 'model', name: 'ListPetsResponse' },
+        { kind: 'model', name: 'ListPetsResponse' },
+      ]);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse']);
+      expect(fieldsOf(ir, 'ListPetsResponse')).toEqual(['data', 'total_pages']);
+      expect(warnings()).toEqual([warningFor('no cursor, offset or page query parameter is declared')]);
+      expectSound(ir);
+    });
+
+    it('an envelope on a 3xx is never paged: the redirect entry stays untyped and its body is a plain content model', async () => {
+      const ir = await parseJson(withResponses({ '200': plainId, '302': envelopeAt('moved') }));
+      const op = onlyOperation(ir);
+      expect(op.pagination).toBeUndefined();
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, { kind: 'model', name: 'ListPetsResponse' }],
+        [302, { kind: 'primitive', type: 'unknown' }],
+      ]);
+      // A 3xx body is typed on its own content entry, as every 3xx body is,
+      // never unwrapped and never the operation's response.
+      const redirect = op.successResponses?.find((r) => r.statusCode === 302);
+      expect(redirect?.contents?.map((c) => [c.contentType, c.type])).toEqual([
+        ['application/json', { kind: 'model', name: 'ListPetsApplicationJsonResponse' }],
+      ]);
+      expect(fieldsOf(ir, 'ListPetsApplicationJsonResponse')).toEqual(['data', 'total_pages']);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse', 'ListPetsApplicationJsonResponse']);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('an unwrapped 201 envelope beside a 200 { id } still becomes the bare array when a parameter pages it', async () => {
+      const ir = await parseJson(
+        withResponses({ '200': plainId, '201': envelopeAt('created') }, [query('after', 'string')]),
+      );
+      const op = onlyOperation(ir);
+      expect(op.successResponses?.map((r) => r.type)).toEqual([
+        { kind: 'model', name: 'ListPetsResponse' },
+        { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+      ]);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse']);
       expect(warnings()).toEqual([]);
       expectSound(ir);
     });
