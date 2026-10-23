@@ -469,6 +469,126 @@ describe('Enum.description on inline enums', () => {
     expectEnumsSound(spec);
   });
 
+  it("a single-member allOf wrapper at every site gives its text to the enum, and the member's only when it has none (Greptile)", async () => {
+    const wrapped = (values: string[], wrapperText: string | undefined, memberText?: string) => ({
+      ...(wrapperText !== undefined ? { description: wrapperText } : {}),
+      allOf: [{ type: 'string', enum: values, ...(memberText !== undefined ? { description: memberText } : {}) }],
+    });
+    const json = (schema: unknown) => ({ 'application/json': { schema } });
+    const spec = await parseDocument(
+      document(
+        {
+          '/modes': {
+            post: {
+              operationId: 'createMode',
+              parameters: [
+                { name: 'kind', in: 'query', schema: wrapped(['x', 'y'], 'Wrapper kind.', 'Member kind.') },
+                { name: 'X-Mode', in: 'header', schema: wrapped(['p', 'q'], undefined, 'Member mode.') },
+              ],
+              requestBody: {
+                content: {
+                  ...json(wrapped(['on', 'off'], 'Wrapper request.', 'Member request.')),
+                  'text/csv': { schema: wrapped(['yes', 'no'], 'Wrapper csv.') },
+                },
+              },
+              responses: {
+                '200': {
+                  description: 'ok',
+                  headers: { 'X-Policy': { schema: wrapped(['retry', 'stop'], 'Wrapper policy.', 'Member policy.') } },
+                  content: {
+                    // Greptile's case: the body is unwrapped by the response path before it is typed.
+                    ...json(wrapped(['a', 'b'], 'Wrapper', 'Member')),
+                    'application/yaml': { schema: wrapped(['c', 'd'], 'Wrapper yaml.') },
+                  },
+                },
+                '202': { description: 'queued', content: json(wrapped(['pending', 'done'], 'Wrapper 202.')) },
+                '204': { description: 'empty', content: json(wrapped(['ok', 'skipped'], undefined, 'Member 204.')) },
+                '404': { description: 'missing', content: json(wrapped(['unknown', 'gone'], 'Wrapper 404.')) },
+                '5XX': { description: 'down', content: json(wrapped(['retry', 'wait'], 'Wrapper 5XX.')) },
+                default: { description: 'other', content: json(wrapped(['e', 'f'], 'Wrapper default.')) },
+              },
+            },
+          },
+        },
+        {
+          webhooks: {
+            petAdopted: {
+              post: {
+                parameters: [{ name: 'X-Source', in: 'header', schema: wrapped(['app', 'web'], 'Wrapper source.') }],
+                requestBody: { content: json(wrapped(['adopted', 'returned'], 'Wrapper payload.', 'Member payload.')) },
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+          components: {
+            schemas: {
+              Pet: {
+                type: 'object',
+                properties: {
+                  size: wrapped(['s', 'l'], 'Wrapper size.', 'Member size.'),
+                  // Nested wrappers: the outermost text with content wins.
+                  deep: {
+                    description: 'Outer.',
+                    allOf: [{ description: 'Middle.', allOf: [{ type: 'string', enum: ['u', 'v'] }] }],
+                  },
+                  deepBare: {
+                    description: 'Outer bare.',
+                    allOf: [{ allOf: [{ type: 'string', enum: ['u2', 'v2'], description: 'Inner bare.' }] }],
+                  },
+                  deepMiddle: {
+                    allOf: [{ description: 'Middle only.', allOf: [{ type: 'string', enum: ['u3', 'v3'] }] }],
+                  },
+                  nullableUnder: {
+                    description: 'Outer nullable.',
+                    allOf: [{ oneOf: [{ type: 'string', enum: ['n1', 'n2'] }, { type: 'null' }] }],
+                  },
+                  // An object member's model keeps the member's own text.
+                  objectUnder: {
+                    description: 'Outer object.',
+                    allOf: [{ type: 'object', properties: { a: { type: 'string' } }, description: 'Inner object.' }],
+                  },
+                },
+              },
+            },
+          },
+        },
+      ),
+    );
+
+    expect(texts(spec.enums)).toEqual([
+      { name: 'PetSize', description: 'Wrapper size.' },
+      { name: 'PetDeep', description: 'Outer.' },
+      { name: 'PetDeepBare', description: 'Outer bare.' },
+      { name: 'PetDeepMiddle', description: 'Middle only.' },
+      { name: 'PetNullableUnder', description: 'Outer nullable.' },
+      { name: 'ModesKind', description: 'Wrapper kind.' },
+      { name: 'ModesXMode', description: 'Member mode.' },
+      { name: 'ModesXPolicy', description: 'Wrapper policy.' },
+      { name: 'CreateModeRequest', description: 'Wrapper request.' },
+      { name: 'CreateModeResponse', description: 'Wrapper' },
+      { name: 'CreateModeResponse202', description: 'Wrapper 202.' },
+      { name: 'CreateModeResponse204', description: 'Member 204.' },
+      { name: 'CreateModeError404', description: 'Wrapper 404.' },
+      { name: 'CreateModeApplicationYamlResponse', description: 'Wrapper yaml.' },
+      { name: 'CreateModeDefaultResponse', description: 'Wrapper default.' },
+      { name: 'CreateModeError5Xx', description: 'Wrapper 5XX.' },
+      { name: 'CreateModeTextCsvRequest', description: 'Wrapper csv.' },
+      { name: 'PetAdoptedXSource', description: 'Wrapper source.' },
+      { name: 'PetAdoptedPayload', description: 'Wrapper payload.' },
+    ]);
+    // The body types are the enums themselves, bare or nullable.
+    const [createMode] = allOperations(spec);
+    expect(createMode.response).toEqual({ kind: 'enum', name: 'CreateModeResponse', values: ['a', 'b'] });
+    expect(createMode.requestBody).toEqual({ kind: 'enum', name: 'CreateModeRequest', values: ['on', 'off'] });
+    expect(byName(byName(spec.models, 'Pet').fields, 'nullableUnder').type).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'enum', name: 'PetNullableUnder', values: ['n1', 'n2'] },
+    });
+    // Model descriptions are untouched: the object member's own text.
+    expect(byName(spec.models, 'PetObjectUnder').description).toBe('Inner object.');
+    expectEnumsSound(spec);
+  });
+
   it('the first inline schema lifted under a name decides the text, as it decides the values and the link', async () => {
     const sort = (description?: string) => ({
       name: 'sort',

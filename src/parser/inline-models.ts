@@ -1756,8 +1756,11 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
  * `extractConstraints`), so they ride along with the member and the model
  * built from it carries the same constraints; its `deprecated` is the
  * wrapper's alone, as `Field.deprecated` reads it, and its link is the
- * wrapper's too, when the wrapper has one — the one keyword `schemaToTypeRef`
- * carries onto the member it types (`withWrapperExternalDocs`).
+ * wrapper's too, when the wrapper has one (`withWrapperExternalDocs`). The
+ * wrapper's `description` is not carried: the model built from the member
+ * keeps the member's own. The type `schemaToTypeRef` builds from the same
+ * member takes the wrapper's text as well as its link (`withWrapperDocs`),
+ * so an inline enum under the wrapper is documented by the wrapper.
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
   return withWrapperExternalDocs(
