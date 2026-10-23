@@ -603,14 +603,15 @@ export function extractOperations(
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
-  // models it minted), and a reference it wrote by sharing another site's
-  // model — the registry matched the shape of a primary body's model or a
-  // companion's — joins that site's roots, so a merge pass that renames the
-  // model (a deprecated copy named like a live one) repoints the `default`
-  // response or header that shares it along with the site's own references.
+  // models it minted). A reference any site wrote by sharing another site's
+  // model — a deferred body or header the registry matched to a primary
+  // body's model or a companion's, an array body's items it matched to an
+  // earlier operation's model — joins that site's roots, so a merge pass
+  // that renames the model (a deprecated copy named like a live one)
+  // repoints every response, header and array that shares it along with
+  // the site's own references.
   inlineModelBundles.push(...deferredTypes.bundles);
-  attachSharedDeferredRefs(
-    deferredTypes.bundles,
+  attachSharedRefs(
     inlineModelBundles,
     new Set([...(componentModels ?? []), ...(componentFieldModels ?? [])].map((model) => model.name)),
   );
@@ -2500,9 +2501,10 @@ function buildOperation(
   // list-envelope companion is (`GetLegacyWidgetWidget`).
   const qualifier = toPascalCase(operationName);
   const inlineModelBundles: InlineModelBundle[] = [];
-  if (responseModels.length > 0) {
-    inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
-  }
+  // The response site is recorded even when it minted nothing: its array
+  // items may have shared another site's model (`typeInlineItems`), and the
+  // reference must follow that model's rename (`attachSharedRefs`).
+  inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   if (reqBodyModels.length > 0 && requestBody) {
     inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
@@ -3681,7 +3683,7 @@ function resolveDeferredInlineTypes(
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
-    // model minted nothing here, see `attachSharedDeferredRefs`).
+    // model minted nothing here, see `attachSharedRefs`).
     bundles.push({
       qualifier: item.operationQualifier,
       roots: [type],
@@ -3693,32 +3695,38 @@ function resolveDeferredInlineTypes(
 }
 
 /**
- * Give each reference a deferred schema wrote by sharing another site's model
- * to that site. A deferred shape identical to a name's owner — a primary
- * body's model, a companion's, an earlier deferred model — takes the name and
- * mints nothing, so its reference is not among the owner's roots, and a merge
- * pass that renames the owner (a deprecated copy named like a live one,
- * `settleSharedNames`) would leave the `default` response or header on
- * the old name, which the live copy then takes. The first site to mint a
- * name owns it, as the registry decided; the references the deferred site's
- * roots and its own models' fields make to that name are added to the
- * owner's roots, so they are repointed with the owner's own. A component is
- * never renamed, so a reference to one is left alone.
+ * Give each reference a site wrote by sharing another site's model to that
+ * site. A shape identical to a name's owner takes the name and mints
+ * nothing — a deferred header or body matching a primary body's model or a
+ * companion's, an array body's or list envelope's items matching a
+ * component field's model or an earlier operation's (`typeInlineItems`
+ * through `materializeInlineSchema`) — so its reference is not among the
+ * owner's roots, and a merge pass that renames the owner (a deprecated copy
+ * named like a live one, `settleSharedNames`) would leave the
+ * `default` response, header or array on the old name, which the live copy
+ * then takes. The first site to mint a name owns it, as the registry
+ * decided; the references every other site's roots and its own models'
+ * fields make to that name are added to the owner's roots, so they are
+ * repointed with the owner's own. A reference to a name the site itself
+ * minted is the site's own, not shared, and is left to its own bundle — two
+ * operations minting one name with different shapes are the merge's
+ * business, and attaching one to the other would drag a live copy's
+ * references along with a renamed deprecated one; a component is never
+ * renamed, so a reference to one is left alone. Idempotent: run over the
+ * operations' bundles once they are complete (`extractOperations`) and again
+ * once the components' field bundles exist (`parseSpec`).
  */
-function attachSharedDeferredRefs(
-  deferredBundles: readonly InlineModelBundle[],
-  bundles: readonly InlineModelBundle[],
-  componentNames: ReadonlySet<string>,
-): void {
+export function attachSharedRefs(bundles: readonly InlineModelBundle[], componentNames: ReadonlySet<string>): void {
   const siteOf = new Map<string, InlineModelBundle>();
   for (const bundle of bundles) {
     for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
   }
-  for (const bundle of deferredBundles) {
+  for (const bundle of bundles) {
+    const own = new Set(bundle.models.map((model) => model.name));
     const refs = [...bundle.roots, ...bundle.models.flatMap((model) => collectModelTypeRefs(model))];
     for (const ref of refs) {
       for (const name of collectModelRefs(ref)) {
-        if (componentNames.has(name)) continue;
+        if (componentNames.has(name) || own.has(name)) continue;
         const site = siteOf.get(name);
         if (site && site !== bundle && !site.roots.includes(ref)) site.roots.push(ref);
       }
