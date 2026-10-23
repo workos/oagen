@@ -1,5 +1,5 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
-import { assertNever, collectModelRefs, renameModelRefs, walkTypeRef } from '../ir/types.js';
+import { assertNever, collectModelRefs, renameModelRefs, renameTypeRefModels } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
 import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
@@ -197,7 +197,8 @@ export function companionBundles(
 
 /**
  * Rename a companion's models to `names` (index-aligned with `models`) and
- * repoint every reference, in its field and inside its models.
+ * repoint every reference, in its field and inside its models — a union
+ * companion's discriminator mapping with its variants (`renameTypeRefModels`).
  */
 function renameCompanion(companion: EnvelopeCompanion, names: string[]): void {
   const renames = new Map<string, string>();
@@ -207,15 +208,7 @@ function renameCompanion(companion: EnvelopeCompanion, names: string[]): void {
   });
   if (renames.size === 0) return;
 
-  const repoint = (ref: TypeRef): void => {
-    walkTypeRef(ref, {
-      model: (r) => {
-        const renamed = renames.get(r.name);
-        if (renamed !== undefined) (r as { name: string }).name = renamed;
-      },
-    });
-  };
-  repoint(companion.field.type);
+  renameTypeRefModels(companion.field.type, renames);
   for (const model of companion.models) {
     model.name = renames.get(model.name) ?? model.name;
     renameModelRefs(model, renames);

@@ -6,6 +6,7 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { nameInlineVariantEntries, schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
 import {
   MAX_ELEMENT_CONTEXT_ATTEMPTS,
+  deepModelFingerprint,
   elementContextDecision,
   extractInlineModelsFromProperties,
   extractInlineModelsFromSchemas,
@@ -4251,6 +4252,44 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(alike).map(isContestedTitle)).toEqual([false, false]);
     });
 
+    it('reads a union object one root reuses under another claim group against that group (Greptile)', () => {
+      // `shape` nests two unions giving `Circle` two shapes: the second's is
+      // skipped there, since the first already claimed the title for the
+      // group. The second union object is reused under `wrapper.marker`,
+      // where it starts a group of its own and keeps `Circle` — so the two
+      // shapes meet under one root, and both are contested, whichever
+      // property the walk reaches the shared object from first.
+      for (const markerFirst of [false, true]) {
+        const first = byRadius();
+        const second = byDiameter();
+        const shape: SchemaObject = { oneOf: [first, second] };
+        const wrapper = obj({ marker: second });
+        markContestedTitles({
+          components: { schemas: { Holder: obj(markerFirst ? { wrapper, shape } : { shape, wrapper }) } },
+        });
+        expect(variantsOf(first).map(isContestedTitle)).toEqual([true, true]);
+        expect(variantsOf(second).map(isContestedTitle)).toEqual([true, true]);
+      }
+    });
+
+    it('reads a union object reused under another group of the same shape once per group, uncontested', () => {
+      const first = byRadius();
+      const second = byRadius();
+      const shape: SchemaObject = { oneOf: [first, second] };
+      markContestedTitles({
+        components: { schemas: { Holder: obj({ shape, wrapper: obj({ marker: second }) }) } },
+      });
+      expect(variantsOf(first).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(second).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    it('ends on a schema that refers back to itself through a property', () => {
+      const node: SchemaObject = obj({ shape: byRadius() });
+      (node.properties as Record<string, SchemaObject>)['child'] = node;
+      markContestedTitles({ components: { schemas: { Node: node } } });
+      expect(variantsOf(node.properties!['shape'] as SchemaObject).map(isContestedTitle)).toEqual([false, false]);
+    });
+
     it('reads only the first variant of a union to carry a title: a later one never keeps it anyway', () => {
       // One union giving `Circle` two shapes: the second falls back through
       // `emitted` whatever the document holds, so it claims nothing and the
@@ -4698,6 +4737,77 @@ describe('a title two unions give different shapes at different depths of one ro
       } finally {
         warnSpy.mockRestore();
       }
+    });
+
+    it('through parseSpec: the warning names the nested model that differs when the parents agree (Greptile)', async () => {
+      // Both parents are `{ kind, detail }` and both reference
+      // `DrawingCircleDetail`, so their own fingerprints agree; the detail is
+      // `{ radius }` under the ordinary object and `{ diameter }` under the
+      // variant, which the comparison reads through the nested models.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseTempSpec(
+          doc({
+            paths: {},
+            components: {
+              schemas: {
+                Drawing: obj({
+                  circle: circleObject({ detail: obj({ radius: n }) }),
+                  marker: obj({ shape: titledDrawingCircle({ detail: obj({ diameter: n }) }) }),
+                }),
+              },
+            },
+          }),
+        );
+        expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+          '[oagen] Warning: Inline model "DrawingCircle" is minted twice with different shapes under DrawingMarker (fields: kind, detail | kind, detail; nested models differ: DrawingCircleDetail) — keeping the first; the second union\'s reference resolves to it',
+        ]);
+        const types = fieldTypesByModel(ir.models);
+        expect(types['DrawingCircle']).toEqual({ ...kind('circle'), detail: model('DrawingCircleDetail') });
+        expect(types['DrawingCircleDetail']).toEqual({ radius: num });
+        expect(types['DrawingMarker']).toEqual({ shape: unionOf('DrawingCircle', 'Square') });
+        expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingCircleDetail', 'DrawingMarker', 'Square']);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('through parseSpec: no warning when the nested models agree too', async () => {
+      const ir = await parseWithoutWarnings(
+        doc({
+          paths: {},
+          components: {
+            schemas: {
+              Drawing: obj({
+                circle: circleObject({ detail: obj({ radius: n }) }),
+                marker: obj({ shape: titledDrawingCircle({ detail: obj({ radius: n }) }) }),
+              }),
+            },
+          },
+        }),
+      );
+      expect(modelNames(ir)).toEqual(['Drawing', 'DrawingCircle', 'DrawingCircleDetail', 'DrawingMarker', 'Square']);
+      expectConsistent(ir, ['Drawing']);
+    });
+
+    it('deepModelFingerprint reads the nested models, stays on a name no model defines, and ends on a cycle', () => {
+      const number = { kind: 'primitive' as const, type: 'number' as const };
+      const ref = (name: string) => ({ kind: 'model' as const, name });
+      const detail = (field: string): Model => ({
+        name: 'Detail',
+        fields: [{ name: field, type: number, required: false }],
+      });
+      const parent: Model = { name: 'Parent', fields: [{ name: 'detail', type: ref('Detail'), required: false }] };
+      expect(deepModelFingerprint(parent, [parent, detail('radius')])).not.toBe(
+        deepModelFingerprint(parent, [parent, detail('diameter')]),
+      );
+      expect(deepModelFingerprint(parent, [parent, detail('radius')])).toBe(
+        deepModelFingerprint(parent, [detail('radius'), parent]),
+      );
+      // A component's name is not in the list: the same on both sides.
+      expect(deepModelFingerprint(parent, [parent])).toBe(deepModelFingerprint(parent, []));
+      const self: Model = { name: 'Node', fields: [{ name: 'child', type: ref('Node'), required: false }] };
+      expect(deepModelFingerprint(self, [self])).toContain('Node');
     });
   });
 });

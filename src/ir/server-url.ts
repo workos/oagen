@@ -162,11 +162,11 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * - A port that is empty or is the scheme's default is dropped
  *   (`https://pets.example.com:443`, `https://pets.example.com:` and
  *   `https://pets.example.com` are one server; `http` and `ws` default to
- *   80, `https` and `wss` to 443). Any other port stays, and so does a port
- *   written as a placeholder.
- * - An empty path after an authority is `/` (`https://pets.example.com` and
- *   `https://pets.example.com/` are one server). Nothing else is done to the
- *   path: `/v1` and `/v1/` stay two servers, and dot-segments are kept.
+ *   80, `https` and `wss` to 443). Any other port stays.
+ * - An empty path after a wholly literal authority is `/`
+ *   (`https://pets.example.com` and `https://pets.example.com/` are one
+ *   server). Nothing else is done to the path: `/v1` and `/v1/` stay two
+ *   servers, and dot-segments are kept.
  * - In a percent-encoded octet the hex digits are upper-cased (`%2f` is
  *   `%2F`) and one that encodes an unreserved character — a letter, a digit,
  *   `-`, `.`, `_` or `~` — is decoded (`%7E` is `~`). Every other octet is
@@ -176,46 +176,76 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * variable name is never case-folded (`{Region}` and `{region}` are different
  * variables) and a template is never confused with what it resolves to
  * (`https://{region}.api.example.com` and `https://eu.api.example.com` stay
- * two servers). A template that opens with a placeholder (`{scheme}://…`)
- * has no known scheme, so no port is dropped from it. A relative reference
- * (`/v1`, `//api.example.com/v1`) goes through the same rules from wherever
- * its syntax starts.
+ * two servers). A placeholder also ends what can be known about the URL's
+ * structure: its value may carry any delimiter — `@` (which makes the text
+ * before it in the authority a username), `:` and a port, `/` and a path,
+ * `://` and a whole URL — so nothing from the first placeholder on is folded,
+ * and a component is folded only when it is complete before that point: the
+ * scheme when its `:` comes first, the authority when its end (`/`, `?`, `#`
+ * or the end of the template) comes first. So `HTTPS://API.example.com/{v}`
+ * is `https://api.example.com/{v}` and `HTTPS://API.example.com{basePath}`
+ * is `https://API.example.com{basePath}`, while `…{basePath}` and
+ * `…{basePath}/`, `https://{host}:443/v2` and `https://{host}/v2`,
+ * `https://USER{suffix}/v1` and `https://user{suffix}/v1` (a `suffix` of
+ * `@api.example.com` makes `USER` a username), and `{prefix}://api.example.com`
+ * and `{prefix}://api.example.com/` (a `prefix` of
+ * `https://gateway.example.com/path` makes the rest a path) all stay two
+ * servers. Every folding therefore applies to text whose part no variable
+ * value can change, and two templates that come out as one string resolve to
+ * one URL under every value of their variables. A relative reference (`/v1`,
+ * `//api.example.com/v1`) goes through the same rules from wherever its
+ * syntax starts.
  */
 export function normalizeServerUrl(url: string): string {
   const units = templateUnits(url);
+  // A placeholder's value may carry any delimiter, so it can change which
+  // part every later character belongs to and, through a `@`, which part
+  // the text before it in its authority belongs to. Nothing from the first
+  // placeholder on is folded, and a component is folded only when it is
+  // complete before that point. Percent-encoding is folded everywhere: an
+  // unreserved character is the same encoded or not in every part.
+  const firstPlaceholder = units.findIndex((unit) => unit.placeholder);
+  const literalEnd = firstPlaceholder === -1 ? units.length : firstPlaceholder;
   let out = '';
   let cursor = 0;
 
-  // Scheme: the units before the first `:`, provided every literal character
-  // among them may appear in a scheme and the first one is a letter (RFC
-  // 3986 §3.1). A unit that may not — `/`, `?`, `#`, `@` — makes the URL a
-  // relative reference with no scheme.
+  // Scheme: the units before the first `:`, provided every character among
+  // them may appear in a scheme and the first one is a letter (RFC 3986
+  // §3.1); a `/`, `?`, `#` or `@` before any `:` makes the URL a relative
+  // reference with no scheme. Folded only when that `:` comes before the
+  // first placeholder: a scheme with a placeholder in it (`{prefix}://…`)
+  // may resolve to anything, so the whole template is kept as written.
   const schemeEnd = schemeLength(units);
   let scheme: string | undefined;
+  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return render(units, normalizePercentEncoding);
   if (schemeEnd !== undefined) {
-    const schemeUnits = units.slice(0, schemeEnd);
-    const schemeText = render(schemeUnits, (text) => text.toLowerCase());
-    out += schemeText + ':';
-    // A scheme written as a placeholder is unknown, so no default port applies.
-    if (schemeUnits.every((unit) => !unit.placeholder)) scheme = schemeText;
+    scheme = render(units.slice(0, schemeEnd), (text) => text.toLowerCase());
+    out += scheme + ':';
     cursor = schemeEnd + 1;
   }
 
-  // Authority: after `//`, up to the first `/`, `?` or `#`.
-  let hasAuthority = false;
+  // Authority: after `//`, up to the first `/`, `?` or `#`. Folded only when
+  // that end comes before the first placeholder: a placeholder inside the
+  // authority may resolve to a host suffix, a port, a path, or a `@` that
+  // makes the text before it a username, so an authority with one is kept
+  // as written and gets no `/` for an empty path.
+  let literalAuthority = false;
   if (isLiteral(units[cursor], '/') && isLiteral(units[cursor + 1], '/')) {
-    hasAuthority = true;
     const start = cursor + 2;
     cursor = start;
     while (cursor < units.length && !isLiteral(units[cursor], '/', '?', '#')) cursor++;
-    out += '//' + normalizeAuthority(units.slice(start, cursor), scheme);
+    const authority = units.slice(start, cursor);
+    literalAuthority = cursor <= literalEnd;
+    out +=
+      '//' + (literalAuthority ? normalizeAuthority(authority, scheme) : render(authority, normalizePercentEncoding));
   }
 
-  // Path: up to the first `?` or `#`; `/` when an authority is followed by none.
+  // Path: up to the first `?` or `#`; `/` when a wholly literal authority is
+  // followed by none (`…{basePath}` and `…{basePath}/` stay two templates).
   const pathStart = cursor;
   while (cursor < units.length && !isLiteral(units[cursor], '?', '#')) cursor++;
   const path = render(units.slice(pathStart, cursor), normalizePercentEncoding);
-  out += hasAuthority && path === '' ? '/' : path;
+  out += literalAuthority && path === '' ? '/' : path;
 
   // Query and fragment: kept as written, percent-encoding aside.
   out += render(units.slice(cursor), normalizePercentEncoding);
@@ -237,20 +267,14 @@ function schemeLength(units: TemplateUnit[]): number | undefined {
 }
 
 /**
- * The authority with userinfo kept as written, the host lower-cased and a
- * port that is empty or the scheme's default dropped. The port is what
- * follows the last `:` after any `]` that closes an IP literal, so the
- * colons inside `[2001:db8::1]` are never read as one.
+ * A wholly literal authority with userinfo kept as written, the host
+ * lower-cased and a port that is empty or the scheme's default dropped. The
+ * port is what follows the last `:` after any `]` that closes an IP literal,
+ * so the colons inside `[2001:db8::1]` are never read as one.
  */
 function normalizeAuthority(units: TemplateUnit[], scheme: string | undefined): string {
-  let userinfo = '';
-  let hostUnits = units;
   const at = units.findIndex((unit) => isLiteral(unit, '@'));
-  if (at !== -1) {
-    userinfo = render(units.slice(0, at), normalizePercentEncoding) + '@';
-    hostUnits = units.slice(at + 1);
-  }
-
+  const hostUnits = units.slice(at + 1);
   let closeBracket = -1;
   for (let i = hostUnits.length - 1; i >= 0; i--) {
     if (isLiteral(hostUnits[i], ']')) {
@@ -266,16 +290,19 @@ function normalizeAuthority(units: TemplateUnit[], scheme: string | undefined): 
     }
   }
 
-  const host = render(colon === -1 ? hostUnits : hostUnits.slice(0, colon), (text) =>
-    normalizePercentEncoding(text).toLowerCase(),
-  );
-  if (colon === -1) return userinfo + host;
+  if (colon === -1) return foldUserinfoAndHost(units);
 
-  const portUnits = hostUnits.slice(colon + 1);
-  const port = render(portUnits, (text) => text);
-  const literalPort = portUnits.every((unit) => !unit.placeholder);
-  if (literalPort && (port === '' || isDefaultPort(port, scheme))) return userinfo + host;
-  return userinfo + host + ':' + port;
+  const port = render(hostUnits.slice(colon + 1), (text) => text);
+  const withoutPort = foldUserinfoAndHost(units.slice(0, at + 1 + colon));
+  if (port === '' || isDefaultPort(port, scheme)) return withoutPort;
+  return withoutPort + ':' + port;
+}
+
+/** Userinfo — up to the first `@` — as written and the host lower-cased, percent-encoding normalised in both. */
+function foldUserinfoAndHost(units: TemplateUnit[]): string {
+  const at = units.findIndex((unit) => isLiteral(unit, '@'));
+  const userinfo = at === -1 ? '' : render(units.slice(0, at), normalizePercentEncoding) + '@';
+  return userinfo + render(units.slice(at + 1), (text) => normalizePercentEncoding(text).toLowerCase());
 }
 
 /** Whether a literal port, read as a decimal number, is the one `scheme` implies. */
@@ -348,7 +375,10 @@ function isUnreserved(char: string): boolean {
  * Structural: the same length, and at each position the same `url` — up to
  * `normalizeServerUrl`, so a scheme or host that differs only in case, a
  * default port written or not, and a trailing `/` after a bare authority
- * are the same URL — and the same `description` and the same `variables`:
+ * are the same URL, and that form folds nothing a placeholder's value could
+ * change, so two entries it calls equal resolve to one URL under every value
+ * of their variables, which `resolveAlike` checks value by value all the
+ * same — and the same `description` and the same `variables`:
  * the same names, each with the same `default`, the same `enum` (same values
  * in the same order) and the same `description`, all compared as written.
  * Position matters because `servers[0]` is the one a client defaults to. A
@@ -374,8 +404,43 @@ function serverEntriesEqual(a: ServerEntry, b: ServerEntry): boolean {
   const bVariables = b.variables ?? {};
   const names = Object.keys(aVariables);
   if (names.length !== Object.keys(bVariables).length) return false;
-  return names.every(
-    (name) => Object.hasOwn(bVariables, name) && serverVariablesEqual(aVariables[name], bVariables[name]),
+  if (
+    !names.every((name) => Object.hasOwn(bVariables, name) && serverVariablesEqual(aVariables[name], bVariables[name]))
+  ) {
+    return false;
+  }
+  // `normalizeServerUrl` folds nothing a placeholder's value could change, so
+  // equal forms with equal variables resolve to one URL under every value;
+  // checked all the same, value by value, so the guarantee does not rest on
+  // that reading alone.
+  return resolveAlike(a, b);
+}
+
+/**
+ * Whether every allowed substitution resolves `a` and `b` to the same URL up
+ * to `normalizeServerUrl`: the defaults, then each enum value of each
+ * variable in turn with every other variable at its default. Both entries
+ * are resolved with `a`'s variables, which the caller has found equal to
+ * `b`'s. Substituted maps are built with `Object.fromEntries`, so a variable
+ * named `__proto__` stays an own key.
+ */
+function resolveAlike(a: ServerEntry, b: ServerEntry): boolean {
+  const variables = a.variables ?? {};
+  const substitutions: Array<Record<string, ServerVariable>> = [variables];
+  for (const [name, variable] of Object.entries(variables)) {
+    for (const value of variable.enum ?? []) {
+      if (value === variable.default) continue;
+      substitutions.push(
+        Object.fromEntries(
+          Object.entries(variables).map(([other, v]) => [other, other === name ? { ...v, default: value } : v]),
+        ),
+      );
+    }
+  }
+  return substitutions.every(
+    (vars) =>
+      normalizeServerUrl(resolveServerUrl({ url: a.url, variables: vars }).url) ===
+      normalizeServerUrl(resolveServerUrl({ url: b.url, variables: vars }).url),
   );
 }
 
@@ -390,39 +455,68 @@ function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
 const DEFAULT_SERVER_URL = '/';
 
 /**
- * Whether a server list means OpenAPI's default server.
- *
- * OpenAPI gives a document with no `servers`, or `servers: []`, a single
- * server with `url: '/'`; a document that writes that server out declares
- * nothing beyond it. So `undefined`, an empty list, and a list of exactly one
- * entry whose `url` is `/` are all the default. Neither the entry's
- * `description` nor its `variables` count: the default server has neither, a
- * description changes nothing about where a request goes, and `/` contains no
- * placeholder (`serverUrlPlaceholders('/')` is empty), so a variable declared
- * on it is never referenced and cannot change where it points either (#292).
- * A template that merely resolves to `/` (a referenced variable whose default
- * is `/`) and `/` listed beside another server are not the default.
- *
- * The parser (`Operation.servers`) and the differ (`base-url-changed`,
- * `server-added`, `server-removed`, `serversChanged`) read lists through
- * `serversBeyondDefault`, so the three spellings of the default compare
- * equal everywhere server lists are compared (#291).
+ * Whether a server entry is OpenAPI's default server: its `url` is `/`.
+ * Neither its `description` nor its `variables` count. The default server
+ * has neither; a description changes nothing about where a request goes; and
+ * `/` contains no placeholder (`serverUrlPlaceholders('/')` is empty), so a
+ * variable declared on it is never referenced and cannot change where it
+ * points either (#292). A template that merely resolves to `/` (a referenced
+ * variable whose default is `/`) is a template, not the default server.
  */
-export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
-  if (!servers || servers.length === 0) return true;
+export function isDefaultServerEntry(server: ServerEntry): boolean {
   // `/` is its own RFC 3986 form; read through `normalizeServerUrl` so that
   // every server URL comparison in this module goes through one function.
-  return servers.length === 1 && normalizeServerUrl(servers[0].url) === DEFAULT_SERVER_URL;
+  return normalizeServerUrl(server.url) === DEFAULT_SERVER_URL;
 }
 
 /**
- * The servers a list declares beyond OpenAPI's default: `servers` itself
- * (the same array, not a copy) when it is not the default by
- * `isDefaultServerList`, else an empty list. A document without `servers`,
- * one with `servers: []`, and one whose only server is `/` (description and
- * variables aside) all come out as `[]`, which is how the parser and the
- * differ compare them as one thing.
+ * Whether a server list means OpenAPI's default server. OpenAPI gives a
+ * document with no `servers`, or `servers: []`, a single server at `/`; a
+ * document that writes that server out declares nothing beyond it, and
+ * neither does one that writes it out twice. So `undefined`, an empty list,
+ * and a list whose every entry is the default by `isDefaultServerEntry` are
+ * all the default. A list with any other entry is not, wherever `/` sits in
+ * it, because position decides the default host.
+ *
+ * The parser asks this of an operation's list and the document's: both at
+ * the default means the operation inherits (`Operation.servers`, #291). The
+ * differ asks it to tell the `/` a document is only implied to have, which
+ * is never reported as added or removed, from one it lists beside another
+ * server, which is.
  */
-export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
-  return servers && !isDefaultServerList(servers) ? servers : [];
+export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
+  return !servers || servers.every(isDefaultServerEntry);
+}
+
+/**
+ * The servers a document is served from: its list as written (the same
+ * array, not a copy) when it declares anything beyond the default, else
+ * OpenAPI's default server, a single `{ url: '/' }`. A document without
+ * `servers`, one with `servers: []`, one whose only server is `/`, and one
+ * that writes `/` out twice all come out as `[{ url: '/' }]` (a description
+ * on the entry is not carried: the default server has none), while
+ * `[/, host]` stays `[/, host]`, because there `/` is a server the document
+ * lists, not one it is implied to have. The differ matches servers on this,
+ * so the three spellings of the default pair with each other and with a `/`
+ * listed beside a host.
+ */
+export function serversOrDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
+  return servers && !isDefaultServerList(servers) ? servers : [{ url: DEFAULT_SERVER_URL }];
+}
+
+/**
+ * A document's default address beyond OpenAPI's default: `''` when
+ * `baseUrl` is `''` (the parser's value for a document with no server) or
+ * `/` (the resolved address of the default server, written out or not),
+ * else `baseUrl` as given. The differ compares `base-url-changed` on this,
+ * so the three spellings of the default share one address and a document
+ * whose first server merely resolves to `/` has not moved from it. Any other
+ * `baseUrl` — a host, or `/v1` — is compared as written, even with no
+ * `servers` beside it (an IR built by hand, which the parser never
+ * produces).
+ */
+export function baseUrlBeyondDefault(baseUrl: string): string {
+  // Read through `normalizeServerUrl` like every other server URL comparison
+  // in this module; `/` is its own form, so only `/` itself is the default.
+  return normalizeServerUrl(baseUrl) === DEFAULT_SERVER_URL ? '' : baseUrl;
 }

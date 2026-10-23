@@ -474,6 +474,18 @@ describe("diffOperations – servers: OpenAPI's default (issue #291)", () => {
     });
   });
 
+  it("reports an operation that drops `/` listed beside its host while the document lists the host alone (the issue author's review)", () => {
+    const petsAndRoot: ServerEntry[] = [...pets, ...root];
+    expect(
+      change(diffOperations('Pets', [withServers(petsAndRoot)], [withServers()], documents(pets, pets))),
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    // Gaining `/` beside the host is a `server-added`, additive, as it is
+    // for a document that lists it beside its host (#299).
+    expect(
+      change(diffOperations('Pets', [withServers()], [withServers(petsAndRoot)], documents(pets, pets))),
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'additive' });
+  });
+
   it('reports an operation that keeps `/` while its document moves from nothing to a named host', () => {
     // Served from `/` on both sides; the document-level diff reports the document.
     expect(diffOperations('Pets', [withServers(root)], [withServers(root)], documents(undefined, api))).toHaveLength(0);

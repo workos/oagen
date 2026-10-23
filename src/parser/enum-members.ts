@@ -50,6 +50,12 @@ export function inlineEnumExternalDocsOf(ref: EnumRef): ExternalDocs | undefined
   return inlineEnumMeta.get(ref)?.externalDocs;
 }
 
+/** Give `to`, a copy of `from`, the members and link recorded for `from`: a copy made any other way is a bare name to every pass that reads them (`cloneTypeRef`). */
+export function copyInlineEnumMeta(from: EnumRef, to: EnumRef): void {
+  const meta = inlineEnumMeta.get(from);
+  if (meta) inlineEnumMeta.set(to, { ...meta, members: [...meta.members] });
+}
+
 /** The IR's `EnumValue` for one member: the display name is the value's UPPER_SNAKE_CASE form; `description` and `deprecated` only when the member carries them. */
 export function toEnumValue(member: EnumMember): EnumValue {
   return {
