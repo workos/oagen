@@ -103,8 +103,9 @@ describe('a list envelope on an operation without a paging parameter (issue #309
 
   const warningFor = (reason: string) =>
     `[oagen] Warning: listPets returns a list envelope but no query parameter drives an iterator (${reason}) — ` +
-    'keeping the body as a plain response model with no pagination; declare the parameter, or set x-pagination / ' +
-    'operationHints pagination naming a query parameter the operation declares';
+    'keeping the body as a plain response model with no pagination; declare the parameter, set x-pagination / ' +
+    'operationHints pagination naming a query parameter the operation declares, or set strategy "none" to accept ' +
+    'the plain model';
 
   it('the issue repro: a page parameter without a page size gets no iterator, not a cursor one on an undeclared after', async () => {
     const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope));
@@ -122,13 +123,18 @@ describe('a list envelope on an operation without a paging parameter (issue #309
   });
 
   it.each([
-    ['page with a camelCase pageSize (the issue)', [query('page'), query('pageSize')], '"page"'],
+    ['page with a camelCase pageSize (the issue)', [query('page'), query('pageSize')], '"page" is'],
     ['pageNumber with pageSize (the issue): neither is a known name', [query('pageNumber'), query('pageSize')], null],
-    ['page_number alone', [query('page_number')], '"page_number"'],
-    ['page_num alone', [query('page_num')], '"page_num"'],
-    ['offset alone', [query('offset')], '"offset"'],
-    ['skip alone', [query('skip')], '"skip"'],
-    ['offset and page, both without a size', [query('offset'), query('page')], '"offset", "page"'],
+    ['page_number alone', [query('page_number')], '"page_number" is'],
+    ['page_num alone', [query('page_num')], '"page_num" is'],
+    ['offset alone', [query('offset')], '"offset" is'],
+    ['skip alone', [query('skip')], '"skip" is'],
+    ['offset and page, both without a size', [query('offset'), query('page')], '"offset" and "page" are'],
+    [
+      'three selectors without a size',
+      [query('page'), query('offset'), query('skip')],
+      '"offset", "skip" and "page" are',
+    ],
   ])('%s: the envelope is kept and the warning names the declared parameter', async (_label, parameters, named) => {
     const ir = await parseJson(petsSpec(parameters, totalPagesEnvelope));
     expectEnvelopeKept(ir, ['data', 'total_pages']);
@@ -136,15 +142,51 @@ describe('a list envelope on an operation without a paging parameter (issue #309
       warningFor(
         named === null
           ? 'no cursor, offset or page query parameter is declared'
-          : `${named} is declared without a page-size parameter: limit, page_size, per_page, size, count`,
+          : `${named} declared without a page-size parameter: limit, page_size, per_page, size, count`,
       ),
     ]);
   });
 
-  it('a page-size parameter alone selects no page either', async () => {
-    const ir = await parseJson(petsSpec([query('limit')], totalPagesEnvelope));
+  it.each([
+    ['a page-size parameter alone', [query('limit')], '"limit" is'],
+    ['two page-size parameters alone', [query('limit'), query('per_page')], '"limit" and "per_page" are'],
+  ])('%s selects no page either', async (_label, parameters, named) => {
+    const ir = await parseJson(petsSpec(parameters, totalPagesEnvelope));
     expectEnvelopeKept(ir, ['data', 'total_pages']);
-    expect(warnings()).toEqual([warningFor('"limit" is declared without a cursor, offset or page parameter')]);
+    expect(warnings()).toEqual([warningFor(`${named} declared without a cursor, offset or page parameter`)]);
+  });
+
+  it('a POST taking its cursor in the body is kept too, and the warning offers strategy "none" (MichaelDeBoey)', async () => {
+    // No query parameter can drive this iterator and no override can name
+    // one, so `strategy: 'none'` is the way to accept the plain model.
+    const ir = await parseJson({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets/search': {
+          post: {
+            operationId: 'searchPets',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: { query: { type: 'string' }, cursor: { type: 'string' } } },
+                },
+              },
+            },
+            responses: {
+              '200': { description: 'ok', content: { 'application/json': { schema: totalPagesEnvelope } } },
+            },
+          },
+        },
+      },
+    });
+    const op = expectEnvelopeKept(ir, ['data', 'total_pages']);
+    expect(op.response).toEqual({ kind: 'model', name: 'SearchPetsResponse' });
+    expect(warnings()).toEqual([
+      expect.stringMatching(
+        /^\[oagen\] Warning: searchPets returns a list envelope but no query parameter drives an iterator \(no cursor, offset or page query parameter is declared\) — .*, or set strategy "none" to accept the plain model$/,
+      ),
+    ]);
   });
 
   it('no paging parameter at all (the WorkOS waitlists shape) gets no iterator on an undeclared after', async () => {

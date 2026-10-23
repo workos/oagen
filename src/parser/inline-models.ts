@@ -5,6 +5,8 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   classifyInlineSchema,
+  componentPropertyLedger,
+  declaredComponentProperty,
   nonObjectVariantContexts,
   constraintsEntry,
   deprecatedEntry,
@@ -13,6 +15,7 @@ import {
   markComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
+  nullableUnionBranch,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -118,7 +121,7 @@ export function mintedInlineNameEntries(
   };
   if (kind === 'allOf' && s.allOf) {
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
-    const reading = readInlineAllOf(s.allOf);
+    const reading = readInlineAllOf(s.allOf, s);
     if (reading === 'unwrapped') return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved);
     return reading === 'merged' ? modelName() : [];
   }
@@ -353,7 +356,7 @@ export function shapeFingerprint(model: Model): string {
  * A model's shape beside its fields: its limits, type parameters,
  * `deprecated` (unless `omit` leaves it out, as `modelAdmits` does), variants
  * (through `readShape`) and dispatch rules, the mapping's targets read under
- * `options.modelName` as the variants are.
+ * `options.readName` as the variants are.
  */
 function modelShapeKey(
   model: Model,
@@ -362,7 +365,7 @@ function modelShapeKey(
 ): string {
   const rest = omitKeys(model, omit);
   if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
-  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.modelName);
+  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.readName);
   return stableStringify(rest);
 }
 
@@ -375,19 +378,24 @@ const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type'
  */
 export interface ShapeReadOptions {
   /**
-   * The name every model reference is read under, on both sides, before the
-   * shapes are compared — in a field's type, a union's variants and a
-   * discriminator's mapping targets alike. Absent, a reference is read under
-   * the name it carries, so a nested inline model that was renamed keeps a
-   * parent from being admitted by one whose child was not. A pass about to
-   * rename models hands the name its renaming gives each one, so two shapes
-   * compare as that renaming leaves them: the `…Json` fold
-   * (`collapseJsonSuffixModels`) reads `<Name>Json…` as `<Name>…`, so a child
-   * it will rename counts as its namesake, while a reference it will not
-   * rename is still read as it is. An enum reference is never renamed by any
-   * pass and is always read as it is.
+   * The name every model reference, and every inline enum reference, is
+   * read under on both sides before the shapes are compared — in a field's
+   * type, a union's variants and a discriminator's mapping targets alike.
+   * Absent, a reference is read under the name it carries, so a nested
+   * inline model that was renamed keeps a parent from being admitted by one
+   * whose child was not. A pass about to rename models hands the name its
+   * renaming gives each one, so two shapes compare as that renaming leaves
+   * them: the `…Json` fold (`collapseJsonSuffixModels`) reads `<Name>Json…`
+   * as `<Name>…`, so a child it will rename counts as its namesake, while a
+   * reference it will not rename is still read as it is. An inline enum
+   * reference — one carrying its `values`, named by the extractor after the
+   * model and field it sits in — is read the same way, so `PetJsonStatus`
+   * with the members of `PetStatus` counts as `PetStatus`, and with other
+   * members does not, since the members are compared with the name. A
+   * component enum reference carries no values and is never renamed by any
+   * pass, so it is always read as it is.
    */
-  readonly modelName?: (name: string) => string;
+  readonly readName?: (name: string) => string;
 }
 
 /**
@@ -403,7 +411,7 @@ export interface ShapeReadOptions {
  * read that way; a wrapper deeper down (an array's items) must agree. The
  * models' own limits, type parameters, variants and dispatch rules must
  * agree, and a model reference is compared by name — the name it carries, or
- * the one `options.modelName` reads it under: a nested inline model keeps its
+ * the one `options.readName` reads it under: a nested inline model keeps its
  * name, so a parent whose child was renamed is not admitted by one whose
  * child was not. The models' own `deprecated` is read apart from the shape
  * (`flagAdmits`): a live `owner` admits a deprecated `candidate` — the flag
@@ -472,7 +480,7 @@ export function modelShares(owner: Model, candidate: Model, sent = false): boole
  * Whether `owner` admits `candidate` as the field of its name: the rule
  * `modelAdmits` applies to each field, on its own. The two agree in
  * everything but their documentation — type (through `fieldTypeAdmits`,
- * model references read under `options.modelName`), limits, default, access
+ * model and inline enum references read under `options.readName`), limits, default, access
  * flags, their own `deprecated` — except that `owner` may be optional where
  * `candidate` is required, and `nullable<…>` where `candidate` is not. The
  * `…Json` fold asks this of every field the base and the `…Json` model both
@@ -494,23 +502,32 @@ function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef, options: ShapeReadO
 /**
  * A type's shape as the admit predicates read it — every inline enum with
  * its per-value deprecation (`shapeWithEnumFlags`), every model reference
- * under `options.modelName` — stable-stringified, so two types compare by
- * string equality. The `…Json` fold compares a base union's variants with
- * the `…Json` model's through this, both read under the fold.
+ * and inline enum reference under `options.readName` — stable-stringified,
+ * so two types compare by string equality. The `…Json` fold compares a
+ * base union's variants with the `…Json` model's through this, both read
+ * under the fold.
  */
 export function typeShapeKey(ref: TypeRef, options: ShapeReadOptions = {}): string {
   return stableStringify(readShape(ref, options));
 }
 
-/** `shapeWithEnumFlags(ref)`, with every model reference renamed by `options.modelName` on a copy — the flags are read first, since the copy has no identity in the enum side table. */
+/**
+ * `shapeWithEnumFlags(ref)`, with every model reference and every inline
+ * enum reference (one carrying its `values`) renamed by `options.readName`
+ * on a copy — the flags are read first, since the copy has no identity in
+ * the enum side table.
+ */
 function readShape(ref: TypeRef, options: ShapeReadOptions): unknown {
   const shape = shapeWithEnumFlags(ref);
-  const { modelName } = options;
-  if (!modelName) return shape;
+  const { readName } = options;
+  if (!readName) return shape;
   const read = structuredClone(shape) as TypeRef;
   walkTypeRef(read, {
     model: (r) => {
-      (r as { name: string }).name = modelName(r.name);
+      (r as { name: string }).name = readName(r.name);
+    },
+    enum: (r) => {
+      if (r.values) r.name = readName(r.name);
     },
   });
   return read;
@@ -992,9 +1009,15 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Every property the object described by `schema` exposes, by name: its own
  * `properties`, those of its `allOf` members (following a member's `$ref`
- * into `schemas` when given, as `extractAllOfModel` does), and those of
- * inline `oneOf`/`anyOf` variants, whose fields the model extractors flatten
- * in; the first definition of a name wins. This is the sibling set
+ * into `schemas` when given, as `extractAllOfModel` does), those of a
+ * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
+ * member it wraps (`nullableUnionBranch`, the definition the model walks
+ * resolve a member by, so a nullable `$ref` member's component is followed
+ * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
+ * those of every other inline `oneOf`/`anyOf` variant, whose fields the
+ * model extractors flatten in — in the order first declared, each name with
+ * the declaration `declareProperty`'s precedence picks: the first
+ * always-applying one, else the first variant's. This is the sibling set
  * `elementContextName` decides from; the TypeRef builder and every extractor
  * derive it through this one function so they agree.
  */
@@ -1002,23 +1025,27 @@ export function collectProperties(
   schema: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): Map<string, SchemaObject> {
-  const properties = new Map<string, SchemaObject>();
+  const ledger = new Map<string, PropertyDeclarations>();
   const seen = new Set<SchemaObject>();
-  const visit = (s: SchemaObject | undefined, followRef: boolean): void => {
+  const visit = (s: SchemaObject | undefined, followRef: boolean, onBranch: boolean): void => {
     if (!s || seen.has(s)) return;
     seen.add(s);
     if (s.$ref) {
-      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true);
+      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value && !properties.has(key)) properties.set(key, value);
+      if (value) declareProperty(ledger, key, value, null, onBranch);
     }
-    for (const sub of s.allOf ?? []) visit(sub, true);
-    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false);
+    for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, followRef, onBranch);
+    else for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false, true);
   };
-  visit(schema, false);
-  return properties;
+  visit(schema, false, false);
+  return new Map(
+    [...ledger.values()].map((entry) => [entry.name, entry.unconditional?.schema ?? entry.conditional[0]!]),
+  );
 }
 
 /**
@@ -1041,13 +1068,24 @@ export function extractInlineModelsFromSchemas(
     // The same sibling set `extractModel` / `extractAllOfModel` type the
     // component's fields from, `$ref`'d allOf members included.
     const siblings = collectProperties(schema, schemas);
+    // The declaration each field is typed from (`componentPropertyLedger`,
+    // the ledger `extractModel`/`extractAllOfModel` build the fields from).
+    const ledger = componentPropertyLedger(parentName, schema, schemas);
     // One field at a time — the inline `allOf` members' properties first,
     // then the schema's own, in the order `extractInlineModelsFromProperties`
     // walks them — so the models each field produced are known (`groups`)
     // and the merge pass can rename one by the field that references it.
     // Every call sees the same siblings, reserved names and results list, so
     // the names are exactly those one call over the whole schema would mint.
+    // Only the declaration the field is typed from mints here: one another
+    // inline member outranks (a branch's beside an always-applying one, the
+    // second of two members declaring one name) mints nothing, and one a
+    // `$ref` member outranks is built by the nested-model pass from that
+    // component's declaration — so the models under a field always have the
+    // shape its type was built from.
     for (const [fieldName, fieldSchema] of inlineProperties(schema)) {
+      const entry = ledger.get(fieldName);
+      if (!entry || declaredComponentProperty(entry) !== fieldSchema) continue;
       const before = inlineModels.length;
       extractInlineModelsFromProperties(
         { properties: { [fieldName]: fieldSchema } },
@@ -1389,7 +1427,7 @@ export function extractInlineModelsFromProperties(
     //  - `'reference'` — `$ref` members only: a plain reference to the first
     //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
-      const reading = readInlineAllOf(fieldSchema.allOf);
+      const reading = readInlineAllOf(fieldSchema.allOf, fieldSchema);
       if (reading === 'merged') {
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
         materializeMergedAllOf(modelName, fieldSchema, results, componentSchemas);
@@ -1670,13 +1708,26 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     rather than left for the reference to dangle on.
  *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
  *     schema itself (`unwrappedAllOfMember`).
- *   - `'reference'`: `$ref` members with nothing inline beside them — the
- *     first component is the type, nothing is minted.
+ *   - `'reference'`: a single `$ref` member with nothing beside it that adds
+ *     to the component — a `description`, limits — is that component, and
+ *     nothing is minted. A second `$ref` member, or a `required` list
+ *     (`wrapper`'s own, or a member's) adds to it: the schema is then the
+ *     merged model, which carries every component's properties and every
+ *     `required` (workos/oagen#359 review: `allOf: [{ $ref: Pet },
+ *     { $ref: Owner }]` was `Pet`, `Owner`'s fields gone; `allOf: [{ $ref:
+ *     Pet }], required: [name]` was `Pet` with `name` optional).
  *
- * `allOfTypesSchema` admits no other shape as an `allOf`.
+ * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
+ * schema the `allOf` is written on, for its own `required`; a site reading
+ * bare members passes none.
  */
-export function readInlineAllOf(members: readonly SchemaObject[]): InlineAllOfReading {
-  if (members.some((m) => m.$ref)) return members.some(isInlineAllOfMember) ? 'merged' : 'reference';
+export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: SchemaObject): InlineAllOfReading {
+  const refs = members.filter((m) => m.$ref).length;
+  if (refs > 0) {
+    if (members.some(isInlineAllOfMember) || refs > 1) return 'merged';
+    const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
+    return addsRequired ? 'merged' : 'reference';
+  }
   if (members.length === 1) return 'unwrapped';
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
 }
@@ -1825,9 +1876,22 @@ export function mergeAllOfMembers(
     }
     if (s.required && !onBranch) required.push(...s.required);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
-    // An inline union is flattened; one a `$ref` member's component carries
-    // belongs to that component's model.
-    if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
+    // A nullable union wrapper — one non-null variant beside `null`, decided
+    // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
+    // collapses by, which `readComponentAllOfMember` reads a component's
+    // member through and the envelope collector reads every member through
+    // (`resolveBareSchema`) — is that variant, applying as the member does:
+    // an instance that is not null is the variant, and beside an object
+    // member it is never null. So the variant is read in the member's own
+    // capacity — its `$ref` followed, its `required` read, its properties
+    // always-applying — wherever the member sits, a `$ref` member's
+    // component included (workos/oagen#308: read as a branch, `Base`'s
+    // `has_more` ended the iteration but was missing from the model). Any
+    // other inline union is flattened; one a `$ref` member's component
+    // carries belongs to that component's model.
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, origin, onBranch);
+    else if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
   };
   visit(schema, null, false);
   const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>
