@@ -67,16 +67,18 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
  * variant is breaking, since callers may construct or match it.
  *
  * A mapping entry that comes with an added variant — a new key whose target is
- * a variant the old union did not dispatch to — or goes with a removed one is
- * part of that variant's change: it is carried as the variant entry's
- * `details` (`mapping added for 'bird'`, `mapping removed for 'dog'`), not
- * reported on its own, so a variant added to a discriminated union is additive
- * whether the spec writes the `mapping` or the parser derives it
+ * a model no variant of the old union names, under any wrapper — or goes with
+ * a removed one is part of that variant's change: it is carried as the variant
+ * entry's `details` (`mapping added for 'bird'`, `mapping removed for 'dog'`),
+ * not reported on its own, so a variant added to a discriminated union is
+ * additive whether the spec writes the `mapping` or the parser derives it
  * (`diffMapping`). Every other discriminator change is breaking, since it
  * changes how an existing payload is dispatched: the discriminator added,
  * removed or moved to another property, a key retargeted, a key added for a
- * variant the old union already had (or for no variant), or a key removed
- * while its variant stays. So is a change of composition keyword between two
+ * model the old union already dispatched to (bare or wrapped: `nullable<Cat>`
+ * added beside `Cat` brings no new model, so a key for `Cat` added with it is
+ * an alias) or for no variant, or a key removed while its model stays. So is a
+ * change of composition keyword between two
  * unions (`anyOf` → `oneOf` rejects values that match more than one branch;
  * the reverse loosens what callers may receive). A model that gains or loses
  * `variants` altogether reports each variant added or removed, not a
@@ -105,7 +107,7 @@ function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
   // the same property; a discriminator added, removed or moved is one change.
   const mapping =
     oldDisc && newDisc && oldDisc.property === newDisc.property
-      ? diffMapping(oldDisc.mapping, newDisc.mapping, added, removed)
+      ? diffMapping(oldDisc.mapping, newDisc.mapping, oldVariants, newVariants)
       : { added: new Map<string, string[]>(), removed: new Map<string, string[]>(), changed: [] };
 
   for (const variant of added) {
@@ -191,9 +193,9 @@ function variantModelNames(ref: TypeRef): string[] {
 
 /** How the two mappings of one discriminator property differ, each key read once. */
 interface MappingDiff {
-  /** Keys the new mapping adds for a variant added in this diff, by that variant's model name. */
+  /** Keys the new mapping adds for a model no old variant names, by that model's name. */
   added: Map<string, string[]>;
-  /** Keys the old mapping had for a variant removed in this diff, by that variant's model name. */
+  /** Keys the old mapping had for a model no new variant names, by that model's name. */
   removed: Map<string, string[]>;
   /** Keys added, removed or retargeted on their own, sorted: each changes how an existing payload is dispatched. */
   changed: string[];
@@ -201,22 +203,28 @@ interface MappingDiff {
 
 /**
  * Compare two mappings key by key and sort each differing key into the
- * variant addition or removal it belongs to, or into `changed`. A key only
- * the new mapping has belongs to an added variant when its target names one
- * (`variantModelNames`); a key only the old mapping has belongs to a removed
- * variant the same way; a key on both sides with different targets, or on one
- * side for a variant the other side still dispatches to (or for none), is
- * `changed`. Keys are visited sorted, so the lists are deterministic whatever
- * the document order.
+ * variant addition or removal it belongs to, or into `changed`. Whether a
+ * model is new is decided on its name after every wrapper is flattened on both
+ * sides (`variantModelNames`), not on the variant's type: `nullable<Cat>`
+ * added beside a kept `Cat` is a new variant but no new model, so a key for
+ * `Cat` added with it is an alias and `changed`. A key only the new mapping has
+ * belongs to an addition when its target names a model no old variant names;
+ * a key only the old mapping has belongs to a removal when its target names a
+ * model no new variant names; a key on both sides with different targets, or
+ * on one side for a model the other side still dispatches to (or for no
+ * variant), is `changed`. Keys are visited sorted, so the lists are
+ * deterministic whatever the document order.
  */
 function diffMapping(
   oldMapping: Record<string, string>,
   newMapping: Record<string, string>,
-  added: TypeRef[],
-  removed: TypeRef[],
+  oldVariants: readonly TypeRef[],
+  newVariants: readonly TypeRef[],
 ): MappingDiff {
-  const addedNames = new Set(added.flatMap(variantModelNames));
-  const removedNames = new Set(removed.flatMap(variantModelNames));
+  const oldNames = new Set(oldVariants.flatMap(variantModelNames));
+  const newNames = new Set(newVariants.flatMap(variantModelNames));
+  const addedNames = new Set([...newNames].filter((name) => !oldNames.has(name)));
+  const removedNames = new Set([...oldNames].filter((name) => !newNames.has(name)));
   const diff: MappingDiff = { added: new Map(), removed: new Map(), changed: [] };
   const push = (into: Map<string, string[]>, name: string, key: string): void => {
     into.set(name, [...(into.get(name) ?? []), key]);
@@ -246,14 +254,16 @@ function diffMapping(
  * The `details` a `variant-added` / `variant-removed` entry carries when
  * mapping keys came or went with the variant (`mapping added for 'bird'`,
  * `mapping removed for 'dog'`); nothing when none did, so an undiscriminated
- * union's entries carry no `details` key.
+ * union's entries carry no `details` key. The keys of every model the variant
+ * names are listed once each, sorted, so a multi-type variant's text does not
+ * depend on the order of its members.
  */
 function mappingDetails(
   change: 'added' | 'removed',
   keysByName: ReadonlyMap<string, string[]>,
   variant: TypeRef,
 ): { details: string } | Record<string, never> {
-  const keys = variantModelNames(variant).flatMap((name) => keysByName.get(name) ?? []);
+  const keys = [...new Set(variantModelNames(variant).flatMap((name) => keysByName.get(name) ?? []))].sort();
   return keys.length > 0 ? { details: `mapping ${change} for ${quoteKeys(keys)}` } : {};
 }
 
