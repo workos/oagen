@@ -16,9 +16,11 @@ import {
 /**
  * Issue #274: an operation carries its `default` and `1XX`–`5XX` responses
  * (`defaultResponse`, `rangeResponses`), so a status one of them covers is
- * not unexpected. The explicit 2xx/3xx codes `successResponses` carries
- * count as declared too; the method's usual success code is implied only
- * when the IR cannot say which single success response the operation has.
+ * not unexpected. Every declared 2xx/3xx code counts as declared too —
+ * `responseStatusCode` for the primary (a lone `302`, a POST's lone `200`)
+ * and every `successResponses` entry — and nothing is implied from the HTTP
+ * method: an operation that declares no success response has no success
+ * code.
  */
 
 const dirs: string[] = [];
@@ -187,7 +189,7 @@ describe('getExpectedStatuses / isUnexpectedStatus (issue #274)', () => {
     ]);
   });
 
-  it('counts every successResponses code as declared and stops implying the method default', async () => {
+  it("counts every successResponses code as declared without implying the method's usual code", async () => {
     const post = await parseOnlyOperation('post', {
       '200': jsonResponse('Updated', 'id'),
       '202': { description: 'Accepted' },
@@ -208,22 +210,43 @@ describe('getExpectedStatuses / isUnexpectedStatus (issue #274)', () => {
     expect(isUnexpectedStatus(204, get)).toBe(false);
   });
 
-  it("implies the method's usual success code when the IR carries a single success response", async () => {
-    const post = await parseOnlyOperation('post', { '201': jsonResponse('Created', 'id') });
+  it('credits a lone success response with its own code, whatever the HTTP method would suggest', async () => {
+    const postCreated = await parseOnlyOperation('post', { '201': jsonResponse('Created', 'id') });
+    const postUpdated = await parseOnlyOperation('post', { '200': jsonResponse('Updated', 'id') });
     const del = await parseOnlyOperation('delete', { '204': { description: 'Deleted' } });
-    const get = await parseOnlyOperation('get', { '200': { description: 'OK' } });
-    const patch = await parseOnlyOperation('patch', { '200': { description: 'OK' } });
-    const put = await parseOnlyOperation('put', { '200': { description: 'OK' } });
+    const redirect = await parseOnlyOperation('get', { '302': { description: 'See the photo' } });
 
-    expect([post, del, get, patch, put].map((op) => getExpectedStatusCodes(op))).toEqual([
+    expect([postCreated, postUpdated, del, redirect].map((op) => getExpectedStatusCodes(op))).toEqual([
       [201],
+      [200],
       [204],
-      [200],
-      [200],
-      [200],
+      [302],
     ]);
-    expect(isUnexpectedStatus(201, post)).toBe(false);
-    expect(isUnexpectedStatus(204, del)).toBe(false);
+    // `POST /notes` declaring only `200`: 200 is declared, 201 (POST's usual code) is not.
+    expect(isUnexpectedStatus(200, postUpdated)).toBe(false);
+    expect(isUnexpectedStatus(201, postUpdated)).toBe(true);
+    expect(formatExpectedStatuses(getExpectedStatuses(postUpdated))).toBe('200');
+    // `GET /pets/{id}/photo` declaring only `302`.
+    expect(isUnexpectedStatus(302, redirect)).toBe(false);
+    expect(isUnexpectedStatus(200, redirect)).toBe(true);
+  });
+
+  it('credits no success code when the operation declares no 2xx or 3xx response', async () => {
+    // `GET /pets` declaring only `404` never declares a 200, so a 200 is unexpected.
+    const errorOnly = await parseOnlyOperation('get', { '404': jsonResponse('Not found', 'code') });
+    expect(getExpectedStatuses(errorOnly)).toEqual({ codes: [404], ranges: [], hasDefault: false });
+    expect(isUnexpectedStatus(404, errorOnly)).toBe(false);
+    expect(isUnexpectedStatus(200, errorOnly)).toBe(true);
+
+    const defaultOnly = await parseOnlyOperation('get', { default: jsonResponse('Anything', 'message') });
+    expect(getExpectedStatuses(defaultOnly)).toEqual({ codes: [], ranges: [], hasDefault: true });
+    expect([200, 404, 503].map((status) => isUnexpectedStatus(status, defaultOnly))).toEqual([false, false, false]);
+    expect(formatExpectedStatuses(getExpectedStatuses(defaultOnly))).toBe('default');
+
+    const rangeOnly = await parseOnlyOperation('get', { '2XX': { description: 'Some success' } });
+    expect(getExpectedStatuses(rangeOnly)).toEqual({ codes: [], ranges: ['2XX'], hasDefault: false });
+    expect(isUnexpectedStatus(200, rangeOnly)).toBe(false);
+    expect(isUnexpectedStatus(404, rangeOnly)).toBe(true);
   });
 
   it('still reports a status that no explicit code, range or default covers', async () => {
@@ -246,6 +269,7 @@ describe('getExpectedStatuses / isUnexpectedStatus (issue #274)', () => {
   it('lists explicit codes ascending and once, whatever order the IR holds them in', () => {
     const op = makeOp({
       httpMethod: 'post',
+      responseStatusCode: 200,
       successResponses: [
         { statusCode: 202, type: { kind: 'primitive', type: 'unknown' } },
         { statusCode: 200, type: { kind: 'primitive', type: 'unknown' } },
@@ -256,8 +280,9 @@ describe('getExpectedStatuses / isUnexpectedStatus (issue #274)', () => {
     expect(getExpectedStatusCodes(op)).toEqual([200, 202, 400, 404]);
   });
 
-  it('falls back to 200 for a method outside the usual-success table', () => {
-    expect(getExpectedStatusCodes(makeOp({ httpMethod: 'head' }))).toEqual([200]);
+  it('lists nothing for an operation without a declared success or error code, whatever its method', () => {
+    expect(getExpectedStatusCodes(makeOp({ httpMethod: 'head' }))).toEqual([]);
+    expect(getExpectedStatusCodes(makeOp({ httpMethod: 'post' }))).toEqual([]);
   });
 });
 

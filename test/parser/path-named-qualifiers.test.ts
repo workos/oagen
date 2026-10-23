@@ -174,6 +174,71 @@ describe('path-named qualifiers (issue #288)', () => {
     });
   });
 
+  it('joins the nested collection of the same word when the service path restores its noun beside an operationId', () => {
+    // Review on #338: `/notes/{noteId}/notes` is `listNotes` on its own; when
+    // `/notes` beside `operationId: list` needs `Notes` back, the two name one
+    // noun and take one spelling, and the parameter tells them apart — the
+    // service's own path keeps `listNotes` rather than `list2`.
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/{noteId}/notes': { get: op('noteId') },
+        '/api/v1/{orgId}/notes': { get: withId('list', 'orgId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.listNotes',
+      'GET /notes/{noteId}/notes': 'Notes.listNotesByNoteId',
+      'GET /api/v1/{orgId}/notes': 'Notes.list',
+    });
+    // Items the same, singular: `getNote` and `getNoteByChildId`.
+    expect(
+      names({
+        '/notes/{noteId}': { get: op('noteId') },
+        '/notes/{noteId}/notes/{childId}': { get: op('noteId', 'childId') },
+        '/api/v1/{orgId}/notes/{noteId}': { get: withId('get', 'orgId', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes/{noteId}': 'Notes.getNote',
+      'GET /notes/{noteId}/notes/{childId}': 'Notes.getNoteByChildId',
+      'GET /api/v1/{orgId}/notes/{noteId}': 'Notes.get',
+    });
+    // Every nested collection of the word joins, each told apart by its own parameters.
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/{noteId}/notes': { get: op('noteId') },
+        '/notes/{noteId}/{x}/notes': { get: op('noteId', 'x') },
+        '/api/v1/{orgId}/notes': { get: withId('list', 'orgId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.listNotes',
+      'GET /notes/{noteId}/notes': 'Notes.listNotesByNoteId',
+      'GET /notes/{noteId}/{x}/notes': 'Notes.listNotesByNoteIdByX',
+      'GET /api/v1/{orgId}/notes': 'Notes.list',
+    });
+    // An operationId that holds the name is never joined: the service path
+    // is numbered on its plain name, and the nested collection, which
+    // collides with that operationId on its own, takes its parameter.
+    expect(
+      names({
+        '/api/notes': { get: json },
+        '/api/notes/{noteId}/notes': { get: op('noteId') },
+        '/api/{teamId}/notes': { get: withId('list', 'teamId') },
+        '/api/{orgId}/notes': { get: withId('listNotes', 'orgId') },
+      }),
+    ).toEqual({
+      'GET /api/notes': 'Notes.list2',
+      'GET /api/notes/{noteId}/notes': 'Notes.listNotesByNoteId',
+      'GET /api/{teamId}/notes': 'Notes.list',
+      'GET /api/{orgId}/notes': 'Notes.listNotes',
+    });
+    // Without an operationId to collide with, nothing is restored or joined.
+    expect(names({ '/notes': { get: json }, '/notes/{noteId}/notes': { get: op('noteId') } })).toEqual({
+      'GET /notes': 'Notes.list',
+      'GET /notes/{noteId}/notes': 'Notes.listNotes',
+    });
+  });
+
   it('skips a By<Param> name an operationId holds, and numbers the plain name only when nothing is left', () => {
     expect(
       names({
@@ -234,6 +299,18 @@ describe('path-named qualifiers (issue #288)', () => {
         '/orgs/teams/members': { get: json },
         '/orgs/{orgId}/groups/members': { get: op('orgId') },
         '/orgs/{orgId}/groups/{groupId}/members': { get: op('orgId', 'groupId') },
+      },
+      {
+        '/notes': { get: json },
+        '/notes/{noteId}/notes': { get: op('noteId') },
+        '/notes/{noteId}/{x}/notes': { get: op('noteId', 'x') },
+        '/api/v1/{orgId}/notes': { get: withId('list', 'orgId') },
+      },
+      {
+        '/api/notes': { get: json },
+        '/api/notes/{noteId}/notes': { get: op('noteId') },
+        '/api/{teamId}/notes': { get: withId('list', 'teamId') },
+        '/api/{orgId}/notes': { get: withId('listNotes', 'orgId') },
       },
     ];
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

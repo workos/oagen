@@ -3,6 +3,7 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
   mergeInlineResponseModels,
+  settleFieldInlineModels,
 } from '../../src/parser/normalize-inline-models.js';
 import type { Model, Service, TypeRef } from '../../src/ir/types.js';
 
@@ -646,6 +647,29 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
     });
     expect(merged.map((m) => m.name)).toEqual(['PetOwner2']);
     expect(ref).toEqual({ kind: 'model', name: 'PetOwner2' });
+    expect(notes).toEqual(['[oagen] Renamed inline model "PetOwner" → "PetOwner2": enum "PetOwner" owns the name']);
+  });
+
+  it('settles the parser’s field models past an enum name when they are settled against the components', () => {
+    // The parser's own path: the components' field models are settled
+    // before any operation is read (`settleFieldInlineModels`), so a
+    // `Pet.owner` object beside a component enum `PetOwner` is `PetOwner2`
+    // from then on, and `Pet.owner` already points at it.
+    const owner = body('PetOwner', 'name');
+    const pet: Model = {
+      name: 'Pet',
+      fields: [{ name: 'owner', type: { kind: 'model', name: 'PetOwner' }, required: false }],
+    };
+    let settled: Model[] = [];
+    const notes = warnings(() => {
+      settled = settleFieldInlineModels([pet], [owner], {
+        bundles: [{ qualifier: 'Pet', roots: [pet.fields[0].type], models: [owner] }],
+        reserved: new Set(['Pet', 'PetOwner']),
+        enums: new Set(['PetOwner']),
+      });
+    });
+    expect(settled.map((m) => m.name)).toEqual(['PetOwner2']);
+    expect(pet.fields[0].type).toEqual({ kind: 'model', name: 'PetOwner2' });
     expect(notes).toEqual(['[oagen] Renamed inline model "PetOwner" → "PetOwner2": enum "PetOwner" owns the name']);
   });
 });

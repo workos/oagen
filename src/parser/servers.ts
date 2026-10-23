@@ -29,9 +29,10 @@ export interface ExtractedServers {
  * A document that writes OpenAPI's default server out (`servers: [{ url:
  * '/' }]`) is carried as written — `servers: [{ url: '/' }]`, `baseUrl: '/'`
  * — while one that declares none has `servers` absent and `baseUrl: ''`. The
- * two mean the same thing, and everywhere server lists are compared
- * (`Operation.servers`, the differ) they are read as one through
- * `serversBeyondDefault` in `ir/server-url.ts` (#291).
+ * two mean the same thing, and everywhere server lists are compared they are
+ * read as one: `isDefaultServerList` for `Operation.servers`,
+ * `serversOrDefault` and `baseUrlBeyondDefault` in the differ, all in
+ * `ir/server-url.ts` (#291).
  */
 export function extractServers(rawServers: unknown): ExtractedServers {
   const servers = extractServerList(rawServers, 'the document');

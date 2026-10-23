@@ -150,8 +150,31 @@ export interface Webhook {
   requestBody?: TypeRef;
   /** How the payload is encoded, read like `Operation.requestBodyEncoding`. */
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
+  /**
+   * The media type the payload was read from, by essence, read like
+   * `Operation.requestBodyContentType` (`application/merge-patch+json`;
+   * `application/json` for `application/json; charset=utf-8`): what the
+   * sender labels the request with, so a handler can check it. Present
+   * exactly when `requestBody` is.
+   */
+  requestBodyContentType?: string;
   /** Present, and `true`, only when the document marks the request body `required`. */
   requestBodyRequired?: boolean;
+  /**
+   * Media types the payload declares under `content`, in document order and
+   * exactly as written, read as `Operation.requestBodyContentTypes` is.
+   * Present only when at least one is declared.
+   */
+  requestBodyContentTypes?: string[];
+  /**
+   * One entry per `requestBodyContentTypes` entry, in the same order, typed
+   * as `Operation.requestBodyContents` is: the entry for the media type
+   * `requestBody` was read from carries that same TypeRef; an inline object
+   * under another media type is materialized as `<Stem><MediaType>Payload`
+   * (`PetAdoptedTextCsvPayload`). Present only when `requestBodyContentTypes`
+   * is.
+   */
+  requestBodyContents?: RequestBodyContent[];
   /**
    * The responses the sender expects from the receiver, in document order:
    * one entry per status code key (three digits, 100–599) the operation
@@ -215,8 +238,9 @@ export interface Operation {
    * declares none with non-whitespace content — the `summary` of the Path
    * Item it sits on (the `paths` entry, or the `components/pathItems` item a
    * `$ref` entry leads to), which OpenAPI applies to every operation on that
-   * path. Present only when one of the two has content; an empty or whitespace-only
-   * summary is treated as absent at either level. Read this to use the
+   * path. Present only when one of the two has content; a summary that is not
+   * a string, or is empty or whitespace-only, is treated as absent at either
+   * level. Read this to use the
    * summary as a one-line label; `description` below still carries the
    * combined form, so emitters that only print `description` are unchanged.
    */
@@ -226,8 +250,9 @@ export interface Operation {
    * each read as `summary` above is: the operation's own, else the Path
    * Item's, field by field. When both have content, this is
    * `summary + "\n\n" + description`; when only one has content (or both are
-   * identical), this is that one. An empty or whitespace-only value is
-   * treated as absent, and text with content is kept verbatim. The parts are
+   * identical), this is that one. A value that is not a string, or is empty
+   * or whitespace-only, is treated as absent, and text with content is kept
+   * verbatim. The parts are
    * not separable from this field alone — use `summary` for that.
    */
   description?: string;
@@ -242,8 +267,9 @@ export interface Operation {
    * declares none at either level, or what it declares is the document's list
    * again (same URLs, descriptions and variables, in the same order), or both
    * it and the document mean OpenAPI's default server (no servers,
-   * `servers: []`, or `/` alone, whatever its description or variables —
-   * `/` references none; `isDefaultServerList` in `ir/server-url.ts`). Same
+   * `servers: []`, or nothing but `/`, whatever its description or
+   * variables — `/` references none; `isDefaultServerList` in
+   * `ir/server-url.ts`). Same
    * shape as `ApiSpec.servers`, variables included, so `resolveServerUrl`
    * from `ir/server-url.ts` fills a template's defaults the way `baseUrl` was
    * produced. To find where a request goes, take `op.servers ?? spec.servers`.
@@ -289,6 +315,20 @@ export interface Operation {
    */
   requestBodyEncoding?: 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
   /**
+   * The media type `requestBody` was read from, by essence — `type/subtype`
+   * with parameters and case stripped: `application/merge-patch+json` for a
+   * body declared under that key, `application/json` for one under
+   * `application/json; charset=utf-8`, `multipart/form-data` for one under
+   * `multipart/form-data; boundary=x`. This is what an emitter sends as the
+   * request's `Content-Type`, so a server that requires its declared media
+   * type accepts the request; parameters such as a multipart boundary are
+   * the emitter's to produce. `requestBodyEncoding` says how to serialize
+   * the body, this says how to label it. The key as written is the
+   * `contentType` of the `requestBodyContents` entry that shares
+   * `requestBody`'s type. Set exactly when `requestBody` is.
+   */
+  requestBodyContentType?: string;
+  /**
    * Whether a caller must send `requestBody`: the Request Body Object's
    * `required`, read after a `components/requestBodies` `$ref` is resolved.
    * OpenAPI defaults the flag to `false`, so a body the document does not
@@ -296,6 +336,27 @@ export interface Operation {
    * `requestBody` is; an operation without a body has no entry.
    */
   requestBodyRequired?: boolean;
+  /**
+   * Media types the request body declares under `content`, in document
+   * order and exactly as written (`application/json; charset=utf-8`,
+   * `multipart/form-data; boundary=x`, `text/csv`), so an emitter can offer
+   * each verbatim as a `Content-Type`. Present only when the body declares at
+   * least one media type — whether or not one of them is read as
+   * `requestBody` — as `responseContentTypes` is on the response side.
+   */
+  requestBodyContentTypes?: string[];
+  /**
+   * One entry per `requestBodyContentTypes` entry, in the same order, with
+   * the type that media type resolves to. The entry for the media type
+   * `requestBody` was read from carries that very TypeRef, so the two never
+   * disagree. Every other entry is typed as it would be were it the only one
+   * declared: from its schema when it has one (an inline object materialized
+   * as `<Op><MediaType>Request`, `ReplaceWidgetTextCsvRequest`), else a
+   * binary string for `application/octet-stream`, a string for `text/plain`,
+   * and `unknown` for any other media type. Present only when
+   * `requestBodyContentTypes` is.
+   */
+  requestBodyContents?: RequestBodyContent[];
   /**
    * The primary success response's body type: the lowest declared status code
    * from 200 to 399 whose type is not `unknown` — the lowest 2xx with a typed
@@ -317,6 +378,22 @@ export interface Operation {
    * `SuccessResponse.type` for one of several success bodies).
    */
   response: TypeRef;
+  /**
+   * The status code of the response `response` was read from — the primary
+   * success response chosen as described there: `200`; `201` when an untyped
+   * `200` yielded to a typed `201`; `302` for a lone redirect; a POST's lone
+   * `200`. Present exactly when the operation declares at least one 2xx or
+   * 3xx response, and absent when it declares none (only `default`, a range,
+   * 4xx/5xx codes, an empty `responses` map or no `responses` key) — the
+   * case where `response` is `unknown`. When `successResponses` is set, this
+   * equals the `statusCode` of the entry `response` was taken from. Read it
+   * to check or document the status an operation succeeds with instead of
+   * guessing one from the HTTP method. The differ pairs a lone 2xx/3xx with
+   * the other spec's entry of this code, so an entry added beside it is not
+   * mistaken for it, and reports it moving while both specs carry one as
+   * `responseStatusCodeChanged`.
+   */
+  responseStatusCode?: number;
   /**
    * Headers the primary success response declares (the one `response` is the
    * body of). Present only when the spec declares at least one. Each entry of
@@ -405,10 +482,11 @@ export interface Operation {
   async?: boolean;
   /**
    * The operation's `tags`, in document order, with every entry that is not
-   * a non-empty string dropped. Present only when at least one remains. The
-   * parser has already named the service from the document's first tag
-   * entry; this list is kept so an emitter can group or document the method
-   * by every tag.
+   * a non-empty string dropped and a repeated entry folded onto its first
+   * occurrence. Present only when at least one remains. The parser names the
+   * service from `tags[0]` — the first usable entry — so the two never
+   * disagree; the list is kept so an emitter can group or document the
+   * method by every tag.
    */
   tags?: string[];
   /**
@@ -673,11 +751,13 @@ export interface Parameter {
    * An inline object schema (a `deepObject` query parameter, say), or an
    * array, map, union or nullable wrapper holding one, references a model
    * the parser creates for it, named from the service and parameter
-   * (`PetsFilter`) and qualified by location or operation when that name
-   * already belongs to another shape (see "Response Headers" in
-   * docs/architecture/ir-types.md); a webhook's is named under the
-   * webhook's stem. A primitive, a `$ref`, an inline enum or an array of
-   * either is typed as written.
+   * (`PetsFilter`; a header's name lower-cased first, so `X-RateLimit-Meta`
+   * and `x-ratelimit-meta` both reference `PetsXRatelimitMeta`) and
+   * qualified by location or operation when that name already belongs to
+   * another shape (see "Response Headers" in docs/architecture/ir-types.md);
+   * a webhook's is named under the webhook's stem. A primitive, a `$ref`, an
+   * inline enum (named the same way) or an array of either is typed as
+   * written.
    */
   type: TypeRef;
   required: boolean;
@@ -788,12 +868,15 @@ export interface TypeParam {
 /**
  * Model definition (maps to an SDK model/data class). Every
  * `components/schemas` entry becomes one, except an enum (`Enum`) and an
- * array component — a schema that is an array and declares `items` — which
+ * array component — a schema that is an array and declares `items`, or an
+ * alias of one (a bare `$ref`, or an `allOf` of a `$ref` and limits) — which
  * becomes no model at all: a `$ref` to it resolves to the array it declares
  * (`{ kind: 'array' }`, under `nullable` when the component admits null),
- * and what its items reference is extracted under `<Component>Item…`. The
- * inline schemas the parser materializes — request bodies, responses, union
- * variants, nested objects, array items, map values — are models too.
+ * and what its items reference is extracted under `<Component>Item…`; the
+ * component's own `description`, `deprecated` and `externalDocs` are read
+ * by a field that names it with a bare `$ref` (`Field`). The inline schemas
+ * the parser materializes — request bodies, responses, union variants,
+ * nested objects, array items, map values — are models too.
  */
 export interface Model {
   name: string;
@@ -863,17 +946,31 @@ export interface Field {
   domainName?: string;
   type: TypeRef;
   required: boolean;
+  /**
+   * The field schema's own `description`; for a bare `$ref` to an array
+   * component — which names no model to carry the component's text — the
+   * component's, as `example` falls back to it. A `$ref` to a model, named
+   * union or enum leaves the text on it.
+   */
   description?: string;
   /**
    * The field schema's own `externalDocs`, when it declares a usable one —
    * read like `description`: for a `$ref` with an `externalDocs` sibling
    * (legal in OAS 3.1), the sibling's link, while the referenced model keeps
-   * its own; a bare `$ref` yields none. Absent otherwise. Documentation, not
+   * its own; a bare `$ref` yields none, unless it names an array component,
+   * whose link the field then carries. Absent otherwise. Documentation, not
    * shape: two fields that differ only here are one shape.
    */
   externalDocs?: ExternalDocs;
   readOnly?: boolean;
   writeOnly?: boolean;
+  /**
+   * Present, and `true`, when the field schema says `deprecated: true` — a
+   * keyword written beside a `$ref` included — or when a bare `$ref` names
+   * an array component that says so, since no model carries that
+   * component's flag. The flag of a model, named union or enum a `$ref`
+   * names stays on it.
+   */
   deprecated?: boolean;
   default?: unknown;
   /**
@@ -1082,29 +1179,155 @@ export function collectModelTypeRefs(model: Model): TypeRef[] {
 }
 
 /**
- * Rename the models a model refers to: every `model` ref in its fields' types
- * and its union variants, and every `discriminator.mapping` target, that
- * `renames` maps is pointed at the new name. Each reference is looked up
- * once, so a map `{ A → B, B → C }` moves `A` to `B`, never on to `C`. The
- * model's own `name` is left to the caller. Every rename and fold site goes
- * through this, so a dispatcher's mapping can never keep naming a model that
- * was renamed away while its variants moved on.
+ * Rename the models a type refers to, in place: every `model` ref under
+ * `ref` — at any depth of array, map, nullable and union wrapper — that
+ * `renames` maps and `admit` accepts is pointed at the new name, and each
+ * `discriminator.mapping` entry of a union follows the variant it belongs
+ * to (`mappingEntriesByVariant`), so a mapping never keeps naming a model
+ * that was renamed away and never moves off a variant that stayed: beside a
+ * `$ref` to `Comp` (`kind: legacy`) an inline variant titled `Comp`
+ * (`kind: new`) renamed to `ThingComp` leaves `{ legacy: 'Comp', new:
+ * 'ThingComp' }`. Each reference is looked up once, so `{ A → B, B → C }`
+ * moves `A` to `B`, never on to `C`. `admit` defaults to every reference; the parser's
+ * merge passes pass one that tells a reference minted for an inline model
+ * from an explicit `$ref` to a same-named component. Returns whether any
+ * reference moved. Every rename site — the merge passes, the shape registry,
+ * the list-envelope pass, the Json fold — goes through this or
+ * `renameModelRefs`, so every reference kind a rename can touch is rewritten
+ * alike: a field's type, a union's variants and mapping, an operation's
+ * bodies, pagination types, headers and secondary bodies, a webhook's
+ * payload and parameters.
  */
-export function renameModelRefs(model: Model, renames: ReadonlyMap<string, string>): void {
-  for (const ref of collectModelTypeRefs(model)) {
-    walkTypeRef(ref, {
-      model: (r) => {
-        const renamed = renames.get(r.name);
-        if (renamed !== undefined) r.name = renamed;
-      },
-    });
+export function renameTypeRefModels(
+  ref: TypeRef,
+  renames: ReadonlyMap<string, string>,
+  admit: (ref: ModelRef) => boolean = () => true,
+): boolean {
+  switch (ref.kind) {
+    case 'model': {
+      const renamed = renames.get(ref.name);
+      if (renamed === undefined || !admit(ref)) return false;
+      ref.name = renamed;
+      return true;
+    }
+    case 'array':
+      return renameTypeRefModels(ref.items, renames, admit);
+    case 'nullable':
+      return renameTypeRefModels(ref.inner, renames, admit);
+    case 'map': {
+      const key = ref.keyType ? renameTypeRefModels(ref.keyType, renames, admit) : false;
+      const value = renameTypeRefModels(ref.valueType, renames, admit);
+      return key || value;
+    }
+    case 'union':
+      return renameVariants(ref.variants, ref.discriminator?.mapping, renames, admit);
+    case 'enum':
+    case 'literal':
+    case 'primitive':
+      return false;
+    default:
+      return assertNever(ref);
   }
-  const mapping = model.discriminator?.mapping;
-  if (!mapping) return;
+}
+
+/**
+ * Rename the models `variants` refer to, each `mapping` entry following the
+ * variant it belongs to. Returns whether any variant moved.
+ */
+function renameVariants(
+  variants: TypeRef[],
+  mapping: Record<string, string> | undefined,
+  renames: ReadonlyMap<string, string>,
+  admit: (ref: ModelRef) => boolean,
+): boolean {
+  const owned = mapping ? mappingEntriesByVariant(variants, mapping) : undefined;
+  let moved = false;
+  variants.forEach((variant, index) => {
+    if (!renameTypeRefModels(variant, renames, admit)) return;
+    moved = true;
+    const model = variantModel(variant);
+    if (mapping && model) for (const value of owned?.get(index) ?? []) mapping[value] = model.name;
+  });
+  return moved;
+}
+
+/** The model a variant names — directly, or under its nullable wrapper — which its mapping entry targets; none for any other variant. */
+function variantModel(variant: TypeRef): ModelRef | undefined {
+  if (variant.kind === 'nullable') return variantModel(variant.inner);
+  return variant.kind === 'model' ? variant : undefined;
+}
+
+/**
+ * Which variant each `mapping` entry belongs to, by the variants' positions:
+ * a name one variant carries owns every entry naming it (a document's own
+ * mapping may send several values to one schema); a name several variants
+ * carry — a `$ref` to a component beside an inline variant titled like it —
+ * hands the j-th entry naming it to the j-th such variant, since the parser
+ * derives one entry per discriminated variant in variant order. A variant's
+ * model is read through its nullable wrapper. An entry naming no variant
+ * belongs to none and stays as written.
+ */
+function mappingEntriesByVariant(variants: readonly TypeRef[], mapping: Record<string, string>): Map<number, string[]> {
+  const indexesByName = new Map<string, number[]>();
+  variants.forEach((variant, index) => {
+    const model = variantModel(variant);
+    if (model) indexesByName.set(model.name, [...(indexesByName.get(model.name) ?? []), index]);
+  });
+  const owned = new Map<number, string[]>();
+  const handed = new Map<string, number>();
+  for (const [value, target] of Object.entries(mapping)) {
+    const indexes = indexesByName.get(target);
+    if (!indexes) continue;
+    let index = indexes[0]!;
+    if (indexes.length > 1) {
+      const j = handed.get(target) ?? 0;
+      handed.set(target, j + 1);
+      if (j >= indexes.length) continue;
+      index = indexes[j]!;
+    }
+    owned.set(index, [...(owned.get(index) ?? []), value]);
+  }
+  return owned;
+}
+
+/** Point every target of `mapping` that `renames` maps at the new name: for a mapping whose members are not among any variants. */
+function renameMappingTargets(mapping: Record<string, string>, renames: ReadonlyMap<string, string>): void {
   for (const [value, target] of Object.entries(mapping)) {
     const renamed = renames.get(target);
     if (renamed !== undefined) mapping[value] = renamed;
   }
+}
+
+/**
+ * Rename the models a model refers to: every `model` ref in its fields' types
+ * and its union variants that `renames` maps and `admit` accepts is pointed
+ * at the new name (`renameTypeRefModels`, so a union's mapping inside a field
+ * follows its variant), and the model's own `discriminator.mapping` follows
+ * its variants entry by entry (`mappingEntriesByVariant`); a mapping whose
+ * members are not among any variants — an allOf+oneOf dispatcher holds its
+ * members in the mapping alone — is rewritten by name, every target
+ * `renames` maps, and only when no `admit` is given, since a target has no
+ * identity to admit. Each reference is looked up once, so a map `{ A → B, B → C }`
+ * moves `A` to `B`, never on to `C`. The model's own `name` is left to the
+ * caller. Every rename and fold site goes through this, so a dispatcher's
+ * mapping can never keep naming a model that was renamed away while its
+ * variants moved on. Returns whether any reference moved.
+ */
+export function renameModelRefs(
+  model: Model,
+  renames: ReadonlyMap<string, string>,
+  admit?: (ref: ModelRef) => boolean,
+): boolean {
+  const accept = admit ?? (() => true);
+  let moved = false;
+  for (const field of model.fields) if (renameTypeRefModels(field.type, renames, accept)) moved = true;
+  const mapping = model.discriminator?.mapping;
+  if (model.variants) {
+    if (renameVariants(model.variants, mapping, renames, accept)) moved = true;
+  } else if (mapping && admit === undefined) {
+    renameMappingTargets(mapping, renames);
+  }
+  return moved;
 }
 
 /**
@@ -1220,6 +1443,11 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
+      for (const { type } of collectRequestBodyTypes(op)) {
+        for (const name of collectModelRefs(type)) {
+          referencedModels.add(name);
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -1288,7 +1516,9 @@ export function validateModelHints(models: Model[], services: Service[], hints: 
 }
 
 /**
- * Collect all model names referenced as request bodies across all services.
+ * Collect all model names referenced as request bodies across all services:
+ * each operation's `requestBody`, and the body of every other media type it
+ * declares (`collectRequestBodyTypes`).
  */
 export function collectRequestBodyModels(services: Service[]): Set<string> {
   const result = new Set<string>();
@@ -1296,6 +1526,11 @@ export function collectRequestBodyModels(services: Service[]): Set<string> {
     for (const op of service.operations) {
       if (op.requestBody) {
         for (const name of collectModelRefs(op.requestBody)) {
+          result.add(name);
+        }
+      }
+      for (const { type } of collectRequestBodyTypes(op)) {
+        for (const name of collectModelRefs(type)) {
           result.add(name);
         }
       }
@@ -1350,12 +1585,14 @@ export function collectFallbackResponseTypes(op: Operation): TypeRef[] {
 }
 
 /**
- * Every type reference a webhook carries: its parameters' types and its
- * request body. Every pass that walks an operation's type refs (reachability,
- * ref rewriting and validation, the differ's direction index, inline-enum
- * collection) walks a webhook's through this, so a model reached only through
- * a webhook payload or header is treated the way one reached through an
- * operation is, and a field added to `Webhook` later has one place to join.
+ * Every type reference a webhook carries: its parameters' types, its
+ * request body, and the payload of every other media type it declares (each
+ * `requestBodyContents` entry whose type is not `requestBody`'s own). Every
+ * pass that walks an operation's type refs (reachability, ref rewriting and
+ * validation, the differ's direction index, inline-enum collection) walks a
+ * webhook's through this, so a model reached only through a webhook payload
+ * or header is treated the way one reached through an operation is, and a
+ * field added to `Webhook` later has one place to join.
  */
 export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
   const refs: TypeRef[] = [];
@@ -1363,6 +1600,9 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
     refs.push(param.type);
   }
   if (webhook.requestBody) refs.push(webhook.requestBody);
+  for (const content of webhook.requestBodyContents ?? []) {
+    if (content.type !== webhook.requestBody) refs.push(content.type);
+  }
   return refs;
 }
 
@@ -1469,7 +1709,7 @@ export interface ErrorResponse {
  * A 3xx entry's `type` is always `unknown`. A 2xx body that is itself an
  * inline enum, or an array of one, is promoted to `spec.enums` as
  * `<Op>Response`; every entry derives that same name, so a second body with
- * other members is qualified with its status code (`CreatePetResponse202`),
+ * other members is qualified with its status code (`CheckPetKindResponse202`),
  * while identical members share one enum.
  */
 export interface SuccessResponse {
@@ -1502,6 +1742,16 @@ export interface SuccessResponse {
  * parameters and all, so it can be sent back verbatim in an `Accept` header.
  */
 export interface ResponseContent {
+  contentType: string;
+  type: TypeRef;
+}
+
+/**
+ * One media type a request body declares under `content`, with the type it
+ * resolves to. `contentType` is kept exactly as written in the spec,
+ * parameters and all, so it can be sent verbatim as a `Content-Type`.
+ */
+export interface RequestBodyContent {
   contentType: string;
   type: TypeRef;
 }
@@ -1543,6 +1793,44 @@ export function collectResponseBodyTypes(op: Operation): ResponseBodyType[] {
     if (range.type) result.push({ type: range.type, source: `rangeResponses.${range.range}` });
   }
   return result;
+}
+
+/**
+ * A request body type other than `Operation.requestBody`, with where it
+ * comes from for diagnostics.
+ */
+export interface RequestBodyType {
+  type: TypeRef;
+  /** The entry it belongs to: `requestBodyContents.<media type>`. */
+  source: string;
+}
+
+/**
+ * Every request body type an operation declares besides `requestBody`: the
+ * bodies of its other media types (`collectAlternateRequestBodyContents`).
+ * The request-side twin of `collectResponseBodyTypes`: every pass that walks
+ * an operation's type refs (reachability, model assignment, ref rewriting
+ * and validation, direction, compat filtering, enum collection) calls this
+ * beside it, so a body declared only for a secondary media type is reached
+ * everywhere `requestBody` is, and a new kind of request body is reached
+ * everywhere by extending this one function.
+ */
+export function collectRequestBodyTypes(op: Operation): RequestBodyType[] {
+  return collectAlternateRequestBodyContents(op).map((content) => ({
+    type: content.type,
+    source: `requestBodyContents.${content.contentType}`,
+  }));
+}
+
+/**
+ * Every request content entry whose type is reachable only through it: the
+ * entries of `requestBodyContents` other than the one `requestBody` was read
+ * from, which shares that very TypeRef and is already reached through
+ * `requestBody`. Every entry when no media type was read as `requestBody`.
+ * Feeds `collectRequestBodyTypes`, which the walkers call.
+ */
+export function collectAlternateRequestBodyContents(op: Operation): RequestBodyContent[] {
+  return (op.requestBodyContents ?? []).filter((content) => content.type !== op.requestBody);
 }
 
 /**
