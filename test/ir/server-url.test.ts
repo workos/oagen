@@ -230,10 +230,14 @@ describe('normalizeServerUrl', () => {
   });
 
   it('keeps every placeholder as written, wherever it sits', () => {
-    expect(normalizeServerUrl('https://{region}.API.example.com/{version}')).toBe(
-      'https://{region}.api.example.com/{version}',
+    // After the first placeholder in the authority nothing is folded.
+    expect(normalizeServerUrl('HTTPS://{region}.API.example.com/{version}')).toBe(
+      'https://{region}.API.example.com/{version}',
     );
-    expect(normalizeServerUrl('https://{Region}.api.example.com')).toBe('https://{Region}.api.example.com/');
+    expect(normalizeServerUrl('https://{Region}.api.example.com')).toBe('https://{Region}.api.example.com');
+    expect(normalizeServerUrl('HTTPS://API.example.com{basePath}')).toBe('https://API.example.com{basePath}');
+    expect(normalizeServerUrl('HTTPS://API.example.com:443/{version}')).toBe('https://api.example.com/{version}');
+    expect(normalizeServerUrl('HTTPS://API.example.com?{q}')).toBe('https://api.example.com/?{q}');
     expect(normalizeServerUrl('https://{Region}.api.example.com')).not.toBe(
       normalizeServerUrl('https://{region}.api.example.com'),
     );
@@ -247,9 +251,140 @@ describe('normalizeServerUrl', () => {
     );
   });
 
-  it('keeps a port written as a placeholder, and drops no port after a placeholder scheme', () => {
-    expect(normalizeServerUrl('https://api.example.com:{port}')).toBe('https://api.example.com:{port}/');
-    expect(normalizeServerUrl('{scheme}://api.example.com:443')).toBe('{scheme}://api.example.com:443/');
+  it('keeps a port written as a placeholder, and folds nothing after a placeholder scheme', () => {
+    expect(normalizeServerUrl('https://api.example.com:{port}')).toBe('https://api.example.com:{port}');
+    expect(normalizeServerUrl('{scheme}://API.example.com:443')).toBe('{scheme}://API.example.com:443');
+  });
+
+  it('keeps the authority as written from its first placeholder on, which may supply a port or a path (Greptile)', () => {
+    // `basePath` defaulting to `/v1` makes these resolve to `/v1` and `/v1/`.
+    expect(normalizeServerUrl('https://api.example.com{basePath}')).toBe('https://api.example.com{basePath}');
+    expect(normalizeServerUrl('https://api.example.com{basePath}/')).toBe('https://api.example.com{basePath}/');
+    expect(normalizeServerUrl('https://api.example.com{basePath}')).not.toBe(
+      normalizeServerUrl('https://api.example.com{basePath}/'),
+    );
+    expect(normalizeServerUrl('https://{host}')).toBe('https://{host}');
+    expect(normalizeServerUrl('https://API.example.com:{port}?x=1')).toBe('https://API.example.com:{port}?x=1');
+    // `host` defaulting to `api.example.com/v1` makes `:443` path text, so no
+    // port is dropped and no `/` added after a placeholder.
+    expect(normalizeServerUrl('https://{host}:443/v2')).toBe('https://{host}:443/v2');
+    expect(normalizeServerUrl('https://{host}:443/v2')).not.toBe(normalizeServerUrl('https://{host}/v2'));
+    expect(normalizeServerUrl('https://{host}:443')).not.toBe(normalizeServerUrl('https://{host}:443/'));
+    expect(normalizeServerUrl('https://{region}.API.example.com:443')).toBe('https://{region}.API.example.com:443');
+    expect(normalizeServerUrl('https://{host}:8443')).toBe('https://{host}:8443');
+    // A `@` after the placeholder makes the text before it userinfo: kept as written.
+    expect(normalizeServerUrl('https://USER{x}@HOST.example.com')).toBe('https://USER{x}@HOST.example.com');
+    // The same literal spellings still fold.
+    expectSame('https://api.example.com/v2', ['https://api.example.com:443/v2', 'https://api.example.com/v2']);
+    // A bare literal authority still gets `/`.
+    expectSame('https://api.example.com/', ['https://api.example.com', 'https://api.example.com/']);
+  });
+
+  it('folds nothing whose URL part an earlier placeholder could change (Greptile, round 3)', () => {
+    // `suffix` defaulting to `@api.example.com` makes `USER` a username, which
+    // keeps its case: the text before a placeholder in the authority is kept.
+    expect(normalizeServerUrl('https://USER{suffix}/v1')).toBe('https://USER{suffix}/v1');
+    expect(normalizeServerUrl('https://USER{suffix}/v1')).not.toBe(normalizeServerUrl('https://user{suffix}/v1'));
+    // `prefix` defaulting to `https://gateway.example.com/path` makes the rest
+    // a path: a template whose scheme holds a placeholder is kept whole.
+    expect(normalizeServerUrl('{prefix}://api.example.com')).toBe('{prefix}://api.example.com');
+    expect(normalizeServerUrl('{prefix}://api.example.com')).not.toBe(
+      normalizeServerUrl('{prefix}://api.example.com/'),
+    );
+    expect(normalizeServerUrl('{prefix}://API.example.com:443')).toBe('{prefix}://API.example.com:443');
+    expect(normalizeServerUrl('https{x}://API.example.com')).toBe('https{x}://API.example.com');
+    // Mirror cases: a part that is complete before the first placeholder still folds.
+    expectSame('https://api.example.com/{version}', [
+      'HTTPS://API.example.com:443/{version}',
+      'https://api.example.com/{version}',
+    ]);
+    expectSame('https://api.example.com/x?{q}', ['HTTPS://API.example.com:/x?{q}', 'https://api.example.com/x?{q}']);
+    expectSame('https://{region}.api.example.com', [
+      'HTTPS://{region}.api.example.com',
+      'Https://{region}.api.example.com',
+    ]);
+    expectSame('https://pets.example.com/', ['HTTPS://PETS.example.com:443', 'https://pets.example.com/']);
+  });
+
+  it('never folds two templates to one that resolve apart under some allowed value (soundness)', () => {
+    // Every template below, with every variable allowed every value below:
+    // whenever two templates come out as one string, they must resolve to
+    // one normalised URL under the defaults and under each single
+    // substitution. Rounds 1 to 3 of review were each an instance of this.
+    const templates = [
+      'https://api.example.com',
+      'https://api.example.com/',
+      'HTTPS://API.example.com:443',
+      'https://api.example.com/v1',
+      'https://api.example.com/v1/',
+      'https://api.example.com{basePath}',
+      'https://api.example.com{basePath}/',
+      'https://{host}',
+      'https://{host}/',
+      'https://{host}:443/v2',
+      'https://{host}/v2',
+      'https://USER{suffix}/v1',
+      'https://user{suffix}/v1',
+      '{prefix}://api.example.com',
+      '{prefix}://api.example.com/',
+      '{prefix}://API.example.com',
+      'https://{region}.api.example.com',
+      'HTTPS://{region}.api.example.com',
+      'https://{region}.API.example.com',
+      'https://api.example.com:{port}',
+      'https://api.example.com:{port}/',
+      'https://api.example.com/{version}',
+      'HTTPS://API.example.com:443/{version}',
+      'https://api.example.com/%7e{x}',
+      'https://api.example.com/~{x}',
+      'https://USER:pw@API.example.com',
+      'https://[2001:DB8::1]:443/{x}',
+      '//{host}/v1',
+      '/{v}',
+      '/v1',
+      '{x}',
+      'https{x}://api.example.com',
+      'https://{a}{b}',
+      'https://{a}/{b}',
+      'https://api.example.com/{a}?{b}',
+    ];
+    const values = [
+      'x',
+      'X',
+      '',
+      '@api.example.com',
+      'api.example.com/v1',
+      'https://gateway.example.com/path',
+      ':8443',
+      '/x?y#z',
+      '%7e',
+      '//evil.example.com',
+      'A@B:443',
+    ];
+    const names = ['basePath', 'host', 'suffix', 'prefix', 'region', 'port', 'version', 'x', 'v', 'a', 'b'];
+    const variables = Object.fromEntries(names.map((name) => [name, { default: 'x', enum: values }]));
+    /** The variables with one of them set to `value`. */
+    const withValue = (name: string, value: string) =>
+      Object.fromEntries(names.map((n) => [n, n === name ? { default: value, enum: values } : variables[n]]));
+    const resolved = (url: string, vars: typeof variables) =>
+      normalizeServerUrl(resolveServerUrl({ url, variables: vars }).url);
+
+    let folded = 0;
+    for (const a of templates) {
+      for (const b of templates) {
+        if (a >= b || normalizeServerUrl(a) !== normalizeServerUrl(b)) continue;
+        folded++;
+        expect(resolved(a, variables), `${a} vs ${b}`).toBe(resolved(b, variables));
+        for (const name of names) {
+          for (const value of values) {
+            const vars = withValue(name, value);
+            expect(resolved(a, vars), `${a} vs ${b} with ${name}=${value}`).toBe(resolved(b, vars));
+          }
+        }
+      }
+    }
+    // The corpus does fold some pairs, so the check above is not vacuous.
+    expect(folded).toBeGreaterThanOrEqual(4);
   });
 
   it('treats an unclosed brace, an empty `{}` and a reopened brace as literal text, like resolveServerUrl', () => {
@@ -282,8 +417,8 @@ describe('normalizeServerUrl', () => {
       '{scheme}://{host}:{port}/v1',
     ]) {
       // Every placeholder the scan finds survives normalisation as written,
-      // and nothing else is treated as one (the literal braces are folded
-      // along with the host they sit in).
+      // and nothing else is treated as one (a literal brace is a character
+      // like any other).
       const normalized = normalizeServerUrl(url);
       for (const name of serverUrlPlaceholders(url)) expect(normalized).toContain(`{${name}}`);
       expect(serverUrlPlaceholders(normalized)).toEqual(serverUrlPlaceholders(url));

@@ -77,7 +77,7 @@ The spec-only baseline generates expected request structure from the OpenAPI spe
 - `request.path` — with `<ID>` placeholders for path params
 - `request.queryParams` — from required query params + `limit=1` for paginated ops
 - `request.body` — expected body keys/structure from the request body model
-- `response.status` — default success status (201 for POST, 200 for GET, etc.)
+- `response.status` — the declared primary success status (`Operation.responseStatusCode`: `200`, `201`, `204`, a lone `302`); `0` when the operation declares no 2xx or 3xx response, since a status the document does not describe cannot be predicted (nothing is guessed from the HTTP method)
 - `response.body` — `null` (unknown without the API)
 
 This enables offline verification of CRITICAL checks (method, path, query params, body keys) during development. Response-side checks (INFO-level) will show as "differs" since the baseline has null response bodies — that's expected and non-blocking.
@@ -93,7 +93,7 @@ npm run smoke -- --lang node --sdk-path ../path/to/sdk --raw-results smoke-resul
 
 ### Raw HTTP (`smoke/raw.ts`)
 
-Calls the real API directly via `fetch` and captures request/response pairs.
+Calls the real API directly via `fetch` and captures request/response pairs. Redirects are never followed (`captureRawExchange` sends with `redirect: 'manual'`): each exchange records the operation's own response — the first hop — so a declared `302` is recorded as 302 and judged like any other status, and a redirect the document does not declare is reported as unexpected rather than hidden behind its target's 200. The redirect target is never requested. An SDK runner must capture the same hop (see the `generate-smoke-test` skill), or `smoke:diff` reports a status mismatch on every redirecting operation.
 
 ```bash
 npm run smoke:raw
@@ -181,7 +181,7 @@ Both `smoke-results-raw.json` and `smoke-results-sdk-{lang}.json` contain a `Smo
 
 - **`outcome`**: `"success"` (2xx), `"api-error"` (4xx/5xx or network failure), or `"skipped"` (missing path params or no SDK mapping)
 - **`unexpectedStatus`**: `true` when the operation's declared responses do not cover the response status code: no explicit code, no `1XX`–`5XX` range response containing it, and no `default` response. Only present when `true`.
-- **`expectedStatusCodes`**: The explicit status codes declared in the spec (success + error codes). A range or `default` response is not listed here. Only present when `unexpectedStatus` is `true`.
+- **`expectedStatusCodes`**: The explicit status codes declared in the spec: every declared 2xx/3xx code (`Operation.responseStatusCode` plus every `successResponses` entry) and every error code; nothing is implied from the HTTP method, so an operation declaring no 2xx/3xx response lists no success code. A range or `default` response is not listed here. Only present when `unexpectedStatus` is `true`.
 - **`expectedStatuses`**: Everything the declared responses cover — `codes` (the same list as `expectedStatusCodes`), `ranges` (the `1XX`–`5XX` range keys, in declaration order) and `hasDefault` (whether a `default` response exists). Only present when `unexpectedStatus` is `true`.
 - **`provenance`**: (SDK results only) Records how the SDK method was resolved — includes `resolutionTier` (`exact`, `crud-prefix`, `fuzzy`, or `manifest`), `resolutionConfidence`, and the `sdkMethodName` used.
 

@@ -1,5 +1,6 @@
 import type { Parameter } from '../ir/types.js';
 import { parameterKey } from '../ir/parameter-key.js';
+import { mediaTypeEssence } from '../utils/media-type.js';
 import type { ParamLocation } from './types.js';
 
 /** A parameter tagged with where it lives, as `locatedParams` yields it. */
@@ -56,4 +57,45 @@ export function locatedParams(node: ParamCarrier): LocatedParam[] {
  */
 export function paramKey(loc: ParamLocation, name: string): string {
   return parameterKey(loc, name);
+}
+
+/** The two sides of a parameter's `contentType`, carried on the `param-content-type-changed` entry that reports them. */
+export interface ParameterContentTypeShift {
+  /** The old spec's `content` key as written, or `null` for a parameter typed by `schema`. */
+  oldContentType: string | null;
+  /** The new spec's `content` key as written, or `null` for a parameter typed by `schema`. */
+  newContentType: string | null;
+  /** `content type <schema> → application/json`, each side as written. */
+  details: string;
+}
+
+/**
+ * How a paired parameter's `Parameter.contentType` differs between two
+ * specs, or `undefined` when it does not. The media type decides how the
+ * value is serialized — a `content` parameter's value is sent in that media
+ * type, a `schema` parameter's by `style`/`explode` — so a parameter that
+ * moves between `schema` and `content`, or between two media types that
+ * differ in essence (`application/json` → `text/plain`), is a change even
+ * when its type did not move. The two keys are compared by essence
+ * (`mediaTypeEssence`: `type/subtype`, case folded, parameters stripped),
+ * since neither case nor a parameter such as `charset` changes how the
+ * value is encoded; both are carried as written. `diffParams` (operations)
+ * and `diffWebhookParams` (webhooks) report it through this one rule.
+ */
+export function parameterContentTypeShift(
+  oldParam: Parameter,
+  newParam: Parameter,
+): ParameterContentTypeShift | undefined {
+  const oldContentType = oldParam.contentType ?? null;
+  const newContentType = newParam.contentType ?? null;
+  const same =
+    oldContentType === null || newContentType === null
+      ? oldContentType === newContentType
+      : mediaTypeEssence(oldContentType) === mediaTypeEssence(newContentType);
+  if (same) return undefined;
+  return {
+    oldContentType,
+    newContentType,
+    details: `content type ${oldContentType ?? '<schema>'} → ${newContentType ?? '<schema>'}`,
+  };
 }
