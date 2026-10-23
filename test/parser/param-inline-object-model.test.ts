@@ -629,3 +629,54 @@ describe('a parameter declared with `content` instead of `schema` (workos/oagen#
     expectSound(spec, ['PetsFilter']);
   });
 });
+
+describe('an enum only a secondary request body carries (#348 review round 2)', () => {
+  // `createPet` under tag `createPet`: its `text/csv` body — a secondary
+  // media type, reached by no field but its `requestBodyContents` entry — is
+  // an inline enum named `CreatePetTextCsvRequest`; a `text_csv_request`
+  // query object on the service's later operation derives the same name.
+  const doc = specDoc({
+    '/pets': {
+      post: {
+        operationId: 'createPet',
+        tags: ['createPet'],
+        requestBody: {
+          content: {
+            'application/json': { schema: obj({ name: str }) },
+            'text/csv': { schema: en(['header', 'bare']) },
+          },
+        },
+        responses: { '201': { description: 'created' } },
+      },
+    },
+    '/pets/search': {
+      get: {
+        operationId: 'listPets',
+        tags: ['createPet'],
+        parameters: [param('text_csv_request', 'query', obj({ q: str }))],
+        responses: ok,
+      },
+    },
+  });
+
+  it('keeps the enum name reserved: the later parameter model is qualified, the enum is never renamed', async () => {
+    const { spec, warnings } = await parse('secondary-body-enum', doc);
+    expect(warnings).toEqual([]);
+    const ops = opsOf(spec);
+    const csv = ops.createPet.requestBodyContents!.find((c) => c.contentType === 'text/csv')!;
+    expect(show(csv.type)).toBe('CreatePetTextCsvRequest');
+    expect(paramTypes(ops.listPets)).toEqual({ 'query:text_csv_request': 'CreatePetListPetsTextCsvRequest' });
+    expect(enumValues(spec, 'CreatePetTextCsvRequest')).toEqual(['header', 'bare']);
+    expect(fieldsOf(spec, 'CreatePetListPetsTextCsvRequest')).toEqual({ q: 'string' });
+    expect(modelNames(spec)).toEqual(['CreatePetListPetsTextCsvRequest', 'CreatePetRequest']);
+    expect(enumNames(spec)).toEqual(['CreatePetTextCsvRequest']);
+    expectSound(spec);
+  });
+
+  it('is among the references collectOperationTypeRefs yields for the operation, so every reservation sees it', async () => {
+    const { spec } = await parse('secondary-body-enum-refs', doc);
+    const op = opsOf(spec).createPet;
+    const csv = op.requestBodyContents!.find((c) => c.contentType === 'text/csv')!.type;
+    expect(collectOperationTypeRefs(op)).toContain(csv);
+  });
+});

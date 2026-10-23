@@ -24,6 +24,8 @@ import {
   collectResponseHeaders,
   collectFallbackResponseTypes,
   collectResponseBodyTypes,
+  collectRequestBodyTypes,
+  collectOperationTypeRefs,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -878,5 +880,163 @@ describe('collectResponseBodyTypes — default and range responses', () => {
     expect(
       collectResponseBodyTypes({ ...baseOperation, defaultResponse: {}, rangeResponses: [{ range: '1XX' }] }),
     ).toEqual([]);
+  });
+});
+
+describe('collectOperationTypeRefs', () => {
+  /** A fresh, distinct reference per site, so identity tells every site apart. */
+  const model = (name: string): TypeRef => ({ kind: 'model', name });
+  const en = (name: string): TypeRef => ({ kind: 'enum', name, values: ['a', 'b'] });
+  const KINDS = new Set(['primitive', 'array', 'model', 'enum', 'literal', 'union', 'nullable', 'map']);
+  const isTypeRef = (value: unknown): value is TypeRef =>
+    typeof value === 'object' && value !== null && KINDS.has((value as { kind?: unknown }).kind as string);
+
+  /**
+   * Every TypeRef reachable from the operation by walking its object graph
+   * blindly — each `type` property that holds one, at any depth, without
+   * descending into a TypeRef itself. What the helper must return, so a
+   * field added to `Operation` later shows up here before it is listed there.
+   */
+  function bruteForceRefs(op: Operation): Set<TypeRef> {
+    const refs = new Set<TypeRef>();
+    const seen = new Set<unknown>();
+    const walk = (value: unknown): void => {
+      if (typeof value !== 'object' || value === null || seen.has(value)) return;
+      seen.add(value);
+      if (isTypeRef(value)) {
+        refs.add(value);
+        return;
+      }
+      for (const inner of Array.isArray(value) ? value : Object.values(value)) walk(inner);
+    };
+    walk(op);
+    return refs;
+  }
+
+  // One operation carrying a reference at every site the IR has: parameters
+  // in every location (the body-owned query parameter included, and a
+  // parameter group pointing at the same objects), a request body with two
+  // other media types, a primary and a second success body with headers and
+  // alternate contents, an error with a body, headers and an alternate
+  // content, a default and a range response likewise, and a pagination item
+  // type and envelope field.
+  const primary = model('ListPetsResponse');
+  const primaryHeaders = [{ name: 'X-Mode', type: en('PetsXMode'), required: false }];
+  const primaryContents = [
+    { contentType: 'application/json', type: primary },
+    { contentType: 'text/html', type: model('ListPetsTextHtmlResponse') },
+  ];
+  const queryFilter = { name: 'filter', type: model('PetsFilter'), required: false };
+  const op: Operation = {
+    name: 'listPets',
+    httpMethod: 'post',
+    path: '/pets/{id}',
+    pathParams: [{ name: 'id', type: model('PetsId'), required: true }],
+    queryParams: [queryFilter],
+    bodyOwnedQueryParams: [{ name: 'owned', type: en('PetsOwned'), required: false }],
+    headerParams: [{ name: 'X-Trace', type: model('PetsXTrace'), required: false }],
+    cookieParams: [{ name: 'session', type: model('PetsSession'), required: false }],
+    parameterGroups: [
+      { name: 'selector', optional: true, variants: [{ name: 'by_filter', parameters: [queryFilter] }] },
+    ],
+    requestBody: model('ListPetsRequest'),
+    requestBodyContentTypes: ['application/json', 'application/xml', 'text/csv'],
+    requestBodyContents: [
+      { contentType: 'application/json', type: model('ListPetsRequest') },
+      { contentType: 'application/xml', type: model('ListPetsApplicationXmlRequest') },
+      { contentType: 'text/csv', type: en('ListPetsTextCsvRequest') },
+    ],
+    response: primary,
+    responseHeaders: primaryHeaders,
+    responseContentTypes: ['application/json', 'text/html'],
+    responseContents: primaryContents,
+    successResponses: [
+      {
+        statusCode: 200,
+        type: primary,
+        headers: primaryHeaders,
+        contentTypes: ['application/json', 'text/html'],
+        contents: primaryContents,
+      },
+      {
+        statusCode: 202,
+        type: model('ListPetsResponse202'),
+        headers: [{ name: 'Retry-After', type: model('PetsRetryAfter'), required: false }],
+        contentTypes: ['application/json'],
+        contents: [{ contentType: 'application/json', type: model('ListPetsResponse202') }],
+      },
+    ],
+    errors: [
+      {
+        statusCode: 404,
+        description: 'nf',
+        type: model('ListPetsError404'),
+        headers: [{ name: 'X-Reason', type: en('PetsXReason'), required: false }],
+        contentTypes: ['application/json', 'text/plain'],
+        contents: [
+          { contentType: 'application/json', type: model('ListPetsError404') },
+          { contentType: 'text/plain', type: { kind: 'primitive', type: 'string' } },
+        ],
+      },
+    ],
+    defaultResponse: {
+      type: model('ListPetsDefaultResponse'),
+      headers: [{ name: 'X-Default', type: model('PetsXDefault'), required: false }],
+      contentTypes: ['application/json', 'application/yaml'],
+      contents: [
+        { contentType: 'application/json', type: model('ListPetsDefaultResponse') },
+        { contentType: 'application/yaml', type: model('ListPetsDefaultApplicationYamlResponse') },
+      ],
+    },
+    rangeResponses: [
+      {
+        range: '5XX',
+        type: model('ListPetsServerErrorResponse'),
+        headers: [{ name: 'X-Outage', type: model('PetsXOutage'), required: false }],
+      },
+    ],
+    pagination: {
+      strategy: 'cursor',
+      param: 'after',
+      itemType: model('Pet'),
+      envelopeFields: [{ name: 'list_metadata', type: model('ListMetadata'), required: true }],
+    },
+    injectIdempotencyKey: false,
+  };
+
+  it('returns every type reference the operation carries, and nothing else', () => {
+    const expected = bruteForceRefs(op);
+    const returned = collectOperationTypeRefs(op);
+    // A reference shared by two sites (the primary body and its
+    // successResponses entry, a group's parameter and its location list) is
+    // one object, so the comparison is by identity.
+    expect(new Set(returned)).toEqual(expected);
+    expect(expected.size).toBeGreaterThanOrEqual(22);
+  });
+
+  it('reaches the other request media types through collectRequestBodyTypes, as the other response bodies through collectResponseBodyTypes', () => {
+    const returned = new Set(collectOperationTypeRefs(op));
+    for (const { type } of collectRequestBodyTypes(op)) expect(returned.has(type)).toBe(true);
+    for (const { type } of collectResponseBodyTypes(op)) expect(returned.has(type)).toBe(true);
+    for (const header of collectResponseHeaders(op)) expect(returned.has(header.type)).toBe(true);
+    // The `text/csv` body is reached by no other field: only its entry carries it.
+    const csv = op.requestBodyContents!.find((c) => c.contentType === 'text/csv')!.type;
+    expect(returned.has(csv)).toBe(true);
+  });
+
+  it('lists a bare operation’s response alone', () => {
+    const bare: Operation = {
+      name: 'ping',
+      httpMethod: 'get',
+      path: '/ping',
+      pathParams: [],
+      queryParams: [],
+      headerParams: [],
+      response: { kind: 'primitive', type: 'unknown' },
+      errors: [],
+      injectIdempotencyKey: false,
+    };
+    expect(collectOperationTypeRefs(bare)).toEqual([bare.response]);
+    expect(new Set(collectOperationTypeRefs(bare))).toEqual(bruteForceRefs(bare));
   });
 });
