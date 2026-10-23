@@ -1351,6 +1351,44 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
 }
 
 /**
+ * Every type reference an operation carries: its parameters' types in every
+ * location (the query parameters the body owns included), its request body,
+ * its primary response and every other success body, every error body, the
+ * pagination iterator's item type and envelope fields, every response header
+ * (`collectResponseHeaders`) and every secondary, fallback and range body
+ * (`collectResponseBodyTypes`). The one list for a pass that reserves or
+ * collects names across an operation's references, as
+ * `collectWebhookTypeRefs` is for a webhook's, so a field added to
+ * `Operation` later has one place to join. When `successResponses` exists
+ * the primary entry's `type` is the very reference `response` carries, so
+ * that reference appears twice; a reader that only collects names is
+ * unaffected.
+ */
+export function collectOperationTypeRefs(op: Operation): TypeRef[] {
+  const refs: TypeRef[] = [];
+  for (const param of [
+    ...op.pathParams,
+    ...op.queryParams,
+    ...(op.bodyOwnedQueryParams ?? []),
+    ...op.headerParams,
+    ...(op.cookieParams ?? []),
+  ]) {
+    refs.push(param.type);
+  }
+  if (op.requestBody) refs.push(op.requestBody);
+  refs.push(op.response);
+  for (const entry of op.successResponses ?? []) refs.push(entry.type);
+  for (const error of op.errors) if (error.type) refs.push(error.type);
+  if (op.pagination) {
+    refs.push(op.pagination.itemType);
+    for (const field of op.pagination.envelopeFields ?? []) refs.push(field.type);
+  }
+  for (const header of collectResponseHeaders(op)) refs.push(header.type);
+  for (const { type } of collectResponseBodyTypes(op)) refs.push(type);
+  return refs;
+}
+
+/**
  * A header a response declares, typed like a parameter. `name` is kept exactly
  * as written in the spec (e.g. `Content-Disposition`); emitters apply their
  * own casing. Header names are case-insensitive (RFC 9110 §5.1), so one

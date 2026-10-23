@@ -240,8 +240,14 @@ function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifie
  * deprecated (`sameEnumShape`) — the ref is renamed to a distinct name
  * before it is promoted. A taken name with the same members is shared, as
  * before; the first lifted copy's value descriptions and link are the
- * enum's. `modelNames` are the names the distinct name must also step
- * around.
+ * enum's. A name no enum holds yet but a model does (`modelNames`) — a
+ * parameter's object named like a parameter enum typed later in the
+ * document (`PetsKind`), a component model named like the `kind` enum a
+ * parameter model's field mints (`PetsOwnerKind`) — is renamed the same way,
+ * so the IR never declares a model and an enum under one name. A name both
+ * a component model and a component enum hold is the document's own clash:
+ * an enum with the component enum's members shares it as it always has.
+ * `modelNames` are also the names the distinct name must step around.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -255,7 +261,8 @@ function collectDistinctEnums(
       if (!ref.values) return;
       const values = enumValuesOf(ref);
       const existing = enums.find((e) => e.name === ref.name);
-      if (existing && !sameEnumShape(existing.values, values)) {
+      const taken = existing ? !sameEnumShape(existing.values, values) : modelNames.has(ref.name);
+      if (taken) {
         ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
@@ -270,13 +277,15 @@ function collectDistinctEnums(
  * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
  * `DocumentsXPolicy3`, ...). Deterministic for a given spec, since it depends
  * only on declaration order. The collectors
- * run after every model is named, and the merge passes mint against every
- * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
- * names chosen here, so this is the side that steps around the other: a
- * model a merge pass qualified to `GetLegacyWidgetWidget2`, because a
- * component enum owns `GetLegacyWidgetWidget`, sends a query enum of that
- * name with other members on to `GetLegacyWidgetWidget3`, and the IR never
- * declares a model and an enum under one name.
+ * run after every model is named, and the passes that mint models — the
+ * deferred inline pass (`reserveEnumNamesInPlay` in operations.ts) and the
+ * merge passes (`reservedTypeNames`) — mint against every enum name an
+ * `EnumRef` carries, but not against the names chosen here, so this is the
+ * side that steps around the other: a model a merge pass qualified to
+ * `GetLegacyWidgetWidget2`, because a component enum owns
+ * `GetLegacyWidgetWidget`, sends a query enum of that name with other
+ * members on to `GetLegacyWidgetWidget3`, and the IR never declares a model
+ * and an enum under one name.
  */
 function distinctEnumName(
   base: string,
