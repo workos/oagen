@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collectEnumRefs, collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
-import type { ApiSpec, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #309: an iterator is driven only by a query parameter the operation
@@ -69,7 +69,11 @@ describe('a list envelope on an operation without a paging parameter (issue #309
 
   const warnings = (): string[] => warn.mock.calls.map((call: unknown[]) => String(call[0]));
 
-  /** Every model and enum reference, from operations and model fields alike, resolves, and every model is referenced. */
+  /**
+   * Every model and enum reference, from operations and model fields alike,
+   * resolves; every model is referenced; and every `discriminator.mapping`
+   * target names a variant of its union.
+   */
   function expectSound(ir: ApiSpec): void {
     const modelNames = new Set(ir.models.map((m) => m.name));
     const enumNames = new Set(ir.enums.map((e) => e.name));
@@ -79,15 +83,29 @@ describe('a list envelope on an operation without a paging parameter (issue #309
       ...ir.models.flatMap((m) => m.fields.map((f) => f.type)),
     ];
     const unresolved: string[] = [];
+    const inconsistentMappings: string[] = [];
+    const visit = (ref: TypeRef): void => {
+      if (ref.kind === 'union') {
+        const variantNames = new Set(ref.variants.flatMap((variant) => collectModelRefs(variant)));
+        for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
+          if (!variantNames.has(target)) inconsistentMappings.push(`${value} → ${target}`);
+        }
+        for (const variant of ref.variants) visit(variant);
+      } else if (ref.kind === 'array') visit(ref.items);
+      else if (ref.kind === 'nullable') visit(ref.inner);
+      else if (ref.kind === 'map') visit(ref.valueType);
+    };
     for (const ref of refs) {
       for (const name of collectModelRefs(ref)) {
         referenced.add(name);
         if (!modelNames.has(name)) unresolved.push(name);
       }
       for (const name of collectEnumRefs(ref)) if (!enumNames.has(name)) unresolved.push(name);
+      visit(ref);
     }
     expect(unresolved).toEqual([]);
     expect([...modelNames].filter((name) => !referenced.has(name))).toEqual([]);
+    expect(inconsistentMappings).toEqual([]);
   }
 
   /** The operation has no iterator, and its response is the envelope as a plain model with exactly `fields`. */
