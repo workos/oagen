@@ -3059,3 +3059,51 @@ describe('extractOperations – path-named services skip the API root (issue #20
     ]);
   });
 });
+
+describe('extractOperations – Operation.tags (issue #273)', () => {
+  const responses = { '200': { description: 'ok' } };
+  const operation = (op: Record<string, unknown>) =>
+    extractOperations({ '/pets': { get: { operationId: 'listPets', responses, ...op } } }).services[0].operations[0];
+
+  it('carries every tag in document order, as a webhook does', () => {
+    expect(operation({ tags: ['Pets', 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('drops entries that are not non-empty strings and keeps the rest', () => {
+    expect(operation({ tags: ['Pets', '', 3, null, 'Store'] }).tags).toEqual(['Pets', 'Store']);
+  });
+
+  it('omits the key when the operation declares no usable tag', () => {
+    expect(operation({})).not.toHaveProperty('tags');
+    expect(operation({ tags: [] })).not.toHaveProperty('tags');
+    expect(operation({ tags: ['', 3] })).not.toHaveProperty('tags');
+    expect(operation({ tags: 'Pets' })).not.toHaveProperty('tags');
+  });
+
+  it('folds a repeated tag onto its first occurrence (MichaelDeBoey)', () => {
+    expect(operation({ tags: ['Pets', 'Store', 'Pets', 'Store'] }).tags).toEqual(['Pets', 'Store']);
+    expect(operation({ tags: ['Pets', 'Pets'] }).tags).toEqual(['Pets']);
+  });
+
+  it('names the service from the first usable tag, the same entry as tags[0] (MichaelDeBoey)', () => {
+    const grouped = (op: Record<string, unknown>) =>
+      extractOperations({ '/notes': { get: { operationId: 'listNotes', responses, ...op } } }).services;
+    expect(grouped({ tags: ['', 'Labels'] }).map((s) => s.name)).toEqual(['Labels']);
+    expect(grouped({ tags: ['', 'Labels'] })[0].operations[0].tags).toEqual(['Labels']);
+    // A non-string first entry used to reach PascalCasing and throw.
+    expect(grouped({ tags: [42, 'Labels'] }).map((s) => s.name)).toEqual(['Labels']);
+    // No usable entry: path-named, as if untagged, with no `tags` key.
+    expect(grouped({ tags: [''] }).map((s) => s.name)).toEqual(['Notes']);
+    expect(grouped({ tags: [42] }).map((s) => s.name)).toEqual(['Notes']);
+    expect(grouped({ tags: [42] })[0].operations[0]).not.toHaveProperty('tags');
+  });
+
+  it('treats an operation with no usable tag as untagged when finding the API root', () => {
+    const item = (operationId: string, op: Record<string, unknown>) => ({ get: { operationId, responses, ...op } });
+    const { services } = extractOperations({
+      '/api/v1/notes': item('listNotes', { tags: [42] }),
+      '/api/v1/labels': item('listLabels', { tags: [''] }),
+    });
+    expect(services.map((s) => s.name).sort()).toEqual(['Labels', 'Notes']);
+  });
+});

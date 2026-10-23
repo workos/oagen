@@ -36,6 +36,27 @@ export function deprecationFlip(
   return oldDeprecated === newDeprecated ? undefined : { oldDeprecated, newDeprecated };
 }
 
+/** The two sides of a `tags` change, carried on the change that reports it. */
+export interface TagsShift {
+  /** The node's `tags` in the old spec, in document order; `[]` when it carried none. */
+  oldTags: string[];
+  /** The node's `tags` in the new spec, in document order; `[]` when it carries none. */
+  newTags: string[];
+}
+
+/**
+ * `{ oldTags, newTags }` when a node's `tags` differ between the two specs,
+ * `undefined` when they do not. The lists are compared in document order,
+ * entry by entry, since the first tag is what the parser names an
+ * operation's service from; an absent key is an empty list.
+ */
+export function tagsShift(oldNode: { tags?: string[] }, newNode: { tags?: string[] }): TagsShift | undefined {
+  const oldTags = oldNode.tags ?? [];
+  const newTags = newNode.tags ?? [];
+  const same = oldTags.length === newTags.length && oldTags.every((tag, i) => tag === newTags[i]);
+  return same ? undefined : { oldTags, newTags };
+}
+
 export function classifyFieldChange(
   kind: FieldChange['kind'],
   fieldName: string,

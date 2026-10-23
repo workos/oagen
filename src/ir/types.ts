@@ -129,7 +129,7 @@ export interface Webhook {
   externalDocs?: ExternalDocs;
   /** Present, and `true`, only when the document marks the webhook deprecated. */
   deprecated?: boolean;
-  /** The operation's `tags`, in document order; present only when non-empty. */
+  /** The operation's `tags`, read exactly as `Operation.tags` is. */
   tags?: string[];
   /** Header parameters the request carries, typed like `Operation.headerParams`. */
   headerParams: Parameter[];
@@ -367,6 +367,15 @@ export interface Operation {
   injectIdempotencyKey: boolean;
   deprecated?: boolean;
   async?: boolean;
+  /**
+   * The operation's `tags`, in document order, with every entry that is not
+   * a non-empty string dropped and a repeated entry folded onto its first
+   * occurrence. Present only when at least one remains. The parser names the
+   * service from `tags[0]` — the first usable entry — so the two never
+   * disagree; the list is kept so an emitter can group or document the
+   * method by every tag.
+   */
+  tags?: string[];
   /**
    * Per-operation security requirements, mirroring the OpenAPI document:
    * - `undefined` — the operation declares nothing and inherits

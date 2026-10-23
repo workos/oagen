@@ -8,6 +8,7 @@ import { extractInlineModelsFromProperties } from './inline-models.js';
 import {
   HTTP_METHODS,
   extractParams,
+  extractTags,
   operationIdModelBase,
   presentText,
   resolveOperationDocs,
@@ -648,9 +649,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
   // Read as an operation's are: the operation's own `summary` and
   // `description`, or the path item's for each it declares none for.
   const { summary, description } = resolveOperationDocs(op, pathItem);
-  const tags = Array.isArray(op.tags)
-    ? op.tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '')
-    : [];
+  const tags = extractTags(op.tags);
   const security = extractSecurityRequirements(op.security, label);
 
   return {
@@ -664,7 +663,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     // level to fall back to.
     ...externalDocsEntry(op.externalDocs),
     ...(op.deprecated === true ? { deprecated: true } : {}),
-    ...(tags.length > 0 ? { tags } : {}),
+    ...(tags !== undefined ? { tags } : {}),
     headerParams,
     queryParams,
     ...(cookieParams.length > 0 ? { cookieParams } : {}),

@@ -155,6 +155,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `link-header`), `param`, `limitParam?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`
   - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
   - `deprecated?`, `async?` — method markers
+  - `tags?` — the operation's `tags` in document order, present only when at least one usable entry remains; for grouping or doc comments (the parser already named the service from the first tag)
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
