@@ -499,6 +499,119 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expectSound(spec, ['Base', 'Pet']);
     });
 
+    it('a property several variants declare carries a key only when every declaration as written agrees (Greptile round 1)', async () => {
+      // Greptile's case: three declarations, the second a repeat of the
+      // first's shape that disagrees on `x-since`. Read off the distinct
+      // shapes alone the key looked agreed; read off every declaration it is
+      // disputed, so it is nobody's. `x-shared` is agreed by all three.
+      const variantsOf = (kind: Record<string, unknown>[]) =>
+        kind.map((schema) => ({ type: 'object', properties: { kind: schema } }));
+      const spec = await parseDocument(
+        document({
+          '/pets': postOp('createPet', {
+            allOf: [
+              { type: 'object', properties: { name: { type: 'string' } } },
+              {
+                oneOf: variantsOf([
+                  { type: 'string', 'x-since': '1', 'x-shared': true },
+                  { type: 'string', 'x-since': '2', 'x-shared': true },
+                  { type: 'integer', 'x-since': '1', 'x-shared': true },
+                ]),
+              },
+            ],
+          }),
+          '/toys': postOp('createToy', {
+            allOf: [
+              { type: 'object', properties: { name: { type: 'string' } } },
+              {
+                // One shape only: the first declaration types the field, but
+                // a key the second disputes is still left off, and one both
+                // write the same way is kept.
+                oneOf: variantsOf([
+                  { type: 'string', 'x-since': '1', 'x-shared': { a: 1 } },
+                  { type: 'string', 'x-since': '2', 'x-shared': { a: 1 } },
+                ]),
+              },
+            ],
+          }),
+        }),
+      );
+      const petKind = fieldOf(byName(spec.models, 'CreatePetRequest'), 'kind');
+      expect(petKind.type.kind).toBe('union');
+      expect(petKind.extensions).toEqual({ 'x-shared': true });
+      const toyKind = fieldOf(byName(spec.models, 'CreateToyRequest'), 'kind');
+      expect(toyKind.type).toEqual({ kind: 'primitive', type: 'string' });
+      expect(toyKind.extensions).toEqual({ 'x-shared': { a: 1 } });
+      expectSound(spec);
+    });
+
+    it('a property several allOf members always declare is typed by the first typing declaration, its keys included; a typeless one fills in what it leaves unset', async () => {
+      const spec = await parseDocument(
+        document({
+          '/pets': postOp('createPet', {
+            allOf: [
+              { type: 'object', properties: { name: { type: 'string', 'x-since': 'first', 'x-only': 1 } } },
+              { type: 'object', properties: { name: { type: 'string', 'x-since': 'second', 'x-other': 2 } } },
+              { type: 'object', properties: { name: { description: 'Annotated', 'x-since': 'third', 'x-note': 3 } } },
+            ],
+          }),
+        }),
+      );
+      const name = fieldOf(byName(spec.models, 'CreatePetRequest'), 'name');
+      // The second typing declaration is not conjoined (`combineDeclarations`);
+      // the typeless third fills in `x-note`, which the first leaves unset.
+      expect(name.extensions).toEqual({ 'x-since': 'first', 'x-only': 1, 'x-note': 3 });
+      expect(name.description).toBe('Annotated');
+      expectSound(spec);
+    });
+
+    it('two list-envelope companions of one shape under one name are one model with the first’s keys', async () => {
+      const list = (operationId: string, since: string) => ({
+        get: {
+          operationId,
+          tags: ['Pets'],
+          parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'OK',
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      data: { type: 'array', items: { type: 'string' } },
+                      list_metadata: {
+                        type: 'object',
+                        'x-since': since,
+                        properties: { after: { type: 'string', 'x-since': since } },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const spec = await parseDocument(
+        document({ '/pets': list('listPets', 'first'), '/toys': list('listToys', 'second') }),
+      );
+      const ops = opsOf(spec);
+      const metaOf = (op: Operation) => byName(op.pagination?.envelopeFields, 'list_metadata');
+      const petsMeta = metaOf(ops.listPets!);
+      const toysMeta = metaOf(ops.listToys!);
+      // Each operation's envelope field keeps its own schema's keys...
+      expect(petsMeta.extensions).toEqual({ 'x-since': 'first' });
+      expect(toysMeta.extensions).toEqual({ 'x-since': 'second' });
+      // ...while the one companion model both reference carries the first's.
+      expect(petsMeta.type).toEqual(toysMeta.type);
+      const companion = petsMeta.type.kind === 'model' ? byName(spec.models, petsMeta.type.name) : undefined;
+      expect(companion?.extensions).toEqual({ 'x-since': 'first' });
+      expect(fieldOf(companion!, 'after').extensions).toEqual({ 'x-since': 'first' });
+      expect(spec.models.filter((m) => m.name === companion!.name)).toHaveLength(1);
+      expectSound(spec);
+    });
+
     it('a named union’s inline variants and a discriminated allOf+oneOf’s variants, each with its own keys', async () => {
       const spec = await parseDocument(
         document(

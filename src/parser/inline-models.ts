@@ -2120,7 +2120,12 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
  * `LIFTED_DECLARATION_KEYWORDS` the declarations agree on, value for value:
  * two `kind` declarations both `readOnly: true` with different consts make a
  * read-only enum field; a keyword the declarations disagree on, or one only
- * some declare, is not the field's. The declarations themselves are kept as
+ * some declare, is not the field's. Every declaration as written has a say,
+ * a repeat of an earlier shape included. The extensions are read by the same
+ * agreement (`agreedExtensions`), and — unlike the keywords, which the first
+ * declaration gives when all share one shape — under both outcomes: the one
+ * declaration a single shape is typed from carries the agreed keys in place
+ * of its own. The declarations themselves are kept as
  * written inside the `oneOf`, so an enum member or a variant model still
  * carries its own description and limits. A `null` any declaration admits
  * (`nullable: true`, or a `type` list naming `null`) is a value the property
@@ -2130,31 +2135,70 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
  * otherwise lose when it collapses to an enum — and off the declarations.
  */
 function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
+  if (declarations.length === 1) return declarations[0]!;
+  // The extensions are decided first, across every declaration as written,
+  // apart from the shape dedupe below: a declaration dropped as a repeat of
+  // an earlier shape still has its say, so `x-since` written as `1`, `2` and
+  // `1` by three declarations is nobody's (workos/oagen#369 review, which
+  // read the keys off the distinct shapes alone and kept the `1`).
+  const extensions = agreedExtensions(declarations);
   const distinct = new Map<string, SchemaObject>();
   for (const declaration of declarations) {
     const key = schemaShapeKey(declaration);
     if (!distinct.has(key)) distinct.set(key, declaration);
   }
   const shapes = [...distinct.values()];
-  if (shapes.length === 1) return shapes[0]!;
+  // One shape: the first declaration, as written, carrying the agreed
+  // extensions in place of its own.
+  if (shapes.length === 1) return withAgreedExtensions(shapes[0]!, extensions);
+  // The keywords are read across every declaration the same way: a dropped
+  // repeat of a shape that disagrees on a keyword leaves it off too.
+  const agreed: Record<string, unknown> = { ...agreedDeclarationKeys(declarations, LIFTED_DECLARATION_KEYWORDS) };
+  const anyAdmitsNull = shapes.some(admitsNull);
+  const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
+  return { ...agreed, ...extensions, oneOf: variants };
+}
+
+/**
+ * The entries of `keys` every one of `declarations` declares with one
+ * value — compared by `stableStringify`, so an object value agrees whatever
+ * its key order — each as the first declaration writes it. A key any
+ * declaration leaves unset, or declares with another value, is left out.
+ * The one agreement rule for a property several variants declare, read for
+ * the lifted keywords and for the extensions alike (`unionOfDeclarations`).
+ */
+function agreedDeclarationKeys(declarations: readonly SchemaObject[], keys: Iterable<string>): Record<string, unknown> {
   const agreed: Record<string, unknown> = {};
-  for (const keyword of LIFTED_DECLARATION_KEYWORDS) {
-    const values = shapes.map((shape) => (shape as Record<string, unknown>)[keyword]);
+  for (const key of keys) {
+    const values = declarations.map((declaration) => declaration[key]);
     if (values[0] === undefined) continue;
-    const first = stableStringify(values[0]);
-    if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[keyword] = values[0];
-  }
-  // The extensions every declaration agrees on are the field's too, value
-  // for value, as its link is; the keys the parser consumes stay where they
-  // are read.
-  for (const key of Object.keys(extensionsOf(shapes[0]!, SCHEMA_CONSUMED_EXTENSIONS) ?? {})) {
-    const values = shapes.map((shape) => shape[key]);
     const first = stableStringify(values[0]);
     if (values.every((value) => value !== undefined && stableStringify(value) === first)) agreed[key] = values[0];
   }
-  const anyAdmitsNull = shapes.some(admitsNull);
-  const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
-  return { ...agreed, oneOf: variants };
+  return agreed;
+}
+
+/**
+ * The extensions every one of `declarations` agrees on
+ * (`agreedDeclarationKeys` over the first declaration's keys, the consumed
+ * ones left out as `extensionsOf` leaves them); `undefined` when none. A
+ * property several variants declare carries exactly these, whether or not
+ * the declarations share one shape: no one declaration is the schema for a
+ * key OpenAPI gives no meaning to, and an emitter may act on it, so a key
+ * the declarations dispute is nobody's.
+ */
+function agreedExtensions(declarations: readonly SchemaObject[]): Extensions | undefined {
+  const keys = Object.keys(extensionsOf(declarations[0]!, SCHEMA_CONSUMED_EXTENSIONS) ?? {});
+  const agreed = agreedDeclarationKeys(declarations, keys);
+  return Object.keys(agreed).length > 0 ? agreed : undefined;
+}
+
+/** `schema` with `extensions` in place of its own (consumed keys kept where they are); `schema` itself when neither has any. */
+function withAgreedExtensions(schema: SchemaObject, extensions: Extensions | undefined): SchemaObject {
+  const own = extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS);
+  if (!own && !extensions) return schema;
+  const kept = Object.entries(schema).filter(([key]) => !(own && Object.hasOwn(own, key)));
+  return { ...Object.fromEntries(kept), ...extensions };
 }
 
 /** Whether a declaration admits `null` on its own: OAS 3.0 `nullable: true`, or a `type` list naming `null`. */
