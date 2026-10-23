@@ -186,6 +186,37 @@ describe('classifyAndExtractResponse', () => {
       // Not a single-resource wrapper — treated as direct resource
       expect(result.response).toEqual({ kind: 'model', name: 'SomeResponse' });
     });
+
+    it('never unwraps a list envelope kept as a plain model, even when its one required companion fits the shape (#309)', () => {
+      // `{ data, pagination: { type: 'pagination', total } }` with `required:
+      // ['pagination']` is what `isSingleResourceWrapper` accepts; an envelope
+      // nothing pages must stay the wire shape, `data` included.
+      const schema = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          pagination: {
+            type: 'object',
+            properties: { type: { type: 'string', const: 'pagination' }, total: { type: 'integer' } },
+            required: ['type', 'total'],
+          },
+        },
+        required: ['pagination'],
+      };
+
+      const kept = classifyAndExtractResponse(schema, 'ListPetsResponse', undefined, { paginationDisabled: true });
+      expect(kept.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(kept.isPaginated).toBe(false);
+      expect(kept.unpagedEnvelope).toBe(true);
+      const wrapper = kept.inlineModels.find((m) => m.name === 'ListPetsResponse');
+      expect(wrapper?.fields.map((f) => f.name)).toEqual(['data', 'pagination']);
+
+      // Unwrapped when something pages it, as before.
+      const unwrapped = classifyAndExtractResponse(schema, 'ListPetsResponse');
+      expect(unwrapped.isPaginated).toBe(true);
+      expect(unwrapped.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(unwrapped.unpagedEnvelope).toBeUndefined();
+    });
   });
 
   describe('allOf with $ref branches', () => {
