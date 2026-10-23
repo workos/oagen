@@ -246,6 +246,17 @@ function keepLargestByName(models: Model[]): Model[] {
  * in the same response map or anywhere else, and never a reference another
  * site's field lent.
  *
+ * Every copy that must leave a name leaves it through `leaveName`,
+ * whichever rule above moves it — the owner's shape, its flag, an enum
+ * holding the name, a renamed child (below): identical copies
+ * (`modelFingerprint`, the flag included, so a deprecated copy and a live
+ * one never cluster) share one renamed model under the first site's
+ * qualified name, every site repointed to it, with one note saying how many
+ * sites share it; a copy of another shape takes a name of its own. Two
+ * deprecated `address` objects beside a live `PetOwnerAddress` of another
+ * shape are one `PetOwnerAddress2`, as they would be one `PetOwnerAddress`
+ * without the component.
+ *
  * Names are decided bottom-up — a name after every name its contenders'
  * fields reference, as the list-envelope pass decides nested companions —
  * so when a parent is compared its children are already named: a parent
@@ -295,7 +306,7 @@ function settleSharedNames(
   for (const bundle of naming?.bundles ?? []) {
     for (const model of bundle.models) bundleOf.set(model, bundle);
   }
-  const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
+  const flagOf = (deprecated: boolean): string => (deprecated ? 'deprecated' : 'live');
   // Every name the merge passes have minted so far (`renameInlineCopy`),
   // shared with the passes before and after this one through `naming`.
   const minted = naming ? (naming.minted ??= new Set<string>()) : new Set<string>();
@@ -372,17 +383,12 @@ function settleSharedNames(
     // model and a component enum hold is the document's own clash and is
     // settled as the model's, below.
     if (!owner && naming?.enums.has(name)) {
-      for (const copy of group) {
-        const bundle = bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
-          );
-          continue;
-        }
-        const renamed = renameInlineCopy(copy, name, bundle, naming);
-        console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": enum "${name}" owns the name`);
-      }
+      leaveName(
+        name,
+        byShape(group),
+        `enum "${name}" owns the name`,
+        `is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
+      );
       continue;
     }
     let nameDeprecated: boolean;
@@ -429,8 +435,8 @@ function settleSharedNames(
     // share are clustered by shape in document order: identical copies that
     // must leave the owner's name share one model under it, as they would
     // share the bare name without the owner (`keepLargestByName`). A copy
-    // whose flag disagrees and that the owner does not share is renamed
-    // below.
+    // whose flag disagrees and that the owner does not share leaves the
+    // name the same way, below.
     const clashing = new Map<string, Model[]>();
     for (const copy of group) {
       if (!owner) continue;
@@ -455,6 +461,16 @@ function settleSharedNames(
       `has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
     );
 
+    // The copies whose flag disagrees with the name's and that nothing takes
+    // in — no owner that shares the name, no live twin — leave it the same
+    // way, clustered by shape in document order: two identical deprecated
+    // `address` objects beside a live `PetOwnerAddress` of another shape, or
+    // beside live inline copies they do not twin, are one `PetOwnerAddress2`
+    // rather than a `PetOwnerAddress2` and a `PetOwnerAddress3`, and two
+    // identical live copies beside a deprecated component share one name the
+    // same way. The note names the copies' flag and the name's; every copy
+    // here carries the one flag the name does not.
+    const disagreeing: Model[] = [];
     for (const copy of group) {
       if (!!copy.deprecated === nameDeprecated || folded.has(copy)) continue;
       // Without an owner, a deprecated copy folds only when every live copy
@@ -470,18 +486,14 @@ function settleSharedNames(
         folded.set(copy, preferredDefinition(live));
         continue;
       }
-      const bundle = naming && bundleOf.get(copy);
-      if (!bundle) {
-        console.warn(
-          `[oagen] Warning: Inline model "${name}" is ${flag(copy)} in one definition and ${nameDeprecated ? 'deprecated' : 'live'} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
-        );
-        continue;
-      }
-      const renamed = renameInlineCopy(copy, name, bundle, naming);
-      console.warn(
-        `[oagen] Renamed inline model "${name}" → "${renamed}": it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
-      );
+      disagreeing.push(copy);
     }
+    leaveName(
+      name,
+      byShape(disagreeing),
+      `it is ${flagOf(!nameDeprecated)} while "${name}" is ${flagOf(nameDeprecated)}`,
+      `is ${flagOf(!nameDeprecated)} in one definition and ${flagOf(nameDeprecated)} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
+    );
   }
 
   return { kept: contenders.filter((m) => !folded.has(m)), folded };
