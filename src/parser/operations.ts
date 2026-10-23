@@ -430,6 +430,18 @@ export interface OperationExtractionResult {
    * `resolveEnvelopeCompanionNames` settles their names once and for all.
    */
   inlineModelBundles: InlineModelBundle[];
+  /**
+   * Every type reference a site shared through `components/responses` wrote
+   * (`componentSite`: the component's fallback or error body, a secondary
+   * body, a header), by identity — the parser's one record of which sites a
+   * component owns, which the IR alone cannot tell (`CardXMode` is a shared
+   * header's enum name wherever the component is returned). The enum
+   * collector reads it so an enum such a site carries steps by number from
+   * the component's stem (`CardXMode2`), never by the status code or
+   * fallback label that mounted the component
+   * (`collectInlineEnumsFromOperations`).
+   */
+  componentSites: ReadonlySet<TypeRef>;
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -458,7 +470,7 @@ export function extractOperations(
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], componentSites: new Set() };
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // `components/pathItems` item its `$ref` leads to, with an entry that
@@ -666,6 +678,14 @@ export function extractOperations(
   }
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
+  // The root every component-shared site wrote, by identity (every target of
+  // a site carries the one TypeRef its resolution produced), for the enum
+  // collector (`OperationExtractionResult.componentSites`).
+  const componentSites = new Set<TypeRef>();
+  for (const item of deferred) {
+    if (!item.componentSite) continue;
+    for (const target of item.targets) if (target.type) componentSites.add(target.type);
+  }
   // Each deferred schema is a site of its own (the references it wrote, the
   // models it minted), and a reference it wrote by sharing another site's
   // model — the registry matched the shape of a primary body's model or a
@@ -710,7 +730,7 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles };
+  return { services, inlineModels, inlineModelBundles, componentSites };
 }
 
 /**

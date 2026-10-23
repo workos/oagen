@@ -1591,6 +1591,79 @@ describe("a component response's other media types and headers (issue #302)", ()
     expectSound(spec);
   });
 
+  describe('an inline enum a component site carries, beside an enum that owns its name (Greptile)', () => {
+    const modeHeader = { 'X-Mode': { schema: { type: 'string', enum: ['compact', 'full'] } } };
+    /** `CardXMode` is a component enum with other members, so the header's enum must step. */
+    const components = {
+      schemas: { CardXMode: { type: 'string', enum: ['x', 'y'] } },
+      responses: { Card: { ...card, headers: modeHeader } },
+    };
+    const enumNames = (spec: ApiSpec) => spec.enums.map((e) => e.name).sort();
+    const members = (spec: ApiSpec, name: string) =>
+      spec.enums.find((e) => e.name === name)?.values.map((v) => v.value);
+
+    it('steps a header enum by number through `default` and `4XX`: one `CardXMode2`, not one per fallback label', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parse(twoOperations('default', '4XX', { '200': ok }), components);
+      expect(warn).not.toHaveBeenCalled();
+
+      // Before: `CardXModeDefault` and `CardXModeClientError`.
+      expect(enumNames(spec)).toEqual(['CardXMode', 'CardXMode2']);
+      expect(members(spec, 'CardXMode')).toEqual(['x', 'y']);
+      expect(members(spec, 'CardXMode2')).toEqual(['compact', 'full']);
+      expect(headersOf(byName(spec).get('getNote')!.defaultResponse)).toEqual(['X-Mode: CardXMode2']);
+      expect(headersOf(byName(spec).get('getPet')!.rangeResponses?.[0])).toEqual(['X-Mode: CardXMode2']);
+      expectSound(spec);
+
+      // Removing one operation leaves the enum name unchanged: `oagen diff`
+      // reports the service gone and nothing about the enum.
+      const petOnly = await parse(
+        { '/pets': { get: { operationId: 'getPet', responses: { '200': ok, '4XX': cardRef } } } },
+        components,
+      );
+      expect(headersOf(byName(petOnly).get('getPet')!.rangeResponses?.[0])).toEqual(['X-Mode: CardXMode2']);
+      expect(diffSpecs(spec, petOnly).changes.map((change) => change.kind)).toEqual(['service-removed']);
+    });
+
+    it('steps a header enum by number through a 404 on two operations: `CardXMode2`, not `CardXMode404`', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parse(twoOperations('404', '404', { '200': ok }), components);
+      expect(warn).not.toHaveBeenCalled();
+
+      expect(enumNames(spec)).toEqual(['CardXMode', 'CardXMode2']);
+      for (const op of ['getNote', 'getPet']) {
+        expect(headersOf(byName(spec).get(op)!.errors[0]), op).toEqual(['X-Mode: CardXMode2']);
+      }
+      expectSound(spec);
+    });
+
+    it('steps a secondary-body enum by number through `4XX` and `default`: one `CardApplicationYamlResponse2`', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const enumCard = {
+        description: 'A card',
+        content: {
+          'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } },
+          'application/yaml': { schema: { type: 'string', enum: ['compact', 'full'] } },
+        },
+      };
+      const spec = await parse(twoOperations('4XX', 'default', { '200': ok }), {
+        schemas: { CardApplicationYamlResponse: { type: 'string', enum: ['x', 'y'] } },
+        responses: { Card: enumCard },
+      });
+      expect(warn).not.toHaveBeenCalled();
+
+      expect(enumNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardApplicationYamlResponse2']);
+      expect(members(spec, 'CardApplicationYamlResponse2')).toEqual(['compact', 'full']);
+      expect(contentsOf(byName(spec).get('getNote')!.rangeResponses?.[0])).toContain(
+        'application/yaml: CardApplicationYamlResponse2',
+      );
+      expect(contentsOf(byName(spec).get('getPet')!.defaultResponse)).toContain(
+        'application/yaml: CardApplicationYamlResponse2',
+      );
+      expectSound(spec);
+    });
+  });
+
   it('derives the stem from the body name the component stepped to: `CardResponse2XMeta`, `CardResponse2ApplicationYamlResponse`', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const spec = await parse(twoOperations('200', '200'), {
