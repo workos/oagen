@@ -8,6 +8,7 @@ import {
   settleFieldInlineModels,
   type InlineModelNaming,
 } from '../../src/parser/normalize-inline-models.js';
+import { recordLiftedFieldModel, resetInheritedModelRefs } from '../../src/parser/inline-models.js';
 import { collectModelRefs } from '../../src/ir/types.js';
 import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
@@ -865,21 +866,39 @@ describe('a parent that references a renamed model leaves a shared name by its s
     expect(warnings).toEqual([]);
   });
 
-  it('bundles the model the schema pass lifted for a field’s schema with the field’s site, and never a component of that name', () => {
-    const pet: Model = { name: 'Pet', fields: [field('widget', modelRef('PetWidget'))] };
-    const lifted: Model = { name: 'PetWidget', fields: [field('owner', modelRef('PetWidgetOwner'))] };
-    const copy: Model = { name: 'PetWidget', fields: [field('owner', modelRef('PetWidgetOwner'))] };
-    const child: Model = { name: 'PetWidgetOwner', fields: [field('city')] };
-    const groups = [{ parentName: 'Pet', fieldName: 'widget', models: [copy, child] }];
-    // `PetWidget` is not a component: the lifted twin joins the site.
-    expect(fieldInlineModelBundles(groups, [pet, lifted], new Set(['Pet']))[0]?.models).toEqual([copy, child, lifted]);
-    // `PetWidget` is a component: its references are its own.
-    expect(fieldInlineModelBundles(groups, [pet, lifted], new Set(['Pet', 'PetWidget']))[0]?.models).toEqual([
-      copy,
-      child,
-    ]);
-    // No component names given (a direct caller): no twin is known.
-    expect(fieldInlineModelBundles(groups, [pet, lifted])[0]?.models).toEqual([copy, child]);
+  it('bundles the model the schema pass lifted from a field’s own schema with that field’s site, by origin and never by name', () => {
+    resetInheritedModelRefs();
+    try {
+      // `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`; the
+      // schema pass lifted one of them, from `FooBar.thing`.
+      const foo: Model = { name: 'Foo', fields: [field('barThing', modelRef('FooBarThing'))] };
+      const fooBar: Model = { name: 'FooBar', fields: [field('thing', modelRef('FooBarThing'))] };
+      const lifted: Model = { name: 'FooBarThing', fields: [field('owner', modelRef('FooBarThingOwner'))] };
+      const fooCopy: Model = { name: 'FooBarThing', fields: [field('owner', modelRef('FooBarThingOwner'), true)] };
+      const fooChild: Model = { name: 'FooBarThingOwner', deprecated: true, fields: [field('city'), field('zip')] };
+      const fooBarCopy: Model = { name: 'FooBarThing', fields: [field('owner', modelRef('FooBarThingOwner'))] };
+      const fooBarChild: Model = { name: 'FooBarThingOwner', fields: [field('city')] };
+      recordLiftedFieldModel('FooBar', 'thing', lifted);
+      const groups = [
+        { parentName: 'Foo', fieldName: 'barThing', models: [fooCopy, fooChild] },
+        { parentName: 'FooBar', fieldName: 'thing', models: [fooBarCopy, fooBarChild] },
+      ];
+      const bundles = fieldInlineModelBundles(groups, [foo, fooBar, lifted]);
+      // Only the site the model was lifted from claims it.
+      expect(bundles[0]?.models).toEqual([fooCopy, fooChild]);
+      expect(bundles[1]?.models).toEqual([fooBarCopy, fooBarChild, lifted]);
+      // The roots stay each field's own reference.
+      expect(bundles[0]?.roots).toEqual([foo.fields[0]?.type]);
+      expect(bundles[1]?.roots).toEqual([fooBar.fields[0]?.type]);
+      // A direct caller whose schemas the schema pass never read has no twins.
+      resetInheritedModelRefs();
+      expect(fieldInlineModelBundles(groups, [foo, fooBar, lifted]).map((b) => b.models)).toEqual([
+        [fooCopy, fooChild],
+        [fooBarCopy, fooBarChild],
+      ]);
+    } finally {
+      resetInheritedModelRefs();
+    }
   });
 });
 

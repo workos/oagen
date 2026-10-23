@@ -1125,6 +1125,12 @@ function collectNestedInlineModels(
           models.push(m);
           modelNames.add(m.name);
           queue.push(m); // re-scan for deeper nesting
+          // Remembered by the field it was read from, so the field's site
+          // can claim it by origin rather than by name when the field
+          // extractor's copy of the same schema is settled
+          // (`fieldInlineModelBundles`): `Foo.barThing` and `FooBar.thing`
+          // both spell `FooBarThing`, and only one of them is lifted.
+          recordLiftedFieldModel(parentModelName, fieldName, m);
         }
       }
     },
@@ -4475,6 +4481,7 @@ import {
   modelFingerprint,
   type PropertyDeclarations,
   qualifyInlineModelName,
+  recordLiftedFieldModel,
   reservedInlineNames,
   resetInheritedModelRefs,
   schemaShapeKey,

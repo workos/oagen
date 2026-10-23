@@ -18,6 +18,7 @@ import {
   fieldAdmits,
   inheritedModelRefsOf,
   isInheritedModelRef,
+  liftedFieldModelsOf,
   modelAdmits,
   modelShares,
   recordFieldModelRename,
@@ -69,36 +70,30 @@ export interface InlineModelNaming {
  *
  * `models` also holds the models the schema pass lifted from the same
  * inline schemas (`extractSchemas`: a component field's object, array items
- * or union variant, named as the field extractor names them). Such a model
- * is not a component (`componentNames`) and shares a group model's name
- * exactly when it was read from that model's schema, so it is the group's
- * twin: the group's copy folds onto it when the fields are settled, and
- * from then on the twin's own field references — minted for the same nested
- * objects the group holds — are the site's. The twin joins the bundle's
- * `models`, so a rename of one of the group's models is repointed in it as
- * in the copy, and a copy whose child was renamed still folds onto its
- * twin. Without `componentNames`, no twin is known, and a direct caller's
- * groups are bundled with their own models alone.
+ * or union variant, named as the field extractor names them), each
+ * remembered by the field it was read from (`liftedFieldModelsOf`). Those
+ * lifted from the group's own field are the group's twins, read from the
+ * same schema: the group's copy folds onto its twin when the fields are
+ * settled, and from then on the twin's own field references — minted for
+ * the same nested objects the group holds — are the site's. The twins join
+ * the bundle's `models`, so a rename of one of the group's models is
+ * repointed in them as in the copy, and a copy whose child was renamed
+ * still folds onto its twin. A twin is claimed by origin, never by name:
+ * `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`, only one of
+ * them is lifted, and the other field's site leaves it alone. A direct
+ * caller whose schemas were not read by `extractSchemas` has no twins, and
+ * its groups are bundled with their own models alone.
  */
-export function fieldInlineModelBundles(
-  groups: FieldInlineModelGroup[],
-  models: Model[],
-  componentNames?: ReadonlySet<string>,
-): InlineModelBundle[] {
+export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
-    const twins = componentNames
-      ? fieldModels
-          .map((m) => byName.get(m.name))
-          .filter((m): m is Model => m !== undefined && !componentNames.has(m.name))
-      : [];
     return {
       qualifier: parentName,
       roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
-      models: [...fieldModels, ...twins],
+      models: [...fieldModels, ...liftedFieldModelsOf(parentName, fieldName)],
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
@@ -703,13 +698,28 @@ function rewriteModelRefs(
  * dropped in favour of the component, with the settle pass's warning; one
  * named like an enum is kept beside it, with a warning, since nothing
  * stands in for it.
+ *
+ * `declared` are the other models the document declares — the components'
+ * own field models, settled first (`settleFieldInlineModels`) and merged
+ * later (`mergeFieldInlineModels`) — which own their names here exactly as
+ * the components do, as they do in the shape registry: an inline model
+ * named like one folds onto it when it admits the shape and takes a
+ * qualified name otherwise, decided bottom-up before its parent is compared
+ * with anything. Read by name alone, a nested object of a response named
+ * like a component field's model would pass for it under a parent the
+ * lifted model admits, and be left behind, renamed, once the field merge
+ * told the two apart. They are not returned: the caller merges them itself.
  */
 export function mergeInlineResponseModels(
   schemaModels: Model[],
   inlineModels: Model[],
   naming?: InlineModelNaming,
+  declared: Model[] = [],
 ): Model[] {
-  return [...schemaModels, ...keepLargestByName(settleAgainstComponents(schemaModels, inlineModels, naming))];
+  return [
+    ...schemaModels,
+    ...keepLargestByName(settleAgainstComponents([...schemaModels, ...declared], inlineModels, naming)),
+  ];
 }
 
 /**
@@ -732,8 +742,10 @@ export function mergeInlineResponseModels(
  * component enum `PetOwner` — takes its qualified name here too (`PetOwner2`),
  * whatever its shape, so the IR never declares a model and an enum under one
  * name. Returns the field models still competing for a name, the renamed
- * ones under their new names; the merges that follow compare them with the
- * operations' survivors only (`mergeFieldInlineModels`).
+ * ones under their new names; the response merge that follows settles the
+ * operations' and webhooks' models against them as against the components
+ * (`mergeInlineResponseModels`, `declared`), and the field merge folds them
+ * in (`mergeFieldInlineModels`).
  */
 export function settleFieldInlineModels(
   components: Model[],
@@ -770,13 +782,15 @@ function settleAgainstComponents(components: Model[], contenders: Model[], namin
  * takes a qualified name otherwise, so a component is never replaced; and a
  * deprecated and a live definition of one name are told apart. The parser
  * has already settled its field models against the components
- * (`settleFieldInlineModels`), so for it this step decides only the names
- * the field models share with the response pass's survivors; a direct
- * caller's field models are settled here. The fold below then only joins
- * models that agree on the flag, and a field model named like an inline
- * survivor of another shape is dropped in favour of the survivor, with a
- * warning naming both shapes, as the earlier definition of an inline name
- * is kept everywhere. A field model named like one of the document's enums
+ * (`settleFieldInlineModels`) and the response pass's models against the
+ * field models (`mergeInlineResponseModels`, `declared`), so for it no
+ * survivor shares a field model's name any more and this step only folds
+ * the field models in; a direct caller's field models are settled here,
+ * and a field model of theirs named like an inline survivor of another
+ * shape is dropped in favour of the survivor, with a warning naming both
+ * shapes, as the earlier definition of an inline name is kept everywhere.
+ * The fold below only joins models that agree on the flag. A field model
+ * named like one of the document's enums
  * (`naming.enums`) — a `Pet.owner` object beside a component enum
  * `PetOwner` — takes a qualified name (`PetOwner2`) whatever its shape, as
  * the response pass's models do; the parser's field models meet that rule
