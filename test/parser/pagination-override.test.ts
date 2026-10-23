@@ -956,6 +956,212 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     });
   });
 
+  describe('the stop field of a wrapper kept under an explicit dataPath (#308)', () => {
+    // The issue's shapes: `Pet`, `PetList: { data: Pet[], has_more }`, and
+    // `GET /pets?page&limit` (plain integers) returning the list under
+    // `x-pagination: { dataPath }`. The stop field belongs to whatever wrapper
+    // the override iterates — a component or an inline body detection did not
+    // recognize — not only to an envelope detection recognized.
+    const Pet = { type: 'object', properties: { name: { type: 'string' } } };
+    const petArray = { type: 'array', items: { $ref: '#/components/schemas/Pet' } };
+    const PetList = { type: 'object', properties: { data: petArray, has_more: { type: 'boolean' } } };
+    const PetListRef = { $ref: '#/components/schemas/PetList' };
+    const nested = { type: 'object', properties: { items: petArray } };
+    const page = { strategy: 'page', param: 'page', limitParam: 'limit', pageStart: 1 };
+    const listOp = (
+      schema: unknown,
+      pagination: Record<string, unknown>,
+      schemas: Record<string, unknown> = {},
+      extra: Record<string, unknown> = {},
+    ) =>
+      petsSpec(
+        {
+          parameters: [query('page'), query('limit')],
+          responses: jsonResponse(schema),
+          'x-pagination': pagination,
+          ...extra,
+        },
+        { schemas: { Pet, PetList, ...schemas } },
+      );
+
+    /** The issue's projection of the pagination entry: item and companion names in place of types. */
+    const projection = (op: Operation) => {
+      const { envelopeFields, itemType, ...rest } = op.pagination!;
+      return {
+        ...rest,
+        itemType: itemType.kind === 'model' ? itemType.name : itemType.kind,
+        ...(envelopeFields && { envelopeFields: envelopeFields.map((f) => f.name) }),
+      };
+    };
+
+    /** Every model the operation or a model field references exists, and no non-component model is orphaned. */
+    const expectModelsConsistent = (ir: ApiSpec, op: Operation, components: string[]) => {
+      const names = new Set(ir.models.map((m) => m.name));
+      const refs = [op.response, op.pagination?.itemType, ...(op.pagination?.envelopeFields ?? []).map((f) => f.type)];
+      const referenced = new Set<string>();
+      for (const ref of refs) if (ref) for (const name of modelNamesIn(ref)) referenced.add(name);
+      for (const model of ir.models)
+        for (const field of model.fields) for (const name of modelNamesIn(field.type)) referenced.add(name);
+      expect([...referenced].filter((name) => !names.has(name))).toEqual([]);
+      expect([...names].filter((name) => !components.includes(name) && !referenced.has(name))).toEqual([]);
+    };
+
+    it('reads the stop field of a $ref list response (the issue repro)', async () => {
+      const ir = await parseJson(listOp(PetListRef, { dataPath: 'data' }));
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'model', name: 'PetList' });
+      expect(projection(op)).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+      });
+      expectModelsConsistent(ir, op, ['Pet', 'PetList']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('unwraps the same body written inline, reading the stop field beside the data array', async () => {
+      const op = onlyOperation(await parseJson(listOp(PetList, { dataPath: 'data' })));
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'Pet' } });
+      expect(projection(op)).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+        envelopeFields: ['has_more'],
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads the stop field of an inline wrapper detection did not recognize (the issue repro)', async () => {
+      // No top-level array beside `total_pages`, so the body is not a list envelope.
+      const body = { type: 'object', properties: { result: nested, total_pages: { type: 'integer' } } };
+      const ir = await parseJson(listOp(body, { dataPath: 'result.items' }));
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(projection(op)).toEqual({
+        ...page,
+        dataPath: 'result.items',
+        endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+        itemType: 'Pet',
+      });
+      expectModelsConsistent(ir, op, ['Pet', 'PetList']);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads it the same way when a data array beside makes the body a recognized envelope', async () => {
+      const body = {
+        type: 'object',
+        properties: { data: petArray, result: nested, total_pages: { type: 'integer' } },
+      };
+      const op = onlyOperation(await parseJson(listOp(body, { dataPath: 'result.items' })));
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(projection(op)).toEqual({
+        ...page,
+        dataPath: 'result.items',
+        endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+        itemType: 'Pet',
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads it one level down inside a $ref wrapper’s pagination companion, and beside its nested array', async () => {
+      const PagedList = {
+        type: 'object',
+        properties: { pets: petArray, pagination: { type: 'object', properties: { totalPages: { type: 'integer' } } } },
+      };
+      const down = onlyOperation(
+        await parseJson(listOp({ $ref: '#/components/schemas/PagedList' }, { dataPath: 'pets' }, { PagedList })),
+      );
+      expect(down.pagination).toMatchObject({
+        dataPath: 'pets',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'totalPages', path: 'pagination.totalPages' },
+      });
+
+      // The full path is excluded, not its root: `pagination.has_more` stays
+      // visible beside `pagination.items`, and the array is never a stop field.
+      const NestedList = {
+        type: 'object',
+        properties: { pagination: { type: 'object', properties: { items: petArray, has_more: { type: 'boolean' } } } },
+      };
+      const beside = onlyOperation(
+        await parseJson(
+          listOp({ $ref: '#/components/schemas/NestedList' }, { dataPath: 'pagination.items' }, { NestedList }),
+        ),
+      );
+      expect(beside.pagination).toMatchObject({
+        dataPath: 'pagination.items',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'pagination.has_more' },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads it from a $ref wrapper’s allOf base, and through a nullable wrapper around the body', async () => {
+      const Base = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const PetPage = {
+        allOf: [{ $ref: '#/components/schemas/Base' }, { type: 'object', properties: { data: petArray } }],
+      };
+      const fromBase = onlyOperation(
+        await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, { Base, PetPage })),
+      );
+      expect(fromBase.pagination).toMatchObject({
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      });
+
+      const nullable = onlyOperation(
+        await parseJson(listOp({ oneOf: [PetListRef, { type: 'null' }] }, { dataPath: 'data' })),
+      );
+      expect(nullable.pagination).toMatchObject({
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads it through the config hint, and lets the override name its own stop field', async () => {
+      const viaHint = onlyOperation(
+        await parseJson(
+          petsSpec(
+            { parameters: [query('page'), query('limit')], responses: jsonResponse(PetListRef) },
+            { schemas: { Pet, PetList } },
+          ),
+          { operationHints: { 'GET /pets': { pagination: { dataPath: 'data' } } } },
+        ),
+      );
+      expect(viaHint.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+
+      const own = onlyOperation(
+        await parseJson(
+          listOp(PetListRef, { dataPath: 'data', endOfIteration: { kind: 'totalCount', path: 'meta.total' } }),
+        ),
+      );
+      expect(own.pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'meta.total' });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads nothing under strategy none, which leaves no iterator to stop', async () => {
+      const op = onlyOperation(await parseJson(listOp(PetListRef, { strategy: 'none', dataPath: 'data' })));
+      expect(op.response).toEqual({ kind: 'model', name: 'PetList' });
+      expect(op.pagination).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('leaves endOfIteration unset when the kept wrapper declares nothing recognizable', async () => {
+      const Plain = { type: 'object', properties: { data: petArray, count: { type: 'integer' } } };
+      const op = onlyOperation(
+        await parseJson(listOp({ $ref: '#/components/schemas/Plain' }, { dataPath: 'data' }, { Plain })),
+      );
+      expect(op.pagination).toMatchObject({ dataPath: 'data', itemType: { kind: 'model', name: 'Pet' } });
+      expect(op.pagination?.endOfIteration).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('operationHints[...].pagination from ParseOptions', () => {
     it('applies the hint keyed by "METHOD /path"', async () => {
       const op = onlyOperation(

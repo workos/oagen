@@ -2667,8 +2667,10 @@ function buildOperation(
       ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
     };
   } else if (paginationFromParams) {
-    // A stop field is also read from an envelope kept as a wrapper under an
-    // explicit `dataPath` (see `ResponseClassificationOptions.dataPathOverride`).
+    // A stop field is also read from a body kept as a wrapper under an
+    // explicit `dataPath` — a `$ref`, an envelope detection would unwrap on
+    // another array, an inline body detection did not recognize (see
+    // `ResponseClassificationOptions.dataPathOverride`).
     detectedPagination = {
       ...paginationFromParams,
       ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),

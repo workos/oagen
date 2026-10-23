@@ -67,9 +67,12 @@ export interface ResponseExtractionResult {
    */
   envelopeFields?: Field[];
   /**
-   * The envelope field that ends an iteration, when the envelope declares an
-   * obvious one (see `PaginationMeta.endOfIteration`). Set only for a list
-   * envelope.
+   * The field that ends an iteration, when the body declares an obvious one
+   * (see `PaginationMeta.endOfIteration`): read beside the array a list
+   * envelope was unwrapped on, and beside the array an explicit `dataPath`
+   * names in a body kept as a wrapper — a `$ref` to a component, an envelope
+   * detection would unwrap on another array, an inline body detection did
+   * not recognize (`bodyEndOfIteration`). Unset for every other body.
    */
   endOfIteration?: PaginationEndOfIteration;
   /**
@@ -90,13 +93,17 @@ export interface ResponseClassificationOptions {
    */
   paginationDisabled?: boolean;
   /**
-   * An explicit `dataPath` (already known to reach an array in the body) that
-   * names another array than the one a list envelope would be unwrapped on.
-   * Detection was wrong for this operation, so the envelope is kept as a
-   * wrapper exactly as under `paginationDisabled` — `response` is what the
-   * wire returns, the override says where the items are in it, and the
-   * wrapper carries the companions — except that its stop field is still
-   * read, with the override's root property as the data property.
+   * An explicit `dataPath`, already known to reach an array in the body. One
+   * that restates the path a list envelope is unwrapped on changes nothing.
+   * Any other keeps the body as the wrapper the override iterates — a
+   * recognized envelope, kept exactly as under `paginationDisabled` since
+   * detection was wrong for this operation; an inline body detection did not
+   * recognize; a `$ref` to a component — so `response` is what the wire
+   * returns, the override says where the items are in it, and the wrapper
+   * carries the companions. The wrapper's stop field is still read, keyed by
+   * the override, whatever the wrapper is (`bodyEndOfIteration`). Read only
+   * when `paginationDisabled` is not set: `strategy: 'none'` leaves no
+   * iterator to stop.
    */
   dataPathOverride?: string;
   /**
@@ -185,6 +192,57 @@ export function classifyAndExtractResponse(
   componentSchemas?: Record<string, SchemaObject>,
   options: ResponseClassificationOptions = {},
 ): ResponseExtractionResult {
+  const body = classifyBody(schema, contextName, componentSchemas, options);
+  // Under an explicit `dataPath`, a body that was not unwrapped on that path
+  // is the wrapper the override iterates — a `$ref` to a component, an
+  // envelope detection would unwrap on another array, an inline body
+  // detection did not recognize — and its stop field is read here, once for
+  // every such shape, keyed by the path. A path that restates the one the
+  // envelope was unwrapped on (`isPaginated`) has had it read by
+  // `extractListResponse`; under `paginationDisabled` there is no iterator
+  // to stop.
+  const override = options.dataPathOverride;
+  if (override === undefined || options.paginationDisabled || body.isPaginated) return body;
+  const endOfIteration = bodyEndOfIteration(schema, override, componentSchemas);
+  return endOfIteration ? { ...body, endOfIteration } : body;
+}
+
+/**
+ * The field that ends an iteration of a body kept as a wrapper under an
+ * explicit `dataPath`, read beside the array the path names — the one
+ * reader for every kept wrapper, whatever wraps it. The body is resolved to
+ * the object the path walks: a `$ref` is followed to its component and a
+ * nullable wrapper of any spelling stripped, however the two alternate
+ * (`resolveBareSchema`, the resolver the path walk uses for the array it
+ * lands on); its properties are then merged across `allOf` branches, `$ref`
+ * branches included, exactly as a recognized envelope's are
+ * (`collectEnvelopeProperties`); and `detectEndOfIteration` reads them as
+ * it reads an unwrapped envelope's, with the full path excluded, not its
+ * root, so the array the path names is never a stop field while a stop
+ * field beside a nested array (`pagination.has_more` next to
+ * `pagination.items`) stays visible. `undefined` when nothing recognizable
+ * is declared, or the body resolves to no object at all.
+ */
+function bodyEndOfIteration(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): PaginationEndOfIteration | undefined {
+  const { properties } = collectEnvelopeProperties(resolveBareSchema(schema, componentSchemas), componentSchemas);
+  return detectEndOfIteration(properties, dataPath, componentSchemas);
+}
+
+/**
+ * Classify one body: a `$ref` names its component; an inline body is a list
+ * envelope — unwrapped on its data array, unless an explicit `dataPath`
+ * names another array in it — a single-resource wrapper, or a plain model.
+ */
+function classifyBody(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  options: ResponseClassificationOptions,
+): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
     return { response: schemaToTypeRef(schema, contextName), inlineModels: [], isPaginated: false };
@@ -209,15 +267,12 @@ export function classifyAndExtractResponse(
       if (override === undefined || override === envelope.dataPath) {
         return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
       }
-      // The full path is excluded, not its root: a stop field beside the
-      // nested array (`pagination.has_more` next to `pagination.items`) stays
-      // visible, and the array itself is never a stop field.
-      const { properties } = collectEnvelopeProperties(schema, componentSchemas);
-      const endOfIteration = detectEndOfIteration(properties, override, componentSchemas);
-      return {
-        ...extractDirectResource(schema, contextName, componentSchemas, options.settle),
-        ...(endOfIteration && { endOfIteration }),
-      };
+      // The override names another array than the one the envelope would be
+      // unwrapped on: detection was wrong for this operation, so the envelope
+      // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
+      // field is read by the caller (`bodyEndOfIteration`), as every kept
+      // wrapper's is.
+      return extractDirectResource(schema, contextName, componentSchemas, options.settle);
     }
   }
 
@@ -360,7 +415,9 @@ function extractListResponse(
   );
 
   // The field that says the list is exhausted — `has_more`, `total_pages`,
-  // `pagination.totalPages` — so an iterator can stop without a wasted request.
+  // `pagination.totalPages` — so an iterator can stop without a wasted
+  // request: the read `bodyEndOfIteration` makes for a kept wrapper, on the
+  // properties already collected above.
   const endOfIteration = detectEndOfIteration(properties, dataPath, componentSchemas);
 
   return {
