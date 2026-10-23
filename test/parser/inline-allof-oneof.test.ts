@@ -11,6 +11,7 @@ import {
   isInlineAllOfMember,
   mergeAllOfMembers,
   mintedInlineNameEntries,
+  readInlineAllOf,
 } from '../../src/parser/inline-models.js';
 import {
   collectModelRefs,
@@ -1128,5 +1129,166 @@ describe('properties are matched by own name', () => {
     ]);
     expect(fieldsOf(models['CreatePetRequestProto'])).toEqual(['x?: string']);
     expectSound(ir, []);
+  });
+});
+
+describe('round 3: a model is built exactly when the reading names one', () => {
+  const emptyObject: SchemaObject = { type: 'object', properties: {} };
+  /** The reported shape: a union member whose only variant is an empty object, beside a documentation-only member. */
+  const emptyUnionPlusDoc: SchemaObject = { allOf: [{ oneOf: [emptyObject] }, { description: 'Pet' }] };
+  const base: SchemaObject = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
+
+  it('builds the empty model an allOf with only an empty properties: {} names, at every depth', async () => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({
+              type: 'object',
+              properties: {
+                // The empty object as the sole variant: the base's fields only.
+                sole: { allOf: [base, { oneOf: [emptyObject] }] },
+                // Beside a `$ref` variant, which is not flattened: the base's fields only.
+                besideRef: { allOf: [base, { oneOf: [{ $ref: '#/components/schemas/Owner' }, emptyObject] }] },
+                // Nested two deep: the inner empty model is built too.
+                outer: { allOf: [{ oneOf: [{ properties: { inner: emptyUnionPlusDoc } }] }, { description: 'Outer' }] },
+              },
+            }),
+            responses: { '200': jsonResponse(emptyUnionPlusDoc) },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Owner: { type: 'object', properties: { ownerId: { type: 'string' } } },
+          Holder: { type: 'object', properties: { pet: emptyUnionPlusDoc } },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['Holder'])).toEqual(['pet?: HolderPet']);
+    // Built with no fields; the `description` is a member's own, not the wrapper's, so the model carries none.
+    expect(models['HolderPet']).toMatchObject({ fields: [], description: undefined });
+    expect(fieldsOf(models['CreatePetRequest'])).toEqual([
+      'sole?: CreatePetRequestSole',
+      'besideRef?: CreatePetRequestBesideRef',
+      'outer?: CreatePetRequestOuter',
+    ]);
+    expect(fieldsOf(models['CreatePetRequestSole'])).toEqual(['name: string']);
+    expect(fieldsOf(models['CreatePetRequestBesideRef'])).toEqual(['name: string']);
+    expect(fieldsOf(models['CreatePetRequestOuter'])).toEqual(['inner?: CreatePetRequestOuterInner']);
+    expect(models['CreatePetRequestOuterInner']?.fields).toEqual([]);
+    expect(opsOf(ir)['createPet']?.response).toEqual(model('CreatePetResponse'));
+    expect(models['CreatePetResponse']?.fields).toEqual([]);
+    expectSound(ir, ['Holder', 'Owner']);
+  });
+
+  /** A discriminated component whose `node.created` variant carries `data`. */
+  const eventWithData = (data: SchemaObject): SchemaObject => ({
+    allOf: [
+      { type: 'object', properties: { id: { type: 'string' }, event: { type: 'string' } }, required: ['id', 'event'] },
+      {
+        oneOf: [
+          {
+            type: 'object',
+            properties: { event: { type: 'string', const: 'node.created' }, data },
+            required: ['event', 'data'],
+          },
+          {
+            type: 'object',
+            properties: {
+              event: { type: 'string', const: 'node.deleted' },
+              data: { type: 'object', properties: { id: { type: 'string' } } },
+            },
+            required: ['event', 'data'],
+          },
+        ],
+      },
+    ],
+  });
+  const withEvent = (schemas: Record<string, SchemaObject>, data: SchemaObject) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/events': {
+        get: { operationId: 'getEvent', responses: { '200': jsonResponse({ $ref: '#/components/schemas/Event' }) } },
+      },
+    },
+    components: { schemas: { ...schemas, Event: eventWithData(data) } },
+  });
+  const baseComponent: Record<string, SchemaObject> = {
+    Base: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } }, required: ['a'] },
+  };
+
+  it('mints nothing under a discriminated variant for an allOf of $ref members only', async () => {
+    for (const data of [
+      { allOf: [{ $ref: '#/components/schemas/Base' }] },
+      { allOf: [{ $ref: '#/components/schemas/Base' }, { description: 'documented' }] },
+    ] as SchemaObject[]) {
+      const ir = await parseWithoutWarnings(withEvent(baseComponent, data));
+      const models = modelsByName(ir);
+      expect(fieldsOf(models['NodeCreated'])).toEqual(['id: string', 'event: literal', 'data: Base']);
+      expect(models['NodeCreatedData']).toBeUndefined();
+      expectSound(ir, ['Base', 'Event']);
+    }
+  });
+
+  it('leaves a declared component named like the nested field untouched when the field is a plain reference', async () => {
+    const ir = await parseWithoutWarnings(
+      withEvent(
+        { ...baseComponent, NodeCreatedData: { type: 'object', properties: { only: { type: 'string' } } } },
+        { allOf: [{ $ref: '#/components/schemas/Base' }] },
+      ),
+    );
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['NodeCreated'])).toEqual(['id: string', 'event: literal', 'data: Base']);
+    // Fewer fields than `Base`: an unused merged copy would have replaced it.
+    expect(fieldsOf(models['NodeCreatedData'])).toEqual(['only?: string']);
+    expectSound(ir, ['Base', 'Event', 'NodeCreatedData']);
+  });
+
+  it('still mints the merged model for a $ref augmented by an inline object, and unwraps a lone inline member', async () => {
+    const augmented = await parseWithoutWarnings(
+      withEvent(baseComponent, {
+        allOf: [{ $ref: '#/components/schemas/Base' }, { properties: { x: { type: 'string' } } }],
+      }),
+    );
+    expect(fieldsOf(modelsByName(augmented)['NodeCreated'])).toEqual([
+      'id: string',
+      'event: literal',
+      'data: NodeCreatedData',
+    ]);
+    expect(fieldsOf(modelsByName(augmented)['NodeCreatedData'])).toEqual(['a: string', 'b?: string', 'x?: string']);
+    expectSound(augmented, ['Base', 'Event']);
+
+    const lone = await parseWithoutWarnings(
+      withEvent(baseComponent, { allOf: [{ type: 'object', properties: { y: { type: 'string' } }, required: ['y'] }] }),
+    );
+    expect(fieldsOf(modelsByName(lone)['NodeCreated'])).toEqual([
+      'id: string',
+      'event: literal',
+      'data: NodeCreatedData',
+    ]);
+    expect(fieldsOf(modelsByName(lone)['NodeCreatedData'])).toEqual(['y: string']);
+    expectSound(lone, ['Base', 'Event']);
+  });
+
+  it('readInlineAllOf is the one reading', () => {
+    const ref: SchemaObject = { $ref: '#/components/schemas/Base' };
+    expect(readInlineAllOf([ref])).toBe('reference');
+    expect(readInlineAllOf([ref, { description: 'doc' }])).toBe('reference');
+    expect(readInlineAllOf([ref, { type: 'object' }])).toBe('merged');
+    expect(readInlineAllOf([ref, { oneOf: [emptyObject] }])).toBe('merged');
+    expect(readInlineAllOf([base])).toBe('unwrapped');
+    expect(readInlineAllOf([{ oneOf: [emptyObject] }, { description: 'Pet' }])).toBe('merged');
+    expect(readInlineAllOf([{ minProperties: 1 }, { description: 'doc' }])).toBe('reference');
+    expect(schemaToTypeRef({ allOf: [ref, { description: 'doc' }] }, 'pet', 'Holder')).toEqual(model('Base'));
+    expect(schemaToTypeRef(emptyUnionPlusDoc, 'pet', 'Holder')).toEqual(model('HolderPet'));
+    const results: Model[] = [];
+    extractInlineModelsFromProperties({ properties: { pet: emptyUnionPlusDoc } }, results, 'Holder', {});
+    expect(results.map((m) => [m.name, m.fields.length])).toEqual([['HolderPet', 0]]);
   });
 });

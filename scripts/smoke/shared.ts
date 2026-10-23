@@ -52,8 +52,9 @@ export interface CapturedExchange {
   unexpectedStatus?: boolean;
   /**
    * The explicit status codes the operation declares (`ExpectedStatuses.codes`:
-   * the success codes and the `errors` codes). A range or `default` response
-   * is not listed here; `expectedStatuses` carries those.
+   * every declared 2xx/3xx code and every `errors` code; nothing is implied
+   * from the HTTP method). A range or `default` response is not listed here;
+   * `expectedStatuses` carries those.
    */
   expectedStatusCodes?: number[];
   /**
@@ -639,12 +640,11 @@ export class IdRegistry {
  */
 export interface ExpectedStatuses {
   /**
-   * The explicit status codes, ascending and without duplicates: the
-   * declared 2xx/3xx codes plus every `errors` code. The 2xx/3xx codes are
-   * read from `successResponses` when the operation declares more than one;
-   * the IR does not carry a lone success response's status code, so an
-   * operation without `successResponses` is credited with its method's usual
-   * success code instead (POST 201, DELETE 204, every other method 200).
+   * The explicit status codes, ascending and without duplicates: every
+   * declared 2xx/3xx code (`responseStatusCode`, the primary success
+   * response's, plus every `successResponses` entry) and every `errors`
+   * code. An operation that declares no 2xx or 3xx response contributes no
+   * success code: nothing is implied from the HTTP method.
    */
   codes: number[];
   /**
@@ -660,29 +660,14 @@ export interface ExpectedStatuses {
 }
 
 /**
- * The success code implied by an HTTP method when the IR cannot say which
- * single 2xx/3xx response the operation declares.
- */
-const DEFAULT_SUCCESS_CODE: Record<string, number> = {
-  post: 201,
-  get: 200,
-  put: 200,
-  patch: 200,
-  delete: 204,
-};
-
-/**
  * Read every status an operation's declared responses cover. Both
  * `getExpectedStatusCodes` and `isUnexpectedStatus` go through this, so the
  * one place that decides what counts as declared is here.
  */
 export function getExpectedStatuses(op: Operation): ExpectedStatuses {
   const codes = new Set<number>();
-  if (op.successResponses) {
-    for (const success of op.successResponses) codes.add(success.statusCode);
-  } else {
-    codes.add(DEFAULT_SUCCESS_CODE[op.httpMethod] ?? 200);
-  }
+  if (op.responseStatusCode !== undefined) codes.add(op.responseStatusCode);
+  for (const success of op.successResponses ?? []) codes.add(success.statusCode);
   for (const err of op.errors) codes.add(err.statusCode);
   return {
     codes: [...codes].sort((a, b) => a - b),
