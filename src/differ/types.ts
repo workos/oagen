@@ -435,13 +435,15 @@ export interface OperationModified {
   /**
    * `Operation.responseStatusCode` — the status code the primary success
    * response is read from — differs while both specs carry one: a lone
-   * `201` that became a lone `200`, or a `201` that became the primary
-   * beside a `200` whose body is no longer typed. Breaking: the status an
-   * operation succeeds with is what an SDK checks or documents (the IR
-   * carries it for that), and the server now answers with another one.
-   * Compared only while both sides carry a code, as `requestBodyRequired`
-   * is while both carry a body; an operation gaining or losing its only
-   * 2xx/3xx is not a move. Not mirrored into `behaviorChanges`.
+   * `201` that became a lone `200`, a `200` added beside a lone `201` (the
+   * `200` is now the primary), or a `201` that became the primary beside a
+   * `200` whose body is no longer typed. Additive on its own: the old code
+   * may still be declared, as in the second case, and whether a bare status
+   * move breaks callers is left to a separate issue — this flag only says
+   * the move happened, so a changelog can. Compared only while both sides
+   * carry a code, as `requestBodyRequired` is while both carry a body; an
+   * operation gaining or losing its only 2xx/3xx is not a move. Not mirrored
+   * into `behaviorChanges`.
    */
   responseStatusCodeChanged: boolean;
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
@@ -503,8 +505,11 @@ export interface ResponseHeaderChange {
   headerName: string;
   /**
    * The response entry's status code — `Operation.responseStatusCode` for a
-   * lone 2xx. Unset for a fallback response, and for a lone 2xx of a
-   * hand-built IR that carries no code.
+   * lone 2xx — of the entry that declares what changed: the old spec's for
+   * `header-removed`, the new spec's for every other kind — so an operation
+   * that lost its only 2xx, whose new primary carries no code, reports that
+   * entry's headers under its old code. Unset for a fallback response, and
+   * for a lone 2xx of a hand-built IR that carries no code.
    */
   statusCode?: number;
   /** Set instead of `statusCode` for the `default` or a `1XX`–`5XX` range response, which carry no code. */
@@ -533,10 +538,14 @@ export interface ResponseHeaderChange {
  * pairs with the entry of its code; a lone 2xx pairs by its
  * `Operation.responseStatusCode` and is reported with that code, and two
  * lone primaries of different codes pair with each other
- * (`responseStatusCodeChanged` reports the move); a lone 2xx that carries no
- * code (a hand-built IR) is paired with the entry of the other spec that
- * offers its media types, else with that spec's primary — reported with
- * `statusCode` unset when it is the new spec's lone entry. The `default` and range responses pair by key
+ * (`responseStatusCodeChanged` reports the move); a primary that carries no
+ * code (an operation declaring no 2xx/3xx, or a hand-built IR's lone 2xx) is
+ * paired with the entry of the other spec that offers its media types, else
+ * with that spec's primary. A change is located at the new spec's entry,
+ * or — when that entry carries no code and the change only removes, as
+ * when an operation lost its only 2xx — at the old spec's entry, which
+ * declared what is gone, so `statusCode` is unset only for a lone 2xx of a
+ * hand-built IR that carries no code. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the
  * new does not is reported with its media types `removed`; one the new spec
  * adds is no media-type change. Media types are compared by essence —
