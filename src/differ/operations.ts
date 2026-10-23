@@ -25,7 +25,7 @@ import {
 } from './media-types.js';
 import type { DocumentShapes } from './shapes.js';
 import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange, ResponseHeaderChange } from './types.js';
-import { locatedParams, paramKey } from './params.js';
+import { locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
   classifyParamChange,
   classifyResponseHeaderChange,
@@ -858,6 +858,13 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
       } else {
         changes.push(at(classifyParamChange('param-type-changed', name), loc));
       }
+    }
+
+    // The media type the value is serialized in (`Parameter.contentType`)
+    // moved: between `schema` and `content`, or between two essences.
+    const reencoded = parameterContentTypeShift(oldEntry.p, newEntry.p);
+    if (reencoded) {
+      changes.push({ ...at(classifyParamChange('param-content-type-changed', name), loc), ...reencoded });
     }
 
     if (oldEntry.p.required !== newEntry.p.required) {

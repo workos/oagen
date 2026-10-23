@@ -736,16 +736,27 @@ export interface Parameter {
    */
   name: string;
   /**
-   * The parameter schema's type. An inline object schema (a `deepObject`
-   * query parameter, say), or an array, map, union or nullable wrapper
-   * holding one, references a model the parser creates for it, named from
-   * the service and parameter (`PetsFilter`; a header's name lower-cased
-   * first, so `X-RateLimit-Meta` and `x-ratelimit-meta` both reference
-   * `PetsXRatelimitMeta`) and qualified by location or operation when that
-   * name already belongs to another shape (see "Response Headers" in
-   * docs/architecture/ir-types.md); a webhook's is named under the webhook's
-   * stem. A primitive, a `$ref`, an inline enum (named the same way) or an
-   * array of either is typed as written.
+   * The parameter schema's type. The parameter's schema is its `schema` or,
+   * for a parameter declared with a `content` map in its place, the schema
+   * of the entry read from that map: `application/json` or a `+json` media
+   * type when the entry declares a schema, else `text/plain` with or without
+   * one, each matched by media type essence (parameters and case stripped).
+   * A `text/plain` entry without a schema types the parameter as a string;
+   * a map none of whose media types is read does too, with a parser warning
+   * that names them; a `schema` beside a `content` map wins. Every field of
+   * this interface that reads "the parameter's schema" reads this schema,
+   * so a parameter declared either way is typed by one rule.
+   *
+   * An inline object schema (a `deepObject` query parameter, say), or an
+   * array, map, union or nullable wrapper holding one, references a model
+   * the parser creates for it, named from the service and parameter
+   * (`PetsFilter`; a header's name lower-cased first, so `X-RateLimit-Meta`
+   * and `x-ratelimit-meta` both reference `PetsXRatelimitMeta`) and
+   * qualified by location or operation when that name already belongs to
+   * another shape (see "Response Headers" in docs/architecture/ir-types.md);
+   * a webhook's is named under the webhook's stem. A primitive, a `$ref`, an
+   * inline enum (named the same way) or an array of either is typed as
+   * written.
    */
   type: TypeRef;
   required: boolean;
@@ -761,22 +772,40 @@ export interface Parameter {
   default?: unknown;
   /**
    * A single illustrative value, resolved level by level: the parameter's own
-   * `example` (else the first entry of its `examples` map), then its inline
-   * schema's `example` (else the first of its `examples` list), then the same
-   * on the component schema its `$ref` points at. A level with neither falls
-   * through; an explicit `null` is kept. Absent when no level gives one.
+   * `example` (else the first entry of its `examples` map), then — for a
+   * parameter declared with `content` — the same on the Media Type Object
+   * its schema was read from, then the parameter schema's `example` (else
+   * the first of its `examples` list), then the same on the component schema
+   * its `$ref` points at. A level with neither falls through; an explicit
+   * `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
    * Every example value the document gives, in document order: the
    * parameter's `examples` map of Example Objects (each entry's `value`, with
-   * `$ref`s resolved against `components.examples`), else the JSON Schema
-   * `examples` list on its inline schema, else the list on the component
-   * schema its `$ref` points at. Present only when at least one value exists.
+   * `$ref`s resolved against `components.examples`), else — for a parameter
+   * declared with `content` — the same map on the Media Type Object its
+   * schema was read from, else the JSON Schema `examples` list on the
+   * parameter's schema, else the list on the component schema its `$ref`
+   * points at. Present only when at least one value exists.
    */
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
   explode?: boolean;
+  /**
+   * The media type the parameter's value is serialized in: the `content`
+   * key its schema was read from, as written (`application/json;
+   * charset=utf-8`). Present exactly when the parameter is declared with
+   * `content` and the map is read (see `type`) — a schema-less `text/plain`
+   * entry included; absent for a `schema` parameter, and for a `content`
+   * map none of whose media types is read, whose string value is sent as
+   * written. An emitter that serializes parameters by `style` and `explode`
+   * must instead serialize such a value in this media type: JSON-encode an
+   * `application/json` or `+json` value, send a `text/plain` value as text.
+   * `oagen diff` compares it by essence and reports a change as a breaking
+   * `param-content-type-changed`.
+   */
+  contentType?: string;
   /**
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
@@ -1610,15 +1639,23 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
  */
 export interface ResponseHeader {
   name: string;
+  /**
+   * The header schema's type. The header's schema is resolved as a
+   * parameter's is (see `Parameter.type`): the Header Object's `schema`
+   * (resolved through `components/headers`) or, in its place, the schema of
+   * the `content` entry read by the same media type rule. A header with
+   * neither, a `text/plain` entry without a schema, or a map none of whose
+   * media types is read — the last with a parser warning — is a string.
+   */
   type: TypeRef;
   required: boolean;
   description?: string;
   deprecated?: boolean;
   /**
    * The header schema's `externalDocs`, when it declares a usable one — the
-   * `schema` of the Header Object (resolved through `components/headers`), or
-   * the schema of its single `content` entry. A Header Object has no
-   * `externalDocs` of its own. Absent otherwise.
+   * schema `type` is read from, whether the Header Object's `schema` or the
+   * `content` entry's. A Header Object has no `externalDocs` of its own.
+   * Absent otherwise.
    */
   externalDocs?: ExternalDocs;
 }

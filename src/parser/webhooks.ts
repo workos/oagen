@@ -28,6 +28,7 @@ import {
   extractParams,
   extractTags,
   operationIdModelBase,
+  parameterSchema,
   presentText,
   resolveOperationDocs,
   resolveParameterRef,
@@ -35,6 +36,7 @@ import {
   schemalessRequestBodyType,
   schemalessRequestContentType,
   selectRequestBodyContent,
+  warnUnreadParameterContent,
   warnUnreadRequestBody,
   type OperationObject,
   type ParameterObject,
@@ -351,6 +353,9 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
           );
           continue;
         }
+        // Reported here, once per webhook parameter: the mint below runs
+        // twice for each webhook, so it must not report.
+        warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${label}`);
         params.push(param);
       }
       const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label);
@@ -660,8 +665,11 @@ function mintWebhook(
   }
   for (const param of params) {
     const ir = typed.get(parameterKey(param.in, param.name));
-    if (!ir || !param.schema) continue;
-    const { ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas, reserved);
+    // The schema `extractParams` typed the parameter from: `schema`, else
+    // the picked `content` entry's (`parameterTyping`).
+    const schema = parameterSchema(param);
+    if (!ir || !schema) continue;
+    const { ref, models, names: own } = mintParameter(param, schema, parent, names, components.schemas, reserved);
     // `extractParams` typed the parameter from its schema alone; the minted
     // reference is the one whose models exist — it differs when the parameter
     // moved to a qualified property, and when a variant was renamed past a

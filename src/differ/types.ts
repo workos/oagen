@@ -781,7 +781,8 @@ export interface ParamChange {
     | 'param-required-changed'
     | 'param-default-changed'
     | 'param-deprecated-changed'
-    | 'param-name-changed';
+    | 'param-name-changed'
+    | 'param-content-type-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
   /** For `param-name-changed`: the name as the old spec wrote it. */
@@ -796,6 +797,13 @@ export interface ParamChange {
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
   /**
+   * For `param-content-type-changed`: `Parameter.contentType` on each side as
+   * written, or `null` for a parameter typed by `schema` (see
+   * `parameterContentTypeShift` in `params.ts`).
+   */
+  oldContentType?: string | null;
+  newContentType?: string | null;
+  /**
    * Where the parameter lives. Set on every entry `diffOperations` produces
    * (an operation's path, query, header and cookie parameters) and on every
    * entry `diffWebhooks` produces (a webhook's header, query and cookie
@@ -805,6 +813,7 @@ export interface ParamChange {
   /**
    * For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`.
    * For `param-name-changed`: `name X-Pet-Token → x-pet-token`.
+   * For `param-content-type-changed`: `content type <schema> → application/json`.
    */
   details?: string;
 }
