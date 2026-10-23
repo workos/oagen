@@ -105,9 +105,11 @@ export interface RequestBodyEncodingShift {
  * `requestBodyEncoding` differs between the two specs, `undefined` when it
  * does not. The encoding is the wire format the body is serialized as
  * (`json`, `form-data`, `form-urlencoded`, `binary`, `text`), read from the
- * media type the body is declared under, so a change breaks either side of
- * the wire: an SDK built for the old spec keeps sending the old format, and
- * a handler built for it keeps decoding it. An absent encoding is compared
+ * media type the body is declared under. Whether a change breaks is the
+ * caller's rule — `diffOperations` and `diffWebhookBody` read it off the
+ * media types each side declares (`ownRepresentationKept`): an SDK built
+ * for the old spec keeps sending the old representation, and a handler
+ * built for it keeps decoding what it declared. An absent encoding is compared
  * as a value of its own, so a body that gained or lost one is a change too;
  * whether to compare at all when one side carries no body is the caller's
  * rule. `diffOperations` and `diffWebhooks` both read the encoding through

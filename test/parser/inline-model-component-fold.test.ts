@@ -4,7 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { modelAdmits } from '../../src/parser/inline-models.js';
-import { collectModelRefs, collectResponseHeaders, collectResponseBodyTypes } from '../../src/ir/types.js';
+import {
+  collectModelRefs,
+  collectRequestBodyTypes,
+  collectResponseHeaders,
+  collectResponseBodyTypes,
+  collectWebhookTypeRefs,
+} from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -85,19 +91,25 @@ function operationRefs(op: Operation): Array<[string, TypeRef]> {
   if (op.pagination) refs.push([`${op.name}.items`, op.pagination.itemType]);
   for (const h of collectResponseHeaders(op)) refs.push([`${op.name}.${h.name}`, h.type]);
   for (const { source, type } of collectResponseBodyTypes(op)) refs.push([`${op.name}.${source}`, type]);
+  for (const { source, type } of collectRequestBodyTypes(op)) refs.push([`${op.name}.${source}`, type]);
   for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
     refs.push([`${op.name}(${p.name})`, p.type]);
   }
   return refs;
 }
 
-/** Every model reference, from operations and model fields alike, that names no model. */
+/** Every model reference, from operations, webhooks and model fields alike, that names no model. */
 function unresolvedReferences(spec: ApiSpec): string[] {
   const names = new Set(spec.models.map((m) => m.name));
   const found: string[] = [];
   for (const op of Object.values(opsOf(spec))) {
     for (const [owner, ref] of operationRefs(op)) {
       for (const name of collectModelRefs(ref)) if (!names.has(name)) found.push(`${owner} → ${name}`);
+    }
+  }
+  for (const webhook of spec.webhooks ?? []) {
+    for (const ref of collectWebhookTypeRefs(webhook)) {
+      for (const name of collectModelRefs(ref)) if (!names.has(name)) found.push(`${webhook.name} → ${name}`);
     }
   }
   for (const model of spec.models) {
@@ -109,11 +121,14 @@ function unresolvedReferences(spec: ApiSpec): string[] {
   return found.sort();
 }
 
-/** Every model that is neither a component nor referenced by any operation or model field. */
+/** Every model that is neither a component nor referenced by any operation, webhook or model field. */
 function orphanedModels(spec: ApiSpec, componentNames: string[]): string[] {
   const referenced = new Set<string>();
   for (const op of Object.values(opsOf(spec))) {
     for (const [, ref] of operationRefs(op)) for (const name of collectModelRefs(ref)) referenced.add(name);
+  }
+  for (const webhook of spec.webhooks ?? []) {
+    for (const ref of collectWebhookTypeRefs(webhook)) for (const name of collectModelRefs(ref)) referenced.add(name);
   }
   for (const model of spec.models) {
     for (const field of model.fields) for (const name of collectModelRefs(field.type)) referenced.add(name);
@@ -385,6 +400,294 @@ describe('the same rule at every other site an inline model is named like a comp
     });
     expect(stepped.warnings).toEqual([]);
     expectSound(stepped.spec, { Pet: ['id'], ListPetsDefaultResponse: ['code'] });
+  });
+});
+
+describe('a renamed inline model’s references, whatever kind holds them (Greptile round 1)', () => {
+  const titled = (title: string, tag: string, field: string) =>
+    obj({ kind: { type: 'string', const: tag }, [field]: str }, { title });
+  const comp = titled('Comp', 'c', 'c');
+  const b = titled('B', 'b', 'b');
+  const union = (compName: string) => ({
+    kind: 'union',
+    variants: [
+      { kind: 'model', name: compName },
+      { kind: 'model', name: 'B' },
+    ],
+    compositionKind: 'oneOf',
+    discriminator: { property: 'kind', mapping: { c: compName, b: 'B' } },
+  });
+
+  it('repoints a union’s discriminator mapping with the renamed variant, on a component field and on a response', async () => {
+    const field = await parse(
+      'mapping-field',
+      specDoc({ Comp: obj({ id: str }), Thing: obj({ shape: { oneOf: [comp, b] } }) }),
+    );
+    expect(field.spec.models.find((m) => m.name === 'Thing')?.fields[0]?.type).toEqual(union('ThingComp'));
+    expect(field.warnings).toEqual([renamed('Comp', 'ThingComp')]);
+    expectSound(field.spec, { Comp: ['id'], Thing: ['shape'] });
+
+    const response = await parse(
+      'mapping-response',
+      specDoc({ Comp: obj({ id: str }) }, { '/shapes/{id}': getOp('getShape', { oneOf: [comp, b] }) }),
+    );
+    expect(opsOf(response.spec).getShape?.response).toEqual(union('GetShapeComp'));
+    expect(response.warnings).toEqual([renamed('Comp', 'GetShapeComp')]);
+    expectSound(response.spec, { Comp: ['id'] });
+  });
+
+  it('and on a webhook payload, whose models have a site of their own qualified by the webhook’s stem', async () => {
+    const { spec, warnings } = await parse(
+      'webhook-variant',
+      webhookDoc({ Comp: obj({ id: str }) }, { oneOf: [comp, b] }),
+    );
+    expect(spec.webhooks?.[0]?.requestBody).toEqual(union('PetAdoptedComp'));
+    expect(describeModels(spec).sort()).toEqual([
+      'B { kind: literal, b: string }',
+      'Comp { id: string }',
+      'PetAdoptedComp { kind: literal, c: string }',
+    ]);
+    expect(warnings).toEqual([renamed('Comp', 'PetAdoptedComp')]);
+    expectSound(spec, { Comp: ['id'] });
+  });
+
+  it('a webhook payload named like a component is kept off the name by its stem, and the component stands', async () => {
+    const { spec, warnings } = await parse(
+      'webhook-payload',
+      webhookDoc({ PetAdoptedPayload: obj({ x: str }) }, obj({ y: str })),
+    );
+    const payload = spec.webhooks?.[0]?.requestBody;
+    expect(payload?.kind).toBe('model');
+    const name = (payload as { name: string }).name;
+    expect(name).toMatch(/^PetAdopted[0-9A-Fa-f]{6}Payload$/);
+    expect(describeModels(spec).sort()).toEqual([`${name} { y: string }`, 'PetAdoptedPayload { x: string }']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, { PetAdoptedPayload: ['x'] });
+  });
+});
+
+/** A document with one webhook, `pet.adopted`, whose POST payload is `payload`. */
+const webhookDoc = (schemas: Record<string, unknown>, payload: unknown) => ({
+  openapi: '3.1.0',
+  info: { title: 'hooks', version: '1' },
+  paths: {},
+  webhooks: {
+    'pet.adopted': {
+      post: {
+        requestBody: { content: { 'application/json': { schema: payload } } },
+        responses: { '200': { description: 'ok' } },
+      },
+    },
+  },
+  components: { schemas },
+});
+
+describe('a component whose inline child is named like another component (Greptile round 1)', () => {
+  const parent = obj({ owner: obj({ name: str }) });
+  const sibling = obj({ legacyId: int });
+
+  it('settles the child before any body is compared with the component, so a body that `$ref`s the sibling keeps it, in either declaration order', async () => {
+    for (const [order, schemas] of [
+      ['parent-first', { GetPetResponse: parent, GetPetResponseOwner: sibling }],
+      ['child-first', { GetPetResponseOwner: sibling, GetPetResponse: parent }],
+    ] as const) {
+      const { spec, warnings } = await parse(
+        `settled-child-${order}`,
+        specDoc(schemas, {
+          '/pets/{id}': getOp('getPet', obj({ owner: { $ref: '#/components/schemas/GetPetResponseOwner' } })),
+        }),
+      );
+      expect(describeModels(spec).sort(), order).toEqual([
+        'GetPetResponse { owner: GetPetResponseOwner2 }',
+        'GetPetResponse2 { owner: GetPetResponseOwner }',
+        'GetPetResponseOwner { legacyId: integer }',
+        'GetPetResponseOwner2 { name: string }',
+      ]);
+      expect(opsOf(spec).getPet?.response, order).toEqual({ kind: 'model', name: 'GetPetResponse2' });
+      expect(warnings, order).toEqual([
+        renamed('GetPetResponseOwner', 'GetPetResponseOwner2'),
+        renamed('GetPetResponse', 'GetPetResponse2'),
+      ]);
+      expectSound(spec, { GetPetResponse: ['owner'], GetPetResponseOwner: ['legacyId'] });
+    }
+  });
+
+  it('and a fallback body through the shape registry alike', async () => {
+    const fallback = {
+      default: {
+        description: 'err',
+        content: {
+          'application/json': {
+            schema: obj({ owner: { $ref: '#/components/schemas/ListPetsDefaultResponseOwner' } }),
+          },
+        },
+      },
+    };
+    const { spec, warnings } = await parse(
+      'settled-child-fallback',
+      specDoc(
+        { Pet: obj({ id: str }), ListPetsDefaultResponse: parent, ListPetsDefaultResponseOwner: sibling },
+        { '/pets': getOp('listPets', { $ref: '#/components/schemas/Pet' }, fallback) },
+      ),
+    );
+    expect(describeModels(spec).sort()).toEqual([
+      'ListPetsDefaultResponse { owner: ListPetsDefaultResponseOwner2 }',
+      'ListPetsDefaultResponse2 { owner: ListPetsDefaultResponseOwner }',
+      'ListPetsDefaultResponseOwner { legacyId: integer }',
+      'ListPetsDefaultResponseOwner2 { name: string }',
+      'Pet { id: string }',
+    ]);
+    expect(opsOf(spec).listPets?.defaultResponse?.type).toEqual({ kind: 'model', name: 'ListPetsDefaultResponse2' });
+    expect(warnings).toEqual([renamed('ListPetsDefaultResponseOwner', 'ListPetsDefaultResponseOwner2')]);
+    expectSound(spec, { Pet: ['id'], ListPetsDefaultResponse: ['owner'], ListPetsDefaultResponseOwner: ['legacyId'] });
+  });
+
+  it('and a reference an operation’s `allOf` merge copies from the settled field is created under the settled name', async () => {
+    const { spec, warnings } = await parse(
+      'settled-child-inherited',
+      specDoc(
+        { Holder: obj({ meta: obj({ name: str }) }), HolderMeta: sibling },
+        {
+          '/holders': postOp('createHolder', {
+            allOf: [{ $ref: '#/components/schemas/Holder' }, obj({ extra: str })],
+          }),
+        },
+      ),
+    );
+    expect(describeModels(spec).sort()).toEqual([
+      'CreateHolderRequest { meta: HolderMeta2, extra: string }',
+      'Holder { meta: HolderMeta2 }',
+      'HolderMeta { legacyId: integer }',
+      'HolderMeta2 { name: string }',
+    ]);
+    expect(opsOf(spec).createHolder?.requestBody).toEqual({ kind: 'model', name: 'CreateHolderRequest' });
+    expect(warnings).toEqual([renamed('HolderMeta', 'HolderMeta2')]);
+    expectSound(spec, { Holder: ['meta'], HolderMeta: ['legacyId'] });
+  });
+});
+
+describe('what the SDK sends shares a component only on an identical shape (review)', () => {
+  const required = obj({ title: str }, { required: ['title'] });
+  const optional = obj({ title: str });
+
+  it('a request body: a looser component would let a caller omit what the operation requires', async () => {
+    const { spec, warnings } = await parse(
+      'request-looser-component',
+      specDoc({ CreateNoteRequest: optional }, { '/notes': postOp('createNote', required) }),
+    );
+    expect(describeModels(spec)).toEqual([
+      'CreateNoteRequest { title: string }',
+      'CreateNoteRequest2 { title!: string }',
+    ]);
+    expect(opsOf(spec).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+    expect(warnings).toEqual([renamed('CreateNoteRequest', 'CreateNoteRequest2')]);
+    expectSound(spec, { CreateNoteRequest: ['title'] });
+    // An identical component is shared, as for any site.
+    const same = await parse(
+      'request-same-component',
+      specDoc({ CreateNoteRequest: required }, { '/notes': postOp('createNote', required) }),
+    );
+    expect(describeModels(same.spec)).toEqual(['CreateNoteRequest { title!: string }']);
+    expect(same.warnings).toEqual([]);
+  });
+
+  it('a secondary request body, through the shape registry', async () => {
+    const post = {
+      post: {
+        operationId: 'createNote',
+        requestBody: { content: { 'application/json': { schema: str }, 'application/xml': { schema: required } } },
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: str } } } },
+      },
+    };
+    const { spec, warnings } = await parse(
+      'secondary-request-looser-component',
+      specDoc({ CreateNoteApplicationXmlRequest: optional }, { '/notes': post }),
+    );
+    const types = collectRequestBodyTypes(opsOf(spec).createNote!).map(({ type }) => type);
+    expect(types).toContainEqual({ kind: 'model', name: 'CreateNoteApplicationXmlRequest2' });
+    expect(describeModels(spec)).toEqual([
+      'CreateNoteApplicationXmlRequest { title: string }',
+      'CreateNoteApplicationXmlRequest2 { title!: string }',
+    ]);
+    expect(warnings).toEqual([]);
+    expectSound(spec, { CreateNoteApplicationXmlRequest: ['title'] });
+  });
+});
+
+describe('identical bodies that must leave a component’s name share one model (review)', () => {
+  const widget = obj({ object: { type: 'string', const: 'widget' }, id: str, name: str });
+
+  it('under the first site’s qualified name, in either path order', async () => {
+    for (const { order, spec, warnings } of await parseBothOrders('twins', { Widget: obj({ id: str }) }, [
+      ['/a-widgets/{id}', getOp('getAWidget', widget)],
+      ['/b-widgets/{id}', getOp('getBWidget', widget)],
+    ])) {
+      const first = order === 'as-written' ? 'GetAWidget' : 'GetBWidget';
+      expect(describeModels(spec), order).toEqual([
+        'Widget { id: string }',
+        `${first}Widget { object: literal, id: string, name: string }`,
+      ]);
+      expect(opsOf(spec).getAWidget?.response, order).toEqual({ kind: 'model', name: `${first}Widget` });
+      expect(opsOf(spec).getBWidget?.response, order).toEqual({ kind: 'model', name: `${first}Widget` });
+      expect(warnings, order).toEqual([`${renamed('Widget', `${first}Widget`)} (shared by 2 sites)`]);
+      expectSound(spec, { Widget: ['id'] });
+    }
+  });
+});
+
+describe('two webhook keys sharing one path item (Greptile round 2)', () => {
+  const titled = (title: string, tag: string, field: string) =>
+    obj({ kind: { type: 'string', const: tag }, [field]: str }, { title });
+  const doc = {
+    openapi: '3.1.0',
+    info: { title: 'hooks', version: '1' },
+    paths: {},
+    webhooks: {
+      'pet.adopted': { $ref: '#/components/pathItems/shared' },
+      'pet.returned': { $ref: '#/components/pathItems/shared' },
+    },
+    components: {
+      schemas: { Comp: obj({ id: str }) },
+      pathItems: {
+        shared: {
+          post: {
+            operationId: 'shared',
+            parameters: [{ name: 'X-Comp', in: 'header', schema: { $ref: '#/components/schemas/Comp' } }],
+            requestBody: {
+              content: { 'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } } },
+            },
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+    },
+  };
+
+  it('renames the shared variant on both and keeps an explicit `$ref` to the component on both', async () => {
+    const { spec, warnings } = await parse('shared-webhooks', doc);
+    expect(spec.webhooks?.map((w) => w.name)).toEqual(['pet.adopted', 'pet.returned']);
+    for (const webhook of spec.webhooks ?? []) {
+      expect(webhook.requestBody, webhook.name).toEqual({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'SharedComp' },
+          { kind: 'model', name: 'B' },
+        ],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: { c: 'SharedComp', b: 'B' } },
+      });
+      expect(
+        webhook.headerParams.map((p) => [p.name, p.type]),
+        webhook.name,
+      ).toEqual([['X-Comp', { kind: 'model', name: 'Comp' }]]);
+    }
+    expect(describeModels(spec).sort()).toEqual([
+      'B { kind: literal, b: string }',
+      'Comp { id: string }',
+      'SharedComp { kind: literal, c: string }',
+    ]);
+    expect(warnings).toEqual([renamed('Comp', 'SharedComp')]);
+    expectSound(spec, { Comp: ['id'] });
   });
 });
 
