@@ -30,6 +30,7 @@ import {
   operationIdModelBase,
   parameterSchema,
   presentText,
+  requestBodyDescriptionOf,
   resolveOperationDocs,
   resolveParameterRef,
   resolveRequestBodyRef,
@@ -936,6 +937,9 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
   const { summary, description } = resolveOperationDocs(op, pathItem);
   const tags = extractTags(op.tags);
   const security = extractSecurityRequirements(op.security, label);
+  // The payload's doc text, read as an operation's body's is: the Request
+  // Body Object's own, else its picked schema's (`requestBodyDescriptionOf`).
+  const requestBodyDescription = requestBodyDescriptionOf(body, selectRequestBodyContent(body));
 
   return {
     name,
@@ -956,6 +960,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     ...(requestBodyEncoding ? { requestBodyEncoding } : {}),
     ...(requestBodyContentType ? { requestBodyContentType } : {}),
     ...(body?.required === true ? { requestBodyRequired: true } : {}),
+    ...(requestBodyDescription !== undefined ? { requestBodyDescription } : {}),
     // Every media type the body declares, present only when there is one, as on an operation.
     ...(requestBodyContentTypes ? { requestBodyContentTypes, requestBodyContents } : {}),
     responses: extractWebhookResponses(op.responses, components.responses, label),

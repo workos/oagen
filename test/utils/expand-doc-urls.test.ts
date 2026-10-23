@@ -536,6 +536,31 @@ describe('expandDocUrls – every collection that holds a documented node', () =
     expect('cookieParams' in bare).toBe(false);
   });
 
+  it('expands requestBodyDescription on an operation and on a webhook, and leaves the key absent otherwise (issue #316)', () => {
+    const op = run({ requestBodyDescription: text });
+    expect(op.requestBodyDescription).toBe(expandedText);
+    expect('requestBodyDescription' in run({})).toBe(false);
+
+    const spec = minimalSpec({
+      webhooks: [
+        {
+          name: 'described',
+          httpMethod: 'post',
+          headerParams: [],
+          queryParams: [],
+          responses: [],
+          requestBodyDescription: text,
+        },
+        { name: 'bare', httpMethod: 'post', headerParams: [], queryParams: [], responses: [] },
+      ],
+    });
+    const [described, bare] = expandDocUrls(spec, base).webhooks!;
+    expect(described.requestBodyDescription).toBe(expandedText);
+    expect('requestBodyDescription' in bare).toBe(false);
+    // The input is untouched.
+    expect(spec.webhooks![0].requestBodyDescription).toBe(text);
+  });
+
   it('walks the primary response headers', () => {
     const op = run({ responseHeaders: [header('X-Rate-Limit')] });
     expectExpanded(op.responseHeaders![0]);

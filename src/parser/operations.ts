@@ -260,6 +260,7 @@ export function resolveParameterRef(
 }
 
 export interface RequestBodyObject {
+  description?: string;
   required?: boolean;
   content?: Record<string, { schema?: SchemaObject }>;
 }
@@ -2597,6 +2598,7 @@ function buildOperation(
     body: requestBody,
     encoding: requestBodyEncoding,
     contentType: requestBodyContentType,
+    description: requestBodyDescription,
     contentTypes: requestBodyContentTypes,
     contents: requestBodyContents,
   } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
@@ -2813,6 +2815,9 @@ function buildOperation(
     // Added only when the operation has a body so bodiless operations keep
     // their shape.
     ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    // The body's doc text, present only when the document gives it some —
+    // the Request Body Object's own, else its picked schema's.
+    ...(requestBodyDescription !== undefined && { requestBodyDescription }),
     // Every media type the body declares, present only when there is one —
     // the request-side twin of `responseContentTypes` / `responseContents`.
     ...(requestBodyContentTypes && { requestBodyContentTypes, requestBodyContents }),
@@ -3424,6 +3429,27 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
 }
 
 /**
+ * The doc text an operation or a webhook carries for its request body
+ * (`Operation.requestBodyDescription`, `Webhook.requestBodyDescription`): the
+ * Request Body Object's own `description` — `body` is read after a
+ * `components/requestBodies` `$ref` is resolved — when it has non-whitespace
+ * content, else the `description` written on the schema of the content entry
+ * the pick reads (`selected`, from `selectRequestBodyContent`), as it stands
+ * there: a `$ref` is not followed, so a component's text stays on its model,
+ * while a `description` written beside the `$ref` is read, as a field reads
+ * one. `undefined` when neither has content; a body none of whose media
+ * types is read has no `selected` and carries its own text alone. The text
+ * is kept verbatim. Every reader of a body — the operation extractor and the
+ * webhook builder — takes the body's doc text from here.
+ */
+export function requestBodyDescriptionOf(
+  body: RequestBodyObject | undefined,
+  selected: SelectedRequestBodyContent | undefined,
+): string | undefined {
+  return presentText(body?.description) ?? presentText(selected?.schema?.description);
+}
+
+/**
  * The type of a picked request body that declares no schema: a binary body is
  * a binary string, a text body a string. A JSON or form body is picked only
  * with a schema (`REQUEST_BODY_MEDIA_TYPES`), so for those encodings this is
@@ -3506,10 +3532,12 @@ interface RequestTypingContext {
   componentSchemas?: Record<string, SchemaObject>;
 }
 
-/** The request body an operation carries: the picked entry typed, and every declared media type with its type. */
+/** The request body an operation carries: the picked entry typed, every declared media type with its type, and its doc text. */
 interface ExtractedRequestBody {
   body?: TypeRef;
   encoding?: RequestBodyEncoding;
+  /** The body's doc text (`Operation.requestBodyDescription`, `requestBodyDescriptionOf`); absent when there is none. */
+  description?: string;
   /** The picked entry's essence (`Operation.requestBodyContentType`); set exactly when `body` is. */
   contentType?: string;
   contentTypes?: string[];
@@ -3544,9 +3572,10 @@ function requestModelStem(op: OperationObject | undefined, pathModelBaseName: st
  * Read an operation's request body: the content entry the pick chooses
  * (`selectRequestBodyContent`) typed as `body` with its `encoding`, and every
  * media type the body declares as `contentTypes` / `contents`, the picked
- * entry sharing `body`'s TypeRef (`extractRequestBodyContents`). A body none
+ * entry sharing `body`'s TypeRef (`extractRequestBodyContents`), and the
+ * body's doc text as `description` (`requestBodyDescriptionOf`). A body none
  * of whose media types is read is reported once and carried in `contents`
- * alone.
+ * alone, with its own `description` when it declares one.
  */
 function extractRequestBody(
   body: RequestBodyObject | undefined,
@@ -3567,7 +3596,8 @@ function extractRequestBody(
     requestModelStem(op, pathModelBaseName),
     ctx,
   );
-  return { ...primary, ...contents };
+  const description = requestBodyDescriptionOf(body, selected);
+  return { ...primary, ...contents, ...(description !== undefined && { description }) };
 }
 
 /**
@@ -3700,7 +3730,7 @@ function typePickedRequestBody(
     }
     inlineModels.push({
       name: contextName,
-      description: undefined,
+      description: schema.description,
       ...externalDocsEntry(schema.externalDocs),
       fields,
       ...deprecatedEntry(schema),
