@@ -562,3 +562,41 @@ describe("the issue's documents (issue #299)", () => {
     expect(diffSpecs(before, after).changes).toEqual([]);
   });
 });
+
+/**
+ * The `documentServers` fallback in `diffOperations` with an additive result
+ * (#349 review): the operation inherits on one side and declares its own
+ * list on the other, and what it is served from gains an entry. The other
+ * tests reach that fallback only where the result is breaking or nothing.
+ */
+describe('inheriting on one side, additive (#349 review)', () => {
+  const added = [{ kind: 'server-added', url: 'https://b.example.com', classification: 'additive' }];
+
+  it('an operation under a document at `a` that starts declaring `[a, b]`', () => {
+    const changes = diffOperations('Notes', [listNotes], [withServers([a, b])], { old: [a], new: [a] });
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'listNotes',
+      serversChanged: true,
+      serverChanges: added,
+      classification: 'additive',
+    });
+  });
+
+  it('an operation whose `[a]` override disappears because the document moved to `[a, b]`', () => {
+    // From a document without servers, and from one at another host: the
+    // operation's `serverChanges` are its own effective lists' alone, `[a]`
+    // → `[a, b]`; what the document itself did is the document-level diff's.
+    for (const oldDocument of [undefined, [c]]) {
+      const changes = diffOperations('Notes', [withServers([a])], [listNotes], { old: oldDocument, new: [a, b] });
+      expect(changes, oldDocument ? 'from another host' : 'from no server').toHaveLength(1);
+      expect(changes[0]).toMatchObject({
+        kind: 'operation-modified',
+        serversChanged: true,
+        serverChanges: added,
+        classification: 'additive',
+      });
+    }
+  });
+});

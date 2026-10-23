@@ -99,17 +99,55 @@ describe("diffCommand — an operation's servers (#299)", () => {
       },
     },
   });
-  const files: Record<'old' | 'wider' | 'moved', string> = { old: '', wider: '', moved: '' };
+  /** `GET /notes` with its own `servers`, or inheriting when none is given, under a document with `servers` or none. */
+  const documentWith = (
+    documentServers: Array<{ url: string }> | undefined,
+    operationServers?: Array<{ url: string }>,
+  ) => ({
+    openapi: '3.1.0',
+    info: { title: 'repro', version: '1' },
+    ...(documentServers ? { servers: documentServers } : {}),
+    paths: {
+      '/notes': {
+        get: {
+          operationId: 'listNotes',
+          ...(operationServers ? { servers: operationServers } : {}),
+          responses: { '204': { description: 'ok' } },
+        },
+      },
+    },
+  });
+  const a = { url: 'https://a.example.com' };
+  const b = { url: 'https://b.example.com' };
+  const files: Record<'old' | 'wider' | 'moved' | 'inherits' | 'overrides' | 'overrideA' | 'movedDocument', string> = {
+    old: '',
+    wider: '',
+    moved: '',
+    inherits: '',
+    overrides: '',
+    overrideA: '',
+    movedDocument: '',
+  };
 
   beforeAll(async () => {
     tmpDir = await fs.mkdtemp(join(os.tmpdir(), 'oagen-cli-diff-299-'));
-    const write = async (name: keyof typeof files, region: { default: string; enum?: string[] }): Promise<void> => {
+    const writeDocument = async (name: keyof typeof files, doc: object): Promise<void> => {
       files[name] = join(tmpDir, `${name}.json`);
-      await fs.writeFile(files[name], JSON.stringify(document(region)), 'utf-8');
+      await fs.writeFile(files[name], JSON.stringify(doc), 'utf-8');
     };
+    const write = (name: keyof typeof files, region: { default: string; enum?: string[] }): Promise<void> =>
+      writeDocument(name, document(region));
     await write('old', { default: 'eu', enum: ['eu'] });
     await write('wider', { default: 'eu', enum: ['eu', 'us'] });
     await write('moved', { default: 'us', enum: ['eu', 'us'] });
+    // Inheriting on one side (#349 review): the operation under a document
+    // at `a` inherits, then declares `[a, b]`; and the operation's `[a]`
+    // override under a document without servers disappears because the
+    // document moved to `[a, b]`.
+    await writeDocument('inherits', documentWith([a]));
+    await writeDocument('overrides', documentWith([a], [a, b]));
+    await writeDocument('overrideA', documentWith(undefined, [a]));
+    await writeDocument('movedDocument', documentWith([a, b]));
   });
 
   afterAll(async () => {
@@ -193,6 +231,44 @@ describe("diffCommand — an operation's servers (#299)", () => {
         },
       ],
       classification: 'breaking',
+    });
+  });
+
+  it('exits 1 when an operation under a document at `a` starts declaring `[a, b]` (#349 review)', async () => {
+    const err: any = await diffCommand({ old: files.inherits, new: files.overrides }).catch((e) => e);
+    expect(err.exitCode).toBe(1);
+
+    const diff = printedReport();
+    expect(diff.summary).toMatchObject({ breaking: 0, additive: 1 });
+    expect(diff.changes).toHaveLength(1);
+    expect(diff.changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'listNotes',
+      serversChanged: true,
+      serverChanges: [{ kind: 'server-added', url: 'https://b.example.com', classification: 'additive' }],
+      classification: 'additive',
+    });
+  });
+
+  it("exits 1 when an operation's `[a]` override disappears because the document moved to `[a, b]` (#349 review)", async () => {
+    const err: any = await diffCommand({ old: files.overrideA, new: files.movedDocument }).catch((e) => e);
+    expect(err.exitCode).toBe(1);
+
+    const diff = printedReport();
+    // The document gained its first host and a second one beside it, all
+    // additive; the operation, served from `[a]` before, gains `b`.
+    expect(diff.summary).toMatchObject({ breaking: 0, additive: 4 });
+    expect(diff.changes.map((c) => [c.kind, c.classification])).toEqual([
+      ['base-url-changed', 'additive'],
+      ['server-added', 'additive'],
+      ['server-added', 'additive'],
+      ['operation-modified', 'additive'],
+    ]);
+    expect(diff.changes[3]).toMatchObject({
+      operationName: 'listNotes',
+      serversChanged: true,
+      serverChanges: [{ kind: 'server-added', url: 'https://b.example.com', classification: 'additive' }],
+      classification: 'additive',
     });
   });
 });
