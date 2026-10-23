@@ -120,6 +120,24 @@ const permutations = <T>(items: T[]): T[][] =>
         permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
       );
 
+/** The model names a type reaches at any depth — through arrays, maps, nullable wrappers and unions — in order. */
+function leafModelNames(type: TypeRef): string[] {
+  switch (type.kind) {
+    case 'model':
+      return [type.name];
+    case 'array':
+      return leafModelNames(type.items);
+    case 'map':
+      return leafModelNames(type.valueType);
+    case 'nullable':
+      return leafModelNames(type.inner);
+    case 'union':
+      return type.variants.flatMap(leafModelNames);
+    default:
+      return [];
+  }
+}
+
 /** Every type reference an operation holds, labelled by where it sits. */
 function operationRefs(op: Operation): Array<[string, TypeRef]> {
   const refs: Array<[string, TypeRef]> = [[`${op.name}.response`, op.response]];
@@ -926,6 +944,52 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(fieldsOf(spec, 'SingleOnly')).toEqual(['name: string', 'kind?: "only"', 'v?: string']);
       expect(warnings).toEqual([]);
       expectSound(spec, ['Pet', 'Single']);
+    });
+  });
+
+  describe('an inherited declaration mints everything its type reaches (review round 3)', () => {
+    /** `Dog` declares, beside its `allOf`, a field of each container kind holding inline objects. */
+    const Dog: SchemaObject = {
+      allOf: [ref('Pet')],
+      properties: {
+        meta: { type: 'object', additionalProperties: obj({ v: str }) },
+        tags: { type: 'array', items: obj({ t: str }) },
+        shape: { oneOf: [obj({ radius: str }), obj({ side: str })] },
+        maybe: { oneOf: [obj({ m: str }), { type: 'null' }] },
+        deep: {
+          type: 'object',
+          additionalProperties: { type: 'array', items: { oneOf: [obj({ d: str }), { type: 'null' }] } },
+        },
+      },
+    };
+    /** The fields of every model `field`'s type reaches on `model`, each model's own, in order. */
+    const reached = (spec: ApiSpec, model: string, field: string): string[][] =>
+      leafModelNames(modelOf(spec, model).fields.find((f) => f.name === field)!.type).map((name) =>
+        fieldsOf(spec, name),
+      );
+
+    it('a map, an array, a union, a nullable object and a map of arrays of nullable objects, inherited one and two levels', async () => {
+      const { spec, warnings } = await parse(
+        'inherited-containers',
+        specDoc({}, { Pet: pet, Dog, Puppy: { allOf: [ref('Dog')] }, Pup: { allOf: [ref('Puppy')] } }),
+      );
+      for (const name of ['Dog', 'Puppy', 'Pup']) {
+        // Typed under the inheriting component, as `extractAllOfModel` types every inherited field …
+        for (const field of ['meta', 'tags', 'shape', 'maybe', 'deep']) {
+          const type = modelOf(spec, name).fields.find((f) => f.name === field)!.type;
+          for (const leaf of leafModelNames(type))
+            expect(leaf.startsWith(name), `${name}.${field} → ${leaf}`).toBe(true);
+        }
+        // … and every model the type reaches exists with the declaration's fields (round 3: an
+        // inherited map's values were typed but never built).
+        expect(reached(spec, name, 'meta'), `${name}.meta`).toEqual([['v?: string']]);
+        expect(reached(spec, name, 'tags'), `${name}.tags`).toEqual([['t?: string']]);
+        expect(reached(spec, name, 'shape'), `${name}.shape`).toEqual([['radius?: string'], ['side?: string']]);
+        expect(reached(spec, name, 'maybe'), `${name}.maybe`).toEqual([['m?: string']]);
+        expect(reached(spec, name, 'deep'), `${name}.deep`).toEqual([['d?: string']]);
+      }
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Dog', 'Puppy', 'Pup']);
     });
   });
 });
