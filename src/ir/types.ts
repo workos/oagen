@@ -376,6 +376,20 @@ export interface Operation {
    */
   response: TypeRef;
   /**
+   * The status code of the response `response` was read from — the primary
+   * success response chosen as described there: `200`; `201` when an untyped
+   * `200` yielded to a typed `201`; `302` for a lone redirect; a POST's lone
+   * `200`. Present exactly when the operation declares at least one 2xx or
+   * 3xx response, and absent when it declares none (only `default`, a range,
+   * 4xx/5xx codes, an empty `responses` map or no `responses` key) — the
+   * case where `response` is `unknown`. When `successResponses` is set, this
+   * equals the `statusCode` of the entry `response` was taken from. Read it
+   * to check or document the status an operation succeeds with instead of
+   * guessing one from the HTTP method; the differ does not key or compare
+   * by it.
+   */
+  responseStatusCode?: number;
+  /**
    * Headers the primary success response declares (the one `response` is the
    * body of). Present only when the spec declares at least one. Each entry of
    * `successResponses` carries its own `headers`, but that list is only set
