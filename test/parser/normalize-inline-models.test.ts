@@ -731,3 +731,136 @@ describe('reservedTypeNames', () => {
     ]);
   });
 });
+
+describe('identical copies leaving a shared name share one model (issue #314)', () => {
+  const str: TypeRef = { kind: 'primitive', type: 'string' };
+  const model = (name: string, fields: string[], deprecated = false): Model => ({
+    name,
+    fields: fields.map((f) => ({ name: f, type: str, required: false })),
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  const ref = (name: string): TypeRef => ({ kind: 'model', name });
+  /** Run `fn`, returning every warning it printed instead of printing it. */
+  const warnings = (fn: () => void): string[] => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fn();
+      return warnSpy.mock.calls.map(([m]) => String(m));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  };
+
+  it('two deprecated field copies beside a live component of another shape: one `PetOwnerAddress2`, each site repointed', () => {
+    const owner = model('PetOwnerAddress', ['city', 'country']);
+    const a = model('PetOwnerAddress', ['city'], true);
+    const b = model('PetOwnerAddress', ['city'], true);
+    const aRef = ref('PetOwnerAddress');
+    const bRef = ref('PetOwnerAddress');
+    let settled: Model[] = [];
+    const notes = warnings(() => {
+      settled = settleFieldInlineModels([owner], [a, b], {
+        bundles: [
+          { qualifier: 'Pet', roots: [aRef], models: [a] },
+          { qualifier: 'PetOwner', roots: [bRef], models: [b] },
+        ],
+        reserved: new Set(['Pet', 'PetOwner', 'PetOwnerAddress']),
+        enums: new Set(),
+      });
+    });
+    expect(settled).toEqual([a]);
+    expect(a.name).toBe('PetOwnerAddress2');
+    expect(aRef).toEqual(ref('PetOwnerAddress2'));
+    expect(bRef).toEqual(ref('PetOwnerAddress2'));
+    expect(owner.name).toBe('PetOwnerAddress');
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "PetOwnerAddress" → "PetOwnerAddress2": it is deprecated while "PetOwnerAddress" is live (shared by 2 sites)',
+    ]);
+  });
+
+  it('a third copy of another shape takes a name of its own, and a copy with no site is left under the shared one', () => {
+    const owner = model('PetOwnerAddress', ['city', 'country']);
+    const a = model('PetOwnerAddress', ['city'], true);
+    const b = model('PetOwnerAddress', ['city'], true);
+    const other = model('PetOwnerAddress', ['city', 'zip'], true);
+    const noSite = model('PetOwnerAddress', ['city'], true);
+    const aRef = ref('PetOwnerAddress');
+    const bRef = ref('PetOwnerAddress');
+    const otherRef = ref('PetOwnerAddress');
+    let settled: Model[] = [];
+    const notes = warnings(() => {
+      settled = settleFieldInlineModels([owner], [a, noSite, other, b], {
+        bundles: [
+          { qualifier: 'Pet', roots: [aRef], models: [a] },
+          { qualifier: 'Shelter', roots: [otherRef], models: [other] },
+          { qualifier: 'PetOwner', roots: [bRef], models: [b] },
+        ],
+        reserved: new Set(['Pet', 'PetOwner', 'PetOwnerAddress', 'Shelter']),
+        enums: new Set(),
+      });
+    });
+    // The no-site copy keeps the component's name and is dropped for it.
+    expect(settled).toEqual([a, other]);
+    expect(a.name).toBe('PetOwnerAddress2');
+    expect(other.name).toBe('ShelterPetOwnerAddress');
+    expect(aRef).toEqual(ref('PetOwnerAddress2'));
+    expect(bRef).toEqual(ref('PetOwnerAddress2'));
+    expect(otherRef).toEqual(ref('ShelterPetOwnerAddress'));
+    expect(notes).toEqual([
+      '[oagen] Warning: Inline model "PetOwnerAddress" is deprecated in one definition and live in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name',
+      '[oagen] Renamed inline model "PetOwnerAddress" → "PetOwnerAddress2": it is deprecated while "PetOwnerAddress" is live (shared by 2 sites)',
+      '[oagen] Renamed inline model "PetOwnerAddress" → "ShelterPetOwnerAddress": it is deprecated while "PetOwnerAddress" is live',
+    ]);
+  });
+
+  it('two live response copies beside a deprecated component share one name the same way', () => {
+    const owner = model('Widget', ['a'], true);
+    const a = model('Widget', ['a']);
+    const b = model('Widget', ['a']);
+    const aRef = ref('Widget');
+    const bRef = ref('Widget');
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([owner], [a, b], {
+        bundles: [
+          { qualifier: 'GetAWidget', roots: [aRef], models: [a] },
+          { qualifier: 'GetBWidget', roots: [bRef], models: [b] },
+        ],
+        reserved: new Set(['Widget']),
+        enums: new Set(),
+      });
+    });
+    expect(merged).toEqual([owner, a]);
+    expect(a.name).toBe('GetAWidgetWidget');
+    expect(aRef).toEqual(ref('GetAWidgetWidget'));
+    expect(bRef).toEqual(ref('GetAWidgetWidget'));
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "Widget" → "GetAWidgetWidget": it is live while "Widget" is deprecated (shared by 2 sites)',
+    ]);
+  });
+
+  it('two identical copies of an enum-owned name share one name the same way', () => {
+    const a = model('Widget', ['a']);
+    const b = model('Widget', ['a']);
+    const aRef = ref('Widget');
+    const bRef = ref('Widget');
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([], [a, b], {
+        bundles: [
+          { qualifier: 'GetAWidget', roots: [aRef], models: [a] },
+          { qualifier: 'GetBWidget', roots: [bRef], models: [b] },
+        ],
+        reserved: new Set(['Widget']),
+        enums: new Set(['Widget']),
+      });
+    });
+    expect(merged).toEqual([a]);
+    expect(a.name).toBe('GetAWidgetWidget');
+    expect(aRef).toEqual(ref('GetAWidgetWidget'));
+    expect(bRef).toEqual(ref('GetAWidgetWidget'));
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "Widget" → "GetAWidgetWidget": enum "Widget" owns the name (shared by 2 sites)',
+    ]);
+  });
+});

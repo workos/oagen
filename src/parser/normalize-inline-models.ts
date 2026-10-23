@@ -209,6 +209,16 @@ function keepLargestByName(models: Model[]): Model[] {
  * in the same response map or anywhere else, and never a reference another
  * site's field lent.
  *
+ * Every copy that must leave a name leaves it through `leaveSharedName`,
+ * whichever rule above moves it — the owner's shape, its flag, an enum
+ * holding the name: identical copies (`modelFingerprint`, the flag
+ * included) share one renamed model under the first site's qualified name,
+ * every site repointed to it, with one note saying how many sites share it;
+ * a copy of another shape takes a name of its own. Two deprecated `address`
+ * objects beside a live `PetOwnerAddress` of another shape are one
+ * `PetOwnerAddress2`, as they would be one `PetOwnerAddress` without the
+ * component.
+ *
  * Names are decided bottom-up — a name after every name its contenders'
  * fields reference, as the list-envelope pass decides nested companions —
  * so when a parent is compared its children are already named: a parent
@@ -253,17 +263,17 @@ function settleSharedNames(
     // model and a component enum hold is the document's own clash and is
     // settled as the model's, below.
     if (!owner && naming?.enums.has(name)) {
-      for (const copy of group) {
-        const bundle = bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
-          );
-          continue;
-        }
-        const renamed = renameInlineCopy(copy, name, bundle, naming);
-        console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": enum "${name}" owns the name`);
-      }
+      leaveSharedName(
+        name,
+        group.map((copy) => ({
+          copy,
+          why: `enum "${name}" owns the name`,
+          noSiteWarning: `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
+        })),
+        naming,
+        bundleOf,
+        folded,
+      );
       continue;
     }
     let nameDeprecated: boolean;
@@ -277,11 +287,12 @@ function settleSharedNames(
       nameDeprecated = false;
     }
 
-    // The copies that agree with the name's flag and that the owner does
-    // not share, clustered by shape in document order: identical copies
-    // that must leave the owner's name share one model under it, as they
-    // would share the bare name without the owner (`keepLargestByName`).
-    const clashing = new Map<string, Model[]>();
+    // Every copy that must leave the name, in document order, the reason
+    // with it: first those that agree with the name's flag and that the
+    // owner does not share, then those whose flag differs and that no live
+    // twin takes in. `leaveSharedName` clusters them by shape, so identical
+    // copies share one model off the name whichever reason moves them.
+    const leavers: NameLeaver[] = [];
     for (const copy of group) {
       if (!!copy.deprecated !== nameDeprecated || !owner) continue;
       const bundle = naming && bundleOf.get(copy);
@@ -289,34 +300,11 @@ function settleSharedNames(
         folded.set(copy, owner);
         continue;
       }
-      const shape = modelFingerprint(copy);
-      clashing.set(shape, [...(clashing.get(shape) ?? []), copy]);
-    }
-    for (const cluster of clashing.values()) {
-      let renamed: string | undefined;
-      let leader: Model | undefined;
-      for (const copy of cluster) {
-        const bundle = naming && bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
-          );
-          continue;
-        }
-        if (renamed === undefined || leader === undefined) {
-          renamed = renameInlineCopy(copy, name, bundle, naming);
-          leader = copy;
-          continue;
-        }
-        repointSite(bundle, name, renamed);
-        folded.set(copy, leader);
-      }
-      if (renamed !== undefined) {
-        const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
-        console.warn(
-          `[oagen] Renamed inline model "${name}" → "${renamed}": its shape differs from component schema "${name}"${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
-        );
-      }
+      leavers.push({
+        copy,
+        why: `its shape differs from component schema "${name}"`,
+        noSiteWarning: `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
+      });
     }
 
     for (const copy of group) {
@@ -334,21 +322,85 @@ function settleSharedNames(
         folded.set(copy, preferredDefinition(live));
         continue;
       }
-      const bundle = naming && bundleOf.get(copy);
-      if (!bundle) {
-        console.warn(
-          `[oagen] Warning: Inline model "${name}" is ${flag(copy)} in one definition and ${nameDeprecated ? 'deprecated' : 'live'} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
-        );
-        continue;
-      }
-      const renamed = renameInlineCopy(copy, name, bundle, naming);
-      console.warn(
-        `[oagen] Renamed inline model "${name}" → "${renamed}": it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
-      );
+      leavers.push({
+        copy,
+        why: `it is ${flag(copy)} while "${name}" is ${nameDeprecated ? 'deprecated' : 'live'}`,
+        noSiteWarning: `[oagen] Warning: Inline model "${name}" is ${flag(copy)} in one definition and ${nameDeprecated ? 'deprecated' : 'live'} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
+      });
     }
+    leaveSharedName(name, leavers, naming, bundleOf, folded);
   }
 
   return { kept: contenders.filter((m) => !folded.has(m)), folded };
+}
+
+/**
+ * A contender that must leave the name it shares, with why it must — the
+ * suffix of the rename note (`its shape differs from component schema
+ * "Widget"`, `it is deprecated while "Widget" is live`, `enum "Widget" owns
+ * the name`) — and the warning to print instead when it has no site to be
+ * renamed from.
+ */
+interface NameLeaver {
+  copy: Model;
+  why: string;
+  noSiteWarning: string;
+}
+
+/**
+ * Move every copy in `leavers` off `name`, identical copies together: the
+ * copies are clustered by shape (`modelFingerprint`, the flag included, so a
+ * deprecated copy and a live one never cluster) in document order, and each
+ * cluster takes one name. Its first copy with a site is renamed
+ * (`renameInlineCopy`) and leads the cluster; every later copy with a site
+ * is repointed to that name (`repointSite`) and folded onto the leader; a
+ * copy with no site is left under `name` with its own warning. One note per
+ * cluster says the leader's new name, why the cluster left, and — when more
+ * than one site shares it — how many. Whichever reason moves a copy off a
+ * name — a shape the component does not admit, a flag the name's differs
+ * from, an enum holding the name — identical copies share one model under
+ * the first site's qualified name, as they would share the bare name
+ * without the owner (`keepLargestByName`): two deprecated `address` objects
+ * beside a live `PetOwnerAddress` of another shape are one
+ * `PetOwnerAddress2`, not a `PetOwnerAddress2` and a `PetOwnerAddress3`.
+ */
+function leaveSharedName(
+  name: string,
+  leavers: readonly NameLeaver[],
+  naming: InlineModelNaming | undefined,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+): void {
+  const clusters = new Map<string, NameLeaver[]>();
+  for (const leaver of leavers) {
+    const shape = modelFingerprint(leaver.copy);
+    clusters.set(shape, [...(clusters.get(shape) ?? []), leaver]);
+  }
+  for (const cluster of clusters.values()) {
+    let renamed: string | undefined;
+    let leader: Model | undefined;
+    let sites = 0;
+    for (const { copy, noSiteWarning } of cluster) {
+      const bundle = naming && bundleOf.get(copy);
+      if (!bundle) {
+        console.warn(noSiteWarning);
+        continue;
+      }
+      sites++;
+      if (renamed === undefined || leader === undefined) {
+        renamed = renameInlineCopy(copy, name, bundle, naming);
+        leader = copy;
+        continue;
+      }
+      repointSite(bundle, name, renamed);
+      folded.set(copy, leader);
+    }
+    if (renamed !== undefined) {
+      console.warn(
+        `[oagen] Renamed inline model "${name}" → "${renamed}": ${cluster[0]!.why}${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
+      );
+    }
+  }
 }
 
 /**
