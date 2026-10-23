@@ -676,22 +676,41 @@ function mintWebhook(
 }
 
 /**
- * A copy of a minted shape for a second member of a group: every type
- * reference through `cloneTypeRef`, so it keeps the marks the merge passes
- * read (a `$ref` to a component, an inherited reference, an inline enum's
- * members), and everything else structurally.
+ * A copy of a minted shape for a second member of a group, carrying every
+ * field the shape has: the fields that hold type references — the
+ * parameters, the payload, the content entries — are copied through
+ * `cloneTypeRef`, so each reference keeps the marks the merge passes read (a
+ * `$ref` to a component, an inherited reference, an inline enum's members),
+ * and each reference is cloned once, so a content entry whose `type` is the
+ * payload's own reference shares the copy as it shared the original; every
+ * other field (the encoding, the content type and its list, anything added
+ * to the shape later) is copied structurally, present or absent exactly as
+ * on the original. A field that comes to hold a type reference must join the
+ * first group.
  */
 function cloneMintedShape(shape: MintedShape): MintedShape {
-  const cloneParameter = ({ type, ...rest }: Parameter): Parameter => ({
-    ...structuredClone(rest),
-    type: cloneTypeRef(type),
-  });
+  const clones = new Map<TypeRef, TypeRef>();
+  const clone = (ref: TypeRef): TypeRef => {
+    let copy = clones.get(ref);
+    if (!copy) clones.set(ref, (copy = cloneTypeRef(ref)));
+    return copy;
+  };
+  const cloneParameter = ({ type, ...rest }: Parameter): Parameter => ({ ...structuredClone(rest), type: clone(type) });
+  const { headerParams, queryParams, cookieParams, requestBody, requestBodyContents, ...rest } = shape;
   return {
-    headerParams: shape.headerParams.map(cloneParameter),
-    queryParams: shape.queryParams.map(cloneParameter),
-    cookieParams: shape.cookieParams.map(cloneParameter),
-    ...(shape.requestBody ? { requestBody: cloneTypeRef(shape.requestBody) } : {}),
-    ...(shape.requestBodyEncoding !== undefined ? { requestBodyEncoding: shape.requestBodyEncoding } : {}),
+    ...structuredClone(rest),
+    headerParams: headerParams.map(cloneParameter),
+    queryParams: queryParams.map(cloneParameter),
+    cookieParams: cookieParams.map(cloneParameter),
+    ...(requestBody ? { requestBody: clone(requestBody) } : {}),
+    ...(requestBodyContents
+      ? {
+          requestBodyContents: requestBodyContents.map(({ type, ...entry }) => ({
+            ...structuredClone(entry),
+            type: clone(type),
+          })),
+        }
+      : {}),
   };
 }
 
