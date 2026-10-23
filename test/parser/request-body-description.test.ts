@@ -36,12 +36,12 @@ const PET = {
   required: ['name'],
 };
 
-/** An OpenAPI 3.1 document around `paths`, with the `Pet` component and whatever else is given. */
+/** An OpenAPI document (3.1 unless `openapi` says otherwise) around `paths`, with the `Pet` component and whatever else is given. */
 const document = (
   paths: Record<string, unknown>,
-  extra: { webhooks?: Record<string, unknown>; requestBodies?: Record<string, unknown> } = {},
+  extra: { webhooks?: Record<string, unknown>; requestBodies?: Record<string, unknown>; openapi?: string } = {},
 ) => ({
-  openapi: '3.1.0',
+  openapi: extra.openapi ?? '3.1.0',
   info: { title: 'Pets', version: '1.0.0' },
   paths,
   ...(extra.webhooks ? { webhooks: extra.webhooks } : {}),
@@ -274,6 +274,71 @@ describe('request body descriptions (issue #316)', () => {
       expect(hooks.petAdopted.requestBodyDescription).toBe('The shared pet body.');
       expect(models.get('PetAdoptedPayload')?.description).toBe('The shared pet schema.');
       expectSound(spec);
+    });
+
+    describe('written beside a components/requestBodies $ref (Greptile round 1)', () => {
+      const requestBodies = {
+        PetBody: {
+          description: 'The shared pet body.',
+          content: { 'application/json': { schema: inlineObject('The shared pet schema.') } },
+        },
+        PetBodyAlias: { $ref: '#/components/requestBodies/PetBody', description: 'The alias text.' },
+      };
+      const refBody = (description?: string, name = 'PetBody') => ({
+        $ref: `#/components/requestBodies/${name}`,
+        ...(description !== undefined ? { description } : {}),
+      });
+
+      it("wins over the shared body's own text and its schema's, on an operation and on a webhook (OAS 3.1)", async () => {
+        const spec = await parseDocument(
+          document(
+            { '/pets': post('createPet', refBody('Text for this operation.')) },
+            { requestBodies, webhooks: { petAdopted: post('petAdopted', refBody('Text for this webhook.')) } },
+          ),
+        );
+        const op = opsOf(spec).createPet;
+        const hook = webhooksOf(spec).petAdopted;
+        const models = modelsOf(spec);
+
+        expect(op.requestBodyDescription).toBe('Text for this operation.');
+        expect(hook.requestBodyDescription).toBe('Text for this webhook.');
+        // The shared body is still read for everything else: its schema types the body and describes the model.
+        expect(describeType(models, op.requestBody)).toBe('CreatePetRequest ("The shared pet schema.")');
+        expect(describeType(models, hook.requestBody)).toBe('PetAdoptedPayload ("The shared pet schema.")');
+        expect(JSON.stringify(spec)).not.toContain('The shared pet body.');
+        expectSound(spec);
+      });
+
+      it('lets the outermost text along a chain win, and falls through a blank one to the shared body’s', async () => {
+        const spec = await parseDocument(
+          document(
+            {
+              '/outer': post('createOuter', refBody('Outer text.', 'PetBodyAlias')),
+              '/inner': post('createInner', refBody(undefined, 'PetBodyAlias')),
+              '/blank': post('createBlank', refBody('   ')),
+            },
+            { requestBodies },
+          ),
+        );
+        const ops = opsOf(spec);
+
+        expect(ops.createOuter.requestBodyDescription).toBe('Outer text.');
+        expect(ops.createInner.requestBodyDescription).toBe('The alias text.');
+        expect(ops.createBlank.requestBodyDescription).toBe('The shared pet body.');
+        expectSound(spec);
+      });
+
+      it('is ignored in an OAS 3.0 document, where nothing beside a $ref is read', async () => {
+        const spec = await parseDocument(
+          document(
+            { '/pets': post('createPet', refBody('Text for this operation.')) },
+            { requestBodies, openapi: '3.0.3' },
+          ),
+        );
+
+        expect(opsOf(spec).createPet.requestBodyDescription).toBe('The shared pet body.');
+        expect(JSON.stringify(spec)).not.toContain('Text for this operation.');
+      });
     });
 
     it('is carried when none of the body’s media types is read as requestBody, beside the warning', async () => {

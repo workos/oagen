@@ -681,6 +681,63 @@ describe('every site a deprecated inline schema identical to a live component ca
     expectSound(both.spec, ['User', 'ListMetadata']);
   });
 
+  it('a list envelope’s companion whose field limit differs keeps its name beside a live component (Greptile, #364 round 2)', async () => {
+    // The reviewer's case: a live `ListMetadata` whose `before` allows 8
+    // characters, a deprecated `list_metadata` whose `before` allows 64. The
+    // component's fields are what every site reads after a fold, so the
+    // companion keeps its name and its own limit; with the same limit it
+    // folds, the envelope field keeping the flag.
+    const listMetadata = (maxLength: number, extra: Record<string, unknown> = {}) =>
+      obj({ before: { type: ['string', 'null'], maxLength }, after: { type: ['string', 'null'] } }, extra);
+    const doc = (component: Record<string, unknown>, companion: Record<string, unknown>) =>
+      specDoc(
+        { User: obj({ id: str }), ListMetadata: component },
+        {
+          '/legacy-users': {
+            get: {
+              operationId: 'listLegacyUsers',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: {
+                    'application/json': {
+                      schema: {
+                        allOf: [
+                          obj({ object: { type: 'string', const: 'list' }, list_metadata: companion }),
+                          obj({ data: { type: 'array', items: { $ref: '#/components/schemas/User' } } }),
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      );
+    const metaOf = (spec: ApiSpec) =>
+      opsOf(spec).listLegacyUsers?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+    const limitOf = (spec: ApiSpec, name: string) =>
+      spec.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'before')?.constraints?.maxLength;
+
+    const kept = await parse('companion-limit-kept', doc(listMetadata(8), listMetadata(64, { deprecated: true })));
+    expect(metaOf(kept.spec)?.type).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+    expect(metaOf(kept.spec)?.deprecated).toBe(true);
+    expect(limitOf(kept.spec, 'ListLegacyUsersListMetadata')).toBe(64);
+    expect(limitOf(kept.spec, 'ListMetadata')).toBe(8);
+    expect(kept.warnings).toEqual([]);
+    expectSound(kept.spec, ['User', 'ListMetadata']);
+
+    const folds = await parse('companion-limit-folds', doc(listMetadata(8), listMetadata(8, { deprecated: true })));
+    expect(metaOf(folds.spec)?.type).toEqual({ kind: 'model', name: 'ListMetadata' });
+    expect(metaOf(folds.spec)?.deprecated).toBe(true);
+    expect(limitOf(folds.spec, 'ListMetadata')).toBe(8);
+    expect(folds.spec.models.map((m) => m.name).sort()).toEqual(['ListMetadata', 'User']);
+    expect(folds.warnings).toEqual([folded('ListMetadata')]);
+    expectSound(folds.spec, ['User', 'ListMetadata']);
+  });
+
   it('a field’s own flag must agree in either direction at every site `modelAdmits` decides (`fieldFlagAgrees`)', async () => {
     const string = { kind: 'primitive', type: 'string' } as const;
     const field = (deprecated: boolean): Field => ({
