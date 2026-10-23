@@ -1,6 +1,6 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, renameTypeRefModels } from '../ir/types.js';
-import type { InlineModelBundle } from './inline-models.js';
+import { flagAdmits, type InlineModelBundle } from './inline-models.js';
 import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
@@ -51,12 +51,20 @@ export interface EnvelopeCompanion {
  * - Otherwise the most common exact shape (first declared, on a tie) becomes
  *   the target: it and every copy it admits take the bare name; any other
  *   copy keeps its operation-qualified name.
- * - `deprecated` is part of a copy's shape, so deprecation never reaches a
- *   live operation and never depends on document order: a copy folds only
- *   onto a target with the same flag, and while any live copy exists the
- *   target is chosen among the live copies, so a deprecated copy keeps its
- *   operation-qualified name (`ListLegacyUsersListMetadata`). Only when every
- *   copy is deprecated does a deprecated shape take the bare name.
+ * - `deprecated` is part of a copy's shape among copies, so deprecation never
+ *   reaches a live operation and never depends on document order: a copy
+ *   folds onto another copy's definition only with the same flag, and while
+ *   any live copy exists the target is chosen among the live copies, so a
+ *   deprecated copy keeps its operation-qualified name
+ *   (`ListLegacyUsersListMetadata`). Only when every copy is deprecated does
+ *   a deprecated shape take the bare name. Beside a component, the
+ *   companion's own flag is read as every declared model reads it
+ *   (`flagAdmits`): a live component admits a deprecated companion — the
+ *   envelope field keeps the flag the schema wrote (`Field.deprecated`), so
+ *   nothing is lost — with the warning the merge passes give such a copy,
+ *   and a deprecated component only a deprecated one. A model nested in the
+ *   companion still folds only onto a component of the same flag, since no
+ *   field of the component's side carries its flag.
  *
  * The comparison covers the companion's whole field type, so a `oneOf`
  * companion is judged on every variant, not just the first, and a copy folds
@@ -117,9 +125,17 @@ export function resolveEnvelopeCompanionNames(
       folds = (c) => {
         // Only a field that references exactly its own lifted model can be
         // repointed at the component; a union of variants has nowhere to go.
+        const own = c.models[0]!;
         const refs = collectModelRefs(c.field.type);
-        if (refs.length !== 1 || refs[0] !== c.models[0].name) return false;
-        return typeAdmits(targetType, componentMap, unwrap(c.field.type), localMap(c), new Set());
+        if (refs.length !== 1 || refs[0] !== own.name) return false;
+        // The companion's own flag is read by `flagAdmits`, apart from its
+        // shape: a deprecated companion is compared with a live component
+        // as if live, since its envelope field keeps the flag. Its nested
+        // models are compared with theirs (`admits`), flag included.
+        if (!flagAdmits(component, own)) return false;
+        const local = localMap(c);
+        if (own.deprecated && !component.deprecated) local.set(own.name, { ...own, deprecated: undefined });
+        return typeAdmits(targetType, componentMap, unwrap(c.field.type), local, new Set());
       };
     } else {
       const counts = new Map<string, { n: number; first: EnvelopeCompanion }>();
@@ -151,6 +167,13 @@ export function resolveEnvelopeCompanionNames(
     // nested references to the bare names, which its map no longer resolves.
     const collapsing = group.filter(folds);
     for (const companion of collapsing) {
+      // A deprecated copy a live component admits is announced once per
+      // companion, as the merge passes announce one (`settleSharedNames`).
+      if (component && !component.deprecated && companion.models[0]!.deprecated) {
+        console.warn(
+          `[oagen] Warning: Inline model "${component.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+        );
+      }
       renameCompanion(companion, finalNames);
       if (companion !== owner) {
         folded.add(companion);
