@@ -8,7 +8,7 @@ import {
   clearSchemaNameTransform,
   resolveSchemaName,
 } from './schemas.js';
-import { extractOperations } from './operations.js';
+import { attachSharedRefs, extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
@@ -242,6 +242,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     ),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
+  // An operation's array items that share a component field's model
+  // (`typeInlineItems`) join that field's site, so a rename of the field's
+  // model reaches the array too (`attachSharedRefs`).
+  attachSharedRefs(naming.bundles, componentNames);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);
