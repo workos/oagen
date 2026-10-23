@@ -5,7 +5,7 @@ import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
   classifyInlineSchema,
-  collectionVariantContexts,
+  nonObjectVariantContexts,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -81,11 +81,19 @@ export interface MintedInlineName {
   schema?: SchemaObject;
 }
 
-/** `mintedInlineNames`, also telling for each name whether it is context-free. */
+/**
+ * `mintedInlineNames`, also telling for each name whether it is context-free.
+ * `reserved` are the names the schema's unions must step around
+ * (`nameInlineVariantEntries`), as `schemaToTypeRef` receives them for the
+ * same schema (`reservedNames`); the sibling-reservation readers leave it
+ * unset and read the names in isolation, while `nonObjectVariantContexts`
+ * passes a variant's own set so the names it records are the ones taken.
+ */
 export function mintedInlineNameEntries(
   contextName: string,
   schema: SchemaObject,
   parentModelName: string | undefined,
+  reserved?: ReadonlySet<string>,
 ): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
   // Dispatch on the one classification `schemaToTypeRef` uses, so the names
@@ -104,31 +112,36 @@ export function mintedInlineNameEntries(
   };
   if (kind === 'allOf' && s.allOf) {
     const only = s.allOf.length === 1 ? s.allOf[0] : undefined;
-    if (only) return mintedInlineNameEntries(contextName, only, parentModelName);
+    if (only) return mintedInlineNameEntries(contextName, only, parentModelName, reserved);
     return s.allOf.some((m) => !m.$ref && (m.properties || m.type === 'object')) ? modelName() : [];
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
     const nonNull = variants.filter((v) => !isNullSchema(v));
     if (nonNull.length >= 2 && nonNull.every((v) => typeof v.const === 'string')) return enumName();
-    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name);
-    // An array or map variant mints under `<context>_item` / `<context>_value`
-    // (`collectionVariantContexts`, read here without siblings but with the
-    // object variants' names), so a sibling that would take one of those
-    // names steps around it.
+    const variantEntries = nameInlineVariantEntries(s, modelName()[0]!.name, reserved);
+    // Every other variant mints under the context `nonObjectVariantContexts`
+    // gives it (read here without siblings but with the object variants'
+    // names): `<context>_item` / `<context>_value` for an array or map, the
+    // context itself or `<context>_variant_<n>` for a nested union, a nullable
+    // object, an `allOf` or an inline enum — stepping around the names the
+    // entry reserves — so a sibling that would take one of those names steps
+    // around it.
     const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
-    const collections = [
-      ...collectionVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames),
-    ].flatMap(([variant, context]) => mintedInlineNameEntries(context, unwrapNullableSchema(variant), parentModelName));
-    return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...collections];
+    const others = [
+      ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames, reserved),
+    ].flatMap(([variant, entry]) =>
+      mintedInlineNameEntries(entry.context, unwrapNullableSchema(variant), parentModelName, entry.reserved),
+    );
+    return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...others];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
-  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName);
+  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName, reserved);
   if (kind === 'object') return modelName();
   if (kind === 'map') {
     const value = mapValueSchema(s);
-    return value ? mintedInlineNameEntries(contextName, value, parentModelName) : [];
+    return value ? mintedInlineNameEntries(contextName, value, parentModelName, reserved) : [];
   }
   return [];
 }
@@ -814,23 +827,35 @@ export function extractInlineModelsFromProperties(
           }
         }
       }
-      // An array or map variant is typed under a context of its own
-      // (`collectionVariantContexts`: `<field>_item`, `<field>_value`, …),
-      // apart from the object variants' and each other's names, so its
-      // inline items or values are extracted the same way: re-entered as a
-      // property of that name, the array and map branches above name them
-      // exactly as the reference does (`ReqShapesItem` for a `shapes`
-      // variant's items). The context already stepped around the siblings;
-      // the re-entry sees none, exactly as `schemaToTypeRef` types the variant.
-      for (const [variant, context] of collectionVariantContexts(
+      // Every other variant that mints a name is typed under the context
+      // `nonObjectVariantContexts` gives it — `<field>_item` / `<field>_value`
+      // for an array or map; the field itself or `<field>_variant_<n>` for a
+      // nested union, a nullable wrapper around an object, an `allOf`, an
+      // inline enum — apart from the object variants' and each other's names,
+      // so whatever it mints is extracted the same way: re-entered as a
+      // property of that name, the branches above materialize it exactly as
+      // the reference names it (`ReqShapesItem` for a `shapes` variant's
+      // items; `ReqShapeVariant2`, `BReqShapeVariant2` for the inline object
+      // variants of a union nested under the second variant). The context
+      // already stepped around the siblings; the re-entry sees none, exactly
+      // as `schemaToTypeRef` types the variant.
+      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
         fieldName,
         unionVariants,
         siblings,
         parentName,
         variantNames,
+        reservedNames,
       )) {
         const member = unwrapNullableField(variant);
-        extractInlineModelsFromProperties({ properties: { [context]: member } }, results, parentName, componentSchemas);
+        extractInlineModelsFromProperties(
+          { properties: { [context]: member } },
+          results,
+          parentName,
+          componentSchemas,
+          undefined,
+          reserved,
+        );
       }
     }
   }

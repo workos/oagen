@@ -934,12 +934,9 @@ function collectNestedInlineModels(
       // mint, as the field's TypeRef did, so derive that set from the same
       // sibling set `extractModel` typed the field with.
       const reserved = reservedInlineNames(fieldName, collectProperties(parentSchema, schemas), parentModelName);
-      const extracted = extractNestedSchema(
-        unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName, reserved),
-        fieldSchema,
-        schemas,
-        reserved,
-      );
+      const baseName = unionBaseName(modelRef.name, fieldName, fieldSchema, parentModelName, reserved);
+      if (baseName === null) return; // a union's non-object variant — field extractor's
+      const extracted = extractNestedSchema(baseName, fieldSchema, schemas, reserved);
       for (const m of extracted) {
         if (!modelNames.has(m.name)) {
           models.push(m);
@@ -953,10 +950,15 @@ function collectNestedInlineModels(
 
 /**
  * The base name `extractNestedSchema` should name a field's `oneOf` variants
- * from: the field's qualified inline name when naming the variants from it
- * yields `refName` (the ref the walk is resolving), else `refName` itself,
- * which is right for every non-union field and for a union whose variant 0 is
- * bare.
+ * from: `refName` itself (the ref the walk is resolving) for every non-union
+ * field, and for a union field the field's qualified inline name when naming
+ * the inline object variants from it yields `refName`. Null for a union
+ * field whose inline object variants are not named `refName`: the ref was
+ * minted for one of the union's other variants — a nullable wrapper around
+ * an object, an `allOf`, a nested union — which `schemaToTypeRef` typed under
+ * a context of its own (`nonObjectVariantContexts`) and which only the field
+ * extractor materializes; naming the union's object variants from such a ref
+ * would register variant 0's fields under the other variant's name.
  */
 function unionBaseName(
   refName: string,
@@ -964,11 +966,11 @@ function unionBaseName(
   fieldSchema: SchemaObject,
   parentModelName: string,
   reserved: ReadonlySet<string>,
-): string {
+): string | null {
   if (!fieldSchema.oneOf) return refName;
   const fromField = qualifyInlineModelName(toPascalCase(fieldName), parentModelName);
   const names = [...nameInlineVariants(fieldSchema, fromField, reserved).values()];
-  return names.includes(refName) ? fromField : refName;
+  return names.includes(refName) ? fromField : null;
 }
 
 /**
@@ -1494,70 +1496,173 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
 }
 
 /**
- * The context each array or map variant of a `oneOf`/`anyOf` is typed and
- * extracted under, keyed by the variant: `<field>_item` for an array,
- * `<field>_value` for a map, so what its items or values mint
- * (`ReqShapesItem`, `ReqShapesValue`) can never take the name an object
- * variant of the same union keeps (`ReqShape`, `ReqShapeWithX`). When a
- * sibling property already mints that name (a real `shapes_item` object), an
- * object variant's own property does (`item` under `ReqShape` is
- * `ReqShapeItem`, see `objectVariantNames`), or an earlier collection
- * variant of the same union does, the context steps on exactly as a plain
- * array's does beside such a sibling (`firstFreeElementContext`:
- * `shapes_array_item`, `shapes_array_item2`, …), so two array variants of one
- * union never share a model, and neither do an array variant's items and an
- * object variant's child. The names minted this way are what
- * `mintedInlineNameEntries` reports for the union, so a sibling steps around
- * them in turn. Any other variant keeps the field's own context and is not in
- * the map. Each variant is read with its nullable wrapper removed, whichever
- * form it takes (`unwrapNullableSchema`), as the extractor reads it. Decided
- * in variant order, from the siblings' and the variants' content only, so
- * both sides of the parser agree.
+ * The context each variant of a `oneOf`/`anyOf` that is not an inline object
+ * is typed and extracted under, keyed by the variant. An inline object
+ * variant is named by `nameInlineVariants` (`objectVariantNames`) and is not
+ * in the map; a `null` variant marks the union nullable and a `$ref` variant
+ * mints nothing, so neither is either. Every other variant is read with its
+ * nullable wrapper removed, whichever form it takes (`unwrapNullableSchema`),
+ * as the extractor reads it, and gets a context by its kind:
+ *
+ *   - an array or map variant is typed under `<field>_item` / `<field>_value`,
+ *     so what its items or values mint (`ReqShapesItem`, `ReqShapesValue`)
+ *     can never take the name an object variant of the same union keeps
+ *     (`ReqShape`, `ReqShapeWithX`);
+ *   - a variant that would mint a model or enum name under the field's own
+ *     context — a nested `oneOf`/`anyOf` with inline object variants (its
+ *     variants are named from the field's name as the outer ones are, so its
+ *     first one would take the outer variant 0's name), a nullable wrapper
+ *     around an inline object, an `allOf`, an inline enum or a union of
+ *     string consts — keeps the field's context when nothing it mints there is
+ *     claimed (a nested union beside a primitive still names its variants
+ *     `ReqShape`, `BReqShape`; an inline enum beside a primitive keeps
+ *     `ReqShape`), and is otherwise typed under `<field>_variant_<n>`, n its
+ *     1-based position among the non-null variants, as a named union's
+ *     non-object variants are (`memberContext`): the nested union's variants
+ *     become `ReqShapeVariant2`, `BReqShapeVariant2`, an enum beside an object
+ *     variant `ReqShapeVariant2`. Only context-dependent names take part in
+ *     the claim check: a nested title-mapped union (`nameInlineVariants`:
+ *     every variant titled and pinning the same const) mints its titles,
+ *     `A` and `B`, under every context alike, so it keeps the field's
+ *     context — it is in the map, so the extractor builds `A` and `B` — and
+ *     steps only for a variant of its own that fell back to a
+ *     context-qualified name (`AReqShape` when `A` is already taken);
+ *   - a variant that mints nothing under the field's context (a primitive, an
+ *     `allOf` of `$ref`s alone) keeps the field's context and is not in the map.
+ *
+ * A name is claimed when a sibling property mints it (a real `shapes_item`
+ * object), the caller reserved it (`reservedNames`: the set an enclosing
+ * field handed down to its array items or map values, or the names a
+ * deferred body's registry already gives another shape — the same set the
+ * object variants step around through `reservedNamesFor`), an inline object
+ * variant of the union takes it (`ReqShape` — the reason a nested union's
+ * variants step), an object variant's own property mints it (`item` under
+ * `ReqShape` is `ReqShapeItem`), or an earlier variant of this map minted it.
+ * When the context chosen by kind still mints a claimed name, it steps on
+ * exactly as a plain array's items do beside such a sibling
+ * (`firstFreeElementContext`: `shapes_array_item`, `shapes_array_item2`, …
+ * for an array; `shapes_variant_2_value`, `shapes_variant_2_member_value`, …
+ * for the rest), so no two variants of one union share a model, and neither
+ * do a variant's items and an object variant's child. The names minted this
+ * way are what `mintedInlineNameEntries` reports for the union, so a sibling
+ * steps around them in turn. Decided in variant order, from the siblings' and
+ * the variants' content only, so both sides of the parser agree:
+ * `schemaToTypeRef` types each variant under its context, the extractors
+ * re-enter with the variant as a property of that name, and
+ * `mintedInlineNameEntries` reads the names under it.
+ *
+ * Each entry also carries the names the variant must step around when it is
+ * typed and extracted under its context (`reserved`): everything claimed at
+ * that point — the sibling-minted and caller-reserved names, the object
+ * variants and their children, every name an earlier variant minted — plus
+ * the context-free title an earlier variant kept for a different shape. Both
+ * sides hand that set down as `reservedNames`, the set the enclosing field's
+ * own variants step around through `reservedNamesFor`, so a nested
+ * title-mapped variant whose title is already a sibling's model (`HolderA`
+ * beside the `a` object of `Holder`), an earlier variant's model
+ * (`HolderShapeVariant2`) or an earlier nested variant's title of another
+ * shape falls back to its context-qualified name (`HolderAHolderShape`,
+ * `AHolderShape`) exactly as a field-level titled variant does beside the
+ * same sibling (`nameInlineVariantEntries`); an earlier nested variant's
+ * title of the identical shape is shared, as between sibling fields
+ * (`reservedInlineNames`). Without the set, the nested variant would keep
+ * the title and the extractor would skip it as already built, so the union
+ * would expose the sibling's fields. The names a variant mints are read with
+ * its own set (`mintedInlineNameEntries`), so the claims a later variant
+ * sees are the names actually taken.
  *
  * `objectVariantNames` is the name each inline object variant's model takes
- * (`nameInlineVariants`), as the caller decided it; the names those models'
- * own properties mint are claimed before any context is chosen. One level is
- * enough: every name a child's children mint starts with the child's.
+ * (`nameInlineVariants`), as the caller decided it; those names, and the
+ * names the models' own properties mint, are claimed before any context is
+ * chosen. One level is enough: every name a child's children mint starts
+ * with the child's.
  */
-export function collectionVariantContexts(
+export function nonObjectVariantContexts(
   contextName: string | undefined,
   variants: readonly SchemaObject[],
   siblings: ReadonlyMap<string, SchemaObject> | undefined,
   parentModelName: string | undefined,
   objectVariantNames: ReadonlyMap<SchemaObject, string>,
-): Map<SchemaObject, string> {
-  const contexts = new Map<SchemaObject, string>();
+  reservedNames?: ReadonlySet<string>,
+): Map<SchemaObject, VariantContext> {
+  const contexts = new Map<SchemaObject, VariantContext>();
   if (contextName === undefined) return contexts;
-  const claimed = new Set<string>();
+  const claimed = new Set<string>(reservedNames);
   for (const [siblingName, siblingSchema] of siblings ?? []) {
     if (siblingName === contextName) continue;
     for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
   }
   for (const [variant, variantName] of objectVariantNames) {
+    claimed.add(variantName);
     for (const [property, propertySchema] of Object.entries(unwrapNullableSchema(variant).properties ?? {})) {
       if (!propertySchema) continue;
       for (const minted of mintedInlineNames(property, propertySchema, variantName)) claimed.add(minted);
     }
   }
+  // The context-free title each earlier variant kept, with the shape it
+  // gave it: reserved for a later variant unless that variant gives the same
+  // title the identical shape, which then shares the model.
+  const keptTitles = new Map<string, string>();
+  let position = 0;
   for (const variant of variants) {
+    if (isNullVariantSchema(variant)) continue;
+    position++;
+    if (objectVariantNames.has(variant)) continue;
     const member = unwrapNullableSchema(variant);
     const kind = classifyInlineSchema(member);
-    if (kind !== 'array' && kind !== 'map') continue;
+    if (kind === 'ref') continue;
+    const ownTitles = new Map<string, string>();
+    for (const entry of mintedInlineNameEntries(contextName, member, parentModelName)) {
+      if (entry.contextFree && entry.schema) ownTitles.set(entry.name, schemaShapeKey(entry.schema));
+    }
+    const reserved = new Set(claimed);
+    for (const [title, shape] of keptTitles) if (ownTitles.get(title) !== shape) reserved.add(title);
+    const minted = (candidate: string): MintedInlineName[] =>
+      mintedInlineNameEntries(candidate, member, parentModelName, reserved);
     const dependentNames = (candidate: string): string[] =>
-      mintedInlineNameEntries(candidate, member, parentModelName)
+      minted(candidate)
         .filter((entry) => !entry.contextFree)
         .map((entry) => entry.name);
-    const { context } = firstFreeElementContext(
-      contextName,
-      kind === 'array' ? 'item' : 'value',
-      claimed,
-      dependentNames,
-      [],
-    );
-    contexts.set(variant, context);
-    for (const name of dependentNames(context)) claimed.add(name);
+    const unclaimed = (names: readonly string[]): boolean => names.every((name) => !reserved.has(name));
+    let context: string;
+    if (kind === 'array' || kind === 'map') {
+      context = firstFreeElementContext(
+        contextName,
+        kind === 'array' ? 'item' : 'value',
+        reserved,
+        dependentNames,
+        [],
+      ).context;
+    } else {
+      // A variant that mints nothing (a primitive, an `allOf` of `$ref`s
+      // alone) needs no entry. One that mints only context-free names — a
+      // nested title-mapped union, whose variants are `A` and `B` under
+      // every context — needs one, so the extractor builds those models, but
+      // never a step: no context could move such a name; a taken title is
+      // stepped off through `reserved` instead.
+      if (minted(contextName).length === 0) continue;
+      const own = dependentNames(contextName);
+      const stepped = `${contextName}_variant_${position}`;
+      const under = dependentNames(stepped);
+      context = unclaimed(own)
+        ? contextName
+        : unclaimed(under)
+          ? stepped
+          : firstFreeElementContext(stepped, 'value', reserved, dependentNames, under).context;
+    }
+    contexts.set(variant, { context, reserved });
+    for (const entry of minted(context)) {
+      if (entry.contextFree && entry.schema) keptTitles.set(entry.name, schemaShapeKey(entry.schema));
+      else claimed.add(entry.name);
+    }
   }
   return contexts;
+}
+
+/** How a non-object variant is typed and extracted: under `context`, stepping around `reserved` (see `nonObjectVariantContexts`). */
+export interface VariantContext {
+  context: string;
+  reserved: ReadonlySet<string>;
 }
 
 /** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
@@ -2969,14 +3074,20 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
       }
     }
 
-    if (kind === 'union' && fieldSchema.oneOf) {
-      const inlineObjectVariants = fieldSchema.oneOf.filter((v) => isInlineObjectSchema(v));
+    const unionVariants = kind === 'union' ? (fieldSchema.oneOf ?? fieldSchema.anyOf) : undefined;
+    if (unionVariants) {
+      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
+      // Decided once, for the object variants' models and for the other
+      // variants' contexts, which step around those models and their children.
+      const variantNames: ReadonlyMap<SchemaObject, string> =
+        inlineObjectVariants.length > 0
+          ? nameInlineVariants(
+              fieldSchema,
+              qualifyNestedInlineName(name, fieldName),
+              reservedInlineNames(fieldName, siblings, name),
+            )
+          : new Map();
       if (inlineObjectVariants.length > 0) {
-        const variantNames = nameInlineVariants(
-          fieldSchema,
-          qualifyNestedInlineName(name, fieldName),
-          reservedInlineNames(fieldName, siblings, name),
-        );
         // A nullable wrapper's one branch is built with the wrapper's
         // `deprecated` and limits, as everywhere else; a multi-variant union's
         // variants are built as written (`collapsedNullableBranch`).
@@ -2993,6 +3104,28 @@ function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Re
             nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
           }
         }
+      }
+      // Every other variant that mints a name — an array or map, a nested
+      // union, a nullable wrapper around an object, an `allOf`, an inline
+      // enum — is typed under the context `nonObjectVariantContexts` gives
+      // it, as `buildFieldFromSchema` typed the field above; re-enter the
+      // field extractor with the variant as a property of that name, so it
+      // is materialized under exactly the name the reference uses.
+      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
+        fieldName,
+        unionVariants,
+        siblings,
+        name,
+        variantNames,
+      )) {
+        extractInlineModelsFromProperties(
+          { properties: { [context]: unwrapNullableField(variant) } },
+          nestedModels,
+          name,
+          schemas,
+          undefined,
+          reserved,
+        );
       }
     }
   }
@@ -3309,16 +3442,19 @@ export function schemaToTypeRef(
     // name in every case, and a multi-type variant's other members are named
     // from that model, not from the mapping, so their items resolve.
     const variants: TypeRef[] = [];
-    // An array or map variant is typed under a context of its own
-    // (`collectionVariantContexts`), so the models its items or values mint
-    // never share a name with an object variant of the same union, which
-    // keeps the field's own name, nor with another collection variant's.
-    const collectionContexts = collectionVariantContexts(
+    // Every other variant that mints a name — an array or map, a nested
+    // union, a nullable wrapper around an object, an `allOf`, an inline enum
+    // — is typed under the context `nonObjectVariantContexts` gives it, so
+    // the models and enums it mints never share a name with an object
+    // variant of the same union, which keeps the field's own name, nor with
+    // another such variant's. The extractors re-enter with the same contexts.
+    const variantContexts = nonObjectVariantContexts(
       contextName,
       rawVariants,
       siblingProperties,
       parentModelName,
       inlineVariantNames,
+      reservedNames,
     );
     for (const v of rawVariants) {
       if (v === nullVariant) continue;
@@ -3327,7 +3463,12 @@ export function schemaToTypeRef(
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
         variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
       } else {
-        variants.push(schemaToTypeRef(v, collectionContexts.get(v) ?? contextName, parentModelName));
+        const entry = variantContexts.get(v);
+        variants.push(
+          entry
+            ? schemaToTypeRef(v, entry.context, parentModelName, undefined, entry.reserved)
+            : schemaToTypeRef(v, contextName, parentModelName),
+        );
       }
     }
     const hasNull = !!nullVariant;
@@ -3503,6 +3644,7 @@ import {
   extractInlineModelsFromProperties,
   firstFreeElementContext,
   mapValueSchema,
+  type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
   qualifyInlineModelName,

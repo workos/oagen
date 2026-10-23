@@ -43,6 +43,8 @@ import {
   constraintsEntry,
   deprecatedEntry,
   collapsedNullableBranch,
+  nonObjectVariantContexts,
+  unwrapNullableField,
 } from './schemas.js';
 import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
@@ -2313,45 +2315,82 @@ function extractRequestBody(
     // nullable or not, is not collapsed: every variant is built as written.
     const branch = collapsedNullableBranch(schema);
 
+    // The inline object variants are named and built first, in order, so the
+    // other variants' contexts can step around their names and their
+    // children's (`nonObjectVariantContexts`).
+    const objectVariantNames = new Map<SchemaObject, string>();
+    for (const variant of inlineObjectVariants) {
+      const named = deriveOneOfVariantName(
+        variant,
+        contextName,
+        inlineModels,
+        inlineObjectVariants,
+        contentNamed,
+        Boolean(op?.operationId),
+      );
+      const variantName = named.name;
+      if (named.fromContent) contentNamed.push(variantName);
+      objectVariantNames.set(variant, variantName);
+      const source = branch ?? variant;
+      const requiredSet = new Set(source.required ?? []);
+      const siblings = collectProperties(source);
+      const fields: Field[] = [];
+      for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
+        if (!fieldSchema) continue;
+        fields.push(buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings));
+      }
+      inlineModels.push({
+        name: variantName,
+        description: source.description,
+        ...externalDocsEntry(source.externalDocs),
+        fields,
+        ...deprecatedEntry(source),
+        ...constraintsEntry(source),
+      });
+      extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
+    }
+    // Every other variant that mints a name — an array or map, a nested
+    // union, a nullable wrapper around an object, an `allOf`, an inline enum
+    // — is typed under the context `nonObjectVariantContexts` gives it, apart
+    // from the object variants' names, and materialized by the field
+    // extractor under that context, so the body never references a model the
+    // parser did not create: the variants of a union nested under the body's
+    // second variant are `CreateThingRequestVariant2`,
+    // `BCreateThingRequestVariant2`, never `CreateThingRequest` again.
+    const variantContexts = nonObjectVariantContexts(
+      contextName,
+      schema.oneOf,
+      undefined,
+      undefined,
+      objectVariantNames,
+    );
+    for (const [variant, { context, reserved }] of variantContexts) {
+      extractInlineModelsFromProperties(
+        { properties: { [context]: unwrapNullableField(variant) } },
+        inlineModels,
+        undefined,
+        componentSchemas,
+        undefined,
+        reserved,
+      );
+    }
+
     for (const variant of schema.oneOf) {
       if (variant.$ref) {
         const ref = schemaToTypeRef(variant, contextName);
         variants.push(ref);
       } else if (variant.type === 'null') {
         // skip null variant in union, handle separately
-      } else if (variant.properties && (variant.type === 'object' || !variant.type)) {
-        const named = deriveOneOfVariantName(
-          variant,
-          contextName,
-          inlineModels,
-          inlineObjectVariants,
-          contentNamed,
-          Boolean(op?.operationId),
-        );
-        const variantName = named.name;
-        if (named.fromContent) contentNamed.push(variantName);
-        const source = branch ?? variant;
-        const requiredSet = new Set(source.required ?? []);
-        const siblings = collectProperties(source);
-        const fields: Field[] = [];
-        for (const [fieldName, fieldSchema] of Object.entries(source.properties ?? {})) {
-          if (!fieldSchema) continue;
-          fields.push(
-            buildFieldFromSchema(fieldName, fieldSchema, variantName, requiredSet, componentSchemas, siblings),
-          );
-        }
-        inlineModels.push({
-          name: variantName,
-          description: source.description,
-          ...externalDocsEntry(source.externalDocs),
-          fields,
-          ...deprecatedEntry(source),
-          ...constraintsEntry(source),
-        });
-        extractInlineModelsFromProperties(source, inlineModels, variantName, componentSchemas);
-        variants.push({ kind: 'model', name: variantName });
       } else {
-        variants.push(schemaToTypeRef(variant, contextName));
+        const variantName = objectVariantNames.get(variant);
+        const entry = variantContexts.get(variant);
+        variants.push(
+          variantName !== undefined
+            ? { kind: 'model', name: variantName }
+            : entry
+              ? schemaToTypeRef(variant, entry.context, undefined, undefined, entry.reserved)
+              : schemaToTypeRef(variant, contextName),
+        );
       }
     }
 
@@ -2371,6 +2410,20 @@ function extractRequestBody(
     return { body, encoding };
   }
 
+  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
+  // array, a map, a nullable object, …). Such a TypeRef can still reach
+  // inline models — the inline object variants of an `anyOf`, an array's
+  // inline items or the variants of an `items.oneOf`, a map's inline values,
+  // and whatever is nested under any of them, a union under a variant
+  // included — so materialize them the way an inline response does: as a
+  // property of this name under no parent, which names every nested model
+  // exactly as the TypeRef references it.
+  extractInlineModelsFromProperties(
+    { properties: { [contextName]: schema } },
+    inlineModels,
+    undefined,
+    componentSchemas,
+  );
   return { body: schemaToTypeRef(schema, contextName), encoding };
 }
 
