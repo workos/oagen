@@ -14,7 +14,6 @@ import {
   classifyInlineSchema,
   constraintsEntry,
   deprecatedEntry,
-  extractConstraints,
   foldSiblingProperties,
   isArraySchema,
   isInlineObjectSchema,
@@ -24,7 +23,12 @@ import {
   warnOnUncarriedProperties,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
-import { collectProperties, extractInlineModelsFromProperties } from './inline-models.js';
+import {
+  collectProperties,
+  extractInlineModelsFromProperties,
+  mergeAllOfMembers,
+  mergedObjectSchema,
+} from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
 import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
 
@@ -484,8 +488,10 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
  * are not silently dropped. A property declared by more than one branch keeps
  * both declarations' shape when both are inline objects — `pagination.next`
  * from one branch and `pagination.total` from another both belong to the
- * response — and otherwise takes the later declaration, as `allOf` merging
- * does elsewhere in the parser.
+ * response — and otherwise takes the later declaration. (Envelope detection
+ * reads the branches' own `properties`; a `oneOf`/`anyOf` branch declares
+ * none, so it contributes nothing here. A body that is not an envelope is
+ * merged by `mergeAllOfMembers`, which reads such a branch's variants.)
  */
 function collectEnvelopeProperties(
   schema: SchemaObject,
@@ -759,75 +765,43 @@ function extractDirectResource(
     };
   }
 
-  // allOf — merge into a single model. $ref branches are resolved against
+  // allOf — merge into a single model through `mergeAllOfMembers`, the one
+  // reading every inline `allOf` gets: $ref branches are resolved against
   // component schemas so the referenced model's fields are merged rather
-  // than silently dropped.
+  // than silently dropped, and the inline object variants of a
+  // `oneOf`/`anyOf` member contribute their fields as optional ones
+  // (workos/oagen#283), as the same schema's component model has them.
+  // Earlier members win on a shared name there, and the fold places the
+  // body's own properties first, so an own `kind` enum beside a member's
+  // plain `kind` stays the enum here as it does in a field or an array's
+  // items.
   if (schema.allOf) {
-    const mergedProperties: Record<string, SchemaObject | undefined> = {};
-    const mergedRequired: string[] = [];
-    const unresolvedRefs: string[] = [];
-    const seenRefs = new Set<string>();
-    let mergedRefFields = false;
-
-    const mergeSubSchemas = (subs: SchemaObject[]) => {
-      for (const sub of subs) {
-        let resolved: SchemaObject = sub;
-        if (sub.$ref) {
-          if (seenRefs.has(sub.$ref)) continue;
-          seenRefs.add(sub.$ref);
-          const segments = sub.$ref.split('/');
-          const refName = segments[segments.length - 1];
-          const refSchema = refName ? componentSchemas?.[refName] : undefined;
-          if (!refSchema) {
-            unresolvedRefs.push(sub.$ref);
-            continue;
-          }
-          resolved = refSchema;
-          mergedRefFields = true;
-        }
-        if (resolved.allOf) mergeSubSchemas(resolved.allOf);
-        // Earlier members win on a shared name, as `mergeAugmentation` merges
-        // a field's `allOf` and the fold places the body's own properties
-        // first, so an own `kind` enum beside a member's plain `kind` stays
-        // the enum here as it does in a field or an array's items.
-        for (const [property, propertySchema] of Object.entries(resolved.properties ?? {})) {
-          if (!Object.hasOwn(mergedProperties, property)) mergedProperties[property] = propertySchema;
-        }
-        if (resolved.required) mergedRequired.push(...resolved.required);
-      }
-    };
-    mergeSubSchemas(schema.allOf);
+    const merged = mergeAllOfMembers(schema, componentSchemas);
+    const mergedRefFields = merged.resolvedRefs.length > 0;
 
     // An unresolvable $ref branch (no component schema map) would drop the
     // referenced model's fields entirely — prefer the referenced model as
     // the response type over a merge that silently guts it.
-    if (unresolvedRefs.length === 1 && !mergedRefFields) {
+    if (merged.unresolvedRefs.length === 1 && !mergedRefFields) {
       return {
-        response: schemaToTypeRef({ $ref: unresolvedRefs[0] }, contextName),
+        response: schemaToTypeRef({ $ref: merged.unresolvedRefs[0] }, contextName),
         inlineModels,
         isPaginated: false,
       };
     }
 
-    if (Object.keys(mergedProperties).length > 0) {
-      // Carry the wrapper's limits, conjoined with its inline members', so the
-      // rebuilt schema still declares what an instance must satisfy, and the
-      // wrapper's own link, as a component `allOf` model carries it; a
-      // member's stays on that member (a `$ref` member's on its component).
-      const merged: SchemaObject = {
-        type: 'object',
-        properties: mergedProperties,
-        required: mergedRequired,
-        // The wrapper's own flag, as for a component `allOf` model.
-        ...deprecatedEntry(schema),
-        ...extractConstraints(schema),
-        ...externalDocsEntry(schema.externalDocs),
-      };
+    if (merged.properties.length > 0) {
+      // The rebuilt schema carries the wrapper's limits, conjoined with its
+      // inline members', so it still declares what an instance must satisfy,
+      // the wrapper's own link and its own `deprecated` flag, as a component
+      // `allOf` model carries them; a member's stay on that member (a `$ref`
+      // member's on its component).
+      const rebuilt = mergedObjectSchema(merged);
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
       // would collide with the component model, so keep the context name.
-      const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(merged, contextName);
-      inlineModels.push(...extractInlineModel(modelName, merged, componentSchemas));
+      const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(rebuilt, contextName);
+      inlineModels.push(...extractInlineModel(modelName, rebuilt, componentSchemas));
       return {
         response: { kind: 'model', name: modelName },
         inlineModels,

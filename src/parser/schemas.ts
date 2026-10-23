@@ -1,6 +1,6 @@
 import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
-import { toPascalCase, cleanSchemaName, singularize, stripListItemMarkers, splitWords } from '../utils/naming.js';
+import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords } from '../utils/naming.js';
 import { externalDocsEntry, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { enumValuesOf, inlineEnumExternalDocsOf, inlineEnumRef, toEnumValue, type EnumMember } from './enum-members.js';
 
@@ -1550,7 +1550,7 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * a reference whatever else it carries; a type list naming another type
  * beside `array` is a union; and a schema that also composes — a `oneOf` /
  * `anyOf` with a typing variant, or an `allOf` with a `$ref` member, a
- * member with `properties` or a lone typing member — is that composition,
+ * member declaring properties inline or a lone typing member — is that composition,
  * `type: 'array'` or not, since it is read before `items` and the item
  * extractor must not claim a variant's name first. An `allOf` or `oneOf` of
  * bare limits (`[{ minItems: 1 }, { maxItems: 10 }]`) types nothing there and
@@ -1794,15 +1794,18 @@ const TYPING_KEYWORDS: readonly string[] = [
 /**
  * Whether an `allOf` is what types the schema, i.e. the cases its branch in
  * `schemaToTypeRef` acts on: a `$ref` member (a reference, or an augmentation
- * model), a member declaring `properties` (a merged model), or a lone member
- * that types on its own (unwrapped). An `allOf` whose members only conjoin
- * limits or documentation — `allOf: [{ minProperties: 1 }, { maxProperties:
- * 3 }]` beside the schema's own `properties` — does not: the schema is then
- * typed from its own keywords, and `extractConstraints` still conjoins the
+ * model), a member declaring properties inline (a merged model —
+ * `declaresInlineProperties`: its own `properties`, or those of a nested
+ * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
+ * reads into the model), or a lone member that types on its own
+ * (unwrapped). An `allOf` whose members only conjoin limits or
+ * documentation — `allOf: [{ minProperties: 1 }, { maxProperties: 3 }]`
+ * beside the schema's own `properties` — does not: the schema is then typed
+ * from its own keywords, and `extractConstraints` still conjoins the
  * members' limits onto the field and the model it builds.
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
-  if (members.some((member) => member.$ref !== undefined || member.properties !== undefined)) return true;
+  if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
   const only = members.length === 1 ? members[0] : undefined;
   return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
 }
@@ -3231,161 +3234,25 @@ function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: stri
   return `${fallbackName}${pascal}`;
 }
 
+/**
+ * The model for a discriminated variant's rebuilt object schema, and every
+ * inline model its fields reference: the variant's own model
+ * (`buildInlineModel`, its properties typed under `name`) followed by
+ * whatever its properties mint, extracted by the field extractor
+ * (`extractInlineModelsFromProperties`) under `name` as parent — so a
+ * nested object, typed or not, nullable or not; array items and map values
+ * of any shape (an inline object, an `allOf` merge, a union); every
+ * `oneOf`/`anyOf` variant and its members; an `allOf` field read as
+ * `readInlineAllOf` reads it; an inline enum — is materialized under exactly
+ * the name `buildFieldFromSchema` typed it with, since the extractor and the
+ * type builder name by the same rules. A variant's fields are built here
+ * the one way every inline object's are, so typing and extraction cannot
+ * disagree for any shape under a discriminated variant.
+ */
 function extractInlineModelDeep(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model[] {
-  const requiredSet = new Set(schema.required ?? []);
-  const fields: Field[] = [];
-  const properties = schema.properties ?? {};
   const nestedModels: Model[] = [];
-
-  const siblings = collectProperties(schema);
-  for (const [fieldName, fieldSchema] of Object.entries(properties)) {
-    if (!fieldSchema) continue;
-    fields.push(buildFieldFromSchema(fieldName, fieldSchema, name, requiredSet, schemas, siblings));
-
-    // One keyword types the field (`classifyInlineSchema`, the order
-    // `schemaToTypeRef` follows), so exactly one branch below runs and the
-    // models it builds are the ones the field's type references — never an
-    // `allOf` model and a `oneOf` variant under the same name. `properties`
-    // beside the composition that types the field are folded into it first,
-    // as `schemaToTypeRef` typed the field above (`foldSiblingProperties`).
-    const composed = foldSiblingProperties(fieldSchema);
-    const kind = classifyInlineSchema(composed);
-
-    if (kind === 'object' && fieldSchema.type === 'object' && fieldSchema.properties) {
-      nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, fieldName), fieldSchema, schemas));
-    }
-
-    // Array items and map values are named like the field — or `<Field>Item` /
-    // `<Field>Value` when a sibling takes the singular name — exactly as
-    // `schemaToTypeRef` references them (`elementContextName`). An array is
-    // whatever `isArraySchema` says — `classifyInlineSchema`'s answer with the
-    // nullable type list unwrapped — so `items` with no `type` counts too.
-    if (isArraySchema(fieldSchema) && fieldSchema.items?.properties) {
-      const itemContext = elementContextName(fieldName, 'item', siblings, name, fieldSchema.items);
-      nestedModels.push(
-        ...extractInlineModelDeep(qualifyNestedInlineName(name, itemContext), fieldSchema.items, schemas),
-      );
-    }
-
-    if (kind === 'map') {
-      const valueSchema = mapValueSchema(fieldSchema);
-      if (valueSchema && !valueSchema.$ref && valueSchema.properties) {
-        const valueContext = elementContextName(fieldName, 'value', siblings, name, valueSchema);
-        nestedModels.push(...extractInlineModelDeep(qualifyNestedInlineName(name, valueContext), valueSchema, schemas));
-      }
-    }
-
-    if (kind === 'allOf' && composed.allOf) {
-      const mergedProperties: Record<string, SchemaObject | undefined> = {};
-      const mergedRequired: string[] = [];
-      for (const sub of composed.allOf) {
-        // Earlier members win on a shared name, as `mergeAugmentation` merges
-        // and the fold places the schema's own properties first.
-        for (const [property, propertySchema] of Object.entries(sub.properties ?? {})) {
-          if (!Object.hasOwn(mergedProperties, property)) mergedProperties[property] = propertySchema;
-        }
-        if (sub.required) mergedRequired.push(...sub.required);
-      }
-      if (Object.keys(mergedProperties).length > 0) {
-        nestedModels.push(
-          ...extractInlineModelDeep(
-            qualifyNestedInlineName(name, fieldName),
-            {
-              type: 'object',
-              properties: mergedProperties,
-              required: mergedRequired,
-              ...deprecatedEntry(fieldSchema),
-              ...extractConstraints(fieldSchema),
-              // The wrapper's own link, as for every `allOf` merge; a member's
-              // stays on that member.
-              ...externalDocsEntry(fieldSchema.externalDocs),
-            },
-            schemas,
-          ),
-        );
-      }
-    }
-
-    const unionVariants = kind === 'union' ? (composed.oneOf ?? composed.anyOf) : undefined;
-    if (unionVariants) {
-      const inlineObjectVariants = unionVariants.filter((v) => isInlineObjectSchema(v));
-      // Decided once, for the object variants' models and for the other
-      // variants' contexts, which step around those models and their children.
-      const variantNames: ReadonlyMap<SchemaObject, string> =
-        inlineObjectVariants.length > 0
-          ? nameInlineVariants(
-              composed,
-              qualifyNestedInlineName(name, fieldName),
-              reservedInlineNames(fieldName, siblings, name),
-            )
-          : new Map();
-      if (inlineObjectVariants.length > 0) {
-        // A nullable wrapper's one branch is built with the wrapper's
-        // `deprecated` and limits, as everywhere else; a multi-variant union's
-        // variants are built as written (`collapsedNullableBranch`).
-        const branch = collapsedNullableBranch(composed);
-        for (const variant of inlineObjectVariants) {
-          const variantName = variantNames.get(variant);
-          if (variantName === undefined) continue;
-          nestedModels.push(...extractInlineModelDeep(variantName, branch ?? variant, schemas));
-          // A multi-type variant's array member types its items under the
-          // variant's name (`<Variant>Item`); extract them there too. The
-          // synthetic wrapper model is dropped, only its nested models kept.
-          const memberSchemas = variantMemberSchemas(variant, variantName);
-          if (Object.keys(memberSchemas).length > 0) {
-            nestedModels.push(...extractInlineModelDeep(variantName, { properties: memberSchemas }, schemas).slice(1));
-          }
-        }
-      }
-      // Every other variant that mints a name — an array or map, a nested
-      // union, a nullable wrapper around an object, an `allOf`, an inline
-      // enum — is typed under the context `nonObjectVariantContexts` gives
-      // it, as `buildFieldFromSchema` typed the field above; re-enter the
-      // field extractor with the variant as a property of that name, so it
-      // is materialized under exactly the name the reference uses.
-      for (const [variant, { context, reserved }] of nonObjectVariantContexts(
-        fieldName,
-        unionVariants,
-        siblings,
-        name,
-        variantNames,
-      )) {
-        extractInlineModelsFromProperties(
-          { properties: { [context]: unwrapNullableField(variant) } },
-          nestedModels,
-          name,
-          schemas,
-          undefined,
-          reserved,
-        );
-      }
-    }
-  }
-
-  return [
-    {
-      name,
-      description: schema.description,
-      ...externalDocsEntry(schema.externalDocs),
-      fields,
-      ...deprecatedEntry(schema),
-      ...constraintsEntry(schema),
-    },
-    ...nestedModels,
-  ];
-}
-
-function qualifyNestedInlineName(parentName: string, fieldName: string): string {
-  const pascalField = toPascalCase(fieldName);
-  if (pascalField.startsWith(parentName)) return pascalField;
-
-  const cleanParent = stripListItemMarkers(parentName);
-  const qualified = `${cleanParent}${pascalField}`;
-  const match = qualified.match(/^(.+?)([A-Z][a-z]+s?)$/);
-  if (match && match[2]) {
-    return match[1] + singularize(match[2]);
-  }
-  return qualified;
+  extractInlineModelsFromProperties(schema, nestedModels, name, schemas);
+  return [buildInlineModel(name, schema, schemas), ...nestedModels];
 }
 
 /**
@@ -3507,27 +3374,28 @@ export function schemaToTypeRef(
   schema = foldSiblingProperties(schema);
   const inlineKind = classifyInlineSchema(schema);
 
-  // Handle allOf — merge properties from all sub-schemas.
-  // This handles patterns like: allOf: [{ type: object, properties: {...} }, { oneOf: [...] }]
-  // which are valid OAS 3.1 but weren't handled for field-level schemas.
+  // Handle allOf, read the one way every site reads it (`readInlineAllOf`):
+  // a merged model — a `$ref` member augmented by an inline object member,
+  // or inline members one of which declares properties, a `oneOf`/`anyOf`
+  // member's inline object variants included — which `materializeMergedAllOf`
+  // builds under this very name; a lone member unwrapped; or a plain
+  // reference to the first `$ref` member.
   if (inlineKind === 'allOf' && schema.allOf) {
-    // If allOf contains a $ref, prefer the ref (it's a named type)
-    const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
-    if (refItem) {
-      // If allOf has $ref AND siblings with properties, return a merged model ref
-      // to avoid losing the augmentation properties
-      const hasAugmentation = schema.allOf.some((s: SchemaObject) => !s.$ref && (s.properties || s.type === 'object'));
-      if (hasAugmentation) {
-        const baseName = toPascalCase(contextName ?? 'UnknownModel');
-        return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
-      }
-      return schemaToTypeRef(refItem, contextName, parentModelName);
+    const reading = readInlineAllOf(schema.allOf);
+    if (reading === 'merged') {
+      const baseName = toPascalCase(contextName ?? 'UnknownModel');
+      return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
     }
-    // If allOf has a single item, unwrap it. The wrapper is the schema the
-    // document wrote, so its link rides onto the member — an inline enum
-    // lifted from it carries the wrapper's link, as a model built from it
-    // does (`withWrapperExternalDocs`).
-    if (schema.allOf.length === 1) {
+    if (reading === 'reference') {
+      const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
+      // `'reference'` is only read with a `$ref` member among the members an
+      // `allOfTypesSchema` admits, so one is found here.
+      if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
+    } else {
+      // A single member, unwrapped. The wrapper is the schema the document
+      // wrote, so its link rides onto the member — an inline enum lifted from
+      // it carries the wrapper's link, as a model built from it does
+      // (`withWrapperExternalDocs`).
       return schemaToTypeRef(
         withWrapperExternalDocs(schema.allOf[0], schema),
         contextName,
@@ -3536,17 +3404,8 @@ export function schemaToTypeRef(
         reservedNames,
       );
     }
-    // If allOf items all have properties, treat as a merged model
-    const hasProperties = schema.allOf.some((s: SchemaObject) => s.properties);
-    if (hasProperties) {
-      const baseName = toPascalCase(contextName ?? 'UnknownModel');
-      return {
-        kind: 'model',
-        name: qualifyInlineModelName(baseName, parentModelName),
-      };
-    }
-    // Unreachable: `allOfTypesSchema` admits only the three cases above. An
-    // `allOf` of bare limits is classified from the schema's own keywords.
+    // Unreachable: `allOfTypesSchema` admits only the three readings above.
+    // An `allOf` of bare limits is classified from the schema's own keywords.
   }
 
   // Handle oneOf / anyOf → Union or Nullable
@@ -3887,12 +3746,14 @@ export function schemaToTypeRef(
 import {
   buildInlineModel,
   collectProperties,
+  declaresInlineProperties,
   elementContextName,
   extractInlineModelsFromProperties,
   firstFreeElementContext,
   isContestedTitle,
   mapValueSchema,
   markContestedTitles,
+  readInlineAllOf,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
