@@ -440,3 +440,70 @@ describe('a name an enum owns is not a parameter model’s', () => {
     expectSound(spec, ['PetsMode', 'PetsOwnerKind']);
   });
 });
+
+describe('a parameter declared with `content` instead of `schema` (workos/oagen#297)', () => {
+  /** The parameter's object under `content.application/json`, the way #297 types it. */
+  const viaContent = (name: string, location: string, schema: SchemaObject) => ({
+    name,
+    in: location,
+    ...(location === 'path' ? { required: true } : {}),
+    ...json(schema),
+  });
+
+  it('mints its model in every location, on an operation as on a webhook, and steps around an enum name too', async () => {
+    const trace = obj({ span: str });
+    const session = obj({ token: str });
+    const { spec, warnings } = await parse(
+      'content',
+      specDoc(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              tags: ['pets'],
+              parameters: [
+                viaContent('filter', 'query', obj({ tag: str, status: en(['draft', 'published']) })),
+                viaContent('X-Trace', 'header', trace),
+                viaContent('session', 'cookie', session),
+              ],
+              responses: ok,
+            },
+          },
+          '/pets/{selector}': {
+            get: {
+              operationId: 'getPet',
+              tags: ['pets'],
+              parameters: [viaContent('selector', 'path', obj({ id: str, rev: int }))],
+              responses: ok,
+            },
+          },
+        },
+        // A component enum owns the `filter` parameter's bare name. (`Pets`,
+        // not `Notes`: `cleanSchemaName` keeps `PetsFilter` as written.)
+        { PetsFilter: en(['a', 'b']) },
+        noteAdded([viaContent('filter', 'query', obj({ tag: str })), viaContent('X-Trace', 'header', trace)]),
+      ),
+    );
+    expect(warnings).toEqual([]);
+    const ops = opsOf(spec);
+    expect(paramTypes(ops.listPets)).toEqual({
+      'query:filter': 'PetsListPetsFilter',
+      'header:X-Trace': 'PetsXTrace',
+      'cookie:session': 'PetsSession',
+    });
+    expect(paramTypes(ops.getPet)).toEqual({ 'path:selector': 'PetsSelector' });
+    expect(paramTypes(hookOf(spec, 'noteAdded'))).toEqual({
+      'query:filter': 'NoteAddedFilter',
+      'header:X-Trace': 'NoteAddedXTrace',
+    });
+    expect(fieldsOf(spec, 'PetsListPetsFilter')).toEqual({ tag: 'string', status: 'PetsListPetsFilterStatus' });
+    expect(fieldsOf(spec, 'PetsXTrace')).toEqual({ span: 'string' });
+    expect(fieldsOf(spec, 'PetsSession')).toEqual({ token: 'string' });
+    expect(fieldsOf(spec, 'PetsSelector')).toEqual({ id: 'string', rev: 'integer' });
+    expect(fieldsOf(spec, 'NoteAddedFilter')).toEqual({ tag: 'string' });
+    expect(fieldsOf(spec, 'NoteAddedXTrace')).toEqual({ span: 'string' });
+    expect(enumValues(spec, 'PetsFilter')).toEqual(['a', 'b']);
+    expect(enumValues(spec, 'PetsListPetsFilterStatus')).toEqual(['draft', 'published']);
+    expectSound(spec, ['PetsFilter']);
+  });
+});
