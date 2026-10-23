@@ -1656,4 +1656,48 @@ describe('a renamed nested model goes with the parent that references it (issue 
     expectSound(same.spec, ['Foo', 'FooBar']);
     expect(same.warnings).toEqual([]);
   });
+
+  it('carries a response folded onto a field model along when the field merge moves that model off an enum’s name (review round 2)', async () => {
+    // `Pet.entries` is a map whose values mint `PetEntry`; `getEntry`'s
+    // response is the same shape, pinned by `object: pet_entry`, and folds
+    // onto the field model in the response merge; a `Pet` query enum
+    // `entry` lifts the enum `PetEntry`, known only once the operations are
+    // read, so the field merge moves the field model to `PetEntry2`. The
+    // response's reference joined the field's site when it folded, so it
+    // follows: one model, named off the enum, referenced by both.
+    const entry = obj({ object: { type: 'string', const: 'pet_entry' }, label: str });
+    const schemas = { Pet: obj({ entries: { type: 'object', additionalProperties: entry } }) };
+    const search = {
+      get: {
+        operationId: 'searchPets',
+        tags: ['Pet'],
+        parameters: [{ name: 'entry', in: 'query', schema: { type: 'string', enum: ['a', 'b'] } }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: str } } } },
+      },
+    };
+    for (const { order, spec, warnings } of await parseBothOrders('map-value-enum', schemas, [
+      ['/pets/{id}', getOp('getPet', refTo('Pet'))],
+      ['/entries/{id}', getOp('getEntry', entry)],
+      ['/search', search],
+    ])) {
+      expect(
+        spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+        order,
+      ).toEqual([['PetEntry', ['a', 'b']]]);
+      expect(fieldRef(spec, 'Pet', 'entries'), order).toEqual({
+        kind: 'map',
+        valueType: { kind: 'model', name: 'PetEntry2' },
+      });
+      expect(opsOf(spec).getEntry?.response, order).toEqual({ kind: 'model', name: 'PetEntry2' });
+      expect(
+        opsOf(spec).searchPets?.queryParams.map((p) => p.type),
+        order,
+      ).toEqual([{ kind: 'enum', name: 'PetEntry', values: ['a', 'b'] }]);
+      expect(spec.models.map((m) => m.name).sort(), order).toEqual(['Pet', 'PetEntry2']);
+      expectSound(spec, Object.keys(schemas));
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "PetEntry" → "PetEntry2": enum "PetEntry" owns the name',
+      ]);
+    }
+  });
 });
