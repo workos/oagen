@@ -3375,9 +3375,18 @@ interface DeferredInlineType {
   /**
    * The bare name the models derive from: the header name, the response stem
    * + media type + role, a fallback body's `<Op><Label>Response`, an error
-   * body's `<Op>Error<code>` or a parameter's name.
+   * body's `<Op>Error<code>`, a parameter's name, or `<Component>Response`
+   * for a fallback or error body a `components/responses` entry declares.
    */
   name: string;
+  /**
+   * Set for a fallback or error body a `components/responses` entry declares,
+   * named after the component (`<Component>Response`) wherever the component
+   * is returned — a 404 of one operation, the `default` or a range of another
+   * — so every such site is a sibling of every other whatever its kind and
+   * steps by number alike, and all settle on one name.
+   */
+  componentBody?: boolean;
   /**
    * What tells this site from another of the same name within one operation:
    * a status code, the label of a fallback response (`Default`,
@@ -3450,9 +3459,11 @@ interface ResponseTypingContext {
  * first owner of a name keeps it. The sites that derive from one bare name
  * — one kind, parent and name: the same header on several status codes or
  * operations, one media type's body on several status codes, a component
- * response's header or secondary body from every operation that returns it
- * — share a record of the stems they settled on, so a later one shares an identical
- * shape under whichever name the earlier took (`materializeInlineSchema`).
+ * response's header or secondary body from every operation that returns it;
+ * or one component response's body, whether the site is an error or a
+ * fallback entry (`componentBody`) — share a record of the stems they
+ * settled on, so a later one shares an identical shape under whichever name
+ * the earlier took (`materializeInlineSchema`).
  * Every enum name in play is registered too (`reserveEnumNamesInPlay`),
  * shared with no model, and so is every enum a deferred site types — an
  * error body that is itself an enum, an enum nested in a model the site
@@ -3489,7 +3500,12 @@ function resolveDeferredInlineTypes(
   const bundles: InlineModelBundle[] = [];
   const siblingsByBareName = new Map<string, SiblingStems>();
   for (const item of deferred) {
-    const bareName = `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
+    // A component response's body is one site wherever the component is
+    // returned, so its record is keyed by the component's name alone, not
+    // by whether the site is an error or a fallback entry.
+    const bareName = item.componentBody
+      ? `component\u0000\u0000${item.name}`
+      : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     let siblings = siblingsByBareName.get(bareName);
     if (!siblings) siblingsByBareName.set(bareName, (siblings = []));
     const minted = models.length;
@@ -3622,6 +3638,10 @@ function attachSharedDeferredRefs(
  *   error     1. the bare name                `GetPetError404`
  *             2. a `Body` suffix              `GetPetError404Body`
  *             3. a numbered `Body` suffix     `GetPetError404Body2`, `…Body3`, …
+ *   a fallback or error body a `components/responses` entry declares
+ *   (`componentBody`), whichever of the two kinds the site is:
+ *             1. the bare name                `ProblemResponse`
+ *             2. a numeric suffix             `ProblemResponse2`, `…3`, …
  *
  * Between the bare name and the kind's own qualifiers come the stems the
  * earlier sites of the same kind, parent and bare name settled on
@@ -3630,9 +3650,14 @@ function attachSharedDeferredRefs(
  * and the `application/vnd.pet+json` body of a 201 tries the `…Response200`
  * its 200 took before `…Response201`, so an identical shape shares the
  * earlier site's model under whichever name that site settled on, and a
- * different shape steps past it to its own qualifier. A fallback body's bare
- * name carries the response's label and an error body's its status code, so
- * within an operation each has a bare name of its own and no sibling to try.
+ * different shape steps past it to its own qualifier. A fallback body named
+ * from the operation carries the response's label in its bare name and an
+ * error body named from it its status code, so within an operation each has
+ * a bare name of its own and no sibling to try. A component response's body
+ * carries the component's name wherever the component is returned, so the
+ * 404 of one operation and the `default` of another are siblings, and an
+ * identical shape — the component's own, every time — shares the first
+ * site's model under whichever name it settled on.
  *
  * Both the type and the models come from the same property name, so nested
  * models (`DocumentsXMeta429Origin`) line up by construction. A shape the
@@ -3677,6 +3702,12 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
   const byOperation = `${operationQualifier}${name}`;
   const byBoth = `${operationQualifier}${name}${statusCode}`;
   const numbered = (index: number): string => `${name}${index + 2}`;
+  const byNumber = (index: number): string => (index === 0 ? name : numbered(index - 1));
+  // A component response's body steps the same way at a 404, at `default`
+  // and in a range — by number, as the pre-pass that named it steps
+  // (`resolveComponentResponseModelNames`) — so every site that returns the
+  // component reaches the same name.
+  if (item.componentBody) return byNumber;
   switch (item.kind) {
     case 'header':
       // Decide the preference between candidates 2 and 3 from the bare
@@ -3693,7 +3724,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'fallback':
-      return (index) => (index === 0 ? name : numbered(index - 1));
+      return byNumber;
     case 'error':
       return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : `${name}Body${index}`);
     case 'param': {
@@ -4254,6 +4285,30 @@ function componentResponseNameOf(resp: ResponseObject | ReferenceObject): string
 }
 
 /**
+ * The model name a response's inline body is shared under when the response
+ * is written as a `$ref` into `components/responses`: the name
+ * `resolveComponentResponseModelNames` settled on for the component, or
+ * `componentResponseModelName` when no map was built. Undefined for a
+ * response written inline, and for a ref no component answers — the
+ * operation then names the body as it names an inline one, and the resolver
+ * has already warned about the ref. The one answer for every place a
+ * response can be written (workos/oagen#301): an explicit status code,
+ * success or error, `default` and a `1XX`–`5XX` range read it alike, so a
+ * component returned at a 404 by one operation and as `default` by another
+ * names one model.
+ */
+function sharedResponseModelName(
+  resp: ResponseObject | ReferenceObject,
+  ctx: ResponseTypingContext,
+): string | undefined {
+  const componentName = componentResponseNameOf(resp);
+  if (componentName === undefined) return undefined;
+  return ctx.componentResponseModelNames
+    ? ctx.componentResponseModelNames.get(componentName)
+    : componentResponseModelName(componentName);
+}
+
+/**
  * `<Component>Response`: the inline body of a response declared once under
  * `components/responses` and referenced from each operation that returns it.
  * It is named after the component, not the operation, so every referrer
@@ -4376,9 +4431,10 @@ function bodyModelNames(
  * operationIdModelBase for the argument): the body (`CardResponse`, or the
  * `CardResponse2` it steps to) and the models nested under it, an inline
  * body under another media type (`CardApplicationYamlResponse`) and an
- * object-shaped header (`CardXMeta`), the last two named from this stem
- * directly (`responseModelSite`). Reserved by resolvePathModelBaseNames so
- * no path-derived name takes it.
+ * object-shaped header (`CardXMeta`), the last two named from the shared
+ * body name less its `Response` (`responseModelSite`), which starts with
+ * this stem. Reserved by resolvePathModelBaseNames so no path-derived name
+ * takes it.
  */
 function componentResponseModelBase(componentName: string): string {
   return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
@@ -4431,13 +4487,16 @@ interface ResponseModelSite {
  * named from. A response written as a `$ref` into `components/responses` is
  * one thing however many operations return it and whatever key each mounts
  * it at, so an inline object under another media type and an object-shaped
- * header are named after the component, as the body is
- * (`componentResponseModelName`): `Card` + `ApplicationYaml` + `Response`
- * for the body under `application/yaml`, `Card` + `XMeta` for an `X-Meta`
- * header — the same names from `GET /notes` at 200, from `GET /pets` at 404
- * and from a `default` or `4XX` that refs it, so every operation shares one
- * model of each (workos/oagen#302). An inline response's are named after
- * the operation: the response stem, media type and the entry's role
+ * header are named from the stem of the model its body is shared under
+ * (`componentModelName`, see `sharedResponseModelName`) — that name less its
+ * `Response`, the way the operation's stem is `deriveResponseName` less its
+ * `Response`: `Card` + `ApplicationYaml` + `Response` for the body under
+ * `application/yaml`, `Card` + `XMeta` for an `X-Meta` header, and
+ * `CardResponse2…` when the body stepped to `CardResponse2` — the same names
+ * from `GET /notes` at 200, from `GET /pets` at 404 and from a `default` or
+ * `4XX` that refs it, so every operation shares one model of each
+ * (workos/oagen#302). An inline response's are named after the operation:
+ * the response stem, media type and the entry's role
  * (`GetNoteApplicationYamlResponse`, `GetNoteApplicationYamlError`,
  * `ListPetsDefaultTextPlainResponse`) and the service plus header name
  * (`NotesXMeta`). The names of either kind go through the shape registry as
@@ -4446,12 +4505,12 @@ interface ResponseModelSite {
  * candidate.
  */
 function responseModelSite(
-  componentName: string | undefined,
+  componentModelName: string | undefined,
   operationStem: string,
   ctx: ResponseTypingContext,
 ): ResponseModelSite {
-  if (componentName !== undefined) {
-    const stem = componentResponseModelBase(componentName);
+  if (componentModelName !== undefined) {
+    const stem = componentModelName.replace(/Response$/, '');
     return { stem, shared: true, headerParent: stem };
   }
   return {
@@ -4567,7 +4626,10 @@ function mediaTypeToken(contentType: string): string {
  * `<Op>DefaultResponse`, `<Op>ClientErrorResponse`: a fallback body's inline
  * model, named like the primary body's `<Op>Response` with the response's
  * label (`Default`, or the word for its range) in between. Starts with the
- * operation's stem, so `operationIdModelBase` reserves it with the rest.
+ * operation's stem, so `operationIdModelBase` reserves it with the rest. A
+ * fallback written as a `$ref` into `components/responses` is named after
+ * the component instead (`sharedResponseModelName`); this name then only
+ * prefixes the inline bodies of its secondary media types.
  */
 function deriveFallbackResponseName(op: OperationObject | undefined, pathModelBaseName: string, label: string): string {
   if (op?.operationId) {
@@ -4642,32 +4704,38 @@ function readFallbackResponse(
     `${key} response of ${sink.opLabel}`,
     sink.ctx.refSiblingDescriptions,
   );
-  // Set when the response came from a component: its secondary bodies and
-  // headers are then named after the component (`responseModelSite`).
-  const componentName = componentResponseNameOf(resp);
+  // A ref into `components/responses` names the body after the component,
+  // as it does at a status code, so every operation that returns the
+  // component — at any status, `default` or a range — shares one model; its
+  // secondary bodies and headers follow the same name (`responseModelSite`).
+  const componentModelName = sharedResponseModelName(resp, sink.ctx);
   // The entry is filled in place: a deferred body's `type` lands on this
   // very object once every operation has been read.
   if (range) {
     const entry: RangeResponse = { range };
-    fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink, componentName);
+    fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink, componentModelName);
     sink.rangeResponses.push(entry);
   } else {
     const entry: DefaultResponse = {};
-    fillFallbackResponse(entry, resolved, 'Default', sink, componentName);
+    fillFallbackResponse(entry, resolved, 'Default', sink, componentModelName);
     sink.defaultResponse = entry;
   }
 }
 
 /**
  * Read the body, media types and headers of one fallback response onto
- * `entry`; a key is left off when absent. The body is read before the
+ * `entry`; a key is left off when absent. The body is named after the
+ * operation and the response's label (`deriveFallbackResponseName`) or, when
+ * the response is a `$ref` into `components/responses`, after the component
+ * (`componentModelName`, see `sharedResponseModelName`), the name every
+ * operation returning the component shares. The body is read before the
  * headers so its deferred models are named first, as they were when every
  * fallback body was typed ahead of every header. The media types are read
  * exactly as a success entry's: every one declared, the one `type` was read
  * from sharing its TypeRef, each other typed on its own — an inline object
  * under `text/plain` of the `default` response is `<Op>DefaultTextPlainResponse`.
  * The secondary bodies and headers of a response written as a `$ref` into
- * `components/responses` (`componentName`) are named after the component
+ * `components/responses` are named from the component's shared body name
  * (`responseModelSite`), as an explicit status code's are.
  */
 function fillFallbackResponse(
@@ -4675,15 +4743,18 @@ function fillFallbackResponse(
   resp: ResponseObject,
   label: string,
   sink: FallbackResponseSink,
-  componentName: string | undefined,
+  componentModelName: string | undefined,
 ): void {
-  const contextName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
-  const site = responseModelSite(componentName, contextName.replace(/Response$/, ''), sink.ctx);
+  const operationName = deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label);
+  const contextName = componentModelName ?? operationName;
+  const site = responseModelSite(componentModelName, operationName.replace(/Response$/, ''), sink.ctx);
   const json = jsonResponseSchema(resp);
   // Shared by reference with the deferred body, so the content entry of the
   // media type `type` was read from can join it once it exists.
   const targets: Array<{ type?: TypeRef }> = [entry];
-  if (json) entry.type = typeFallbackBody(json.schema, contextName, label, sink, targets);
+  if (json) {
+    entry.type = typeFallbackBody(json.schema, contextName, label, sink, targets, componentModelName !== undefined);
+  }
   const contents = extractResponseContents(
     resp.content,
     json?.contentType,
@@ -4718,10 +4789,13 @@ function fillFallbackResponse(
  * registry, so a component, or another operation's body, that happens to be
  * named like the fallback is never overwritten by `mergeInlineResponseModels`:
  * a clash moves the whole body to the next free name (`<Op>DefaultResponse2`,
- * `…3`), nested models and ref together. List envelope and resource-wrapper
- * detection are skipped on purpose: a fallback body is not what the SDK
- * method returns, so it must not drive pagination. Returns the placeholder
- * the resolution replaces on `target`.
+ * `…3`), nested models and ref together. A body a `components/responses`
+ * entry declares (`componentBody`) is named after the component
+ * (`<Component>Response`) and shares the model of every other site that
+ * returns the component, whatever its kind. List envelope and
+ * resource-wrapper detection are skipped on purpose: a fallback body is not
+ * what the SDK method returns, so it must not drive pagination. Returns the
+ * placeholder the resolution replaces on `target`.
  */
 function typeFallbackBody(
   schema: SchemaObject,
@@ -4729,6 +4803,7 @@ function typeFallbackBody(
   label: string,
   sink: FallbackResponseSink,
   targets: Array<{ type?: TypeRef }>,
+  componentBody: boolean,
 ): TypeRef {
   if (schema.$ref) return schemaToTypeRef(schema, contextName);
   sink.ctx.deferred.push({
@@ -4739,6 +4814,7 @@ function typeFallbackBody(
     operationQualifier: sink.ctx.operationQualifier,
     componentSchemas: sink.ctx.componentSchemas,
     targets,
+    ...(componentBody && { componentBody }),
   });
   return { kind: 'primitive', type: 'unknown' };
 }
@@ -4765,9 +4841,13 @@ function typeFallbackBody(
  * reserved and qualified (`CircleGetPetError400`), as under any deferred
  * kind. A body that is itself an inline enum, or an array of one, mints no
  * model and is promoted to `spec.enums` by `collectInlineEnumsFromOperations`.
- * List envelope and resource-wrapper detection are skipped on purpose, as for
- * a fallback body. Returns the placeholder the resolution replaces on every
- * target.
+ * A body a `components/responses` entry declares (`componentBody`) is named
+ * after the component (`<Component>Response`) and steps by number
+ * (`<Component>Response2`) rather than by `Body`, the way the same
+ * component's body steps at a `default` or range site, so every site that
+ * returns the component settles on one model. List envelope and
+ * resource-wrapper detection are skipped on purpose, as for a fallback body.
+ * Returns the placeholder the resolution replaces on every target.
  */
 function typeErrorBody(
   schema: SchemaObject,
@@ -4775,6 +4855,7 @@ function typeErrorBody(
   code: number,
   ctx: ResponseTypingContext,
   targets: Array<{ type?: TypeRef }>,
+  componentBody: boolean,
 ): TypeRef {
   if (schema.$ref) return schemaToTypeRef(schema, contextName);
   ctx.deferred.push({
@@ -4785,6 +4866,7 @@ function typeErrorBody(
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets,
+    ...(componentBody && { componentBody }),
   });
   return { kind: 'primitive', type: 'unknown' };
 }
@@ -4946,17 +5028,14 @@ function extractResponses(
           )
         : rawResponse;
     // Set when the response came from a component: its inline body is then
-    // named after the component, shared by every operation that returns it.
-    const componentName = code >= 200 ? componentResponseNameOf(rawResponse) : undefined;
-    const componentModelName =
-      componentName === undefined
-        ? undefined
-        : ctx.componentResponseModelNames
-          ? ctx.componentResponseModelNames.get(componentName)
-          : componentResponseModelName(componentName);
+    // named after the component, shared by every operation that returns it —
+    // at a status code, as `default` or in a range (`readFallbackResponse`
+    // asks the same helper).
+    const componentModelName = code >= 200 ? sharedResponseModelName(rawResponse, ctx) : undefined;
     // Where this response's secondary bodies and headers are named from: the
-    // component for a `$ref` into `components/responses`, else the operation.
-    const site = responseModelSite(componentName, operationStem, ctx);
+    // component's shared body name for a `$ref` into `components/responses`,
+    // else the operation.
+    const site = responseModelSite(componentModelName, operationStem, ctx);
     // Headers belong to the status code they are declared on, success or
     // error alike: `Location` on a 201/302, `Retry-After` on a 429. A 1xx
     // response, which no branch below keeps, declares none worth
@@ -5053,6 +5132,7 @@ function extractResponses(
             code,
             ctx,
             targets,
+            componentModelName !== undefined,
           )
         : undefined;
       entry.type = type;

@@ -820,11 +820,20 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         'adopted_by',
       ]);
 
+      // A shared inline body returned as `default` by two operations and in a
+      // `5XX` range by a third: one model, named after the component (#301).
+      const failure = { kind: 'model', name: 'FailureResponse' };
+      expect(getPet.defaultResponse?.type).toEqual(failure);
+      expect(byName.get('getOwner')!.rangeResponses?.map((r) => [r.range, r.type])).toEqual([['5XX', failure]]);
+      expect(adoptPet.defaultResponse?.type).toEqual(failure);
+      expect(spec.models.find((m: Model) => m.name === 'FailureResponse')?.fields.map((f) => f.name)).toEqual(['code']);
+
       const modelNames = spec.models.map((m: Model) => m.name).sort();
       expect(new Set(modelNames).size).toBe(modelNames.length);
       expect(modelNames).toMatchInlineSnapshot(`
         [
           "ConflictResponse",
+          "FailureResponse",
           "ListMetadata",
           "OwnerCardResponse",
           "OwnerCardResponseAddress",
@@ -839,6 +848,290 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         ]
       `);
     });
+  });
+});
+
+describe('a shared inline body returned as default or in a range (issue #301)', () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  const model = (name: string): TypeRef => ({ kind: 'model', name });
+  const unknown: TypeRef = { kind: 'primitive', type: 'unknown' };
+  const ref = (component: string) => ({ $ref: `#/components/responses/${component}` });
+  const inline = (properties: Record<string, unknown>, description: string) => ({
+    description,
+    content: { 'application/json': { schema: { type: 'object', properties } } },
+  });
+  /** The media-type lists a `application/json`-only body carries, its entry sharing the body's type. */
+  const jsonBody = (type: TypeRef) => ({
+    contentTypes: ['application/json'],
+    contents: [{ contentType: 'application/json', type }],
+  });
+  const found = inline({ id: { type: 'string' } }, 'Found');
+  const problem = inline({ title: { type: 'string' } }, 'A problem');
+
+  /** Parse a document through the whole pipeline, as the issue's repro does. */
+  async function parseDocument(paths: Record<string, unknown>, components: Record<string, unknown>): Promise<ApiSpec> {
+    dir = mkdtempSync(join(tmpdir(), 'oagen-301-'));
+    const specPath = join(dir, 'spec.json');
+    const document = { openapi: '3.1.0', info: { title: 'shared', version: '1' }, paths, components };
+    writeFileSync(specPath, JSON.stringify(document));
+    return parseSpec(specPath);
+  }
+
+  const opsByName = (spec: ApiSpec): Map<string, Operation> =>
+    new Map(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+  const fieldsOf = (spec: ApiSpec, name: string): string[] | undefined =>
+    spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+
+  /** Every `model` ref anywhere under `value` — fallback responses, ranges and errors included. */
+  function modelRefsAnywhere(value: unknown, out = new Set<string>()): Set<string> {
+    if (Array.isArray(value)) value.forEach((v) => modelRefsAnywhere(v, out));
+    else if (value && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      if (record['kind'] === 'model' && typeof record['name'] === 'string') out.add(record['name']);
+      for (const v of Object.values(record)) modelRefsAnywhere(v, out);
+    }
+    return out;
+  }
+
+  /** Every model reference resolves, and no model but the named component schemas is orphaned. */
+  function expectSound(spec: ApiSpec, componentSchemas: string[] = []): void {
+    validateModelRefs(spec);
+    const referenced = modelRefsAnywhere(spec.services.flatMap((s) => s.operations));
+    for (const m of spec.models) modelRefsAnywhere(m.fields, referenced);
+    const known = new Set(spec.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name))).toEqual([]);
+    expect([...known].filter((name) => !componentSchemas.includes(name) && !referenced.has(name))).toEqual([]);
+  }
+
+  it("the issue's repro: one ProblemResponse, which the default and 4XX of both operations point at", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const responses = { '200': ref('Found'), '4XX': ref('Problem'), default: ref('Problem') };
+    const spec = await parseDocument(
+      {
+        '/notes': { get: { operationId: 'getNote', responses } },
+        '/pets': { get: { operationId: 'getPet', responses } },
+      },
+      { responses: { Found: found, Problem: problem } },
+    );
+
+    expect(spec.models.map(({ name }) => name)).toEqual(['FoundResponse', 'ProblemResponse']);
+    const ops = opsByName(spec);
+    for (const name of ['getNote', 'getPet']) {
+      const op = ops.get(name)!;
+      expect(op.response).toEqual(model('FoundResponse'));
+      expect(op.defaultResponse).toEqual({
+        type: model('ProblemResponse'),
+        ...jsonBody(model('ProblemResponse')),
+        description: 'A problem',
+      });
+      expect(op.rangeResponses).toEqual([
+        {
+          range: '4XX',
+          type: model('ProblemResponse'),
+          ...jsonBody(model('ProblemResponse')),
+          description: 'A problem',
+        },
+      ]);
+    }
+    expect(fieldsOf(spec, 'ProblemResponse')).toEqual(['title']);
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // The component at a 404 (an error entry) of one operation, as `default`
+  // of a second and in a `5XX` range of a third; `Found` at a 200 and in a
+  // `2XX` range. One model each, whichever kind of site is read first.
+  const errorFirst = {
+    '/a': { get: { operationId: 'opA', responses: { '200': ref('Found'), '404': ref('Problem') } } },
+    '/b': { get: { operationId: 'opB', responses: { '2XX': ref('Found'), default: ref('Problem') } } },
+    '/c': { get: { operationId: 'opC', responses: { '5XX': ref('Problem') } } },
+  };
+  const fallbackFirst = { '/c': errorFirst['/c'], '/b': errorFirst['/b'], '/a': errorFirst['/a'] };
+  it.each([
+    ['the error entry first', errorFirst],
+    ['the fallback entries first', fallbackFirst],
+  ])('shares one model across a status code, default and a range of three operations (%s)', async (_order, paths) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(paths, { responses: { Found: found, Problem: problem } });
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual(['FoundResponse', 'ProblemResponse']);
+    const ops = opsByName(spec);
+    expect(ops.get('opA')!.response).toEqual(model('FoundResponse'));
+    expect(ops.get('opA')!.errors.map((e) => [e.statusCode, e.type])).toEqual([[404, model('ProblemResponse')]]);
+    // A `2XX` range is never promoted into `response`.
+    expect(ops.get('opB')!.response).toEqual(unknown);
+    expect(ops.get('opB')!.rangeResponses?.map((r) => [r.range, r.type])).toEqual([['2XX', model('FoundResponse')]]);
+    expect(ops.get('opB')!.defaultResponse?.type).toEqual(model('ProblemResponse'));
+    expect(ops.get('opC')!.rangeResponses?.map((r) => [r.range, r.type])).toEqual([['5XX', model('ProblemResponse')]]);
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('mints the shared model once at extraction, so no merge pass has to fold copies', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { services, inlineModels } = extract(
+      {
+        '/a': { get: { operationId: 'opA', responses: { '404': ref('Problem') } } },
+        '/b': { get: { operationId: 'opB', responses: { default: ref('Problem') } } },
+        '/c': { get: { operationId: 'opC', responses: { '4XX': ref('Problem') } } },
+      },
+      { responses: { Problem: problem } },
+    );
+    expect(inlineModels.map((m) => m.name)).toEqual(['ProblemResponse']);
+    const ops = services.flatMap((s) => s.operations);
+    expect(ops.map((op) => op.errors[0]?.type ?? op.defaultResponse?.type ?? op.rangeResponses?.[0].type)).toEqual([
+      model('ProblemResponse'),
+      model('ProblemResponse'),
+      model('ProblemResponse'),
+    ]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('names the body after the component for an operation without an operationId too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      {
+        '/notes': { get: { responses: { '200': ref('Found'), default: ref('Problem') } } },
+        '/pets': { get: { responses: { '200': ref('Found'), '4XX': ref('Problem') } } },
+      },
+      { responses: { Found: found, Problem: problem } },
+    );
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual(['FoundResponse', 'ProblemResponse']);
+    const [notes, pets] = spec.services.flatMap((s) => s.operations);
+    expect(notes.defaultResponse?.type).toEqual(model('ProblemResponse'));
+    expect(pets.rangeResponses?.map((r) => [r.range, r.type])).toEqual([['4XX', model('ProblemResponse')]]);
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('names the body after the ref the operation wrote, not the end of a chain, at default as at a status code', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      {
+        '/notes': { get: { operationId: 'getNote', responses: { '200': ref('Found'), default: ref('Alias') } } },
+        '/pets': { get: { operationId: 'getPet', responses: { '200': ref('Found'), '404': ref('Alias') } } },
+      },
+      { responses: { Found: found, Alias: ref('Problem'), Problem: problem } },
+    );
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual(['AliasResponse', 'FoundResponse']);
+    const ops = opsByName(spec);
+    expect(ops.get('getNote')!.defaultResponse?.type).toEqual(model('AliasResponse'));
+    expect(ops.get('getPet')!.errors[0].type).toEqual(model('AliasResponse'));
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('steps every site to the numbered name the pre-pass chose when a component schema owns <Component>Response', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      {
+        '/notes': {
+          get: {
+            operationId: 'getNote',
+            responses: { '200': ref('Found'), '404': ref('Problem'), default: ref('Problem') },
+          },
+        },
+      },
+      {
+        schemas: { ProblemResponse: { type: 'object', properties: { id: { type: 'string' } } } },
+        responses: { Found: found, Problem: problem },
+      },
+    );
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual([
+      'FoundResponse',
+      'ProblemResponse',
+      'ProblemResponse2',
+    ]);
+    expect(fieldsOf(spec, 'ProblemResponse')).toEqual(['id']);
+    expect(fieldsOf(spec, 'ProblemResponse2')).toEqual(['title']);
+    const op = opsByName(spec).get('getNote')!;
+    expect(op.errors[0].type).toEqual(model('ProblemResponse2'));
+    expect(op.defaultResponse?.type).toEqual(model('ProblemResponse2'));
+    expectSound(spec, ['ProblemResponse']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("steps a 404 and a default of the component the same way when an operation's own model holds its name", async () => {
+    // `problem`'s inline 200 body is `ProblemResponse`, a name the pre-pass
+    // does not reserve against, so both component sites step past it — by
+    // number alike, whichever kind of site each is, so they still share.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parseDocument(
+      {
+        '/problems': {
+          get: { operationId: 'problem', responses: { '200': inline({ detail: { type: 'string' } }, 'Own') } },
+        },
+        '/notes': { get: { operationId: 'getNote', responses: { '200': ref('Found'), '404': ref('Problem') } } },
+        '/pets': { get: { operationId: 'getPet', responses: { '200': ref('Found'), default: ref('Problem') } } },
+      },
+      { responses: { Found: found, Problem: problem } },
+    );
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual([
+      'FoundResponse',
+      'ProblemResponse',
+      'ProblemResponse2',
+    ]);
+    expect(fieldsOf(spec, 'ProblemResponse')).toEqual(['detail']);
+    expect(fieldsOf(spec, 'ProblemResponse2')).toEqual(['title']);
+    const ops = opsByName(spec);
+    expect(ops.get('problem')!.response).toEqual(model('ProblemResponse'));
+    expect(ops.get('getNote')!.errors[0].type).toEqual(model('ProblemResponse2'));
+    expect(ops.get('getPet')!.defaultResponse?.type).toEqual(model('ProblemResponse2'));
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("keeps the component's headers and description, and names a secondary media type's body after the component", async () => {
+    // A component's secondary media types are named after the component
+    // (#302), at `default` and in a range as at an explicit status code, so
+    // the two operations share one `ProblemApplicationYamlResponse`.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const yamlProblem = {
+      description: 'A problem',
+      headers: { 'Retry-After': { schema: { type: 'integer' } } },
+      content: {
+        'application/json': { schema: { type: 'object', properties: { title: { type: 'string' } } } },
+        'application/yaml': { schema: { type: 'object', properties: { text: { type: 'string' } } } },
+      },
+    };
+    const spec = await parseDocument(
+      {
+        '/notes': { get: { operationId: 'getNote', responses: { '200': ref('Found'), default: ref('Problem') } } },
+        '/pets': { get: { operationId: 'getPet', responses: { '200': ref('Found'), '5XX': ref('Problem') } } },
+      },
+      { responses: { Found: found, Problem: yamlProblem } },
+    );
+
+    const ops = opsByName(spec);
+    const shared = {
+      type: model('ProblemResponse'),
+      contentTypes: ['application/json', 'application/yaml'],
+      contents: [
+        { contentType: 'application/json', type: model('ProblemResponse') },
+        { contentType: 'application/yaml', type: model('ProblemApplicationYamlResponse') },
+      ],
+      headers: [{ name: 'Retry-After', type: { kind: 'primitive', type: 'integer' }, required: false }],
+      description: 'A problem',
+    };
+    expect(ops.get('getNote')!.defaultResponse).toEqual(shared);
+    expect(ops.get('getPet')!.rangeResponses).toEqual([{ range: '5XX', ...shared }]);
+    expect(spec.models.map(({ name }) => name).sort()).toEqual([
+      'FoundResponse',
+      'ProblemApplicationYamlResponse',
+      'ProblemResponse',
+    ]);
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
