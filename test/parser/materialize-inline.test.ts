@@ -301,6 +301,49 @@ describe('materializeInlineSchema — the stems earlier sites of the same bare n
     expect(pushes).toBeTypeOf('function');
   });
 
+  it('accepts a bare list of settlements as the settled list itself, and reads an empty array as read-only (Greptile re-review)', () => {
+    // The form between the string form and the container: a non-empty list
+    // of settlement objects is the mutable settled list, appended to in place.
+    const list: SettledSite[] = [settled('Body200')];
+    const sharedInto: Model[] = [];
+    expect(
+      materializeInlineSchema(shape, {
+        stem: byCode(201),
+        siblings: list,
+        registry: registryWithSettled(),
+        models: sharedInto,
+      }),
+    ).toEqual({ kind: 'model', name: 'Body200' });
+    expect(sharedInto).toEqual([]);
+    expect(list).toEqual([settled('Body200')]);
+    const minted: Model[] = [];
+    expect(
+      materializeInlineSchema(otherShape, {
+        stem: byCode(201),
+        siblings: list,
+        registry: registryWithSettled(),
+        models: minted,
+      }),
+    ).toEqual({ kind: 'model', name: 'Body201' });
+    expect(names(minted)).toEqual(['Body201']);
+    expect(list).toEqual([settled('Body200'), settled('Body201')]);
+
+    // An empty array has no element to tell the forms apart, so it is read-only whatever it was typed as.
+    const empty: SettledSite[] = [];
+    const frozenEmpty: SettledSite[] = Object.freeze([] as SettledSite[]) as SettledSite[];
+    for (const given of [empty, frozenEmpty]) {
+      const models: Model[] = [];
+      expect(
+        materializeInlineSchema(shape, { stem: byCode(200), siblings: given, registry: new Map(), models }),
+      ).toEqual({
+        kind: 'model',
+        name: 'Body',
+      });
+      expect(names(models)).toEqual(['Body']);
+      expect(given).toEqual([]);
+    }
+  });
+
   it('createSiblingSites seeds a container from the string form, and the container is what a call records into', () => {
     const container = createSiblingSites(['Body200']);
     expect(container.settled).toEqual([settled('Body200')]);
