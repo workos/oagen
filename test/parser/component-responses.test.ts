@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, ResponseContent, ResponseHeader, TypeRef } from '../../src/ir/types.js';
 
@@ -1163,9 +1164,13 @@ describe("a component response's other media types and headers (issue #302)", ()
 
   async function parse(
     paths: Record<string, unknown>,
-    components: { schemas?: Record<string, unknown>; responses?: Record<string, unknown> } = {},
+    components: {
+      schemas?: Record<string, unknown>;
+      responses?: Record<string, unknown>;
+      headers?: Record<string, unknown>;
+    } = {},
   ): Promise<ApiSpec> {
-    dir = mkdtempSync(join(tmpdir(), 'oagen-302-'));
+    dir ??= mkdtempSync(join(tmpdir(), 'oagen-302-'));
     const specPath = join(dir, 'spec.json');
     writeFileSync(
       specPath,
@@ -1173,7 +1178,11 @@ describe("a component response's other media types and headers (issue #302)", ()
         openapi: '3.1.0',
         info: { title: '302', version: '1' },
         paths,
-        components: { schemas: components.schemas ?? {}, responses: components.responses ?? { Card: card } },
+        components: {
+          schemas: components.schemas ?? {},
+          responses: components.responses ?? { Card: card },
+          headers: components.headers ?? {},
+        },
       }),
     );
     return parseSpec(specPath);
@@ -1398,38 +1407,160 @@ describe("a component response's other media types and headers (issue #302)", ()
     expectSound(spec);
   });
 
-  it('steps around a component schema that owns the name with another shape, and both operations still share the stepped model', async () => {
+  it('steps a name a component schema owns with another shape by number, the same from a 200 and from a 404', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const other = { type: 'object', properties: { other: { type: 'integer' } } };
-    const spec = await parse(twoOperations('200', '200'), {
-      schemas: { CardXMeta: other, CardApplicationYamlResponse: other },
-      responses: { Card: card },
-    });
+    const components = { schemas: { CardXMeta: other, CardApplicationYamlResponse: other }, responses: { Card: card } };
+    const spec = await parse(twoOperations('200', '404', { '204': ok }), components);
     expect(warn).not.toHaveBeenCalled();
 
-    // The header kind's candidate after the bare name, on a clash with a
-    // component, is the operation's (`CardGetNoteXMeta`); the content kind's
-    // is the status code's (`…Response200`). The second operation tries the
-    // stem the first settled on before its own and shares the model.
+    // A component site steps by number (`componentSite`), as the component's
+    // body steps to `CardResponse2` — never to the operation's candidate
+    // (`CardGetNoteXMeta`) or the status code's (`CardApplicationYamlResponse200`),
+    // which belong to an inline response's sites — so the 200 of one
+    // operation and the 404 of the other settle on one name (MichaelDeBoey).
     const getNote = byName(spec).get('getNote')!;
     const getPet = byName(spec).get('getPet')!;
-    expect(headersOf({ headers: getNote.responseHeaders })).toEqual(['X-Meta: CardGetNoteXMeta']);
-    expect(headersOf({ headers: getPet.responseHeaders })).toEqual(['X-Meta: CardGetNoteXMeta']);
+    expect(headersOf({ headers: getNote.responseHeaders })).toEqual(['X-Meta: CardXMeta2']);
+    expect(headersOf(getPet.errors[0])).toEqual(['X-Meta: CardXMeta2']);
     expect(contentsOf({ contents: getNote.responseContents })).toEqual([
       'application/json: CardResponse',
-      'application/yaml: CardApplicationYamlResponse200',
+      'application/yaml: CardApplicationYamlResponse2',
     ]);
-    expect(contentsOf({ contents: getPet.responseContents })).toEqual(
-      contentsOf({ contents: getNote.responseContents }),
-    );
+    expect(contentsOf(getPet.errors[0])).toEqual(contentsOf({ contents: getNote.responseContents }));
     expect(mintedFor(spec)).toEqual({
-      meta: ['CardGetNoteXMeta', 'CardXMeta'],
-      yaml: ['CardApplicationYamlResponse', 'CardApplicationYamlResponse200'],
+      meta: ['CardXMeta', 'CardXMeta2'],
+      yaml: ['CardApplicationYamlResponse', 'CardApplicationYamlResponse2'],
     });
     // The components keep their own shape.
     expect(fieldsOf(spec, 'CardXMeta')).toEqual([['other', 'integer']]);
     expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['other', 'integer']]);
     expectSound(spec, ['CardXMeta', 'CardApplicationYamlResponse']);
+
+    // Removing one operation leaves the other's stepped names unchanged, so
+    // `oagen diff` reports the `Notes` service (and its one operation) gone
+    // and nothing else: no model removed or added, no header retyped.
+    const petOnly = await parse(
+      { '/pets': { get: { operationId: 'getPet', responses: { '204': ok, '404': cardRef } } } },
+      components,
+    );
+    const petError = byName(petOnly).get('getPet')!.errors[0];
+    expect(headersOf(petError)).toEqual(['X-Meta: CardXMeta2']);
+    expect(contentsOf(petError)).toEqual(contentsOf(getPet.errors[0]));
+    expect(diffSpecs(spec, petOnly).changes.map((change) => change.kind)).toEqual(['service-removed']);
+  });
+
+  it('steps by number beside a component response whose body owns the YAML name, so a 200 and a 404 agree', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `CardApplicationYaml`'s own body is `CardApplicationYamlResponse`, the
+    // name `Card`'s YAML body derives; before, `Card`'s was
+    // `CardApplicationYamlResponse200` at the 200 and `…404` at the 404.
+    const spec = await parse(
+      {
+        ...twoOperations('200', '404', { '204': ok }),
+        '/cards': {
+          get: { operationId: 'getCard', responses: { '200': { $ref: '#/components/responses/CardApplicationYaml' } } },
+        },
+      },
+      {
+        responses: {
+          Card: card,
+          CardApplicationYaml: {
+            description: 'Owns the name',
+            content: { 'application/json': { schema: { type: 'object', properties: { owner: { type: 'string' } } } } },
+          },
+        },
+      },
+    );
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(typeName(byName(spec).get('getCard')!.response)).toBe('CardApplicationYamlResponse');
+    expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['owner', 'string']]);
+    const getNote = byName(spec).get('getNote')!;
+    const getPet = byName(spec).get('getPet')!;
+    expect(contentsOf({ contents: getNote.responseContents })).toContain(
+      'application/yaml: CardApplicationYamlResponse2',
+    );
+    expect(contentsOf(getPet.errors[0])).toContain('application/yaml: CardApplicationYamlResponse2');
+    expect(mintedFor(spec).yaml).toEqual(['CardApplicationYamlResponse', 'CardApplicationYamlResponse2']);
+    expect(fieldsOf(spec, 'CardApplicationYamlResponse2')).toEqual([['y', 'string']]);
+    expectSound(spec);
+  });
+
+  it('names an inline enum header after the component: one `CardXMode`, not one enum per service', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const withMode = {
+      ...card,
+      headers: { ...card.headers, 'X-Mode': { schema: { type: 'string', enum: ['compact', 'full'] } } },
+    };
+    const spec = await parse(twoOperations('200', '200'), { responses: { Card: withMode } });
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: `NotesXMode` and `PetsXMode`.
+    expect(spec.enums.map((e) => e.name)).toEqual(['CardXMode']);
+    for (const op of ['getNote', 'getPet']) {
+      expect(headersOf({ headers: byName(spec).get(op)!.responseHeaders }), op).toEqual([
+        'X-Meta: CardXMeta',
+        'X-Mode: CardXMode',
+      ]);
+    }
+    expectSound(spec);
+  });
+
+  it('derives the stem from the body name the component stepped to: `CardResponse2XMeta`, `CardResponse2ApplicationYamlResponse`', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('200', '200'), {
+      schemas: { CardResponse: { type: 'object', properties: { id: { type: 'string' } } } },
+      responses: { Card: card },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const op of ['getNote', 'getPet']) {
+      const operation = byName(spec).get(op)!;
+      expect(typeName(operation.response), op).toBe('CardResponse2');
+      expect(contentsOf({ contents: operation.responseContents }), op).toEqual([
+        'application/json: CardResponse2',
+        'application/yaml: CardResponse2ApplicationYamlResponse',
+      ]);
+      expect(headersOf({ headers: operation.responseHeaders }), op).toEqual(['X-Meta: CardResponse2XMeta']);
+    }
+    expect(modelNames(spec)).toEqual([
+      'CardResponse',
+      'CardResponse2',
+      'CardResponse2ApplicationYamlResponse',
+      'CardResponse2XMeta',
+    ]);
+    expect(fieldsOf(spec, 'CardResponse')).toEqual([['id', 'string']]);
+    expectSound(spec, ['CardResponse']);
+  });
+
+  it('names a header through components/headers, and one declared with `content`, after the component too', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const viaRefAndContent = {
+      ...card,
+      headers: {
+        'X-Meta': { $ref: '#/components/headers/Meta' },
+        'X-Extra': {
+          content: { 'application/json': { schema: { type: 'object', properties: { note: { type: 'string' } } } } },
+        },
+      },
+    };
+    const spec = await parse(twoOperations('200', '200'), {
+      headers: { Meta: { schema: { type: 'object', properties: { trace: { type: 'string' } } } } },
+      responses: { Card: viaRefAndContent },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const op of ['getNote', 'getPet']) {
+      expect(headersOf({ headers: byName(spec).get(op)!.responseHeaders }), op).toEqual([
+        'X-Meta: CardXMeta',
+        'X-Extra: CardXExtra',
+      ]);
+    }
+    expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'string']]);
+    expect(fieldsOf(spec, 'CardXExtra')).toEqual([['note', 'string']]);
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXExtra', 'CardXMeta']);
+    expectSound(spec);
   });
 
   it('shares a component schema that admits the shape instead of minting a model', async () => {
