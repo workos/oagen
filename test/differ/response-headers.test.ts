@@ -37,7 +37,10 @@ const header = (name: string, over: Partial<ResponseHeader> = {}): ResponseHeade
   ...over,
 });
 
-/** `GET /pets` (`listPets`) with a lone `200` declaring `headers`, as the parser builds it. */
+/**
+ * `GET /pets` (`listPets`) with a lone `200` declaring `headers`, as the parser
+ * builds it: `responseStatusCode` carries the lone entry's code.
+ */
 const listPets = (headers: ResponseHeader[] | undefined, over: Partial<Operation> = {}): Operation => ({
   name: 'listPets',
   httpMethod: 'get',
@@ -46,11 +49,26 @@ const listPets = (headers: ResponseHeader[] | undefined, over: Partial<Operation
   queryParams: [],
   headerParams: [],
   response: { kind: 'array', items: pet },
+  responseStatusCode: 200,
   ...(headers ? { responseHeaders: headers } : {}),
   errors: [],
   injectIdempotencyKey: false,
   ...over,
 });
+
+const dirs: string[] = [];
+afterAll(async () => {
+  await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+});
+
+/** Writes an OpenAPI document to a fresh temp dir and returns its path. */
+async function writeSpec(name: string, doc: unknown): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-response-headers-'));
+  dirs.push(dir);
+  const file = path.join(dir, name);
+  await fs.writeFile(file, JSON.stringify(doc));
+  return file;
+}
 
 const specOf = (op: Operation): ApiSpec => ({
   name: 'Pets',
@@ -74,19 +92,6 @@ function modified(oldOp: Operation, newOp: Operation) {
 const headerChangesOf = (oldOp: Operation, newOp: Operation) => modified(oldOp, newOp).responseHeaderChanges;
 
 describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecated, and added', () => {
-  const dirs: string[] = [];
-  afterAll(async () => {
-    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
-  });
-
-  async function writeSpec(name: string, doc: unknown): Promise<string> {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-response-headers-'));
-    dirs.push(dir);
-    const file = path.join(dir, name);
-    await fs.writeFile(file, JSON.stringify(doc));
-    return file;
-  }
-
   /** `GET /pets` whose `200` declares `headers`, as the issue writes it. */
   const document = (headers: Record<string, unknown>) => ({
     openapi: '3.1.0',
@@ -134,14 +139,15 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
       classification: 'breaking',
     });
     if (diff.changes[0].kind !== 'operation-modified') return;
-    // A lone 2xx carries no status code in the IR, so none is reported.
+    // The parser carries the lone 200's code as `responseStatusCode`, so every entry says so.
     expect(diff.changes[0].responseHeaderChanges).toEqual([
-      { kind: 'header-added', headerName: 'X-Request-Id', classification: 'additive' },
-      { kind: 'header-removed', headerName: 'X-Next-Cursor', classification: 'breaking' },
-      { kind: 'header-type-changed', headerName: 'X-Rate-Limit', classification: 'breaking' },
+      { kind: 'header-added', headerName: 'X-Request-Id', statusCode: 200, classification: 'additive' },
+      { kind: 'header-removed', headerName: 'X-Next-Cursor', statusCode: 200, classification: 'breaking' },
+      { kind: 'header-type-changed', headerName: 'X-Rate-Limit', statusCode: 200, classification: 'breaking' },
       {
         kind: 'header-deprecated-changed',
         headerName: 'X-Rate-Limit',
+        statusCode: 200,
         classification: 'additive',
         oldDeprecated: false,
         newDeprecated: true,
@@ -155,6 +161,7 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
         serviceName: diff.changes[0].serviceName,
         operationName: 'listPets',
         headerName: 'X-Rate-Limit',
+        statusCode: 200,
         oldDeprecated: false,
         newDeprecated: true,
         classification: 'additive',
@@ -167,6 +174,136 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
     const a = await parseSpec(await writeSpec('same-a.json', before));
     const b = await parseSpec(await writeSpec('same-b.json', before));
     expect(diffSpecs(a, b).changes).toEqual([]);
+  });
+
+  /** `POST /pets` declaring `responses`, as Greptile's round-1 scenario writes it. */
+  const documentWith = (responses: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    paths: { '/pets': { post: { operationId: 'createPet', responses } } },
+  });
+  const created = { description: 'Created', headers: { Location: { required: true, schema: { type: 'string' } } } };
+  const ok = { description: 'OK', headers: { 'X-Total': { schema: { type: 'integer' } } } };
+
+  it("pairs a lone 201 with the new spec's 201 beside an added 200, by status code (Greptile round 1)", async () => {
+    const lone201 = await parseSpec(await writeSpec('lone-201.json', documentWith({ '201': created })));
+    const with200 = await parseSpec(await writeSpec('with-200.json', documentWith({ '200': ok, '201': created })));
+    const diff = diffSpecs(lone201, with200);
+    // Used to pair the lone 201 with the new primary 200 and report
+    // `Location` removed at 200, breaking, with the 201 unchanged.
+    expect(diff.changes).toHaveLength(1);
+    expect(diff.changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'createPet',
+      responseChanged: false,
+      responseHeadersChanged: false,
+      responseHeaderChanges: [],
+      responseContentTypesChanged: false,
+      responseStatusCodeChanged: true,
+      oldResponseStatusCode: 201,
+      newResponseStatusCode: 200,
+      classification: 'breaking',
+    });
+    // The other way round, the 200 that is gone is reported by its own code.
+    expect(diffSpecs(with200, lone201).changes[0]).toMatchObject({
+      responseHeaderChanges: [
+        { kind: 'header-removed', headerName: 'X-Total', statusCode: 200, classification: 'breaking' },
+      ],
+      responseStatusCodeChanged: true,
+      oldResponseStatusCode: 200,
+      newResponseStatusCode: 201,
+    });
+  });
+});
+
+describe('diffOperations — a lone 2xx pairs by its status code (Greptile round 1)', () => {
+  /** A lone `201` carrying `Location`, as the parser builds an operation declaring only a `201`. */
+  const lone201 = listPets([header('Location', { required: true })], { response: pet, responseStatusCode: 201 });
+  /** The same operation after a `200` carrying `X-Total` is added beside the unchanged `201`: the `200` is now the primary. */
+  const with200 = listPets([header('X-Total')], {
+    response: pet,
+    responseStatusCode: 200,
+    successResponses: [
+      { statusCode: 200, type: pet, headers: [header('X-Total')] },
+      { statusCode: 201, type: pet, headers: [header('Location', { required: true })] },
+    ],
+  });
+
+  it("pairs the lone 201 with the new spec's 201, not with the new primary 200: no header is removed", () => {
+    const change = modified(lone201, with200);
+    expect(change.responseHeaderChanges).toEqual([]);
+    expect(change.responseContentTypeChanges).toEqual([]);
+    // What is reported is the primary moving to the added 200.
+    expect(change).toMatchObject({
+      responseHeadersChanged: false,
+      responseStatusCodeChanged: true,
+      oldResponseStatusCode: 201,
+      newResponseStatusCode: 200,
+      classification: 'breaking',
+    });
+  });
+
+  it('pairs the old 201 with the new lone 201 the other way round, and reports the dropped 200 by its own code', () => {
+    const change = modified(with200, lone201);
+    expect(change.responseHeaderChanges).toEqual([
+      { kind: 'header-removed', headerName: 'X-Total', statusCode: 200, classification: 'breaking' },
+    ]);
+    expect(change).toMatchObject({
+      responseStatusCodeChanged: true,
+      oldResponseStatusCode: 200,
+      newResponseStatusCode: 201,
+    });
+  });
+
+  it('reports a lone 2xx changing code with the same headers once, as the status move, not as headers removed and added', () => {
+    const lone200 = listPets([header('Location', { required: true })], { response: pet, responseStatusCode: 200 });
+    const change = modified(lone201, lone200);
+    expect(change.responseHeaderChanges).toEqual([]);
+    expect(change.responseContentTypeChanges).toEqual([]);
+    expect(change).toMatchObject({
+      responseStatusCodeChanged: true,
+      oldResponseStatusCode: 201,
+      newResponseStatusCode: 200,
+      classification: 'breaking',
+    });
+    // A header that changes along with the code is reported under the new code.
+    const lone200More = listPets([header('Location', { required: true }), header('X-Total')], {
+      response: pet,
+      responseStatusCode: 200,
+    });
+    expect(headerChangesOf(lone201, lone200More)).toEqual([
+      { kind: 'header-added', headerName: 'X-Total', statusCode: 200, classification: 'additive' },
+    ]);
+  });
+
+  it('compares the code only while both specs carry one, and carries no sides while the flag is false', () => {
+    const none = listPets(undefined, {
+      response: { kind: 'primitive', type: 'unknown' },
+      responseStatusCode: undefined,
+    });
+    const change = modified(lone201, none);
+    expect(change).toMatchObject({ responseChanged: true, responseStatusCodeChanged: false });
+    expect(change).not.toHaveProperty('oldResponseStatusCode');
+    expect(change).not.toHaveProperty('newResponseStatusCode');
+    expect(diffOperations('Pets', [lone201], [lone201])).toEqual([]);
+  });
+
+  it('falls back to the media types a lone 2xx offers only when a hand-built IR carries no code', () => {
+    const uncoded = listPets([header('X-Total')], { response: pet, responseStatusCode: undefined });
+    const uncodedTwo: Operation = { ...with200, responseStatusCode: undefined };
+    // Without a code the lone entry pairs with the entry that offers its
+    // media types (none here, so every 2xx does), the primary first.
+    expect(diffOperations('Pets', [uncoded], [uncodedTwo])).toEqual([]);
+    expect(modified(uncodedTwo, uncoded)).toMatchObject({
+      responseHeaderChanges: [
+        { kind: 'header-removed', headerName: 'Location', statusCode: 201, classification: 'breaking' },
+      ],
+      responseStatusCodeChanged: false,
+    });
+    // A lone entry that carries no code reports none.
+    expect(headerChangesOf(uncoded, { ...uncoded, responseHeaders: [] })).toEqual([
+      { kind: 'header-removed', headerName: 'X-Total', classification: 'breaking' },
+    ]);
   });
 });
 
@@ -184,24 +321,26 @@ describe('diffOperations — response headers, one entry at a time', () => {
       listPets([header('X-Total'), header('Location', { required: true })]),
     );
     expect(change.responseHeaderChanges).toEqual([
-      { kind: 'header-added', headerName: 'Location', classification: 'additive' },
+      { kind: 'header-added', headerName: 'Location', statusCode: 200, classification: 'additive' },
     ]);
     expect(change).toMatchObject({ responseHeadersChanged: true, classification: 'additive' });
     // The first header the operation declares is additive too.
     expect(headerChangesOf(listPets(undefined), listPets([header('X-Total', { required: true })]))).toEqual([
-      { kind: 'header-added', headerName: 'X-Total', classification: 'additive' },
+      { kind: 'header-added', headerName: 'X-Total', statusCode: 200, classification: 'additive' },
     ]);
   });
 
   it('reports a header removed as breaking: an accessor the SDK exposed is gone', () => {
     const change = modified(listPets([header('X-Total'), header('Location')]), listPets([header('X-Total')]));
     expect(change.responseHeaderChanges).toEqual([
-      { kind: 'header-removed', headerName: 'Location', classification: 'breaking' },
+      { kind: 'header-removed', headerName: 'Location', statusCode: 200, classification: 'breaking' },
     ]);
     expect(change.classification).toBe('breaking');
     // The last header going is a change to the operation, not a vanished list.
     expect(modified(listPets([header('X-Total')]), listPets(undefined))).toMatchObject({
-      responseHeaderChanges: [{ kind: 'header-removed', headerName: 'X-Total', classification: 'breaking' }],
+      responseHeaderChanges: [
+        { kind: 'header-removed', headerName: 'X-Total', statusCode: 200, classification: 'breaking' },
+      ],
       classification: 'breaking',
     });
   });
@@ -209,10 +348,12 @@ describe('diffOperations — response headers, one entry at a time', () => {
   it('reports a retyped header as breaking, whether primitive or model typed', () => {
     expect(
       headerChangesOf(listPets([header('X-Rate-Limit', { type: integer })]), listPets([header('X-Rate-Limit')])),
-    ).toEqual([{ kind: 'header-type-changed', headerName: 'X-Rate-Limit', classification: 'breaking' }]);
+    ).toEqual([
+      { kind: 'header-type-changed', headerName: 'X-Rate-Limit', statusCode: 200, classification: 'breaking' },
+    ]);
     expect(
       headerChangesOf(listPets([header('X-Meta', { type: pet })]), listPets([header('X-Meta', { type: problem })])),
-    ).toEqual([{ kind: 'header-type-changed', headerName: 'X-Meta', classification: 'breaking' }]);
+    ).toEqual([{ kind: 'header-type-changed', headerName: 'X-Meta', statusCode: 200, classification: 'breaking' }]);
   });
 
   it('reports a format-only change as additive with the two formats, as elsewhere', () => {
@@ -222,6 +363,7 @@ describe('diffOperations — response headers, one entry at a time', () => {
       {
         kind: 'header-format-changed',
         headerName: 'Location',
+        statusCode: 200,
         classification: 'additive',
         details: 'format <unset> → uri',
       },
@@ -237,6 +379,7 @@ describe('diffOperations — response headers, one entry at a time', () => {
         {
           kind: 'header-required-changed',
           headerName: 'X-Total',
+          statusCode: 200,
           classification: 'additive',
           details: 'optional → required',
         },
@@ -248,6 +391,7 @@ describe('diffOperations — response headers, one entry at a time', () => {
         {
           kind: 'header-required-changed',
           headerName: 'X-Total',
+          statusCode: 200,
           classification: 'breaking',
           details: 'required → optional',
         },
@@ -264,6 +408,7 @@ describe('diffOperations — response headers, one entry at a time', () => {
         {
           kind: 'header-deprecated-changed',
           headerName: 'X-Total',
+          statusCode: 200,
           classification: 'additive',
           oldDeprecated: false,
           newDeprecated: true,
@@ -276,6 +421,7 @@ describe('diffOperations — response headers, one entry at a time', () => {
       {
         kind: 'header-deprecated-changed',
         headerName: 'X-Total',
+        statusCode: 200,
         classification: 'additive',
         oldDeprecated: true,
         newDeprecated: false,
@@ -309,9 +455,9 @@ describe('diffOperations — response headers, one entry at a time', () => {
     const after = listPets([header('X-Total', { deprecated: true }), header('X-Request-Id')]);
     expect(modified(before, after)).toMatchObject({
       responseHeaderChanges: [
-        { kind: 'header-added', headerName: 'X-Request-Id', classification: 'additive' },
-        { kind: 'header-removed', headerName: 'X-Next-Cursor', classification: 'breaking' },
-        { kind: 'header-deprecated-changed', headerName: 'X-Total', classification: 'additive' },
+        { kind: 'header-added', headerName: 'X-Request-Id', statusCode: 200, classification: 'additive' },
+        { kind: 'header-removed', headerName: 'X-Next-Cursor', statusCode: 200, classification: 'breaking' },
+        { kind: 'header-deprecated-changed', headerName: 'X-Total', statusCode: 200, classification: 'additive' },
       ],
       classification: 'breaking',
     });
@@ -331,6 +477,7 @@ describe('diffOperations — header names are case-insensitive (RFC 9110 §5.1)'
       {
         kind: 'header-name-changed',
         headerName: 'x-rate-limit',
+        statusCode: 200,
         classification: 'additive',
         oldName: 'X-Rate-Limit',
         newName: 'x-rate-limit',
@@ -357,13 +504,14 @@ describe('diffOperations — header names are case-insensitive (RFC 9110 §5.1)'
     );
     // The `x-foo` that stays pairs with its own spelling, so only `X-Foo` is gone.
     expect(headerChangesOf(both, listPets([header('x-foo', { type: integer })]))).toEqual([
-      { kind: 'header-removed', headerName: 'X-Foo', classification: 'breaking' },
+      { kind: 'header-removed', headerName: 'X-Foo', statusCode: 200, classification: 'breaking' },
     ]);
     // A spelling nothing claims exactly pairs with the next unpaired name of its folding.
     expect(headerChangesOf(both, listPets([header('x-foo', { type: integer }), header('X-FOO')]))).toEqual([
       {
         kind: 'header-name-changed',
         headerName: 'X-FOO',
+        statusCode: 200,
         classification: 'additive',
         oldName: 'X-Foo',
         newName: 'X-FOO',
@@ -564,6 +712,7 @@ describe('diffSpecs — response header flips in behaviorChanges and the summary
         serviceName: 'Pets',
         operationName: 'listPets',
         headerName: 'X-Total',
+        statusCode: 200,
         oldDeprecated: false,
         newDeprecated: true,
         classification: 'additive',

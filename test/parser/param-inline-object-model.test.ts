@@ -21,14 +21,22 @@ import type { SchemaObject } from '../../src/parser/schemas.js';
  * mints a model is now deferred like a response header
  * (`deferParameterModels`) and materialized under a name nothing else owns.
  *
- * "Nothing else" includes every enum name: the component enums, the inline
- * enums every typed site carries, and those a deferred site types. A
- * parameter model named like one of them stepped past nothing before, so
- * the IR declared a model and an enum under one name and an emitter wrote
- * both to one file. The deferred registry now reserves every enum name
- * (`reserveEnumNamesInPlay`, `reserveEnumNames`), and an enum lifted after a
- * model of its name steps to a distinct name (`collectDistinctEnums`), so
- * the first site to carry a name keeps it.
+ * "Nothing else" includes every enum name, under two precedences. An enum a
+ * parameter, a request body, a success body or a pagination field carries —
+ * typed as the operation is built, in the registry before any deferred site
+ * is named (`reserveEnumNames`) — keeps its name wherever the document
+ * declares it: a `status` query enum on a later operation sends an earlier
+ * operation's `status` object to `PetsListPetsStatus`, and the same
+ * operation's to `PetsQueryStatus` (the registry records whose reference
+ * carries the enum). Among the deferred sites — response headers, error
+ * bodies, secondary and fallback bodies, parameter models — document order
+ * decides: each site registers the enums it types as it is resolved, so the
+ * earlier site keeps the name and a later one that derives it steps
+ * (`PetsSearchPetsXMode`, `GetPetError404Body`), while an enum lifted after a
+ * model of its name steps to a distinct name in the collectors
+ * (`collectDistinctEnums`: `PetsOwnerKind2`, `GetPetError404Body` when the
+ * object body comes first). So the IR never declares a model and an enum
+ * under one name.
  */
 
 const dirs: string[] = [];
@@ -294,6 +302,120 @@ describe('a name an enum owns is not a parameter model’s', () => {
     '/pets': { get: { operationId: 'listPets', tags: ['pets'], parameters: listPets, responses: ok } },
     '/pets/search': { get: { operationId: 'searchPets', tags: ['pets'], parameters: searchPets, responses: ok } },
     '/pets/tags': { get: { operationId: 'listPetTags', tags: ['pets'], parameters: listPetTags, responses: ok } },
+  });
+
+  // The four documents the review of #348 tabled, where the enum-name rule of
+  // #333 on the base (every enum typed before the deferred pass is reserved,
+  // the collectors step a lifted enum around a model's name) and this
+  // branch's additions pick different winners: a same-operation clash reads
+  // by location, and among deferred sites the earlier one keeps the name.
+  describe('the review’s four documents, as the merged tree names them', () => {
+    const Pet = { $ref: '#/components/schemas/Pet' };
+    const okPet = { '200': { description: 'ok', ...json(Pet) } };
+
+    it('a header `status` enum and a query `status` object on one operation: by location', async () => {
+      const { spec, warnings } = await parse(
+        'table-1',
+        specDoc(pets([param('status', 'header', en(['on', 'off'])), param('status', 'query', obj({ code: str }))])),
+      );
+      expect(warnings).toEqual([]);
+      expect(paramTypes(opsOf(spec).listPets)).toEqual({
+        'query:status': 'PetsQueryStatus',
+        'header:status': 'PetsStatus',
+      });
+      expect(enumValues(spec, 'PetsStatus')).toEqual(['on', 'off']);
+      expect(fieldsOf(spec, 'PetsQueryStatus')).toEqual({ code: 'string' });
+      expectSound(spec);
+    });
+
+    it('`get-pet` enum 404, then `getPet` object 404: the enum keeps the stem, the object steps', async () => {
+      const { spec, warnings } = await parse(
+        'table-2',
+        specDoc(
+          {
+            '/pet/{petId}': {
+              get: {
+                operationId: 'get-pet',
+                tags: ['pets'],
+                parameters: [param('petId', 'path', str)],
+                responses: { ...okPet, '404': { description: 'nf', ...json(en(['gone', 'missing'])) } },
+              },
+            },
+            '/pets/{petId}': {
+              get: {
+                operationId: 'getPet',
+                tags: ['pets'],
+                parameters: [param('petId', 'path', str)],
+                responses: { ...okPet, '404': { description: 'nf', ...json(obj({ reason: str })) } },
+              },
+            },
+          },
+          { Pet: obj({ name: str }) },
+        ),
+      );
+      expect(warnings).toEqual([]);
+      const byPath = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.path, op]));
+      expect(show(byPath['/pet/{petId}'].errors[0].type!)).toBe('GetPetError404');
+      expect(show(byPath['/pets/{petId}'].errors[0].type!)).toBe('GetPetError404Body');
+      expect(enumValues(spec, 'GetPetError404')).toEqual(['gone', 'missing']);
+      expect(fieldsOf(spec, 'GetPetError404Body')).toEqual({ reason: 'string' });
+      expectSound(spec, ['Pet']);
+    });
+
+    it('an `X-Mode` response-header enum, then an `X-Mode` header parameter object on a later operation', async () => {
+      const { spec, warnings } = await parse(
+        'table-3',
+        specDoc(
+          {
+            '/pets': {
+              get: {
+                operationId: 'listPets',
+                tags: ['pets'],
+                responses: {
+                  '200': { description: 'ok', ...json(Pet), headers: { 'X-Mode': { schema: en(['fast', 'slow']) } } },
+                },
+              },
+            },
+            '/pets/search': {
+              get: {
+                operationId: 'searchPets',
+                tags: ['pets'],
+                parameters: [param('X-Mode', 'header', obj({ lane: str }))],
+                responses: ok,
+              },
+            },
+          },
+          { Pet: obj({ name: str }) },
+        ),
+      );
+      expect(warnings).toEqual([]);
+      const ops = opsOf(spec);
+      expect(show(ops.listPets.responseHeaders![0].type)).toBe('PetsXMode');
+      expect(paramTypes(ops.searchPets)).toEqual({ 'header:X-Mode': 'PetsSearchPetsXMode' });
+      expect(enumValues(spec, 'PetsXMode')).toEqual(['fast', 'slow']);
+      expect(fieldsOf(spec, 'PetsSearchPetsXMode')).toEqual({ lane: 'string' });
+      expectSound(spec, ['Pet']);
+    });
+
+    it('a `filter` object with a `status` enum, then a `filterStatus` object on a later operation', async () => {
+      const { spec, warnings } = await parse(
+        'table-4',
+        specDoc(
+          pets(
+            [param('filter', 'query', obj({ status: en(['draft', 'published']) }))],
+            [param('filterStatus', 'query', obj({ code: str }))],
+          ),
+        ),
+      );
+      expect(warnings).toEqual([]);
+      const ops = opsOf(spec);
+      expect(paramTypes(ops.listPets)).toEqual({ 'query:filter': 'PetsFilter' });
+      expect(paramTypes(ops.searchPets)).toEqual({ 'query:filterStatus': 'PetsSearchPetsFilterStatus' });
+      expect(fieldsOf(spec, 'PetsFilter')).toEqual({ status: 'PetsFilterStatus' });
+      expect(enumValues(spec, 'PetsFilterStatus')).toEqual(['draft', 'published']);
+      expect(fieldsOf(spec, 'PetsSearchPetsFilterStatus')).toEqual({ code: 'string' });
+      expectSound(spec);
+    });
   });
 
   it('a component enum: the model is qualified by the operation, its nested enum with it', async () => {

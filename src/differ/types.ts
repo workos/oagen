@@ -79,7 +79,7 @@ export type DeprecatedNode =
       operationName: string;
       /** The header's name as written in the new spec. */
       headerName: string;
-      /** The response entry's status code; unset for a fallback response and for a lone 2xx, as on `ResponseHeaderChange`. */
+      /** The response entry's status code, as on `ResponseHeaderChange`; unset for a fallback response. */
       statusCode?: number;
       /** Set instead of `statusCode` for the `default` or a range response. */
       fallback?: 'default' | StatusRange;
@@ -293,12 +293,25 @@ export interface OperationModified {
    * The body stayed but its `requestBodyEncoding` differs: the wire format
    * the SDK serializes it as (`json`, `form-data`, `form-urlencoded`,
    * `binary` or `text`), read from the media type the body is declared
-   * under. Always breaking: an SDK built for the old spec keeps serializing
-   * and labelling the body as that spec said (`application/json` where the
-   * server now reads `application/x-www-form-urlencoded`). Compared only
-   * while both specs carry a body, as `requestBodyRequiredChanged` is; a
-   * body appearing or disappearing takes its encoding with it and is
-   * `requestBodyChanged` alone.
+   * under. An SDK built for the old spec keeps serializing and labelling the
+   * body as that spec said, so the change is breaking when the new spec no
+   * longer accepts that representation — the media type the old body was
+   * read from is gone from `requestBodyContentTypes`, or its shape changed,
+   * compared as `retyped` is (`application/json` where the server now reads only
+   * `application/x-www-form-urlencoded`) — and additive when it still does,
+   * as when a media type the parser prefers is added beside it
+   * (`application/json` added beside a kept
+   * `application/x-www-form-urlencoded`: existing callers keep sending the
+   * form body). A body without media-type lists reads as breaking. Compared
+   * only while both specs carry a body, as `requestBodyRequiredChanged` is;
+   * a body appearing or disappearing takes its encoding with it and is
+   * `requestBodyChanged` alone. Reported beside
+   * `requestBodyContentTypesChanged`, which lists the media types callers
+   * may choose from: a body moving from `application/json` to
+   * `application/x-www-form-urlencoded` sets both (the JSON media type is
+   * removed, the form one added), while a media type changing essence
+   * within one encoding (`application/json` → `application/vnd.api+json`)
+   * sets `requestBodyContentTypesChanged` alone.
    */
   requestBodyEncodingChanged: boolean;
   /**
@@ -309,6 +322,15 @@ export interface OperationModified {
    */
   oldRequestBodyEncoding?: RequestBodyEncoding;
   newRequestBodyEncoding?: RequestBodyEncoding;
+  /**
+   * True when, both specs declaring a body, it gained or lost a media type
+   * or a secondary media type's body type changed;
+   * `requestBodyContentTypeChange` says which. A body appearing or
+   * disappearing is `requestBodyChanged` alone.
+   */
+  requestBodyContentTypesChanged: boolean;
+  /** Present exactly when `requestBodyContentTypesChanged`. */
+  requestBodyContentTypeChange?: RequestBodyContentTypesChange;
   httpMethodChanged: boolean;
   pathChanged: boolean;
   paginatedChanged: boolean;
@@ -385,7 +407,13 @@ export interface OperationModified {
   /**
    * The operation's `tags` differ, compared in document order (an absent key
    * is an empty list). Always additive: tags group and document a method and
-   * change nothing a caller compiles against.
+   * change nothing a caller compiles against. Operations are matched by
+   * name within a service, so this flag only ever carries an edit that
+   * leaves the operation in a service of the same name; a first-tag change
+   * that the parser's grouping files under another service leaves nothing
+   * to match, and the diff reports the move instead — removed from the old
+   * service and added to the new one, or `service-removed` and
+   * `service-added` when a service goes or comes with it.
    */
   tagsChanged: boolean;
   /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
@@ -404,6 +432,21 @@ export interface OperationModified {
    */
   responseHeadersChanged: boolean;
   responseHeaderChanges: ResponseHeaderChange[];
+  /**
+   * `Operation.responseStatusCode` — the status code the primary success
+   * response is read from — differs while both specs carry one: a lone
+   * `201` that became a lone `200`, or a `201` that became the primary
+   * beside a `200` whose body is no longer typed. Breaking: the status an
+   * operation succeeds with is what an SDK checks or documents (the IR
+   * carries it for that), and the server now answers with another one.
+   * Compared only while both sides carry a code, as `requestBodyRequired`
+   * is while both carry a body; an operation gaining or losing its only
+   * 2xx/3xx is not a move. Not mirrored into `behaviorChanges`.
+   */
+  responseStatusCodeChanged: boolean;
+  /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
+  oldResponseStatusCode?: number;
+  newResponseStatusCode?: number;
   /** The `default` or a `1XX`–`5XX` range response was added, removed, or changed type. */
   fallbackResponsesChanged: boolean;
   classification: 'additive' | 'breaking';
@@ -425,11 +468,13 @@ export interface OperationModified {
  *
  * Response entries pair up between the two specs exactly as they do for
  * `responseContentTypeChanges`: by status code — every 2xx entry, the
- * primary among them, and every error — with `statusCode` set; a lone 2xx,
- * which carries no code in the IR, with the entry of the other spec that
- * offers its media types, else with that spec's primary, reported with
- * `statusCode` unset when it is the new spec's lone entry; the `default` and
- * range responses by key, with `fallback` set. Within an entry, headers pair
+ * primary among them (a lone 2xx by `Operation.responseStatusCode`), and
+ * every error — with `statusCode` set; two lone primaries of different
+ * codes pair with each other, the move reported once as
+ * `responseStatusCodeChanged`; a lone 2xx that carries no code (a hand-built
+ * IR) pairs with the entry of the other spec that offers its media types,
+ * else with that spec's primary, and is reported with `statusCode` unset;
+ * the `default` and range responses by key, with `fallback` set. Within an entry, headers pair
  * by name case-insensitively (RFC 9110 §5.1, `foldHeaderName`), so
  * `X-Rate-Limit` and `x-rate-limit` are one header: a pair whose written
  * names differ is reported as `header-name-changed` with `oldName`/`newName`
@@ -456,7 +501,11 @@ export interface ResponseHeaderChange {
     | 'header-deprecated-changed';
   /** The header's name as written in the spec that declares it: the new spec's for a header both declare. */
   headerName: string;
-  /** The response entry's status code; unset for a fallback response and for a lone 2xx, which carries no code in the IR. */
+  /**
+   * The response entry's status code — `Operation.responseStatusCode` for a
+   * lone 2xx. Unset for a fallback response, and for a lone 2xx of a
+   * hand-built IR that carries no code.
+   */
   statusCode?: number;
   /** Set instead of `statusCode` for the `default` or a `1XX`–`5XX` range response, which carry no code. */
   fallback?: 'default' | StatusRange;
@@ -481,24 +530,30 @@ export interface ResponseHeaderChange {
  * How one response entry's media types changed between two specs. Entries
  * pair up by status code — 2xx entries from `successResponses`, the primary
  * among them, errors from `errors` — so a primary that changes status still
- * pairs with the entry of its code; a lone 2xx carries no code in the IR and
- * is paired with the entry of the other spec that offers its media types,
- * else with that spec's primary — reported with `statusCode` unset when it is
- * the new spec's lone entry. The `default` and range responses pair by key
+ * pairs with the entry of its code; a lone 2xx pairs by its
+ * `Operation.responseStatusCode` and is reported with that code, and two
+ * lone primaries of different codes pair with each other
+ * (`responseStatusCodeChanged` reports the move); a lone 2xx that carries no
+ * code (a hand-built IR) is paired with the entry of the other spec that
+ * offers its media types, else with that spec's primary — reported with
+ * `statusCode` unset when it is the new spec's lone entry. The `default` and range responses pair by key
  * and are reported with `fallback` set. A 2xx the old spec declared and the
  * new does not is reported with its media types `removed`; one the new spec
  * adds is no media-type change. Media types are compared by essence —
  * `type/subtype`, case folded, parameters stripped (`mediaTypeEssence`, the
  * rule the parser types a body by) — and order aside: reordering them is no
  * change, and neither is a key that only changed case (`Text/HTML`) or
- * gained, lost or respelled a parameter (`application/problem+json;
- * charset=utf-8`). Each media type is reported as written in the spec that
- * declares it (`retyped` lists the new spec's spelling). Two keys of one
+ * gained, lost or respelled `charset` (`application/problem+json;
+ * charset=utf-8`); a pair whose other parameters differ is
+ * `reparameterized`, additive. Each media type is reported as written in
+ * the spec that declares it (`retyped` lists the new spec's spelling). Two keys of one
  * essence declared side by side (`application/json` beside
- * `application/json; charset=utf-8`) stay two media types: each pairs with
- * the key spelled the same way on the other side, else with the other
- * side's next unpaired key of its essence, and one left over is `added` or
- * `removed`.
+ * `application/json; charset=utf-8`) stay two media types: each pairs, in
+ * this order of preference, with the key spelled the same way on the other
+ * side, else one of its essence with the same parameters other than
+ * `charset`, else one of its essence whose body is the same shape, else the
+ * other side's next unpaired key of its essence; one left over is `added`
+ * or `removed`.
  */
 export interface ResponseContentTypesChange {
   statusCode?: number;
@@ -509,12 +564,74 @@ export interface ResponseContentTypesChange {
   /** Media types the old spec declared and the new does not: a representation callers could ask for is gone. */
   removed: string[];
   /**
-   * Media types declared by both whose body type changed, other than the one
-   * the entry's own `type` is read from, which `responseChanged` and
-   * `errorsChanged` already report.
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one the entry's
+   * own `type` is read from, which `responseChanged` and `errorsChanged`
+   * already report.
    */
   retyped: string[];
+  /**
+   * Media types declared by both whose parameters other than `charset`
+   * differ (`application/pdf; version=1.7` → `; version=2.0`), both
+   * spellings as written: the body is typed the same, but the parameter
+   * may select another representation, so the change is kept visible.
+   * Additive. Case, whitespace, parameter order and `charset` are not
+   * differences.
+   */
+  reparameterized: Array<{ from: string; to: string }>;
   /** `breaking` when anything was removed or retyped, else `additive`. */
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * How an operation's or a webhook's request body media types changed: the
+ * `content` keys of its Request Body Object, compared the way a response
+ * entry's are (see `ResponseContentTypesChange`) — by essence, order aside,
+ * each reported as written in the spec that declares it, two keys of one
+ * essence kept apart. Compared only while both specs declare a body: one
+ * appearing or disappearing is `requestBodyChanged` alone, and the body
+ * `requestBody` is read from is left to `requestBodyChanged` when it changes
+ * type, so `retyped` only ever lists a secondary media type. Classified
+ * from the node's side. For an operation, the caller sends the body: a
+ * media type it could send that is gone, or whose body changed type, is
+ * breaking; one it can newly send is additive. For a webhook, the handler
+ * decodes the body the sender chose: a media type the sender can newly use,
+ * or whose body changed type, is breaking; one it can no longer use is
+ * additive.
+ */
+export interface RequestBodyContentTypesChange {
+  /** Media types the new spec declares and the old did not: a representation the caller can newly send. */
+  added: string[];
+  /** Media types the old spec declared and the new does not: a representation the caller could send is gone. */
+  removed: string[];
+  /**
+   * Media types declared by both whose body's shape changed — two model
+   * refs are compared field by field through the two specs' models, nested
+   * models and enums included, so a model that was only renamed (a
+   * parameter edit on a key declared beside another spelling of its essence
+   * renames the model the parser mints for it) is no retype and surfaces as
+   * `model-removed` + `model-added` instead — other than the one
+   * `requestBody` is read from, which `requestBodyChanged` reports.
+   */
+  retyped: string[];
+  /**
+   * Media types declared by both whose parameters other than `charset`
+   * differ (`application/vnd.pets+json; version=1` → `; version=2`), both
+   * spellings as written: the body is typed the same, but the parameter
+   * may select another representation, so the change is kept visible.
+   * Additive on either side. Case, whitespace, parameter order and
+   * `charset` are not differences.
+   */
+  reparameterized: Array<{ from: string; to: string }>;
+  /**
+   * From the caller's side on an operation: `breaking` when anything was
+   * removed or retyped, else `additive`. From the receiver's side on a
+   * webhook: `breaking` when anything was added or retyped, else `additive`.
+   */
   classification: 'additive' | 'breaking';
 }
 
@@ -557,16 +674,32 @@ export interface WebhookModified {
   name: string;
   httpMethod: string;
   paramChanges: ParamChange[];
-  /** True when the payload's type, encoding, or `requestBodyRequired` changed; `details` says which. */
+  /**
+   * True when the payload's type, encoding or `requestBodyRequired` changed,
+   * or — both specs declaring a payload — the media types the sender may use
+   * did; `details` says which.
+   */
   requestBodyChanged: boolean;
   /**
    * Set exactly when the payload's encoding changed (`details` reads
    * `encoding json → form-urlencoded`): the encoding on each side, old →
-   * new, as an `operation-modified` change carries them. Breaking: the
-   * handler decodes a different wire format.
+   * new, as an `operation-modified` change carries them. Breaking when the
+   * representation the sender now uses — the media type the new payload is
+   * read from, with its shape — is not one the old spec declared with that
+   * shape, so the handler decodes a wire format it never saw; additive when
+   * the old spec already declared it. A payload without media-type lists
+   * reads as breaking. Compared only while both specs declare a payload, as
+   * on an operation: a payload appearing or disappearing is `payload added`
+   * / `payload removed` in `details` and carries neither field.
    */
   oldRequestBodyEncoding?: RequestBodyEncoding;
   newRequestBodyEncoding?: RequestBodyEncoding;
+  /**
+   * Present exactly when the payload's media types changed: which were
+   * added, removed or retyped, classified from the receiver's side (see
+   * `RequestBodyContentTypesChange`).
+   */
+  requestBodyContentTypeChange?: RequestBodyContentTypesChange;
   /** True when the set of status codes the sender accepts changed; `details` says which (a code removed is breaking). */
   responsesChanged: boolean;
   /**
@@ -674,25 +807,30 @@ export interface ParamChange {
  * URLs are compared through `normalizeServerUrl` (RFC 3986: scheme and host
  * case, a default or empty port, a bare authority's `/`, percent-encoding
  * case), so a `baseUrl` that only changed in one of those ways is not
- * reported; both are carried as written. A document that declares no server
- * and one whose only server is `/` without variables both have OpenAPI's
- * default server and no default host, so nothing is reported between them
- * (#291).
+ * reported; both are carried as written. The comparison also reads `''` and
+ * `/` as one address — OpenAPI's default, whether the document declares no
+ * server, writes `/` out, or resolves its first server to `/` — so nothing
+ * is reported between those (#291).
  */
 export interface BaseUrlChanged {
   kind: 'base-url-changed';
-  /** As written in the old document; `''` when it declared no server, `/` when it wrote OpenAPI's default out, which means the same. */
+  /** As written in the old document; `''` when it declared no server, `/` when its first server resolved to `/`, which means the same. */
   oldBaseUrl: string;
-  /** As written in the new document; `''` when it declares no server, `/` when it writes OpenAPI's default out, which means the same. */
+  /** As written in the new document; `''` when it declares no server, `/` when its first server resolves to `/`, which means the same. */
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document declared no server, or only `/`: every existing caller had to
+   * document's default address was `''` or `/`: every existing caller had to
    * name a host themselves and still can.
    */
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * A server the new document lists and the old did not. The `/` a document
+ * is only implied to have — its list means OpenAPI's default — is never
+ * reported here; `/` listed beside another server is, like any other (#291).
+ */
 export interface ServerAdded {
   kind: 'server-added';
   /** The URL template as written in the new document, placeholders included. */
@@ -700,6 +838,11 @@ export interface ServerAdded {
   classification: 'additive';
 }
 
+/**
+ * A server the old document listed and the new does not. The `/` a document
+ * is only implied to have is never reported here; `/` listed beside another
+ * server is, like any other (#291).
+ */
 export interface ServerRemoved {
   kind: 'server-removed';
   /** The URL template as written in the old document, placeholders included. */
@@ -732,7 +875,8 @@ export interface ServerModified {
  * in the template, so the resolved URL a caller built on moves) and additive
  * when it does not: a variable the template never references cannot reach
  * any resolved URL, so nothing a caller relied on is taken away. In that
- * additive case `details` says so.
+ * additive case — those four kinds only — `details` says so; the three kinds
+ * that are additive for any variable keep their shape.
  */
 export interface ServerVariableChange {
   kind:
@@ -777,10 +921,12 @@ export interface DocumentSecurityChanged {
   /** The new document's list; `[]` when it declares none. */
   newSecurity: SecurityRequirementSet[];
   /**
-   * Read from the caller's side, as for an operation: breaking when a
-   * request built for the old list no longer satisfies the new one. When a
-   * webhook in either document inherits the default, read from the
-   * receiver's side as well, and breaking if either side breaks.
+   * Read from each side that inherits the default, by the rule the
+   * inheriting node would be read by (`classifySecurityChange`): the
+   * caller's when an operation in either document declares no `security`
+   * of its own, the receiver's when a webhook does; breaking if any such
+   * side breaks. When nothing inherits it, no request reads the default,
+   * so the change is additive.
    */
   classification: 'additive' | 'breaking';
 }

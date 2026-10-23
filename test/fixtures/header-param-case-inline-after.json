@@ -1,0 +1,50 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets", "version": "1" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "listPets",
+        "parameters": [
+          { "name": "x-ratelimit-policy", "in": "header", "schema": { "type": "string", "enum": ["burst", "sustained"] } },
+          {
+            "name": "x-pet-meta",
+            "in": "header",
+            "schema": { "type": "object", "properties": { "etag": { "type": "string" } } }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "headers": {
+              "x-ratelimit-scope": { "schema": { "type": "string", "enum": ["user", "org"] } },
+              "x-pet-origin": { "schema": { "type": "object", "properties": { "region": { "type": "string" } } } }
+            },
+            "content": { "application/json": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "petAdopted": {
+      "post": {
+        "operationId": "petAdopted",
+        "parameters": [
+          { "name": "x-pet-signature-algo", "in": "header", "schema": { "type": "string", "enum": ["sha256", "sha512"] } },
+          {
+            "name": "x-pet-meta",
+            "in": "header",
+            "schema": { "type": "object", "properties": { "etag": { "type": "string" } } }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": { "schema": { "type": "object", "properties": { "pet_id": { "type": "string" } } } }
+          }
+        },
+        "responses": { "200": { "description": "Acknowledged" } }
+      }
+    }
+  }
+}

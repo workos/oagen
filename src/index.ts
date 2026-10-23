@@ -13,6 +13,8 @@ export type {
   ResponseHeader,
   ResponseContent,
   ResponseBodyType,
+  RequestBodyContent,
+  RequestBodyType,
   DefaultResponse,
   RangeResponse,
   StatusRange,
@@ -57,6 +59,8 @@ export {
   collectRequestBodyModels,
   collectResponseHeaders,
   collectResponseBodyTypes,
+  collectAlternateRequestBodyContents,
+  collectRequestBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
   collectOperationTypeRefs,
@@ -102,12 +106,14 @@ export { defaultSdkBehavior, mergeSdkBehavior } from './ir/sdk-behavior.js';
 // Server URL templates, their RFC 3986 comparison form and server-list equality
 export type { ResolvedServerUrl } from './ir/server-url.js';
 export {
+  baseUrlBeyondDefault,
+  isDefaultServerEntry,
   isDefaultServerList,
   normalizeServerUrl,
   resolveServerUrl,
   serverListsEqual,
   serverUrlPlaceholders,
-  serversBeyondDefault,
+  serversOrDefault,
 } from './ir/server-url.js';
 
 // Parameter identity: location + name, a header's name case-folded
@@ -161,15 +167,19 @@ export type {
   ParamLocation,
   ResponseContentTypesChange,
   ResponseHeaderChange,
+  RequestBodyContentTypesChange,
   BehaviorChange,
   ParamDefaultChanged,
   DeprecatedChanged,
   DeprecatedNode,
+  SecurityChanged,
+  SecurityNode,
   BaseUrlChanged,
   ServerAdded,
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  DocumentSecurityChanged,
 } from './differ/types.js';
 
 // Core parse + generate

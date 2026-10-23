@@ -4,7 +4,7 @@ import { diffServers } from '../../src/differ/servers.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import { isDefaultServerList, resolveServerUrl, serversBeyondDefault } from '../../src/ir/server-url.js';
+import { isDefaultServerList, resolveServerUrl, serversOrDefault } from '../../src/ir/server-url.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Operation, ServerEntry, ServerVariable } from '../../src/ir/types.js';
 
@@ -264,6 +264,62 @@ describe('diffServers – a variable the template never references (#292)', () =
       ]);
     });
 
+    it("reads each matched pair's own template, so one variable name is additive on one server and breaking on another (MichaelDeBoey)", () => {
+      const unreferencing = 'https://{env}.pets.example.com';
+      const referencing = 'https://pets.example.com:{port}';
+      const old = [
+        server(unreferencing, { env: { default: 'prod' }, port: { default: '443' } }),
+        server(referencing, { port: { default: '443' } }),
+      ];
+      const next = [
+        server(unreferencing, { env: { default: 'prod' }, port: { default: '8443' } }),
+        server(referencing, { port: { default: '8443' } }),
+      ];
+      // servers[0] still resolves to https://prod.pets.example.com, so no base-url-changed.
+      expect(diffServers(spec(old), spec(next))).toEqual([
+        {
+          kind: 'server-modified',
+          url: unreferencing,
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'port',
+              classification: 'additive',
+              oldDefault: '443',
+              newDefault: '8443',
+              details: `default changed from '443' to '8443'; ${reason('port')}`,
+            },
+          ],
+          classification: 'additive',
+        },
+        {
+          kind: 'server-modified',
+          url: referencing,
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'port',
+              classification: 'breaking',
+              oldDefault: '443',
+              newDefault: '8443',
+              details: "default changed from '443' to '8443'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+      // The same two servers, with the referencing one first: its port moves the default host too.
+      expect(diffServers(spec([old[1], old[0]]), spec([next[1], next[0]]))).toMatchObject([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://pets.example.com:443',
+          newBaseUrl: 'https://pets.example.com:8443',
+        },
+        { kind: 'server-modified', url: referencing, classification: 'breaking' },
+        { kind: 'server-modified', url: unreferencing, classification: 'additive' },
+      ]);
+    });
+
     it('counts a placeholder anywhere in the template, the path included, and one used more than once', () => {
       const inPath = 'https://api.example.com/{version}';
       expect(
@@ -433,7 +489,7 @@ describe("OpenAPI's default server with a variable (#291 read by the #292 rule)"
 
   it('is the default: `/` references no variable, so writing one on it declares nothing beyond the default', () => {
     expect(isDefaultServerList(rootWithPort)).toBe(true);
-    expect(serversBeyondDefault(rootWithPort)).toEqual([]);
+    expect(serversOrDefault(rootWithPort)).toEqual([{ url: '/' }]);
   });
 
   it('reports nothing against a document without servers or one that writes `/` out, in either direction', () => {
