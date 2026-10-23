@@ -63,19 +63,3 @@ export function operationExtensionsEntry(op: object): { extensions?: Extensions 
   const extensions = extensionsOf(op, OPERATION_CONSUMED_EXTENSIONS);
   return extensions ? { extensions } : {};
 }
-
-/**
- * `inner` carrying the wrapper's extensions beside its own, the wrapper's
- * value winning for a key both declare; `inner` itself when the wrapper
- * declares none. A wrapper the parser collapses — a nullable
- * `oneOf`/`anyOf`, a single-member `allOf` — is the schema the document
- * wrote for the property, parameter, header or body, so its keys reach the
- * model built from the branch and the enum lifted from it, as its link does
- * (`withWrapperExternalDocs`); the keys the parser consumes stay where they
- * are read. Every site that collapses a wrapper reads this
- * (`unwrapNullableField`, `unwrappedAllOfMember`, `withWrapperDocs`).
- */
-export function withWrapperExtensions(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
-  const extensions = extensionsOf(wrapper, SCHEMA_CONSUMED_EXTENSIONS);
-  return extensions ? { ...inner, ...extensions } : inner;
-}
