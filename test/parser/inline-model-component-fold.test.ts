@@ -655,7 +655,10 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
             operationId: 'shared',
             parameters: [{ name: 'X-Comp', in: 'header', schema: { $ref: '#/components/schemas/Comp' } }],
             requestBody: {
-              content: { 'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } } },
+              content: {
+                'application/json': { schema: { oneOf: [titled('Comp', 'c', 'c'), titled('B', 'b', 'b')] } },
+                'application/xml': { schema: obj({ x: str }) },
+              },
             },
             responses: { '200': { description: 'ok' } },
           },
@@ -667,6 +670,23 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
   it('renames the shared variant on both and keeps an explicit `$ref` to the component on both', async () => {
     const { spec, warnings } = await parse('shared-webhooks', doc);
     expect(spec.webhooks?.map((w) => w.name)).toEqual(['pet.adopted', 'pet.returned']);
+    // The second key's copy carries every field of the first's — the declared
+    // media types and the secondary payload among them — with every type
+    // reference cloned once, so the content entry that is the payload's own
+    // reference shares the copy as it shares the original.
+    const [first, second] = spec.webhooks!;
+    expect(Object.keys(second!).sort()).toEqual(Object.keys(first!).sort());
+    expect(second!.requestBodyContentType).toBe('application/json');
+    expect(second!.requestBodyContentTypes).toEqual(['application/json', 'application/xml']);
+    expect(second!.requestBodyContents).toEqual(first!.requestBodyContents);
+    expect(second!.requestBodyContents?.map((c) => c.contentType)).toEqual(['application/json', 'application/xml']);
+    for (const webhook of [first!, second!]) {
+      const json = webhook.requestBodyContents?.find((c) => c.contentType === 'application/json');
+      expect(json?.type === webhook.requestBody, webhook.name).toBe(
+        first!.requestBodyContents?.find((c) => c.contentType === 'application/json')?.type === first!.requestBody,
+      );
+    }
+    expect(second!.requestBody).not.toBe(first!.requestBody);
     for (const webhook of spec.webhooks ?? []) {
       expect(webhook.requestBody, webhook.name).toEqual({
         kind: 'union',
@@ -685,6 +705,7 @@ describe('two webhook keys sharing one path item (Greptile round 2)', () => {
     expect(describeModels(spec).sort()).toEqual([
       'B { kind: literal, b: string }',
       'Comp { id: string }',
+      'SharedApplicationXmlPayload { x: string }',
       'SharedComp { kind: literal, c: string }',
     ]);
     expect(warnings).toEqual([renamed('Comp', 'SharedComp')]);
