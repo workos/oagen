@@ -142,6 +142,30 @@ describe('operation callbacks (issue #272)', () => {
       expect(warnings()[0]).toContain('`callbacks` on createPet are not read ("adopted")');
     });
 
+    it('labels colliding paths by their raw path, in an OpenAPI 3.0 document, and ignores a null map', async () => {
+      // The reviewer's cases: `GET /pets` and `GET /api/pets` flatten to one
+      // operation name, yet each warning names the path as written; a 3.0
+      // document is read the same way; `callbacks: null` declares nothing.
+      const spec = await parseJson({
+        openapi: '3.0.3',
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            get: opWith({ petListed: callbackPosting() }),
+            post: opWith(null),
+          },
+          '/api/pets': { get: opWith({ apiPetListed: callbackPosting() }) },
+        },
+      });
+
+      expect(operationNames(spec)).toHaveLength(3);
+      expect(spec.models).toEqual([]);
+      expect(warnings()).toEqual([
+        expect.stringContaining('`callbacks` on GET /pets are not read ("petListed")'),
+        expect.stringContaining('`callbacks` on GET /api/pets are not read ("apiPetListed")'),
+      ]);
+    });
+
     it('is silent for an empty `callbacks` map and for a components/callbacks entry nothing references', async () => {
       const spec = await parseJson({
         ...issueRepro,
