@@ -127,6 +127,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `example` — Example value annotation
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or argument checks
 - `examples` — Every example value (the list `example` is drawn from)
+- `contentType` — The media type a `content`-declared parameter's value is serialized in (`application/json`): the value must be encoded in it (JSON) rather than by `style`/`explode`; absent for a `schema` parameter
 
 #### Model
 

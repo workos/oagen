@@ -73,6 +73,9 @@ const paramsOf = (op: Operation): Parameter[] => [
   ...(op.cookieParams ?? []),
   ...(op.bodyOwnedQueryParams ?? []),
 ];
+/** A parameter without the media type it is serialized in, to compare a `content` twin with its `schema` twin. */
+const withoutContentType = (p: Parameter): Partial<Parameter> =>
+  Object.fromEntries(Object.entries(p).filter(([key]) => key !== 'contentType'));
 const namesIn = (ref: TypeRef, kind: 'model' | 'enum'): string[] => {
   const names: string[] = [];
   walkTypeRef(ref, { [kind]: (node: { name: string }) => names.push(node.name) });
@@ -209,7 +212,11 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
 
     const { createNote, copyNote } = opsOf(spec);
     expect(paramsOf(createNote).map((p) => p.name)).toEqual(['id', 'mood', 'X-Trace', 'session', 'body']);
-    expect(paramsOf(createNote)).toEqual(paramsOf(copyNote));
+    // Identical but for the media type the value is serialized in, which
+    // only the `content` twin carries.
+    expect(paramsOf(createNote).map(withoutContentType)).toEqual(paramsOf(copyNote));
+    expect(paramsOf(createNote).map((p) => p.contentType)).toEqual(Array(5).fill('application/json'));
+    expect(paramsOf(copyNote).some((p) => 'contentType' in p)).toBe(false);
     expect(paramsOf(createNote).map((p) => typeLabel(p.type))).toEqual([
       'primitive integer',
       'enum NotesMood',
@@ -252,7 +259,8 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
     );
 
     const { listNotes, listRecentNotes } = opsOf(spec);
-    expect(paramsOf(listNotes)).toEqual(paramsOf(listRecentNotes));
+    expect(paramsOf(listNotes).map(withoutContentType)).toEqual(paramsOf(listRecentNotes));
+    expect(paramsOf(listNotes).map((p) => p.contentType)).toEqual(Array(3).fill('application/json'));
     // `prefs` is singularized by the model naming, as for a `schema` parameter.
     expect(paramsOf(listNotes).map((p) => typeLabel(p.type))).toEqual([
       'model NotesFilter',
@@ -268,6 +276,77 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
       ['NotesPrefOwner', ['id']],
     ]);
     expect(warn).not.toHaveBeenCalled();
+    expectSound(spec);
+  });
+
+  it('carries the content key the value is serialized under, as written, wherever a parameter is read from content', async () => {
+    const spec = await parseDocument(
+      document(
+        {
+          '/notes/{id}': {
+            // A path-level parameter, merged into the operation.
+            parameters: [
+              {
+                name: 'id',
+                in: 'path',
+                required: true,
+                ...content('application/json; charset=utf-8', { schema: { type: 'integer' } }),
+              },
+            ],
+            ...getOp('listNotes', [
+              { $ref: '#/components/parameters/Mood' },
+              // A schema-less text/plain entry is read: the string is sent as text.
+              { name: 'note', in: 'query', ...content('TEXT/PLAIN; charset=utf-8') },
+              { name: 'plain', in: 'query', schema: { type: 'string' } },
+              {
+                name: 'both',
+                in: 'query',
+                schema: { type: 'integer' },
+                ...content('application/json', { schema: mood }),
+              },
+              // Not read: the string is sent as written, so no media type.
+              { name: 'blob', in: 'header', ...content('image/png', { schema: { type: 'string' } }) },
+            ]),
+          },
+        },
+        {
+          components: {
+            parameters: {
+              Mood: { name: 'mood', in: 'query', ...content('application/vnd.api+json', { schema: mood }) },
+            },
+          },
+          webhooks: {
+            noteAdded: {
+              post: {
+                parameters: [
+                  { name: 'X-Mood', in: 'header', ...content('application/json', { schema: mood }) },
+                  { name: 'tag', in: 'query', schema: { type: 'string' } },
+                ],
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+        },
+      ),
+    );
+
+    const { listNotes } = opsOf(spec);
+    expect(paramsOf(listNotes).map((p) => [p.name, p.contentType])).toEqual([
+      ['id', 'application/json; charset=utf-8'],
+      ['mood', 'application/vnd.api+json'],
+      ['note', 'TEXT/PLAIN; charset=utf-8'],
+      ['plain', undefined],
+      ['both', undefined],
+      ['blob', undefined],
+    ]);
+    // Absent, not set to `undefined`, where it does not apply.
+    for (const name of ['plain', 'both', 'blob']) {
+      expect(paramsOf(listNotes).find((p) => p.name === name)).not.toHaveProperty('contentType');
+    }
+    const [noteAdded] = spec.webhooks!;
+    expect(noteAdded.headerParams[0]).toMatchObject({ name: 'X-Mood', contentType: 'application/json' });
+    expect(noteAdded.queryParams[0]).not.toHaveProperty('contentType');
+    expect(warnings()).toEqual([unreadWarning('Parameter "blob" (in: header) on listNotes', 'image/png')]);
     expectSound(spec);
   });
 
@@ -483,13 +562,17 @@ describe('a webhook parameter declared with `content` (the `mintParameter` twin)
       responses: { '200': { description: 'ok' } },
     },
   });
-  /** A webhook's parameter types and models with its stem replaced, so two stems can be compared. */
+  /**
+   * A webhook's parameter types and models with its stem replaced, so two
+   * stems can be compared; the media type only a `content` twin carries is
+   * left out and asserted on its own.
+   */
   const shape = (hook: Webhook, models: Model[], stem: string) =>
     JSON.parse(
       JSON.stringify({
-        header: hook.headerParams,
-        query: hook.queryParams,
-        cookie: hook.cookieParams,
+        header: hook.headerParams.map(withoutContentType),
+        query: hook.queryParams.map(withoutContentType),
+        cookie: hook.cookieParams?.map(withoutContentType),
         models: models.filter((m) => m.name.startsWith(stem)),
       }).replaceAll(stem, 'Stem'),
     );
@@ -501,6 +584,13 @@ describe('a webhook parameter declared with `content` (the `mintParameter` twin)
     });
 
     const [adopted, returned] = webhooks;
+    // The key as written travels with each `content` parameter; the `schema` twin carries none.
+    for (const list of [adopted.headerParams, adopted.queryParams, adopted.cookieParams!]) {
+      expect(list.map((p) => p.contentType)).toEqual(['application/json; charset=utf-8']);
+    }
+    for (const list of [returned.headerParams, returned.queryParams, returned.cookieParams!]) {
+      expect(list.some((p) => 'contentType' in p)).toBe(false);
+    }
     expect(adopted.headerParams[0].type).toEqual({ kind: 'model', name: 'PetAdoptedXMeta' });
     expect(adopted.queryParams[0].type).toEqual({ kind: 'enum', name: 'PetAdoptedMood', values: ['calm', 'busy'] });
     expect(adopted.cookieParams?.[0]).toMatchObject({
