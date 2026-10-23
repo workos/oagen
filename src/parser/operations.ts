@@ -37,6 +37,7 @@ import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameF
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
+  typesAsUnknown,
   buildFieldFromSchema,
   nameInlineVariant,
   resolveSchemaName,
@@ -5018,22 +5019,42 @@ interface PaginationOverrideDecision {
   problem?: string;
 }
 
-/**
- * The lowest 2xx entry that declares a body — `primaryBodySchema` picks a
- * schema from it, or types a media type declared without one — with that
- * schema when it has one: the body `Operation.response` describes, read
- * before any body is classified. `undefined` when no 2xx declares a body.
- */
-function primaryDeclaredBody(resolved: Map<string, ResponseObject>): { schema?: SchemaObject } | undefined {
-  const declared = [...resolved.entries()]
-    .map(([statusCode, resp]) => ({ code: Number(statusCode), pick: primaryBodySchema(resp) }))
-    .filter(({ code, pick }) => code < 300 && (pick.schema !== undefined || pick.type !== undefined))
-    .sort((a, b) => a.code - b.code);
-  return declared.length > 0 ? { schema: declared[0].pick.schema } : undefined;
+/** One 2xx or 3xx entry, with the body `primaryBodySchema` picks from a 2xx (`{}` for a 3xx, which never types one). */
+interface SuccessEntry {
+  code: number;
+  pick: ReturnType<typeof primaryBodySchema>;
 }
 
 /**
- * Accept or reject the override against the primary body, once, before any
+ * The primary response among the 2xx and 3xx entries — the one
+ * `Operation.response` describes and the pagination override is decided
+ * against — chosen by one rule, before any body is classified, so the two
+ * never diverge: the lowest 2xx whose body is typed (`bodyIsTyped`), else
+ * the lowest declared code (an untyped 2xx, or a 3xx when there is no 2xx).
+ * `undefined` when no 2xx or 3xx is declared.
+ */
+function primaryResponseEntry(entries: readonly SuccessEntry[]): SuccessEntry | undefined {
+  const sorted = [...entries].sort((a, b) => a.code - b.code);
+  return sorted.find((entry) => entry.code < 300 && bodyIsTyped(entry.pick)) ?? sorted[0];
+}
+
+/**
+ * Whether a 2xx body will type as anything but `unknown` once classified: a
+ * media type typed without a schema (binary, text), or a schema
+ * `schemaToTypeRef` types as something (`typesAsUnknown`, the decision
+ * `schemaToTypeRef` itself returns on, asked here before any body is typed
+ * and without its warning). Every classification reading of a body ends
+ * on a model, an array or a union — a list envelope, a single-resource
+ * wrapper, an object, a composition, a union (`classifyBody`,
+ * `extractDirectResource`) — or on `schemaToTypeRef` itself, so a body is
+ * `unknown` after classification exactly when this says so before it.
+ */
+function bodyIsTyped(pick: ReturnType<typeof primaryBodySchema>): boolean {
+  return pick.type !== undefined || (pick.schema !== undefined && !typesAsUnknown(pick.schema));
+}
+
+/**
+ * Accept or reject the override against the primary response, once, before any
  * success body is classified — the one check for the fields that depend on
  * the response, in the order `buildOperation` reports them: a `dataPath`
  * must reach an array in that body (`resolveDataPathFromSchema`, the walk
@@ -5041,20 +5062,21 @@ function primaryDeclaredBody(resolved: Map<string, ResponseObject>): { schema?: 
  * to a field of the fitting type (`bodyEndOfIterationProblem`). An override
  * that sets neither asks nothing of the response and is usable; its
  * parameters were checked before the response was read
- * (`resolveOverrideParams`). No primary body — no 2xx declares one — and a
- * body declaring a schema that describes nothing resolve nothing, so an
- * override that sets either field is rejected against them.
+ * (`resolveOverrideParams`). No primary response (no `responses`, no 2xx or
+ * 3xx), a primary without a body (a 204, or a 3xx when no 2xx is
+ * declared) and a primary whose schema describes nothing resolve nothing,
+ * so an override that sets either field is rejected against them.
  */
 function decidePaginationOverride(
   pagination: PaginationExtractionOptions,
-  primary: { schema?: SchemaObject } | undefined,
+  primary: SuccessEntry | undefined,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationOverrideDecision {
   if (pagination.dataPath !== undefined) {
     const reaches =
-      primary?.schema !== undefined &&
-      resolveDataPathFromSchema(primary.schema, pagination.dataPath, contextName, componentSchemas) !== undefined;
+      primary?.pick.schema !== undefined &&
+      resolveDataPathFromSchema(primary.pick.schema, pagination.dataPath, contextName, componentSchemas) !== undefined;
     if (!reaches) {
       return {
         usable: false,
@@ -5063,7 +5085,7 @@ function decidePaginationOverride(
     }
   }
   if (pagination.endOfIteration !== undefined) {
-    const problem = bodyEndOfIterationProblem(pagination.endOfIteration, primary?.schema, componentSchemas);
+    const problem = bodyEndOfIterationProblem(pagination.endOfIteration, primary?.pick.schema, componentSchemas);
     if (problem !== undefined) return { usable: false, problem };
   }
   return { usable: true };
@@ -5870,11 +5892,6 @@ function extractResponses(
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
   let unpagedEnvelope: boolean | undefined;
 
-  // An operation without a `responses` object declares no success response,
-  // so `response` is `unknown` here as it is for one that declares only
-  // `default`, ranges or errors.
-  if (!responses) return { response, errors, inlineModels, isPaginated };
-
   const allSuccessResponses: SuccessResponse[] = [];
   const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
   // Every 2xx body's classification, by status code. The models of all of
@@ -5903,7 +5920,7 @@ function extractResponses(
   // extension are left as written, as nothing here reads them, and a 1xx is
   // read as written too.
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of Object.entries(responses ?? {})) {
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
     resolvedResponses.set(
@@ -5918,18 +5935,29 @@ function extractResponses(
   }
 
   // The override is accepted or rejected once, before any body is
-  // classified, against the primary body — the lowest 2xx that declares one
-  // (`primaryDeclaredBody`) — and every success body below is read with
+  // classified, against the primary response — the entry
+  // `Operation.response` will describe, chosen here by the one rule
+  // (`primaryResponseEntry`) — and every success body below is read with
   // that one decision (`overrideDecision`): a rejected override is handed
   // to no body, so a secondary 2xx is read exactly as detection reads it,
   // never kept as the wrapper the dropped override would have selected; an
   // accepted one applies to each body its `dataPath` reaches an array in.
-  const overrideDecision = decidePaginationOverride(
-    pagination,
-    primaryDeclaredBody(resolvedResponses),
-    operationBodyName,
-    componentSchemas,
-  );
+  const successEntries: SuccessEntry[] = [...resolvedResponses.entries()]
+    .map(([statusCode, resp]) => ({ code: Number(statusCode), resp }))
+    .filter(({ code }) => code < 400)
+    .map(({ code, resp }) => ({ code, pick: code < 300 ? primaryBodySchema(resp) : {} }));
+  const primaryEntry = primaryResponseEntry(successEntries);
+  const overrideDecision = decidePaginationOverride(pagination, primaryEntry, operationBodyName, componentSchemas);
+  // The one reason the override cannot apply to the response, decided
+  // before any body is read. It is reported from every exit below: an
+  // operation without `responses` declares nothing an override could name
+  // either.
+  const overrideProblem = pagination.disabled ? undefined : overrideDecision.problem;
+
+  // An operation without a `responses` object declares no success response,
+  // so `response` is `unknown` here as it is for one that declares only
+  // `default`, ranges or errors.
+  if (!responses) return { response, errors, inlineModels, isPaginated, overrideProblem };
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
@@ -6105,20 +6133,18 @@ function extractResponses(
     }
   }
 
-  // Primary response = lowest status code whose type is not `unknown` (the
-  // lowest 2xx with a typed body; a 3xx entry is always `unknown`), falling
-  // back to the lowest declared code (an untyped 2xx, or a 3xx when there is
-  // no 2xx). With no 2xx or 3xx at all, `response` stays `unknown` — the type
-  // of a body the document does not describe — with no headers, description
-  // or media types; a `2XX` range or `default` body is never promoted into it.
-  let primaryStatus: number | undefined;
-  if (allSuccessResponses.length > 0) {
-    const sorted = [...allSuccessResponses].sort((a, b) => a.statusCode - b.statusCode);
-    const primary =
-      sorted.find((r) => r.type.kind !== 'primitive' || (r.type as { type: string }).type !== 'unknown') ?? sorted[0];
+  // The primary response was chosen before any body was read
+  // (`primaryResponseEntry`: the lowest 2xx with a typed body, else the
+  // lowest declared code — the rule the override was decided by), and its
+  // entry is read here: type, headers, media types, description. With no
+  // 2xx or 3xx at all, `response` stays `unknown` — the type of a body the
+  // document does not describe — with no headers, description or media
+  // types; a `2XX` range or `default` body is never promoted into it.
+  const primaryStatus = primaryEntry?.code;
+  const primary = allSuccessResponses.find((entry) => entry.statusCode === primaryStatus);
+  if (primary) {
     response = primary.type;
     responseHeaders = primary.headers;
-    primaryStatus = primary.statusCode;
     responseContentTypes = primary.contentTypes;
     responseContents = primary.contents;
     // The operation-level description is the primary response's — the same
@@ -6211,10 +6237,6 @@ function extractResponses(
       }
     }
   }
-
-  // The one reason the override cannot apply to the response, decided
-  // before any body was read (`decidePaginationOverride`).
-  const overrideProblem = pagination.disabled ? undefined : overrideDecision.problem;
 
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
