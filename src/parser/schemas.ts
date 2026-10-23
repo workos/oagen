@@ -5,6 +5,7 @@ import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs, type RawE
 import {
   enumShapeKey,
   enumValuesOf,
+  inlineEnumDescriptionOf,
   inlineEnumExternalDocsOf,
   inlineEnumRef,
   toEnumValue,
@@ -625,6 +626,26 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
   return result;
 }
 
+/**
+ * `inner` carrying the wrapper's documentation — its `description` and its
+ * link — for the type `schemaToTypeRef` builds from it. A wrapper the
+ * builder collapses (a nullable `oneOf`/`anyOf`, a single-member `allOf`) is
+ * the schema the document wrote for the property, parameter, header or
+ * body, so an inline enum lifted from the branch documents itself by the
+ * wrapper's text and link when the wrapper has them, and by the branch's
+ * own only when it does not: the same precedence for both keys, decided
+ * here once. The text counts when it has non-whitespace content, as
+ * `inlineEnumRef` reads it; the link when it is usable
+ * (`withWrapperExternalDocs`). Only the type builder reads this: the model
+ * extractors unwrap through `unwrapNullableField`, which carries the link
+ * and leaves the branch's own `description` on the model.
+ */
+export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
+  const linked = withWrapperExternalDocs(inner, wrapper);
+  const described = typeof wrapper.description === 'string' && wrapper.description.trim() !== '';
+  return described ? { ...linked, description: wrapper.description } : linked;
+}
+
 /** Keywords where the stricter of two declarations is the larger value. */
 const MIN_KEYS = ['minimum', 'exclusiveMinimum', 'minLength', 'minItems', 'minContains', 'minProperties'] as const;
 /** Keywords where the stricter of two declarations is the smaller value. */
@@ -1023,21 +1044,28 @@ export function clearSchemaNameTransform(): void {
  * Walk a single TypeRef and extract inline enum refs as top-level enum definitions.
  * Shared by both schemas.ts (field-level) and parse.ts (model-level) collection passes.
  *
- * The lifted `Enum` carries the link its schema declared and each value's
- * own `description` and `deprecated` (recorded against the ref by
- * `inlineEnumRef`), like a component enum. The first ref lifted under a name
- * decides the enum, link and value documentation included — the same
- * first-wins rule `seen` applies to the values — so the key is absent when
- * that schema declared no usable link, even if a later same-named one does.
+ * The lifted `Enum` carries the `description` and link its schema declared
+ * and each value's own `description` and `deprecated` (recorded against the
+ * ref by `inlineEnumRef`), like a component enum. This is the one place an
+ * inline enum becomes an `Enum`, whatever declared it — a property, a
+ * parameter, a response header, a request, response, error or secondary
+ * body, a webhook parameter or payload — so every site documents its enum
+ * by one rule. The first ref lifted under a name decides the enum, its
+ * `description`, link and value documentation included — the same
+ * first-wins rule `seen` applies to the values — so a key is absent when
+ * that schema declared no text or usable link, even if a later same-named
+ * one does.
  */
 export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<string>): void {
   walkTypeRef(ref, {
     enum: (r) => {
       if (r.values && !seen.has(r.name)) {
         seen.add(r.name);
+        const description = inlineEnumDescriptionOf(r);
         const externalDocs = inlineEnumExternalDocsOf(r);
         enums.push({
           name: r.name,
+          ...(description !== undefined ? { description } : {}),
           values: enumValuesOf(r),
           ...(externalDocs ? { externalDocs } : {}),
         });
@@ -2263,15 +2291,17 @@ export function buildFieldFromSchema(
 
 /**
  * Build an EnumRef the same way the regular enum path does for naming. The
- * `oneOf`/`anyOf` wrapper is the schema that declares this enum, so its link
- * is the enum's (`rawExternalDocs`), as an inline `enum:` schema's is; the
- * members carry each variant's own documentation (`constUnionEnumMembers`).
+ * `oneOf`/`anyOf` wrapper is the schema that declares this enum, so its
+ * `description` and link are the enum's (`rawDescription`,
+ * `rawExternalDocs`), as an inline `enum:` schema's are; the members carry
+ * each variant's own documentation (`constUnionEnumMembers`).
  */
 function buildSyntheticEnumRef(
   members: readonly EnumMember[],
   contextName: string | undefined,
   parentModelName: string | undefined,
   rawExternalDocs: unknown,
+  rawDescription: unknown,
 ): TypeRef {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
@@ -2280,7 +2310,7 @@ function buildSyntheticEnumRef(
   // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
   // `oagen.config.ts`) catches inline parameter enums too.
   const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-  return inlineEnumRef(finalName, members, rawExternalDocs);
+  return inlineEnumRef(finalName, members, rawExternalDocs, rawDescription);
 }
 
 /**
@@ -2480,8 +2510,8 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
       : undefined;
 
   // The component's own `description` is the enum's, as a model's is its
-  // model's; a lifted inline enum gets none, since its schema's text is the
-  // field's or parameter's. Present only when it has content.
+  // model's; a lifted inline enum takes its schema's the same way
+  // (`collectInlineEnumFromRef`). Present only when it has content.
   return {
     name,
     ...descriptionEntry(schema.description),
@@ -4105,11 +4135,12 @@ export function schemaToTypeRef(
       if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
     } else {
       // A single member, unwrapped. The wrapper is the schema the document
-      // wrote, so its link rides onto the member — an inline enum lifted from
-      // it carries the wrapper's link, as a model built from it does
-      // (`withWrapperExternalDocs`).
+      // wrote, so its documentation rides onto the member — an inline enum
+      // lifted from it carries the wrapper's `description` and link
+      // (`withWrapperDocs`), and a model built from it the wrapper's link
+      // (`unwrappedAllOfMember`).
       return schemaToTypeRef(
-        withWrapperExternalDocs(schema.allOf[0], schema),
+        withWrapperDocs(schema.allOf[0], schema),
         contextName,
         parentModelName,
         siblingProperties,
@@ -4150,7 +4181,13 @@ export function schemaToTypeRef(
     // `type: 'null'` is a nullable literal).
     const constMembers = constUnionEnumMembers(schema);
     if (constMembers !== null && (constMembers.length >= 2 || Array.isArray(schema.enum))) {
-      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
+      const enumRef = buildSyntheticEnumRef(
+        constMembers,
+        contextName,
+        parentModelName,
+        schema.externalDocs,
+        schema.description,
+      );
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
       return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
@@ -4159,12 +4196,13 @@ export function schemaToTypeRef(
     if (nullVariant && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
-      // The wrapper's link rides onto the branch, as it does for the model
-      // the extractor builds from it (`withWrapperExternalDocs`), so an
-      // inline enum under a nullable wrapper lifts with the wrapper's link.
+      // The wrapper's `description` and link ride onto the branch
+      // (`withWrapperDocs`), so an inline enum under a nullable wrapper lifts
+      // with the wrapper's text and link; the model the extractor builds from
+      // the same branch takes the wrapper's link (`unwrapNullableField`).
       return asNullable(
         schemaToTypeRef(
-          withWrapperExternalDocs(nonNullVariants[0], schema),
+          withWrapperDocs(nonNullVariants[0], schema),
           contextName,
           parentModelName,
           siblingProperties,
@@ -4343,11 +4381,12 @@ export function schemaToTypeRef(
     // this, `RadarAction` (built from path param `action` on the Radar
     // service) couldn't be redirected to `RadarListAction` from config.
     const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-    // The schema's link and each value's `x-enum-descriptions` /
-    // `x-enumDescriptions` entry are recorded against the ref so the lifted
-    // `Enum` carries them (`collectInlineEnumFromRef`); the nullable unwraps
-    // above spread the schema, so a wrapped enum's link reaches here too.
-    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs);
+    // The schema's `description` and link and each value's
+    // `x-enum-descriptions` / `x-enumDescriptions` entry are recorded against
+    // the ref so the lifted `Enum` carries them (`collectInlineEnumFromRef`);
+    // the nullable unwraps above spread the schema, so a wrapped enum's text
+    // and link reach here too.
+    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs, schema.description);
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 

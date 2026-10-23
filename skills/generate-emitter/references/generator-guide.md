@@ -111,7 +111,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 
 - Input: `Enum[]`. Each `Enum` has:
   - `name` — PascalCase enum name
-  - `description?` — the component enum schema's own description, when it has content; a lifted inline enum carries none (its schema's text is the field's or parameter's)
+  - `description?` — the enum schema's own description, when it has content: a component enum's, or the inline schema's the enum was lifted from (a collapsed nullable or single-member `allOf` wrapper's text wins over its branch's); emit it as the enum's doc comment
   - `values` — `EnumValue[]`
   - `default?` — the schema's `default:` value (`string | number`)
   - `externalDocs?` — the enum schema's link, when usable: a component enum's own, or the inline schema's an enum was lifted from

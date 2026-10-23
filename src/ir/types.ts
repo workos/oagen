@@ -355,10 +355,11 @@ export interface Operation {
    * stays on its model, while a `description` written beside the `$ref` is
    * read. When both have content the body's own wins. The schema's text is
    * also the `description` of the model an inline object body is
-   * materialized as (`<Op>Request`); for a body no single model carries —
-   * an inline `oneOf`, an array, a primitive, an inline enum — this field
-   * is the only place that text reaches. Present only when one of the two
-   * has non-whitespace content, kept verbatim. The body's own text is
+   * materialized as (`<Op>Request`), and the `description` of the `Enum`
+   * an inline enum body is lifted to (`<Op>Request` in `enums`); for a body
+   * no model or enum carries — an inline `oneOf`, an array, a primitive —
+   * this field is the only place that text reaches. Present only when one
+   * of the two has non-whitespace content, kept verbatim. The body's own text is
    * carried whether or not a media type is read as `requestBody`; the
    * schema's is read only from the entry that is.
    */
@@ -1061,10 +1062,23 @@ export interface Field {
 export interface Enum {
   name: string;
   /**
-   * The component enum schema's own `description`, as `Model.description`
-   * is a component model's. Present only when it has non-whitespace
-   * content. An enum lifted from an inline schema carries none: that
-   * schema's text is the field's or parameter's description.
+   * The enum schema's own `description`: a component enum's, as
+   * `Model.description` is a component model's, or — for an enum lifted
+   * from an inline schema on a property, parameter, response header,
+   * request or response body (primary, secondary-media-type, error or
+   * fallback) or webhook parameter or payload, including array items,
+   * `oneOf` variants and a `oneOf` of string consts collapsed into one enum
+   * — the text of the schema that declares its members, read as its
+   * `externalDocs` is: a nullable `oneOf`/`anyOf` or single-member `allOf`
+   * wrapper the parser collapses gives its own text when it has content,
+   * and the branch's own counts only when the wrapper has none. A
+   * Parameter or Header Object's `description` is that parameter's or
+   * header's, never the enum's. Present only when the text has
+   * non-whitespace content, kept verbatim. When several inline schemas lift
+   * to one name, the first lifted gives the text, as it gives the values and
+   * the link, so the key is absent when that schema declared none even if a
+   * later one does. Documentation, not shape: the differ does not report a
+   * change to it, and two inline enums that differ only in it are one enum.
    */
   description?: string;
   values: EnumValue[];

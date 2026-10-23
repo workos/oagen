@@ -152,7 +152,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Enum
 
-- `description` — Enum doc comment (the component enum schema's own `description`; a lifted inline enum carries none)
+- `description` — Enum doc comment (the enum schema's own `description`: a component enum's, or the inline schema's the enum was lifted from; a collapsed nullable or single-member `allOf` wrapper's text wins over its branch's)
 - `default` — The schema's `default:` value, for a default-value annotation
 - `externalDocs` — Link to external documentation, for a `@see`-style tag
 - `deprecated` — Deprecation marker on enums (the component enum schema's own keyword, normalized to a literal `true`)
@@ -186,7 +186,7 @@ If the emitter source contains comments like `// @oagen-ignore: <field>` or simi
 
 ### 3d: Free-Text Escaping (security)
 
-Spec free-text fields (`description` on model/field/operation/parameter/enum-value, and `info.title` when it becomes the namespace) are attacker-influenceable. An emitter that interpolates them verbatim into output can be made to emit arbitrary source — a code-execution vector during `oagen generate` → `oagen verify` and in published SDKs.
+Spec free-text fields (`description` on model/field/operation/parameter/enum/enum-value, and `info.title` when it becomes the namespace) are attacker-influenceable. An emitter that interpolates them verbatim into output can be made to emit arbitrary source — a code-execution vector during `oagen generate` → `oagen verify` and in published SDKs.
 
 For every covered free-text field, check that the emitter escapes it at the interpolation site:
 
