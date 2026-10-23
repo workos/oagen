@@ -384,4 +384,26 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
     expect(viaRef.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
     expect(viaRef.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
   });
+
+  it('still recognizes the envelope when a later member only describes the data array (Greptile)', () => {
+    const typed: SchemaObject = {
+      type: 'object',
+      properties: {
+        data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+        has_more: { type: 'boolean' },
+      },
+    };
+    const described: SchemaObject = { type: 'object', properties: { data: { description: 'The pets' } } };
+    for (const members of [
+      [typed, described],
+      [described, typed],
+    ]) {
+      const result = classifyAndExtractResponse({ allOf: members }, 'ListPetsResponse');
+      expect(result.isPaginated).toBe(true);
+      expect(result.dataPath).toBe('data');
+      expect(result.dataDescription).toBe('The pets');
+      expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'Pet' } });
+      expect(result.endOfIteration).toEqual({ kind: 'hasMore', path: 'has_more' });
+    }
+  });
 });
