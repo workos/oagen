@@ -8,7 +8,7 @@ Use this guide when changing parsing, IR types, orchestration, file writing, or 
 
 Three stages transform an OpenAPI spec into SDK files:
 
-1. **Parse** (`src/parser/parse.ts`) — Load and bundle the spec via `@redocly/openapi-core`, extract `Model[]`, `Enum[]`, and `Service[]` into the IR (`ApiSpec`). Sub-modules handle ref resolution (`refs.ts`), schema walking (`schemas.ts`), operation grouping (`operations.ts`), pagination detection (`pagination.ts`), and inline model extraction (`inline-models.ts`).
+1. **Parse** (`src/parser/parse.ts`) — Load and bundle the spec via `@redocly/openapi-core`, extract `Model[]`, `Enum[]`, `Service[]` and `Webhook[]` into the IR (`ApiSpec`). Sub-modules handle bundling (`refs.ts`), schema walking (`schemas.ts`), operation grouping (`operations.ts`), pagination detection (`pagination.ts`), the `webhooks` map (`webhooks.ts`), and inline model extraction (`inline-models.ts`).
 
 2. **Emit** (`src/engine/orchestrator.ts`) — Call each emitter method in order (`generateModels` → `generateEnums` → `generateResources` → `generateClient` → `generateErrors` → `generateTypeSignatures` → `generateTests`), then call `buildOperationsMap` to produce the operations map (stored in `.oagen-manifest.json`), collect `GeneratedFile[]`, prepend file headers.
 
@@ -44,7 +44,7 @@ When changing pipeline behavior:
 
 ## Directory Landmarks
 
-- `src/parser/`: OpenAPI to IR (refs, schemas, operations, pagination, inline models)
+- `src/parser/`: OpenAPI to IR (refs, schemas, operations, pagination, webhooks, inline models)
 - `src/engine/`: orchestration, writer, merger, registry, shared engine types
 - Language-specific emitters live in the separate `oagen-emitters` project (import from `@workos/oagen`)
 - `src/differ/`: spec diffing and breaking change classification
