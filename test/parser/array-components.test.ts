@@ -1462,6 +1462,80 @@ describe('shapes compared as the real pass types them (Greptile round 4)', () =>
   });
 });
 
+describe('shapes compared under the names the plans settle on (Greptile, at the frontier)', () => {
+  // Shared on a provisional name: while every tree was still under `item`,
+  // `Pets`'s items `{ value: { $ref: Palette } }` read as `array<PaletteItem>`
+  // and matched the component `PetsItem { value: array<$ref PaletteItem> }`;
+  // then `Palette` stepped to `PaletteItemItem`, the two shapes differed, and
+  // `keepLarger` dropped one of two equal-count definitions silently.
+  const entries: Array<[string, unknown]> = [
+    ['Palette', { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } }],
+    ['PaletteItem', { type: 'object', properties: { id: { type: 'integer' } } }],
+    ['Pets', { type: 'array', items: { type: 'object', properties: { value: ref('Palette') } } }],
+    ['PetsItem', { type: 'object', properties: { value: { type: 'array', items: ref('PaletteItem') } } }],
+  ];
+  const holder = { type: 'object', properties: { pets: ref('Pets'), item: ref('PetsItem'), palette: ref('Palette') } };
+
+  it.each([
+    ['as written', entries],
+    ['reversed', [...entries].reverse()],
+  ])("keeps both definitions apart (Greptile's shape), with the document %s", async (_order, ordered) => {
+    const spec = await parse(specDoc({ Holder: holder, ...Object.fromEntries(ordered) }));
+    expect(fieldType(spec, 'Holder', 'palette')).toEqual(array(model('PaletteItemItem')));
+    expect(fieldType(spec, 'PaletteItemItem', 'name')).toEqual(string);
+    expect(fieldType(spec, 'PaletteItem', 'id')).toEqual({ kind: 'primitive', type: 'integer' });
+    // The component keeps its array of the object component; the array's
+    // items keep their array of `Palette`'s items, under their own name.
+    expect(fieldType(spec, 'Holder', 'item')).toEqual(model('PetsItem'));
+    expect(fieldType(spec, 'PetsItem', 'value')).toEqual(array(model('PaletteItem')));
+    expect(fieldType(spec, 'Holder', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'PetsItemItem', 'value')).toEqual(array(model('PaletteItemItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual([
+      'Holder',
+      'PaletteItem',
+      'PaletteItemItem',
+      'PetsItem',
+      'PetsItemItem',
+    ]);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'PaletteItem', 'PetsItem'], ['Palette', 'Pets']);
+  });
+
+  it('settles a chain of trees that reference each other in a few rounds, without the cap warning', async () => {
+    // `Pets` holds `Palette`'s items, `Zoo` holds `Pets`'s items; `Palette`
+    // steps past a component, and each tree downstream is re-read under the
+    // settled names of the one it references.
+    const spec = await parse(
+      specDoc({
+        Holder: { type: 'object', properties: { zoo: ref('Zoo'), zooItem: ref('ZooItem') } },
+        Palette: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } },
+        PaletteItem: { type: 'object', properties: { id: { type: 'integer' } } },
+        Pets: { type: 'array', items: { type: 'object', properties: { value: ref('Palette') } } },
+        PetsItem: { type: 'object', properties: { value: { type: 'array', items: ref('PaletteItem') } } },
+        Zoo: { type: 'array', items: { type: 'object', properties: { pets: ref('Pets') } } },
+        ZooItem: { type: 'object', properties: { pets: { type: 'array', items: ref('PetsItem') } } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'zoo')).toEqual(array(model('ZooItemItem')));
+    expect(fieldType(spec, 'ZooItemItem', 'pets')).toEqual(array(model('PetsItemItem')));
+    expect(fieldType(spec, 'PetsItemItem', 'value')).toEqual(array(model('PaletteItemItem')));
+    expect(fieldType(spec, 'Holder', 'zooItem')).toEqual(model('ZooItem'));
+    expect(fieldType(spec, 'ZooItem', 'pets')).toEqual(array(model('PetsItem')));
+    expect(fieldType(spec, 'PetsItem', 'value')).toEqual(array(model('PaletteItem')));
+    expect(spec.models.map((m) => m.name).sort()).toEqual([
+      'Holder',
+      'PaletteItem',
+      'PaletteItemItem',
+      'PetsItem',
+      'PetsItemItem',
+      'ZooItem',
+      'ZooItemItem',
+    ]);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'PaletteItem', 'PetsItem', 'ZooItem'], ['Palette', 'Pets', 'Zoo']);
+  });
+});
+
 describe('two keys that resolve to one name with different shapes', () => {
   it('keeps one definition and says so, rather than dropping the other silently', async () => {
     const spec = await parse(
