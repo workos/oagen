@@ -1655,8 +1655,17 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     inline object with no fields, as it is as a plain field or a union
  *     variant (`isInlineObjectSchema`), so its model is built with none
  *     rather than left for the reference to dangle on.
- *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
- *     schema itself (`unwrappedAllOfMember`).
+ *   - `'unwrapped'`: a single non-`$ref` member with nothing beside it that
+ *     adds to it, typed and extracted as the schema itself
+ *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
+ *     link onto it). A `required` list the wrapper writes beside a lone
+ *     member that declares properties (`declaresInlineProperties`) adds to
+ *     it: the schema is then the merged model, which reads both lists
+ *     (workos/oagen#359 review: the unwrap carried the member's `required`
+ *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
+ *     left `name` optional). Beside a member that declares none — an
+ *     array, a primitive, an enum — `required` constrains nothing, and the
+ *     member is the schema.
  *   - `'reference'`: a single `$ref` member with nothing beside it that adds
  *     to the component — a `description`, limits — is that component, and
  *     nothing is minted. A second `$ref` member, or a `required` list
@@ -1677,7 +1686,11 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
     const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
     return addsRequired ? 'merged' : 'reference';
   }
-  if (members.length === 1) return 'unwrapped';
+  if (members.length === 1) {
+    const only = members[0]!;
+    const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
+    return addsRequired ? 'merged' : 'unwrapped';
+  }
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
 }
 

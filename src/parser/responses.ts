@@ -897,10 +897,11 @@ function extractDirectResource(
   // a copy of the component under its own name); a ref no component answers
   // is that reference too. A second `$ref`, or a `required` beside the
   // `$ref`, makes the body the merge below, as it makes a field (every
-  // component's properties and every `required` kept). A lone member is
-  // the body itself, carrying the wrapper's limits, flag and link
-  // (`unwrappedAllOfMember`), read by the branches of this function as if
-  // written in its place. Every other
+  // component's properties and every `required` kept). A lone member with
+  // nothing added to it is the body itself, carrying the wrapper's limits,
+  // flag and link (`unwrappedAllOfMember`), read by the branches of this
+  // function as if written in its place; a `required` beside a lone object
+  // member makes the body the merge too, so `name` stays required. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
