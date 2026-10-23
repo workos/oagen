@@ -228,25 +228,104 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
     ]);
   });
 
-  it('reads a literal with no parameter before it whose last word is a CRUD verb as the action, for any method', () => {
+  it('reads a literal with no parameter before it whose last word is a CRUD verb as the action for a POST only', () => {
     expect(
       names({
-        '/pets/bulk-delete': { post: ok },
+        '/pets/bulk-delete': { post: ok, put: ok },
+        '/pets/update': { get: ok },
+        '/pets/last-update': { get: ok },
         '/store/pets/bulk-update': { post: ok },
         '/store/pets/{id}/photos/bulk-delete': { post: item('id') },
-        '/store/pets/delete-candidates': { get: ok },
+        '/store/pets/delete-candidates': { get: ok, post: ok },
         '/store/events/check-ins': { get: ok },
         '/store/settings/display-options': { get: ok },
         '/store/pets/search': { post: ok },
       }),
     ).toEqual([
       'Pets.bulkDelete                POST   /pets/bulk-delete',
+      'Pets.updateBulkDelete          PUT    /pets/bulk-delete',
+      'Pets.listLastUpdate            GET    /pets/last-update',
+      'Pets.listUpdate                GET    /pets/update',
       'Store.listCheckIns             GET    /store/events/check-ins',
       'Store.bulkUpdatePets           POST   /store/pets/bulk-update',
       'Store.listDeleteCandidates     GET    /store/pets/delete-candidates',
+      'Store.createDeleteCandidates   POST   /store/pets/delete-candidates',
       'Store.createSearch             POST   /store/pets/search',
       'Store.bulkDeletePhotos         POST   /store/pets/{id}/photos/bulk-delete',
       'Store.listDisplayOptions       GET    /store/settings/display-options',
+    ]);
+  });
+
+  it('reads list and check as the verb only at the start of a segment; every other verb anywhere', () => {
+    expect(
+      names({
+        '/pets/{id}/wish-list': { get: item('id') },
+        '/pets/allow-list': { get: ok },
+        '/pets/list-all': { get: ok },
+        '/pets/{id}/health-check': { head: item('id') },
+        '/pets/check-health': { head: ok },
+        '/pets:batchGet': { get: ok },
+        '/pets/force-update': { put: ok },
+      }),
+    ).toEqual([
+      'Pets.listAllowList             GET    /pets/allow-list',
+      'Pets.checkHealth               HEAD   /pets/check-health',
+      'Pets.forceUpdate               PUT    /pets/force-update',
+      'Pets.listAll                   GET    /pets/list-all',
+      'Pets.checkPetHealthCheck       HEAD   /pets/{id}/health-check',
+      'Pets.getPetWishList            GET    /pets/{id}/wish-list',
+      'Pets.batchGet                  GET    /pets:batchGet',
+    ]);
+  });
+
+  it('reads an irregular plural singularizePathSegment does not recognise as a singleton', () => {
+    expect(
+      names({
+        '/pets/{id}/children': { get: item('id') },
+        '/pets/{id}/people': { get: item('id') },
+      }),
+    ).toEqual([
+      'Pets.getPetChildren            GET    /pets/{id}/children',
+      'Pets.getPetPeople              GET    /pets/{id}/people',
+    ]);
+  });
+
+  it('leaves the plain CRUD name with the CRUD operation and qualifies the action beside it', () => {
+    expect(
+      names({
+        '/pets': { post: ok },
+        '/pets/all': { get: ok },
+        '/pets/create': { post: ok },
+        '/pets/delete': { post: ok },
+        '/pets/list-all': { get: ok },
+        '/pets/update': { post: ok },
+        '/pets/{id}': { put: item('id'), delete: item('id') },
+      }),
+    ).toEqual([
+      'Pets.create                    POST   /pets',
+      'Pets.listAll                   GET    /pets/all',
+      'Pets.createPets                POST   /pets/create',
+      'Pets.deletePets                POST   /pets/delete',
+      'Pets.listAllPets               GET    /pets/list-all',
+      'Pets.updatePets                POST   /pets/update',
+      'Pets.delete                    DELETE /pets/{id}',
+      'Pets.update                    PUT    /pets/{id}',
+    ]);
+    // With no dropped collection to take back — the name already ends with
+    // it, or the collection is not the service segment — the name without
+    // the action rule.
+    expect(
+      names({
+        '/store/pets': { put: ok },
+        '/store/pets/update': { post: ok },
+        '/store/pets/{id}': { post: item('id') },
+        '/store/pets/{id}/create': { post: item('id') },
+      }),
+    ).toEqual([
+      'Store.updatePets               PUT    /store/pets',
+      'Store.createUpdate             POST   /store/pets/update',
+      'Store.createPet                POST   /store/pets/{id}',
+      'Store.createPetCreate          POST   /store/pets/{id}/create',
     ]);
   });
 
