@@ -88,6 +88,7 @@ import {
   type InlineModelRegistry,
   type InlineModelOwner,
   type SiblingSites,
+  createSiblingSites,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -619,14 +620,15 @@ export function extractOperations(
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
-  // models it minted), and a reference it wrote by sharing another site's
-  // model — the registry matched the shape of a primary body's model or a
-  // companion's — joins that site's roots, so a merge pass that renames the
-  // model (a deprecated copy named like a live one) repoints the `default`
-  // response or header that shares it along with the site's own references.
+  // models it minted). A reference any site wrote by sharing another site's
+  // model — a deferred body or header the registry matched to a primary
+  // body's model or a companion's, an array body's items it matched to an
+  // earlier operation's model — joins that site's roots, so a merge pass
+  // that renames the model (a deprecated copy named like a live one)
+  // repoints every response, header and array that shares it along with
+  // the site's own references.
   inlineModelBundles.push(...deferredTypes.bundles);
-  attachSharedDeferredRefs(
-    deferredTypes.bundles,
+  attachSharedRefs(
     inlineModelBundles,
     new Set(registeredModels.map((model) => model.name)),
   );
@@ -1417,7 +1419,10 @@ function inferAction(
  * them — would otherwise see one of the two. An action that shares a name
  * with a path-named operation of another shape yields next
  * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
- * `POST /pets/update` is `updatePets`.
+ * `POST /pets/update` is `updatePets`. A name any pass gives an operation is
+ * checked against every name the service holds, and once every pass has run
+ * the one-path rule is checked once more (numberSamePathNames), since a
+ * rename can land on a name an operation on the same path already has.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1721,12 +1726,10 @@ function disambiguateOperationNames(
     );
     const keeper = ordered[0];
     const nameByPath = new Map<string, string>([[keeper.path, name]]);
-    let n = 2;
     for (const op of ordered) {
       let next = nameByPath.get(op.path);
       if (next === undefined) {
-        while (taken.has(numberedName(name, n))) n++;
-        next = numberedName(name, n);
+        next = suffixedName(name, taken);
         taken.add(next);
         nameByPath.set(op.path, next);
         // A path-derived name is the parser's own and is refined silently,
@@ -1743,6 +1746,10 @@ function disambiguateOperationNames(
       rename(op, next);
     }
   }
+
+  // Once more on one path, after every pass: a rename above can land on a
+  // name an operation on the same path holds (see numberSamePathNames).
+  numberSamePathNames(operations, pathNamed, rename);
 }
 
 /**
@@ -1793,27 +1800,17 @@ function demoteSamePathNames(
   const demoted = new Set<Operation>();
   const taken = new Set(operations.map((op) => op.name));
   const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
-  const methodOrder = (a: Operation, b: Operation) =>
-    HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
   // The verb that keeps a shared action name among path-named operations.
   const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
-  const freeSuffixed = (base: string) => {
-    let n = 2;
-    while (taken.has(numberedName(base, n))) n++;
-    return numberedName(base, n);
-  };
 
-  const byPath = new Map<string, Operation[]>();
-  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
-  for (const path of [...byPath.keys()].sort()) {
-    const onPath = (byPath.get(path) ?? []).sort(methodOrder);
+  for (const onPath of operationsByPath(operations).values()) {
     const byName = new Map<string, Operation[]>();
     for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
     for (const [name, sharing] of byName) {
       if (sharing.length < 2) continue;
       const explicit = sharing.filter((op) => !pathNamed.has(op));
       for (const op of explicit.slice(1)) {
-        const next = freeSuffixed(name);
+        const next = suffixedName(name, taken);
         console.warn(
           `[oagen] Warning: Operations ${explicit[0].httpMethod.toUpperCase()} ${explicit[0].path} and ` +
             `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
@@ -1832,7 +1829,7 @@ function demoteSamePathNames(
         const held = onPath.some(
           (other) => other !== op && other.name === base && (!pathNamed.has(other) || verbOf(other) !== verbOf(op)),
         );
-        const next = held ? freeSuffixed(base) : base;
+        const next = held ? suffixedName(base, taken) : base;
         if (next !== op.name) {
           rename(op, next);
           taken.add(next);
@@ -1880,20 +1877,90 @@ function yieldActionNames(
   const fellBack: Operation[] = [];
   const isAction = (op: Operation) =>
     pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  // Every name the service holds, kept current as actions are renamed, so a
+  // rename never lands on a name another operation already has — least of
+  // all one on the action's own path, which no later pass looks at again.
+  const taken = new Set(operations.map((op) => op.name));
   for (const group of collidingGroups(operations)) {
     if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
     for (const op of group.filter(isAction)) {
       const root = apiRootLengthOf(op);
       const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
-      if (qualified !== op.name) {
-        rename(op, qualified);
-      } else {
-        rename(op, fallbackOperationName(op.httpMethod, op.path, root, false));
-        fellBack.push(op);
-      }
+      const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
+      const next =
+        [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ?? suffixedName(plain, taken);
+      rename(op, next);
+      taken.add(next);
+      if (next !== qualified) fellBack.push(op);
     }
   }
   return fellBack;
+}
+
+/**
+ * The last check on one path, after every pass has run. Each pass renames
+ * path-named operations, and a new name can be one another operation on the
+ * same path already holds: the service noun restored to `GET /api/notes`
+ * beside `operationId: list` on `/api/{teamId}/notes` is `listNotes`, which
+ * `POST /api/notes` may carry as its operationId. No pass after the first
+ * looks at one path again, since collidingGroups leaves a name shared on one
+ * path alone, so the sharing rule of demoteSamePathNames is applied once
+ * more here: a path-named operation that shares its name with an
+ * operationId-named operation on its path, or with a path-named one of
+ * another CRUD verb, takes the first numeric suffix free in the service,
+ * silently, as the numeric pass numbers a path-named operation. The keeper is
+ * the operationId-named operation, else the first path-named one in
+ * HTTP_METHODS order.
+ */
+function numberSamePathNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  rename: (op: Operation, name: string) => void,
+): void {
+  const taken = new Set(operations.map((op) => op.name));
+  const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
+  for (const onPath of operationsByPath(operations).values()) {
+    const byName = new Map<string, Operation[]>();
+    for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, sharing] of byName) {
+      if (sharing.length < 2) continue;
+      const keeper = sharing.find((op) => !pathNamed.has(op)) ?? sharing[0];
+      for (const op of sharing) {
+        if (op === keeper || !pathNamed.has(op)) continue;
+        if (pathNamed.has(keeper) && verbOf(op) === verbOf(keeper)) continue;
+        const next = suffixedName(name, taken);
+        rename(op, next);
+        taken.add(next);
+      }
+    }
+  }
+}
+
+/**
+ * The operations of a service grouped by path, paths in lexical order and
+ * each path's operations in HTTP_METHODS order, so a pass over them depends
+ * only on the document's paths and methods, never on its order.
+ */
+function operationsByPath(operations: Operation[]): Map<string, Operation[]> {
+  const byPath = new Map<string, Operation[]>();
+  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
+  return new Map([...byPath.keys()].sort().map((path) => [path, (byPath.get(path) ?? []).sort(methodOrder)]));
+}
+
+/** Operations in HTTP_METHODS order (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE). */
+function methodOrder(a: Operation, b: Operation): number {
+  return HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
+}
+
+/**
+ * `base` with the first numeric suffix, from 2, that no name in `taken` has,
+ * spelled by numberedName: `updatePet2`, and `updateTop10No2` for a base
+ * that ends in a digit.
+ */
+function suffixedName(base: string, taken: ReadonlySet<string>): string {
+  let n = 2;
+  while (taken.has(numberedName(base, n))) n++;
+  return numberedName(base, n);
 }
 
 /**
@@ -2016,15 +2083,14 @@ function nameIsFree(
 }
 
 /**
- * `name` with the numeric suffix `n`, the last resort of
- * disambiguateOperationNames across paths and of demoteSamePathNames on one
- * path: `list` + 2 is `list2`. A name that already
- * ends in a digit takes the number behind `No`, so that it cannot be read
- * as part of the number the name ends with: `listV1` + 2 is `listV1No2`,
- * never `listV12`, which reads as version 12 of the API, and `listTop10` +
- * 2 is `listTop10No2`. An underscore would not do: splitWords reads a digit
- * run as a word of its own, so `listV1_2` re-cased by toPascalCase or
- * toCamelCase is `ListV12` or `listV12` again.
+ * `name` with the numeric suffix `n`, the spelling of every numbered
+ * operation name (suffixedName picks the first free `n`): `list` + 2 is
+ * `list2`. A name that already ends in a digit takes the number behind
+ * `No`, so that it cannot be read as part of the number the name ends with:
+ * `listV1` + 2 is `listV1No2`, never `listV12`, which reads as version 12
+ * of the API, and `listTop10` + 2 is `listTop10No2`. An underscore would
+ * not do: splitWords reads a digit run as a word of its own, so `listV1_2`
+ * re-cased by toPascalCase or toCamelCase is `ListV12` or `listV12` again.
  */
 function numberedName(name: string, n: number): string {
   return /\d$/.test(name) ? `${name}No${n}` : `${name}${n}`;
@@ -2717,9 +2783,10 @@ function buildOperation(
   // list-envelope companion is (`GetLegacyWidgetWidget`).
   const qualifier = toPascalCase(operationName);
   const inlineModelBundles: InlineModelBundle[] = [];
-  if (responseModels.length > 0) {
-    inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
-  }
+  // The response site is recorded even when it minted nothing: its array
+  // items may have shared another site's model (`typeInlineItems`), and the
+  // reference must follow that model's rename (`attachSharedRefs`).
+  inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   if (reqBodyModels.length > 0 && requestBody) {
     inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
@@ -4052,7 +4119,7 @@ function resolveDeferredInlineTypes(
   for (const item of deferred) {
     const bareName = `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     let siblings = siblingsByBareName.get(bareName);
-    if (!siblings) siblingsByBareName.set(bareName, (siblings = []));
+    if (!siblings) siblingsByBareName.set(bareName, (siblings = createSiblingSites()));
     const minted = models.length;
     const type = materializeDeferredType(item, registry, models, siblings);
     // An enum this site typed — a body that is itself an enum, one nested in
@@ -4065,7 +4132,7 @@ function resolveDeferredInlineTypes(
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
-    // model minted nothing here, see `attachSharedDeferredRefs`).
+    // model minted nothing here, see `attachSharedRefs`).
     bundles.push({
       qualifier: item.operationQualifier,
       roots: [type],
@@ -4077,32 +4144,38 @@ function resolveDeferredInlineTypes(
 }
 
 /**
- * Give each reference a deferred schema wrote by sharing another site's model
- * to that site. A deferred shape identical to a name's owner — a primary
- * body's model, a companion's, an earlier deferred model — takes the name and
- * mints nothing, so its reference is not among the owner's roots, and a merge
- * pass that renames the owner (a deprecated copy named like a live one,
- * `settleSharedNames`) would leave the `default` response or header on
- * the old name, which the live copy then takes. The first site to mint a
- * name owns it, as the registry decided; the references the deferred site's
- * roots and its own models' fields make to that name are added to the
- * owner's roots, so they are repointed with the owner's own. A component is
- * never renamed, so a reference to one is left alone.
+ * Give each reference a site wrote by sharing another site's model to that
+ * site. A shape identical to a name's owner takes the name and mints
+ * nothing — a deferred header or body matching a primary body's model or a
+ * companion's, an array body's or list envelope's items matching a
+ * component field's model or an earlier operation's (`typeInlineItems`
+ * through `materializeInlineSchema`) — so its reference is not among the
+ * owner's roots, and a merge pass that renames the owner (a deprecated copy
+ * named like a live one, `settleSharedNames`) would leave the
+ * `default` response, header or array on the old name, which the live copy
+ * then takes. The first site to mint a name owns it, as the registry
+ * decided; the references every other site's roots and its own models'
+ * fields make to that name are added to the owner's roots, so they are
+ * repointed with the owner's own. A reference to a name the site itself
+ * minted is the site's own, not shared, and is left to its own bundle — two
+ * operations minting one name with different shapes are the merge's
+ * business, and attaching one to the other would drag a live copy's
+ * references along with a renamed deprecated one; a component is never
+ * renamed, so a reference to one is left alone. Idempotent: run over the
+ * operations' bundles once they are complete (`extractOperations`) and again
+ * once the components' field bundles exist (`parseSpec`).
  */
-function attachSharedDeferredRefs(
-  deferredBundles: readonly InlineModelBundle[],
-  bundles: readonly InlineModelBundle[],
-  componentNames: ReadonlySet<string>,
-): void {
+export function attachSharedRefs(bundles: readonly InlineModelBundle[], componentNames: ReadonlySet<string>): void {
   const siteOf = new Map<string, InlineModelBundle>();
   for (const bundle of bundles) {
     for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
   }
-  for (const bundle of deferredBundles) {
+  for (const bundle of bundles) {
+    const own = new Set(bundle.models.map((model) => model.name));
     const refs = [...bundle.roots, ...bundle.models.flatMap((model) => collectModelTypeRefs(model))];
     for (const ref of refs) {
       for (const name of collectModelRefs(ref)) {
-        if (componentNames.has(name)) continue;
+        if (componentNames.has(name) || own.has(name)) continue;
         const site = siteOf.get(name);
         if (site && site !== bundle && !site.roots.includes(ref)) site.roots.push(ref);
       }
