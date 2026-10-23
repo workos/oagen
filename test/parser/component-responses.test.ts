@@ -1135,4 +1135,88 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
     expectSound(spec);
     expect(warn).not.toHaveBeenCalled();
   });
+
+  it("steps a component's 404 bodies by number when an operation's own model holds its name, with no default or range anywhere", async () => {
+    // The numbered stepping of a component body applies at an error site on
+    // its own (review on #353): `problem`'s inline 200 body is
+    // `ProblemResponse`, and two operations return the component at a 404
+    // only. Both step to `ProblemResponse2` — not to the error kind's
+    // `ProblemResponseBody` — nested object included, and share it.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const detailed = inline(
+      { title: { type: 'string' }, detail: { type: 'object', properties: { code: { type: 'string' } } } },
+      'A problem',
+    );
+    const spec = await parseDocument(
+      {
+        '/problems': {
+          get: { operationId: 'problem', responses: { '200': inline({ other: { type: 'string' } }, 'Own') } },
+        },
+        '/notes': { get: { operationId: 'getNote', responses: { '200': ref('Found'), '404': ref('Problem') } } },
+        '/pets': { get: { operationId: 'getPet', responses: { '200': ref('Found'), '404': ref('Problem') } } },
+      },
+      { responses: { Found: found, Problem: detailed } },
+    );
+
+    expect(spec.models.map(({ name }) => name).sort()).toEqual([
+      'FoundResponse',
+      'ProblemResponse',
+      'ProblemResponse2',
+      'ProblemResponse2Detail',
+    ]);
+    expect(fieldsOf(spec, 'ProblemResponse')).toEqual(['other']);
+    expect(fieldsOf(spec, 'ProblemResponse2')).toEqual(['title', 'detail']);
+    expect(
+      spec.models.find((m) => m.name === 'ProblemResponse2')?.fields.find((f) => f.name === 'detail')?.type,
+    ).toEqual(model('ProblemResponse2Detail'));
+    const ops = opsByName(spec);
+    expect(ops.get('problem')!.response).toEqual(model('ProblemResponse'));
+    expect(ops.get('getNote')!.errors.map((e) => [e.statusCode, e.type])).toEqual([[404, model('ProblemResponse2')]]);
+    expect(ops.get('getPet')!.errors.map((e) => [e.statusCode, e.type])).toEqual([[404, model('ProblemResponse2')]]);
+    expectSound(spec);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  // `listNotes`'s own inline `default` is `ListNotesDefaultResponse`; so is
+  // the body of a component `ListNotesDefault`. The earlier site in the
+  // document keeps the name and the later one steps by number; the two shapes
+  // are never folded onto each other.
+  const ownDefault = {
+    get: {
+      operationId: 'listNotes',
+      responses: { '200': ref('Found'), default: inline({ a: { type: 'string' } }, 'Own') },
+    },
+  };
+  const viaComponent = {
+    get: { operationId: 'getPet', responses: { '200': ref('Found'), default: ref('ListNotesDefault') } },
+  };
+  it.each([
+    [
+      'the operation returning the component first',
+      { '/pets': viaComponent, '/notes': ownDefault },
+      'getPet',
+      'listNotes',
+    ],
+    [
+      'the operation with its own default first',
+      { '/notes': ownDefault, '/pets': viaComponent },
+      'listNotes',
+      'getPet',
+    ],
+  ])(
+    "keeps an operation's own default apart from a component body that derives the same name (%s)",
+    async (_order, paths, first, second) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parseDocument(paths, { responses: { Found: found, ListNotesDefault: problem } });
+
+      const ops = opsByName(spec);
+      expect(ops.get(first)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse'));
+      expect(ops.get(second)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse2'));
+      const fieldsByOperation = { listNotes: ['a'], getPet: ['title'] };
+      expect(fieldsOf(spec, 'ListNotesDefaultResponse')).toEqual(fieldsByOperation[first as 'listNotes' | 'getPet']);
+      expect(fieldsOf(spec, 'ListNotesDefaultResponse2')).toEqual(fieldsByOperation[second as 'listNotes' | 'getPet']);
+      expectSound(spec);
+      expect(warn).not.toHaveBeenCalled();
+    },
+  );
 });
