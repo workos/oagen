@@ -636,9 +636,12 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
  * own only when it does not: the same precedence for both keys, decided
  * here once. The text counts when it has non-whitespace content, as
  * `inlineEnumRef` reads it; the link when it is usable
- * (`withWrapperExternalDocs`). Only the type builder reads this: the model
- * extractors unwrap through `unwrapNullableField`, which carries the link
- * and leaves the branch's own `description` on the model.
+ * (`withWrapperExternalDocs`). Read by the two wrapper sites of
+ * `schemaToTypeRef` and by the response path where it types the member of
+ * a single-member `allOf` body it unwrapped itself (`extractDirectResource`).
+ * The model extractors unwrap through `unwrapNullableField` and
+ * `unwrappedAllOfMember`, which carry the link and leave the branch's own
+ * `description` on the model.
  */
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const linked = withWrapperExternalDocs(inner, wrapper);
