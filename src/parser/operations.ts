@@ -1254,7 +1254,10 @@ function inferAction(
  * them — would otherwise see one of the two. An action that shares a name
  * with a path-named operation of another shape yields next
  * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
- * `POST /pets/update` is `updatePets`.
+ * `POST /pets/update` is `updatePets`. A name any pass gives an operation is
+ * checked against every name the service holds, and once every pass has run
+ * the one-path rule is checked once more (numberSamePathNames), since a
+ * rename can land on a name an operation on the same path already has.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1527,6 +1530,10 @@ function disambiguateOperationNames(
       rename(op, next);
     }
   }
+
+  // Once more on one path, after every pass: a rename above can land on a
+  // name an operation on the same path holds (see numberSamePathNames).
+  numberSamePathNames(operations, pathNamed, rename);
 }
 
 /**
@@ -1575,27 +1582,17 @@ function demoteSamePathNames(
   const demoted = new Set<Operation>();
   const taken = new Set(operations.map((op) => op.name));
   const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
-  const methodOrder = (a: Operation, b: Operation) =>
-    HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
   // The verb that keeps a shared action name among path-named operations.
   const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
-  const freeSuffixed = (base: string) => {
-    let n = 2;
-    while (taken.has(`${base}${n}`)) n++;
-    return `${base}${n}`;
-  };
 
-  const byPath = new Map<string, Operation[]>();
-  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
-  for (const path of [...byPath.keys()].sort()) {
-    const onPath = (byPath.get(path) ?? []).sort(methodOrder);
+  for (const onPath of operationsByPath(operations).values()) {
     const byName = new Map<string, Operation[]>();
     for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
     for (const [name, sharing] of byName) {
       if (sharing.length < 2) continue;
       const explicit = sharing.filter((op) => !pathNamed.has(op));
       for (const op of explicit.slice(1)) {
-        const next = freeSuffixed(name);
+        const next = suffixedName(name, taken);
         console.warn(
           `[oagen] Warning: Operations ${explicit[0].httpMethod.toUpperCase()} ${explicit[0].path} and ` +
             `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
@@ -1614,7 +1611,7 @@ function demoteSamePathNames(
         const held = onPath.some(
           (other) => other !== op && other.name === base && (!pathNamed.has(other) || verbOf(other) !== verbOf(op)),
         );
-        const next = held ? freeSuffixed(base) : base;
+        const next = held ? suffixedName(base, taken) : base;
         if (next !== op.name) {
           rename(op, next);
           taken.add(next);
@@ -1662,20 +1659,86 @@ function yieldActionNames(
   const fellBack: Operation[] = [];
   const isAction = (op: Operation) =>
     pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  // Every name the service holds, kept current as actions are renamed, so a
+  // rename never lands on a name another operation already has — least of
+  // all one on the action's own path, which no later pass looks at again.
+  const taken = new Set(operations.map((op) => op.name));
   for (const group of collidingGroups(operations)) {
     if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
     for (const op of group.filter(isAction)) {
       const root = apiRootLengthOf(op);
       const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
-      if (qualified !== op.name) {
-        rename(op, qualified);
-      } else {
-        rename(op, fallbackOperationName(op.httpMethod, op.path, root, false));
-        fellBack.push(op);
-      }
+      const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
+      const next =
+        [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ?? suffixedName(plain, taken);
+      rename(op, next);
+      taken.add(next);
+      if (next !== qualified) fellBack.push(op);
     }
   }
   return fellBack;
+}
+
+/**
+ * The last check on one path, after every pass has run. Each pass renames
+ * path-named operations, and a new name can be one another operation on the
+ * same path already holds: the service noun restored to `GET /api/notes`
+ * beside `operationId: list` on `/api/{teamId}/notes` is `listNotes`, which
+ * `POST /api/notes` may carry as its operationId. No pass after the first
+ * looks at one path again, since collidingGroups leaves a name shared on one
+ * path alone, so the sharing rule of demoteSamePathNames is applied once
+ * more here: a path-named operation that shares its name with an
+ * operationId-named operation on its path, or with a path-named one of
+ * another CRUD verb, takes the first numeric suffix free in the service,
+ * silently, as the numeric pass numbers a path-named operation. The keeper is
+ * the operationId-named operation, else the first path-named one in
+ * HTTP_METHODS order.
+ */
+function numberSamePathNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  rename: (op: Operation, name: string) => void,
+): void {
+  const taken = new Set(operations.map((op) => op.name));
+  const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
+  for (const onPath of operationsByPath(operations).values()) {
+    const byName = new Map<string, Operation[]>();
+    for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, sharing] of byName) {
+      if (sharing.length < 2) continue;
+      const keeper = sharing.find((op) => !pathNamed.has(op)) ?? sharing[0];
+      for (const op of sharing) {
+        if (op === keeper || !pathNamed.has(op)) continue;
+        if (pathNamed.has(keeper) && verbOf(op) === verbOf(keeper)) continue;
+        const next = suffixedName(name, taken);
+        rename(op, next);
+        taken.add(next);
+      }
+    }
+  }
+}
+
+/**
+ * The operations of a service grouped by path, paths in lexical order and
+ * each path's operations in HTTP_METHODS order, so a pass over them depends
+ * only on the document's paths and methods, never on its order.
+ */
+function operationsByPath(operations: Operation[]): Map<string, Operation[]> {
+  const byPath = new Map<string, Operation[]>();
+  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
+  return new Map([...byPath.keys()].sort().map((path) => [path, (byPath.get(path) ?? []).sort(methodOrder)]));
+}
+
+/** Operations in HTTP_METHODS order (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS, TRACE). */
+function methodOrder(a: Operation, b: Operation): number {
+  return HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
+}
+
+/** `base` with the first numeric suffix, from 2, that no name in `taken` has: `updatePet2`. */
+function suffixedName(base: string, taken: ReadonlySet<string>): string {
+  let n = 2;
+  while (taken.has(`${base}${n}`)) n++;
+  return `${base}${n}`;
 }
 
 /**
