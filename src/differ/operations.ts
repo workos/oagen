@@ -27,6 +27,7 @@ import {
   classifyParamChange,
   deprecationDetails,
   deprecationFlip,
+  parameterNameShift,
   requestBodyEncodingShift,
   tagsShift,
 } from './classify.js';
@@ -620,7 +621,10 @@ function classifyKeyedResponsesChange<K>(
 /**
  * Diff an operation's parameters in every location it carries them — path,
  * query, header and cookie, through `locatedParams` — matched by location
- * and name (`paramKey`) and classified from the caller's side by
+ * and name (`paramKey`, which folds a header's name, so `X-Pet-Token` on
+ * one side and `x-pet-token` on the other are one parameter, compared like
+ * any other and reported as `param-name-changed` rather than as a removal
+ * beside an addition — #295) and classified from the caller's side by
  * `classifyParamChange`. Cookie parameters were left out of this walk until
  * #294, so a change to one came out as no change.
  */
@@ -652,6 +656,11 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
     if (!oldEntry) continue;
     const name = newEntry.p.name;
     const loc = newEntry.loc;
+
+    const renamed = parameterNameShift(oldEntry.p, newEntry.p);
+    if (renamed) {
+      changes.push({ ...at(classifyParamChange('param-name-changed', name), loc), ...renamed });
+    }
 
     if (!typeRefsEqual(oldEntry.p.type, newEntry.p.type)) {
       if (primitivesDifferOnlyByFormat(oldEntry.p.type, newEntry.p.type)) {

@@ -724,16 +724,26 @@ export interface Constraints {
 }
 
 export interface Parameter {
+  /**
+   * The name as the document wrote it (`X-Pet-Token`); emitters apply their
+   * own casing. A parameter's identity is its location and name —
+   * `parameterKey` in `ir/parameter-key.ts`, which compares a header's name
+   * case-insensitively (RFC 9110 §5.1) and every other as written. The
+   * parser merges a path item's parameters into its operations on that
+   * identity, and the differ pairs parameters on it.
+   */
   name: string;
   /**
    * The parameter schema's type. An inline object schema (a `deepObject`
    * query parameter, say), or an array, map, union or nullable wrapper
    * holding one, references a model the parser creates for it, named from
-   * the service and parameter (`PetsFilter`) and qualified by location or
-   * operation when that name already belongs to another shape (see "Response
-   * Headers" in docs/architecture/ir-types.md); a webhook's is named under
-   * the webhook's stem. A primitive, a `$ref`, an inline enum or an array of
-   * either is typed as written.
+   * the service and parameter (`PetsFilter`; a header's name lower-cased
+   * first, so `X-RateLimit-Meta` and `x-ratelimit-meta` both reference
+   * `PetsXRatelimitMeta`) and qualified by location or operation when that
+   * name already belongs to another shape (see "Response Headers" in
+   * docs/architecture/ir-types.md); a webhook's is named under the webhook's
+   * stem. A primitive, a `$ref`, an inline enum (named the same way) or an
+   * array of either is typed as written.
    */
   type: TypeRef;
   required: boolean;
@@ -1591,7 +1601,10 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
 /**
  * A header a response declares, typed like a parameter. `name` is kept exactly
  * as written in the spec (e.g. `Content-Disposition`); emitters apply their
- * own casing.
+ * own casing. Header names are case-insensitive (RFC 9110 §5.1), so one
+ * response declares each header once: of two keys that differ in case
+ * alone, the parser keeps the later (`foldHeaderName` in
+ * `ir/parameter-key.ts` decides which keys are one header).
  */
 export interface ResponseHeader {
   name: string;

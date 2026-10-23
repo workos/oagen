@@ -11,6 +11,7 @@ import type {
   WebhookResponse,
 } from '../ir/types.js';
 import { collectModelTypeRefs, collectResponseHeaders, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
+import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
@@ -335,12 +336,12 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
       const label = `webhooks.${name}.${method}`;
       warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
-      // a path-item-level one of the same (in, name) identity, in the
-      // path-level position.
+      // a path-item-level one of the same identity (`parameterKey`: location
+      // and name, a header's name case-folded), in the path-level position.
       const paramsByIdentity = new Map<string, ParameterObject>();
       for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
         const param = resolveParameterRef(rawParam, components.parameters, label);
-        paramsByIdentity.set(`${param.in}:${param.name}`, param);
+        paramsByIdentity.set(parameterKey(param.in, param.name), param);
       }
       const params: ParameterObject[] = [];
       for (const param of paramsByIdentity.values()) {
@@ -647,16 +648,18 @@ function mintWebhook(
     for (const name of payload.names) names.add(name);
   }
 
+  // Each raw parameter and the IR parameter `extractParams` typed from it,
+  // paired on the identity every parameter lookup uses (`parameterKey`).
   const typed = new Map<string, Parameter>();
   for (const [location, list] of [
     ['header', minted.headerParams],
     ['query', minted.queryParams],
     ['cookie', minted.cookieParams],
   ] as const) {
-    for (const param of list) typed.set(`${location}:${param.name}`, param);
+    for (const param of list) typed.set(parameterKey(location, param.name), param);
   }
   for (const param of params) {
-    const ir = typed.get(`${param.in}:${param.name}`);
+    const ir = typed.get(parameterKey(param.in, param.name));
     if (!ir || !param.schema) continue;
     const { ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas, reserved);
     // `extractParams` typed the parameter from its schema alone; the minted
@@ -860,9 +863,12 @@ function mintParameter(
   reserved: ReservedNames,
 ): MintedSchema {
   let previous: { minted: MintedSchema; clashing: string } | undefined;
+  // The name the models derive from is the one `extractParams` typed the
+  // parameter under — a header's lower-cased (`foldParameterName`) — so the
+  // reference and the models agree, and neither moves with the header's case.
+  const stem = foldParameterName(param.in, param.name);
   for (let attempt = 0; ; attempt++) {
-    const property =
-      attempt === 0 ? param.name : attempt === 1 ? `${param.in}_${param.name}` : `${param.in}_${param.name}_${attempt}`;
+    const property = attempt === 0 ? stem : attempt === 1 ? `${param.in}_${stem}` : `${param.in}_${stem}_${attempt}`;
     const minted = mintSchema(schema, property, parent, componentSchemas, reserved);
     const clashing = [...minted.names]
       .filter((name) => taken.has(name))

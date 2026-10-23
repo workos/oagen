@@ -438,7 +438,7 @@ describe('response headers', () => {
       expect(services[0].operations[0].responseHeaders?.[0].type).toMatchInlineSnapshot(`
         {
           "kind": "enum",
-          "name": "DocumentsXRateLimitPolicy",
+          "name": "DocumentsXRatelimitPolicy",
           "values": [
             "burst",
             "sustained",
@@ -448,7 +448,7 @@ describe('response headers', () => {
       expect(enums).toMatchInlineSnapshot(`
         [
           {
-            "name": "DocumentsXRateLimitPolicy",
+            "name": "DocumentsXRatelimitPolicy",
             "values": [
               {
                 "name": "BURST",

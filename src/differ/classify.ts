@@ -37,6 +37,39 @@ export function deprecationFlip(
   return oldDeprecated === newDeprecated ? undefined : { oldDeprecated, newDeprecated };
 }
 
+/** The two sides of a parameter's name, carried on the `param-name-changed` entry that reports it. */
+export interface ParameterNameShift {
+  /** The name as the old spec wrote it (`X-Pet-Token`). */
+  oldName: string;
+  /** The name as the new spec writes it (`x-pet-token`). */
+  newName: string;
+  /** `name X-Pet-Token → x-pet-token`. */
+  details: string;
+}
+
+/**
+ * `{ oldName, newName, details }` when two parameters the differ paired
+ * are not written the same, `undefined` when they are. Parameters are
+ * paired on `parameterKey`, which folds a header's name and nothing else,
+ * so the only pairing whose two names differ is a header whose name
+ * changed case alone (`X-Pet-Token` → `x-pet-token`): the same header on
+ * the wire (RFC 9110 §5.1), still accepted with the same type and
+ * requiredness, hence additive at the IR layer — an emitter that derives an
+ * identifier from the name as written may still rename it, which its own
+ * compat check reports, as it does for `param-format-changed` (#295).
+ */
+export function parameterNameShift(
+  oldParam: { name: string },
+  newParam: { name: string },
+): ParameterNameShift | undefined {
+  if (oldParam.name === newParam.name) return undefined;
+  return {
+    oldName: oldParam.name,
+    newName: newParam.name,
+    details: `name ${oldParam.name} → ${newParam.name}`,
+  };
+}
+
 /** The two sides of a `tags` change, carried on the change that reports it. */
 export interface TagsShift {
   /** The node's `tags` in the old spec, in document order; `[]` when it carried none. */
@@ -190,6 +223,11 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
     case 'param-deprecated-changed':
       // See `field-deprecated-changed`: the parameter is still accepted with
       // the same type and requiredness, so this is additive either way.
+      return { kind, paramName, classification: 'additive' };
+    case 'param-name-changed':
+      // See `parameterNameShift`: only a header's case can differ between
+      // two paired parameters, and the wire reads it the same, so this is
+      // additive at the IR layer like `param-format-changed`.
       return { kind, paramName, classification: 'additive' };
   }
 }

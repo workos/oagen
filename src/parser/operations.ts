@@ -22,6 +22,7 @@ import type {
 } from '../ir/types.js';
 import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
+import { foldHeaderName, foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -2450,17 +2451,20 @@ function buildOperation(
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
   // An operation-level parameter overrides a path-level one with the same
-  // (name, in) identity rather than adding a second entry. Operation params come
-  // last, so last-write-wins; Map.set keeps the original insertion position, so
-  // path-level parameter ordering is preserved.
+  // identity — `parameterKey`: location and name, a header's name
+  // case-folded, so a path-level `X-Pet-Token` and an operation-level
+  // `x-pet-token` are one header (#295) — rather than adding a second entry.
+  // Operation params come last, so last-write-wins; Map.set keeps the
+  // original insertion position, so path-level parameter ordering is
+  // preserved.
   const paramsByIdentity = new Map<string, ParameterObject>();
   for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
     const param = resolveParameterRef(raw, componentParameters, opLabel);
-    paramsByIdentity.set(`${param.in}:${param.name}`, param);
+    paramsByIdentity.set(parameterKey(param.in, param.name), param);
   }
   const allParams = [...paramsByIdentity.values()];
 
-  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && p.name.toLowerCase() === 'idempotency-key');
+  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key');
 
   // A parameter the spec declares both as `in: query` and as a request-body
   // property is one value with two wire locations. On a body-carrying method
@@ -2523,7 +2527,7 @@ function buildOperation(
   // The idempotency header is the SDK's to inject (`injectIdempotencyKey`), not a parameter to type.
   const headerParams = extract(
     'header',
-    wireParams.filter((p) => !(p.in === 'header' && p.name.toLowerCase() === 'idempotency-key')),
+    wireParams.filter((p) => !(p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key')),
   );
   const cookieParams = extract('cookie');
   // Keep the body-owned declarations on the operation so downstream passes
@@ -2783,7 +2787,7 @@ function responseTypeRefs(op: Operation): TypeRef[] {
 
 /**
  * The qualifier that tells one operation's header models from another's
- * (`materializeDeferredType`'s `byOperation` candidate), and that the shape
+ * (`deferredNamingStem`'s `byOperationName` candidate), and that the shape
  * registry records as the owner of its models. An `operationId` names the
  * operation. A path-named operation uses the path-derived stem its request
  * and response models are built from, so the model name depends only on the
@@ -2915,8 +2919,16 @@ export function extractParams(
       const externalDocs = readExternalDocs(p.schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
       return {
         name: p.name,
+        // Typed under the name the parameter is compared by (`foldParameterName`:
+        // a header's lower-cased), so the inline enum or model its schema mints
+        // keeps its name when the header's case changes (#295); `name` above
+        // stays as written.
         type: p.schema
-          ? schemaToTypeRef(p.schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+          ? schemaToTypeRef(
+              p.schema,
+              foldParameterName(p.in, p.name),
+              operationContext ? toPascalCase(operationContext) : undefined,
+            )
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
         description: firstDescription(p.description, p.schema?.description, refTarget?.description),
@@ -4103,22 +4115,25 @@ function isSentSite(item: DeferredInlineType): boolean {
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
   const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
-  const byOperation = `${operationQualifier}${name}`;
-  const byBoth = `${operationQualifier}${name}${statusCode}`;
   const numbered = (index: number): string => `${name}${index + 2}`;
   switch (item.kind) {
-    case 'header':
+    case 'header': {
       // Decide the preference between candidates 2 and 3 from the bare
       // name's owners: a clash within this operation reads best by status
       // code, one with a component, a primary body or another operation by
-      // operation name.
+      // operation name. Joined with `_`, as a parameter's are, since the
+      // bare name is the lower-cased header name (`ListDocuments_x-meta` →
+      // `ListDocumentsXMeta`, not `ListDocumentsxMeta`).
+      const byOperationName = `${operationQualifier}_${name}`;
+      const byOperationAndStatus = `${operationQualifier}_${name}${statusCode}`;
       return (index, firstClashOwners) => {
         const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
         const candidates = withinOperation
-          ? [name, byStatus, byOperation, byBoth]
-          : [name, byOperation, byStatus, byBoth];
+          ? [name, byStatus, byOperationName, byOperationAndStatus]
+          : [name, byOperationName, byStatus, byOperationAndStatus];
         return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
       };
+    }
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'request':
@@ -4182,9 +4197,13 @@ function deferParameterModels(
   raw.forEach((param, index) => {
     const target = typed[index];
     if (!param.schema || !target) return;
+    // The name the models derive from is the one `extractParams` typed the
+    // parameter under — a header's lower-cased (`foldParameterName`) — so the
+    // reference and the model agree, and neither moves with the header's case.
+    const name = foldParameterName(location, param.name);
     const trial: Model[] = [];
     extractInlineModelsFromProperties(
-      { properties: { [param.name]: param.schema } },
+      { properties: { [name]: param.schema } },
       trial,
       parentName,
       ctx.componentSchemas,
@@ -4193,7 +4212,7 @@ function deferParameterModels(
     ctx.deferred.push({
       kind: 'param',
       schema: param.schema,
-      name: param.name,
+      name,
       statusCode: location,
       operationQualifier: ctx.operationQualifier,
       parentName,
@@ -4213,6 +4232,13 @@ function deferParameterModels(
  * — otherwise the ref would dangle with nothing to emit. That naming waits
  * for every primary model (`resolveDeferredInlineTypes`), so a header with a
  * schema is deferred and its `type` filled in then.
+ *
+ * Header names are case-insensitive (RFC 9110 §5.1; OpenAPI says so of this
+ * map), so two keys that differ in case alone (`X-Request-Id` beside
+ * `x-request-id`) declare one header: the later declaration is kept, in the
+ * earlier one's position, with a warning — the way an operation-level
+ * parameter replaces a path-level one, except that the document gave these
+ * two no precedence (#295).
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
@@ -4223,11 +4249,23 @@ function extractResponseHeaders(
 ): ResponseHeader[] | undefined {
   if (!headers) return undefined;
 
-  const result: ResponseHeader[] = [];
+  const declarations = new Map<string, { name: string; raw: RawHeaderObject }>();
   for (const [name, raw] of Object.entries(headers)) {
+    const folded = foldHeaderName(name);
+    const earlier = declarations.get(folded);
+    if (earlier) {
+      console.warn(
+        `[oagen] Warning: Response header "${name}" on ${operationLabel} ${statusCode} is also declared as "${earlier.name}"; header names are case-insensitive, so the later declaration is used.`,
+      );
+    }
+    declarations.set(folded, { name, raw });
+  }
+
+  const result: ResponseHeader[] = [];
+  for (const [folded, { name, raw }] of declarations) {
     // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
     // media type is already carried by the response's `content` map.
-    if (name.toLowerCase() === 'content-type') continue;
+    if (folded === 'content-type') continue;
 
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
     if (!header) continue;
@@ -4247,10 +4285,13 @@ function extractResponseHeaders(
       ...externalDocsEntry(schema?.externalDocs),
     };
     if (schema) {
+      // Named from the lower-cased header name, as a header parameter's inline
+      // type is, so the model or enum a header mints keeps its name when the
+      // header's case changes; `entry.name` stays as written.
       ctx.deferred.push({
         kind: 'header',
         schema,
-        name,
+        name: folded,
         statusCode,
         operationQualifier: ctx.operationQualifier,
         parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,

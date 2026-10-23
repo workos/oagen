@@ -110,6 +110,14 @@ describe('paramKey', () => {
     expect(paramKey('cookie', 'session')).toBe('cookie:session');
     expect(paramKey('query', 'session')).not.toBe(paramKey('cookie', 'session'));
   });
+
+  it("folds a header's name and no other, as `parameterKey` in ir/parameter-key.ts does (#295)", () => {
+    expect(paramKey('header', 'X-Pet-Token')).toBe('header:x-pet-token');
+    expect(paramKey('header', 'X-Pet-Token')).toBe(paramKey('header', 'x-pet-token'));
+    expect(paramKey('cookie', 'Session')).not.toBe(paramKey('cookie', 'session'));
+    expect(paramKey('query', 'Limit')).not.toBe(paramKey('query', 'limit'));
+    expect(paramKey('path', 'petId')).not.toBe(paramKey('path', 'petid'));
+  });
 });
 
 describe('diffOperations – cookie parameters (issue #294)', () => {
