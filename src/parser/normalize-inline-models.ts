@@ -5,6 +5,7 @@ import {
   collectModelTypeRefs,
   collectRequestBodyTypes,
   collectResponseBodyTypes,
+  collectOperationTypeRefs,
   collectWebhookTypeRefs,
   renameModelRefs,
   renameTypeRefModels,
@@ -93,26 +94,7 @@ export function reservedTypeNames(
   }
   for (const e of enums) reserved.add(e.name);
   for (const service of services) {
-    for (const op of service.operations) {
-      for (const param of [
-        ...op.pathParams,
-        ...op.queryParams,
-        ...(op.bodyOwnedQueryParams ?? []),
-        ...op.headerParams,
-        ...(op.cookieParams ?? []),
-      ]) {
-        visit(param.type);
-      }
-      if (op.requestBody) visit(op.requestBody);
-      visit(op.response);
-      for (const r of op.successResponses ?? []) visit(r.type);
-      for (const e of op.errors) if (e.type) visit(e.type);
-      for (const field of op.pagination?.envelopeFields ?? []) visit(field.type);
-      if (op.pagination) visit(op.pagination.itemType);
-      for (const header of collectResponseHeaders(op)) visit(header.type);
-      for (const { type } of collectResponseBodyTypes(op)) visit(type);
-      for (const { type } of collectRequestBodyTypes(op)) visit(type);
-    }
+    for (const op of service.operations) for (const ref of collectOperationTypeRefs(op)) visit(ref);
   }
   for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) visit(ref);
   return reserved;

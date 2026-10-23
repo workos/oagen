@@ -10,7 +10,7 @@ import type {
   Webhook,
   WebhookResponse,
 } from '../ir/types.js';
-import { collectModelTypeRefs, collectResponseHeaders, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
+import { collectModelTypeRefs, collectOperationTypeRefs, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
 import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment } from '../utils/media-type.js';
@@ -289,26 +289,7 @@ function collectExistingNamesByKind(
     enumNames.add(e.name);
   }
   for (const service of services) {
-    for (const op of service.operations) {
-      for (const param of [
-        ...op.pathParams,
-        ...op.queryParams,
-        ...(op.bodyOwnedQueryParams ?? []),
-        ...op.headerParams,
-        ...(op.cookieParams ?? []),
-      ]) {
-        collect(param.type);
-      }
-      if (op.requestBody) collect(op.requestBody);
-      collect(op.response);
-      for (const success of op.successResponses ?? []) collect(success.type);
-      for (const error of op.errors) if (error.type) collect(error.type);
-      if (op.pagination) {
-        collect(op.pagination.itemType);
-        for (const field of op.pagination.envelopeFields ?? []) collect(field.type);
-      }
-      for (const header of collectResponseHeaders(op)) collect(header.type);
-    }
+    for (const op of service.operations) for (const ref of collectOperationTypeRefs(op)) collect(ref);
   }
   return { all: names, enums: enumNames };
 }

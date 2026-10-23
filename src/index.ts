@@ -63,6 +63,7 @@ export {
   collectRequestBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
+  collectOperationTypeRefs,
 } from './ir/types.js';
 
 // Operation resolution

@@ -86,13 +86,19 @@ export function registerInlineModels(registry: InlineModelRegistry, models: Mode
 
 /**
  * Record every name of `names` the registry does not know yet as an enum's,
- * so no inline model is materialized under it (`ENUM_NAME_FINGERPRINT`). A
- * name a model already owns keeps the model's entry: that is the document's
- * own clash, not one the registry can move.
+ * so no inline model is materialized under it (`ENUM_NAME_FINGERPRINT`),
+ * owned by `operation` when one of that operation's own references carries
+ * the enum — so a deferred model of the operation that derives the name is
+ * qualified by location, as one that clashes with the operation's models is
+ * (`deferredNamingStem`) — and by no operation for a component enum's name
+ * or one a component's field or a shared companion carries, which reads as
+ * a clash with a component. A name a model or an earlier enum already owns
+ * keeps its entry: the first owner keeps a name, and a model's is the
+ * document's own clash, not one the registry can move.
  */
-export function reserveEnumNames(registry: InlineModelRegistry, names: Iterable<string>): void {
+export function reserveEnumNames(registry: InlineModelRegistry, names: Iterable<string>, operation?: string): void {
   for (const name of names) {
-    if (!registry.has(name)) registry.set(name, { fingerprint: ENUM_NAME_FINGERPRINT });
+    if (!registry.has(name)) registry.set(name, { fingerprint: ENUM_NAME_FINGERPRINT, operation });
   }
 }
 

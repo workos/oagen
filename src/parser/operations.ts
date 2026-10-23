@@ -52,7 +52,13 @@ import {
   unwrapNullableField,
   warnOnUncarriedProperties,
 } from './schemas.js';
-import { collectResponseHeaders, collectModelRefs, collectModelTypeRefs, walkTypeRef } from '../ir/types.js';
+import {
+  collectResponseHeaders,
+  collectModelRefs,
+  collectModelTypeRefs,
+  collectEnumRefs,
+  collectOperationTypeRefs,
+} from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
   detectPagination,
@@ -460,9 +466,11 @@ export function extractOperations(
   // (`resolveDeferredInlineTypes`): their names must not collide with a
   // differently shaped component, request body or primary response of any
   // operation, or the later merge would overwrite the first. The registry
-  // records which operation minted each model, so a clash within one
+  // records which operation minted each model, and which operation's own
+  // reference carries each enum name (`qualifierOf`), so a clash within one
   // operation can be told from one across two.
   const deferred: DeferredInlineType[] = [];
+  const qualifierOf = new Map<Operation, string>();
   // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
   // with every name decided before the operations — the component models
   // and enums, the components' field models (a nested object, a map's
@@ -481,20 +489,13 @@ export function extractOperations(
     if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
   }
   // Every enum name decided so far, held as names no model may take
-  // (`reserveEnumNames`): the component enums', and every inline enum the
-  // component models and the components' field models mint (an `EnumRef`
-  // carrying `values`, named before the enum collector may rename it). The
+  // (`reserveEnumNames`): the component enums', and every enum the component
+  // models and the components' field models reference (an inline enum's
+  // `EnumRef`, named before the enum collector may rename it; a `$ref` to a
+  // component enum names one already held). None is an operation's. The
   // operations' own join once they are read, below.
-  const reservedEnumNames = new Set<string>((componentEnums ?? []).map((e) => e.name));
-  const reserveEnumRefs = (ref: TypeRef): void => {
-    walkTypeRef(ref, {
-      enum: (r) => {
-        if (r.values) reservedEnumNames.add(r.name);
-      },
-    });
-  };
-  for (const model of registeredModels) for (const ref of collectModelTypeRefs(model)) reserveEnumRefs(ref);
-  reserveEnumNames(registry, reservedEnumNames);
+  const enumRefsOf = (model: Model): string[] => collectModelTypeRefs(model).flatMap(collectEnumRefs);
+  reserveEnumNames(registry, [...(componentEnums ?? []).map((e) => e.name), ...registeredModels.flatMap(enumRefsOf)]);
 
   for (const [path, pathItem] of Object.entries(paths)) {
     // Everything read at path-item level — `parameters`, `servers`, and the
@@ -561,6 +562,7 @@ export function extractOperations(
       // later operation's items and every deferred schema step around them;
       // its settled item models are already there (`typeInlineItems`).
       registerInlineModels(registry, opModels, operationQualifier);
+      qualifierOf.set(operation, operationQualifier);
       inlineModelBundles.push(...opBundles);
       if (opCompanions) {
         envelopeCompanions.push(...opCompanions);
@@ -598,31 +600,23 @@ export function extractOperations(
   // are named last, in document order, against every name in the registry —
   // the component models and enums, the components' field models, every
   // request body, primary response, item and companion model — and against
-  // every enum name decided so far: the component enums, and every inline
-  // enum those models' fields or the operations' parameters, bodies (the
-  // primary and every alternate success body), pagination (item type and
-  // envelope fields) and headers minted (an `EnumRef` carrying `values`,
-  // named before the enum collector may rename it). So none of them takes a
-  // name one of those owns, whichever comes first in the document, and no
-  // model is ever named like an enum.
+  // every enum name decided so far: the component enums, and every enum
+  // those models' fields or the operations' references — a parameter in any
+  // location, a body, a response of any kind, a response header, the
+  // pagination item type and envelope fields (`collectOperationTypeRefs`) —
+  // carry (an inline enum's `EnumRef`, named before the enum collector may
+  // rename it). An enum one of an operation's own references carries is
+  // registered as that operation's, so a deferred model of the operation
+  // that derives the name is qualified by location, as one that clashes
+  // with the operation's models is; a model's field enums are its
+  // operation's, a companion's no one's. So none of them takes a name one
+  // of those owns, whichever comes first in the document, and no model is
+  // ever named like an enum.
   registerInlineModels(registry, companionModels);
-  for (const model of inlineModels) for (const ref of collectModelTypeRefs(model)) reserveEnumRefs(ref);
-  for (const operations of serviceMap.values()) {
-    for (const op of operations) {
-      for (const param of [
-        ...op.pathParams,
-        ...op.queryParams,
-        ...(op.bodyOwnedQueryParams ?? []),
-        ...op.headerParams,
-        ...(op.cookieParams ?? []),
-      ]) {
-        reserveEnumRefs(param.type);
-      }
-      if (op.requestBody) reserveEnumRefs(op.requestBody);
-      for (const ref of responseTypeRefs(op)) reserveEnumRefs(ref);
-    }
+  for (const model of inlineModels) reserveEnumNames(registry, enumRefsOf(model), registry.get(model.name)?.operation);
+  for (const [op, qualifier] of qualifierOf) {
+    reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
   }
-  reserveEnumNames(registry, reservedEnumNames);
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
@@ -634,10 +628,7 @@ export function extractOperations(
   // repoints every response, header and array that shares it along with
   // the site's own references.
   inlineModelBundles.push(...deferredTypes.bundles);
-  attachSharedRefs(
-    inlineModelBundles,
-    new Set([...(componentModels ?? []), ...(componentFieldModels ?? [])].map((model) => model.name)),
-  );
+  attachSharedRefs(inlineModelBundles, new Set(registeredModels.map((model) => model.name)));
 
   // The API root each operation's path sits under, for every step below: none
   // for a tagged operation, whose service is its tag.
@@ -4094,8 +4085,26 @@ interface ResponseTypingContext {
  * operations, one media type's body on several status codes — share a
  * record of the stems they settled on and the renames made under them, so a
  * later one shares an identical shape under whichever name the earlier took
- * (`materializeInlineSchema`). Returns the models materialized, having set
- * each target's `type`.
+ * (`materializeInlineSchema`).
+ *
+ * Two precedences decide a name a model and an enum both derive. An enum
+ * typed as an operation is built — one a parameter, a request body, a
+ * success body, a pagination field carries — is in the registry before this
+ * pass and keeps its name wherever the document declares it: a `status`
+ * query enum on a later operation sends an earlier operation's `status`
+ * parameter object to `PetsListPetsStatus`, and the same operation's to
+ * `PetsQueryStatus`. Among the sites named here — response headers, error
+ * bodies, secondary and fallback bodies, parameter models — document order
+ * decides: each site registers the enums it types (a body that is itself an
+ * enum, an enum nested in a model it minted) as it is resolved, so the
+ * earlier site keeps the name and a later one that derives it steps (an
+ * `X-Mode` header parameter object after an earlier operation's `X-Mode`
+ * response-header enum is `PetsGetPetXMode`; `getPet`'s object 404 after
+ * `get-pet`'s enum 404 is `GetPetError404Body`), while an enum typed after
+ * a model of its name steps in the collectors instead
+ * (`collectDistinctEnums`, `GetPetError404Body` when the object 404 comes
+ * first). So the IR never declares a model and an enum under one name.
+ * Returns the models materialized, having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -4110,6 +4119,13 @@ function resolveDeferredInlineTypes(
     if (!siblings) siblingsByBareName.set(bareName, (siblings = createSiblingSites()));
     const minted = models.length;
     const type = materializeDeferredType(item, registry, models, siblings);
+    // An enum this site typed — a body that is itself an enum, one nested in
+    // a model it minted — owns its name from here on, as the site's models do.
+    reserveEnumNames(
+      registry,
+      [type, ...models.slice(minted).flatMap(collectModelTypeRefs)].flatMap(collectEnumRefs),
+      item.operationQualifier,
+    );
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
