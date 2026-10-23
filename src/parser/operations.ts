@@ -69,6 +69,7 @@ import {
   resolveOverrideParams,
   applyPaginationOverride,
   resolveDataPathItemType,
+  endOfIterationProblem,
 } from './pagination.js';
 import {
   classifyAndExtractResponse,
@@ -2660,10 +2661,12 @@ function buildOperation(
     envelopeFields,
     endOfIteration: responseEndOfIteration,
     overrideItemType,
+    overrideEndOfIterationProblem,
     envelopeCompanions,
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
     disabled: paginationDisabled,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
+    endOfIteration: paginationDisabled ? undefined : paginationOverride?.hint.endOfIteration,
     componentModels,
   });
   const inlineModels = [...responseModels, ...reqBodyModels];
@@ -2686,6 +2689,19 @@ function buildOperation(
     console.warn(
       `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: dataPath "${paginationOverride.hint.dataPath}" ` +
         'does not resolve to an array in the response — ignoring the override',
+    );
+    paginationOverride = undefined;
+  }
+
+  // An explicit `endOfIteration` the primary response cannot satisfy — a
+  // path that resolves to no field, or to one whose type does not fit the
+  // kind — would send an iterator reading a field that is not there, so the
+  // whole override falls back to detection the same way. One warning names
+  // the operation and the path; an override already dropped above is not
+  // reported twice.
+  if (paginationOverride && !paginationDisabled && overrideEndOfIterationProblem !== undefined) {
+    console.warn(
+      `[oagen] Warning: ${paginationOverride.source} on ${opLabel}: ${overrideEndOfIterationProblem} — ignoring the override`,
     );
     paginationOverride = undefined;
   }
@@ -4939,6 +4955,12 @@ interface PaginationExtractionOptions {
   disabled?: boolean;
   /** An explicit `dataPath` to resolve to the element type of the array it names. */
   dataPath?: string;
+  /**
+   * An explicit `endOfIteration` to check against the primary response
+   * (`endOfIterationProblem`): its path must land on a field whose type fits
+   * its kind, or the override is unusable.
+   */
+  endOfIteration?: PaginationEndOfIteration;
   /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
   componentModels?: Model[];
 }
@@ -5699,6 +5721,13 @@ function extractResponses(
   endOfIteration?: PaginationEndOfIteration;
   /** Element type of the array the override's `dataPath` names; unset when it does not resolve. */
   overrideItemType?: TypeRef;
+  /**
+   * Why the override's `endOfIteration` cannot be read from the primary
+   * response — a path that resolves to no field, or to one whose type does
+   * not fit its kind — in the words of `endOfIterationProblem`; unset when
+   * none was given or it can be.
+   */
+  overrideEndOfIterationProblem?: string;
   envelopeCompanions?: EnvelopeCompanion[];
 } {
   const errors: ErrorResponse[] = [];
@@ -5809,12 +5838,19 @@ function extractResponses(
       if (pick.type) extractedType = pick.type;
       if (bodySchema) {
         const contextName = componentModelName ?? deriveResponseName(op, pathModelBaseName);
-        // An explicit `dataPath` is handed to classification only when it
-        // reaches an array in this body; one that does not is left for the
-        // override's own warning, and detection stands.
+        // An explicit `dataPath` is handed to classification only when the
+        // override can apply to this body: the path reaches an array in it,
+        // and an explicit `endOfIteration` resolves in it to a field of the
+        // fitting type. An override that fails either is left for its own
+        // warning, and the body is read exactly as detection reads it.
+        const stopFieldUsable =
+          pagination.disabled ||
+          pagination.endOfIteration === undefined ||
+          endOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) === undefined;
         const dataPathOverride =
           pagination.disabled ||
           pagination.dataPath === undefined ||
+          !stopFieldUsable ||
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
@@ -6014,6 +6050,14 @@ function extractResponses(
     }
   }
 
+  // An explicit `endOfIteration` is checked against the same body: the path
+  // must land on a field of the primary response whose type fits the kind.
+  // Without a primary body there is no field for it to name.
+  const overrideEndOfIterationProblem =
+    pagination.disabled || pagination.endOfIteration === undefined
+      ? undefined
+      : endOfIterationProblem(pagination.endOfIteration, primaryBody && primarySchema, componentSchemas);
+
   const successResponses = allSuccessResponses.length > 1 ? allSuccessResponses : undefined;
 
   return {
@@ -6035,6 +6079,7 @@ function extractResponses(
     envelopeFields,
     endOfIteration,
     overrideItemType,
+    overrideEndOfIterationProblem,
     envelopeCompanions,
   };
 }

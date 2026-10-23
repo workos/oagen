@@ -9,6 +9,7 @@ import {
   applyPaginationOverride,
   validatePaginationHint,
   resolveSchemaKeyword,
+  endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
 } from '../../src/parser/pagination.js';
 import type { PaginationOverrides } from '../../src/parser/pagination.js';
@@ -644,11 +645,39 @@ describe('resolvePaginationOverride + applyPaginationOverride', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('drops pageStart when the resulting strategy is not page', () => {
-    expect(apply(detected, { extension: { strategy: 'offset', pageStart: 5 } })?.pageStart).toBeUndefined();
+  it('drops a detected pageStart when the resulting strategy is not page, and rejects one the override sets', () => {
+    // An override's own pageStart under another strategy is a contradiction,
+    // not a field to drop quietly (#310): the override is ignored.
+    expect(apply(detected, { extension: { strategy: 'offset', pageStart: 5 } })).toBe(detected);
+    expect(warn).toHaveBeenCalledWith(
+      '[oagen] Warning: x-pagination on listPets: pageStart 5 applies to the "page" strategy only, not to "offset" — ignoring the override',
+    );
     expect(
       apply({ ...detected, strategy: 'page', pageStart: 1 }, { hint: { strategy: 'cursor', param: 'cursor' } }),
     ).not.toHaveProperty('pageStart');
+  });
+
+  it('rejects pageStart under the detected strategy too, when the override names none (#310)', () => {
+    // `{ pageStart: 5 }` alone on an offset iterator.
+    expect(apply(detected, { hint: { pageStart: 5 } })).toBe(detected);
+    expect(warn).toHaveBeenCalledWith(
+      '[oagen] Warning: operationHints pagination on listPets: pageStart 5 applies to the "page" strategy only, not to "offset" — ignoring the override',
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns and falls back when param and limitParam resolve to one query parameter (#310)', () => {
+    expect(apply(detected, { extension: { param: 'limit' } })).toBe(detected);
+    expect(warn).toHaveBeenCalledWith(
+      '[oagen] Warning: x-pagination on listPets: param and limitParam both name "limit" — ignoring the override',
+    );
+    // The resolved pair is checked, whichever side the override restates.
+    expect(apply(detected, { hint: { limitParam: 'page' } })).toBe(detected);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('param and limitParam both name "page"'));
+    // Including a `param` the strategy's own name resolved: `cursor` is declared, so `{ strategy: 'cursor' }` drives it.
+    expect(apply(detected, { extension: { strategy: 'cursor', limitParam: 'cursor' } })).toBe(detected);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('param and limitParam both name "cursor"'));
+    expect(warn).toHaveBeenCalledTimes(3);
   });
 
   it('warns and falls back to detection on an unknown strategy', () => {
@@ -771,5 +800,75 @@ describe('validatePaginationHint', () => {
     expect(validatePaginationHint({ endOfIteration: { kind: 'hasMore' } }, 'x-pagination', 'op')).toBeUndefined();
     expect(validatePaginationHint({ endOfIteration: 'has_more' }, 'x-pagination', 'op')).toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('endOfIterationProblem', () => {
+  // `meta.page.last`: a nullable `$ref` companion, an `allOf` member, a `$ref`
+  // field, a nullable `oneOf` boolean. `pages` is a type list.
+  const components: Record<string, SchemaObject> = {
+    Flag: { oneOf: [{ type: 'boolean' }, { type: 'null' }] },
+    PageInfo: { type: 'object', properties: { last: { $ref: '#/components/schemas/Flag' } } },
+    Meta: { allOf: [{ type: 'object', properties: { page: { $ref: '#/components/schemas/PageInfo' } } }] },
+  };
+  const body: SchemaObject = {
+    type: 'object',
+    properties: {
+      data: { type: 'array', items: { type: 'string' } },
+      meta: { oneOf: [{ $ref: '#/components/schemas/Meta' }, { type: 'null' }] },
+      pages: { type: ['integer', 'null'] },
+      total: { type: 'integer' },
+      label: { type: 'string' },
+    },
+  };
+  const problem = (
+    kind: 'hasMore' | 'totalPages' | 'totalCount',
+    path: string,
+    schema: SchemaObject | undefined = body,
+  ) => endOfIterationProblem({ kind, path }, schema, components);
+
+  it('accepts a path that lands on a field of the fitting type, through $refs, allOf members and nullable wrappers', () => {
+    expect(problem('hasMore', 'meta.page.last')).toBeUndefined();
+    expect(problem('totalPages', 'pages')).toBeUndefined();
+    expect(problem('totalCount', 'pages')).toBeUndefined();
+    expect(problem('totalCount', 'total')).toBeUndefined();
+  });
+
+  it('names a path that resolves to no field, and any path when there is no body', () => {
+    const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
+    expect(problem('hasMore', 'nope.missing')).toBe(missing('nope.missing'));
+    expect(problem('hasMore', 'meta.page.nope')).toBe(missing('meta.page.nope'));
+    expect(problem('hasMore', 'total.count')).toBe(missing('total.count'));
+    expect(endOfIterationProblem({ kind: 'totalCount', path: 'total' }, undefined, components)).toBe(missing('total'));
+  });
+
+  it('names a field whose type does not fit the kind, by the test detection applies', () => {
+    expect(problem('hasMore', 'total')).toBe(
+      'endOfIteration path "total" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(problem('hasMore', 'label')).toBe(
+      'endOfIteration path "label" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(problem('totalCount', 'meta.page.last')).toBe(
+      'endOfIteration path "meta.page.last" is not an integer or number field, as kind "totalCount" requires',
+    );
+    expect(problem('totalPages', 'data')).toBe(
+      'endOfIteration path "data" is not an integer or number field, as kind "totalPages" requires',
+    );
+  });
+
+  it('agrees with detection about which fields can end an iteration', () => {
+    // A string `has_more` is no stop field to detection, and no stop field to an override either.
+    const properties: Record<string, SchemaObject> = {
+      data: { type: 'array', items: { type: 'string' } },
+      has_more: { type: 'string' },
+      total: { type: 'integer' },
+    };
+    expect(detectEndOfIteration(properties, 'data')).toEqual({ kind: 'totalCount', path: 'total' });
+    const schema: SchemaObject = { type: 'object', properties };
+    expect(endOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, schema)).toBe(
+      'endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(endOfIterationProblem({ kind: 'totalCount', path: 'total' }, schema)).toBeUndefined();
   });
 });
