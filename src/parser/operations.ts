@@ -1498,8 +1498,13 @@ function inferAction(
  *      each a variant of its twin rather than of the operationId;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), when no pass above
  *      has a free name that tells the group apart, so an emitter never
- *      sees two methods with one name in one class. An operationId-named
- *      operation keeps the plain name over a path-named one; then the path
+ *      sees two methods with one name in one class. A name that already
+ *      ends in a digit — the version the root words gave it (`listV1`), a
+ *      path word (`listTop10`), an operationId (`getV2`) — takes the number
+ *      behind `No` (numberedName): `GET /api/v1` beside `GET /api/v1/` is
+ *      `listV1` and `listV1No2`, never `listV12`, which reads as version
+ *      12. An operationId-named operation keeps the plain name over a
+ *      path-named one; then the path
  *      that skipped the shorter root, so `/health` or a tagged `/notes` keeps
  *      `list` over `/api/health` or `/api/v1/notes`; otherwise the lexically
  *      first path keeps it, whatever the document order. The suffix is silent
@@ -1704,12 +1709,10 @@ function disambiguateOperationNames(
     );
     const keeper = ordered[0];
     const nameByPath = new Map<string, string>([[keeper.path, name]]);
-    let n = 2;
     for (const op of ordered) {
       let next = nameByPath.get(op.path);
       if (next === undefined) {
-        while (taken.has(`${name}${n}`)) n++;
-        next = `${name}${n}`;
+        next = suffixedName(name, taken);
         taken.add(next);
         nameByPath.set(op.path, next);
         // A path-derived name is the parser's own and is refined silently,
@@ -1758,7 +1761,9 @@ function disambiguateOperationNames(
  * still held on the path by an operationId or by another verb — path-named
  * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
  * to drop — a numeric suffix free in the service is added, silently, as the
- * numeric pass adds one (`updatePet2`). Two operationId-named operations on
+ * numeric pass adds one and spelled as it spells it (numberedName:
+ * `updatePet2`, and `updateTop10No2` for a PATCH on `/store/top10/{id}`
+ * beside `operationId: updateTop10`). Two operationId-named operations on
  * one path with one name are the document reusing an operationId: the first
  * in HTTP_METHODS order keeps it and the rest are numbered with the warning
  * the numeric pass gives that case. Paths are visited in lexical order and
@@ -1930,11 +1935,15 @@ function methodOrder(a: Operation, b: Operation): number {
   return HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
 }
 
-/** `base` with the first numeric suffix, from 2, that no name in `taken` has: `updatePet2`. */
+/**
+ * `base` with the first numeric suffix, from 2, that no name in `taken` has,
+ * spelled by numberedName: `updatePet2`, and `updateTop10No2` for a base
+ * that ends in a digit.
+ */
 function suffixedName(base: string, taken: ReadonlySet<string>): string {
   let n = 2;
-  while (taken.has(`${base}${n}`)) n++;
-  return `${base}${n}`;
+  while (taken.has(numberedName(base, n))) n++;
+  return numberedName(base, n);
 }
 
 /**
@@ -1944,10 +1953,11 @@ function suffixedName(base: string, taken: ReadonlySet<string>): string {
  * their methods take one verb (PUT + PATCH).
  *
  * Name order, not document order: the numeric pass draws suffixed names from
- * one pool per service, and two groups can reach the same one (`listNotes` +
- * `12` and `listNotes1` + `2`), so whichever is served first decides. Names
- * are unique per group, so this is a total order, and with the members of a
- * group also sorted the whole assignment depends only on the paths.
+ * one pool per service, and two groups can reach the same one (`listNotes1`
+ * + `No2` and `listNotes1No` + `2`, see numberedName), so whichever is
+ * served first decides. Names are unique per group, so this is a total
+ * order, and with the members of a group also sorted the whole assignment
+ * depends only on the paths.
  */
 function collidingGroups(operations: Operation[]): Operation[][] {
   const byName = new Map<string, Operation[]>();
@@ -2053,6 +2063,20 @@ function nameIsFree(
     const otherNoun = pathNamed.has(other) ? nounOf(other) : null;
     return noun !== null && otherNoun !== null && sameNoun(otherNoun.toLowerCase(), noun.toLowerCase());
   });
+}
+
+/**
+ * `name` with the numeric suffix `n`, the spelling of every numbered
+ * operation name (suffixedName picks the first free `n`): `list` + 2 is
+ * `list2`. A name that already ends in a digit takes the number behind
+ * `No`, so that it cannot be read as part of the number the name ends with:
+ * `listV1` + 2 is `listV1No2`, never `listV12`, which reads as version 12
+ * of the API, and `listTop10` + 2 is `listTop10No2`. An underscore would
+ * not do: splitWords reads a digit run as a word of its own, so `listV1_2`
+ * re-cased by toPascalCase or toCamelCase is `ListV12` or `listV12` again.
+ */
+function numberedName(name: string, n: number): string {
+  return /\d$/.test(name) ? `${name}No${n}` : `${name}${n}`;
 }
 
 /**
