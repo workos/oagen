@@ -648,7 +648,10 @@ export type ParamLocation = ParameterLocation;
  * and the spelling change is a `param-name-changed` entry (additive, with
  * `oldName`/`newName`) beside whatever else changed about it, not a
  * `param-removed` beside a `param-added`. Path, query and cookie names are
- * case-sensitive. `paramName` is the name as the new spec writes it.
+ * case-sensitive. On the entries of a paired parameter, `paramName` is the
+ * name as the new spec writes it; a `param-removed` entry carries the old
+ * spec's name, which the new spec no longer has, and a `param-added` entry
+ * the new spec's.
  */
 export interface ParamChange {
   kind:
