@@ -1578,9 +1578,11 @@ describe('response content types', () => {
         name: 'ListThingsApplicationVndPropertiesAdditionalJsonResponse',
       });
       expect(fieldsOf(spec, 'ListThingsApplicationVndPropertiesAdditionalJsonResponse')).toContain('name');
-      // `oneOf` wins over `properties`.
+      // `oneOf` wins over `properties` for the type, and the properties are
+      // carried into each inline object variant (#282: `foldSiblingProperties`).
       expect(typeOf(op, 'application/vnd.oneof-properties+json')).toMatchObject({ kind: 'union' });
-      expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponse')).toEqual(['a']);
+      expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponse')).toEqual(['name', 'a']);
+      expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponseWithB')).toEqual(['name', 'b']);
       // `allOf` wins over `oneOf`.
       expect(typeOf(op, 'application/vnd.allof-oneof+json')).toEqual({
         kind: 'model',
@@ -1606,7 +1608,8 @@ describe('response content types', () => {
       expect(fieldsOf(spec, 'PuzzleItemsProperty')).toEqual(['id']);
       expect(fieldType('propertiesAdditional')).toEqual({ kind: 'model', name: 'PuzzlePropertiesAdditional' });
       expect(fieldType('oneOfProperties')).toMatchObject({ kind: 'union' });
-      expect(fieldsOf(spec, 'PuzzleOneOfProperty')).toEqual(['a']);
+      expect(fieldsOf(spec, 'PuzzleOneOfProperty')).toEqual(['name', 'a']);
+      expect(fieldsOf(spec, 'PuzzleOneOfPropertyWithB')).toEqual(['name', 'b']);
       expect(fieldType('allOfOneOf')).toEqual({ kind: 'model', name: 'PuzzleAllOfOneOf' });
       expect(fieldsOf(spec, 'PuzzleAllOfOneOf')).toEqual(['base']);
     });

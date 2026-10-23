@@ -8,7 +8,7 @@ import {
   clearSchemaNameTransform,
   resolveSchemaName,
 } from './schemas.js';
-import { extractOperations } from './operations.js';
+import { attachSharedRefs, extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
@@ -161,8 +161,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
-    // The component enums, so no header, fallback, error or secondary-body
-    // model the operations pass names last takes one of their names.
+    // The component enums, so no model the operations pass mints — a header,
+    // parameter, fallback, error or secondary body's, an array body's items —
+    // takes one of their names.
     enums,
   );
 
@@ -211,8 +212,11 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
   // The field models' sites, resolved now that the response merge may have
-  // replaced a component's fields.
+  // replaced a component's fields. An operation's array items that share a
+  // component field's model (`typeInlineItems`) then join that field's site,
+  // so the field merge's rename of a deprecated copy reaches the array too.
   naming.bundles.push(...fieldInlineModelBundles(fieldInlineModelGroups, responseNormalizedModels));
+  attachSharedRefs(naming.bundles, componentNames);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks);
   applyFieldHints(finalModels, options?.fieldHints);

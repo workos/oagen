@@ -25,15 +25,15 @@ export { modelFingerprint };
 /**
  * Spec-wide record of every name an inline model must not silently reuse:
  * the component models (seeded up front), each operation's primary response
- * and request body models, each header and fallback model materialized so
- * far — and every enum name, component or minted (`reserveEnumNames`), since
- * a model and an enum under one name reach an emitter as one public symbol.
- * A model's entry carries its shape fingerprint, so a model whose shape
- * matches can share the name, and — for operation-owned models — which
- * operation produced it, so a collision inside one operation can be told
- * apart from one across operations. An enum's entry carries
- * `ENUM_NAME_FINGERPRINT`, which no model's fingerprint equals, so a model
- * minted under an enum's name always clashes and moves on.
+ * and request body models, each header, body and parameter model
+ * materialized so far — and every enum name, component or minted
+ * (`reserveEnumNames`), since a model and an enum under one name reach an
+ * emitter as one public symbol. A model's entry carries its shape
+ * fingerprint, so a model whose shape matches can share the name, and — for
+ * operation-owned models — which operation produced it, so a collision
+ * inside one operation can be told apart from one across operations. An
+ * enum's entry carries `ENUM_NAME_FINGERPRINT`, which no model's fingerprint
+ * equals, so a model minted under an enum's name always clashes and moves on.
  */
 export type InlineModelRegistry = Map<string, InlineModelOwner>;
 
