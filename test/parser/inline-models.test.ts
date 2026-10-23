@@ -4362,12 +4362,6 @@ describe('a title two unions give different shapes at different depths of one ro
         }),
       },
       {
-        label: 'a `paths` key starting with `x-`',
-        document: (schema) => ({
-          paths: { 'x-path': { get: { responses: { '200': { content: { 'application/json': { schema } } } } } } },
-        }),
-      },
-      {
         label: 'a media type named `x-custom/json`',
         document: (schema) => ({
           paths: { '/d': { get: { responses: { '200': { content: { 'x-custom/json': { schema } } } } } } },
@@ -4388,12 +4382,6 @@ describe('a title two unions give different shapes at different depths of one ro
               get: { parameters: [{ name: 'x-filter', in: 'query', content: { 'x-custom/json': { schema } } }] },
             },
           },
-        }),
-      },
-      {
-        label: 'a webhook named `x-event`',
-        document: (schema) => ({
-          webhooks: { 'x-event': { post: { requestBody: { content: { 'application/json': { schema } } } } } },
         }),
       },
       {
@@ -4489,18 +4477,26 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
     });
 
-    it('steps over an `x-` key only in a Responses Object and a Callback Object, where it is an extension', () => {
+    it('steps over an `x-` key in the Paths Object, the `webhooks` map, a Responses Object and a Callback Object, where it is an extension (#350)', () => {
       // A contested pair under each extension: marked only if the extension
-      // is read. The status-code and expression entries beside them are.
+      // is read. The path, webhook, status-code and expression entries beside
+      // them are. A `paths` or `webhooks` key starting with `x-` is an
+      // extension by the specification, which `extractOperations` and
+      // `extractWebhooks` step over, so the walker steps over it too, whatever
+      // its value — even one shaped like a path item.
       const read = [byRadius(), byDiameter()] as const;
       const inResponsesExtension = [byRadius(), byDiameter()] as const;
       const inCallbackExtension = [byRadius(), byDiameter()] as const;
       const underCallback = [byRadius(), byDiameter()] as const;
+      const inPathsExtension = [byRadius(), byDiameter()] as const;
+      const underWebhook = [byRadius(), byDiameter()] as const;
+      const inWebhooksExtension = [byRadius(), byDiameter()] as const;
       const body = (pair: readonly [SchemaObject, SchemaObject]) => ({
         content: { 'application/json': { schema: nested(pair[0], pair[1]) } },
       });
       markContestedTitles({
         paths: {
+          'x-internal': true,
           '/d': {
             get: {
               responses: { '200': body(read), 'x-ext': body(inResponsesExtension) },
@@ -4512,12 +4508,23 @@ describe('a title two unions give different shapes at different depths of one ro
               },
             },
           },
+          'x-path': { get: { responses: { '200': body(inPathsExtension) } } },
+        },
+        webhooks: {
+          'x-note': 'text',
+          petAdopted: { post: { requestBody: body(underWebhook) } },
+          'x-event': { post: { requestBody: body(inWebhooksExtension) } },
         },
       });
-      for (const union of [...read, ...underCallback]) {
+      for (const union of [...read, ...underCallback, ...underWebhook]) {
         expect(variantsOf(union).map(isContestedTitle)).toEqual([true, true]);
       }
-      for (const union of [...inResponsesExtension, ...inCallbackExtension]) {
+      for (const union of [
+        ...inResponsesExtension,
+        ...inCallbackExtension,
+        ...inPathsExtension,
+        ...inWebhooksExtension,
+      ]) {
         expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
       }
     });

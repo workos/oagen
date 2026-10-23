@@ -193,7 +193,7 @@ describe('path items written as a $ref (issue #300)', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
-    it('takes the referenced item whole: fields written beside the $ref are not read', () => {
+    it('takes the referenced item whole: fields written beside the $ref are not read, and are reported once', () => {
       const { services } = operationsOf(
         {
           '/pets/{id}': {
@@ -212,7 +212,10 @@ describe('path items written as a $ref (issue #300)', () => {
       expect(ops[0].summary).toBe('A pet');
       expect(ops[0].queryParams).toEqual([]);
       expect(ops[0].servers).toEqual([{ url: 'https://pets.example.com' }]);
-      expect(warn).not.toHaveBeenCalled();
+      // Reported once, naming the keys: the `post` beside the ref is not lost silently.
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Path "/pets/{id}" has fields beside its $ref ("summary", "parameters", "servers", "post") that are not read: the referenced path item is taken whole.',
+      ]);
     });
 
     it('resolves the entry before the API-root and model-name passes read it, as for an inline item', () => {
@@ -344,6 +347,83 @@ describe('path items written as a $ref (issue #300)', () => {
     });
   });
 
+  describe('x- keys, which are specification extensions and never path items', () => {
+    const pets = { get: { operationId: 'listPets', responses } };
+    const adopted = { post: { operationId: 'adopted', responses } };
+
+    it('steps over a scalar extension beside a path, without a warning', () => {
+      const { services } = operationsOf({ 'x-internal': true, '/pets': pets });
+
+      expect(allOperations({ services }).map((op) => [op.name, op.path])).toEqual([['listPets', '/pets']]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('steps over an object-valued extension beside a path, even one shaped like a path item or a ref', () => {
+      // `x-alias` resolves to a real item: still an extension, never an `XAlias` service.
+      const { services } = operationsOf(
+        {
+          'x-group': { get: { operationId: 'notAnOperation', responses } },
+          'x-alias': { $ref: '#/components/pathItems/Pets' },
+          'x-ref': { $ref: '#/components/pathItems/Missing' },
+          '/pets': pets,
+        },
+        { Pets: pets },
+      );
+
+      expect(services.map((s) => s.name)).toEqual(['Pets']);
+      expect(allOperations({ services }).map((op) => [op.name, op.path])).toEqual([['listPets', '/pets']]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('steps over a scalar extension beside a webhook, without a warning', () => {
+      const { webhooks } = extractWebhooks({ 'x-internal': true, petAdopted: adopted });
+
+      expect(webhooks.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('steps over an object-valued extension beside a webhook, even one shaped like a path item or a ref', () => {
+      const { webhooks } = extractWebhooks(
+        {
+          'x-event': { post: { operationId: 'notAWebhook', responses } },
+          'x-alias': { $ref: '#/components/pathItems/Adopted' },
+          'x-ref': { $ref: '#/components/pathItems/Missing' },
+          petAdopted: adopted,
+        },
+        { pathItems: { Adopted: adopted } },
+      );
+
+      expect(webhooks.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps the extensions out of the IR through parseSpec, paths and webhooks alike', async () => {
+      const spec = await parseDocument({
+        openapi: '3.1.0',
+        info: { title: 'ext', version: '1' },
+        paths: {
+          'x-internal': true,
+          'x-group': { get: { operationId: 'notAnOperation', responses } },
+          'x-alias': { $ref: '#/components/pathItems/Pets' },
+          '/pets': pets,
+        },
+        webhooks: {
+          'x-note': 'text',
+          'x-event': { post: { operationId: 'notAWebhook', responses } },
+          'x-alias': { $ref: '#/components/pathItems/Adopted' },
+          petAdopted: adopted,
+        },
+        components: { pathItems: { Pets: pets, Adopted: adopted } },
+      });
+
+      expect(spec.services.map((s) => s.name)).toEqual(['Pets']);
+      expect(allOperations(spec).map((op) => [op.name, op.path])).toEqual([['listPets', '/pets']]);
+      expect(spec.webhooks?.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
+      expect(warn).not.toHaveBeenCalled();
+      expectResolvedAndReferenced(spec);
+    });
+  });
+
   describe('one resolver for paths and webhooks', () => {
     it('reads one components/pathItems entry as both an operation and a webhook', async () => {
       const spec = await parseDocument({
@@ -400,6 +480,35 @@ describe('path items written as a $ref (issue #300)', () => {
           "[oagen] Warning: Circular path item $ref chain starting at "#/components/pathItems/Loop" for webhook "loop"; skipping it.",
         ]
       `);
+    });
+
+    it('reports fields beside a $ref once per entry, chain links included and extensions aside, for a path and a webhook', () => {
+      const pathItems: ComponentPathItems = {
+        A: { $ref: '#/components/pathItems/B', description: 'On the link', 'x-link': true },
+        B: { get: { operationId: 'getPet', responses } },
+      };
+      const entry = { $ref: '#/components/pathItems/A', summary: 'Beside', 'x-internal': true };
+
+      expect(resolvePathItemRef(entry, pathItems, { kind: 'path', key: '/pets' })).toBe(pathItems.B);
+      expect(resolvePathItemRef(entry, pathItems, { kind: 'webhook', key: 'petAdopted' })).toBe(pathItems.B);
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Path "/pets" has fields beside its $ref ("summary", "description") that are not read: the referenced path item is taken whole.',
+        '[oagen] Warning: Webhook "petAdopted" has fields beside its $ref ("summary", "description") that are not read: the referenced path item is taken whole.',
+      ]);
+    });
+
+    it('warns, through extractWebhooks, about a webhook whose fields beside the $ref are not read', () => {
+      const { webhooks } = extractWebhooks(
+        { petAdopted: { $ref: '#/components/pathItems/Adopted', summary: 'Beside the ref', post: { responses } } },
+        { pathItems: { Adopted: { summary: 'Pet adopted', post: { operationId: 'adopted', responses } } } },
+      );
+
+      expect(webhooks.map((w) => [w.name, w.operationId, w.summary])).toEqual([
+        ['petAdopted', 'adopted', 'Pet adopted'],
+      ]);
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Webhook "petAdopted" has fields beside its $ref ("summary", "post") that are not read: the referenced path item is taken whole.',
+      ]);
     });
 
     it('still resolves a webhook entry through a chain, as before', () => {
