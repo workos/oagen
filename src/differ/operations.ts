@@ -144,7 +144,10 @@ export function diffOperations(
     // The status code `response` is read from (`responseStatusCode`, present
     // exactly when a 2xx or 3xx is declared), compared only while both sides
     // carry one, as `requestBodyRequired` is while both carry a body: an
-    // operation gaining or losing its only 2xx/3xx is not a move.
+    // operation gaining or losing its only 2xx/3xx is not a move. Reported
+    // as additive: the old code may still be declared (a `200` added beside
+    // a lone `201` makes the `200` the primary), and whether a bare status
+    // move breaks callers is left to a separate issue.
     const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
     const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
     const status = responseStatusCodeChanged
@@ -271,10 +274,6 @@ export function diffOperations(
         errorsBreaking ||
         responseContentTypesBreaking ||
         responseHeadersBreaking ||
-        // responseStatusCode: breaking — the status the operation succeeds
-        // with is what an SDK checks or documents (the IR carries it for
-        // that), and the server now answers with another one.
-        responseStatusCodeChanged ||
         requestBodyContentTypesBreaking ||
         fallbackBreaking ||
         serversChanged ||
@@ -409,9 +408,10 @@ const JSON_MEDIA_TYPE = 'application/json';
  * entry of its code — and, for a lone 2xx that `successResponses` does not
  * list, `responseStatusCode` itself, the code the parser read `response`
  * from, so a lone `201` pairs with the other spec's `201` whether that spec
- * declares it alone or beside a `200` it added. A hand-built IR whose lone
- * 2xx carries no code is keyed `primary` (see `pairContentEntries` for what
- * it pairs with).
+ * declares it alone or beside a `200` it added. A primary that carries no
+ * code — an operation declaring no 2xx/3xx at all, or a hand-built IR's
+ * lone 2xx — is keyed `primary` (see `pairContentEntries` for what it pairs
+ * with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
@@ -508,9 +508,13 @@ function pairResponseHeaders(
  * whose media types are compared with another's is the one whose headers
  * are; within an entry, headers pair by case-folded name
  * (`pairResponseHeaders`), so a header that only changed case is one header,
- * reported `header-name-changed`. A 2xx the old spec declared and the new
- * does not has no other diff to report it, so each of its headers is
- * reported `header-removed`, as its media types are reported removed; an
+ * reported `header-name-changed`. A change is located at the entry of the
+ * spec that declares what changed: a header removed at the old spec's
+ * entry, one added or changed at the new spec's — so an operation that
+ * lost its only 2xx, whose new primary carries no code, reports that
+ * entry's headers under its old code, not nowhere. A 2xx the old spec declared and
+ * the new does not has no other diff to report it, so each of its headers
+ * is reported `header-removed`, as its media types are reported removed; an
  * error or fallback entry only one spec declares is the errors or fallback
  * diff's business, and a 2xx the new spec adds is no header change. A
  * webhook's accepted responses carry no headers in the IR, so `diffWebhooks`
@@ -525,16 +529,10 @@ function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeader
   // Every change says which response entry it is about, in the position
   // `ResponseContentTypesChange` reports an entry: a status code (a lone
   // 2xx's `responseStatusCode` included), or the fallback key, or neither
-  // for a lone 2xx of a hand-built IR that carries no code.
+  // only for a lone 2xx of a hand-built IR that carries no code.
   const at = (entry: ContentEntry, change: ResponseHeaderChange): ResponseHeaderChange => {
     const { kind, headerName, ...rest } = change;
-    return {
-      kind,
-      headerName,
-      ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
-      ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
-      ...rest,
-    };
+    return { kind, headerName, ...entryLocation(entry), ...rest };
   };
   for (const entry of newEntries) {
     const old = pairs.get(entry);
@@ -542,7 +540,7 @@ function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeader
     paired.add(old);
     const { pairs: headers, added, removed } = pairResponseHeaders(old.headers, entry.headers);
     for (const header of added) changes.push(at(entry, classifyResponseHeaderChange('header-added', header.name)));
-    for (const header of removed) changes.push(at(entry, classifyResponseHeaderChange('header-removed', header.name)));
+    for (const header of removed) changes.push(at(old, classifyResponseHeaderChange('header-removed', header.name)));
     for (const [before, after] of headers) {
       for (const change of headerChanges(before, after)) changes.push(at(entry, change));
     }
@@ -553,6 +551,20 @@ function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeader
       changes.push(at(old, classifyResponseHeaderChange('header-removed', header.name)));
   }
   return changes;
+}
+
+/**
+ * Where a response entry is, as a change reports it: its status code (a
+ * lone 2xx's `responseStatusCode` included), else its fallback key, else
+ * nothing — a primary that carries no code, which among the parser's
+ * operations is only one declaring no 2xx/3xx, whose primary carries no
+ * headers or media types of its own to report.
+ */
+function entryLocation(entry: ContentEntry): Pick<ResponseHeaderChange, 'statusCode' | 'fallback'> {
+  return {
+    ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
+    ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
+  };
 }
 
 /**
@@ -630,9 +642,14 @@ function diffResponseContentTypes(
     const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
     const reparameterized = reparameterizedBodies(bodies);
     if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
+    // Located at the new spec's entry, or — when that entry carries no code
+    // and the change only removes, as when an operation lost its only 2xx —
+    // at the old spec's entry, which declared what is gone; as a removed
+    // header is located at the old entry.
+    const onlyRemoves = added.length === 0 && retyped.length === 0 && reparameterized.length === 0;
+    const unlocated = entry.statusCode === undefined && entry.fallback === undefined;
     changes.push({
-      ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
-      ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
+      ...entryLocation(onlyRemoves && unlocated ? old : entry),
       added: added.map((body) => body.mediaType),
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
@@ -665,11 +682,15 @@ function diffResponseContentTypes(
  * moved (a lone `201` became a lone `200`): the two primaries pair, and
  * `responseStatusCodeChanged` reports the move once rather than every header
  * and media type as removed under one code and added under the other. Only
- * a lone 2xx that carries no code (a hand-built IR, keyed `primary`) falls
- * back to shape: it pairs with the 2xx entry of the other side that offers
- * the very same media types, whatever that entry's code — the response it
- * most plausibly still is — and, when none does, with the other side's
- * primary. A new entry nothing pairs with is left out of the map.
+ * a primary that carries no code (keyed `primary`: an operation declaring no
+ * 2xx/3xx at all, whose `response` is `unknown`, or a hand-built IR's lone
+ * 2xx) falls back to shape: it pairs with the 2xx entry of the other side
+ * that offers the very same media types, whatever that entry's code — the
+ * response it most plausibly still is — and, when none does, with the other
+ * side's primary; so an operation that lost its only 2xx pairs that entry
+ * with its new, empty primary, and `diffResponseHeaders` and
+ * `diffResponseContentTypes` report what it declared under its old code. A
+ * new entry nothing pairs with is left out of the map.
  */
 function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
   const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
