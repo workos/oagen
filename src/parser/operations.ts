@@ -383,12 +383,17 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
  * The `paths` map with every entry resolved to the Path Item it denotes —
  * the entry itself, or the `components/pathItems` item its `$ref` leads to
  * (OpenAPI 3.1) — in document order, through `resolvePathItemRef`, the
- * resolver a `webhooks` entry goes through too. Resolved once, before any
+ * resolver a `webhooks` entry goes through too. A key starting with `x-` is
+ * a specification extension of the Paths Object, not a path, and is
+ * stepped over without a warning whatever its value, as
+ * `collectWebhookEntries` steps over one under `webhooks`. Resolved once,
+ * before any
  * pass reads the map, so the model-name reservation
  * (`resolvePathModelBaseNames`), the API root (`documentApiRoot`) and the
  * operation loop all see the same items, and a referenced item's
  * operations, `parameters`, `servers`, `summary` and `description` are read
- * exactly as an inline item's. An entry the resolver rejects — not an
+ * exactly as an inline item's (fields written beside the `$ref` are not, and
+ * the resolver reports them). An entry the resolver rejects — not an
  * object, a non-string `$ref`, a ref outside `components/pathItems`, a
  * dangling ref, a cycle — is warned about once, naming the path, and left
  * out. Two paths that `$ref` one entry map to one object, read once per
@@ -400,6 +405,9 @@ function resolvePathItems(
 ): Record<string, PathItem> {
   const resolved: Record<string, PathItem> = {};
   for (const [path, raw] of Object.entries(paths)) {
+    // A specification extension of the Paths Object, never a path item:
+    // stepped over whatever its value, before the resolver can warn about it.
+    if (path.startsWith('x-')) continue;
     const pathItem = resolvePathItemRef(raw, componentPathItems, { kind: 'path', key: path });
     if (pathItem) resolved[path] = pathItem as PathItem;
   }

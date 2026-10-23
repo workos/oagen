@@ -21,14 +21,19 @@ export interface PathItemSite {
 /**
  * The path item an entry denotes: the entry itself, or the
  * `components/pathItems` component a `$ref` chain leads to. Fields written
- * beside a `$ref` are not merged in — OpenAPI leaves a conflict between them
- * and the referenced item undefined, so the referenced item is taken whole.
- * Returns `undefined`, after one warning naming the site, for an entry that is
- * not an object, a `$ref` that is not a string, a ref outside
- * `components/pathItems` (into another section, or into another `paths`
- * entry), a dangling ref, or a cycle; the caller skips the entry. A dangling
- * ref is only reachable when the document bypassed the bundler, which fails
- * on one before parsing.
+ * beside a `$ref` — on the entry or on a link of its chain — are not merged
+ * in: OpenAPI leaves a field present on both sides undefined, and the
+ * referenced item is taken whole so the rule does not depend on which fields
+ * clash. They are reported once per entry, naming the site and the keys, so
+ * a `post` written beside a ref to an item that declares only `get` is not
+ * lost silently; an `x-` extension beside the `$ref` is not reported, since
+ * the parser reads none off a path item. Returns `undefined`, after one
+ * warning naming the site, for an entry that is not an object, a `$ref` that
+ * is not a string, a ref outside `components/pathItems` (into another
+ * section, or into another `paths` entry), a dangling ref, or a cycle; the
+ * caller skips the entry. A dangling ref and a cycle are only reachable when
+ * the document bypassed the bundler, which fails on either before parsing
+ * (`Can't resolve $ref`; `Self-referencing circular pointer`).
  */
 export function resolvePathItemRef(
   raw: unknown,
@@ -37,6 +42,8 @@ export function resolvePathItemRef(
 ): Record<string, unknown> | undefined {
   const label = `${site.kind === 'path' ? 'Path' : 'Webhook'} "${site.key}"`;
   const seenRefs = new Set<string>();
+  /** Keys written beside a `$ref` along the chain, in document order; reported once the item is resolved. */
+  const droppedKeys: string[] = [];
   let current: unknown = raw;
   while (true) {
     if (!isRecord(current)) {
@@ -44,10 +51,21 @@ export function resolvePathItemRef(
       return undefined;
     }
     const ref = current.$ref;
-    if (ref === undefined) return current;
+    if (ref === undefined) {
+      if (droppedKeys.length > 0) {
+        console.warn(
+          `[oagen] Warning: ${label} has fields beside its $ref (${droppedKeys.map((key) => `"${key}"`).join(', ')}) ` +
+            'that are not read: the referenced path item is taken whole.',
+        );
+      }
+      return current;
+    }
     if (typeof ref !== 'string') {
       console.warn(`[oagen] Warning: ${label} has a non-string $ref; skipping it.`);
       return undefined;
+    }
+    for (const key of Object.keys(current)) {
+      if (key !== '$ref' && !key.startsWith('x-') && !droppedKeys.includes(key)) droppedKeys.push(key);
     }
     if (seenRefs.has(ref)) {
       console.warn(
