@@ -371,6 +371,8 @@ function modelShapeKey(
 
 /** Field properties `fieldAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
 const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required', 'deprecated']);
+/** Field properties outside `fieldPropertiesKey`: the documentation and the type, which the list-envelope pass compares by structure on its own. */
+const FIELD_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type']);
 
 /**
  * How `modelAdmits`, `fieldAdmits` and `typeShapeKey` read a shape before
@@ -484,15 +486,45 @@ export function modelShares(owner: Model, candidate: Model, sent = false): boole
  * flags, their own `deprecated` (`fieldFlagAgrees`: in either direction,
  * since the owner's fields are what every site reads after a fold) — except
  * that `owner` may be optional where `candidate` is required, and
- * `nullable<…>` where `candidate` is not. The `…Json` fold asks this of
- * every field the base and the `…Json` model both declare, since the base
- * takes the `…Json` model's fields.
+ * `nullable<…>` where `candidate` is not. Everything but the type is
+ * `fieldPropertiesAdmit`, which the list-envelope pass reads as well. The
+ * `…Json` fold asks this of every field the base and the `…Json` model both
+ * declare, since the base takes the `…Json` model's fields.
  */
 export function fieldAdmits(owner: Field, candidate: Field, options: ShapeReadOptions = {}): boolean {
+  return fieldPropertiesAdmit(owner, candidate) && fieldTypeAdmits(owner.type, candidate.type, options);
+}
+
+/**
+ * Whether `owner` admits `candidate` as the field of its name in everything
+ * but the type — what `fieldAdmits` reads beside `fieldTypeAdmits`: the two
+ * agree on their own `deprecated` (`fieldFlagAgrees`), `owner` is no
+ * stricter on requiredness (a field `candidate` requires may be optional on
+ * `owner`, never the reverse), and every other property — limits, default,
+ * access flags, whatever else the IR adds to a field — is identical
+ * (`FIELD_ADMIT_KEYS` names the ones read on their own, so a property added
+ * to `Field` is compared verbatim until it is listed there). The one
+ * definition of a field's properties a fold must preserve: `fieldAdmits`
+ * applies it with the type read by shape key, and the list-envelope pass
+ * (`admits`) with the type compared by structure, since a companion's nested
+ * models are named per operation.
+ */
+export function fieldPropertiesAdmit(owner: Field, candidate: Field): boolean {
   if (!fieldFlagAgrees(owner, candidate)) return false;
   if (owner.required && !candidate.required) return false;
-  if (!fieldTypeAdmits(owner.type, candidate.type, options)) return false;
   return stableStringify(omitKeys(owner, FIELD_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, FIELD_ADMIT_KEYS));
+}
+
+/**
+ * A field's properties as `fieldPropertiesAdmit` reads them, as one string:
+ * everything but its documentation and its type — requiredness, its own
+ * `deprecated`, limits, default, access flags. Two fields with the same key
+ * admit each other in everything but the type; the list-envelope pass keys
+ * a companion's shape by it (`fingerprintModel`) beside the structural key
+ * of the type, so the shapes it counts agree with the folds it allows.
+ */
+export function fieldPropertiesKey(field: Field): string {
+  return stableStringify(omitKeys(field, FIELD_PROPERTY_KEYS_OMITTED));
 }
 
 /**
