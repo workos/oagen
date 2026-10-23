@@ -620,37 +620,12 @@ export function extractOperations(
   // for a tagged operation, whose service is its tag.
   const rootLengthOf = (op: Operation) => (tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot));
 
-  // Split services when a single tag groups operations from multiple path prefixes.
-  // Example: /organizations and /organization_domains both tagged "organizations"
-  // should become separate services based on their first path segment.
-  // The segment compared is the one the service would be named from without
-  // the tag (see serviceSegmentIndex): the first for a tagged operation, the
-  // first past the API root for an untagged one, so `/notes` and
-  // `/api/v1/notes` stay together in `Notes` rather than the latter being
-  // moved to `Api` after its name was shortened for `Notes`.
-  for (const [serviceName, operations] of serviceMap) {
-    const pathGroups = new Map<string, Operation[]>();
-    for (const op of operations) {
-      const firstSeg = pathSegments(op.path)[serviceSegmentIndex(op.path, rootLengthOf(op))] ?? '';
-      const groupKey = firstSeg.startsWith('{') ? serviceName : toPascalCase(firstSeg);
-      const group = pathGroups.get(groupKey) ?? [];
-      group.push(op);
-      pathGroups.set(groupKey, group);
-    }
-    // Only split if there are multiple distinct path-prefix groups AND
-    // at least one group name differs from the current service name
-    if (pathGroups.size > 1) {
-      const needsSplit = [...pathGroups.keys()].some((k) => k !== serviceName);
-      if (needsSplit) {
-        serviceMap.delete(serviceName);
-        for (const [groupName, groupOps] of pathGroups) {
-          const existing = serviceMap.get(groupName) ?? [];
-          existing.push(...groupOps);
-          serviceMap.set(groupName, existing);
-        }
-      }
-    }
-  }
+  // Split a tagged service whose tag groups operations from several first
+  // path segments — `/organizations` and `/organization_domains` both tagged
+  // `organizations` — into one service per segment. Decided over the tagged
+  // operations alone, so an untagged operation the service picked up by path
+  // never moves its tagged siblings (see splitTaggedServices).
+  splitTaggedServices(serviceMap, tagServiceByOperation);
 
   // Disambiguate operation names within each service.
   // Multiple operations can get the same name (e.g., several "list" endpoints
@@ -927,6 +902,108 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
+}
+
+/**
+ * The service a tagged operation is split off to, named from its first path
+ * segment: `/organization_domains/{id}` → `OrganizationDomains`. A path whose
+ * first segment is a parameter, or that has no segment at all (`/`), has
+ * nothing to be split on and names the service it is already in, so
+ * `/{tenant}/notes` beside `/notes` under one tag stays put.
+ */
+function splitSegmentService(op: Operation, serviceName: string): string {
+  const first = pathSegments(op.path)[0];
+  return first === undefined || first.startsWith('{') ? serviceName : toPascalCase(first);
+}
+
+/**
+ * The service an operation lands in once the service it was grouped under
+ * (`serviceName`: its tag, else the segment its path named) is known in full.
+ *
+ * A tagged operation moves to the service its own first segment names (see
+ * splitSegmentService) only when the operations carrying its tag sit under
+ * more than one first segment — `segmentServices`, the first-segment services
+ * of that service's tagged operations alone. A tag whose operations all share
+ * one first segment keeps them together even when that segment is not the
+ * tag: `/api/v1/notes` tagged `notes` stays in `Notes`, not `Api`.
+ *
+ * An untagged operation keeps the service its path named: the segment it
+ * would be split on is the one it was named from, so it can neither cause
+ * nor prevent a split, nor be moved by one.
+ */
+function resolveServiceName(
+  op: Operation,
+  serviceName: string,
+  tagged: boolean,
+  segmentServices: ReadonlySet<string>,
+): string {
+  if (!tagged || segmentServices.size <= 1) return serviceName;
+  return splitSegmentService(op, serviceName);
+}
+
+/**
+ * Split each service whose tag groups operations from several first path
+ * segments into one service per segment: `/organizations` and
+ * `/organization_domains` both tagged `organizations` become `Organizations`
+ * and `OrganizationDomains`. A part named like a service that already exists
+ * — another tag's, or one named from a path — joins it.
+ *
+ * Every operation's destination is decided by resolveServiceName from the
+ * grouping as it stands before any service is split, over each service's
+ * tagged operations alone. So an untagged operation a tagged service picked
+ * up by path — `/api/v1/notes/{noteId}/export` beside `/api/v1/notes` tagged
+ * `notes` — does not add a second segment to the tag's set and move the
+ * tagged operations into `Api` (issue #287), and operations a split moves
+ * into another tag's service do not add a segment to that tag's set either,
+ * whichever service the document lists first.
+ *
+ * Mutates `serviceMap`: a split service is removed and each of its parts is
+ * appended under its own name, or merged into the existing service of that
+ * name, in the order the parts first appear.
+ */
+function splitTaggedServices(
+  serviceMap: Map<string, Operation[]>,
+  tagServiceByOperation: ReadonlyMap<Operation, string>,
+): void {
+  const plan = new Map<string, ServiceSplit>();
+  for (const [serviceName, operations] of serviceMap) {
+    const segmentServices = new Set<string>();
+    for (const op of operations) {
+      if (tagServiceByOperation.has(op)) segmentServices.add(splitSegmentService(op, serviceName));
+    }
+    const parts = new Map<string, Operation[]>();
+    for (const op of operations) {
+      const name = resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices);
+      const part = parts.get(name) ?? [];
+      part.push(op);
+      parts.set(name, part);
+    }
+    plan.set(serviceName, { operations, own: operations.length, parts });
+  }
+  for (const [serviceName, { operations, own, parts }] of plan) {
+    if (parts.size <= 1) continue;
+    // Parts of services split before this one that joined it were appended to
+    // its array after the plan was read. They resolved to this service's name,
+    // so they stay in the part that keeps it instead of going with the array.
+    const joined = operations.slice(own);
+    if (joined.length > 0) parts.set(serviceName, [...(parts.get(serviceName) ?? []), ...joined]);
+    serviceMap.delete(serviceName);
+    for (const [name, ops] of parts) {
+      const existing = serviceMap.get(name) ?? [];
+      existing.push(...ops);
+      serviceMap.set(name, existing);
+    }
+  }
+}
+
+/** One service's split, planned from the grouping before any service is split (see splitTaggedServices). */
+interface ServiceSplit {
+  /** The service's operations: the array `serviceMap` holds, which parts of services split earlier may join. */
+  operations: Operation[];
+  /** How many of `operations` the plan was read from; any beyond them joined since. */
+  own: number;
+  /** The service each operation moves to, with its operations in document order; one entry when nothing moves. */
+  parts: Map<string, Operation[]>;
 }
 
 /**
