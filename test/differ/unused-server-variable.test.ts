@@ -430,14 +430,14 @@ describe("an operation's servers – the comment on #292", () => {
     { url: 'https://notes.example.com', variables: { port: { default: port } } },
   ];
 
-  it("flips serversChanged on the comment's documents; the flag is breaking until it can carry additive (#299)", async () => {
+  it("flips serversChanged on the comment's documents, additive: the flag carries the document-level classification (#299)", async () => {
     const [before, after] = await Promise.all([
       parseSpec(resolve(fixtures, 'operation-servers-unused-variable-before.json')),
       parseSpec(resolve(fixtures, 'operation-servers-unused-variable-after.json')),
     ]);
     const { changes } = diffSpecs(before, after);
     expect(changes.map(({ kind, classification }) => ({ kind, classification }))).toEqual([
-      { kind: 'operation-modified', classification: 'breaking' },
+      { kind: 'operation-modified', classification: 'additive' },
     ]);
     expect(changes[0]).toMatchObject({ operationName: 'listNotes', serversChanged: true });
   });
@@ -449,7 +449,7 @@ describe("an operation's servers – the comment on #292", () => {
       [{ ...listNotes, servers: notes('8443') }],
     );
     expect(changes).toHaveLength(1);
-    expect(changes[0]).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'additive' });
   });
 
   it('is additive at the document level for the same two lists, the building block #299 can read', () => {

@@ -179,6 +179,7 @@ export type {
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  ServerChange,
   DocumentSecurityChanged,
 } from './differ/types.js';
 

@@ -357,24 +357,46 @@ export interface OperationModified {
   injectIdempotencyKeyChanged: boolean;
   errorsChanged: boolean;
   /**
-   * The servers the operation is actually served from changed, so its
-   * requests go elsewhere. Always breaking. Each side is `op.servers ??`
-   * that document's servers (`diffSpecs` supplies them), compared by the rule
-   * the document-level diff uses: matched on `url` template plus variables
-   * (names, defaults, enum values as a set), ignoring position, descriptions
-   * and enum order — except that a reorder that moves the first entry's
-   * resolved URL counts, as `base-url-changed` does for the document. URLs
-   * are compared through `normalizeServerUrl`, so a scheme or host that only
-   * changed case, a default port written or dropped, or a `/` added after a
-   * bare authority is no change. Absent on both sides is unchanged: the
-   * operation inherits twice, and a moved document is the document-level
-   * diff's to report. So a document that moves to where an operation already
-   * pointed is not a change to that operation. OpenAPI's default server is
-   * one list however it is spelled (#291): no servers and `/` alone —
-   * description and variables aside, since `/` references no variable — are
-   * served from the same place.
+   * The servers the operation is actually served from changed. Each side is
+   * `op.servers ??` that document's servers (`diffSpecs` supplies them),
+   * compared by `diffServers`, the document-level diff, with each list read
+   * as a document whose `baseUrl` is its first entry resolved: matched on
+   * `url` template plus variables (names, defaults, enum values as a set),
+   * ignoring position, descriptions and enum order — except that a reorder
+   * that moves the first entry's resolved URL counts, as `base-url-changed`
+   * does for the document. URLs are compared through `normalizeServerUrl`,
+   * so a scheme or host that only changed case, a default port written or
+   * dropped, or a `/` added after a bare authority is no change. Absent on
+   * both sides is unchanged: the operation inherits twice, and a moved
+   * document is the document-level diff's to report. So a document that
+   * moves to where an operation already pointed is not a change to that
+   * operation. OpenAPI's default server is one list however it is spelled
+   * (#291): no servers and `/` alone — description and variables aside,
+   * since `/` references no variable — are served from the same place.
+   *
+   * Classified change by change, as the document-level diff classifies the
+   * same edit to the document's `servers` (#299), and `serverChanges` lists
+   * them. Breaking when a server the operation's callers could use is gone
+   * or its resolved URL moved: the first entry's resolved URL changed or
+   * disappeared (`base-url-changed`), an entry removed (`server-removed`),
+   * or, on a `server-modified`, a variable the template references removed,
+   * its default changed, an enum put on it or a value taken off it.
+   * Additive otherwise: an entry added, a first entry appearing where there
+   * was none, a variable added, an enum lifted or a value added to it, and
+   * any change to a variable the template never references. The operation
+   * is breaking for its servers exactly when one entry of `serverChanges`
+   * is. A webhook carries no `servers` in the IR (`Webhook` has no such
+   * field), so a `webhook-modified` change has no such flag.
    */
   serversChanged: boolean;
+  /**
+   * What changed between the two effective lists, as `diffServers` reports
+   * it for a document — `base-url-changed`, `server-added`, `server-removed`
+   * and `server-modified` with its `variableChanges` — in that order, each
+   * with its own classification and every URL as written in the spec that
+   * declares it. `[]` when `serversChanged` is false.
+   */
+  serverChanges: ServerChange[];
   /**
    * The operation's own `deprecated` flipped. Additive either way: the
    * signature is unchanged. A parameter's flag flipping is a
@@ -676,7 +698,8 @@ export interface WebhookRemoved {
  * an operation. The security the request carries is read from the
  * receiver's side too: a credential the sender stops presenting, or an
  * alternative it may now present that the handler never checked for, is
- * breaking.
+ * breaking. A webhook carries no `servers` in the IR (`Webhook` has no such
+ * field), so there is no `serversChanged` or `serverChanges` here.
  */
 export interface WebhookModified {
   kind: 'webhook-modified';
@@ -925,6 +948,13 @@ export interface ServerVariableChange {
    */
   details?: string;
 }
+
+/**
+ * The changes `diffServers` reports between two server lists: the
+ * document-level kinds, which an `operation-modified` change carries as
+ * `serverChanges` when the operation's effective servers differ (#299).
+ */
+export type ServerChange = BaseUrlChanged | ServerAdded | ServerRemoved | ServerModified;
 
 /**
  * `ApiSpec.security` — the default every operation and webhook that declares

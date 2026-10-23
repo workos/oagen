@@ -15,8 +15,11 @@ import type { ApiSpec, Operation, ServerEntry } from '../../src/ir/types.js';
  * Covers `serversChanged` on `operation-modified` (issue #251): where an
  * operation is actually served from — `op.servers ?? document servers` on each
  * side — compared by the document-level rule (templates plus variables,
- * descriptions and order ignored, a moved first entry counts), every change
- * breaking because the operation's requests go elsewhere.
+ * descriptions and order ignored, a moved first entry counts). Each change is
+ * classified as the document-level diff classifies it (#299, covered in
+ * test/differ/operation-server-change-additive.test.ts): breaking when a
+ * server the caller could use is gone or its resolved URL moved, additive
+ * otherwise.
  */
 const listPets: Operation = {
   name: 'listPets',
@@ -54,14 +57,17 @@ function change(changes: Change[]) {
 
 describe('diffOperations – servers (issue #251)', () => {
   describe('without the documents (a direct caller)', () => {
-    it('reports an operation gaining its own servers as breaking', () => {
+    it('reports an operation gaining its own servers as additive: a host where there was none (#299)', () => {
+      // Inheriting with no document is OpenAPI's default, `/`, which has no
+      // host; a host appearing is additive, as `base-url-changed` is for a
+      // document that gains its first server.
       const changes = diffOperations('Pets', [withServers()], [withServers(pets)]);
       expect(changes).toHaveLength(1);
       expect(changes[0]).toMatchObject({
         kind: 'operation-modified',
         operationName: 'listPets',
         serversChanged: true,
-        classification: 'breaking',
+        classification: 'additive',
       });
     });
 
@@ -200,8 +206,8 @@ describe('diffOperations – servers (issue #251)', () => {
         serversChanged: true,
       });
 
-      // Additive at the document level (`variable-enum-value-added`), but one
-      // boolean cannot say so.
+      // Additive at the document level (`variable-enum-value-added`), and
+      // additive here too since #299; what counts is that it is reported.
       const widerEnum = withServers([
         {
           url: 'https://{region}.pets.example.com',
@@ -322,15 +328,22 @@ describe('diffOperations – servers (issue #251)', () => {
     expect(changes[0]).toMatchObject({ responseChanged: true, serversChanged: false });
   });
 
-  it('is breaking even when every other change is additive', () => {
+  it('is breaking even when every other change is additive, when the server change is (#299)', () => {
     const relaxed: Operation = {
       ...listPets,
       queryParams: [{ name: 'limit', type: { kind: 'primitive', type: 'integer' }, required: false }],
     };
     expect(diffOperations('Pets', [listPets], [relaxed])[0]).toMatchObject({ classification: 'additive' });
-    expect(diffOperations('Pets', [listPets], [{ ...relaxed, servers: pets }])[0]).toMatchObject({
+    // The host moves: breaking, whatever else changed.
+    expect(diffOperations('Pets', [withServers(pets)], [{ ...relaxed, servers: other }])[0]).toMatchObject({
       serversChanged: true,
       classification: 'breaking',
+    });
+    // A host where there was none is additive, as on the document, so the
+    // operation stays additive.
+    expect(diffOperations('Pets', [listPets], [{ ...relaxed, servers: pets }])[0]).toMatchObject({
+      serversChanged: true,
+      classification: 'additive',
     });
   });
 
@@ -443,9 +456,11 @@ describe("diffOperations – servers: OpenAPI's default (issue #291)", () => {
   });
 
   it('reports an operation that moves from `/` written out to a named host, and back', () => {
+    // A host where there was none is additive, as `base-url-changed` is for
+    // a document that gains its first server (#299); losing it is breaking.
     expect(
       change(diffOperations('Pets', [withServers(root)], [withServers(pets)], documents(undefined, undefined))),
-    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'additive' });
     expect(
       change(diffOperations('Pets', [withServers(pets)], [withServers(root)], documents(undefined, undefined))),
     ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
@@ -464,9 +479,11 @@ describe("diffOperations – servers: OpenAPI's default (issue #291)", () => {
     expect(
       change(diffOperations('Pets', [withServers(petsAndRoot)], [withServers()], documents(pets, pets))),
     ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    // Gaining `/` beside the host is a `server-added`, additive, as it is
+    // for a document that lists it beside its host (#299).
     expect(
       change(diffOperations('Pets', [withServers()], [withServers(petsAndRoot)], documents(pets, pets))),
-    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'breaking' });
+    ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'additive' });
   });
 
   it('reports an operation that keeps `/` while its document moves from nothing to a named host', () => {

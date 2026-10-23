@@ -153,6 +153,7 @@ describe('issue #273 repro: security and tags on an operation and a webhook', ()
         responseStatusCodeChanged: false,
         fallbackResponsesChanged: false,
         serversChanged: false,
+        serverChanges: [],
         deprecatedChanged: false,
         securityChanged: true,
         oldSecurity: apiKey,
