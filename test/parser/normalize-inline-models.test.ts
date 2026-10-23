@@ -9,7 +9,11 @@ import {
   settleFieldInlineModels,
   type InlineModelNaming,
 } from '../../src/parser/normalize-inline-models.js';
-import { recordLiftedFieldModel, resetInheritedModelRefs } from '../../src/parser/inline-models.js';
+import {
+  recordLiftedFieldModel,
+  resetInheritedModelRefs,
+  type InlineModelBundle,
+} from '../../src/parser/inline-models.js';
 import { collectModelRefs } from '../../src/ir/types.js';
 import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
@@ -1035,6 +1039,144 @@ describe('a parent that references a renamed model leaves a shared name by its s
     } finally {
       resetInheritedModelRefs();
     }
+  });
+});
+
+describe('a fold carries the copy’s references into the winner’s site (issue #313, review round 2)', () => {
+  const str: TypeRef = { kind: 'primitive', type: 'string' };
+  const field = (name: string, type: TypeRef = str): Model['fields'][number] => ({ name, type, required: false });
+  const modelRef = (name: string): TypeRef => ({ kind: 'model', name });
+  /** Run `fn`, returning every warning it printed instead of printing it. */
+  const warnings = (fn: () => void): string[] => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fn();
+      return warnSpy.mock.calls.map(([m]) => String(m));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  };
+
+  it('repoints a response folded onto a field model when a later pass renames the field model through its own site', () => {
+    // The response merge folds `getEntry`'s `PetEntry` onto the field's
+    // (`declared`); the field merge then moves the field model off an enum
+    // name known only now. The response's root joined the field's site at
+    // the fold, so the rename repoints it along with `Pet.entries`.
+    const fieldModel: Model = { name: 'PetEntry', fields: [field('label')] };
+    const copy: Model = { name: 'PetEntry', fields: [field('label')] };
+    const pet: Model = { name: 'Pet', fields: [field('entries', { kind: 'map', valueType: modelRef('PetEntry') })] };
+    const responseRef = modelRef('PetEntry');
+    const fieldBundle: InlineModelBundle = { qualifier: 'Pet', roots: [pet.fields[0]!.type], models: [fieldModel] };
+    const responseBundle = { qualifier: 'GetEntry', roots: [responseRef], models: [copy] };
+    const naming: InlineModelNaming = {
+      bundles: [fieldBundle, responseBundle],
+      reserved: new Set(['Pet', 'PetEntry']),
+      enums: new Set(),
+    };
+    const merged = mergeInlineResponseModels([pet], [copy], naming, [fieldModel]);
+    expect(merged).toEqual([pet]);
+    expect(responseRef).toEqual(modelRef('PetEntry'));
+    // The response's site is carried onto the field model, by identity.
+    expect(fieldBundle.carried).toEqual([{ owner: fieldModel, roots: [responseRef], models: [] }]);
+    expect(fieldBundle.roots).toEqual([pet.fields[0]!.type]);
+
+    let final: Model[] = [];
+    const notes = warnings(() => {
+      final = mergeFieldInlineModels(merged, [fieldModel], new Set(['Pet']), {
+        ...naming,
+        enums: new Set(['PetEntry']),
+      });
+    });
+    expect(final.map((m) => m.name)).toEqual(['Pet', 'PetEntry2']);
+    expect(pet.fields[0]!.type).toEqual({ kind: 'map', valueType: modelRef('PetEntry2') });
+    expect(responseRef).toEqual(modelRef('PetEntry2'));
+    expect(notes).toEqual(['[oagen] Renamed inline model "PetEntry" → "PetEntry2": enum "PetEntry" owns the name']);
+  });
+
+  it('carries the models minted beside the copy too, so a parent of the folded copy follows the winner’s rename', () => {
+    // `getEntry`'s response `Entries { item: PetEntry }` references its own
+    // `PetEntry`, which folds onto the field's; when the field's is renamed,
+    // the response's parent must reference the new name as well.
+    const fieldModel: Model = { name: 'PetEntry', fields: [field('label')] };
+    const copy: Model = { name: 'PetEntry', fields: [field('label')] };
+    const parent: Model = { name: 'Entries', fields: [field('item', modelRef('PetEntry'))] };
+    const pet: Model = { name: 'Pet', fields: [field('entries', { kind: 'map', valueType: modelRef('PetEntry') })] };
+    const responseRef = modelRef('Entries');
+    const fieldBundle: InlineModelBundle = { qualifier: 'Pet', roots: [pet.fields[0]!.type], models: [fieldModel] };
+    const naming: InlineModelNaming = {
+      bundles: [fieldBundle, { qualifier: 'GetEntry', roots: [responseRef], models: [parent, copy] }],
+      reserved: new Set(['Pet', 'PetEntry', 'Entries']),
+      enums: new Set(),
+    };
+    const merged = mergeInlineResponseModels([pet], [parent, copy], naming, [fieldModel]);
+    expect(merged.map((m) => m.name)).toEqual(['Pet', 'Entries']);
+    expect(fieldBundle.carried).toEqual([{ owner: fieldModel, roots: [responseRef], models: [parent] }]);
+    expect(fieldBundle.models).toEqual([fieldModel]);
+
+    const final = warnings(() =>
+      mergeFieldInlineModels(merged, [fieldModel], new Set(['Pet']), { ...naming, enums: new Set(['PetEntry']) }),
+    );
+    expect(final).toEqual(['[oagen] Renamed inline model "PetEntry" → "PetEntry2": enum "PetEntry" owns the name']);
+    expect(parent.fields[0]!.type).toEqual(modelRef('PetEntry2'));
+    expect(pet.fields[0]!.type).toEqual({ kind: 'map', valueType: modelRef('PetEntry2') });
+  });
+
+  it('carries nothing onto a component, which is never renamed', () => {
+    const component: Model = { name: 'PetEntry', fields: [field('label')] };
+    const copy: Model = { name: 'PetEntry', fields: [field('label')] };
+    const responseRef = modelRef('PetEntry');
+    const responseBundle = { qualifier: 'GetEntry', roots: [responseRef], models: [copy] };
+    const merged = mergeInlineResponseModels([component], [copy], {
+      bundles: [responseBundle],
+      reserved: new Set(['PetEntry']),
+      enums: new Set(),
+    });
+    expect(merged).toEqual([component]);
+    expect(responseBundle.roots).toEqual([responseRef]);
+    expect(responseBundle.models).toEqual([copy]);
+    expect(responseBundle).not.toHaveProperty('carried');
+  });
+
+  it('reads a carried site by the winner’s identity: a rename of another model of the winner’s site leaves it alone', () => {
+    // `getA` and `getB` both mint `Widget { owner: WidgetOwner }` beside a
+    // component `Widget` of another shape. The children are decided first:
+    // identical, `getB`'s `WidgetOwner` folds onto `getA`'s, so `getB`'s site
+    // is carried onto it. Then `getA`'s `Widget` leaves the component's name
+    // — a rename of another model of `getA`'s site — and must not take
+    // `getB`'s response with it: `getB`'s `Widget` is `getB`'s own, decided
+    // on its own (here, folded onto `getA`'s renamed `Widget` as its twin).
+    const componentWidget: Model = { name: 'Widget', fields: [field('object'), field('extra')] };
+    const componentOwner: Model = { name: 'WidgetOwner', fields: [field('city')] };
+    const aOwner: Model = { name: 'WidgetOwner', fields: [field('city'), field('zip')] };
+    const bOwner: Model = { name: 'WidgetOwner', fields: [field('city'), field('zip')] };
+    const aWidget: Model = { name: 'Widget', fields: [field('object'), field('owner', modelRef('WidgetOwner'))] };
+    const bWidget: Model = { name: 'Widget', fields: [field('object'), field('owner', modelRef('WidgetOwner'))] };
+    const aRef = modelRef('Widget');
+    const bRef = modelRef('Widget');
+    const aBundle: InlineModelBundle = { qualifier: 'GetA', roots: [aRef], models: [aWidget, aOwner] };
+    const bBundle: InlineModelBundle = { qualifier: 'GetB', roots: [bRef], models: [bWidget, bOwner] };
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([componentWidget, componentOwner], [aWidget, aOwner, bWidget, bOwner], {
+        bundles: [aBundle, bBundle],
+        reserved: new Set(['Widget', 'WidgetOwner']),
+        enums: new Set(),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['Widget', 'WidgetOwner', 'GetAWidget', 'GetAWidgetOwner']);
+    expect(aRef).toEqual(modelRef('GetAWidget'));
+    expect(bRef).toEqual(modelRef('GetAWidget'));
+    expect(aWidget.fields[1]!.type).toEqual(modelRef('GetAWidgetOwner'));
+    expect(aBundle).toMatchObject({
+      carried: [
+        { owner: aOwner, roots: [bRef], models: [bWidget] },
+        { owner: aWidget, roots: [bRef], models: [bOwner] },
+      ],
+    });
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "WidgetOwner" → "GetAWidgetOwner": its shape differs from component schema "WidgetOwner" (shared by 2 sites)',
+      '[oagen] Renamed inline model "Widget" → "GetAWidget": its shape differs from component schema "Widget" (shared by 2 sites)',
+    ]);
   });
 });
 
