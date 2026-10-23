@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { collectModelRefs, collectResponseBodyTypes, collectResponseHeaders } from '../../src/ir/types.js';
-import type { ApiSpec, Model, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Model, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #305: the `<Name>Json` fold compared the models it would collapse by
@@ -181,6 +181,9 @@ function collapse(models: Model[]): { kept: Model[]; warnings: string[] } {
 }
 
 const modelRef = (name: string): TypeRef => ({ kind: 'model', name });
+/** A model as `name {field,ref:Model,…}`, in field order. */
+const describeFolded = (kept: Model[]): string[] =>
+  kept.map((m) => `${m.name} {${m.fields.map((f) => `${f.name}${f.type.kind === 'model' ? `:${f.type.name}` : ''}`)}}`);
 const string: TypeRef = { kind: 'primitive', type: 'string' };
 const integer: TypeRef = { kind: 'primitive', type: 'integer' };
 const field = (name: string, type: TypeRef = string, required = false): Model['fields'][number] => ({
@@ -387,13 +390,11 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(nested.kept[0]?.fields.map((f) => f.name)).toEqual(['part', 'name']);
     expect(nested.kept[0]?.fields[0]?.type).toEqual(modelRef('WidgetPart'));
   });
-  it("decides a fold's whole subtree against the folds before it: a refused nested child refuses the parent (Greptile)", () => {
+  it('refuses two folds whose children would end under one name with different shapes, in either order (Greptile)', () => {
     // Two prefixes nest: `PetJsonFooBar` (a child of `PetJson`) and `PetFooJsonBar` (a child of
-    // `PetFooJson`) both fold to `PetFooBar`, and their `inner` children both to `PetFooBarInner`,
-    // which no model holds when the candidates are chosen. The first fold seats `PetFooBar` and
-    // `PetFooBarInner { x }`; the second reads alike at the top (`PetFooJsonBar.inner` folds to
-    // `PetFooBarInner`) but its `PetFooJsonBarInner { y }` is not admitted — so none of it is
-    // applied: `PetFooJson` keeps its name and `bar.inner` still exposes `y`.
+    // `PetFooJson`) both end under `PetFooBar`, and their `inner` children under `PetFooBarInner`.
+    // The `inner` pair reads alike at the top but `{ x }` and `{ y }` are not one shape, so the two
+    // folds refuse each other and nothing is written — the same in both declaration orders.
     const models = (): Model[] => [
       { name: 'Pet', fields: [field('a')] },
       { name: 'PetJson', fields: [field('a'), field('b'), field('fooBar', modelRef('PetJsonFooBar'))] },
@@ -404,45 +405,22 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
       { name: 'PetFooJsonBar', fields: [field('inner', modelRef('PetFooJsonBarInner'))] },
       { name: 'PetFooJsonBarInner', fields: [field('y')] },
     ];
-    const describe = (kept: Model[]): string[] =>
-      kept.map(
-        (m) => `${m.name} {${m.fields.map((f) => `${f.name}${f.type.kind === 'model' ? `:${f.type.name}` : ''}`)}}`,
-      );
+    const warningsOf = {
+      pet: '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonFooBarInner" would fold onto "PetFooBarInner" beside "PetFooJsonBarInner", which has a different shape — keeping both',
+      petFoo:
+        '[oagen] Warning: Json-suffix model "PetFooJson" does not preserve the shape of "PetFoo": "PetFooJsonBarInner" would fold onto "PetFooBarInner" beside "PetJsonFooBarInner", which has a different shape — keeping both',
+    };
 
     const { kept, warnings } = collapse(models());
-    expect(describe(kept)).toEqual([
-      'Pet {a,b,fooBar:PetFooBar}',
-      'PetFooBar {inner:PetFooBarInner}',
-      'PetFooBarInner {x}',
-      'PetFoo {c}',
-      'PetFooJson {c,d,bar:PetFooJsonBar}',
-      'PetFooJsonBar {inner:PetFooJsonBarInner}',
-      'PetFooJsonBarInner {y}',
-    ]);
-    expect(warnings).toEqual([
-      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetFooBar"',
-      '[oagen] Renamed child "PetJson…" → "PetFooBarInner"',
-      '[oagen] Warning: Json-suffix model "PetFooJson" does not preserve the shape of "PetFoo": "PetFooJsonBarInner" would fold onto "PetFooBarInner", which has a different shape — keeping both',
-    ]);
+    expect(describeFolded(kept)).toEqual(describeFolded(models()));
+    expect(warnings).toEqual([warningsOf.pet, warningsOf.petFoo]);
 
-    // The mirror: declared the other way round, the first fold seats `PetFooBarInner { y }` and
-    // the `PetJson` fold is the one refused, whole.
+    // The mirror: declared the other way round, the same two refusals.
     const mirrored = collapse([...models().slice(4), ...models().slice(0, 4)]);
-    expect(describe(mirrored.kept)).toEqual([
-      'PetFoo {c,d,bar:PetFooBar}',
-      'PetFooBar {inner:PetFooBarInner}',
-      'PetFooBarInner {y}',
-      'Pet {a}',
-      'PetJson {a,b,fooBar:PetJsonFooBar}',
-      'PetJsonFooBar {inner:PetJsonFooBarInner}',
-      'PetJsonFooBarInner {x}',
-    ]);
-    expect(mirrored.warnings.at(-1)).toBe(
-      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonFooBarInner" would fold onto "PetFooBarInner", which has a different shape — keeping both',
-    );
+    expect(describeFolded(mirrored.kept)).toEqual(describeFolded([...models().slice(4), ...models().slice(0, 4)]));
+    expect(mirrored.warnings).toEqual([warningsOf.petFoo, warningsOf.pet]);
 
-    // Three levels down the same: the mismatch is read through two admitted parents.
+    // Three levels down the same: the mismatch is read through two parents that read alike.
     const deep = (): Model[] =>
       models().flatMap((m) => {
         if (m.name === 'PetJsonFooBarInner') {
@@ -460,41 +438,36 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
         return [m];
       });
     const threeLevels = collapse(deep());
-    expect(threeLevels.kept.map((m) => m.name)).toEqual([
-      'Pet',
-      'PetFooBar',
-      'PetFooBarInner',
-      'PetFooBarInnerDeep',
-      'PetFoo',
-      'PetFooJson',
-      'PetFooJsonBar',
-      'PetFooJsonBarInner',
-      'PetFooJsonBarInnerDeep',
+    expect(describeFolded(threeLevels.kept)).toEqual(describeFolded(deep()));
+    expect(threeLevels.warnings).toEqual([
+      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonFooBarInnerDeep" would fold onto "PetFooBarInnerDeep" beside "PetFooJsonBarInnerDeep", which has a different shape — keeping both',
+      '[oagen] Warning: Json-suffix model "PetFooJson" does not preserve the shape of "PetFoo": "PetFooJsonBarInnerDeep" would fold onto "PetFooBarInnerDeep" beside "PetJsonFooBarInnerDeep", which has a different shape — keeping both',
     ]);
-    expect(threeLevels.kept.find((m) => m.name === 'PetFooJsonBarInnerDeep')?.fields).toEqual([field('y')]);
-    expect(threeLevels.warnings.at(-1)).toBe(
-      '[oagen] Warning: Json-suffix model "PetFooJson" does not preserve the shape of "PetFoo": "PetFooJsonBarInnerDeep" would fold onto "PetFooBarInnerDeep", which has a different shape — keeping both',
-    );
 
-    // The same subtree of one shape collapses onto the seated names, as any admitted child does.
+    // The same subtree of one shape: both fold, the first declared keeps each name and the
+    // other collapses onto it.
     const same = models().map((m) => (m.name === 'PetFooJsonBarInner' ? { ...m, fields: [field('x')] } : m));
     const folded = collapse(same);
-    expect(describe(folded.kept)).toEqual([
+    expect(describeFolded(folded.kept)).toEqual([
       'Pet {a,b,fooBar:PetFooBar}',
       'PetFooBar {inner:PetFooBarInner}',
       'PetFooBarInner {x}',
       'PetFoo {c,d,bar:PetFooBar}',
     ]);
-    expect(folded.warnings.slice(-3)).toEqual([
+    expect(folded.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJson…" → "PetFooBar"',
+      '[oagen] Renamed child "PetJson…" → "PetFooBarInner"',
       '[oagen] Merged "PetFooJson" into "PetFoo" (3 fields, superset)',
       '[oagen] Collapsed child "PetFooJsonBar" into existing "PetFooBar"',
       '[oagen] Collapsed child "PetFooJsonBarInner" into existing "PetFooBarInner"',
     ]);
   });
-  it('collapses a child onto the model holding its folded name by identity, never onto the name it vacates (Greptile)', () => {
+
+  it('reads a child that folds to a name another child vacates as ending under that child’s name (Greptile)', () => {
     // `PetJsonJsonThing` folds to `PetJsonThing`, the name `PetJsonThing` holds and vacates for
-    // `PetThing` in the same fold: the child collapses onto that model and its references end
-    // under `PetThing` — in either document order of the two children.
+    // `PetThing` in the same fold: both end under `PetThing`, so they must be one shape, and the
+    // first declared keeps the name — in either document order of the two children.
     const models = (first: 'thing' | 'jsonThing', jsonThingField: Model['fields'][number] = field('x')): Model[] => {
       const thing: Model = { name: 'PetJsonThing', fields: [field('x')] };
       const jsonThing: Model = { name: 'PetJsonJsonThing', fields: [jsonThingField] };
@@ -512,13 +485,9 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
         ...(first === 'thing' ? [thing, jsonThing] : [jsonThing, thing]),
       ];
     };
-    const describe = (kept: Model[]): string[] =>
-      kept.map(
-        (m) => `${m.name} {${m.fields.map((f) => `${f.name}${f.type.kind === 'model' ? `:${f.type.name}` : ''}`)}}`,
-      );
 
     const thingFirst = collapse(models('thing'));
-    expect(describe(thingFirst.kept)).toEqual(['Pet {a,b,thing:PetThing,jsonThing:PetThing}', 'PetThing {x}']);
+    expect(describeFolded(thingFirst.kept)).toEqual(['Pet {a,b,thing:PetThing,jsonThing:PetThing}', 'PetThing {x}']);
     expect(thingFirst.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
       '[oagen] Renamed child "PetJson…" → "PetThing"',
@@ -526,24 +495,27 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     ]);
 
     const jsonThingFirst = collapse(models('jsonThing'));
-    expect(describe(jsonThingFirst.kept)).toEqual(['Pet {a,b,thing:PetThing,jsonThing:PetThing}', 'PetThing {x}']);
+    expect(describeFolded(jsonThingFirst.kept)).toEqual([
+      'Pet {a,b,thing:PetThing,jsonThing:PetThing}',
+      'PetThing {x}',
+    ]);
     expect(jsonThingFirst.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
-      '[oagen] Collapsed child "PetJsonJsonThing" into existing "PetThing"',
       '[oagen] Renamed child "PetJson…" → "PetThing"',
+      '[oagen] Collapsed child "PetJsonThing" into existing "PetThing"',
     ]);
 
-    // The holder it collapses onto must admit it, as any holder must.
+    // Two shapes under one name refuse the fold, as any pair that ends under one name does.
     const refused = collapse(models('thing', field('y')));
     expect(refused.kept.map((m) => m.name)).toEqual(['Pet', 'PetJson', 'PetJsonThing', 'PetJsonJsonThing']);
     expect(refused.warnings).toEqual([
-      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonJsonThing" would fold onto "PetJsonThing", which has a different shape — keeping both',
+      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonThing" would fold onto "PetThing" beside "PetJsonJsonThing", which has a different shape — keeping both',
     ]);
   });
 
   it('collapses a child onto a component that vacates its folded name, through parseSpec', async () => {
     // `PetJsonThing` is a component the fold renames to `PetThing`; the inline object of
-    // `PetJson.jsonThing` is named `PetJsonJsonThing` and folds to the vacated name.
+    // `PetJson.jsonThing` is named `PetJsonJsonThing` and ends under `PetThing` too.
     const { spec, warnings } = await parseWithWarnings(
       'vacated-component.json',
       petsDoc({
@@ -571,15 +543,195 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(orphanedModels(spec, ['Pet'])).toEqual([]);
   });
 
-  it('holds the invariant over generated nested `…Json` layouts, whatever the order of the folds and the children', () => {
+  it('folds a `…Json` model an earlier fold renamed, reading its names as that fold left them (MichaelDeBoey)', () => {
+    // `NoteJsonPetJson` folds onto `NoteJsonPet`, and both are children of `NoteJson`, which
+    // folds onto `Note`: `NoteJsonPetJsonToy` is read as `NotePetToy` under both folds, so the
+    // identical `…Toy { inner }` / `…ToyInner { x }` subtrees collapse — whichever pair the
+    // document declares first.
+    const models = (): Model[] => [
+      { name: 'Note', fields: [field('a')] },
+      { name: 'NoteJson', fields: [field('a'), field('b'), field('pet', modelRef('NoteJsonPet'))] },
+      { name: 'NoteJsonPet', fields: [field('c'), field('toy', modelRef('NoteJsonPetToy'))] },
+      { name: 'NoteJsonPetToy', fields: [field('inner', modelRef('NoteJsonPetToyInner'))] },
+      { name: 'NoteJsonPetToyInner', fields: [field('x')] },
+      { name: 'NoteJsonPetJson', fields: [field('c'), field('d'), field('toy', modelRef('NoteJsonPetJsonToy'))] },
+      { name: 'NoteJsonPetJsonToy', fields: [field('inner', modelRef('NoteJsonPetJsonToyInner'))] },
+      { name: 'NoteJsonPetJsonToyInner', fields: [field('x')] },
+    ];
+    const expected = [
+      'Note {a,b,pet:NotePet}',
+      'NotePet {c,d,toy:NotePetToy}',
+      'NotePetToy {inner:NotePetToyInner}',
+      'NotePetToyInner {x}',
+    ];
+
+    const noteFirst = collapse(models());
+    expect(describeFolded(noteFirst.kept)).toEqual(expected);
+    expect(noteFirst.warnings).toEqual([
+      '[oagen] Merged "NoteJson" into "Note" (3 fields, superset)',
+      '[oagen] Renamed child "NoteJson…" → "NotePet"',
+      '[oagen] Renamed child "NoteJson…" → "NotePetToy"',
+      '[oagen] Renamed child "NoteJson…" → "NotePetToyInner"',
+      '[oagen] Merged "NoteJsonPetJson" into "NotePet" (3 fields, superset)',
+      '[oagen] Collapsed child "NoteJsonPetJsonToy" into existing "NotePetToy"',
+      '[oagen] Collapsed child "NoteJsonPetJsonToyInner" into existing "NotePetToyInner"',
+    ]);
+
+    const petFirst = collapse([...models().slice(2), ...models().slice(0, 2)]);
+    expect([...describeFolded(petFirst.kept)].sort()).toEqual([...expected].sort());
+    expect(petFirst.warnings.filter((w) => w.startsWith('[oagen] Merged '))).toEqual([
+      '[oagen] Merged "NoteJsonPetJson" into "NotePet" (3 fields, superset)',
+      '[oagen] Merged "NoteJson" into "Note" (3 fields, superset)',
+    ]);
+  });
+
+  it('reads an inline enum under the fold: the same members fold under the base’s enum, other members refuse (MichaelDeBoey)', () => {
+    const inlineEnum = (name: string, values: string[] = ['on', 'off']): TypeRef => ({ kind: 'enum', name, values });
+    const pet = (status: TypeRef): Model => ({ name: 'Pet', fields: [field('a'), field('status', status)] });
+    const petJson = (status: TypeRef, extra: Model['fields'] = []): Model => ({
+      name: 'PetJson',
+      fields: [field('a'), field('b'), field('status', status), ...extra],
+    });
+
+    // `PetJsonStatus` with the members of `PetStatus` reads as `PetStatus`: the fold goes ahead
+    // and `Pet.status` keeps the base's own enum name; an enum on a field only the Json model
+    // declares, or under a child, is renamed with its model.
+    const same = collapse([
+      pet(inlineEnum('PetStatus')),
+      petJson(inlineEnum('PetJsonStatus'), [
+        field('mode', inlineEnum('PetJsonMode', ['a', 'b'])),
+        field('toy', modelRef('PetJsonToy')),
+      ]),
+      { name: 'PetJsonToy', fields: [field('kind', inlineEnum('PetJsonToyKind', ['k']))] },
+    ]);
+    expect(same.kept.map((m) => m.name)).toEqual(['Pet', 'PetToy']);
+    expect(
+      same.kept[0]?.fields.map((f) => `${f.name}${f.type.kind === 'enum' ? `:${f.type.name}[${f.type.values}]` : ''}`),
+    ).toEqual(['a', 'b', 'status:PetStatus[on,off]', 'mode:PetMode[a,b]', 'toy']);
+    expect(same.kept[1]?.fields[0]?.type).toEqual(inlineEnum('PetToyKind', ['k']));
+    expect(same.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (5 fields, superset)',
+      '[oagen] Renamed child "PetJson…" → "PetToy"',
+    ]);
+
+    // Other members are another shape: the base keeps the values its operations accept.
+    const other = collapse([pet(inlineEnum('PetStatus')), petJson(inlineEnum('PetJsonStatus', ['on', 'off', 'idle']))]);
+    expect(other.kept.map((m) => m.name)).toEqual(['Pet', 'PetJson']);
+    expect(other.warnings).toEqual([
+      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": field "status" has a different shape — keeping both',
+    ]);
+
+    // Given the enums the component pass lifted, the fold drops the entry its rename left
+    // unreferenced, so one `PetStatus` remains; an entry named by the document stays.
+    const lifted = (): Enum[] => [
+      {
+        name: 'PetStatus',
+        values: [
+          { name: 'ON', value: 'on' },
+          { name: 'OFF', value: 'off' },
+        ],
+      },
+      {
+        name: 'PetJsonStatus',
+        values: [
+          { name: 'ON', value: 'on' },
+          { name: 'OFF', value: 'off' },
+        ],
+      },
+    ];
+    const dropped = lifted();
+    collapseJsonSuffixModels(
+      [pet(inlineEnum('PetStatus')), petJson(inlineEnum('PetJsonStatus'))],
+      [],
+      [],
+      dropped,
+      new Set(),
+    );
+    expect(dropped.map((e) => e.name)).toEqual(['PetStatus']);
+    const declared = lifted();
+    collapseJsonSuffixModels(
+      [pet(inlineEnum('PetStatus')), petJson(inlineEnum('PetJsonStatus'))],
+      [],
+      [],
+      declared,
+      new Set(['PetJsonStatus']),
+    );
+    expect(declared.map((e) => e.name)).toEqual(['PetStatus', 'PetJsonStatus']);
+
+    // A component enum reference carries no members and is read by name, so two components
+    // refuse the fold even when their members agree (see ir-types.md).
+    const components = collapse([
+      pet({ kind: 'enum', name: 'PetStatus' }),
+      petJson({ kind: 'enum', name: 'PetJsonStatus' }),
+    ]);
+    expect(components.kept.map((m) => m.name)).toEqual(['Pet', 'PetJson']);
+    expect(components.warnings).toEqual([
+      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": field "status" has a different shape — keeping both',
+    ]);
+  });
+
+  it('lifts a folded inline enum under the base’s name, through parseSpec', async () => {
+    const status = { type: 'string', enum: ['on', 'off'] };
+    const { spec, warnings } = await parseWithWarnings(
+      'inline-enum.json',
+      petsDoc({
+        Pet: obj({ a: str, status }),
+        PetJson: obj({ a: str, b: str, status, mode: { type: 'string', enum: ['fast', 'slow'] } }),
+      }),
+    );
+    // The component pass lifted `PetJsonStatus` and `PetJsonMode`; the fold leaves them
+    // unreferenced and drops them, and the collectors lift the renamed references: `PetStatus`
+    // onto the base's own enum, `PetMode` under its new name.
+    expect(warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
+      '[oagen] Folded enum "PetJsonStatus" into "PetStatus"',
+      '[oagen] Folded enum "PetJsonMode" into "PetMode"',
+    ]);
+    expect(describeModels(spec)).toEqual(['Pet {a,b,status,mode}']);
+    expect(spec.models[0]?.fields.find((f) => f.name === 'status')?.type).toMatchObject({
+      kind: 'enum',
+      name: 'PetStatus',
+    });
+    expect(spec.models[0]?.fields.find((f) => f.name === 'mode')?.type).toMatchObject({
+      kind: 'enum',
+      name: 'PetMode',
+    });
+    expect(spec.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+      ['PetStatus', ['on', 'off']],
+      ['PetMode', ['fast', 'slow']],
+    ]);
+    expect(describeResponses(spec)).toEqual(['getPet: Pet', 'getPetJson: Pet']);
+    expect(unresolvedReferences(spec)).toEqual([]);
+
+    // Declared as components, the two enums are read by name and the fold is refused.
+    const declared = await parseWithWarnings(
+      'component-enum.json',
+      petsDoc({
+        PetStatus: status,
+        PetJsonStatus: status,
+        Pet: obj({ a: str, status: { $ref: '#/components/schemas/PetStatus' } }),
+        PetJson: obj({ a: str, b: str, status: { $ref: '#/components/schemas/PetJsonStatus' } }),
+      }),
+    );
+    expect(declared.warnings).toEqual([
+      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": field "status" has a different shape — keeping both',
+    ]);
+    expect(describeModels(declared.spec)).toEqual(['Pet {a,status}', 'PetJson {a,b,status}']);
+    expect(describeResponses(declared.spec)).toEqual(['getPet: Pet', 'getPetJson: PetJson']);
+    expect(unresolvedReferences(declared.spec)).toEqual([]);
+  });
+
+  it('holds the invariant and reads the same in every declaration order over generated nested `…Json` layouts', () => {
     // A small deterministic generator (mulberry32), so a failing layout is reproducible by its
-    // seed. Each layout draws from a pool spelled to collide: two `<Name>`/`<Name>Json` pairs
-    // whose prefixes nest (`Pet`, `PetFoo`), children whose folded names meet each other
-    // (`PetJsonJsonThing` folds to `PetJsonThing`), the other pair's models (`PetJsonFoo` folds
-    // to `PetFoo`, `PetJsonFooBar` and `PetFooJsonBar` to `PetFooBar`) and pre-existing holders
-    // (`PetThing`); every model has an `x` or `y` field, every child is referenced by its
-    // `…Json` model and every holder by its base, with extra references only to models of the
-    // layout, in a shuffled document order.
+    // seed. Each layout draws from a pool spelled to collide: `<Name>`/`<Name>Json` pairs whose
+    // prefixes nest (`Pet`, `PetFoo`) and a pair spelled under another `…Json` prefix
+    // (`PetJsonPet`/`PetJsonPetJson`, read under the `PetJson` fold too), children whose folded
+    // names meet each other (`PetJsonJsonThing` folds to `PetJsonThing`), the other pairs' models
+    // (`PetJsonFoo` folds to `PetFoo`, `PetJsonFooBar` and `PetFooJsonBar` to `PetFooBar`) and
+    // pre-existing holders (`PetThing`, `PetPetToy`); every model has an `x` or `y` field, every
+    // child is referenced by its `…Json` model and every holder by its base, with extra references
+    // only to models of the layout. Each layout is folded in its own order and in three more
+    // shuffles of it: every run holds the invariant and every run reads the same.
     const rng = (seed: number): (() => number) => {
       let t = seed >>> 0;
       return () => {
@@ -589,7 +741,7 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
         return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
       };
     };
-    const pool = {
+    const pool: Record<string, { children: string[]; holders: string[] }> = {
       Pet: {
         children: [
           'PetJsonThing',
@@ -605,17 +757,20 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
         children: ['PetFooJsonBar', 'PetFooJsonBarInner', 'PetFooJsonJsonBar', 'PetFooJsonThing'],
         holders: ['PetFooBar', 'PetFooThing'],
       },
+      PetJsonPet: {
+        children: ['PetJsonPetJsonToy', 'PetJsonPetJsonToyInner', 'PetJsonPetJsonThing'],
+        holders: ['PetJsonPetToy', 'PetJsonPetToyInner', 'PetJsonPetThing', 'PetPetToy', 'PetPetThing'],
+      },
     };
-    const layout = (seed: number): Model[] => {
-      const next = rng(seed);
+    const layout = (next: () => number): Model[] => {
       const pick = <T>(xs: readonly T[]): T => xs[Math.floor(next() * xs.length)]!;
-      const bases = next() < 0.4 ? (['Pet'] as const) : (['Pet', 'PetFoo'] as const);
-      const chosen = new Map<string, string[]>();
+      const bases = ['Pet', ...(next() < 0.5 ? ['PetFoo'] : []), ...(next() < 0.5 ? ['PetJsonPet'] : [])];
+      const chosen = new Map<string, { children: string[]; holders: string[] }>();
       const names = new Set<string>();
       for (const base of bases) {
-        const children = pool[base].children.filter(() => next() < 0.5);
-        const holders = pool[base].holders.filter(() => next() < 0.4);
-        chosen.set(base, [...children, ...holders]);
+        const children = pool[base]!.children.filter(() => next() < 0.5);
+        const holders = pool[base]!.holders.filter(() => next() < 0.4);
+        chosen.set(base, { children, holders });
         for (const name of [base, `${base}Json`, ...children, ...holders]) names.add(name);
       }
       const all = [...names];
@@ -630,23 +785,43 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
       for (const base of bases) {
         const plain = models.find((m) => m.name === base)!;
         const json = models.find((m) => m.name === `${base}Json`)!;
-        const [children, holders] = [
-          chosen.get(base)!.filter((n) => n.startsWith(`${base}Json`)),
-          chosen.get(base)!.filter((n) => !n.startsWith(`${base}Json`)),
-        ];
+        const { children, holders } = chosen.get(base)!;
         // The Json model is a superset of its base, with the base's fields admitted, and names
         // every child; the base names every holder.
         plain.fields = [field('a'), ...holders.map((n, i) => field(`holder${i}`, modelRef(n)))];
         json.fields = [field('a'), field('b'), ...children.map((n, i) => field(`child${i}`, modelRef(n)))];
       }
-      return models.sort(() => next() - 0.5);
+      return models;
     };
+    const shuffled = (models: Model[], next: () => number): Model[] =>
+      structuredClone(models)
+        .map((m) => [next(), m] as const)
+        .sort(([a], [b]) => a - b)
+        .map(([, m]) => m);
+    const reading = (kept: Model[]): string[] =>
+      kept
+        .map(
+          (m) =>
+            `${m.name} {${m.fields
+              .map((f) => `${f.name}:${'name' in f.type ? f.type.name : f.type.kind}`)
+              .sort()
+              .join(',')}}`,
+        )
+        .sort();
     let folds = 0;
     for (let seed = 1; seed <= 400; seed++) {
-      const { warnings } = collapse(layout(seed));
-      folds += warnings.filter((w) => w.startsWith('[oagen] Merged ')).length;
+      const next = rng(seed);
+      const models = layout(next);
+      const runs = [shuffled(models, next), shuffled(models, next), shuffled(models, next), shuffled(models, next)].map(
+        (order) => {
+          const { kept, warnings } = collapse(order);
+          folds += warnings.filter((w) => w.startsWith('[oagen] Merged ')).length;
+          return reading(kept);
+        },
+      );
+      for (const run of runs.slice(1)) expect(run, `seed ${seed}`).toEqual(runs[0]);
     }
     // The sweep exercises folds, not only refusals.
-    expect(folds).toBeGreaterThan(50);
+    expect(folds).toBeGreaterThan(200);
   });
 });
