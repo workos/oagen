@@ -1,6 +1,6 @@
 import type { ApiSpec, ServerEntry, ServerVariable } from '../ir/types.js';
 import { normalizeServerUrl, resolveServerUrl, serverUrlPlaceholders, serversBeyondDefault } from '../ir/server-url.js';
-import type { Change, ServerVariableChange } from './types.js';
+import type { ServerChange, ServerVariableChange } from './types.js';
 
 /**
  * Compare the two documents' `baseUrl` and `servers`.
@@ -43,12 +43,18 @@ import type { Change, ServerVariableChange } from './types.js';
  * them to a named host gains that host as additive, with no `server-removed`
  * for `/`. `oldBaseUrl` and `newBaseUrl` still carry `ApiSpec.baseUrl` as
  * the parser set it, `/` included.
+ *
+ * `diffOperations` compares an operation's two effective server lists
+ * through this same function, each read as a document whose `baseUrl` is
+ * its first entry resolved, and carries the result as `serverChanges` on the
+ * `operation-modified` change, so an edit is classified the same whether it
+ * sits on the document, a Path Item or an Operation (#299).
  */
 export function diffServers(
   oldSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
   newSpec: Pick<ApiSpec, 'baseUrl' | 'servers'>,
-): Change[] {
-  const changes: Change[] = [];
+): ServerChange[] {
+  const changes: ServerChange[] = [];
 
   const oldServers = serversBeyondDefault(oldSpec.servers);
   const newServers = serversBeyondDefault(newSpec.servers);

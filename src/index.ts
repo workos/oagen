@@ -59,6 +59,7 @@ export {
   collectResponseBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
+  collectOperationTypeRefs,
 } from './ir/types.js';
 
 // Operation resolution
@@ -169,6 +170,7 @@ export type {
   ServerRemoved,
   ServerModified,
   ServerVariableChange,
+  ServerChange,
 } from './differ/types.js';
 
 // Core parse + generate

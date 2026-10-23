@@ -13,7 +13,14 @@ import { foldHeaderName } from '../ir/parameter-key.js';
 import { resolveServerUrl } from '../ir/server-url.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
-import type { Change, ParamChange, ParamLocation, ResponseContentTypesChange, ResponseHeaderChange } from './types.js';
+import type {
+  Change,
+  ParamChange,
+  ParamLocation,
+  ResponseContentTypesChange,
+  ResponseHeaderChange,
+  ServerChange,
+} from './types.js';
 import { locatedParams, paramKey } from './params.js';
 import {
   classifyParamChange,
@@ -133,10 +140,16 @@ export function diffOperations(
     // document is the document-level diff's to report. Otherwise the lists the
     // operation is actually served from are compared, so a document that moves
     // to where the operation already pointed (its override vanishes) is no
-    // change to the operation.
-    const serversChanged =
-      (!!oldOp.servers || !!newOp.servers) &&
-      effectiveServersChanged(oldOp.servers ?? documentServers?.old ?? [], newOp.servers ?? documentServers?.new ?? []);
+    // change to the operation. Each change keeps the classification the
+    // document-level diff gives it (#299).
+    const serverChanges =
+      !!oldOp.servers || !!newOp.servers
+        ? effectiveServerChanges(
+            oldOp.servers ?? documentServers?.old ?? [],
+            newOp.servers ?? documentServers?.new ?? [],
+          )
+        : [];
+    const serversChanged = serverChanges.length > 0;
     // What the operation's requests must carry, `op.security ?? document
     // security` on each side, by the same rule as `servers`: absent on both
     // sides inherits twice and is the document-level diff's to report.
@@ -201,13 +214,18 @@ export function diffOperations(
       // or now always sent does not.
       const responseHeadersBreaking = responseHeaderChanges.some((c) => c.classification === 'breaking');
       const fallbackBreaking = fallbackDiff === 'breaking';
+      // servers: breaking exactly when the same edit to the document's
+      // `servers` would be — a server the callers could use is gone or its
+      // resolved URL moved; an entry, a variable or an enum value added, an
+      // enum lifted, or a variable the template never references changed, is
+      // additive (#299).
+      const serversBreaking = serverChanges.some((c) => c.classification === 'breaking');
       // security: breaking when a request built for the old requirements no
       // longer satisfies the new ones, read from the caller's side.
       const securityBreaking =
         security !== undefined &&
         classifySecurityChange(security.oldSecurity, security.newSecurity, 'caller') === 'breaking';
 
-      // servers: any change is breaking (the operation's requests go elsewhere)
       const hasBreaking =
         responseChanged ||
         requestBodyBreaking ||
@@ -232,7 +250,7 @@ export function diffOperations(
         responseContentTypesBreaking ||
         responseHeadersBreaking ||
         fallbackBreaking ||
-        serversChanged ||
+        serversBreaking ||
         securityBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
@@ -264,6 +282,7 @@ export function diffOperations(
         deprecatedChanged,
         ...deprecation,
         serversChanged,
+        serverChanges,
         securityChanged,
         ...security,
         tagsChanged,
@@ -286,26 +305,27 @@ function endOfIterationEqual(
 }
 
 /**
- * Whether an operation's effective server list changed in a way a caller
+ * What changed about an operation's effective server list, in a way a caller
  * notices: the document-level diff's own answer (`diffServers`, #255), read
  * off the two lists as if each were a document — `baseUrl` is the first
- * entry resolved, as the parser sets it. Anything it reports flips the flag:
- * a moved default host (`base-url-changed`, so a reorder counts exactly when
- * it moves the first entry's resolved URL), a server added or removed by
- * `url` template, and any variable change — the additive ones included (a
- * new enum value, a new variable, a lifted enum), since one boolean cannot
- * carry that distinction. Descriptions on a server or a variable, enum order,
- * a repeated enum value and position do not count there, so they do not here;
- * neither does a URL spelling `normalizeServerUrl` folds (scheme and host
- * case, a default port, a bare authority's `/`). Neither does the spelling of
- * OpenAPI's default server (#291): a list that is empty and one that is `/`
- * alone (description and variables aside, since `/` references no variable)
- * are the same list there, so an operation served
- * from `/` written out and one served from a document that declares nothing
- * are served from the same place.
+ * entry resolved, as the parser sets it — and returned as it reports it,
+ * each change with its own classification (#299). Anything it reports is a
+ * change: a moved default host (`base-url-changed`, so a reorder counts
+ * exactly when it moves the first entry's resolved URL), a server added or
+ * removed by `url` template, and any variable change — the additive ones
+ * included (a new enum value, a new variable, a lifted enum), which the
+ * caller tells apart from the breaking ones by their classification.
+ * Descriptions on a server or a variable, enum order, a repeated enum value
+ * and position do not count there, so they do not here; neither does a URL
+ * spelling `normalizeServerUrl` folds (scheme and host case, a default port,
+ * a bare authority's `/`). Neither does the spelling of OpenAPI's default
+ * server (#291): a list that is empty and one that is `/` alone (description
+ * and variables aside, since `/` references no variable) are the same list
+ * there, so an operation served from `/` written out and one served from a
+ * document that declares nothing are served from the same place.
  */
-function effectiveServersChanged(oldServers: ServerEntry[], newServers: ServerEntry[]): boolean {
-  return diffServers(asDocument(oldServers), asDocument(newServers)).length > 0;
+function effectiveServerChanges(oldServers: ServerEntry[], newServers: ServerEntry[]): ServerChange[] {
+  return diffServers(asDocument(oldServers), asDocument(newServers));
 }
 
 /** A server list as the document-level diff reads a document: `baseUrl` is its first entry resolved, `''` without one. */

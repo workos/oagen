@@ -32,10 +32,12 @@ export { modelFingerprint };
  * reuse: the component models and the models their fields mint (seeded up
  * front, each with the model itself), each operation's primary response and
  * request body models, and each header and fallback model materialized so
- * far. The value carries the model's shape fingerprint, so a model whose
+ * far — and every enum name in play (`enumNameOwner`), which no model may
+ * take. The value carries the model's shape fingerprint, so a model whose
  * shape the owner shares can take the name (`ownerShares`), and — for
- * operation-owned models — which operation produced it, so a collision
- * inside one operation can be told apart from one across operations.
+ * operation-owned models and the enums an operation's references carry —
+ * which operation produced it, so a collision inside one operation can be
+ * told apart from one across operations.
  */
 export type InlineModelRegistry = Map<string, InlineModelOwner>;
 
@@ -46,9 +48,45 @@ export interface InlineModelOwner {
    * The owner itself, for a model the document declares — a component schema
    * or a model a component's field minted — which shares its name with every
    * shape it admits (`modelAdmits`). Absent for an operation's model, which
-   * shares its name on an identical fingerprint only.
+   * shares its name on an identical fingerprint only, and for an enum's
+   * name, which no model shares.
    */
   model?: Model;
+}
+
+/**
+ * The fingerprint of the entry that reserves an enum's name. No model's
+ * fingerprint is this string — `modelFingerprint` always holds a `#` between
+ * the fields and the shape — so `ownerShares` never lets a model take the
+ * name, and a trial that mints one under it clashes and moves on to its next
+ * candidate, as it does on a model of another shape.
+ */
+export const ENUM_NAME_FINGERPRINT = '\u0000enum';
+
+/**
+ * The registry entry for an enum name: a component enum's, or that of an
+ * inline enum a component field or a shared companion carries, with no
+ * operation; an inline enum one of an operation's own references carries,
+ * with that operation, so a deferred model of the operation that would take
+ * the name is qualified the way one taken by the operation's models is.
+ */
+export function enumNameOwner(operation?: string): InlineModelOwner {
+  return { fingerprint: ENUM_NAME_FINGERPRINT, operation };
+}
+
+/**
+ * Register every enum name the references carry that the registry does not
+ * know yet, owned by `operation` (`enumNameOwner`). A name a model or an
+ * earlier enum already holds is left to its owner.
+ */
+export function reserveEnumNames(registry: InlineModelRegistry, refs: Iterable<TypeRef>, operation?: string): void {
+  for (const ref of refs) {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (!registry.has(r.name)) registry.set(r.name, enumNameOwner(operation));
+      },
+    });
+  }
 }
 
 /**

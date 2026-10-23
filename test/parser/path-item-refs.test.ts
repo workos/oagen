@@ -54,6 +54,7 @@ function operationsOf(paths: Record<string, unknown>, pathItems?: ComponentPathI
     undefined,
     undefined,
     undefined,
+    undefined,
     pathItems,
   );
 }
