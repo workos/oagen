@@ -45,7 +45,8 @@ import {
   type RequestBodyObject,
 } from './operations.js';
 import { externalDocsEntry } from './external-docs.js';
-import { resolveComponentRef, resolvePathItemRef } from './path-item-refs.js';
+import { resolvePathItemRef } from './path-item-refs.js';
+import { followReference, type SiblingDocs } from './reference-objects.js';
 import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
@@ -178,6 +179,11 @@ export function extractWebhooks(
   components: WebhookComponents = {},
   reservedNames: Iterable<string> = [],
   reservedEnumNames: Iterable<string> = [],
+  // Whether text written beside a `$ref` into `components/parameters`,
+  // `requestBodies`, `responses` or `examples` overrides the component's
+  // (OAS 3.1) or is ignored (OAS 3.0): the document's mode, as the operations
+  // read it (`siblingDocsMode`), applied to every Reference Object here.
+  siblingDocs: SiblingDocs = 'override',
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   if (!isRecord(webhooks)) {
@@ -185,14 +191,14 @@ export function extractWebhooks(
     return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   }
 
-  const entries = collectWebhookEntries(webhooks, components);
+  const entries = collectWebhookEntries(webhooks, components, siblingDocs);
   const { groups, groupOf } = groupEntries(entries);
   const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
-  const stems = resolveWebhookModelStems(groups, reserved, components);
+  const stems = resolveWebhookModelStems(groups, reserved, components, siblingDocs);
   const inlineModels: Model[] = [];
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
   for (const group of groups) {
-    const minted = mintWebhook(group.owner, stems.get(group)!, components, reserved);
+    const minted = mintWebhook(group.owner, stems.get(group)!, components, reserved, siblingDocs);
     inlineModels.push(...minted.inlineModels);
     mintedByGroup.set(group, minted);
   }
@@ -218,7 +224,12 @@ export function extractWebhooks(
       requestBodyContentTypes: minted.requestBodyContentTypes,
       requestBodyContents: minted.requestBodyContents,
     };
-    const webhook = buildWebhook(entry, entry === group.owner ? shape : cloneMintedShape(shape), components);
+    const webhook = buildWebhook(
+      entry,
+      entry === group.owner ? shape : cloneMintedShape(shape),
+      components,
+      siblingDocs,
+    );
     result.push(webhook);
     webhooksByGroup.set(group, [...(webhooksByGroup.get(group) ?? []), webhook]);
   }
@@ -309,7 +320,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * and parameter / request-body refs up front so the stem resolution below can
  * mint every entry's names before any stem is decided.
  */
-function collectWebhookEntries(webhooks: Record<string, unknown>, components: WebhookComponents): WebhookEntry[] {
+function collectWebhookEntries(
+  webhooks: Record<string, unknown>,
+  components: WebhookComponents,
+  siblingDocs: SiblingDocs,
+): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
   for (const [name, raw] of Object.entries(webhooks)) {
     // A specification extension, never a webhook: stepped over whatever its
@@ -336,7 +351,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
       // and name, a header's name case-folded), in the path-level position.
       const paramsByIdentity = new Map<string, ParameterObject>();
       for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
-        const param = resolveParameterRef(rawParam, components.parameters, label);
+        const param = resolveParameterRef(rawParam, components.parameters, label, siblingDocs);
         paramsByIdentity.set(parameterKey(param.in, param.name), param);
       }
       const params: ParameterObject[] = [];
@@ -352,7 +367,7 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
         warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${label}`);
         params.push(param);
       }
-      const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label);
+      const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label, siblingDocs);
       // Reported here, once per webhook: the mint below runs twice for each
       // (`resolveWebhookModelStems`, then the build), so it must not report.
       warnUnreadRequestBody(body, label);
@@ -449,10 +464,11 @@ function resolveWebhookModelStems(
   groups: WebhookGroup[],
   reserved: ReservedNames,
   components: WebhookComponents,
+  siblingDocs: SiblingDocs,
 ): Map<WebhookGroup, string> {
   const minted = new Map<WebhookGroup, Set<string>>();
   for (const group of groups) {
-    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components, reserved).names);
+    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components, reserved, siblingDocs).names);
   }
 
   const stems = new Map<WebhookGroup, string>();
@@ -558,13 +574,14 @@ function mintWebhook(
   stem: string,
   components: WebhookComponents,
   reserved: ReservedNames,
+  siblingDocs: SiblingDocs,
 ): MintedWebhook {
   const { params, body, label } = entry;
   const parent = toPascalCase(stem);
   const inlineModels: Model[] = [];
   const names = new Set<string>();
   const extract = (location: 'query' | 'header' | 'cookie'): Parameter[] =>
-    extractParams(params, location, stem, components.schemas, components.examples, label);
+    extractParams(params, location, stem, components.schemas, components.examples, label, siblingDocs);
   const minted: MintedWebhook = {
     headerParams: extract('header'),
     queryParams: extract('query'),
@@ -920,7 +937,12 @@ function repointMintedRefs(ref: TypeRef, from: string, to: string): void {
   }
 }
 
-function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: WebhookComponents): Webhook {
+function buildWebhook(
+  entry: WebhookEntry,
+  minted: MintedShape,
+  components: WebhookComponents,
+  siblingDocs: SiblingDocs,
+): Webhook {
   const { name, method, op, pathItem, body, label } = entry;
   const {
     headerParams,
@@ -963,7 +985,7 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     ...(requestBodyDescription !== undefined ? { requestBodyDescription } : {}),
     // Every media type the body declares, present only when there is one, as on an operation.
     ...(requestBodyContentTypes ? { requestBodyContentTypes, requestBodyContents } : {}),
-    responses: extractWebhookResponses(op.responses, components.responses, label),
+    responses: extractWebhookResponses(op.responses, components.responses, label, siblingDocs),
     ...(security !== undefined ? { security } : {}),
   };
 }
@@ -976,8 +998,10 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
  * skipped silently; a key OpenAPI does not define (`error`, `6XX`, `600`) is
  * warned about and ignored, as on an operation. A response written as a
  * `$ref` into `components/responses` is followed for its description, chains
- * included; a description written beside the `$ref` (OpenAPI 3.1) wins over
- * the component's. A ref that leads nowhere, or anywhere else, keeps the
+ * included; a description written beside the `$ref` wins over the
+ * component's under `siblingDocs: 'override'` (OpenAPI 3.1) and is ignored
+ * under `'ignore'` (3.0), as beside every Reference Object
+ * (`followReference`). A ref that leads nowhere, or anywhere else, keeps the
  * status code without a description, with a warning. A blank description is
  * omitted.
  */
@@ -985,13 +1009,14 @@ function extractWebhookResponses(
   responses: OperationObject['responses'],
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   label: string,
+  siblingDocs: SiblingDocs,
 ): WebhookResponse[] {
   const result: WebhookResponse[] = [];
   for (const [code, raw] of Object.entries(responses ?? {})) {
     const responseKey = classifyResponseKey(code);
     if (responseKey.kind === 'unrecognized') warnUnrecognizedResponseKey(code, label);
     if (responseKey.kind !== 'status') continue;
-    const description = presentText(resolveResponseDescription(raw, componentResponses, code, label));
+    const description = presentText(resolveResponseDescription(raw, componentResponses, code, label, siblingDocs));
     result.push({ statusCode: responseKey.code, ...(description !== undefined ? { description } : {}) });
   }
   return result;
@@ -999,36 +1024,31 @@ function extractWebhookResponses(
 
 /**
  * The description of a response, following a `components/responses` `$ref`
- * chain with a cycle guard. The outermost description along the chain wins,
- * so a sibling beside a ref overrides what it points at.
+ * chain through `followReference`, the walk every Reference Object takes:
+ * the outermost sibling description with content wins under `'override'`
+ * and the component's own is read under `'ignore'`. A chain that loops, a
+ * `$ref` that is not a string, or a ref nothing answers is warned about and
+ * the walk's last object read as written.
  */
 function resolveResponseDescription(
   raw: unknown,
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   code: string,
   label: string,
+  siblingDocs: SiblingDocs,
 ): string | undefined {
-  const seenRefs = new Set<string>();
-  let description: string | undefined;
-  let current: unknown = raw;
-  while (isRecord(current)) {
-    if (description === undefined && typeof current.description === 'string') description = current.description;
-    const ref = current.$ref;
-    if (ref === undefined) break;
-    if (typeof ref !== 'string' || seenRefs.has(ref)) {
-      console.warn(
-        `[oagen] Warning: Circular or malformed response $ref for status ${code} in ${label}; keeping the status code only.`,
-      );
-      break;
-    }
-    seenRefs.add(ref);
-    current = resolveComponentRef(ref, 'responses', componentResponses);
-    if (!current) {
-      console.warn(
-        `[oagen] Warning: Unresolved response $ref "${ref}" for status ${code} in ${label}: ` +
-          'no matching entry under components/responses. Keeping the status code only.',
-      );
-    }
+  if (!isRecord(raw)) return undefined;
+  const followed = followReference<{ description?: unknown }>(raw, 'responses', componentResponses, siblingDocs);
+  if (followed.outcome === 'circular' || followed.outcome === 'malformed') {
+    console.warn(
+      `[oagen] Warning: Circular or malformed response $ref for status ${code} in ${label}; keeping the status code only.`,
+    );
+  } else if (followed.outcome === 'unresolved') {
+    console.warn(
+      `[oagen] Warning: Unresolved response $ref "${followed.ref}" for status ${code} in ${label}: ` +
+        'no matching entry under components/responses. Keeping the status code only.',
+    );
   }
-  return description;
+  const { description } = followed.value;
+  return typeof description === 'string' ? description : undefined;
 }
