@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { modelAdmits } from '../../src/parser/inline-models.js';
-import { renameTypeRefModels } from '../../src/ir/types.js';
+import { renameModelRefs, renameTypeRefModels } from '../../src/ir/types.js';
 import {
   collectModelRefs,
   collectRequestBodyTypes,
@@ -776,6 +776,81 @@ describe('a union holding a `$ref` and an inline variant of one name (Greptile)'
     expect(ref.variants.map((v) => (v as { name: string }).name)).toEqual(['Comp', 'ThingComp', 'Moved']);
     expect(ref.discriminator?.mapping).toEqual({ legacy: 'Comp', new: 'ThingComp', o: 'Moved', o2: 'Moved' });
     expect(second).toEqual({ kind: 'model', name: 'ThingComp' });
+  });
+});
+
+describe('a mapping entry naming a model outside the variants (Greptile, merge round)', () => {
+  const dispatcher = (): Model => ({
+    name: 'Pet',
+    fields: [],
+    variants: [
+      { kind: 'model', name: 'Cat' },
+      { kind: 'model', name: 'Dog' },
+    ],
+    compositionKind: 'oneOf',
+    discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', other: 'FooJson' } },
+  });
+
+  it('follows a rename by name on a model and on a union type, so a fold never leaves a dispatcher naming a removed model', () => {
+    const model = dispatcher();
+    renameModelRefs(model, new Map([['FooJson', 'Foo']]));
+    expect(model.discriminator?.mapping).toEqual({ cat: 'Cat', dog: 'Dog', other: 'Foo' });
+    const union: TypeRef = {
+      kind: 'union',
+      variants: dispatcher().variants!,
+      discriminator: dispatcher().discriminator,
+    };
+    renameTypeRefModels(union, new Map([['FooJson', 'Foo']]));
+    expect(union.kind === 'union' && union.discriminator?.mapping).toEqual({ cat: 'Cat', dog: 'Dog', other: 'Foo' });
+  });
+
+  it('stays under a filtered rename, which only moves an entry a renamed variant owns', () => {
+    const model = dispatcher();
+    renameModelRefs(
+      model,
+      new Map([
+        ['FooJson', 'Foo'],
+        ['Dog', 'Hound'],
+      ]),
+      () => true,
+    );
+    expect(model.variants).toEqual([
+      { kind: 'model', name: 'Cat' },
+      { kind: 'model', name: 'Hound' },
+    ]);
+    expect(model.discriminator?.mapping).toEqual({ cat: 'Cat', dog: 'Hound', other: 'FooJson' });
+  });
+
+  it('follows the Json fold through the parser', async () => {
+    const kind = (value: string) => ({ kind: { type: 'string', const: value } });
+    const { spec } = await parse(
+      'json-fold-mapping',
+      specDoc({
+        Cat: obj({ ...kind('cat'), meow: str }),
+        Dog: obj({ ...kind('dog'), bark: str }),
+        Foo: obj({ id: str }),
+        FooJson: obj({ id: str, name: str }),
+        Pet: {
+          oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: {
+              cat: '#/components/schemas/Cat',
+              dog: '#/components/schemas/Dog',
+              other: '#/components/schemas/FooJson',
+            },
+          },
+        },
+      }),
+    );
+    const names = new Set(spec.models.map((m) => m.name));
+    expect(names.has('FooJson')).toBe(false);
+    const pet = spec.models.find((m) => m.name === 'Pet');
+    expect(pet?.discriminator?.mapping).toEqual({ cat: 'Cat', dog: 'Dog', other: 'Foo' });
+    for (const model of spec.models) {
+      for (const target of Object.values(model.discriminator?.mapping ?? {}))
+        expect(names.has(target), `${model.name} → ${target}`).toBe(true);
+    }
   });
 });
 
