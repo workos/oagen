@@ -644,18 +644,14 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expect(itemType?.kind).toBe('model');
         const itemModel = itemType?.kind === 'model' ? ir.models.find((m) => m.name === itemType.name) : undefined;
         expect(itemModel?.fields.map((f) => f.name)).toEqual(['id']);
-        // The 202's own model is kept as well, so `successResponses` never dangles.
+        // The 202's own model is kept as well, so `successResponses` never dangles:
+        // its `{ job_id }` is another shape than the 200's kept wrapper, so it
+        // steps to its status code instead of resolving to the 200's model (#309).
         const job = op.successResponses?.find((r) => r.statusCode === 202)?.type;
-        expect(job?.kind).toBe('model');
-        if (job?.kind === 'model') expect(ir.models.some((m) => m.name === job.name)).toBe(true);
+        expect(job).toEqual({ kind: 'model', name: 'ListPetsResponse202' });
+        expect(ir.models.find((m) => m.name === 'ListPetsResponse202')?.fields.map((f) => f.name)).toEqual(['job_id']);
         // validateModelRefs would have warned about any dangling reference.
-        // The one warning is #240's: the 202's inline body takes the 200's
-        // `<Op>Response` name with another shape, and the primary's is kept.
-        expect(warn.mock.calls.map((call) => call[0])).toEqual([
-          expect.stringContaining(
-            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
-          ),
-        ]);
+        expect(warn).not.toHaveBeenCalled();
       });
     });
 
@@ -730,12 +726,13 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         );
         const op = expectWrapperKept(ir);
         expect(op.successResponses?.map((r) => r.statusCode)).toEqual([200, 202]);
-        // The one warning is #240's: the 202's inline body takes the 200's name with another shape.
-        expect(warn.mock.calls.map((call) => call[0])).toEqual([
-          expect.stringContaining(
-            'Inline model "ListPetsResponse" from the 202 response has different fields than the 200 response\'s',
-          ),
-        ]);
+        // The 202's `{ job_id }` is another shape than the 200's kept wrapper,
+        // so it steps to its status code and keeps its fields (#309).
+        expect(op.successResponses?.find((r) => r.statusCode === 202)?.type).toEqual({
+          kind: 'model',
+          name: 'ListPetsResponse202',
+        });
+        expect(warn).not.toHaveBeenCalled();
       });
     });
 
@@ -1315,6 +1312,74 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       const selecting = { dataPath: 'result.items', endOfIteration: { kind: 'hasMore', path: 'more' } };
       const unwrapped = { kind: 'array', items: { kind: 'primitive', type: 'string' } };
 
+      const unknown = { kind: 'primitive', type: 'unknown' };
+      const hasMore = { endOfIteration: { kind: 'hasMore', path: 'more' } };
+
+      it('is decided against the primary Operation.response describes: a 200 whose schema describes nothing yields to the typed 201 (Greptile)', async () => {
+        const ir = await parseJson(issueSpec(hasMore, undefined, { '200': ok({}), '201': ok(nested(more)) }));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.responseStatusCode).toBe(201);
+        expect(op.response).toEqual(unwrapped);
+        expect(op.pagination).toMatchObject({ dataPath: 'data', endOfIteration: { kind: 'hasMore', path: 'more' } });
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unknown],
+          [201, unwrapped],
+        ]);
+        expectSound(ir, []);
+      });
+
+      it('keeps the 200 as primary when the 201 is the one whose schema describes nothing', async () => {
+        const ir = await parseJson(issueSpec(hasMore, undefined, { '200': ok(nested(more)), '201': ok({}) }));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.responseStatusCode).toBe(200);
+        expect(op.response).toEqual(unwrapped);
+        expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'more' });
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unknown],
+        ]);
+      });
+
+      it.each([
+        [
+          'no responses at all',
+          undefined,
+          { dataPath: 'data' },
+          'dataPath "data" does not resolve to an array in the response',
+        ],
+        [
+          'no 2xx',
+          { '404': { description: 'missing' } },
+          { endOfIteration: { kind: 'hasMore', path: 'more' } },
+          'endOfIteration path "more" does not resolve to a field in the response',
+        ],
+        [
+          'a 204 primary',
+          { '204': { description: 'no content' } },
+          { dataPath: 'data' },
+          'dataPath "data" does not resolve to an array in the response',
+        ],
+      ])(
+        'rejects an override that asks of the response when there is %s',
+        async (_label, responses, fields, problem) => {
+          // `p` alone: the override is the only possible source of an iterator.
+          const op = onlyOperation(
+            await parseJson(
+              petsSpec({
+                parameters: [query('p')],
+                responses,
+                'x-pagination': { strategy: 'page', param: 'p', ...fields },
+              }),
+            ),
+          );
+          rejected(problem);
+          expect(op.pagination).toBeUndefined();
+          expect(op.response).toEqual(unknown);
+        },
+      );
+
       it("a rejection on the primary reaches every 2xx: the 201 unwraps on data as detection does, not on the override's wrapper", async () => {
         // Only the 201 declares `more`; the 200 is primary and rejects the
         // override, so the 201 is read exactly as detection reads it.
@@ -1685,6 +1750,50 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         itemType: 'Pet',
         envelopeFields: ['has_more', 'meta'],
       });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('keeps a stop field’s type against a typeless declaration of it, in the model and in the read alike (Greptile)', async () => {
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const boolean = { type: 'boolean' };
+      const doc = { description: 'More pages' };
+      const member = (has_more: unknown) => ({ type: 'object', properties: { has_more } });
+      // Greptile's case: the component's own boolean beside its `allOf`, folded
+      // in first, against a member's description; then the reverse order; then
+      // a typeless override written in the wrapper beside the data array.
+      const cases: Record<string, { Base: unknown; beside: Record<string, unknown> }> = {
+        ownTyped: { Base: { properties: { has_more: boolean }, allOf: [member(doc)] }, beside: {} },
+        ownTypeless: { Base: { properties: { has_more: doc }, allOf: [member(boolean)] }, beside: {} },
+        siblingOverride: { Base: member(boolean), beside: { has_more: doc } },
+      };
+      const expectedField = {
+        name: 'has_more',
+        type: { kind: 'primitive', type: 'boolean' },
+        description: 'More pages',
+      };
+      for (const [label, { Base, beside }] of Object.entries(cases)) {
+        const PetPage = { allOf: [ref('Base'), { type: 'object', properties: { data: petArray, ...beside } }] };
+        const schemas = { Base, PetPage };
+        const fieldOf = (ir: ApiSpec, model: string) =>
+          ir.models.find((m) => m.name === model)?.fields.find((f) => f.name === 'has_more');
+        for (const [kind, body, model] of [
+          ['$ref wrapper', ref('PetPage'), 'PetPage'],
+          ['inline wrapper', PetPage, 'ListPetsResponse'],
+        ] as const) {
+          const ir = await parseJson(listOp(body, { dataPath: 'data' }, schemas));
+          const op = onlyOperation(ir);
+          expect(op.pagination?.endOfIteration, `${label} (${kind})`).toEqual({ kind: 'hasMore', path: 'has_more' });
+          // The field as the wrapper model declares it — or, when the typeless
+          // declaration written beside `data` makes the inline body a recognized
+          // envelope, as the unwrapped envelope's companion.
+          const field = op.pagination?.envelopeFields?.find((f) => f.name === 'has_more') ?? fieldOf(ir, model);
+          expect(field, `${label} (${kind} model)`).toMatchObject(expectedField);
+          expect(fieldOf(ir, 'Base'), `${label} (${kind}, Base)`).toMatchObject({
+            ...expectedField,
+            ...(label === 'siblingOverride' && { description: undefined }),
+          });
+        }
+      }
       expect(warn).not.toHaveBeenCalled();
     });
 

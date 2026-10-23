@@ -120,6 +120,24 @@ const permutations = <T>(items: T[]): T[][] =>
         permutations([...items.slice(0, i), ...items.slice(i + 1)]).map((rest) => [item, ...rest]),
       );
 
+/** The model names a type reaches at any depth — through arrays, maps, nullable wrappers and unions — in order. */
+function leafModelNames(type: TypeRef): string[] {
+  switch (type.kind) {
+    case 'model':
+      return [type.name];
+    case 'array':
+      return leafModelNames(type.items);
+    case 'map':
+      return leafModelNames(type.valueType);
+    case 'nullable':
+      return leafModelNames(type.inner);
+    case 'union':
+      return type.variants.flatMap(leafModelNames);
+    default:
+      return [];
+  }
+}
+
 /** Every type reference an operation holds, labelled by where it sits. */
 function operationRefs(op: Operation): Array<[string, TypeRef]> {
   const refs: Array<[string, TypeRef]> = [[`${op.name}.response`, op.response]];
@@ -574,7 +592,6 @@ describe('workos/oagen#307: properties written beside allOf', () => {
   describe('declaration precedence at every depth (review round 1)', () => {
     /** `tag` declared on a branch only, under a nested `allOf` on a branch only, by an enum member, and by a plain string member. */
     const branch: SchemaObject = { oneOf: [obj({ tag: int }), obj({ other: str })] };
-    const nestedBranch: SchemaObject = { allOf: [branch] };
     const enumMember = obj({ tag: { type: 'string', enum: ['a', 'b'] } });
     const stringMember = obj({ tag: str });
     const tagOf = (spec: ApiSpec, name: string): string | undefined =>
@@ -689,7 +706,17 @@ describe('workos/oagen#307: properties written beside allOf', () => {
     });
 
     it("a field's type is the first always-applying declaration's, whatever the member order", async () => {
-      const memberOf = { branch, nestedBranch, enum: enumMember, string: stringMember };
+      // The string member requires `tag`; a branch requires `other`.
+      const requiringString = obj({ tag: str }, { required: ['tag'] });
+      const requiringBranch: SchemaObject = {
+        oneOf: [obj({ tag: int }), obj({ other: str }, { required: ['other'] })],
+      };
+      const memberOf = {
+        branch: requiringBranch,
+        nestedBranch: { allOf: [requiringBranch] },
+        enum: enumMember,
+        string: requiringString,
+      };
       type Kind = keyof typeof memberOf;
       const orders = permutations<Kind>(['branch', 'nestedBranch', 'enum', 'string']);
       const schemas = Object.fromEntries(
@@ -700,7 +727,9 @@ describe('workos/oagen#307: properties written beside allOf', () => {
         const name = `Order${i}`;
         const first = order.find((kind) => kind === 'enum' || kind === 'string');
         const expected = first === 'enum' ? `${name}Tag` : 'string';
-        expect(tagOf(spec, name), `${name}: ${order.join(' > ')}`).toBe(`tag?: ${expected}`);
+        // `required` is the union of every always-applying member's list, whichever
+        // member types the field; a variant's list is not read.
+        expect(tagOf(spec, name), `${name}: ${order.join(' > ')}`).toBe(`tag: ${expected}`);
         expect(fieldsOf(spec, name), name).toContain('other?: string');
       }
       expect(warnings).toEqual([]);
@@ -765,7 +794,8 @@ describe('workos/oagen#307: properties written beside allOf', () => {
         branch,
         nestedBranch: { allOf: [branch] },
         a: obj({ child: obj({ aField: str }) }),
-        b: obj({ child: obj({ bField: str }) }),
+        // `b` requires `child`: the requirement holds whichever declaration types it.
+        b: obj({ child: obj({ bField: str }) }, { required: ['child'] }),
       };
       type Kind = keyof typeof memberOf;
       const orders = permutations<Kind>(['branch', 'nestedBranch', 'a', 'b']);
@@ -779,6 +809,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
         const chosen = order.find((kind) => kind === 'a' || kind === 'b')!;
         const child = modelOf(spec, name).fields.find((f) => f.name === 'child')!.type;
         expect(show(child), label).toBe(`${name}Child`);
+        expect(fieldsOf(spec, name), label).toContain(`child: ${name}Child`);
         // The one model of that name has the chosen declaration's field; the
         // other member's declaration minted nothing.
         expect(fieldsOf(spec, `${name}Child`), label).toEqual([`${chosen}Field?: string`]);
@@ -926,6 +957,119 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(fieldsOf(spec, 'SingleOnly')).toEqual(['name: string', 'kind?: "only"', 'v?: string']);
       expect(warnings).toEqual([]);
       expectSound(spec, ['Pet', 'Single']);
+    });
+  });
+
+  describe('an inherited declaration mints everything its type reaches (review round 3)', () => {
+    /** `Dog` declares, beside its `allOf`, a field of each container kind holding inline objects. */
+    const Dog: SchemaObject = {
+      allOf: [ref('Pet')],
+      properties: {
+        meta: { type: 'object', additionalProperties: obj({ v: str }) },
+        tags: { type: 'array', items: obj({ t: str }) },
+        shape: { oneOf: [obj({ radius: str }), obj({ side: str })] },
+        maybe: { oneOf: [obj({ m: str }), { type: 'null' }] },
+        deep: {
+          type: 'object',
+          additionalProperties: { type: 'array', items: { oneOf: [obj({ d: str }), { type: 'null' }] } },
+        },
+      },
+    };
+    /** The fields of every model `field`'s type reaches on `model`, each model's own, in order. */
+    const reached = (spec: ApiSpec, model: string, field: string): string[][] =>
+      leafModelNames(modelOf(spec, model).fields.find((f) => f.name === field)!.type).map((name) =>
+        fieldsOf(spec, name),
+      );
+
+    it('a map, an array, a union, a nullable object and a map of arrays of nullable objects, inherited one and two levels', async () => {
+      const { spec, warnings } = await parse(
+        'inherited-containers',
+        specDoc({}, { Pet: pet, Dog, Puppy: { allOf: [ref('Dog')] }, Pup: { allOf: [ref('Puppy')] } }),
+      );
+      for (const name of ['Dog', 'Puppy', 'Pup']) {
+        // Typed under the inheriting component, as `extractAllOfModel` types every inherited field …
+        for (const field of ['meta', 'tags', 'shape', 'maybe', 'deep']) {
+          const type = modelOf(spec, name).fields.find((f) => f.name === field)!.type;
+          for (const leaf of leafModelNames(type))
+            expect(leaf.startsWith(name), `${name}.${field} → ${leaf}`).toBe(true);
+        }
+        // … and every model the type reaches exists with the declaration's fields (round 3: an
+        // inherited map's values were typed but never built).
+        expect(reached(spec, name, 'meta'), `${name}.meta`).toEqual([['v?: string']]);
+        expect(reached(spec, name, 'tags'), `${name}.tags`).toEqual([['t?: string']]);
+        expect(reached(spec, name, 'shape'), `${name}.shape`).toEqual([['radius?: string'], ['side?: string']]);
+        expect(reached(spec, name, 'maybe'), `${name}.maybe`).toEqual([['m?: string']]);
+        expect(reached(spec, name, 'deep'), `${name}.deep`).toEqual([['d?: string']]);
+      }
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Dog', 'Puppy', 'Pup']);
+    });
+  });
+
+  describe('a wrapper that adds `required` to a lone member is the merge (review round 4)', () => {
+    const named = obj({ name: str });
+    const wrapped: SchemaObject = { allOf: [named], required: ['name'] };
+
+    it("Greptile's case: `required` beside a lone object member keeps `name` required at a field, a body, a 404 and a component", async () => {
+      const { spec, warnings } = await parse(
+        'wrapper-required',
+        specDoc(
+          {
+            '/things': {
+              get: {
+                operationId: 'getThing',
+                responses: {
+                  '200': { description: 'ok', ...json(wrapped) },
+                  '404': { description: 'missing', ...json(wrapped) },
+                },
+              },
+            },
+          },
+          { Holder: obj({ thing: wrapped }), Comp: wrapped },
+        ),
+      );
+      const op = opsOf(spec).getThing!;
+      expect(fieldsOf(spec, show(op.response))).toEqual(['name: string']);
+      expect(fieldsOf(spec, show(op.errors.find((e) => String(e.statusCode) === '404')!.type!))).toEqual([
+        'name: string',
+      ]);
+      expect(fieldsOf(spec, 'Holder')).toEqual(['thing?: HolderThing']);
+      expect(fieldsOf(spec, 'HolderThing')).toEqual(['name: string']);
+      expect(fieldsOf(spec, 'Comp')).toEqual(['name: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Holder', 'Comp']);
+    });
+
+    it('a `required` beside a lone array member constrains nothing: the array is unwrapped, its items as written', async () => {
+      const list: SchemaObject = { allOf: [{ type: 'array', items: obj({ x: str }) }], required: ['x'] };
+      const { spec, warnings } = await parse(
+        'wrapper-required-array',
+        specDoc({ '/lists': getOp('getList', list) }, { Holder: obj({ list }) }),
+      );
+      const field = modelOf(spec, 'Holder').fields.find((f) => f.name === 'list')!.type;
+      expect(field.kind).toBe('array');
+      expect(fieldsOf(spec, show(field.kind === 'array' ? field.items : field))).toEqual(['x?: string']);
+      const body = opsOf(spec).getList!.response;
+      expect(body.kind).toBe('array');
+      expect(fieldsOf(spec, show(body.kind === 'array' ? body.items : body))).toEqual(['x?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Holder']);
+    });
+
+    it('a wrapper carrying only a `description` or limits still unwraps, the limits carried', async () => {
+      const described: SchemaObject = { allOf: [named], description: 'doc' };
+      const limited: SchemaObject = { allOf: [named], minProperties: 1 };
+      const { spec, warnings } = await parse(
+        'wrapper-doc-only',
+        specDoc({ '/things': getOp('getThing', described) }, { Holder: obj({ a: described, b: limited }) }),
+      );
+      expect(fieldsOf(spec, 'Holder')).toEqual(['a?: HolderA', 'b?: HolderB']);
+      expect(fieldsOf(spec, 'HolderA')).toEqual(['name?: string']);
+      expect(fieldsOf(spec, 'HolderB')).toEqual(['name?: string']);
+      expect(modelOf(spec, 'HolderB').constraints).toEqual({ minProperties: 1 });
+      expect(fieldsOf(spec, show(opsOf(spec).getThing!.response))).toEqual(['name?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Holder']);
     });
   });
 });
