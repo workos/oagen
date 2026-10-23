@@ -176,35 +176,59 @@ export function singularize(word: string): string {
  * Conservative singularisation of a path segment, for naming an operation on
  * one item of a collection: `pets` → `pet`, `api_keys` → `api_key`,
  * `directories` → `directory`, `addresses` → `address`, `statuses` → `status`,
- * `boxes` → `box`, `batches` → `batch`, `responses` → `response`.
+ * `aliases` → `alias`, `analyses` → `analysis`, `boxes` → `box`, `batches` →
+ * `batch`, `responses` → `response`.
  *
  * Suffix rules only, no dictionary, so anything that does not look plural is
- * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`
- * or `is` (`status`, `analysis`), or is an invariant plural (`series`).
- * Case is preserved — the rules only slice, except `-ies` → `-y`, whose `y`
- * takes the case of the `ies` it replaces (`DIRECTORIES` → `DIRECTORY`, so
- * splitWords still sees one word) — and only the trailing word of a compound
- * segment matters.
+ * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`,
+ * `is` or `ias` (`status`, `analysis`, `alias`), or is an invariant plural
+ * (`series`). Case is preserved — the rules only slice, except `-ies` → `-y`
+ * and `-yses` → `-ysis`, whose `y` and `is` take the case of the letters they
+ * replace (`DIRECTORIES` → `DIRECTORY`, `ANALYSES` → `ANALYSIS`, so splitWords
+ * still sees one word) — and only the trailing word of a compound segment
+ * matters. Idempotent: every singular it produces is returned as it is when
+ * passed back in (`aliases` → `alias` → `alias`), so a comparison of two
+ * words by their singular forms (see appendQualifier) is sound.
  *
  * Deliberately not handled — a resource that stems wrong should carry an
  * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
  * words whose singular keeps the `ie` (`cookies` → `cooky`), `-oes` (`heroes`
  * → `heroe`), `-ches` nouns ending in `-che` (`caches` → `cach`), `-uses`
- * nouns ending in `-use` (`excuses` → `excus`), plurals of `-u`/`-i` nouns
- * (`menus`, `apis` are kept as they are) and acronyms (`sms` → `sm`).
+ * nouns ending in `-use` (`excuses` → `excus`), `-ases` nouns ending in `-as`
+ * other than `-ias` (`canvases` → `canvase`, where `cases` → `case` is the
+ * common reading), `-es` plurals of `-is` nouns other than `-ysis` (`crises`
+ * → `crise`, `theses` → `these`, where `premises` → `premise` and `cheeses`
+ * → `cheese` are the common readings), singular nouns ending in `-as` other
+ * than `-ias`, or in `-ns` (`canvas` → `canva`, `lens` → `len`, where `areas`
+ * → `area` and `tokens` → `token` are the common readings), plurals of `-ia`
+ * nouns (`utopias` is kept as it is, so that `alias` is), plurals of
+ * `-u`/`-i` nouns (`menus`, `apis` are kept as they are) and acronyms (`sms`
+ * → `sm`). These limits reach every segment the parser singularises — the
+ * resource of an item operation, a deeper segment a path parameter follows
+ * and the service noun a name restores — so `/messages/sms/{smsId}/attachments`
+ * contributes `Sm` and `/design/canvas/{id}/layers/{layerId}` contributes
+ * `Canva` to a qualified name.
  */
 export function singularizePathSegment(segment: string): string {
   const lower = segment.toLowerCase();
   if (lower.length <= 2 || !lower.endsWith('s')) return segment;
   if (lower.endsWith('series') || lower.endsWith('species') || lower.endsWith('news')) return segment;
-  if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is')) return segment;
+  // `-ias` is kept for `alias` and `bias`, the singulars the `-iases` rule
+  // below produces, at the price of the rarer `-ia` plurals (`utopias`).
+  if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is') || lower.endsWith('ias')) return segment;
   // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
   if (lower.endsWith('ies') && lower.length > 4) {
     return segment.slice(0, -3) + (segment.endsWith('IES') ? 'Y' : 'y');
   }
-  // An `es` added to a sibilant stem: `addresses`, `statuses`, `boxes`, `batches`,
-  // `hashes`. A vowel before `uses` is a plain `s` instead (`warehouses`).
-  if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower)) return segment.slice(0, -2);
+  // `analyses` → `analysis`: every English `-yses` noun is the plural of a
+  // `-ysis` noun (`paralyses`, `dialyses`, `catalyses`).
+  if (lower.endsWith('yses')) return segment.slice(0, -2) + (segment.endsWith('ES') ? 'IS' : 'is');
+  // An `es` added to a sibilant stem: `addresses`, `statuses`, `aliases`,
+  // `boxes`, `batches`, `hashes`. A vowel before `uses` is a plain `s` instead
+  // (`warehouses`), and so is any letter but `i` before `ases` (`cases`,
+  // `releases`): no English noun ends in `-iase`, so `aliases` and `biases`
+  // are `-ias` nouns.
+  if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower) || lower.endsWith('iases')) return segment.slice(0, -2);
   if (lower.endsWith('xes') || lower.endsWith('ches') || lower.endsWith('shes')) return segment.slice(0, -2);
   return segment.slice(0, -1);
 }

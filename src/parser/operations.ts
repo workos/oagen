@@ -910,7 +910,8 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
  * collection, a path with no resource, a segment that does not look plural —
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
- * the singular name is an operationId's.
+ * the singular name is an operationId's, or another path-named operation's
+ * whose path differs only by that plural.
  */
 function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
   if (method === 'post' && inferPostAction(path, apiRootLength)) return null;
@@ -949,10 +950,28 @@ function inferVerb(method: HttpMethod, path: string): string {
 }
 
 /**
+ * The noun a literal path segment contributes to an operation name. A
+ * segment a path parameter follows addresses one item of its collection, so
+ * it is singular (`singularizePathSegment`): `pets` in `/store/pets/{id}` is
+ * `pet`. Any other segment is kept as the path spells it: `pets` in
+ * `/store/pets`, `legacy` in `/users/{id}/legacy/factors`. The one rule for
+ * the resource (inferResourceFromPath), the segments between the service and
+ * the resource (inferDeeperContext) and the service noun a name restores
+ * (inferServiceNoun), so `/store/cats/{id}/toys/{toyId}` and
+ * `/api/notes/{noteId}` read `Cat` and `Note`, as `/store/pets/{id}` reads
+ * `Pet`. An action's parent (inferPostAction) is singular by that function's
+ * own rule, which does not look at the segment after it.
+ */
+function pathSegmentNoun(segments: readonly string[], index: number): string {
+  const segment = segments[index];
+  return segments[index + 1]?.startsWith('{') ? singularizePathSegment(segment) : segment;
+}
+
+/**
  * Extract a resource noun from the path for operation naming.
  * Uses the last non-param segment (the resource being operated on). An item
  * operation — the last literal segment is followed by a path parameter —
- * addresses one entity, so its noun is singularised (`singularizePathSegment`).
+ * addresses one entity, so its noun is singularised (pathSegmentNoun).
  *
  * Examples:
  *   /accounts/users → "Users"
@@ -973,22 +992,21 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
 
   // Find the last meaningful (non-param) segment past the API root, so a
   // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
-  let resourceSegment: string | null = null;
-  let isItem = false;
+  let resourceIndex = -1;
   for (let i = segments.length - 1; i >= apiRootLength; i--) {
     if (!segments[i].startsWith('{')) {
-      resourceSegment = segments[i];
-      isItem = i < segments.length - 1;
+      resourceIndex = i;
       break;
     }
   }
 
-  if (!resourceSegment) return null;
+  if (resourceIndex < 0) return null;
+  const resourceSegment = segments[resourceIndex];
   // Skip the service name (the segment the service was named from) — it
   // would be redundant: /api/notes is Notes.list, not Notes.listNotes.
   if (resourceSegment === segments[serviceSegmentIndex(segments, apiRootLength)]) return null;
 
-  return toPascalCase(isItem && singularItem ? singularizePathSegment(resourceSegment) : resourceSegment);
+  return toPascalCase(singularItem ? pathSegmentNoun(segments, resourceIndex) : resourceSegment);
 }
 
 /**
@@ -1058,8 +1076,18 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *
  *   1. the resource noun (inferResourceFromPath);
  *   2. the path segments between the service and the resource
- *      (inferDeeperContext): `GET /users/{id}/sso/factors` next to
- *      `GET /users/{id}/factors` → `listFactorsSso`;
+ *      (inferDeeperContext), each singular when a path parameter follows it
+ *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
+ *      `GET /users/{id}/factors` → `listFactorsLegacy`, and
+ *      `GET /store/cats/{id}/toys/{toyId}` next to
+ *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`.
+ *      A path whose singular spelling would take the name of an operation
+ *      outside the group, or of another path in the group that the
+ *      spelling as written sets apart, keeps the segments as written, the
+ *      plural being what tells them apart: `/store/pets/{id}/toys/{toyId}`
+ *      next to `/store/pet/{id}/toys/{toyId}` → `getToyPets` and
+ *      `getToyPet`, and `/store/cats/{id}/toys/{toyId}` next to
+ *      `operationId: getToyCat` → `getToyCats`;
  *   3. `By<Param>` for each path parameter the colliding paths do not all
  *      share, in path order, when those are what tell the paths apart:
  *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
@@ -1079,15 +1107,23 @@ function inferPostAction(path: string, apiRootLength = 0): { verb: string; resou
  *      parameters above cannot touch: `GET /api/notes` beside
  *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`;
  *   6. for a path-named item operation whose singular name none of those
- *      could tell from an operationId — `GET /store/pets/{id}` is `getPet`,
- *      and so is `operationId: getPet` on `/store/featured/{id}` — the plural
- *      name it had before item resources were singularised, `getPets`
- *      (pluralFallbackName), when no operation in the service has it. The
- *      plural still says which collection is read, and it is the name every
- *      SDK generated from such a document already exposes, where a number
- *      says nothing. Two path-named operations never need it: their paths
- *      differ, so a qualifier above tells them apart. A name a qualifier has
- *      already extended, and an action, go straight to the suffix;
+ *      could tell apart — `GET /store/pets/{id}` is `getPet`, and so is
+ *      `operationId: getPet` on `/store/featured/{id}`, or path-named
+ *      `GET /store/pet/{id}`, whose path differs only by the plural the
+ *      singular erased — the plural name it had before item resources were
+ *      singularised, `getPets` (pluralFallbackName), when no operation
+ *      outside the group has it. The plural still says which collection is
+ *      read, and it is the name every SDK generated from such a document
+ *      already exposes, where a number says nothing. Like the qualifiers
+ *      above it runs only when it tells the group apart: an operationId-named
+ *      operation, an action and a name a qualifier has already extended
+ *      have no plural, so any member that has one differs from them, while
+ *      a group whose members would all take the same plural
+ *      (`/store/Pets/{id}` beside `/store/pets/{id}`) goes straight to the
+ *      suffix, since `getPets` beside `getPet` would say nothing about
+ *      which is which. Members that share a plural some other member does
+ *      not take it together and are numbered by the suffix: beside
+ *      `/store/pet/{id}` those two are `getPets` and `getPets2`;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), so an emitter never
  *      sees two methods with one name in one class. An operationId-named
  *      operation keeps the plain name over a path-named one; then the path
@@ -1110,7 +1146,11 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
-  const byPath = (a: Operation, b: Operation) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  /** The names every operation of the service outside `group` has right now, operationIds included. */
+  const namesOutside = (group: Operation[]): ReadonlySet<string> => {
+    const members = new Set(group);
+    return new Set(operations.filter((op) => !members.has(op)).map((op) => op.name));
+  };
 
   const qualifiers: Array<(group: Operation[]) => void> = [
     (group) => {
@@ -1121,11 +1161,38 @@ function disambiguateOperationNames(
       }
     },
     (group) => {
-      for (const op of group) {
-        if (!pathNamed.has(op)) continue;
+      // Singular, like the resource of an item operation, unless that
+      // spelling gives a path the name of an operation outside the group or
+      // of another path in the group whose spelling as written differs: the
+      // plural is then what tells them apart, so the path takes its context
+      // as written. `/store/pets/{id}/toys/{toyId}` beside
+      // `/store/pet/{id}/toys/{toyId}` is `getToyPets` and `getToyPet`, and
+      // `/store/cats/{id}/toys/{toyId}` beside `operationId: getToyCat` is
+      // `getToyCats`. Two paths whose contexts agree in both spellings
+      // (`/orgs/teams/{id}/members` and `/orgs/{orgId}/teams/{id}/members`)
+      // stay singular and go on to the parameters. Both spellings are read
+      // before any member is renamed, so the outcome does not depend on
+      // document order.
+      const outside = namesOutside(group);
+      const named = group.filter((op) => pathNamed.has(op));
+      const spelled = named.map((op) => {
         const root = apiRootLengthOf(op);
-        rename(op, appendQualifier(op.name, inferDeeperContext(qualifierPath(op, root), root)));
-      }
+        const path = qualifierPath(op, root);
+        return {
+          singular: appendQualifier(op.name, inferDeeperContext(path, root)),
+          written: appendQualifier(op.name, inferDeeperContext(path, root, false)),
+        };
+      });
+      named.forEach((op, i) => {
+        const { singular, written } = spelled[i];
+        const pluralTellsApart =
+          written !== singular &&
+          (outside.has(singular) ||
+            spelled.some(
+              (other, j) => named[j].path !== op.path && other.singular === singular && other.written !== written,
+            ));
+        rename(op, pluralTellsApart ? written : singular);
+      });
     },
     (group) => {
       // Parameters only help when they differ between the colliding paths,
@@ -1184,29 +1251,33 @@ function disambiguateOperationNames(
     for (const group of collidingGroups(operations)) qualify(group);
   }
 
-  // The plural pass and the numeric pass below both draw names from one pool
-  // per service. Groups come in name order and members are sorted by path,
-  // so the names are allocated in an order that depends only on the data.
-  const inUse = new Set(operations.map((op) => op.name));
+  // The plural a member could take back: none for an operationId-named
+  // operation, and for a path-named one only while its name is still the one
+  // it was built with — no qualifier above has extended it.
+  const pluralOf = (op: Operation): string | null => {
+    if (!pathNamed.has(op)) return null;
+    const root = apiRootLengthOf(op);
+    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root)) return null;
+    return pluralFallbackName(op.httpMethod, op.path, root);
+  };
   for (const group of collidingGroups(operations)) {
-    // Only next to an operationId: two path-named operations have different
-    // paths, and the qualifiers above are what tell those apart.
-    if (group.every((op) => pathNamed.has(op))) continue;
-    const pluralByPath = new Map<string, string>();
-    for (const op of group.filter((member) => pathNamed.has(member)).sort(byPath)) {
-      let plural = pluralByPath.get(op.path);
-      if (plural === undefined) {
-        const root = apiRootLengthOf(op);
-        const candidate = pluralFallbackName(op.httpMethod, op.path, root);
-        // The name must still be the one the operation was built with — no
-        // qualifier above has extended it — and the plural must be free.
-        const untouched = op.name === fallbackOperationName(op.httpMethod, op.path, root);
-        if (candidate === null || !untouched || inUse.has(candidate)) continue;
-        plural = candidate;
-        inUse.add(plural);
-        pluralByPath.set(op.path, plural);
-      }
-      rename(op, plural);
+    // Like every qualifier, only when it tells the group apart: beside an
+    // operationId, which has no plural, or beside a path that spells the
+    // resource singular (`/store/pet/{id}`). Members that would all take the
+    // same plural are left to the numeric suffix. A plural is blocked only by
+    // a name outside the group (`operationId: getPets`); members that share
+    // one some other member does not (`/store/Pets/{id}` and
+    // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
+    // numbered below, `getPets` and `getPets2` — the names such a document
+    // produced before item resources were singularised. Two groups never
+    // share a plural: it is the group's singular name with the resource as
+    // written, so one plural means one singular name, and one group.
+    const plurals = new Map(group.map((op) => [op, pluralOf(op)]));
+    if (new Set(plurals.values()).size <= 1) continue;
+    const outside = namesOutside(group);
+    for (const op of group) {
+      const plural = plurals.get(op);
+      if (plural != null && !outside.has(plural)) rename(op, plural);
     }
   }
 
@@ -1284,19 +1355,40 @@ function collidingGroups(operations: Operation[]): Operation[][] {
  * remain are then joined where they overlap the end of the name: `listNotes`
  * + `Notes` and `listOAuth2Tokens` + `OAuth2Tokens` stay as they are, and
  * `listTeams` + `TeamsAnalytics` is `listTeamsAnalytics`. Words are compared
- * case-insensitively on the camelCase boundary, so `listNotes` + `Note` does
- * not overlap and is appended whole. The name's own words are never touched.
+ * on the camelCase boundary, case-insensitively and as nouns (sameNoun), so
+ * a noun the name ends with is not repeated in the other number either:
+ * `listNotes` + `Note` and `listAliases` + `Alias`, the deeper contexts of
+ * `/orgs/notes/{id}/notes` and `/org/aliases/{id}/aliases`, stay `listNotes`
+ * and `listAliases`. The name's own words are never touched.
  */
 function appendQualifier(name: string, qualifier: string | null): string {
   if (!qualifier) return name;
   const have = splitWords(name).map((w) => w.toLowerCase());
-  const words = splitWords(qualifier).filter((w, i, all) => i === 0 || w.toLowerCase() !== all[i - 1].toLowerCase());
+  const words = splitWords(qualifier).filter(
+    (w, i, all) => i === 0 || !sameNoun(w.toLowerCase(), all[i - 1].toLowerCase()),
+  );
   const want = words.map((w) => w.toLowerCase());
   // The longest run of words that both ends the name and starts the qualifier.
   let overlap = Math.min(have.length, want.length);
-  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => w === have[have.length - overlap + i])) overlap--;
+  while (overlap > 0 && !want.slice(0, overlap).every((w, i) => sameNoun(w, have[have.length - overlap + i]))) {
+    overlap--;
+  }
   const rest = words.slice(overlap);
   return rest.length === 0 ? name : toCamelCase([name, ...rest].join('_'));
+}
+
+/**
+ * Whether two lowercase words name one noun: they are the same word, or
+ * their singular forms (singularizePathSegment) are — `notes` and `note`,
+ * `aliases` and `alias`, `analyses` and `analysis`. singularizePathSegment
+ * is idempotent, so a word that is already singular is its own singular
+ * form and is never shortened a second time on one side only (`alias`
+ * compares as `alias`, not `alia`, against the `alias` that `aliases`
+ * becomes). Two words the stemmer cannot relate, `canvases` and `canvas`,
+ * are different nouns here, as they are everywhere else.
+ */
+function sameNoun(a: string, b: string): boolean {
+  return a === b || singularizePathSegment(a) === singularizePathSegment(b);
 }
 
 /**
@@ -1344,37 +1436,53 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
 
 /**
  * The resource noun inferResourceFromPath leaves off because it is the
- * segment the service was named from: `Notes` for `/api/notes`,
- * `/api/notes/{id}` and `/api/{teamId}/notes` under an `/api` root, and for a
- * root-less `/notes`. Null when the last literal segment past the API root is
- * a different word (`/api/notes/{id}/tags`, whose `Tags` the plain name
- * already carries) or when nothing literal follows the root (`/api/v1/{id}`).
+ * segment the service was named from, spelled as that function would have
+ * spelled it (pathSegmentNoun): `Notes` for `/api/notes` and
+ * `/api/{teamId}/notes` under an `/api` root and for a root-less `/notes`,
+ * `Note` for the item `/api/notes/{id}`. Null when the last literal segment
+ * past the API root is a different word (`/api/notes/{id}/tags`, whose `Tags`
+ * the plain name already carries) or when nothing literal follows the root
+ * (`/api/v1/{id}`).
  */
 function inferServiceNoun(path: string, apiRootLength: number): string | null {
   const segments = path.split('/').filter(Boolean);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
   if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
-  return toPascalCase(segments[last]);
+  return toPascalCase(pathSegmentNoun(segments, last));
 }
 
 /**
- * Extract a deeper disambiguation context from the path when the last
- * segment isn't unique enough. Uses the second-to-last non-param segment.
+ * Extract a deeper disambiguation context from the path when the resource
+ * noun isn't unique enough: the literal segments between the service segment
+ * and the resource, joined in path order, each spelled as pathSegmentNoun
+ * spells it — singular when a path parameter follows it, since the segment
+ * then addresses one item, and as written otherwise.
  *
- * /users/{id}/auth_factors → already captured as "AuthFactors"
- * /users/external_id/{external_id} → "ExternalId" (special path, not a sub-resource)
+ * /users/{id}/legacy/factors → "Legacy"
+ * /store/cats/{id}/toys/{toyId} → "Cat" (one cat's toys), so `getToyCat`
+ * /store/cats/toys/{toyId} → "Cats" (no one cat), so `getToyCats`
+ * /org/analytics/analytics/teams → "AnalyticsAnalytics" (appendQualifier collapses the repeat)
+ * /users/{id}/auth_factors → null: nothing lies between the service and the resource
  *
  * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
  * left out along with the service segment that follows it, so
  * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
+ * `singularItem` false keeps every segment as the path spells it (`Pets` for
+ * `/store/pets/{id}/toys/{toyId}`), for the qualifier that falls back to the
+ * plural when the singular does not tell two paths apart (see
+ * disambiguateOperationNames). The stemmer's limits reach every segment it
+ * singularises: `/messages/sms/{smsId}/attachments` contributes "Sm".
  */
-function inferDeeperContext(path: string, apiRootLength = 0): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = path.split('/').filter(Boolean);
-  const nonParams = segments.slice(apiRootLength).filter((s) => !s.startsWith('{'));
+  const nouns: string[] = [];
+  for (let i = apiRootLength; i < segments.length; i++) {
+    if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
+  }
   // Skip first (service) and last (already used) — use the middle ones
-  if (nonParams.length >= 3) {
-    return toPascalCase(nonParams.slice(1, -1).join('_'));
+  if (nouns.length >= 3) {
+    return toPascalCase(nouns.slice(1, -1).join('_'));
   }
   return null;
 }
