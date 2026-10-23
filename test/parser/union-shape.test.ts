@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Model, TypeRef } from '../../src/ir/types.js';
-import { unionRulesKey, unionShapeKey } from '../../src/parser/union-shape.js';
+import { readDiscriminator, unionRulesKey, unionShapeKey } from '../../src/parser/union-shape.js';
 
 const key = (ref: TypeRef): string => (ref.kind === 'model' ? ref.name : ref.kind);
 
@@ -66,5 +66,33 @@ describe('unionShapeKey / unionRulesKey', () => {
     expect(unionRulesKey(a)).toBe(unionRulesKey(b));
     expect(unionShapeKey(a, key, { sorted: true })).toBe(unionShapeKey(b, key, { sorted: true }));
     expect(unionShapeKey(a, key)).not.toBe(unionShapeKey(b, key));
+  });
+
+  it('reads mapping targets under `modelName` when given, and the variants only through `variantKey`', () => {
+    // The `…Json` fold's reading: `PetJson…` as `Pet…`.
+    const fold = (name: string): string => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name);
+    const foldedKey = (ref: TypeRef): string => (ref.kind === 'model' ? fold(ref.name) : ref.kind);
+    const base: Model = {
+      name: 'Pet',
+      fields: [],
+      variants: [{ kind: 'model', name: 'PetA' }],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { a: 'PetA' } },
+    };
+    const json: Model = {
+      name: 'PetJson',
+      fields: [],
+      variants: [{ kind: 'model', name: 'PetJsonA' }],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { a: 'PetJsonA' } },
+    };
+    expect(unionRulesKey(json)).not.toBe(unionRulesKey(base));
+    expect(unionRulesKey(json, fold)).toBe(unionRulesKey(base));
+    expect(unionShapeKey(json, foldedKey, { modelName: fold })).toBe(unionShapeKey(base, key));
+    expect(unionShapeKey(json, key, { modelName: fold })).not.toBe(unionShapeKey(base, key));
+    // The model is never touched.
+    expect(json.discriminator).toEqual({ property: 'kind', mapping: { a: 'PetJsonA' } });
+    expect(readDiscriminator(json.discriminator!, fold)).toEqual({ property: 'kind', mapping: { a: 'PetA' } });
+    expect(readDiscriminator(json.discriminator!, undefined)).toBe(json.discriminator);
   });
 });
