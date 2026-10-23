@@ -61,7 +61,8 @@ import {
   collectModelTypeRefs,
   collectEnumRefs,
   collectOperationTypeRefs,
-  walkTypeRef,
+  renameModelRefs,
+  renameTypeRefModels,
 } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
@@ -6409,7 +6410,14 @@ function stepSecondaryBody(
   // Reached through the body's own models, not the kept ones: the body
   // keeps its root once it steps, so everything under that root is its.
   const own = reachedModels(result.response, result.inlineModels, new Map());
-  const named = [...own].filter((model) => model.name.startsWith(context));
+  // A model the context names carries it: as a prefix (the root, a nested
+  // object `…Owner`, a nested variant `…Shape`), as a suffix (a const-named
+  // variant, `Square…` — `deriveModelName`) or in between (a const-named
+  // nested variant, `Square…Shape`); it moves by that one occurrence. A
+  // settled item (`<Op>Item`) and a titled variant do not carry it.
+  const namedByContext = (name: string): boolean => name.includes(context);
+  const movedTo = (name: string, stem: string): string => name.replace(context, stem);
+  const named = [...own].filter((model) => namedByContext(model.name));
   if (!named.some((model) => clashes(model, model.name))) return false;
 
   // What moves: every model the context names, except one a kept model
@@ -6421,29 +6429,26 @@ function stepSecondaryBody(
     for (const model of named) {
       if (moving.has(model)) continue;
       const movingNames = new Set([...moving].map((m) => m.name));
-      if (model.fields.some((field) => collectModelRefs(field.type).some((name) => movingNames.has(name)))) {
+      if (collectModelTypeRefs(model).some((ref) => collectModelRefs(ref).some((name) => movingNames.has(name)))) {
         moving.add(model);
         grew = true;
       }
     }
   }
   const under = (stem: string): Map<Model, string> =>
-    new Map([...moving].map((model) => [model, stem + model.name.slice(context.length)]));
+    new Map([...moving].map((model) => [model, movedTo(model.name, stem)]));
   let names = under(`${context}${status}`);
   // Unbounded on purpose: the kept names and the registry are finite and
   // every step is a new number, so a free stem is always reached.
   for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) names = under(`${context}${n}`);
 
+  // Every reference moves through the one rewriter every rename site uses
+  // (`renameTypeRefModels`, `renameModelRefs`), so a union's
+  // `discriminator.mapping` follows the variant it belongs to and never
+  // keeps naming the model that moved.
   const byOldName = new Map([...names].map(([model, name]) => [model.name, name]));
-  const rewrite = (ref: TypeRef): void =>
-    walkTypeRef(ref, {
-      model: (modelRef) => {
-        const to = byOldName.get(modelRef.name);
-        if (to !== undefined) modelRef.name = to;
-      },
-    });
-  rewrite(result.response);
-  for (const model of own) for (const field of model.fields) rewrite(field.type);
+  renameTypeRefModels(result.response, byOldName);
+  for (const model of own) renameModelRefs(model, byOldName);
   for (const [model, name] of names) model.name = name;
   return true;
 }
