@@ -432,6 +432,21 @@ export interface OperationExtractionResult {
    * `resolveEnvelopeCompanionNames` settles their names once and for all.
    */
   inlineModelBundles: InlineModelBundle[];
+  /**
+   * The type of every inline error body an operation named itself, by
+   * identity: the `errors[].type` and `errors[].contents[].type` of a
+   * 4xx/5xx status code and the `type` and `contents[].type` of a `4XX`/`5XX`
+   * range, each written as `<Op>Error<code>…` (`ownedErrorBodyTypes`). A
+   * body a `components/responses` entry declares is never here, at
+   * whichever of those sites an operation returns it: it is named after the
+   * component (`<Component>Response`, `<Component><MediaType>Response`) and
+   * shared by every operation that returns it, so an enum body among them
+   * must step by number at every site (`ProblemResponse2`), as the
+   * component's model does, never by the `Body` the operation-owned bodies
+   * step by — the collector reads this set to tell the two apart
+   * (`collectInlineEnumsFromOperations`).
+   */
+  ownedErrorBodies: ReadonlySet<TypeRef>;
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -460,7 +475,7 @@ export function extractOperations(
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], ownedErrorBodies: new Set() };
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // `components/pathItems` item its `$ref` leads to, with an entry that
@@ -712,7 +727,33 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles };
+  return { services, inlineModels, inlineModelBundles, ownedErrorBodies: ownedErrorBodyTypes(deferred) };
+}
+
+/**
+ * The type of every inline error body the operations named themselves, by
+ * identity, once every deferred schema is resolved (so each target's `type`
+ * is the TypeRef the IR carries): the deferred sites of kind `error` that
+ * carry no `componentBody`. Every operation-owned error body is deferred
+ * that way and nothing else is — the JSON body of a 4xx/5xx status code and
+ * of a `4XX`/`5XX` range (`typeErrorBody`), and the bodies of their
+ * secondary media types (`typeSecondaryContent`, role `Error`) — while a
+ * body a `components/responses` entry declares is deferred with
+ * `componentBody` (its JSON body, at a status code, `default` or a range
+ * alike) or as `content` under the component's `Response` name (its
+ * secondary bodies, `contentModelNaming`), whether the operation wrote the
+ * `$ref` directly or through a chain (`resolveResponseRef` follows it before
+ * the site is deferred). A body that is a `$ref` into `components/schemas`
+ * is not deferred at all and references a component, so it is no inline
+ * body of either kind. See `OperationExtractionResult.ownedErrorBodies`.
+ */
+function ownedErrorBodyTypes(deferred: readonly DeferredInlineType[]): ReadonlySet<TypeRef> {
+  const types = new Set<TypeRef>();
+  for (const item of deferred) {
+    if (item.kind !== 'error' || item.componentBody) continue;
+    for (const target of item.targets) if (target.type) types.add(target.type);
+  }
+  return types;
 }
 
 /**

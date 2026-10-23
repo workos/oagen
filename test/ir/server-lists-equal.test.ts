@@ -82,6 +82,23 @@ describe('serverListsEqual', () => {
     expect(
       serverListsEqual([{ url: 'HTTPS://API.example.com:443/{v}' }], [{ url: 'https://api.example.com/{v}' }]),
     ).toBe(true);
+    // Percent-encoding after a placeholder may land in a scheme or a port,
+    // where it is not decoded (MichaelDeBoey): `http%73://…` vs `https://…`,
+    // and a port `%34%34%33` kept vs `443` dropped.
+    const scheme = { scheme: { default: 'http' } };
+    expect(
+      serverListsEqual(
+        [{ url: '{scheme}%73://notes.example.com', variables: scheme }],
+        [{ url: '{scheme}s://notes.example.com', variables: scheme }],
+      ),
+    ).toBe(false);
+    const colon = { x: { default: ':' } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://notes.example.com{x}%34%34%33', variables: colon }],
+        [{ url: 'https://notes.example.com{x}443', variables: colon }],
+      ),
+    ).toBe(false);
     // After a placeholder the authority is kept as written, so a port or `/`
     // that a placeholder value could turn into path text is a difference
     // (Greptile): `host` = `api.example.com/v1` gives `/v1:443/v2` vs `/v1/v2`.
