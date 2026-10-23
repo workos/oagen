@@ -1,0 +1,350 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { parseSpec } from '../../src/parser/parse.js';
+import { collectEnumRefs, collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
+import type { ApiSpec, Operation } from '../../src/ir/types.js';
+
+/**
+ * Issue #309: an iterator is driven only by a query parameter the operation
+ * declares. A recognized list envelope on an operation whose parameters
+ * yield no strategy — a `page` or `offset` parameter without a page size, a
+ * page size alone, no paging parameter at all — used to get `strategy:
+ * 'cursor'` on an invented `after`, with the envelope's `total_pages` as a
+ * stop on an iterator that counts no pages. Now it gets no `pagination`: the
+ * envelope is kept as a plain response model, as `strategy: 'none'` keeps
+ * it, with one warning naming what is missing. An override naming a declared
+ * parameter still creates the iterator, built around that envelope.
+ */
+describe('a list envelope on an operation without a paging parameter (issue #309)', () => {
+  let tmpDir: string;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-undeclared-param-'));
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    warn.mockRestore();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  async function parseJson(doc: unknown): Promise<ApiSpec> {
+    const specFile = path.join(tmpDir, 'spec.json');
+    await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
+    return parseSpec(specFile);
+  }
+
+  const query = (name: string, type = 'integer') => ({ name, in: 'query', schema: { type } });
+
+  /** `GET /pets` (`listPets`) with `parameters`, returning `schema` at 200, plus any other operation fields. */
+  const petsSpec = (parameters: unknown[], schema: unknown, operation: Record<string, unknown> = {}) => ({
+    openapi: '3.1.0',
+    info: { title: 'repro', version: '1' },
+    paths: {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters,
+          ...operation,
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema } } } },
+        },
+      },
+    },
+  });
+
+  /** The issue's envelope: `{ data: string[], total_pages: integer }`. */
+  const totalPagesEnvelope = {
+    type: 'object',
+    properties: { data: { type: 'array', items: { type: 'string' } }, total_pages: { type: 'integer' } },
+  };
+
+  const onlyOperation = (ir: ApiSpec): Operation => {
+    const operations = ir.services.flatMap((s) => s.operations);
+    expect(operations).toHaveLength(1);
+    return operations[0];
+  };
+
+  const warnings = (): string[] => warn.mock.calls.map((call: unknown[]) => String(call[0]));
+
+  /** Every model and enum reference, from operations and model fields alike, resolves, and every model is referenced. */
+  function expectSound(ir: ApiSpec): void {
+    const modelNames = new Set(ir.models.map((m) => m.name));
+    const enumNames = new Set(ir.enums.map((e) => e.name));
+    const referenced = new Set<string>();
+    const refs = [
+      ...ir.services.flatMap((s) => s.operations).flatMap((op) => collectOperationTypeRefs(op)),
+      ...ir.models.flatMap((m) => m.fields.map((f) => f.type)),
+    ];
+    const unresolved: string[] = [];
+    for (const ref of refs) {
+      for (const name of collectModelRefs(ref)) {
+        referenced.add(name);
+        if (!modelNames.has(name)) unresolved.push(name);
+      }
+      for (const name of collectEnumRefs(ref)) if (!enumNames.has(name)) unresolved.push(name);
+    }
+    expect(unresolved).toEqual([]);
+    expect([...modelNames].filter((name) => !referenced.has(name))).toEqual([]);
+  }
+
+  /** The operation has no iterator, and its response is the envelope as a plain model with exactly `fields`. */
+  function expectEnvelopeKept(ir: ApiSpec, fields: string[]): Operation {
+    const op = onlyOperation(ir);
+    expect(op.pagination).toBeUndefined();
+    expect(op.response.kind).toBe('model');
+    const wrapper = ir.models.find((m) => op.response.kind === 'model' && m.name === op.response.name);
+    expect(wrapper?.fields.map((f) => f.name)).toEqual(fields);
+    expectSound(ir);
+    return op;
+  }
+
+  const warningFor = (reason: string) =>
+    `[oagen] Warning: listPets returns a list envelope but no query parameter drives an iterator (${reason}) — ` +
+    'keeping the body as a plain response model with no pagination; declare the parameter, or set x-pagination / ' +
+    'operationHints pagination naming a query parameter the operation declares';
+
+  it('the issue repro: a page parameter without a page size gets no iterator, not a cursor one on an undeclared after', async () => {
+    const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope));
+    const op = expectEnvelopeKept(ir, ['data', 'total_pages']);
+    expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+    expect(op.queryParams.map((p) => p.name)).toEqual(['page']);
+    const wrapper = ir.models.find((m) => m.name === 'ListPetsResponse')!;
+    expect(wrapper.fields.map((f) => [f.name, f.type])).toEqual([
+      ['data', { kind: 'array', items: { kind: 'primitive', type: 'string' } }],
+      ['total_pages', { kind: 'primitive', type: 'integer' }],
+    ]);
+    expect(warnings()).toEqual([
+      warningFor('"page" is declared without a page-size parameter: limit, page_size, per_page, size, count'),
+    ]);
+  });
+
+  it.each([
+    ['page with a camelCase pageSize (the issue)', [query('page'), query('pageSize')], '"page"'],
+    ['pageNumber with pageSize (the issue): neither is a known name', [query('pageNumber'), query('pageSize')], null],
+    ['page_number alone', [query('page_number')], '"page_number"'],
+    ['page_num alone', [query('page_num')], '"page_num"'],
+    ['offset alone', [query('offset')], '"offset"'],
+    ['skip alone', [query('skip')], '"skip"'],
+    ['offset and page, both without a size', [query('offset'), query('page')], '"offset", "page"'],
+  ])('%s: the envelope is kept and the warning names the declared parameter', async (_label, parameters, named) => {
+    const ir = await parseJson(petsSpec(parameters, totalPagesEnvelope));
+    expectEnvelopeKept(ir, ['data', 'total_pages']);
+    expect(warnings()).toEqual([
+      warningFor(
+        named === null
+          ? 'no cursor, offset or page query parameter is declared'
+          : `${named} is declared without a page-size parameter: limit, page_size, per_page, size, count`,
+      ),
+    ]);
+  });
+
+  it('a page-size parameter alone selects no page either', async () => {
+    const ir = await parseJson(petsSpec([query('limit')], totalPagesEnvelope));
+    expectEnvelopeKept(ir, ['data', 'total_pages']);
+    expect(warnings()).toEqual([warningFor('"limit" is declared without a cursor, offset or page parameter')]);
+  });
+
+  it('no paging parameter at all (the WorkOS waitlists shape) gets no iterator on an undeclared after', async () => {
+    // `GET /user_management/waitlists`: `parameters: []`, and the spec says the
+    // endpoint is not paginated — the `list_metadata` cursors are always null.
+    const ir = await parseJson({
+      ...petsSpec([], {
+        type: 'object',
+        properties: {
+          object: { type: 'string', const: 'list' },
+          data: { type: 'array', items: { $ref: '#/components/schemas/Waitlist' } },
+          list_metadata: {
+            type: 'object',
+            properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
+          },
+        },
+      }),
+      components: { schemas: { Waitlist: { type: 'object', properties: { id: { type: 'string' } } } } },
+    });
+    const op = expectEnvelopeKept(ir, ['object', 'data', 'list_metadata']);
+    expect(op.queryParams).toEqual([]);
+    // The wrapper's data array still types the component's items.
+    const wrapper = ir.models.find((m) => op.response.kind === 'model' && m.name === op.response.name)!;
+    expect(wrapper.fields.find((f) => f.name === 'data')?.type).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'Waitlist' },
+    });
+    expect(warnings()).toEqual([warningFor('no cursor, offset or page query parameter is declared')]);
+  });
+
+  it.each([
+    [
+      'a page size beside the page parameter',
+      [query('page'), query('limit')],
+      { strategy: 'page', param: 'page', limitParam: 'limit', pageStart: 1 },
+    ],
+    ['a cursor parameter', [query('after', 'string')], { strategy: 'cursor', param: 'after' }],
+    [
+      'a page size beside an offset parameter',
+      [query('offset'), query('limit')],
+      { strategy: 'offset', param: 'offset', limitParam: 'limit' },
+    ],
+  ])('declaring %s drives the iterator, which unwraps the envelope as before', async (_label, parameters, iterator) => {
+    const ir = await parseJson(petsSpec(parameters, totalPagesEnvelope));
+    const op = onlyOperation(ir);
+    expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+    expect(op.pagination).toEqual({
+      ...iterator,
+      dataPath: 'data',
+      itemType: { kind: 'primitive', type: 'string' },
+      envelopeFields: [{ name: 'total_pages', type: { kind: 'primitive', type: 'integer' }, required: false }],
+      endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+    });
+    expect(warnings()).toEqual([]);
+    expectSound(ir);
+  });
+
+  describe('an override naming a declared parameter creates the iterator around the envelope', () => {
+    it('{ strategy: "page" } on the issue repro drives page, with the envelope and its stop field', async () => {
+      const ir = await parseJson(
+        petsSpec([query('page')], totalPagesEnvelope, { 'x-pagination': { strategy: 'page' } }),
+      );
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.pagination).toEqual({
+        strategy: 'page',
+        param: 'page',
+        pageStart: 1,
+        dataPath: 'data',
+        itemType: { kind: 'primitive', type: 'string' },
+        envelopeFields: [{ name: 'total_pages', type: { kind: 'primitive', type: 'integer' }, required: false }],
+        endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+      });
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('a cursor on a parameter detection does not know keeps the data description and the companions', async () => {
+      const described = {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' }, description: 'The pets on this page.' },
+          total_pages: { type: 'integer' },
+        },
+      };
+      const ir = await parseJson(
+        petsSpec([query('c', 'string')], described, { 'x-pagination': { strategy: 'cursor', param: 'c' } }),
+      );
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.pagination).toEqual({
+        strategy: 'cursor',
+        param: 'c',
+        dataPath: 'data',
+        dataDescription: 'The pets on this page.',
+        itemType: { kind: 'primitive', type: 'string' },
+        envelopeFields: [{ name: 'total_pages', type: { kind: 'primitive', type: 'integer' }, required: false }],
+        endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+      });
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('an operationHints entry works like the extension', async () => {
+      const specFile = path.join(tmpDir, 'spec.json');
+      await fs.writeFile(specFile, JSON.stringify(petsSpec([query('page')], totalPagesEnvelope)), 'utf-8');
+      const ir = await parseSpec(specFile, { operationHints: { 'GET /pets': { pagination: { strategy: 'page' } } } });
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(op.pagination).toMatchObject({ strategy: 'page', param: 'page', dataPath: 'data' });
+      expect(warnings()).toEqual([]);
+    });
+  });
+
+  describe('an override that cannot apply leaves the envelope kept, with the rejection as the one warning', () => {
+    it('a param the operation does not declare', async () => {
+      const ir = await parseJson(
+        petsSpec([], totalPagesEnvelope, { 'x-pagination': { strategy: 'cursor', param: 'after' } }),
+      );
+      expectEnvelopeKept(ir, ['data', 'total_pages']);
+      expect(warnings()).toEqual([
+        '[oagen] Warning: x-pagination on listPets: param "after" is not a query parameter of the operation — ignoring the override',
+      ]);
+    });
+
+    it('a strategy with no param from any source', async () => {
+      const ir = await parseJson(
+        petsSpec([query('limit')], totalPagesEnvelope, { 'x-pagination': { strategy: 'page' } }),
+      );
+      expectEnvelopeKept(ir, ['data', 'total_pages']);
+      expect(warnings()).toEqual([
+        '[oagen] Warning: x-pagination on listPets: strategy "page" needs a param, and none was given or detected — ignoring the override',
+      ]);
+    });
+
+    it('a dataPath that reaches no array, when only the override could have paged the body', async () => {
+      const ir = await parseJson(
+        petsSpec([query('c', 'string')], totalPagesEnvelope, {
+          'x-pagination': { strategy: 'cursor', param: 'c', dataPath: 'nope' },
+        }),
+      );
+      const op = expectEnvelopeKept(ir, ['data', 'total_pages']);
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(warnings()).toEqual([
+        '[oagen] Warning: x-pagination on listPets: dataPath "nope" does not resolve to an array in the response — ignoring the override',
+      ]);
+    });
+
+    it('a malformed extension', async () => {
+      const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope, { 'x-pagination': 'page' }));
+      expectEnvelopeKept(ir, ['data', 'total_pages']);
+      expect(warnings()).toEqual(['[oagen] Warning: x-pagination on listPets must be an object — ignoring it']);
+    });
+  });
+
+  it('strategy "none" asks for the plain model and gets no warning', async () => {
+    const ir = await parseJson(petsSpec([query('page')], totalPagesEnvelope, { 'x-pagination': { strategy: 'none' } }));
+    expectEnvelopeKept(ir, ['data', 'total_pages']);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('a secondary 2xx envelope the override cannot read is kept too, while the primary is iterated', async () => {
+    // Only the override pages the operation (`c` is no name detection knows).
+    // Its `dataPath` reaches the 200's array and not the 202's, so the 202's
+    // envelope — which nothing will page — stays the wire shape instead of
+    // being unwrapped into a bare array that drops its companions.
+    const doc = petsSpec([query('c', 'string')], totalPagesEnvelope, {
+      'x-pagination': { strategy: 'cursor', param: 'c', dataPath: 'data' },
+    });
+    const queued = {
+      description: 'queued',
+      content: {
+        'application/json': {
+          schema: {
+            type: 'object',
+            properties: {
+              results: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' } } } },
+              total: { type: 'integer' },
+            },
+          },
+        },
+      },
+    };
+    Object.assign(doc.paths['/pets'].get.responses, { '202': queued });
+    const withSecondary = await parseJson(doc);
+
+    const op = onlyOperation(withSecondary);
+    expect(op.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+    expect(op.pagination).toMatchObject({
+      strategy: 'cursor',
+      param: 'c',
+      dataPath: 'data',
+      envelopeFields: [{ name: 'total_pages' }],
+      endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+    });
+    const secondary = op.successResponses?.find((r) => r.statusCode === 202)?.type;
+    expect(secondary?.kind).toBe('model');
+    const wrapper = withSecondary.models.find((m) => secondary?.kind === 'model' && m.name === secondary.name);
+    expect(wrapper?.fields.map((f) => f.name)).toEqual(['results', 'total']);
+    expect(warnings()).toEqual([]);
+    expectSound(withSecondary);
+  });
+});

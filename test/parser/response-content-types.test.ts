@@ -1955,9 +1955,11 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       ({ contents, statusCode }) =>
         `${statusCode}: ${contents!.map(({ contentType, type }) => `${contentType} → ${name(type)}`).join(', ')}`,
     );
-  const createPet = (responses: Record<string, unknown>) => ({
-    '/pets': { post: { operationId: 'createPet', responses } },
+  const createPet = (responses: Record<string, unknown>, operation: Record<string, unknown> = {}) => ({
+    '/pets': { post: { operationId: 'createPet', ...operation, responses } },
   });
+  /** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
+  const afterParam = { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] };
   /** A response with `{ id }` under application/json and the given schema under the vendor media type. */
   const withVendor = (vendor: unknown, description = 'ok') => ({
     description,
@@ -2456,16 +2458,19 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
-          createPet({
-            '200': json(obj({ id: str })),
-            '201': json(
-              obj({
-                data: { type: 'array', items: obj({ id: str }) },
-                list_metadata: obj({ before: str, after: str }),
-              }),
-              'created',
-            ),
-          }),
+          createPet(
+            {
+              '200': json(obj({ id: str })),
+              '201': json(
+                obj({
+                  data: { type: 'array', items: obj({ id: str }) },
+                  list_metadata: obj({ before: str, after: str }),
+                }),
+                'created',
+              ),
+            },
+            afterParam,
+          ),
         ),
       );
 

@@ -37,7 +37,11 @@ describe('parseSpec — pagination data description', () => {
     };
   }
 
-  const pageParam = [{ name: 'page', in: 'query', schema: { type: 'integer' } }];
+  // A page parameter alone drives no iterator (#309); the page size beside it makes the `page` strategy.
+  const pageParam = [
+    { name: 'page', in: 'query', schema: { type: 'integer' } },
+    { name: 'limit', in: 'query', schema: { type: 'integer' } },
+  ];
   const afterParam = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
 
   it('keeps the data array property description on PaginationMeta (#207 repro)', async () => {

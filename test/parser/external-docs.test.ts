@@ -810,6 +810,8 @@ describe('externalDocs survives schema rebuilds and unwraps (PR #228 review)', (
       '/pets': {
         get: {
           operationId: 'listPets',
+          // The envelope is unwrapped only for an iterator a declared parameter drives (#309).
+          parameters: [{ name: 'after', in: 'query' as const, schema: { type: 'string' } }],
           responses: {
             '200': {
               description: 'ok',

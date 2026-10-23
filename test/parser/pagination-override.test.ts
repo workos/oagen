@@ -1221,6 +1221,37 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
     });
 
+    it('keeps an envelope only the override could have paged as a plain model when its stop field is rejected (#309)', async () => {
+      // `p` is no name detection knows, so the override is the only source of
+      // an iterator. Rejected for its stop field, it leaves the envelope as
+      // nothing pages it — the wire shape, with the rejection as the one
+      // warning — exactly as a `dataPath` that reaches no array does, never an
+      // unwrapped envelope without an iterator.
+      const cases: Array<[Record<string, unknown>, string]> = [
+        [
+          { strategy: 'page', param: 'p', endOfIteration: { kind: 'hasMore', path: 'nope' } },
+          'endOfIteration path "nope" does not resolve to a field in the response',
+        ],
+        [
+          { strategy: 'page', param: 'p', dataPath: 'data', endOfIteration: { kind: 'hasMore', path: 'total' } },
+          'endOfIteration path "total" is not a boolean field, as kind "hasMore" requires',
+        ],
+      ];
+      for (const [extension, problem] of cases) {
+        const ir = await parseJson(issueSpec(extension, ['p']));
+        const op = onlyOperation(ir);
+        rejected(problem);
+        expect(op.pagination).toBeUndefined();
+        expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+        expect(ir.models.find((m) => m.name === 'ListPetsResponse')?.fields.map((f) => f.name)).toEqual([
+          'data',
+          'total',
+        ]);
+        expectSound(ir, []);
+        warn.mockClear();
+      }
+    });
+
     it('checks only the shape under strategy none: there is no iterator for the other fields to serve', async () => {
       const op = onlyOperation(
         await parseJson(

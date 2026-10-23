@@ -329,6 +329,8 @@ describe('Field.externalDocs', () => {
           '/users': {
             get: {
               operationId: 'listUsers',
+              // The envelope is unwrapped only for an iterator a declared parameter drives (#309).
+              parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
               responses: {
                 '200': {
                   description: 'ok',

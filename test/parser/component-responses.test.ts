@@ -47,9 +47,17 @@ function singleOperation(paths: Record<string, unknown>, components: ExtractOpti
 }
 
 /** A GET with an operationId whose responses are the given map. */
-function get(operationId: string, responses: Record<string, unknown>, path = `/${operationId}`) {
-  return { [path]: { get: { operationId, responses } } };
+function get(
+  operationId: string,
+  responses: Record<string, unknown>,
+  path = `/${operationId}`,
+  operation: Record<string, unknown> = {},
+) {
+  return { [path]: { get: { operationId, ...operation, responses } } };
 }
+
+/** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
+const afterParam = { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] };
 
 const PET_SCHEMA = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
 const PROBLEM_SCHEMA = { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] };
@@ -499,10 +507,15 @@ describe('responses written as $ref into components/responses (issue #234)', () 
 
     it('keeps both bodies, the primary first, and takes paging from the primary', () => {
       const { services, inlineModels } = extract(
-        get('createOwner', {
-          '200': { $ref: '#/components/responses/OwnerCard' },
-          '201': { $ref: '#/components/responses/NewOwner' },
-        }),
+        get(
+          'createOwner',
+          {
+            '200': { $ref: '#/components/responses/OwnerCard' },
+            '201': { $ref: '#/components/responses/NewOwner' },
+          },
+          undefined,
+          afterParam,
+        ),
         components,
       );
       const [op] = services.flatMap((s) => s.operations);
@@ -511,8 +524,14 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         [200, { kind: 'model', name: 'OwnerCardResponse' }],
         [201, { kind: 'array', items: { kind: 'model', name: 'NewOwnerItem' } }],
       ]);
-      // The 201 page was read last; the primary 200 is a plain object.
-      expect(op.pagination).toBeUndefined();
+      // The 201 page was read last; the primary 200 is a plain object, so the
+      // `after` parameter pages the plain body and none of the 201's page
+      // fields — its data path, its companions — are read.
+      expect(op.pagination).toEqual({
+        strategy: 'cursor',
+        param: 'after',
+        itemType: { kind: 'model', name: 'OwnerCardResponse' },
+      });
       expect(inlineModels.map((m) => m.name)).toEqual([
         'OwnerCardResponse',
         'OwnerCardResponseAddress',
@@ -523,10 +542,15 @@ describe('responses written as $ref into components/responses (issue #234)', () 
 
     it('takes paging from the primary whatever order the status codes are declared in', () => {
       const { services, inlineModels } = extract(
-        get('createOwner', {
-          '201': { $ref: '#/components/responses/OwnerCard' },
-          '200': { $ref: '#/components/responses/NewOwner' },
-        }),
+        get(
+          'createOwner',
+          {
+            '201': { $ref: '#/components/responses/OwnerCard' },
+            '200': { $ref: '#/components/responses/NewOwner' },
+          },
+          undefined,
+          afterParam,
+        ),
         components,
       );
       const [op] = services.flatMap((s) => s.operations);
