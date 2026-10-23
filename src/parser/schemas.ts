@@ -3572,8 +3572,10 @@ function readComponentAllOf(
 }
 
 /**
- * The schema that types a property a component declares: the first
- * always-applying declaration (`declareProperty`), else the first branch's.
+ * The schema that types a property a component declares: the always-applying
+ * declaration `declareProperty` settles on — the first that declares a type,
+ * a typeless one only annotating it (`combineDeclarations`) — else the first
+ * branch's.
  * A component flattens a union's branches as written; the union of distinct
  * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
  * built here, since no pass would materialize its inline variants under a
@@ -3593,8 +3595,10 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
  * typed under the component's own name with one sibling set
  * (`collectProperties`), from the one declaration
- * `declaredComponentProperty` picks: the first always-applying declaration,
- * the component's own first, whatever a `oneOf`/`anyOf` variant declares
+ * `declaredComponentProperty` picks: the always-applying declaration
+ * `declareProperty` settles on — the first that declares a type, the
+ * component's own first, a typeless one only annotating it — whatever a
+ * `oneOf`/`anyOf` variant declares
  * before or after it and at whatever depth — the precedence
  * `declareProperty` gives `mergeAllOfMembers` too — and `required` is the
  * union of every always-applying member's list and the component's own; a
