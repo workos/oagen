@@ -17,6 +17,8 @@ paths:
           $ref: '#/components/responses/PetFound'
         '404':
           $ref: '#/components/responses/NotFound'
+        default:
+          $ref: '#/components/responses/Failure'
   /owners/{ownerId}:
     get:
       operationId: getOwner
@@ -31,6 +33,8 @@ paths:
           $ref: '#/components/responses/OwnerCard'
         '404':
           $ref: '#/components/responses/NotFound'
+        '5XX':
+          $ref: '#/components/responses/Failure'
   /owners/{ownerId}/preview:
     get:
       operationId: previewOwner
@@ -86,6 +90,8 @@ paths:
           $ref: '#/components/responses/Adopted'
         '409':
           $ref: '#/components/responses/Conflict'
+        default:
+          $ref: '#/components/responses/Failure'
 components:
   schemas:
     Pet:
@@ -184,4 +190,13 @@ components:
             type: object
             properties:
               adopted_by:
+                type: string
+    Failure:
+      description: Any other outcome, declared inline and returned as default or in a range by three operations
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              code:
                 type: string
