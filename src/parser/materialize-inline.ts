@@ -116,23 +116,39 @@ export interface SettledSite {
  * The settlements of the sites that derive from one bare name — the same
  * header on several status codes or operations, one media type's inline body
  * on several status codes — in the order the sites were resolved, one per
- * stem. `materializeInlineSchema` tries their stems right after the bare name
- * (the bare name itself with the renames of the site that settled on it), so
- * a shape identical to an earlier site's shares that site's model under
- * whichever stem it took (`…Response200`, not a fresh `…Response201`), and a
- * different shape steps past them to the site's own candidates; the site
- * each call settles is appended for the sites after it.
+ * stem: the one container `materializeInlineSchema` writes to. The caller
+ * creates it (`createSiblingSites`) and hands the same object to every site
+ * of the bare name. Each call reads `settled`, tries those stems right after
+ * the bare name (the bare name itself with the renames of the site that
+ * settled on it), so a shape identical to an earlier site's shares that
+ * site's model under whichever stem it took (`…Response200`, not a fresh
+ * `…Response201`), and a different shape steps past them to the site's own
+ * candidates; then it appends the site it settles — the only argument a call
+ * mutates, and only this field of it.
  */
-export type SiblingSites = SettledSite[];
+export interface SiblingSites {
+  /** The settlements so far, in the order the sites were resolved; appended to by `materializeInlineSchema`. */
+  readonly settled: SettledSite[];
+}
+
+/**
+ * A settlement container for one bare name: empty, or seeded from `stems` —
+ * the earlier string form (`SiblingStems`) read as settlements without
+ * renames. The strings are copied, never written.
+ */
+export function createSiblingSites(stems: SiblingStems = []): SiblingSites {
+  return { settled: stems.map((stem) => ({ stem, renames: [] })) };
+}
 
 /**
  * The form `siblings` took before a settlement carried its renames: the
- * stems earlier sites settled on, and nothing else. Accepted so a caller on
- * that form keeps compiling: `materializeInlineSchema` reads it as a
- * `SiblingSites` whose entries carry no renames (`siblingSitesOf`), to the
- * same result that `SiblingSites` would give, and records this call's
- * settlement in that private copy only — a caller that wants the sites after
- * this one to see the settlement passes a `SiblingSites`.
+ * stems earlier sites settled on, and nothing else. Read-only in type
+ * (`readonly`, so a push is a type error) and in fact: `materializeInlineSchema`
+ * copies it into a container of its own (`siblingSitesOf`), to the same result
+ * a `SiblingSites` would give, and records this call's settlement in that
+ * private container only — the array given, empty or frozen, is never
+ * touched. A caller that wants the sites after this one to see the settlement
+ * creates a `SiblingSites` and passes it to each of them.
  */
 export type SiblingStems = readonly string[];
 
@@ -148,10 +164,11 @@ export interface MaterializeInlineOptions {
   /**
    * The settlements of the earlier sites of the same bare name, whose stems
    * are tried between the bare name and the caller's other candidates with
-   * their renames replayed, and which this site's settlement is appended to
-   * (see `SiblingSites`; the earlier string form, `SiblingStems`, is read the
-   * same way). Absent, only the caller's candidates are tried and nothing is
-   * recorded.
+   * their renames replayed, and which this site's settlement is appended to:
+   * a `SiblingSites` container the caller created — the one argument this
+   * call mutates — or the earlier read-only string form, `SiblingStems`,
+   * copied into a container of this call's own. Absent, only the caller's
+   * candidates are tried and nothing is recorded.
    */
   siblings?: SiblingSites | SiblingStems;
   /** The parent the schema is a property of; none for a body. */
@@ -275,16 +292,16 @@ interface ResolvedOptions extends Omit<MaterializeInlineOptions, 'siblings'> {
 }
 
 /**
- * `siblings` as the loop reads it: a `SiblingSites` as given — the very array,
- * since this call's settlement is appended to it — or the earlier string form
- * (`SiblingStems`) copied into entries without renames. An empty array is a
- * `SiblingSites` with nothing settled yet; absent stays absent.
+ * `siblings` as the loop reads it: the `SiblingSites` container as given —
+ * the very object, since this call's settlement is appended to it — or, for
+ * the earlier string form (`SiblingStems`), a fresh container seeded from it
+ * (`createSiblingSites`), so the strings are only read. The two are told
+ * apart by shape — a container carries `settled`, the string form is an
+ * array, empty or not — never by emptiness; absent stays absent.
  */
 function siblingSitesOf(siblings: SiblingSites | SiblingStems | undefined): SiblingSites | undefined {
-  if (siblings === undefined || siblings.length === 0 || typeof siblings[0] !== 'string') {
-    return siblings as SiblingSites | undefined;
-  }
-  return (siblings as SiblingStems).map((stem) => ({ stem, renames: [] }));
+  if (siblings === undefined) return undefined;
+  return 'settled' in siblings ? siblings : createSiblingSites(siblings);
 }
 
 /** A stem to try, with the renames to replay on the trial extracted under it (none for the caller's own candidates). */
@@ -308,7 +325,7 @@ interface Candidate {
 function candidateStem(index: number, options: ResolvedOptions, firstClashOwners: InlineModelOwner[]): Candidate {
   const own = (i: number): string => options.stem(i, firstClashOwners);
   const bare = own(0);
-  const sites = options.siblings ?? [];
+  const sites = options.siblings?.settled ?? [];
   if (index === 0) return { stem: bare, renames: sites.find((site) => site.stem === bare)?.renames ?? [] };
   const others = sites.filter((site) => site.stem !== bare);
   if (index <= others.length) return others[index - 1];
@@ -427,8 +444,8 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
   }
   const { siblings } = options;
   const { settledStem } = trial;
-  if (siblings && settledStem !== undefined && !siblings.some((site) => site.stem === settledStem)) {
-    siblings.push({ stem: settledStem, renames: [...trial.renames] });
+  if (siblings && settledStem !== undefined && !siblings.settled.some((site) => site.stem === settledStem)) {
+    siblings.settled.push({ stem: settledStem, renames: [...trial.renames] });
   }
   return trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
 }
