@@ -1203,6 +1203,25 @@ export interface InlineModelBundle {
    * object, whose direction the document does not say.
    */
   sent?: boolean;
+  /**
+   * The sites of the copies that folded onto one of `models` (`foldOnto` in
+   * the merge passes), each keyed to the model it folded onto (`owner`): the
+   * copy's references name the owner from then on, so when the owner is
+   * renamed — and only then, by the owner's identity, never by name — the
+   * references in those roots and models that carry the owner's name are
+   * repointed with the site's own (`repointSite`). A rename of another model
+   * of this site leaves them alone: a model of the carried site under that
+   * name is that site's own, decided on its own. Absent until a copy folds
+   * onto one of `models`.
+   */
+  carried?: CarriedSite[];
+}
+
+/** One copy's site, carried into the site of the model it folded onto (`InlineModelBundle.carried`). */
+export interface CarriedSite {
+  owner: Model;
+  roots: TypeRef[];
+  models: Model[];
 }
 
 /**
