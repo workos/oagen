@@ -2,6 +2,7 @@ import type { ApiSpec, Model, TypeRef } from '../ir/types.js';
 import {
   collectResponseHeaders,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
 } from '../ir/types.js';
@@ -43,6 +44,9 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
     for (const service of spec.services) {
       for (const op of service.operations) {
         if (op.requestBody) requestSeeds.push(op.requestBody);
+        // A body the caller may send under another media type is constructed
+        // by the caller just the same, so it is request-facing too.
+        for (const { type } of collectRequestBodyTypes(op)) requestSeeds.push(type);
         // Parameters are caller-supplied too, so a model reached through one is
         // request-facing even when the operation has no body.
         for (const param of [

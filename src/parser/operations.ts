@@ -9,19 +9,20 @@ import type {
   SuccessResponse,
   ResponseHeader,
   ResponseContent,
+  RequestBodyContent,
+  Enum,
   DefaultResponse,
   RangeResponse,
   Model,
-  Enum,
   Field,
   PaginationMeta,
   PaginationEndOfIteration,
   ExternalDocs,
   ServerEntry,
 } from '../ir/types.js';
-import { pathSegments, type OperationHint } from '../ir/operation-hints.js';
-import { serverListsEqual, serversBeyondDefault } from '../ir/server-url.js';
-import { foldHeaderName, parameterKey } from '../ir/parameter-key.js';
+import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
+import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
+import { foldHeaderName, foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { createHash } from 'node:crypto';
 import {
   toPascalCase,
@@ -31,7 +32,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
+import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -46,13 +47,16 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
+  isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
+  warnOnUncarriedProperties,
 } from './schemas.js';
 import {
   collectResponseHeaders,
   collectModelRefs,
   collectModelTypeRefs,
+  collectEnumRefs,
   collectOperationTypeRefs,
 } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
@@ -67,22 +71,23 @@ import {
 } from './pagination.js';
 import {
   classifyAndExtractResponse,
+  composedWithoutFields,
   classifyResponseKey,
   resolveDataPathFromSchema,
   STATUS_RANGE_LABELS,
   warnUnrecognizedResponseKey,
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
-import type { ResponseExtractionResult } from './responses.js';
+import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
-  enumNameOwner,
+  registerInlineModels,
   reserveEnumNames,
   type InlineModelRegistry,
   type InlineModelOwner,
-  type SiblingStems,
+  type SiblingSites,
 } from './materialize-inline.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
@@ -449,7 +454,7 @@ export function extractOperations(
   documentServers?: ServerEntry[],
   openapiVersion?: string,
   operationHints?: Record<string, OperationHint>,
-  /** The component enums, whose names no deferred model may take (`reserveEnumNamesInPlay`). */
+  /** The component enums, whose names no deferred or item model may take (see `reserveEnumNames`). */
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
@@ -504,19 +509,47 @@ export function extractOperations(
   // Only these may be renamed when names collide within a service (see
   // disambiguateOperationNames); a name taken from an operationId is kept as is.
   const pathNamed = new Set<Operation>();
-  // Header, secondary-body, fallback-body and error-body schemas are typed
-  // only after this loop, once every primary model is known
+  // Header, secondary-body, fallback-body, error-body and parameter schemas
+  // are typed only after this loop, once every primary model is known
   // (`resolveDeferredInlineTypes`): their names must not collide with a
   // differently shaped component, request body or primary response of any
-  // operation, or the later merge would overwrite the first. `operationOf`
-  // remembers which operation minted each primary model, and `qualifierOf`
-  // which operation typed each reference (an inline enum's name among them),
-  // so a clash within one operation can be told from one across two.
+  // operation, or the later merge would overwrite the first. The registry
+  // records which operation minted each model, and which operation's own
+  // reference carries each enum name (`qualifierOf`), so a clash within one
+  // operation can be told from one across two.
   const deferred: DeferredInlineType[] = [];
-  const operationOf = new Map<Model, string>();
   const qualifierOf = new Map<Operation, string>();
+  // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
+  // with every name decided before the operations — the component models
+  // and enums, the components' field models (a nested object, a map's
+  // values; not among `componentModels`, see parseSpec) and the enums their
+  // fields mint — and filled as the operations are read: each operation's
+  // models once it is built, its array items as they are typed
+  // (`typeInlineItems` settles them against it), the envelope companions
+  // once named, and every enum the operations mint. The deferred schemas are
+  // named against all of it last.
+  const registry: ModelShapeRegistry = new Map();
+  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
+  // Each seeded with the model itself: a declared model shares its name with
+  // every shape it admits (`ownerShares`), an operation's with an identical
+  // one only.
+  for (const model of registeredModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
+  }
+  // Every enum name decided so far, held as names no model may take
+  // (`reserveEnumNames`): the component enums', and every enum the component
+  // models and the components' field models reference (an inline enum's
+  // `EnumRef`, named before the enum collector may rename it; a `$ref` to a
+  // component enum names one already held). None is an operation's. The
+  // operations' own join once they are read, below.
+  const enumRefsOf = (model: Model): string[] => collectModelTypeRefs(model).flatMap(collectEnumRefs);
+  reserveEnumNames(registry, [...(componentEnums ?? []).map((e) => e.name), ...registeredModels.flatMap(enumRefsOf)]);
 
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
+    // Everything read at path-item level — `parameters`, `servers`, and the
+    // `summary`/`description` an operation falls back to — comes from this one
+    // object: the entry itself, or the `components/pathItems` item its `$ref`
+    // leads to, resolved by `resolvePathItems` above (issue #300).
     const pathLevelParams = pathItem.parameters ?? [];
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
@@ -527,7 +560,10 @@ export function extractOperations(
       const op = pathItem[method];
       if (!op) continue;
 
-      const tag = op.tags?.[0];
+      // The first usable tag — `Operation.tags[0]`, read by the same helper —
+      // so the service and the list the IR carries never disagree, and an
+      // entry that is not a string (`42`) never reaches PascalCasing.
+      const tag = extractTags(op.tags)?.[0];
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
       const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
@@ -566,9 +602,13 @@ export function extractOperations(
         // Same "METHOD /path" key the operation resolver uses for the rest of the hint.
         operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
         componentModels,
+        registry,
       );
       inlineModels.push(...opModels);
-      for (const model of opModels) operationOf.set(model, operationQualifier);
+      // The operation's models join the registry under its qualifier, so a
+      // later operation's items and every deferred schema step around them;
+      // its settled item models are already there (`typeInlineItems`).
+      registerInlineModels(registry, opModels, operationQualifier);
       qualifierOf.set(operation, operationQualifier);
       inlineModelBundles.push(...opBundles);
       if (opCompanions) {
@@ -603,22 +643,28 @@ export function extractOperations(
     ...companionBundles(envelopeCompanions, companionModels, companionFolds, companionQualifiers),
   );
 
-  // Parameter models, headers, secondary bodies, fallback bodies and error
-  // bodies are named last, in document order, against every name above — the
-  // component models, the inline models the components' own fields mint (a
-  // nested object, a map's values; not among `componentModels`, see
-  // parseSpec), every request body, primary response and companion model,
-  // and every enum name in play (`reserveEnumNamesInPlay`) — so none of them
-  // takes a name one of those owns, whichever comes first in the document.
-  const documentModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
-  const deferredTypes = resolveDeferredInlineTypes(
-    deferred,
-    documentModels,
-    inlineModels,
-    operationOf,
-    componentEnums ?? [],
-    qualifierOf,
-  );
+  // Headers, secondary bodies, fallback bodies, error bodies and parameters
+  // are named last, in document order, against every name in the registry —
+  // the component models and enums, the components' field models, every
+  // request body, primary response, item and companion model — and against
+  // every enum name decided so far: the component enums, and every enum
+  // those models' fields or the operations' references — a parameter in any
+  // location, a body, a response of any kind, a response header, the
+  // pagination item type and envelope fields (`collectOperationTypeRefs`) —
+  // carry (an inline enum's `EnumRef`, named before the enum collector may
+  // rename it). An enum one of an operation's own references carries is
+  // registered as that operation's, so a deferred model of the operation
+  // that derives the name is qualified by location, as one that clashes
+  // with the operation's models is; a model's field enums are its
+  // operation's, a companion's no one's. So none of them takes a name one
+  // of those owns, whichever comes first in the document, and no model is
+  // ever named like an enum.
+  registerInlineModels(registry, companionModels);
+  for (const model of inlineModels) reserveEnumNames(registry, enumRefsOf(model), registry.get(model.name)?.operation);
+  for (const [op, qualifier] of qualifierOf) {
+    reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
+  }
+  const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
   // models it minted), and a reference it wrote by sharing another site's
@@ -630,7 +676,7 @@ export function extractOperations(
   attachSharedDeferredRefs(
     deferredTypes.bundles,
     inlineModelBundles,
-    new Set(documentModels.map((model) => model.name)),
+    new Set(registeredModels.map((model) => model.name)),
   );
 
   // The API root each operation's path sits under, for every step below: none
@@ -817,10 +863,10 @@ function pathRootLength(segments: readonly string[]): number {
 function documentApiRoot(paths: Record<string, PathItem>): string[] {
   const contributions: string[][] = [];
   for (const [path, pathItem] of Object.entries(paths)) {
-    // Same truthiness check as inferServiceName: a first tag names the service.
+    // Same read as the service naming above: a first usable tag names the service.
     const hasUntaggedOperation = HTTP_METHODS.some((method) => {
       const op = pathItem[method];
-      return Boolean(op) && !op?.tags?.[0];
+      return Boolean(op) && extractTags(op?.tags) === undefined;
     });
     if (!hasUntaggedOperation) continue;
     const segments = pathSegments(path);
@@ -869,22 +915,30 @@ function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
 }
 
 /**
- * Index of the segment a path-named service takes its name from. Under an
- * API root it is the first literal segment after the root, so `/v1/notes` and
- * `/v1/{teamId}/notes` both name `Notes`; when nothing literal follows the
- * root, the first segment, so `/api` and `/api/{id}` name `Api` as they
- * always did rather than `Default`. The fallback operation name skips the
- * same segment (see inferResourceFromPath), so it is never echoed as
- * `Api.getApi`.
+ * Index of the segment a path-named service takes its name from, among the
+ * segments readPath reads. Under an API root it is the first literal segment
+ * after the root, so `/v1/notes` and `/v1/{teamId}/notes` both name `Notes`;
+ * when nothing literal follows the root, the first segment, so `/api` and
+ * `/api/{id}` name `Api` as they always did rather than `Default`. The
+ * fallback operation name skips the same segment (see inferResourceFromPath),
+ * so it is never echoed as `Api.getApi`.
+ *
+ * The verb of a custom method is not a resource and never names a service:
+ * `/v1/{name}:cancel` stays in `V1` beside `/v1/{name}`, and `/api/v1:reset`
+ * lands in `Api`, where the slash-written `/v1/{name}/cancel` names
+ * `Cancel`. The resource it is written on is still found first when there is
+ * one, so `/v1/pets:batchGet` names `Pets` like `/v1/pets`.
  *
  * Without a root (`apiRootLength` of 0: a root-less document, a path outside
  * the root, or a tagged operation) it is always the first segment, parameter
  * or not, so every such operation is named exactly as before this rule
  * existed: an untagged `/{tenant}/users` stays `Default.listUsers`.
  */
-function serviceSegmentIndex(segments: readonly string[], apiRootLength: number): number {
+function serviceSegmentIndex(path: string, apiRootLength: number): number {
   if (apiRootLength === 0) return 0;
-  const index = segments.findIndex((segment, i) => i >= apiRootLength && !segment.startsWith('{'));
+  const index = readPath(path).findIndex(
+    (segment, i) => i >= apiRootLength && !segment.text.startsWith('{') && !segment.customMethod,
+  );
   return index === -1 ? 0 : index;
 }
 
@@ -898,6 +952,8 @@ function serviceSegmentIndex(segments: readonly string[], apiRootLength: number)
  * When nothing literal follows the root — the path is the root itself, or
  * only parameters come next — the first segment names the service as it
  * always did, so `/api` and `/api/{id}` land in `Api` rather than in `Default`.
+ * The verb of a custom method is read past (see serviceSegmentIndex), so
+ * `/v1/{name}:cancel` lands in `V1` as well.
  */
 function inferServiceName(path: string, tag: string | undefined, apiRootLength: number): string {
   // Prefer OpenAPI tag when available — tags represent the logical grouping
@@ -905,8 +961,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   if (tag) {
     return toPascalCase(tag);
   }
-  const segments = pathSegments(path);
-  const first = segments[serviceSegmentIndex(segments, apiRootLength)] ?? 'Default';
+  const first = pathSegments(path)[serviceSegmentIndex(path, apiRootLength)] ?? 'Default';
   // Skip path params
   if (first.startsWith('{')) return 'Default';
   return toPascalCase(first);
@@ -973,29 +1028,28 @@ function splitTaggedServices(
   serviceMap: Map<string, Operation[]>,
   tagServiceByOperation: ReadonlyMap<Operation, string>,
 ): void {
-  // The grouping before any split, read in full before the map is changed.
-  const grouped = Array.from(serviceMap);
-  const resolved = new Map<Operation, string>();
-  for (const [serviceName, operations] of grouped) {
+  const plan = new Map<string, ServiceSplit>();
+  for (const [serviceName, operations] of serviceMap) {
     const segmentServices = new Set<string>();
     for (const op of operations) {
       if (tagServiceByOperation.has(op)) segmentServices.add(splitSegmentService(op, serviceName));
     }
-    for (const op of operations) {
-      resolved.set(op, resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices));
-    }
-  }
-  // A part that joins a service listed later lands in that service's array,
-  // which is read below with the operations already resolved to it.
-  for (const [serviceName, operations] of grouped) {
     const parts = new Map<string, Operation[]>();
     for (const op of operations) {
-      const name = resolved.get(op) ?? serviceName;
+      const name = resolveServiceName(op, serviceName, tagServiceByOperation.has(op), segmentServices);
       const part = parts.get(name) ?? [];
       part.push(op);
       parts.set(name, part);
     }
+    plan.set(serviceName, { operations, own: operations.length, parts });
+  }
+  for (const [serviceName, { operations, own, parts }] of plan) {
     if (parts.size <= 1) continue;
+    // Parts of services split before this one that joined it were appended to
+    // its array after the plan was read. They resolved to this service's name,
+    // so they stay in the part that keeps it instead of going with the array.
+    const joined = operations.slice(own);
+    if (joined.length > 0) parts.set(serviceName, [...(parts.get(serviceName) ?? []), ...joined]);
     serviceMap.delete(serviceName);
     for (const [name, ops] of parts) {
       const existing = serviceMap.get(name) ?? [];
@@ -1003,6 +1057,16 @@ function splitTaggedServices(
       serviceMap.set(name, existing);
     }
   }
+}
+
+/** One service's split, planned from the grouping before any service is split (see splitTaggedServices). */
+interface ServiceSplit {
+  /** The service's operations: the array `serviceMap` holds, which parts of services split earlier may join. */
+  operations: Operation[];
+  /** How many of `operations` the plan was read from; any beyond them joined since. */
+  own: number;
+  /** The service each operation moves to, with its operations in document order; one entry when nothing moves. */
+  parts: Map<string, Operation[]>;
 }
 
 /**
@@ -1082,9 +1146,13 @@ function inferOperationName(
  * so a word is never repeated across a join:
  * `GET /companies/verification/{id}/verification-status` is
  * `getVerificationStatus`.
+ *
+ * `actions` false skips the first shape, for an operation that gave an
+ * action name up to another method on its path (demoteSamePathNames):
+ * `POST /pets/bulk-delete` is then `createBulkDelete`.
  */
-function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number): string {
-  const action = inferAction(method, path, apiRootLength);
+function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string {
+  const action = actions ? inferAction(method, path, apiRootLength) : null;
   if (action) return appendQualifier(toCamelCase(action.verb), action.resource);
   const singleton = inferSingleton(path, apiRootLength);
   if (singleton) {
@@ -1105,10 +1173,10 @@ function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: 
  * so a non-null result always differs from the singular name.
  * disambiguateOperationNames falls back to it before a numeric suffix when
  * the singular name is an operationId's, or another path-named operation's
- * whose path differs only by that plural.
+ * whose path differs only by that plural. `actions` is fallbackOperationName's.
  */
-function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number): string | null {
-  if (inferAction(method, path, apiRootLength) || inferSingleton(path, apiRootLength)) return null;
+function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string | null {
+  if ((actions && inferAction(method, path, apiRootLength)) || inferSingleton(path, apiRootLength)) return null;
   const resource = inferResourceFromPath(path, apiRootLength, false);
   if (resource === null || resource === inferResourceFromPath(path, apiRootLength)) return null;
   return toCamelCase(`${inferVerb(method, path)}_${resource}`);
@@ -1130,12 +1198,21 @@ const METHOD_VERBS: Record<HttpMethod, { readonly item: string; readonly collect
 };
 
 /**
- * The verbs a path segment with no parameter before it is read as an action
- * phrase by (inferAction): the CRUD verbs of METHOD_VERBS. `options` and
- * `trace` are left out, since `/settings/display-options` names a
- * collection.
+ * The verbs a POST on a literal with no parameter before it is read as an
+ * action phrase by, when one of them is the segment's last word
+ * (inferAction): the CRUD verbs of METHOD_VERBS. `options` and `trace` are
+ * left out, since `/settings/display-options` names a collection.
  */
 const CRUD_VERBS: ReadonlySet<string> = new Set(['get', 'list', 'create', 'update', 'delete', 'check']);
+
+/**
+ * The verbs that count as a method's own only as the first word of a segment
+ * (segmentCarriesVerb): `list-all` and `check-health` do something, while as
+ * a later word `list` and `check` name a thing — `wish-list`, `allow-list`,
+ * `health-check`. Every other verb counts in any position: `bulk-delete`,
+ * `batch-get`, `force-update`, `auto-create`.
+ */
+const LEADING_ONLY_VERBS: ReadonlySet<string> = new Set(['list', 'check']);
 
 /**
  * Infer the CRUD verb from the HTTP method and the path shape (METHOD_VERBS):
@@ -1157,6 +1234,24 @@ function inferVerb(method: HttpMethod, path: string): string {
 function methodVerbs(method: HttpMethod): string[] {
   const verbs = METHOD_VERBS[method];
   return verbs.item === verbs.collection ? [verbs.item] : [verbs.item, verbs.collection];
+}
+
+/**
+ * Whether the last segment of a path is a literal whose words include one of
+ * the method's own verbs (methodVerbs): `bulk-delete` for a DELETE, `list-all`
+ * and `batch-get` for a GET, `update-password` for a PUT or PATCH, and not
+ * `bulk-delete` for a POST. `list` and `check` count only as the first word
+ * (LEADING_ONLY_VERBS), so `wish-list`, `allow-list` and `health-check` carry
+ * no verb. Such a segment is the action for that method (inferAction) and
+ * keeps the action name when another method on the path would take it too
+ * (demoteSamePathNames).
+ */
+function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
+  const segments = pathSegments(path);
+  const last = segments[segments.length - 1];
+  if (last === undefined || last.startsWith('{')) return false;
+  const words = splitWords(last).map((w) => w.toLowerCase());
+  return methodVerbs(method).some((verb) => (LEADING_ONLY_VERBS.has(verb) ? words[0] === verb : words.includes(verb)));
 }
 
 /** Whether a path segment looks plural: singularizePathSegment would change it. */
@@ -1236,7 +1331,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
   // later segment that spells the same word names a resource of its own:
   // /teams/{id}/teams in Teams is listTeams, the teams under one team, and
   // never the bare `list` that reads as the service collection.
-  if (resourceIndex === serviceSegmentIndex(segments, apiRootLength)) return null;
+  if (resourceIndex === serviceSegmentIndex(path, apiRootLength)) return null;
 
   return toPascalCase(singularItem ? pathSegmentNoun(segments, resourceIndex) : segments[resourceIndex]);
 }
@@ -1301,17 +1396,21 @@ function inferSingleton(path: string, apiRootLength = 0): { parent: string | nul
  *     ending in `s` after the parameter is a nested collection to create into
  *     (`/orgs/{id}/api_keys`) or a singleton of the item (`/orders/{id}/status`,
  *     see inferSingleton), and keeps `create`;
- *   - for any method, a literal whose words include the method's own verb
- *     (methodVerbs), which the name would otherwise repeat: `bulk-delete` on
- *     a DELETE, `list-all` on a GET, `update-password` on a PUT after a
- *     parameter. After a parameter, a literal that carries another method's
- *     verb is a singleton: `GET /users/{id}/last-update` is
- *     `getUserLastUpdate`;
- *   - a literal with no parameter before it whose last word is any CRUD verb
- *     (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`.
- *     Such a literal is otherwise read as a collection (`/pets/search` is
- *     `createSearch`), which would make it `createBulkDelete`. The last word
- *     only, so `/pets/delete-candidates` stays a collection.
+ *   - for any method, a literal that carries the method's own verb
+ *     (segmentCarriesVerb), which the name would otherwise repeat:
+ *     `bulk-delete` on a DELETE, `list-all` on a GET, `update-password` on a
+ *     PUT after a parameter. A literal that carries another method's verb is
+ *     not: after a parameter it is a singleton, `GET /users/{id}/last-update`
+ *     is `getUserLastUpdate`, and before none it is a collection,
+ *     `GET /pets/update` is `listUpdate` and `GET /pets/last-update` is
+ *     `listLastUpdate`;
+ *   - a POST on a literal with no parameter before it whose last word is any
+ *     CRUD verb (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`,
+ *     `POST /v1/pets:batchGet`. Such a literal is otherwise read as a
+ *     collection (`/pets/search` is `createSearch`), which would make it
+ *     `createBulkDelete`. The last word only, so `/pets/delete-candidates`
+ *     stays a collection, and a POST only, since a verb that is not the
+ *     method's own is not what the method does.
  *
  * The verb is the segment itself. The resource is the singular parent
  * (inferItemParent) when the segment follows a parameter — `adopt` + `Pet` —
@@ -1341,8 +1440,8 @@ function inferAction(
   const afterParam = segments.length >= 2 && segments[segments.length - 2].startsWith('{');
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
-  const ownVerb = methodVerbs(method).some((verb) => words.includes(verb));
-  const verbPhrase = !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
+  const ownVerb = segmentCarriesVerb(method, path);
+  const verbPhrase = method === 'post' && !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
 
   const resource = afterParam
@@ -1358,9 +1457,15 @@ function inferAction(
  * rewritten here. A name derived from the method and path (inferOperationName)
  * is only as unique as the path words it was built from, so when operations on
  * different paths share one, the path-named operations are qualified until
- * every path in the service has a name of its own. Same-name operations on
- * the same path (PUT + PATCH both "update") are left as-is since they
- * represent the same logical resource.
+ * every path in the service has a name of its own. Operations on one path
+ * share a name only when both are path-named and their methods take the same
+ * CRUD verb (PUT and PATCH both `update`); any other sharing on one path is
+ * resolved first (demoteSamePathNames), before the qualifiers below, since
+ * every consumer that keys a service's operations by name — the differ among
+ * them — would otherwise see one of the two. An action that shares a name
+ * with a path-named operation of another shape yields next
+ * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
+ * `POST /pets/update` is `updatePets`.
  *
  * `apiRootLengthOf` gives the API root each operation's path sits under (see
  * documentApiRoot), so neither the resource nor the deeper context echoes the
@@ -1375,28 +1480,45 @@ function inferAction(
  * the one before, and every pass — the qualifiers, the plural and nothing
  * else — goes through one rule, qualifyGroup: a pass renames a group's
  * path-named members only when the names it proposes tell the group apart,
- * compared as noun phrases (nounKey), so a qualifier the colliding paths all
- * carry — `Teams` in `/org/teams/members` and `/org/teams/{teamId}/members`,
- * whether it comes out as `Teams` or `Team` — is never added, and the next
- * pass tells them apart: `listMembers` and `listMembersByTeamId`; a proposal
- * an operation outside the group already has is not taken, so a pass never
- * hands out a name only for the numeric suffix to follow it
+ * and a context two paths write alike is spelled alike for both (see the
+ * deeper-context qualifier), so a qualifier the colliding paths all carry —
+ * `Teams` in `/org/teams/members` and `/org/teams/{teamId}/members`, written
+ * once, singular after `{teamId}` — is never added, and the next pass tells
+ * them apart: `listMembers` and `listMembersByTeamId`; a proposal
+ * another operation already has is not taken, so a pass never hands a member
+ * a name another operation had with the number then landing on it
  * (`/org/members/archived` beside `/org/archived_members` is never
  * `listArchivedMembers2`, and `/api/notes` beside `operationId: listNotes` is
- * never `listNotes2`); and members whose proposals say the same thing take one
- * spelling and stay one group for the next pass. A qualifier never puts the
+ * never `listNotes2`) — unless every operation that has it is path-named and
+ * names the same noun, which the member then joins (nameIsFree): `/notes`
+ * restoring `Notes` beside `/notes/{noteId}/notes` is `listNotes` with the
+ * nested collection `listNotesByNoteId`; and members whose proposals say the
+ * same thing take one spelling and stay one group for the next pass, numbered
+ * on it when nothing after tells them apart. A qualifier never puts the
  * same word twice in a row into a name, whether the name already ends with it
  * (`listNotes` never becomes `listNotesNotes`) or the qualifier repeats it
  * itself (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared
  * word by word on the camelCase boundary rather than as a substring:
  *
- *   1. the resource noun (inferResourceFromPath);
+ *   1. the resource noun (inferResourceFromPath); for the service's own
+ *      path, whose plain name left that noun off, the service noun
+ *      (inferServiceNoun) when a path-named operation outside the group
+ *      already carries it under the name it would make, so that `/notes`
+ *      beside `operationId: list` joins `/notes/{noteId}/notes` at
+ *      `listNotes` and the parameter then tells them apart;
  *   2. the path segments between the service and the resource
  *      (inferDeeperContext), each singular when a path parameter follows it
  *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
  *      `GET /users/{id}/factors` → `listFactorsLegacy`, and
  *      `GET /store/cats/{id}/toys/{toyId}` next to
- *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`;
+ *      `GET /store/dogs/{id}/toys/{toyId}` → `getToyCat` and `getToyDog`.
+ *      A path whose singular spelling would take the name of an operation
+ *      outside the group, or of another path in the group that the
+ *      spelling as written sets apart, keeps the segments as written, the
+ *      plural being what tells them apart: `/store/pets/{id}/toys/{toyId}`
+ *      next to `/store/pet/{id}/toys/{toyId}` → `getToyPets` and
+ *      `getToyPet`, and `/store/cats/{id}/toys/{toyId}` next to
+ *      `operationId: getToyCat` → `getToyCats`;
  *   3. `By<Param>` for each path parameter the colliding paths do not all
  *      share, in path order, when those are what tell the paths apart:
  *      `GET /v1/notes` keeps `list` while `GET /v1/{teamId}/notes` becomes
@@ -1424,16 +1546,16 @@ function inferAction(
  *      outside the group has it. The plural still says which collection is
  *      read, and it is the name every SDK generated from such a document
  *      already exposes, where a number says nothing. Like the qualifiers
- *      above it runs only when it tells the group apart, the plural compared
- *      as written since its number is the point: an operationId-named
+ *      above it runs only when it tells the group apart: an operationId-named
  *      operation, an action, a singleton and a name a qualifier has already
  *      extended have no plural, so any member that has one differs from
  *      them, while a group whose members would all take the same plural
  *      (`/store/Pets/{id}` beside `/store/pets/{id}`) goes straight to the
  *      suffix, since `getPets` beside `getPet` would say nothing about
- *      which is which. Beside an operationId's `getPet` those two take
- *      `getPets` together and the suffix lands on it, `getPets2`, a variant
- *      of its twin rather than of the operationId;
+ *      which is which. Members that share a plural some other member does
+ *      not take it together and are numbered on it: beside `/store/pet/{id}`
+ *      or an operationId's `getPet`, those two are `getPets` and `getPets2`,
+ *      each a variant of its twin rather than of the operationId;
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), when no pass above
  *      has a free name that tells the group apart, so an emitter never
  *      sees two methods with one name in one class. A name that already
@@ -1462,20 +1584,101 @@ function disambiguateOperationNames(
   const rename = (op: Operation, name: string) => {
     (op as { name: string }).name = name;
   };
+  // The noun an operation's path names: its resource, or, for the service's
+  // own path, the service noun the plain name left off (`Notes` for `/notes`
+  // and for `/notes/{noteId}/notes` alike, `Note` for their items). What
+  // nameIsFree compares when another path-named operation holds a proposal.
+  const nounOf = (op: Operation): string | null => {
+    const root = apiRootLengthOf(op);
+    return inferResourceFromPath(op.path, root) ?? inferServiceNoun(op.path, root);
+  };
+  /** The names every operation of the service outside `group` has right now, operationIds included. */
+  const namesOutside = (group: Operation[]): ReadonlySet<string> => {
+    const members = new Set(group);
+    return new Set(operations.filter((op) => !members.has(op)).map((op) => op.name));
+  };
   /** One pass on one group, through the rule every pass shares (qualifyGroup). */
-  const qualify = (group: Operation[], proposal: (op: Operation) => string, key: (name: string) => string) =>
-    qualifyGroup(group, operations, pathNamed, proposal, key, rename);
+  const qualify = (group: Operation[], proposal: (op: Operation) => string) =>
+    qualifyGroup(group, operations, pathNamed, nounOf, proposal, rename);
+
+  // One path first: the qualifiers below tell paths apart and leave a name
+  // shared on one path alone, so that sharing is settled before they run.
+  const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
+  // Then an action beside a CRUD or singleton operation of its name: the
+  // plain name stays with the latter, which the qualifiers would rename.
+  for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   // Each qualifier, given the group, is the word or words a path-named
   // member would add to its name: `null` or `''` when its path has none.
   const qualifiers: Array<(group: Operation[]) => (op: Operation) => string | null> = [
-    () => (op) => {
+    (group) => (op) => {
       const root = apiRootLengthOf(op);
-      return inferResourceFromPath(qualifierPath(op, root), root);
+      const resource = inferResourceFromPath(qualifierPath(op, root, !demoted.has(op)), root);
+      if (resource !== null) return resource;
+      // The service's own path left its noun off the plain name (`list` for
+      // `/notes`). It is proposed here, ahead of the service-noun pass, when a
+      // path-named operation outside the group already carries it under the
+      // name it would make — the nested collection of the same word,
+      // `/notes/{noteId}/notes` as `listNotes` — so the two take one spelling
+      // (nameIsFree) and the parameters tell them apart, `listNotes` and
+      // `listNotesByNoteId`, rather than the nested collection keeping the
+      // name the service's own path restores beside an operationId.
+      const noun = inferServiceNoun(op.path, root);
+      if (noun === null) return null;
+      const name = appendQualifier(op.name, noun);
+      const held = operations.some((other) => !group.includes(other) && pathNamed.has(other) && other.name === name);
+      return held && nameIsFree(group, operations, pathNamed, nounOf, op, name) ? noun : null;
     },
-    () => (op) => {
-      const root = apiRootLengthOf(op);
-      return inferDeeperContext(qualifierPath(op, root), root);
+    (group) => {
+      // Singular, like the resource of an item operation, unless that
+      // spelling gives a path the name of an operation outside the group or
+      // of another path in the group whose spelling as written differs: the
+      // plural is then what tells them apart, so the path takes its context
+      // as written. `/store/pets/{id}/toys/{toyId}` beside
+      // `/store/pet/{id}/toys/{toyId}` is `getToyPets` and `getToyPet`, and
+      // `/store/cats/{id}/toys/{toyId}` beside `operationId: getToyCat` is
+      // `getToyCats`. As written, too, when another path in the group
+      // writes the same words but singularises them differently — `teams`
+      // in `/org/teams/members` and in `/org/teams/{teamId}/members` — so
+      // one spelling in the paths is one spelling in the names, `Teams` for
+      // both, which tells nothing apart (qualifyGroup) and leaves the
+      // parameters to do it: `listMembers` and `listMembersByTeamId`, never
+      // `listMembersTeams` beside `listMembersTeam` (issue #288). Two paths
+      // whose contexts agree in both spellings (`/orgs/teams/{id}/members`
+      // and `/orgs/{orgId}/teams/{id}/members`) stay singular and go on to
+      // the parameters together. Both spellings are read before any member
+      // is renamed, so the outcome does not depend on document order.
+      const outside = namesOutside(group);
+      const spelled = new Map(
+        group
+          .filter((op) => pathNamed.has(op))
+          .map((op) => {
+            const root = apiRootLengthOf(op);
+            const path = qualifierPath(op, root, !demoted.has(op));
+            return [
+              op,
+              {
+                singular: inferDeeperContext(path, root),
+                written: inferDeeperContext(path, root, false),
+                singularName: appendQualifier(op.name, inferDeeperContext(path, root)),
+                writtenName: appendQualifier(op.name, inferDeeperContext(path, root, false)),
+              },
+            ] as const;
+          }),
+      );
+      return (op) => {
+        const own = spelled.get(op);
+        if (own === undefined) return null;
+        const asWritten =
+          own.writtenName !== own.singularName &&
+          (outside.has(own.singularName) ||
+            [...spelled].some(
+              ([other, spelling]) =>
+                other.path !== op.path &&
+                (spelling.singularName === own.singularName) !== (spelling.writtenName === own.writtenName),
+            ));
+        return asWritten ? own.written : own.singular;
+      };
     },
     (group) => {
       // Parameters only help when they differ between the colliding paths,
@@ -1518,7 +1721,7 @@ function disambiguateOperationNames(
   for (const qualifier of qualifiers) {
     for (const group of collidingGroups(operations)) {
       const words = qualifier(group);
-      qualify(group, (op) => appendQualifier(op.name, words(op)), nounKey);
+      qualify(group, (op) => appendQualifier(op.name, words(op)));
     }
   }
 
@@ -1532,15 +1735,23 @@ function disambiguateOperationNames(
   // to the numeric suffix.
   const pluralOf = (op: Operation): string | null => {
     const root = apiRootLengthOf(op);
-    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root)) return null;
-    return pluralFallbackName(op.httpMethod, op.path, root);
+    const actions = !demoted.has(op);
+    if (op.name !== fallbackOperationName(op.httpMethod, op.path, root, actions)) return null;
+    return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
   for (const group of collidingGroups(operations)) {
-    qualify(
-      group,
-      (op) => pluralOf(op) ?? op.name,
-      (name) => name,
-    );
+    // Like every qualifier, only when it tells the group apart: beside an
+    // operationId, which has no plural, or beside a path that spells the
+    // resource singular (`/store/pet/{id}`). Members that would all take the
+    // same plural are left to the numeric suffix. A plural is blocked only by
+    // a name outside the group (`operationId: getPets`); members that share
+    // one some other member does not (`/store/Pets/{id}` and
+    // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
+    // numbered below, `getPets` and `getPets2` — the names such a document
+    // produced before item resources were singularised. Two groups never
+    // share a plural: it is the group's singular name with the resource as
+    // written, so one plural means one singular name, and one group.
+    qualify(group, (op) => pluralOf(op) ?? op.name);
   }
 
   const taken = new Set(operations.map((op) => op.name));
@@ -1583,9 +1794,161 @@ function disambiguateOperationNames(
 }
 
 /**
+ * Give operations on one path distinct names when their methods take
+ * different CRUD verbs. Two operations on one path share a name only when
+ * both are path-named and their methods take the same verb (inferVerb): PUT
+ * and PATCH are both `update`, so `/pets/{id}` has one `updatePet` for the
+ * two, as it always has. Any other sharing hides one of the two from every
+ * consumer that keys a service's operations by name, such as the differ, and
+ * an action name is where it arises: `bulk-delete` is the action of a DELETE
+ * (its own verb) and of a POST (a CRUD verb last), so both would be
+ * `bulkDelete`.
+ *
+ * The name stays with one verb, and every path-named operation of another
+ * verb takes the name it has without the action rule (fallbackOperationName
+ * with `actions` false): `POST /pets/bulk-delete` beside a DELETE is
+ * `createBulkDelete`, and `POST /users/{id}/update-password` beside a PUT is
+ * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
+ * operationId-named operation's, since that name is the author's and a
+ * path-named sibling steps aside whatever its verb; else the verb the segment
+ * carries (segmentCarriesVerb), `delete` for `bulk-delete`, the first
+ * method's in HTTP_METHODS order when it carries two; else `create`, POST
+ * being the only other method an action is read on (inferAction); else, for
+ * a shared name that is no action (PUT and PATCH `updatePet`), the verb of
+ * the first method in HTTP_METHODS order. When the name an operation falls back to is
+ * still held on the path by an operationId or by another verb — path-named
+ * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
+ * to drop — a numeric suffix free in the service is added, silently, as the
+ * numeric pass adds one and spelled as it spells it (numberedName:
+ * `updatePet2`, and `updateTop10No2` for a PATCH on `/store/top10/{id}`
+ * beside `operationId: updateTop10`). Two operationId-named operations on
+ * one path with one name are the document reusing an operationId: the first
+ * in HTTP_METHODS order keeps it and the rest are numbered with the warning
+ * the numeric pass gives that case. Paths are visited in lexical order and
+ * their operations in HTTP_METHODS order, so the result depends only on the
+ * document's paths and methods.
+ *
+ * Returns the path-named operations that gave an action name up, whose
+ * qualifiers and plural read their path as the shape they fell back to.
+ */
+function demoteSamePathNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  serviceName: string,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Set<Operation> {
+  const demoted = new Set<Operation>();
+  const taken = new Set(operations.map((op) => op.name));
+  const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
+  const methodOrder = (a: Operation, b: Operation) =>
+    HTTP_METHODS.indexOf(a.httpMethod) - HTTP_METHODS.indexOf(b.httpMethod);
+  // The verb that keeps a shared action name among path-named operations.
+  const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
+  const freeSuffixed = (base: string) => {
+    let n = 2;
+    while (taken.has(numberedName(base, n))) n++;
+    return numberedName(base, n);
+  };
+
+  const byPath = new Map<string, Operation[]>();
+  for (const op of operations) byPath.set(op.path, [...(byPath.get(op.path) ?? []), op]);
+  for (const path of [...byPath.keys()].sort()) {
+    const onPath = (byPath.get(path) ?? []).sort(methodOrder);
+    const byName = new Map<string, Operation[]>();
+    for (const op of onPath) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, sharing] of byName) {
+      if (sharing.length < 2) continue;
+      const explicit = sharing.filter((op) => !pathNamed.has(op));
+      for (const op of explicit.slice(1)) {
+        const next = freeSuffixed(name);
+        console.warn(
+          `[oagen] Warning: Operations ${explicit[0].httpMethod.toUpperCase()} ${explicit[0].path} and ` +
+            `${op.httpMethod.toUpperCase()} ${op.path} in service ${serviceName} both take the name ` +
+            `"${name}" from their operationId; the latter is renamed "${next}" — give each a distinct operationId`,
+        );
+        rename(op, next);
+        taken.add(next);
+      }
+      const keeper =
+        explicit.length > 0 ? null : [...sharing].sort((a, b) => claim(a) - claim(b) || methodOrder(a, b))[0];
+      const keptVerb = keeper === null ? null : verbOf(keeper);
+      for (const op of sharing) {
+        if (!pathNamed.has(op) || verbOf(op) === keptVerb) continue;
+        const base = fallbackOperationName(op.httpMethod, op.path, apiRootLengthOf(op), false);
+        // Still held on the path by an operationId or another verb? Number it.
+        const held = onPath.some(
+          (other) => other !== op && other.name === base && (!pathNamed.has(other) || verbOf(other) !== verbOf(op)),
+        );
+        const next = held ? freeSuffixed(base) : base;
+        if (next !== op.name) {
+          rename(op, next);
+          taken.add(next);
+        }
+        demoted.add(op);
+      }
+    }
+  }
+  return demoted;
+}
+
+/**
+ * Keep the plain CRUD name with the CRUD operation when an action takes it.
+ * `POST /pets/update` is the action `update` — its collection `pets` is the
+ * service segment, which a name leaves off — and so is `PUT /pets/{id}`. Left
+ * to the qualifiers, the pair would be told apart by `By<Param>`, which
+ * renames the PUT to `updateById`, and code calling `update` would then
+ * reach `POST /pets/update`. So before the qualifiers run, a path-named
+ * action that shares its name with a path-named operation of another shape —
+ * a CRUD operation or a singleton, for which inferAction is null, a demoted
+ * action among them — is renamed alone. It takes back the collection it
+ * dropped, the service noun of the path the action segment sits on
+ * (inferServiceNoun of qualifierPath): `updatePets`, `createPets` for
+ * `POST /pets/create` beside `POST /pets`, `listAllPets` for
+ * `GET /pets/list-all` beside `GET /pets/all`. When that adds nothing —
+ * the name already ends with it (`POST /store/pets/{id}/create` is
+ * `createPet`, as `POST /store/pets/{id}` is) or there is none
+ * (`POST /store/pets/update` is `updatePets`, as `PUT /store/pets` is) — it
+ * takes the name it has without the action rule (`createPetCreate`,
+ * `createUpdate`) and is read from then on
+ * as that shape, like a demoted action (demoteSamePathNames). An action
+ * beside an operationId of its name is left to the numeric pass
+ * (`adoptPet2`), and two actions of one name to the qualifiers
+ * (`adoptPetRescue`). Groups come in name order and the renames depend only
+ * on each operation's own path, so the result is deterministic. Returns the
+ * operations that fell back to their non-action name.
+ */
+function yieldActionNames(
+  operations: Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  demoted: ReadonlySet<Operation>,
+  apiRootLengthOf: (op: Operation) => number,
+  rename: (op: Operation, name: string) => void,
+): Operation[] {
+  const fellBack: Operation[] = [];
+  const isAction = (op: Operation) =>
+    pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  for (const group of collidingGroups(operations)) {
+    if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
+    for (const op of group.filter(isAction)) {
+      const root = apiRootLengthOf(op);
+      const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
+      if (qualified !== op.name) {
+        rename(op, qualified);
+      } else {
+        rename(op, fallbackOperationName(op.httpMethod, op.path, root, false));
+        fellBack.push(op);
+      }
+    }
+  }
+  return fellBack;
+}
+
+/**
  * The groups of operations that share a name but not a path, in name order.
- * A name shared only by operations on one path (PUT + PATCH) is not a
- * collision and is excluded.
+ * A name shared only by operations on one path is not a collision and is
+ * excluded: after demoteSamePathNames such operations are path-named and
+ * their methods take one verb (PUT + PATCH).
  *
  * Name order, not document order: the numeric pass draws suffixed names from
  * one pool per service, and two groups can reach the same one (`listNotes1`
@@ -1618,33 +1981,31 @@ function comparePaths(a: Operation, b: Operation): number {
  * tells the group apart, and only names no operation outside the group has.
  * An operationId-named member is never renamed and stands at its own name.
  *
- * `proposal` is the name a path-named member would take. `key` is how two
- * proposals are compared: a qualifier pass compares them as noun phrases
- * (nounKey), so `listMembersTeams` and `listMembersTeam`, the proposals for
- * `/org/teams/members` and `/org/teams/{teamId}/members`, say the same thing;
- * the plural pass compares them as written, since the plural's number is the
- * point. Three rules follow, each on this one place:
+ * `proposal` is the name a path-named member would take, compared as
+ * written: a pass that must not part two paths on a word's number alone
+ * spells it alike for both before proposing (the deeper context of
+ * `/org/teams/members` and `/org/teams/{teamId}/members` is `Teams` for
+ * both, never `Teams` beside `Team`), and a pass whose number is the point
+ * (the plural, `getPets` beside `getPet`) proposes it as it is. Three rules
+ * follow, each on this one place:
  *
- *   - The pass is skipped for the group when every proposal says the same
- *     thing. A qualifier the colliding paths all carry — `Teams` above,
- *     whether it comes out as `Teams` or `Team` — would move the collision
- *     further from the plain name and tell nothing apart; the next pass
- *     (`ByTeamId`) is what does.
- *   - A proposal an operation outside the group already has is not taken: the
- *     member keeps its name for this pass and the next pass is tried, so
- *     `/org/members/archived` beside `/org/archived_members`, whose name is
- *     `listArchivedMembers`, is never `listArchivedMembers2`, which reads as a
- *     variant of a path it is unrelated to; a number is for when no pass is
- *     left. Its colliding twin `/org/teams/archived` still takes
- *     `listArchivedTeams`, and `listArchived` is then its own.
- *   - Members whose proposals say the same thing stay one group for the next
- *     pass: they take one spelling, the first of their proposals in path order
- *     that is free, so `/orgs/{orgId}/groups/members` and
+ *   - The pass is skipped for the group when every proposal is one name. A
+ *     qualifier the colliding paths all carry — `Teams` above — would move
+ *     the collision further from the plain name and tell nothing apart; the
+ *     next pass (`ByTeamId`) is what does.
+ *   - A proposal an operation outside the group already has is not taken
+ *     (nameIsFree): the member keeps its name for this pass and the next pass
+ *     is tried, so `/org/members/archived` beside `/org/archived_members`,
+ *     whose name is `listArchivedMembers`, is never `listArchivedMembers2`,
+ *     which reads as a variant of a path it is unrelated to; a number is for
+ *     when no pass is left. Its colliding twin `/org/teams/archived` still
+ *     takes `listArchivedTeams`, and `listArchived` is then its own.
+ *   - Members with one proposal stay one group for the next pass: they take
+ *     it together — `/orgs/{orgId}/groups/members` and
  *     `/orgs/{orgId}/groups/{groupId}/members` beside `/orgs/teams/members`
- *     are `listMembersGroups` both, told apart next by `ByGroupId`, rather
- *     than `listMembersGroups` beside `listMembersGroup`, which differ by a
- *     number alone. Members on one path (PUT + PATCH) share a name by the
- *     same rule.
+ *     are `listMembersGroups` both, told apart next by `ByGroupId` — and are
+ *     numbered on it when nothing after tells them apart. Members on one path
+ *     (PUT + PATCH) share a name by the same rule.
  *
  * Which names are taken is read when the group is reached, so groups a pass
  * served earlier — in name order (collidingGroups) — hold their new names
@@ -1654,44 +2015,58 @@ function qualifyGroup(
   group: readonly Operation[],
   operations: readonly Operation[],
   pathNamed: ReadonlySet<Operation>,
+  nounOf: (op: Operation) => string | null,
   proposal: (op: Operation) => string,
-  key: (name: string) => string,
   rename: (op: Operation, name: string) => void,
 ): void {
-  const taken = new Set(operations.filter((op) => !group.includes(op)).map((op) => op.name));
   const proposals = new Map(group.map((op) => [op, pathNamed.has(op) ? proposal(op) : op.name]));
   const clusters = new Map<string, Operation[]>();
   for (const op of [...group].sort(comparePaths)) {
-    const k = key(proposals.get(op) ?? op.name);
-    clusters.set(k, [...(clusters.get(k) ?? []), op]);
+    const name = proposals.get(op) ?? op.name;
+    clusters.set(name, [...(clusters.get(name) ?? []), op]);
   }
   if (clusters.size <= 1) return;
-  for (const members of clusters.values()) {
-    const spelling = members.map((op) => proposals.get(op) ?? op.name).find((name) => !taken.has(name));
-    if (spelling === undefined) continue;
+  for (const [name, members] of clusters) {
+    if (!members.every((op) => nameIsFree(group, operations, pathNamed, nounOf, op, name))) continue;
     for (const op of members) {
-      if (pathNamed.has(op)) rename(op, spelling);
+      if (pathNamed.has(op)) rename(op, name);
     }
   }
 }
 
 /**
- * A name as the noun phrase it says: its words on the camelCase boundary,
- * lowercase and each in its singular form (singularizePathSegment, the
- * stem sameNoun compares by), so two names that differ only in a word's
- * number — `listMembersTeams` and `listMembersTeam` — read the same. How a
- * qualifier pass decides whether two proposals tell their operations apart
- * (qualifyGroup).
+ * Whether `name` is free for `op`, a member of `group`: no operation outside
+ * the group has it, or every operation that has it is path-named and names
+ * the noun `op` names (`nounOf`, compared as sameNoun compares) — the nested
+ * collection of the service's own word, `/notes/{noteId}/notes` as
+ * `listNotes` beside `/notes`. Such a name the member takes and joins the
+ * group of, and the passes after tell the two apart by what does differ
+ * between their paths: `listNotes` and `listNotesByNoteId`, `getNote` and
+ * `getNoteByChildId`. A name an operationId-named operation has is never
+ * free, nor is one a path-named operation of another noun has:
+ * `listArchivedMembers` on `/org/archived_members` beside the `Archived` of
+ * `/org/members/archived`, which nothing after could tell apart.
  */
-function nounKey(name: string): string {
-  return splitWords(name)
-    .map((word) => singularizePathSegment(word.toLowerCase()))
-    .join(' ');
+function nameIsFree(
+  group: readonly Operation[],
+  operations: readonly Operation[],
+  pathNamed: ReadonlySet<Operation>,
+  nounOf: (op: Operation) => string | null,
+  op: Operation,
+  name: string,
+): boolean {
+  const noun = nounOf(op);
+  return operations.every((other) => {
+    if (group.includes(other) || other.name !== name) return true;
+    const otherNoun = pathNamed.has(other) ? nounOf(other) : null;
+    return noun !== null && otherNoun !== null && sameNoun(otherNoun.toLowerCase(), noun.toLowerCase());
+  });
 }
 
 /**
  * `name` with the numeric suffix `n`, the last resort of
- * disambiguateOperationNames: `list` + 2 is `list2`. A name that already
+ * disambiguateOperationNames across paths and of demoteSamePathNames on one
+ * path: `list` + 2 is `list2`. A name that already
  * ends in a digit takes the number behind `No`, so that it cannot be read
  * as part of the number the name ends with: `listV1` + 2 is `listV1No2`,
  * never `listV12`, which reads as version 12 of the API, and `listTop10` +
@@ -1764,11 +2139,12 @@ function sameNoun(a: string, b: string): boolean {
  * read as `/shop/rescue/status`, whose resource `Status` the name ends with,
  * so the same `Rescue` tells it from `/shop/pets/{id}/status` rather than
  * `Pet` coming back as `getPetStatusPet`. Every other operation is read
- * whole.
+ * whole, as is an action that gave its name up on its path
+ * (demoteSamePathNames; `actions` false), whose name is the next shape's.
  */
-function qualifierPath(op: Operation, apiRootLength: number): string {
+function qualifierPath(op: Operation, apiRootLength: number, actions = true): string {
   const segments = pathSegments(op.path);
-  if (inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
+  if (actions && inferAction(op.httpMethod, op.path, apiRootLength)) return '/' + segments.slice(0, -1).join('/');
   if (inferSingleton(op.path, apiRootLength)) {
     const parent = itemParentIndex(segments, apiRootLength);
     return '/' + segments.filter((_, i) => i !== parent && i !== segments.length - 2).join('/');
@@ -1822,7 +2198,7 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
   const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && segments[last].startsWith('{')) last--;
-  if (last < apiRootLength || last !== serviceSegmentIndex(segments, apiRootLength)) return null;
+  if (last < apiRootLength || last !== serviceSegmentIndex(path, apiRootLength)) return null;
   return toPascalCase(pathSegmentNoun(segments, last));
 }
 
@@ -1847,12 +2223,17 @@ function inferServiceNoun(path: string, apiRootLength: number): string | null {
  * The API root the path sits under (`apiRootLength`, see documentApiRoot) is
  * left out along with the service segment that follows it, so
  * /api/v1/core/auth/permissions in `Core` contributes "Auth", not "V1CoreAuth".
+ * `singularItem` false keeps every segment as the path spells it (`Pets` for
+ * `/store/pets/{id}/toys/{toyId}`), for the qualifier that falls back to the
+ * plural when the singular does not tell two paths apart (see
+ * disambiguateOperationNames). The stemmer's limits reach every segment it
+ * singularises: `/messages/sms/{smsId}/attachments` contributes "Sm".
  */
-function inferDeeperContext(path: string, apiRootLength = 0): string | null {
+function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true): string | null {
   const segments = pathSegments(path);
   const nouns: string[] = [];
   for (let i = apiRootLength; i < segments.length; i++) {
-    if (!segments[i].startsWith('{')) nouns.push(pathSegmentNoun(segments, i));
+    if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
   }
   // Skip first (service) and last (already used) — use the middle ones
   if (nouns.length >= 3) {
@@ -2052,6 +2433,7 @@ function buildOperation(
   componentResponseModelNames?: ReadonlyMap<string, string>,
   paginationHint?: unknown,
   componentModels?: Model[],
+  registry?: ModelShapeRegistry,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -2133,18 +2515,17 @@ function buildOperation(
     deferred,
     refSiblingDescriptions,
     componentResponseModelNames,
+    registry,
   };
-  // One location's parameters, typed by `extractParams`; a parameter whose
-  // inline schema mints a model is then deferred so the model is created
-  // under a name nothing else owns (`deferParameterModels`).
+  // One location's parameters, typed by `extractParams`. A parameter whose
+  // inline schema mints a model is deferred once the responses have been
+  // read (`deferParameterModels`, after `extractResponses` below), so the
+  // model is created under a name nothing else owns and a response header
+  // the operation types keeps the name it has.
+  const pendingParams: Array<[raw: ParameterObject[], typed: Parameter[], location: ParameterObject['in']]> = [];
   const extract = (location: ParameterObject['in'], source: ParameterObject[] = wireParams): Parameter[] => {
     const params = extractParams(source, location, opContext, componentSchemas, componentExamples, opLabel);
-    deferParameterModels(
-      source.filter((p) => p.in === location),
-      params,
-      location,
-      typing,
-    );
+    pendingParams.push([source.filter((p) => p.in === location), params, location]);
     return params;
   };
   const pathParams = extract('path');
@@ -2167,14 +2548,17 @@ function buildOperation(
       : [];
 
   const reqBodyModels: Model[] = [];
-  const { body: requestBody, encoding: requestBodyEncoding } = extractRequestBody(
-    requestBodyObject,
-    op,
-    pathModelBaseName,
-    reqBodyModels,
+  const {
+    body: requestBody,
+    encoding: requestBodyEncoding,
+    contentType: requestBodyContentType,
+    contentTypes: requestBodyContentTypes,
+    contents: requestBodyContents,
+  } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
+    deferred,
+    operationQualifier,
     componentSchemas,
-    opLabel,
-  );
+  });
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
   // to `false`, and a non-boolean value is not a declaration of requiredness.
@@ -2220,6 +2604,7 @@ function buildOperation(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode,
     successResponses,
     errors,
     defaultResponse,
@@ -2239,6 +2624,12 @@ function buildOperation(
     componentModels,
   });
   const inlineModels = [...responseModels, ...reqBodyModels];
+
+  // The parameters' deferred sites follow the responses' in the registry, so
+  // a response header the operation typed keeps its name (`PetsXMeta`) and a
+  // header parameter of the same name takes the location-qualified one
+  // (`PetsHeaderXMeta`), never the reverse.
+  for (const [raw, typed, location] of pendingParams) deferParameterModels(raw, typed, location, typing);
 
   // An explicit `dataPath` that does not reach an array cannot type the
   // iterator's items, so the whole override falls back to detection, as
@@ -2331,15 +2722,24 @@ function buildOperation(
     cookieParams: cookieParams.length > 0 ? cookieParams : undefined,
     requestBody,
     requestBodyEncoding,
+    // The picked media type's essence, what an emitter sends as Content-Type;
+    // set exactly when the body is.
+    ...(requestBodyContentType && { requestBodyContentType }),
     // Added only when the operation has a body so bodiless operations keep
     // their shape.
     ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    // Every media type the body declares, present only when there is one —
+    // the request-side twin of `responseContentTypes` / `responseContents`.
+    ...(requestBodyContentTypes && { requestBodyContentTypes, requestBodyContents }),
     response,
     // Added only when present so operations without headers keep their shape.
     ...(responseHeaders && { responseHeaders }),
     ...(responseContentTypes && { responseContentTypes, responseContents }),
     // Likewise only when the primary response declares a description.
     ...(responseDescription && { responseDescription }),
+    // And only when a 2xx or 3xx response is declared at all, so the status
+    // code is present exactly when `response` was read from one.
+    ...(responseStatusCode !== undefined && { responseStatusCode }),
     successResponses,
     errors,
     // Added only when the document declares them so operations without
@@ -2369,7 +2769,7 @@ function buildOperation(
     inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
   }
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels });
+    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
   return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
@@ -2395,7 +2795,7 @@ function responseTypeRefs(op: Operation): TypeRef[] {
 
 /**
  * The qualifier that tells one operation's header models from another's
- * (`materializeDeferredType`'s `byOperation` candidate), and that the shape
+ * (`deferredNamingStem`'s `byOperationName` candidate), and that the shape
  * registry records as the owner of its models. An `operationId` names the
  * operation. A path-named operation uses the path-derived stem its request
  * and response models are built from, so the model name depends only on the
@@ -2435,9 +2835,10 @@ export interface OperationDocs {
  * Item's `summary` and `description` as applying to every operation on it.
  * The two fields fall back one by one, so an operation with a `summary` of
  * its own and no `description` shows its own `summary` over the Path Item's
- * `description`. Text with content wins at either level and blank text
- * counts as absent at either level (`presentText`), so `summary: ""` on the
- * operation still takes the Path Item's. Either field is `undefined` when
+ * `description`. Text with content wins at either level; a value that is not
+ * a string, or is blank, counts as absent at either level (`presentText`), so
+ * `summary: ""` on the operation still takes the Path Item's. Either field is
+ * `undefined` when
  * neither level gives it; the caller decides whether the key is then omitted
  * (`Webhook`) or present (`Operation.description`).
  */
@@ -2470,12 +2871,17 @@ export function presentText(text: string | undefined): string | undefined {
 /**
  * An operation's `tags` as the IR carries them, on an `Operation` and on a
  * `Webhook` alike: the list in document order with every entry that is not a
- * non-empty string dropped, or `undefined` when nothing remains (or the
- * keyword is not a list), so the key is omitted rather than set to `[]`.
+ * non-empty string dropped and a repeated entry folded onto its first
+ * occurrence, or `undefined` when nothing remains (or the keyword is not a
+ * list), so the key is omitted rather than set to `[]`. The service an
+ * operation is grouped under is named from `[0]` of this same list.
  */
 export function extractTags(tags: unknown): string[] | undefined {
   if (!Array.isArray(tags)) return undefined;
-  const kept = tags.filter((tag): tag is string => typeof tag === 'string' && tag !== '');
+  const kept: string[] = [];
+  for (const tag of tags) {
+    if (typeof tag === 'string' && tag !== '' && !kept.includes(tag)) kept.push(tag);
+  }
   return kept.length > 0 ? kept : undefined;
 }
 
@@ -2635,8 +3041,16 @@ export function extractParams(
       const externalDocs = readExternalDocs(schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
       return {
         name: p.name,
+        // Typed under the name the parameter is compared by (`foldParameterName`:
+        // a header's lower-cased), so the inline enum or model its schema mints
+        // keeps its name when the header's case changes (#295); `name` above
+        // stays as written.
         type: schema
-          ? schemaToTypeRef(schema, p.name, operationContext ? toPascalCase(operationContext) : undefined)
+          ? schemaToTypeRef(
+              schema,
+              foldParameterName(p.in, p.name),
+              operationContext ? toPascalCase(operationContext) : undefined,
+            )
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
         description: firstDescription(p.description, schema?.description, refTarget?.description),
@@ -2820,8 +3234,15 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   encoding: RequestBodyEncoding;
   schemaRequired: boolean;
 }> = [
-  { matches: (essence) => essence === 'application/json', encoding: 'json', schemaRequired: true },
-  { matches: (essence) => essence.endsWith('+json'), encoding: 'json', schemaRequired: true },
+  // The one JSON rule requests and responses share (`isJsonMediaType`), in
+  // the order `jsonResponseSchema` applies it: `application/json` itself
+  // first, then any `+json` type.
+  { matches: isPlainJsonMediaType, encoding: 'json', schemaRequired: true },
+  {
+    matches: (essence) => isJsonMediaType(essence) && !isPlainJsonMediaType(essence),
+    encoding: 'json',
+    schemaRequired: true,
+  },
   { matches: (essence) => essence === 'multipart/form-data', encoding: 'form-data', schemaRequired: true },
   {
     matches: (essence) => essence === 'application/x-www-form-urlencoded',
@@ -2832,10 +3253,31 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
   { matches: (essence) => essence === 'text/plain', encoding: 'text', schemaRequired: false },
 ];
 
-/** The content entry a request body is read from: the key as written, its wire encoding and its schema. */
+/** The wire encoding a media type implies by essence (`REQUEST_BODY_MEDIA_TYPES`); `undefined` for one the pick never reads. */
+function requestBodyEncodingOf(contentType: string): RequestBodyEncoding | undefined {
+  const essence = mediaTypeEssence(contentType);
+  return REQUEST_BODY_MEDIA_TYPES.find(({ matches }) => matches(essence))?.encoding;
+}
+
+/**
+ * The type of a request content entry that declares no schema, by media type
+ * essence: a binary string for `application/octet-stream`, a string for
+ * `text/plain` (`schemalessRequestBodyType`), and `unknown` for anything
+ * else — a JSON or form media type included, since the pick reads those only
+ * with a schema. How a secondary entry of `requestBodyContents` is typed, on
+ * an operation and on a webhook alike.
+ */
+export function schemalessRequestContentType(contentType: string): TypeRef {
+  const encoding = requestBodyEncodingOf(contentType);
+  return (encoding && schemalessRequestBodyType(encoding)) ?? { kind: 'primitive', type: 'unknown' };
+}
+
+/** The content entry a request body is read from: the key as written, its essence, its wire encoding and its schema. */
 export interface SelectedRequestBodyContent {
   /** The `content` key the body was read from, exactly as written (`application/json; charset=utf-8`). */
   contentType: string;
+  /** The essence of `contentType` (`application/json`): what an emitter sends as the `Content-Type` (`Operation.requestBodyContentType`). */
+  essence: string;
   encoding: RequestBodyEncoding;
   /** Absent only for a binary or text body that declares none. */
   schema?: SchemaObject;
@@ -2848,7 +3290,7 @@ export interface SelectedRequestBodyContent {
  * `application/x-www-form-urlencoded` — each only with a schema — then
  * `application/octet-stream`, then `text/plain`. Within one tier the first
  * matching key in document order wins. `undefined` when the body declares no
- * content, or none of its media types is read; `warnDroppedRequestBody`
+ * content, or none of its media types is read; `warnUnreadRequestBody`
  * reports the latter. Every pass that asks what the body is — the body
  * extractor, the body-owned query names, the const prefixes, the body
  * parameter groups, a webhook payload — reads it through this one pick.
@@ -2861,30 +3303,33 @@ export function selectRequestBodyContent(body: RequestBodyObject | undefined): S
     const match = entries.find(
       ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
     );
-    if (match) return { contentType: match[0], encoding, schema: match[1]?.schema };
+    if (match) {
+      return { contentType: match[0], essence: mediaTypeEssence(match[0]), encoding, schema: match[1]?.schema };
+    }
   }
   return undefined;
 }
 
 /**
- * Warn that a request body is dropped: it declares at least one media type
- * and `selectRequestBodyContent` reads none, so no `requestBody` is set.
- * Called once per operation (`extractRequestBody`) and once per webhook
- * (where its entry is built: a webhook is minted twice, so the mint itself
- * must not report), while the passes that re-read the pick for an operation
- * (the body-owned query names, the const prefixes, the body parameter
- * groups) stay silent — so a dropped body is reported once, and never
- * silently. A body with no `content`, or an empty map, declares nothing and
- * is not reported.
+ * Warn that a request body is not read as `requestBody`: it declares at
+ * least one media type and `selectRequestBodyContent` reads none, so
+ * `requestBody` and `requestBodyEncoding` stay unset and the body reaches an
+ * emitter through `requestBodyContents` alone. Called once per operation
+ * (`extractRequestBody`) and once per webhook (where its entry is built: a
+ * webhook is minted twice, so the mint itself must not report), while the
+ * passes that re-read the pick for an operation (the body-owned query names,
+ * the const prefixes, the body parameter groups) stay silent — so such a
+ * body is reported once, and never silently. A body with no `content`, or an
+ * empty map, declares nothing and is not reported.
  */
-export function warnDroppedRequestBody(body: RequestBodyObject | undefined, label: string): void {
+export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label: string): void {
   const declared = Object.keys(body?.content ?? {});
   if (declared.length === 0 || selectRequestBodyContent(body)) return;
   console.warn(
-    `[oagen] Warning: Request body of ${label} is dropped: none of its media types (${declared.join(', ')}) ` +
-      `is read. A body is read from application/json or a +json media type, multipart/form-data or ` +
-      `application/x-www-form-urlencoded when it declares a schema, and from application/octet-stream or ` +
-      `text/plain with or without one, parameters and case aside.`,
+    `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
+      `(${declared.join(', ')}) is one the parser reads — application/json or a +json media type, ` +
+      `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
+      `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`,
   );
 }
 
@@ -2961,6 +3406,58 @@ function collectBodyPropertyNames(
   return names;
 }
 
+/** What request body typing needs beyond the body: where deferred schemas go and how their names are qualified. */
+interface RequestTypingContext {
+  /** Collects every secondary-body schema, named after the operations loop (`resolveDeferredInlineTypes`). */
+  deferred: DeferredInlineType[];
+  /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
+  operationQualifier: string;
+  /** Lets inline models resolve `$ref` siblings and augmentations the way fields do. */
+  componentSchemas?: Record<string, SchemaObject>;
+}
+
+/** The request body an operation carries: the picked entry typed, and every declared media type with its type. */
+interface ExtractedRequestBody {
+  body?: TypeRef;
+  encoding?: RequestBodyEncoding;
+  /** The picked entry's essence (`Operation.requestBodyContentType`); set exactly when `body` is. */
+  contentType?: string;
+  contentTypes?: string[];
+  contents?: RequestBodyContent[];
+}
+
+/**
+ * The name an operation's inline request body is materialized under:
+ * `<Op>Request` from the `operationId` (`operationIdModelName`), else the
+ * path-derived prefix plus `Request` (see derivePathModelBaseName) so two
+ * operations without an `operationId` never share one inline body model —
+ * every operationId-less body used to be `RequestBody`, and only the largest
+ * survived deduplication, leaving every other operation pointing at a model
+ * with someone else's fields.
+ */
+function requestModelName(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+}
+
+/**
+ * The stem a secondary request body's model is named from: the primary
+ * body's name without its `Request` suffix, followed by the media type and
+ * `Request` — `ReplaceWidgetTextCsvRequest` beside `ReplaceWidgetRequest` —
+ * the way a secondary response body's stem is the primary response's name
+ * without `Response`.
+ */
+function requestModelStem(op: OperationObject | undefined, pathModelBaseName: string): string {
+  return requestModelName(op, pathModelBaseName).replace(/Request$/, '');
+}
+
+/**
+ * Read an operation's request body: the content entry the pick chooses
+ * (`selectRequestBodyContent`) typed as `body` with its `encoding`, and every
+ * media type the body declares as `contentTypes` / `contents`, the picked
+ * entry sharing `body`'s TypeRef (`extractRequestBodyContents`). A body none
+ * of whose media types is read is reported once and carried in `contents`
+ * alone.
+ */
 function extractRequestBody(
   body: RequestBodyObject | undefined,
   op: OperationObject | undefined,
@@ -2968,34 +3465,123 @@ function extractRequestBody(
   inlineModels: Model[],
   componentSchemas: Record<string, SchemaObject> | undefined,
   opLabel: string,
-): { body?: TypeRef; encoding?: RequestBodyEncoding } {
+  ctx: RequestTypingContext,
+): ExtractedRequestBody {
   const selected = selectRequestBodyContent(body);
-  if (!selected) {
-    // No content, or no media type the parser reads: no body, reported once.
-    warnDroppedRequestBody(body, opLabel);
-    return {};
-  }
-  const { encoding } = selected;
+  if (!selected) warnUnreadRequestBody(body, opLabel);
+  const primary = selected ? typeRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas) : {};
+  const contents = extractRequestBodyContents(
+    body?.content,
+    selected?.contentType,
+    primary.body,
+    requestModelStem(op, pathModelBaseName),
+    ctx,
+  );
+  return { ...primary, ...contents };
+}
+
+/**
+ * Read a request body's `content` map into the media types it declares — in
+ * document order and verbatim, parameters and vendor suffixes included — with
+ * a type for each, as `extractResponseContents` reads a response's. The entry
+ * for `primaryContentType` (the one the pick read `primaryType` from) carries
+ * that very TypeRef; every other entry goes through
+ * `typeSecondaryRequestContent`. `undefined` when the body declares no media
+ * type at all, so the caller leaves both keys off.
+ */
+function extractRequestBodyContents(
+  content: Record<string, { schema?: SchemaObject }> | undefined,
+  primaryContentType: string | undefined,
+  primaryType: TypeRef | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+): { contentTypes: string[]; contents: RequestBodyContent[] } | undefined {
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const contents = contentTypes.map((contentType) => {
+    const entry: RequestBodyContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+    entry.type =
+      primaryType !== undefined && contentType === primaryContentType
+        ? primaryType
+        : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry, contentTypes);
+    return entry;
+  });
+  return { contentTypes, contents };
+}
+
+/**
+ * Type a media type the request body pick did not choose, as it would be
+ * typed were it the only one declared: from its schema when it has one — an
+ * inline object materialized as `<Op><MediaType>Request`
+ * (`ReplaceWidgetTextCsvRequest`), named once every primary model is known
+ * (`resolveDeferredInlineTypes`), so the schema is deferred and the
+ * placeholder returned here is filled in then — else as
+ * `schemalessRequestContentType` types it. The media type's fragment is
+ * decided among its `siblings`, the body's content keys
+ * (`mediaTypeNameFragment`): two spellings of one media type declared side
+ * by side take separate names by their parameters, and case-only spellings
+ * that derive one name are told apart by the registry.
+ */
+function typeSecondaryRequestContent(
+  contentType: string,
+  schema: SchemaObject | undefined,
+  stem: string,
+  ctx: RequestTypingContext,
+  target: RequestBodyContent,
+  siblings: readonly string[],
+): TypeRef {
+  if (!schema) return schemalessRequestContentType(contentType);
+  ctx.deferred.push({
+    kind: 'request',
+    schema,
+    name: `${stem}${mediaTypeNameFragment(contentType, siblings)}Request`,
+    operationQualifier: ctx.operationQualifier,
+    componentSchemas: ctx.componentSchemas,
+    targets: [target],
+  });
+  return target.type;
+}
+
+/**
+ * The picked content entry typed as `Operation.requestBody`, with its
+ * encoding and its essence (`Operation.requestBodyContentType`), and its
+ * inline models pushed to `inlineModels`.
+ */
+function typeRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { body?: TypeRef; encoding?: RequestBodyEncoding; contentType?: string } {
+  const typed = typePickedRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas);
+  return typed ? { body: typed, encoding: selected.encoding, contentType: selected.essence } : {};
+}
+
+/** The picked content entry's type: a primitive for a schema-less binary or text body, else typed from its schema. */
+function typePickedRequestBody(
+  selected: SelectedRequestBodyContent,
+  op: OperationObject | undefined,
+  pathModelBaseName: string,
+  inlineModels: Model[],
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): TypeRef | undefined {
   let schema = selected.schema;
 
-  if (!schema) {
-    // Only a binary or text pick comes without a schema; it is a primitive.
-    const primitive = schemalessRequestBodyType(encoding);
-    return primitive ? { body: primitive, encoding } : {};
-  }
+  // Only a binary or text pick comes without a schema; it is a primitive.
+  if (!schema) return schemalessRequestBodyType(selected.encoding);
 
-  // Without an operationId, name the body from the operation's path-derived
-  // prefix (see derivePathModelBaseName) so two operations don't share one
-  // inline body model. Every operationId-less body used to be `RequestBody`,
-  // and only the largest survived deduplication — every other operation was
-  // left pointing at a model with someone else's fields.
-  const contextName = op?.operationId ? operationIdModelName(op.operationId, 'Request') : pathModelBaseName + 'Request';
+  const contextName = requestModelName(op, pathModelBaseName);
 
   // `properties` written beside a typing `allOf`/`oneOf`/`anyOf` are folded
   // into the composition, as `schemaToTypeRef` and the field extractor read
   // them (`foldSiblingProperties`), so the body is read the one way a field
   // of the same schema is: the object branch below reads `properties` first
-  // and would otherwise drop the composition.
+  // and would otherwise drop the composition. The variants that cannot take
+  // the properties are reported on the body as written, under the body's
+  // name, since the fold leaves `schemaToTypeRef` nothing to report.
+  warnOnUncarriedProperties(schema, contextName, undefined);
   schema = foldSiblingProperties(schema);
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)
@@ -3010,8 +3596,11 @@ function extractRequestBody(
     if (merged) schema = merged;
   }
 
-  // If the request body is an inline object with properties, extract it as a model
-  if (schema.properties && (schema.type === 'object' || !schema.type)) {
+  // If the request body is an inline object with properties, extract it as a
+  // model. An empty `properties: {}` beside a composition that types the
+  // body is not its object (`composedWithoutFields`): the `oneOf` branch or
+  // the fall-through reads the composition, as for a response body.
+  if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
     const requiredSet = new Set(schema.required ?? []);
     const siblings = collectProperties(schema);
     const fields: Field[] = [];
@@ -3033,12 +3622,26 @@ function extractRequestBody(
     // schemas are handled in extractInlineModelsFromSchemas — otherwise the
     // generated body model references a model that never gets generated.
     extractInlineModelsFromProperties(schema, inlineModels, contextName, componentSchemas);
-    return { body: { kind: 'model', name: contextName }, encoding };
+    return { kind: 'model', name: contextName };
   }
+
+  // A nullable body (`oneOf: [object, null]`) is one schema: the model built
+  // from its object branch takes the wrapper's `deprecated` and limits, as
+  // every other nullable unwrap gives it (`collapsedNullableBranch`). The
+  // null branch still makes the body nullable below. A multi-variant union,
+  // nullable or not, is not collapsed: every variant is built as written. A
+  // nullable wrapper around one branch that is not an inline object — an
+  // array (`oneOf: [{ items }, { type: 'null' }]`), a `$ref`, a primitive —
+  // is not a union to build: it takes the fall-through, where
+  // `schemaToTypeRef` types it as it types the same wrapper on a field or a
+  // parameter (`nullable<CreatePetsRequest[]>`, `nullable<Pet>`) and the
+  // array's inline items are named from the body (`CreatePetsRequest`), the
+  // way `type: ['array', 'null']` and `nullable: true` already are.
+  const branch = collapsedNullableBranch(schema);
 
   // If the request body is a oneOf, extract each variant as an inline model
   // and build a union type pointing to them by name.
-  if (schema.oneOf) {
+  if (schema.oneOf && (branch === undefined || isInlineObjectSchema(branch))) {
     const variants: TypeRef[] = [];
     // The inline object variants of this union and the names its const-less
     // variants have taken so far, for `deriveOneOfVariantName`.
@@ -3046,12 +3649,6 @@ function extractRequestBody(
       (v) => !v.$ref && v.properties && (v.type === 'object' || !v.type),
     );
     const contentNamed: string[] = [];
-    // A nullable body (`oneOf: [object, null]`) is one schema: the model built
-    // from its object branch takes the wrapper's `deprecated` and limits, as
-    // every other nullable unwrap gives it (`collapsedNullableBranch`). The
-    // null branch still makes the body nullable below. A multi-variant union,
-    // nullable or not, is not collapsed: every variant is built as written.
-    const branch = collapsedNullableBranch(schema);
 
     // The inline object variants are named and built first, in order, so the
     // other variants' contexts can step around their names and their
@@ -3144,25 +3741,25 @@ function extractRequestBody(
           }
         : {}),
     };
-    const body = hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
-    return { body, encoding };
+    return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 
   // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
-  // array, a map, a nullable object, …). Such a TypeRef can still reach
-  // inline models — the inline object variants of an `anyOf`, an array's
-  // inline items or the variants of an `items.oneOf`, a map's inline values,
-  // and whatever is nested under any of them, a union under a variant
-  // included — so materialize them the way an inline response does: as a
-  // property of this name under no parent, which names every nested model
-  // exactly as the TypeRef references it.
+  // array, a map, a nullable object, a nullable wrapper around an array, a
+  // `$ref` or a primitive, …). Such a TypeRef can still reach inline models
+  // — the inline object variants of an `anyOf`, an array's inline items or
+  // the variants of an `items.oneOf`, a map's inline values, and whatever is
+  // nested under any of them, a union under a variant included — so
+  // materialize them the way an inline response does: as a property of this
+  // name under no parent, which names every nested model exactly as the
+  // TypeRef references it.
   extractInlineModelsFromProperties(
     { properties: { [contextName]: schema } },
     inlineModels,
     undefined,
     componentSchemas,
   );
-  return { body: schemaToTypeRef(schema, contextName), encoding };
+  return schemaToTypeRef(schema, contextName);
 }
 
 /**
@@ -3336,16 +3933,18 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * document's servers under a Path Item that diverges inherits, not the Path
  * Item's.
  *
- * Both lists go through `serversBeyondDefault` before they are compared, so
- * OpenAPI's default server is one thing however it is spelled (#291): a
- * document without `servers` (or with `servers: []`) and one whose only
- * server is `/` both compare as an empty list, the entry's description and
- * variables aside (the default server has neither, and `/` references no
- * variable, so one declared on it changes nothing — #292). An operation or
- * Path Item that writes `/` out under a document that declares nothing
- * therefore inherits — description and variables included — and any other
- * usable list under such a document is kept, as `/` is under a document that
- * names a host.
+ * OpenAPI's default server is one thing however it is spelled (#291): a list
+ * that means it — no servers, `servers: []`, or nothing but `/`, by
+ * `isDefaultServerList`, description and variables aside (the default server
+ * has neither, and `/` references no variable, so one declared on it changes
+ * nothing — #292) — under a document whose list means it too is inherited as
+ * well. So an operation or Path Item that writes `/` out under a document
+ * that declares nothing inherits, the entry's description and variables
+ * included. Any other list is compared
+ * entry for entry as written, `/` entries included, because position decides
+ * the default host: `/` under a document that names a host is kept, a named
+ * host under a document that writes `/` out is kept, and a named host alone
+ * under a document that lists `/` before that host is kept.
  */
 function operationServers(
   own: ServerEntry[] | undefined,
@@ -3354,9 +3953,8 @@ function operationServers(
 ): ServerEntry[] | undefined {
   const effective = own ?? pathLevel;
   if (!effective) return undefined;
-  return serverListsEqual(serversBeyondDefault(effective), serversBeyondDefault(documentServers))
-    ? undefined
-    : effective;
+  if (serverListsEqual(effective, documentServers ?? [])) return undefined;
+  return isDefaultServerList(effective) && isDefaultServerList(documentServers) ? undefined : effective;
 }
 
 /**
@@ -3378,13 +3976,14 @@ type ModelShapeRegistry = InlineModelRegistry;
  * then the target carries a placeholder.
  */
 interface DeferredInlineType {
-  kind: 'header' | 'content' | 'fallback' | 'error' | 'param';
+  kind: 'header' | 'content' | 'request' | 'fallback' | 'error' | 'param';
   schema: SchemaObject;
   /**
    * The bare name the models derive from: the header name, the response stem
-   * + media type + role, a fallback body's `<Op><Label>Response`, an error
-   * body's `<Op>Error<code>`, a parameter's name, or `<Component>Response`
-   * for a fallback or error body a `components/responses` entry declares.
+   * + media type + role, a secondary request body's `<Op><MediaType>Request`,
+   * a fallback body's `<Op><Label>Response`, an error body's
+   * `<Op>Error<code>`, a parameter's name, or `<Component>Response` for a
+   * fallback or error body a `components/responses` entry declares.
    */
   name: string;
   /**
@@ -3398,9 +3997,10 @@ interface DeferredInlineType {
   /**
    * What tells this site from another of the same name within one operation:
    * a status code, the label of a fallback response (`Default`,
-   * `ClientError`), or a parameter's location (`query`).
+   * `ClientError`), or a parameter's location (`query`); a request body has
+   * none.
    */
-  statusCode: number | string;
+  statusCode?: number | string;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
   /** Qualifies a header's names (`Documents` + `X-Meta` → `DocumentsXMeta`); a body has none. */
@@ -3439,63 +4039,69 @@ interface ResponseTypingContext {
   operationQualifier: string;
   /** Collects every schema whose models are named after the operations loop. */
   deferred: DeferredInlineType[];
+  /**
+   * The spec-wide registry of model shapes the operations fill as they are
+   * read (see `extractOperations`); with it, the primary body's array items
+   * are settled against every name it holds (`typeInlineItems`). Absent for
+   * a dry run that only reads the names a body would mint.
+   */
+  registry?: ModelShapeRegistry;
 }
 
 /**
- * Name and materialize every deferred header, secondary-body, fallback-body
- * and error-body schema, now that every primary model is known. The registry
- * holds the component models first (with the inline models their fields
- * mint), each seeded with the model itself so it shares its name with every
- * shape it admits (`ownerShares`), then every inline model the operations
- * minted — request bodies, primary response bodies with their nested objects
- * and union variants, envelope companions — shared on an identical shape
- * only, so no deferred schema can take one of their names for a shape the
- * owner does not share, whichever operation minted it; each resolved
- * schema's own models join it in turn, in document order (path order, then
- * the response keys as written; a response's headers before its error body
- * and its secondary bodies, a fallback's body before its headers), so the
- * first owner of a name keeps it. The sites that derive from one bare name
+ * Name and materialize every deferred header, secondary request-body,
+ * secondary response-body, fallback-body, error-body and parameter schema,
+ * now that every primary model is known. The registry comes filled from
+ * `extractOperations`: the component models first (with the inline models
+ * their fields mint), each seeded with the model itself so it shares its
+ * name with every shape it admits (`ownerShares`), then every inline model
+ * the operations minted — request bodies, primary response bodies with
+ * their nested objects, union variants and settled array items, envelope
+ * companions — shared on an identical shape only, so no deferred schema
+ * can take one of their names for a shape the owner does not share,
+ * whichever operation minted it; each resolved schema's own models join it
+ * in turn, in document order (path order, then an operation's secondary
+ * request bodies in content order, then the response keys as written; a
+ * response's headers before its error body and its secondary bodies, a
+ * fallback's body before its headers), so the first owner of a name keeps
+ * it. Every enum name decided before this pass, component or minted, is
+ * held too, as a name no model may take (`reserveEnumNames`): a deferred
+ * schema that derives one steps to its next candidate, so a component enum
+ * `ReplaceWidgetTextCsvRequest` sends the `text/csv` body's model to
+ * `ReplaceWidgetTextCsvRequest2`. The sites that derive from one bare name
  * — one kind, parent and name: the same header on several status codes or
  * operations, one media type's body on several status codes; or one
  * component response's body, whether the site is an error or a fallback
- * entry (`componentBody`) — share a record of the stems they settled on, so
- * a later one shares an identical shape under whichever name the earlier
- * took (`materializeInlineSchema`).
- * Every enum name in play is registered too (`reserveEnumNamesInPlay`),
- * shared with no model, and so is every enum a deferred site types — an
- * error body that is itself an enum, an enum nested in a model the site
- * minted — as the site is resolved (`reserveEnumNames`). So a deferred model
- * named like an enum known when it is named — a `filter` parameter's object
- * beside a component enum `PetsFilter`, a `status` parameter's object on
- * one operation beside another operation's `status` enum, an error body's
- * object after an earlier operation's enum body of the same name — steps to
- * its next candidate the way one named like a model of another shape does.
- * An enum typed after a model of its name — the enum body of a later
- * operation — is the one that steps, in the collectors
- * (`collectDistinctEnums`); so the first site to carry a name keeps it, and
- * the IR never declares a model and an enum under one name. Returns the
- * models materialized, having set each target's `type`.
+ * entry (`componentBody`) — share a record of the stems they settled on and
+ * the renames made under them, so a later one shares an identical shape
+ * under whichever name the earlier took (`materializeInlineSchema`).
+ *
+ * Two precedences decide a name a model and an enum both derive. An enum
+ * typed as an operation is built — one a parameter, a request body, a
+ * success body, a pagination field carries — is in the registry before this
+ * pass and keeps its name wherever the document declares it: a `status`
+ * query enum on a later operation sends an earlier operation's `status`
+ * parameter object to `PetsListPetsStatus`, and the same operation's to
+ * `PetsQueryStatus`. Among the sites named here — response headers, error
+ * bodies, secondary and fallback bodies, parameter models — document order
+ * decides: each site registers the enums it types (a body that is itself an
+ * enum, an enum nested in a model it minted) as it is resolved, so the
+ * earlier site keeps the name and a later one that derives it steps (an
+ * `X-Mode` header parameter object after an earlier operation's `X-Mode`
+ * response-header enum is `PetsGetPetXMode`; `getPet`'s object 404 after
+ * `get-pet`'s enum 404 is `GetPetError404Body`), while an enum typed after
+ * a model of its name steps in the collectors instead
+ * (`collectDistinctEnums`, `GetPetError404Body` when the object 404 comes
+ * first). So the IR never declares a model and an enum under one name.
+ * Returns the models materialized, having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
-  componentModels: readonly Model[],
-  inlineModels: readonly Model[],
-  operationOf: ReadonlyMap<Model, string>,
-  componentEnums: readonly Enum[],
-  operations: Iterable<[Operation, string]>,
+  registry: ModelShapeRegistry,
 ): { models: Model[]; bundles: InlineModelBundle[] } {
-  const registry: ModelShapeRegistry = new Map();
-  for (const model of componentModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
-  }
-  for (const model of inlineModels) {
-    if (registry.has(model.name)) continue;
-    registry.set(model.name, { fingerprint: modelFingerprint(model), operation: operationOf.get(model) });
-  }
-  reserveEnumNamesInPlay(registry, componentEnums, componentModels, inlineModels, operationOf, operations);
   const models: Model[] = [];
   const bundles: InlineModelBundle[] = [];
-  const siblingsByBareName = new Map<string, SiblingStems>();
+  const siblingsByBareName = new Map<string, SiblingSites>();
   for (const item of deferred) {
     // A component response's body is one site wherever the component is
     // returned, so its record is keyed by the component's name alone, not
@@ -3511,52 +4117,21 @@ function resolveDeferredInlineTypes(
     // a model it minted — owns its name from here on, as the site's models do.
     reserveEnumNames(
       registry,
-      [type, ...models.slice(minted).flatMap((model) => collectModelTypeRefs(model))],
+      [type, ...models.slice(minted).flatMap(collectModelTypeRefs)].flatMap(collectEnumRefs),
       item.operationQualifier,
     );
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedDeferredRefs`).
-    bundles.push({ qualifier: item.operationQualifier, roots: [type], models: models.slice(minted) });
+    bundles.push({
+      qualifier: item.operationQualifier,
+      roots: [type],
+      models: models.slice(minted),
+      ...(isSentSite(item) ? { sent: true } : {}),
+    });
   }
   return { models, bundles };
-}
-
-/**
- * Register every enum name in play before the deferred schemas are named,
- * each owned by the operation that typed it (`enumNameOwner`): the component
- * enums; the inline enums the fields of the component models and of the
- * models those fields mint carry; those in the fields of every inline model
- * the operations minted (request bodies, primary responses, envelope
- * companions); and every enum an operation's own references carry — a
- * parameter in any location, a body, a response header, a pagination
- * envelope field (`collectOperationTypeRefs`) — named on its `EnumRef` when
- * the site was typed and lifted into `spec.enums` only once every model is
- * named (`collectInlineEnumsFrom…`). The collectors step a lifted enum
- * around every model name, so a deferred model that took one of these names
- * (a `filter` parameter's object beside a component enum `PetsFilter`) would
- * send the enum the document declared, or an earlier site typed, to a
- * numbered name; registered, the name moves the model instead, whatever the
- * document order of the two sites. A name one of an operation's own
- * references carries is that operation's, so a clash with it is qualified by
- * location, as one with the operation's models is; a component's, a
- * component field's or a companion's is no operation's. A name a model
- * already holds is the document's own clash (a component model named like a
- * component enum) and stays the model's.
- */
-function reserveEnumNamesInPlay(
-  registry: ModelShapeRegistry,
-  componentEnums: readonly Enum[],
-  documentModels: readonly Model[],
-  inlineModels: readonly Model[],
-  operationOf: ReadonlyMap<Model, string>,
-  operations: Iterable<[Operation, string]>,
-): void {
-  for (const e of componentEnums) if (!registry.has(e.name)) registry.set(e.name, enumNameOwner());
-  for (const model of documentModels) reserveEnumNames(registry, collectModelTypeRefs(model));
-  for (const model of inlineModels) reserveEnumNames(registry, collectModelTypeRefs(model), operationOf.get(model));
-  for (const [op, qualifier] of operations) reserveEnumNames(registry, collectOperationTypeRefs(op), qualifier);
 }
 
 /**
@@ -3604,10 +4179,13 @@ function attachSharedDeferredRefs(
  * body from the operation's response stem and media type,
  * `RenderPetCardTextHtmlResponse`; a fallback body from the stem and the
  * response's label, `ListPetsDefaultResponse`; an error body from the stem
- * and its status code, `GetPetError404` (`deriveErrorModelName`). Any of them
+ * and its status code, `GetPetError404` (`deriveErrorModelName`); a
+ * parameter from the service and parameter name, `PetsFilter`. Any of them
  * is a name a component schema, a model nested in one (`GetPet.error404` owns
  * `GetPetError404`), a primary body, the same header on a 429 or another
- * operation may already own with a different shape. Left alone, the later
+ * operation may already own with a different shape, or an enum — a
+ * component's, or one a parameter or field lifts — may own outright
+ * (`reserveEnumNames`). Left alone, the later
  * merge keeps one definition for the name and every other reference silently
  * gets the wrong fields (a request body using the component would even change
  * type without any emitter reading headers).
@@ -3627,6 +4205,8 @@ function attachSharedDeferredRefs(
  *   content   1. the bare name                `RenderPetCardTextHtmlResponse`
  *             2. the status code              `RenderPetCardTextHtmlResponse201`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
+ *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
  *   fallback  1. the bare name                `ListPetsDefaultResponse`
  *             2. a numeric suffix             `ListPetsDefaultResponse2`, `…3`, …
  *   error     1. the bare name                `GetPetError404`
@@ -3676,7 +4256,7 @@ function materializeDeferredType(
   item: DeferredInlineType,
   registry: ModelShapeRegistry,
   models: Model[],
-  siblings: SiblingStems,
+  siblings: SiblingSites,
 ): TypeRef {
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),
@@ -3685,16 +4265,20 @@ function materializeDeferredType(
     componentSchemas: item.componentSchemas,
     registry,
     operation: item.operationQualifier,
+    sent: isSentSite(item),
     models,
   });
 }
 
+/** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
+function isSentSite(item: DeferredInlineType): boolean {
+  return item.kind === 'request' || item.kind === 'param';
+}
+
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
-  const { name, statusCode, operationQualifier } = item;
+  const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
-  const byOperation = `${operationQualifier}${name}`;
-  const byBoth = `${operationQualifier}${name}${statusCode}`;
   const numbered = (index: number): string => `${name}${index + 2}`;
   const byNumber = (index: number): string => (index === 0 ? name : numbered(index - 1));
   // A component response's body steps the same way at a 404, at `default`
@@ -3703,20 +4287,26 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
   // component reaches the same name.
   if (item.componentBody) return byNumber;
   switch (item.kind) {
-    case 'header':
+    case 'header': {
       // Decide the preference between candidates 2 and 3 from the bare
       // name's owners: a clash within this operation reads best by status
       // code, one with a component, a primary body or another operation by
-      // operation name.
+      // operation name. Joined with `_`, as a parameter's are, since the
+      // bare name is the lower-cased header name (`ListDocuments_x-meta` →
+      // `ListDocumentsXMeta`, not `ListDocumentsxMeta`).
+      const byOperationName = `${operationQualifier}_${name}`;
+      const byOperationAndStatus = `${operationQualifier}_${name}${statusCode}`;
       return (index, firstClashOwners) => {
         const withinOperation = firstClashOwners.every((owner) => owner.operation === operationQualifier);
         const candidates = withinOperation
-          ? [name, byStatus, byOperation, byBoth]
-          : [name, byOperation, byStatus, byBoth];
+          ? [name, byStatus, byOperationName, byOperationAndStatus]
+          : [name, byOperationName, byStatus, byOperationAndStatus];
         return index < candidates.length ? candidates[index] : numbered(index - candidates.length);
       };
+    }
     case 'content':
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
+    case 'request':
     case 'fallback':
       return byNumber;
     case 'error':
@@ -3750,14 +4340,22 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
  * once every primary model is known (`resolveDeferredInlineTypes`), under a
  * name nothing else owns: `<Service><Param>` (`PetsFilter`), else the
  * location-, operation- or number-qualified candidates `deferredNamingStem`
- * lists. `extractParams` typed the parameter as the property of its name
- * under the service, and the trial extraction here reads the same synthetic
- * property, so the deferred site's first candidate is the name the
- * parameter already references and a parameter that mints no model — a
- * primitive, a `$ref`, an inline enum, an array of either — keeps the type
- * it has and is not deferred. `raw` and `typed` are the location's
- * parameters in document order, `typed[i]` built from `raw[i]`
- * (`extractParams` maps the filtered list one to one).
+ * lists; a name an enum has or will have — a component enum's, or the name
+ * another parameter's or a field's inline enum is lifted under (`PetsKind`)
+ * — is reserved in the registry, so the model steps to the
+ * operation-qualified name (`PetsSearchPetsKind`). Called after the
+ * operation's responses have been read, so a parameter's site follows the
+ * response headers' in the registry: a response header the operation
+ * already typed keeps its name (`PetsXMeta`), and a header parameter of the
+ * same name takes the location-qualified one (`PetsHeaderXMeta`).
+ * `extractParams` typed the parameter as the property of its name under the
+ * service, and the trial extraction here reads the same synthetic property,
+ * so the deferred site's first candidate is the name the parameter already
+ * references and a parameter that mints no model — a primitive, a `$ref`,
+ * an inline enum, an array of either — keeps the type it has and is not
+ * deferred. `raw` and `typed` are the location's parameters in document
+ * order, `typed[i]` built from `raw[i]` (`extractParams` maps the filtered
+ * list one to one).
  */
 function deferParameterModels(
   raw: readonly ParameterObject[],
@@ -3772,18 +4370,17 @@ function deferParameterModels(
     // picked `content` entry's (`parameterTyping`).
     const schema = parameterSchema(param);
     if (!schema || !target) return;
+    // The name the models derive from is the one `extractParams` typed the
+    // parameter under — a header's lower-cased (`foldParameterName`) — so the
+    // reference and the model agree, and neither moves with the header's case.
+    const name = foldParameterName(location, param.name);
     const trial: Model[] = [];
-    extractInlineModelsFromProperties(
-      { properties: { [param.name]: schema } },
-      trial,
-      parentName,
-      ctx.componentSchemas,
-    );
+    extractInlineModelsFromProperties({ properties: { [name]: schema } }, trial, parentName, ctx.componentSchemas);
     if (trial.length === 0) return;
     ctx.deferred.push({
       kind: 'param',
       schema,
-      name: param.name,
+      name,
       statusCode: location,
       operationQualifier: ctx.operationQualifier,
       parentName,
@@ -3859,10 +4456,13 @@ function extractResponseHeaders(
       ...externalDocsEntry(schema?.externalDocs),
     };
     if (schema) {
+      // Named from the lower-cased header name, as a header parameter's inline
+      // type is, so the model or enum a header mints keeps its name when the
+      // header's case changes; `entry.name` stays as written.
       ctx.deferred.push({
         kind: 'header',
         schema,
-        name,
+        name: folded,
         statusCode,
         operationQualifier: ctx.operationQualifier,
         parentName: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
@@ -4060,7 +4660,7 @@ function resolvePathModelBaseNames(
  */
 function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   let best: string | undefined;
-  let bestScore: [number, number] | undefined;
+  let bestScore: PathDeviation | undefined;
   let tied = false;
   for (const path of rawPaths) {
     const score = pathDeviation(path);
@@ -4076,28 +4676,35 @@ function canonicalPath(rawPaths: Iterable<string>): string | undefined {
   return tied ? undefined : best;
 }
 
+/** See pathDeviation. */
+type PathDeviation = [trailingSlash: number, customMethods: number, irregularSegments: number];
+
 /**
  * How far a raw path's spelling is from the plain prefix it flattens to:
- * `[trailing slash, segments other than a bare parameter with any character
- * outside a-z0-9]`, compared lexicographically. `/notes` scores [0, 0] and
- * `/notes/` [1, 0]; `/notes/{id}` scores [0, 0] and `/notes/by-id` [0, 1].
- * The raw URL segments are read here, not pathSegments: a custom method is
- * spelled with a colon the plain form does without, so `/pets/{id}:adopt`
- * scores [0, 1] and `/pets/{id}/adopt`, which flattens to the same prefix,
- * keeps the plain name.
+ * `[trailing slash, custom methods written after a colon, literal segments
+ * with any character outside a-z0-9]`, compared lexicographically. `/notes`
+ * scores [0, 0, 0] and `/notes/` [1, 0, 0]; `/notes/{id}` scores [0, 0, 0]
+ * and `/notes/by-id` [0, 0, 1]. A custom method is counted on its own rather
+ * than as an irregular segment, so the slash form wins whatever the verb's
+ * spelling: `/pets/{id}:adopt` scores [0, 1, 0] against `/pets/{id}/adopt`
+ * at [0, 0, 0], and `/pets/{id}:batchAdopt` [0, 1, 1] against
+ * `/pets/{id}/batchAdopt` at [0, 0, 1]. A parameter segment is never
+ * irregular, whatever follows its braces, so a path without a colon scores
+ * as it did before custom methods were read: `/tags/{tag}.json` and
+ * `/tags/{tag}/json` still tie.
  */
-function pathDeviation(rawPath: string): [number, number] {
+function pathDeviation(rawPath: string): PathDeviation {
   const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
-  const isBareParam = (segment: string) => segment.startsWith('{') && segment.endsWith('}');
-  const irregularSegments = rawPath
-    .split('/')
-    .filter(Boolean)
-    .filter((segment) => !isBareParam(segment) && /[^a-z0-9]/.test(segment)).length;
-  return [trailingSlash, irregularSegments];
+  const segments = readPath(rawPath);
+  const customMethods = segments.filter((segment) => segment.customMethod).length;
+  const irregularSegments = segments.filter(
+    (segment) => !segment.text.startsWith('{') && /[^a-z0-9]/.test(segment.text),
+  ).length;
+  return [trailingSlash, customMethods, irregularSegments];
 }
 
-function compareDeviation(a: [number, number], b: [number, number]): number {
-  return a[0] - b[0] || a[1] - b[1];
+function compareDeviation(a: PathDeviation, b: PathDeviation): number {
+  return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
 /** The first six hex characters of the SHA-1 of a raw path. */
@@ -4226,6 +4833,7 @@ function resolveOverrideItemType(
   dataPath: string,
   componentModels: Model[],
   componentSchemas?: Record<string, SchemaObject>,
+  settle?: ItemSettlement,
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
   if (dataPath === result.dataPath && result.itemType) return { itemType: result.itemType, inlineModels: [] };
 
@@ -4246,7 +4854,7 @@ function resolveOverrideItemType(
   }
   if (fromIr) return { itemType: fromIr, inlineModels: [] };
 
-  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas);
+  return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas, settle);
 }
 
 /** What the explicit pagination override asks of response extraction. */
@@ -4462,7 +5070,7 @@ function extractResponseContents(
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry);
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes);
     return entry;
   });
   return { contentTypes, contents };
@@ -4476,10 +5084,13 @@ function extractResponseContents(
  * and one without a schema is `unknown`. The one addition is that an inline
  * object under such a media type is materialized — the primary pick's
  * `...Response` name belongs to the primary body, so this one is named after
- * its media type as well: `RenderPetCardTextHtmlResponse`. That naming waits
- * for every primary model (`resolveDeferredInlineTypes`), so a schema is
- * deferred and `target.type` — returned here as a placeholder — filled in
- * then.
+ * its media type as well: `RenderPetCardTextHtmlResponse`, from the media
+ * type's essence among its `siblings` (the response's content keys), so a
+ * key keeps its model name however it is spelled and two spellings of one
+ * essence side by side are told apart by their parameters
+ * (`mediaTypeNameFragment`). That naming waits for every primary model
+ * (`resolveDeferredInlineTypes`), so a schema is deferred and `target.type`
+ * — returned here as a placeholder — filled in then.
  */
 function typeSecondaryContent(
   contentType: string,
@@ -4487,6 +5098,7 @@ function typeSecondaryContent(
   naming: ContentModelNaming,
   ctx: ResponseTypingContext,
   target: ResponseContent,
+  siblings: readonly string[],
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
@@ -4500,26 +5112,13 @@ function typeSecondaryContent(
   ctx.deferred.push({
     kind: 'content',
     schema,
-    name: `${naming.base}${mediaTypeToken(contentType)}${naming.suffix}`,
+    name: `${naming.base}${mediaTypeNameFragment(contentType, siblings)}${naming.suffix}`,
     statusCode: naming.statusCode,
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
   });
   return target.type;
-}
-
-/**
- * The PascalCase token that qualifies an inline model minted for a secondary
- * media type: `text/html` → `TextHtml`, `application/vnd.api+json` →
- * `ApplicationVndApiJson`. Parameters are part of it (`application/json;
- * charset=utf-8` → `ApplicationJsonCharsetUtf8`) so two parameterizations of
- * one type never share a model, and a wildcard segment reads as `Any`
- * (`application/*` → `ApplicationAny`) since the caser would drop the `*`.
- */
-function mediaTypeToken(contentType: string): string {
-  const token = toPascalCase(contentType.split('*').join('Any'));
-  return token.length > 0 ? token : 'Content';
 }
 
 /**
@@ -4809,9 +5408,11 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
  */
 function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
   const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  // The one JSON rule requests and responses share (`isJsonMediaType`):
+  // `application/json` itself first, then any `+json` type.
   const match =
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType) === 'application/json') ??
-    entries.find(([mediaType]) => mediaTypeEssence(mediaType).endsWith('+json'));
+    entries.find(([mediaType]) => isPlainJsonMediaType(mediaType)) ??
+    entries.find(([mediaType]) => isJsonMediaType(mediaType));
   return match && match[1].schema ? { contentType: match[0], schema: match[1].schema } : undefined;
 }
 
@@ -4843,6 +5444,8 @@ function extractResponses(
   responseContentTypes?: string[];
   responseContents?: ResponseContent[];
   responseDescription?: string;
+  /** The status code of the entry `response` was read from; undefined when no 2xx/3xx is declared. */
+  responseStatusCode?: number;
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
   /** The `default` response, when the operation declares one. */
@@ -4966,9 +5569,13 @@ function extractResponses(
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
+        // The primary body's array items are settled against the registry
+        // (`typeInlineItems`); the dry run that reads a component response's
+        // names (`bodyModelNames`) passes none and mints nothing into it.
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled: pagination.disabled,
           dataPathOverride,
+          ...(ctx.registry && { settle: { registry: ctx.registry, operation: ctx.operationQualifier } }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -5146,6 +5753,7 @@ function extractResponses(
       pagination.dataPath,
       pagination.componentModels ?? [],
       componentSchemas,
+      ctx.registry && { registry: ctx.registry, operation: ctx.operationQualifier },
     );
     if (resolved) {
       overrideItemType = resolved.itemType;
@@ -5165,6 +5773,7 @@ function extractResponses(
     responseContentTypes,
     responseContents,
     responseDescription,
+    responseStatusCode: primaryStatus,
     successResponses,
     errors,
     defaultResponse: fallback.defaultResponse,
