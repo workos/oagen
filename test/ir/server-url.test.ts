@@ -227,6 +227,9 @@ describe('normalizeServerUrl', () => {
     );
     // Decoded before the host is folded.
     expect(normalizeServerUrl('https://%41PI.example.com')).toBe('https://api.example.com/');
+    // The host is lower-cased outside its octets, whose hex digits stay upper-cased (MichaelDeBoey).
+    expectSame('https://p%C3%A9ts.example.com/', ['https://p%C3%A9ts.EXAMPLE.com', 'https://P%c3%a9TS.example.com']);
+    expect(normalizeServerUrl('https://p%C3%A9ts.example.com')).not.toContain('%c3');
   });
 
   it('keeps every placeholder as written, wherever it sits', () => {
@@ -306,6 +309,27 @@ describe('normalizeServerUrl', () => {
     expectSame('https://pets.example.com/', ['HTTPS://PETS.example.com:443', 'https://pets.example.com/']);
   });
 
+  it('keeps percent-encoding as written from the first placeholder up to the next `/`, `?` or `#` (MichaelDeBoey)', () => {
+    // A value may put that text in a scheme or a port, where `%` has no
+    // meaning: `scheme` = `http` resolves these to `http%73://…` and `https://…`.
+    expect(normalizeServerUrl('{scheme}%73://notes.example.com')).toBe('{scheme}%73://notes.example.com');
+    expect(normalizeServerUrl('{scheme}s://notes.example.com')).toBe('{scheme}s://notes.example.com');
+    expect(normalizeServerUrl('{scheme}%73://notes.example.com')).not.toBe(
+      normalizeServerUrl('{scheme}s://notes.example.com'),
+    );
+    // `x` = `:` makes `%34%34%33` a port that keeps its encoding, where `443` is dropped.
+    expect(normalizeServerUrl('https://notes.example.com{x}%34%34%33')).toBe('https://notes.example.com{x}%34%34%33');
+    expect(normalizeServerUrl('https://notes.example.com{x}%34%34%33')).not.toBe(
+      normalizeServerUrl('https://notes.example.com{x}443'),
+    );
+    expect(normalizeServerUrl('https://{host}%7e')).toBe('https://{host}%7e');
+    // From the next delimiter on the text is a path, query or fragment, so
+    // percent-encoding folds again there; before the placeholder it always did.
+    expect(normalizeServerUrl('https://{host}/%7e?%7e#%7e')).toBe('https://{host}/~?~#~');
+    expect(normalizeServerUrl('https://api.example.com/%7e{x}%7e/%7e')).toBe('https://api.example.com/~{x}%7e/~');
+    expect(normalizeServerUrl('{x}%7e/%7e')).toBe('{x}%7e/~');
+  });
+
   it('never folds two templates to one that resolve apart under some allowed value (soundness)', () => {
     // Every template below, with every variable allowed every value below:
     // whenever two templates come out as one string, they must resolve to
@@ -337,6 +361,16 @@ describe('normalizeServerUrl', () => {
       'HTTPS://API.example.com:443/{version}',
       'https://api.example.com/%7e{x}',
       'https://api.example.com/~{x}',
+      'https://api.example.com/{x}%7e',
+      'https://api.example.com/{x}~',
+      'https://{host}/%7e',
+      'https://{host}/~',
+      '{scheme}%73://notes.example.com',
+      '{scheme}s://notes.example.com',
+      'https://notes.example.com{x}%34%34%33',
+      'https://notes.example.com{x}443',
+      'https://p%C3%A9ts.EXAMPLE.com',
+      'https://P%c3%a9TS.example.com',
       'https://USER:pw@API.example.com',
       'https://[2001:DB8::1]:443/{x}',
       '//{host}/v1',
@@ -360,8 +394,13 @@ describe('normalizeServerUrl', () => {
       '%7e',
       '//evil.example.com',
       'A@B:443',
+      ':',
+      'http',
+      'https',
+      '%',
+      '7e',
     ];
-    const names = ['basePath', 'host', 'suffix', 'prefix', 'region', 'port', 'version', 'x', 'v', 'a', 'b'];
+    const names = ['basePath', 'host', 'suffix', 'prefix', 'region', 'port', 'version', 'x', 'v', 'a', 'b', 'scheme'];
     const variables = Object.fromEntries(names.map((name) => [name, { default: 'x', enum: values }]));
     /** The variables with one of them set to `value`. */
     const withValue = (name: string, value: string) =>
@@ -384,7 +423,7 @@ describe('normalizeServerUrl', () => {
       }
     }
     // The corpus does fold some pairs, so the check above is not vacuous.
-    expect(folded).toBeGreaterThanOrEqual(4);
+    expect(folded).toBeGreaterThanOrEqual(6);
   });
 
   it('treats an unclosed brace, an empty `{}` and a reopened brace as literal text, like resolveServerUrl', () => {
