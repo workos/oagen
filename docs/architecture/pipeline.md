@@ -32,7 +32,7 @@ Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 1. **refs.ts** — Loads the spec file, uses `@redocly/openapi-core` to bundle and resolve all `$ref` pointers
 2. **schemas.ts** — Walks `components.schemas`, extracts `Model[]` and `Enum[]` (an array component yields no model: a `$ref` to it is typed as the array, and only what its items reference becomes a model or enum)
-3. **operations.ts** — Walks `paths`, groups endpoints into `Service[]` with `Operation[]`
+3. **operations.ts** — Walks `paths` (an entry written as a `$ref` into `components/pathItems` is first resolved by **path-item-refs.ts**, the resolver **webhooks.ts** uses for a `webhooks` entry; one that cannot be resolved is warned about and skipped), groups endpoints into `Service[]` with `Operation[]`
 4. **pagination.ts** — Detects cursor-based pagination from query params; also detected from response shape in `responses.ts` (either source sets `paginated: true`)
 
 ### Operation Name Inference

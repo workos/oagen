@@ -327,7 +327,10 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
         description: 'Pet adopted\n\nSent when a pet is adopted.',
         keys: withBoth,
       });
-      expect(warn).not.toHaveBeenCalled();
+      // The text beside the ref is not read, and that is said once (#350).
+      expect(warn.mock.calls.map((call: unknown[]) => String(call[0]))).toEqual([
+        '[oagen] Warning: Webhook "petAdopted" has fields beside its $ref ("summary") that are not read: the referenced path item is taken whole.',
+      ]);
     });
 
     it('follows a $ref chain to the component, and two keys sharing one component each carry its text over one payload model', () => {
