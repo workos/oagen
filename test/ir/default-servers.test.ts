@@ -3,7 +3,7 @@ import {
   baseUrlBeyondDefault,
   isDefaultServerEntry,
   isDefaultServerList,
-  serversBeyondDefault,
+  serversOrDefault,
 } from '../../src/ir/server-url.js';
 import type { ServerEntry } from '../../src/ir/types.js';
 
@@ -90,30 +90,22 @@ describe('isDefaultServerList', () => {
   });
 });
 
-describe('serversBeyondDefault', () => {
-  it('is an empty list for every spelling of the default', () => {
-    expect(serversBeyondDefault(undefined)).toEqual([]);
-    expect(serversBeyondDefault([])).toEqual([]);
-    expect(serversBeyondDefault([root])).toEqual([]);
-    expect(serversBeyondDefault([{ url: '/', description: 'Same origin' }])).toEqual([]);
-    expect(serversBeyondDefault([root, root])).toEqual([]);
-    // `/` references no variable, so one declared on it is not a server beyond the default (#292).
-    expect(serversBeyondDefault([rootWithVariable])).toEqual([]);
-    expect(serversBeyondDefault([root, rootWithVariable])).toEqual([]);
+describe('serversOrDefault', () => {
+  it("is OpenAPI's single `/` for every spelling of the default", () => {
+    expect(serversOrDefault(undefined)).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([])).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([root])).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([{ url: '/', description: 'Same origin' }])).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([root, root])).toEqual([{ url: '/' }]);
+    // `/` references no variable, so one declared on it is still only the default (#292).
+    expect(serversOrDefault([rootWithVariable])).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([root, rootWithVariable])).toEqual([{ url: '/' }]);
   });
 
-  it('leaves `/` out wherever it sits and keeps the rest in order', () => {
-    expect(serversBeyondDefault([root, staging])).toEqual([staging]);
-    expect(serversBeyondDefault([staging, root])).toEqual([staging]);
-    expect(serversBeyondDefault([root, staging, root, rootTemplate])).toEqual([staging, rootTemplate]);
-    expect(serversBeyondDefault([rootWithVariable, staging])).toEqual([staging]);
-  });
-
-  it('is the list itself, not a copy, when nothing is left out', () => {
-    const list = [staging];
-    expect(serversBeyondDefault(list)).toBe(list);
-    const template = [rootTemplate];
-    expect(serversBeyondDefault(template)).toBe(template);
+  it('is the list itself, not a copy, when it declares anything beyond the default', () => {
+    for (const list of [[staging], [root, staging], [staging, root], [rootWithVariable, staging], [rootTemplate]]) {
+      expect(serversOrDefault(list)).toBe(list);
+    }
   });
 });
 
