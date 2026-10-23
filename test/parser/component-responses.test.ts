@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
-import { collectModelRefs } from '../../src/ir/types.js';
-import type { Model, Operation } from '../../src/ir/types.js';
+import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
+import type { ApiSpec, Model, Operation, ResponseContent, ResponseHeader, TypeRef } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/component-responses.yml');
@@ -839,5 +839,342 @@ describe('responses written as $ref into components/responses (issue #234)', () 
         ]
       `);
     });
+  });
+});
+
+describe("a component response's other media types and headers (issue #302)", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  /** The issue's `Card`: an inline JSON body, an inline YAML body and a header whose schema is an inline object. */
+  const card = {
+    description: 'A card',
+    headers: { 'X-Meta': { schema: { type: 'object', properties: { trace: { type: 'string' } } } } },
+    content: {
+      'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } },
+      'application/yaml': { schema: { type: 'object', properties: { y: { type: 'string' } } } },
+    },
+  };
+  const cardRef = { $ref: '#/components/responses/Card' };
+  const ok = { description: 'ok' };
+
+  /** `GET /notes` (`getNote`) and `GET /pets` (`getPet`), two services, each mounting `Card` at its own key. */
+  const twoOperations = (noteKey: string, petKey: string, extra: Record<string, unknown> = {}) => ({
+    '/notes': { get: { operationId: 'getNote', responses: { ...extra, [noteKey]: cardRef } } },
+    '/pets': { get: { operationId: 'getPet', responses: { ...extra, [petKey]: cardRef } } },
+  });
+
+  async function parse(
+    paths: Record<string, unknown>,
+    components: { schemas?: Record<string, unknown>; responses?: Record<string, unknown> } = {},
+  ): Promise<ApiSpec> {
+    dir = mkdtempSync(join(tmpdir(), 'oagen-302-'));
+    const specPath = join(dir, 'spec.json');
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: '302', version: '1' },
+        paths,
+        components: { schemas: components.schemas ?? {}, responses: components.responses ?? { Card: card } },
+      }),
+    );
+    return parseSpec(specPath);
+  }
+
+  const typeName = (type: TypeRef | undefined): string | undefined =>
+    type?.kind === 'model' || type?.kind === 'enum'
+      ? type.name
+      : type?.kind === 'primitive'
+        ? type.type
+        : JSON.stringify(type);
+  const contentsOf = (entry: { contents?: ResponseContent[] } | undefined): string[] =>
+    (entry?.contents ?? []).map((c) => `${c.contentType}: ${typeName(c.type)}`);
+  const headersOf = (entry: { headers?: ResponseHeader[] } | undefined): string[] =>
+    (entry?.headers ?? []).map((h) => `${h.name}: ${typeName(h.type)}`);
+  const fieldsOf = (spec: ApiSpec, name: string) =>
+    spec.models.find((m) => m.name === name)?.fields.map((f) => [f.name, typeName(f.type)]);
+  const modelNames = (spec: ApiSpec): string[] => spec.models.map((m) => m.name).sort();
+  /** Every model minted for an `X-Meta` header and for an `application/yaml` body, whichever stem named it. */
+  const mintedFor = (spec: ApiSpec) => ({
+    meta: modelNames(spec).filter((name) => /XMeta\d*$/.test(name)),
+    yaml: modelNames(spec).filter((name) => /ApplicationYaml(Response|Error)\d*$/.test(name)),
+  });
+  const byName = (spec: ApiSpec): Map<string, Operation> =>
+    new Map(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+
+  /** Every model reference an operation or a model field makes that no model answers, as `owner → Model`. */
+  function unresolved(spec: ApiSpec): string[] {
+    const names = new Set(spec.models.map((m) => m.name));
+    const found: string[] = [];
+    for (const op of spec.services.flatMap((s) => s.operations)) {
+      for (const ref of collectOperationTypeRefs(op)) {
+        for (const name of collectModelRefs(ref)) if (!names.has(name)) found.push(`${op.name} → ${name}`);
+      }
+    }
+    for (const model of spec.models) {
+      for (const field of model.fields) {
+        for (const name of collectModelRefs(field.type))
+          if (!names.has(name)) found.push(`${model.name}.${field.name} → ${name}`);
+      }
+    }
+    return found;
+  }
+
+  /** Every model no operation and no model field reaches, the component schemas aside. */
+  function orphaned(spec: ApiSpec, componentNames: string[]): string[] {
+    const referenced = new Set<string>();
+    for (const op of spec.services.flatMap((s) => s.operations)) {
+      for (const ref of collectOperationTypeRefs(op)) for (const name of collectModelRefs(ref)) referenced.add(name);
+    }
+    for (const model of spec.models) {
+      for (const field of model.fields) for (const name of collectModelRefs(field.type)) referenced.add(name);
+    }
+    return spec.models.map((m) => m.name).filter((name) => !referenced.has(name) && !componentNames.includes(name));
+  }
+
+  /** Nothing dangles and nothing is orphaned. */
+  function expectSound(spec: ApiSpec, componentNames: string[] = []): void {
+    expect(unresolved(spec)).toEqual([]);
+    expect(orphaned(spec, componentNames)).toEqual([]);
+  }
+
+  it("the issue's repro: one YAML model and one header model, named after the component and shared by both operations", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('200', '200'));
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: `GetNoteApplicationYamlResponse` + `GetPetApplicationYamlResponse`, `NotesXMeta` + `PetsXMeta`.
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    for (const op of ['getNote', 'getPet']) {
+      const operation = byName(spec).get(op)!;
+      expect(contentsOf({ contents: operation.responseContents }), op).toEqual([
+        'application/json: CardResponse',
+        'application/yaml: CardApplicationYamlResponse',
+      ]);
+      expect(headersOf({ headers: operation.responseHeaders }), op).toEqual(['X-Meta: CardXMeta']);
+    }
+    expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['y', 'string']]);
+    expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'string']]);
+    expectSound(spec);
+  });
+
+  it('as a 404 on both operations: the same two models, suffixed `Response` as the body is, not `…Error`', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('404', '404', { '200': ok }));
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: `GetNoteApplicationYamlError` + `GetPetApplicationYamlError`, `NotesXMeta` + `PetsXMeta`.
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    for (const op of ['getNote', 'getPet']) {
+      const [error] = byName(spec).get(op)!.errors;
+      expect(error.statusCode, op).toBe(404);
+      expect(typeName(error.type), op).toBe('CardResponse');
+      expect(contentsOf(error), op).toEqual([
+        'application/json: CardResponse',
+        'application/yaml: CardApplicationYamlResponse',
+      ]);
+      expect(headersOf(error), op).toEqual(['X-Meta: CardXMeta']);
+    }
+    expectSound(spec);
+  });
+
+  it('mounted at 200 by one operation and at 404 by the other: still one model of each', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('200', '404', { '204': ok }));
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    const getNote = byName(spec).get('getNote')!;
+    const getPet = byName(spec).get('getPet')!;
+    const success = getNote.successResponses!.find((r) => r.statusCode === 200)!;
+    expect(contentsOf(success)).toEqual(contentsOf(getPet.errors[0]));
+    expect(headersOf(success)).toEqual(headersOf(getPet.errors[0]));
+    expect(headersOf(success)).toEqual(['X-Meta: CardXMeta']);
+    expectSound(spec);
+  });
+
+  it('on a `default` and a `4XX` written as a $ref: named after the component, as at an explicit status code', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('default', '4XX', { '200': ok }));
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: `GetNoteDefaultApplicationYamlResponse` + `GetPetClientErrorApplicationYamlResponse`,
+    // `NotesXMeta` + `PetsXMeta`. (The fallback body itself is #301's.)
+    expect(mintedFor(spec)).toEqual({ meta: ['CardXMeta'], yaml: ['CardApplicationYamlResponse'] });
+    const fallback = byName(spec).get('getNote')!.defaultResponse;
+    const range = byName(spec).get('getPet')!.rangeResponses?.[0];
+    expect(range?.range).toBe('4XX');
+    for (const entry of [fallback, range]) {
+      expect(contentsOf(entry)).toContain('application/yaml: CardApplicationYamlResponse');
+      expect(headersOf(entry)).toEqual(['X-Meta: CardXMeta']);
+    }
+    expectSound(spec);
+  });
+
+  it('on a 302 written as a $ref: every media type typed on its own, each named after the component', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('302', '302', { '200': ok }));
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(modelNames(spec)).toEqual(['CardApplicationJsonResponse', 'CardApplicationYamlResponse', 'CardXMeta']);
+    for (const op of ['getNote', 'getPet']) {
+      const redirect = byName(spec)
+        .get(op)!
+        .successResponses!.find((r) => r.statusCode === 302)!;
+      expect(contentsOf(redirect), op).toEqual([
+        'application/json: CardApplicationJsonResponse',
+        'application/yaml: CardApplicationYamlResponse',
+      ]);
+      expect(headersOf(redirect), op).toEqual(['X-Meta: CardXMeta']);
+    }
+    expectSound(spec);
+  });
+
+  it('from an operation without an operationId: the component names them, not the path', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse({
+      '/notes': { get: { responses: { '200': cardRef } } },
+      '/pets': { get: { operationId: 'getPet', responses: { '200': cardRef } } },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: `NotesGetApplicationYamlResponse` beside `GetPetApplicationYamlResponse`.
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    for (const op of spec.services.flatMap((s) => s.operations)) {
+      expect(contentsOf({ contents: op.responseContents }), op.name).toContain(
+        'application/yaml: CardApplicationYamlResponse',
+      );
+      expect(headersOf({ headers: op.responseHeaders }), op.name).toEqual(['X-Meta: CardXMeta']);
+    }
+    expectSound(spec);
+  });
+
+  it('a component already named `…Response` keeps one stem: `CardXMeta`, not `CardResponseXMeta`', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const ref = { $ref: '#/components/responses/CardResponse' };
+    const spec = await parse(
+      {
+        '/notes': { get: { operationId: 'getNote', responses: { '200': ref } } },
+        '/pets': { get: { operationId: 'getPet', responses: { '200': ref } } },
+      },
+      { responses: { CardResponse: card } },
+    );
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    expect(headersOf({ headers: byName(spec).get('getPet')!.responseHeaders })).toEqual(['X-Meta: CardXMeta']);
+    expectSound(spec);
+  });
+
+  it('qualifies the objects nested under the header and the YAML body by the component', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const nested = {
+      description: 'A card',
+      headers: {
+        'X-Meta': {
+          schema: {
+            type: 'object',
+            properties: { trace: { type: 'object', properties: { id: { type: 'string' } } } },
+          },
+        },
+      },
+      content: {
+        'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } },
+        'application/yaml': {
+          schema: { type: 'object', properties: { y: { type: 'object', properties: { z: { type: 'string' } } } } },
+        },
+      },
+    };
+    const spec = await parse(twoOperations('200', '200'), { responses: { Card: nested } });
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(modelNames(spec)).toEqual([
+      'CardApplicationYamlResponse',
+      'CardApplicationYamlResponseY',
+      'CardResponse',
+      'CardXMeta',
+      'CardXMetaTrace',
+    ]);
+    expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'CardXMetaTrace']]);
+    expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['y', 'CardApplicationYamlResponseY']]);
+    expectSound(spec);
+  });
+
+  it('steps around a component schema that owns the name with another shape, and both operations still share the stepped model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const other = { type: 'object', properties: { other: { type: 'integer' } } };
+    const spec = await parse(twoOperations('200', '200'), {
+      schemas: { CardXMeta: other, CardApplicationYamlResponse: other },
+      responses: { Card: card },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    // The header kind's candidate after the bare name, on a clash with a
+    // component, is the operation's (`CardGetNoteXMeta`); the content kind's
+    // is the status code's (`…Response200`). The second operation tries the
+    // stem the first settled on before its own and shares the model.
+    const getNote = byName(spec).get('getNote')!;
+    const getPet = byName(spec).get('getPet')!;
+    expect(headersOf({ headers: getNote.responseHeaders })).toEqual(['X-Meta: CardGetNoteXMeta']);
+    expect(headersOf({ headers: getPet.responseHeaders })).toEqual(['X-Meta: CardGetNoteXMeta']);
+    expect(contentsOf({ contents: getNote.responseContents })).toEqual([
+      'application/json: CardResponse',
+      'application/yaml: CardApplicationYamlResponse200',
+    ]);
+    expect(contentsOf({ contents: getPet.responseContents })).toEqual(
+      contentsOf({ contents: getNote.responseContents }),
+    );
+    expect(mintedFor(spec)).toEqual({
+      meta: ['CardGetNoteXMeta', 'CardXMeta'],
+      yaml: ['CardApplicationYamlResponse', 'CardApplicationYamlResponse200'],
+    });
+    // The components keep their own shape.
+    expect(fieldsOf(spec, 'CardXMeta')).toEqual([['other', 'integer']]);
+    expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['other', 'integer']]);
+    expectSound(spec, ['CardXMeta', 'CardApplicationYamlResponse']);
+  });
+
+  it('shares a component schema that admits the shape instead of minting a model', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse(twoOperations('200', '200'), {
+      schemas: {
+        CardXMeta: { description: 'the component', type: 'object', properties: { trace: { type: 'string' } } },
+      },
+      responses: { Card: card },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
+    expect(spec.models.find((m) => m.name === 'CardXMeta')?.description).toBe('the component');
+    for (const op of ['getNote', 'getPet']) {
+      expect(headersOf({ headers: byName(spec).get(op)!.responseHeaders }), op).toEqual(['X-Meta: CardXMeta']);
+    }
+    expectSound(spec);
+  });
+
+  it('leaves an inline response named after its operation and service', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const spec = await parse({
+      '/notes': { get: { operationId: 'getNote', responses: { '200': card, '404': card } } },
+    });
+    expect(warn).not.toHaveBeenCalled();
+
+    const getNote = byName(spec).get('getNote')!;
+    expect(contentsOf({ contents: getNote.responseContents })).toEqual([
+      'application/json: GetNoteResponse',
+      'application/yaml: GetNoteApplicationYamlResponse',
+    ]);
+    expect(headersOf({ headers: getNote.responseHeaders })).toEqual(['X-Meta: NotesXMeta']);
+    expect(contentsOf(getNote.errors[0])).toEqual([
+      'application/json: GetNoteError404',
+      'application/yaml: GetNoteApplicationYamlError',
+    ]);
+    expect(headersOf(getNote.errors[0])).toEqual(['X-Meta: NotesXMeta']);
+    expectSound(spec);
   });
 });
