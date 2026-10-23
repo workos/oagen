@@ -4,7 +4,7 @@ import { diffServers } from '../../src/differ/servers.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import { isDefaultServerList, resolveServerUrl, serversBeyondDefault } from '../../src/ir/server-url.js';
+import { isDefaultServerList, resolveServerUrl, serversOrDefault } from '../../src/ir/server-url.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Operation, ServerEntry, ServerVariable } from '../../src/ir/types.js';
 
@@ -489,7 +489,7 @@ describe("OpenAPI's default server with a variable (#291 read by the #292 rule)"
 
   it('is the default: `/` references no variable, so writing one on it declares nothing beyond the default', () => {
     expect(isDefaultServerList(rootWithPort)).toBe(true);
-    expect(serversBeyondDefault(rootWithPort)).toEqual([]);
+    expect(serversOrDefault(rootWithPort)).toEqual([{ url: '/' }]);
   });
 
   it('reports nothing against a document without servers or one that writes `/` out, in either direction', () => {

@@ -484,25 +484,29 @@ export function isDefaultServerEntry(server: ServerEntry): boolean {
  * it, because position decides the default host.
  *
  * The parser asks this of an operation's list and the document's: both at
- * the default means the operation inherits (`Operation.servers`, #291).
+ * the default means the operation inherits (`Operation.servers`, #291). The
+ * differ asks it to tell the `/` a document is only implied to have, which
+ * is never reported as added or removed, from one it lists beside another
+ * server, which is.
  */
 export function isDefaultServerList(servers: readonly ServerEntry[] | undefined): boolean {
   return !servers || servers.every(isDefaultServerEntry);
 }
 
 /**
- * The servers a list declares beyond OpenAPI's default: its entries that are
- * not the default server by `isDefaultServerEntry`, in order — the list
- * itself (the same array, not a copy) when none is, an empty list when
- * every one is. The differ matches servers on this, so a `/` entry is never
- * reported as added or removed, whether it stands alone or beside a named
- * host: a document without `servers`, one with `servers: []`, and one whose
- * only server is `/` all come out as `[]`, and `[/, host]` as `[host]`.
+ * The servers a document is served from: its list as written (the same
+ * array, not a copy) when it declares anything beyond the default, else
+ * OpenAPI's default server, a single `{ url: '/' }`. A document without
+ * `servers`, one with `servers: []`, one whose only server is `/`, and one
+ * that writes `/` out twice all come out as `[{ url: '/' }]` (a description
+ * on the entry is not carried: the default server has none), while
+ * `[/, host]` stays `[/, host]`, because there `/` is a server the document
+ * lists, not one it is implied to have. The differ matches servers on this,
+ * so the three spellings of the default pair with each other and with a `/`
+ * listed beside a host.
  */
-export function serversBeyondDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
-  if (!servers) return [];
-  const beyond = servers.filter((server) => !isDefaultServerEntry(server));
-  return beyond.length === servers.length ? servers : beyond;
+export function serversOrDefault(servers: readonly ServerEntry[] | undefined): readonly ServerEntry[] {
+  return servers && !isDefaultServerList(servers) ? servers : [{ url: DEFAULT_SERVER_URL }];
 }
 
 /**
