@@ -357,15 +357,17 @@ describe('response media types are matched by essence (issue #237)', () => {
         },
       });
       expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
-      // Both statuses derive `GetPetResponse`; the primary's definition is the one kept.
+      // Both statuses derive `GetPetResponse`; the primary's definition keeps the name.
       expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['owner']);
       const names = inlineModels.map((m) => m.name);
       expect(new Set(names).size).toBe(names.length);
       expect(names).toContain('GetPetResponseOwner');
-      // The 201's `tags` item model was referenced only by the 201's own
-      // `GetPetResponse`, which the 200's replaced, so it goes with it rather
-      // than staying behind with nothing referencing it (issue #280).
+      // The 201's body is another shape, so it steps to its status code with
+      // its `tags` item model (#309); nothing of it is left under the bare
+      // stem with nothing referencing it (issue #280).
       expect(names.some((n) => n.startsWith('GetPetResponseTag'))).toBe(false);
+      expect(fieldNames(inlineModels, 'GetPetResponse201')).toEqual(['tags']);
+      expect(names).toContain('GetPetResponse201Tags');
       expectClosed(op, inlineModels);
     });
 
@@ -401,10 +403,10 @@ describe('response media types are matched by essence (issue #237)', () => {
       expect(declaredFirst.op.pagination).toEqual(baseline.op.pagination);
     });
 
-    it('warns when a secondary body drops a model whose fields differ from the kept one', () => {
+    it('steps a secondary body whose fields differ from the kept one to its status code, keeping both (#309)', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        const { inlineModels } = getPetWith({
+        const { op, inlineModels } = getPetWith({
           '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
           '201': {
             description: 'created',
@@ -412,11 +414,13 @@ describe('response media types are matched by essence (issue #237)', () => {
           },
         });
         expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
-        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
-          expect.stringContaining(
-            'Inline model "GetPetResponse" from the 201 response has different fields than the 200',
-          ),
-        );
+        expect(fieldNames(inlineModels, 'GetPetResponse201')).toEqual(['age']);
+        expect(op.successResponses?.map((r) => r.type)).toEqual([
+          { kind: 'model', name: 'GetPetResponse' },
+          { kind: 'model', name: 'GetPetResponse201' },
+        ]);
+        expectClosed(op, inlineModels);
+        expect(warn).not.toHaveBeenCalled();
       } finally {
         warn.mockRestore();
       }

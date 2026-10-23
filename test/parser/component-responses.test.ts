@@ -1919,4 +1919,45 @@ describe('a component list envelope is reserved under both readings (#309 review
     );
     expect(warnings).toEqual([unpagedWarning]);
   });
+
+  it('reserves the kept reading at a secondary status code too, beside another primary body', async () => {
+    // The component is returned at the 201 of an operation whose 200 is a
+    // plain `{ id }`; the kept envelope keeps the component's stem, stepped
+    // past the clashing schema, and never the operation's primary stem.
+    const { spec, warnings } = await parseNotes(
+      {
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+              },
+              '201': { $ref: '#/components/responses/NotePage' },
+            },
+          },
+        },
+      },
+      { NotePageResponseData: { type: 'object', properties: { other: { type: 'string' } } } },
+    );
+    const op = opsByName(spec).get('listNotes')!;
+    expect(op.pagination).toBeUndefined();
+    expect(op.response).toEqual({ kind: 'model', name: 'ListNotesResponse' });
+    expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+      [200, { kind: 'model', name: 'ListNotesResponse' }],
+      [201, { kind: 'model', name: 'NotePageResponse2' }],
+    ]);
+    expect(fieldsOf(spec, 'ListNotesResponse')).toEqual([['id', { kind: 'primitive', type: 'string' }]]);
+    expect(fieldsOf(spec, 'NotePageResponse2')).toEqual([
+      ['data', { kind: 'array', items: { kind: 'model', name: 'NotePageResponse2Data' } }],
+      ['has_more', { kind: 'primitive', type: 'boolean' }],
+    ]);
+    expect(fieldsOf(spec, 'NotePageResponseData')).toEqual([['other', { kind: 'primitive', type: 'string' }]]);
+    expect(spec.models.map((m) => m.name).sort()).toEqual(
+      ['ListNotesResponse', 'NotePageResponse2', 'NotePageResponse2Data', 'NotePageResponseData'].sort(),
+    );
+    // The primary 200 is no envelope, so nothing warns.
+    expect(warnings).toEqual([]);
+  });
 });

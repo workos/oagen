@@ -60,6 +60,7 @@ import {
   collectModelTypeRefs,
   collectEnumRefs,
   collectOperationTypeRefs,
+  walkTypeRef,
 } from '../ir/types.js';
 import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
 import {
@@ -88,6 +89,7 @@ import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
+  ownerShares,
   registerInlineModels,
   reserveEnumNames,
   type InlineModelRegistry,
@@ -5865,6 +5867,10 @@ function extractResponses(
   // Each classified body's schema, for resolving an overridden `dataPath`
   // through the document when the IR cannot answer.
   const bodySchemas = new Map<number, SchemaObject>();
+  // The context each 2xx body's models were named under — `<Op>Response`,
+  // or the component's shared name — the stem a later status code's body
+  // steps from when a kept model holds one of its names (`stepSecondaryBody`).
+  const bodyContexts = new Map<number, string>();
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
@@ -5961,6 +5967,7 @@ function extractResponses(
         extractedType = result.response;
         bodyResults.set(code, result);
         bodySchemas.set(code, bodySchema);
+        bodyContexts.set(code, contextName);
       }
       const contents = extractResponseContents(
         resp.content,
@@ -6081,18 +6088,20 @@ function extractResponses(
 
   // Keep the models of every 2xx body: `successResponses` references each of
   // them, so keeping only one body's would leave the others dangling. Every
-  // status derives the same `<Op>Response` context name, so on a name clash
-  // the primary's definition — the one `response` points at — goes first and
-  // wins; the other bodies follow in status order.
-  // A dropped model whose shape differs from the kept one is warned about,
-  // since its status then points at a shape it did not declare. The models
-  // only that dropped copy referenced go with it (`reachedModels`): the
+  // status derives the same `<Op>Response` context name, so the primary's
+  // definition — the one `response` points at — goes first; the other bodies
+  // follow in status order, and a model of theirs the kept one shares
+  // (`modelFingerprint`) resolves to the kept definition silently. A later
+  // body that reaches a model the kept ones hold under another shape is
+  // re-derived under its own stem first — `<Op>Response<code>`, then a
+  // number (`stepSecondaryBody`) — so its `successResponses` entry keeps the
+  // shape its status code declared; only a clash on a model the stem does
+  // not name is still resolved to the kept definition, with a warning. The
+  // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
   // `successResponses` entry, so of its models only those the entry's type
-  // still reaches are kept; `CreatePetResponseOwner` under a 201
-  // `CreatePetResponse` the 200's `{ id }` replaced is not, rather than kept
-  // with nothing referencing it.
+  // still reaches are kept, rather than kept with nothing referencing them.
   const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
     if (a === primaryStatus) return -1;
     if (b === primaryStatus) return 1;
@@ -6100,6 +6109,9 @@ function extractResponses(
   });
   const keptByName = new Map<string, { model: Model; status: number }>();
   for (const [status, result] of bodiesByPrimacy) {
+    if (status !== primaryStatus) {
+      stepSecondaryBody(result, bodyContexts.get(status) ?? operationBodyName, status, keptByName, ctx.registry);
+    }
     const reached =
       status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
     for (const model of result.inlineModels) {
@@ -6206,6 +6218,90 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
     for (const field of resolved.fields) queue.push(...collectModelRefs(field.type));
   }
   return reached;
+}
+
+/**
+ * Re-derive a later status code's body under its own stem when a model it
+ * reaches is already kept — by the primary, or by an earlier status code —
+ * under another shape, so its `successResponses` entry keeps the shape the
+ * status code declared instead of resolving to the kept model's: a 201
+ * `{ owner: { id } }` beside a 200 `{ id }`, or a list envelope kept at a
+ * 201 beside a 200 `{ id }` (`{ data, total_pages }`, no paging parameter).
+ * The stem steps as a secondary media-type body's does (`deferredNamingStem`):
+ * the status code first (`CreatePetResponse201`), then a number
+ * (`CreatePetResponse2`, `…3`, …). Every model the body reaches that its
+ * context names moves with it (`CreatePetResponse201Owner`) — except one a
+ * kept model already holds under the same shape, which stays shared (the
+ * 201's `{ owner: { id } }` beside the 200's keeps `CreatePetResponseOwner`),
+ * unless it references a model that moves — the entry's type and the
+ * models' fields rewritten in place, so the `contents` entry that shares
+ * the type follows; a model named outside the context (a settled item,
+ * `CreatePetItem`; a titled variant) keeps its name. A candidate is taken
+ * when a name it would give is kept, or owned in the spec-wide registry by
+ * a component or another operation, under a shape the owner does not share
+ * (`ownerShares`); an identical shape shares the name, as it always did.
+ * Returns whether anything moved: nothing does when no reached model
+ * clashes, or when the clash is on a model the context does not name, which
+ * the caller then reports as before.
+ */
+function stepSecondaryBody(
+  result: ResponseExtractionResult,
+  context: string,
+  status: number,
+  kept: ReadonlyMap<string, { model: Model; status: number }>,
+  registry: InlineModelRegistry | undefined,
+): boolean {
+  const sharedByKept = (model: Model, name: string): boolean => {
+    const keptModel = kept.get(name)?.model;
+    return keptModel !== undefined && modelFingerprint(keptModel) === modelFingerprint(model);
+  };
+  const clashes = (model: Model, name: string): boolean => {
+    const fingerprint = modelFingerprint(model);
+    const keptModel = kept.get(name)?.model;
+    if (keptModel && modelFingerprint(keptModel) !== fingerprint) return true;
+    const owner = registry?.get(name);
+    return owner !== undefined && !ownerShares(owner, model, fingerprint);
+  };
+  // Reached through the body's own models, not the kept ones: the body
+  // keeps its root once it steps, so everything under that root is its.
+  const own = reachedModels(result.response, result.inlineModels, new Map());
+  const named = [...own].filter((model) => model.name.startsWith(context));
+  if (!named.some((model) => clashes(model, model.name))) return false;
+
+  // What moves: every model the context names, except one a kept model
+  // already holds under the same shape, which stays shared — unless it
+  // references a model that moves, since its shape then differs after all.
+  const moving = new Set(named.filter((model) => !sharedByKept(model, model.name)));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const model of named) {
+      if (moving.has(model)) continue;
+      const movingNames = new Set([...moving].map((m) => m.name));
+      if (model.fields.some((field) => collectModelRefs(field.type).some((name) => movingNames.has(name)))) {
+        moving.add(model);
+        grew = true;
+      }
+    }
+  }
+  const under = (stem: string): Map<Model, string> =>
+    new Map([...moving].map((model) => [model, stem + model.name.slice(context.length)]));
+  let names = under(`${context}${status}`);
+  // Unbounded on purpose: the kept names and the registry are finite and
+  // every step is a new number, so a free stem is always reached.
+  for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) names = under(`${context}${n}`);
+
+  const byOldName = new Map([...names].map(([model, name]) => [model.name, name]));
+  const rewrite = (ref: TypeRef): void =>
+    walkTypeRef(ref, {
+      model: (modelRef) => {
+        const to = byOldName.get(modelRef.name);
+        if (to !== undefined) modelRef.name = to;
+      },
+    });
+  rewrite(result.response);
+  for (const model of own) for (const field of model.fields) rewrite(field.type);
+  for (const [model, name] of names) model.name = name;
+  return true;
 }
 
 /**
