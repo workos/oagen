@@ -31,11 +31,14 @@ import {
  * the shared name can be renamed and exactly its own references repointed;
  * every name already in play (`reserved`) — the component models and enums,
  * and every inline model of every pass — so the new name is free; and the
- * names the document's enums hold (`enums`) — those in `spec.enums` as the
- * passes run: the component enums, and the inline enums lifted from the
- * component schemas' own fields, union variants and array items — which no
- * inline model may keep, whatever its shape. A name minted here is added to
- * `reserved`, so both passes, and every mint within one, agree.
+ * enum names among them (`enums`), which no inline model may keep, whatever
+ * its shape: when the component fields are settled before the operations
+ * are read (`settleFieldInlineModels`), the names `spec.enums` holds — the
+ * component enums and the inline enums lifted from the component schemas'
+ * own fields, union variants and array items; when the merges run, every
+ * enum name in play — those, and every inline enum an operation's or a
+ * webhook's reference carries (`reservedNamesByKind`). A name minted here is
+ * added to `reserved`, so both passes, and every mint within one, agree.
  */
 export interface InlineModelNaming {
   bundles: InlineModelBundle[];
@@ -56,19 +59,47 @@ export interface InlineModelNaming {
  * settled name. Read once before the operations (`settleFieldInlineModels`)
  * and again, with the copies made since, before the merges.
  */
-export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
+export function fieldInlineModelBundles(
+  groups: FieldInlineModelGroup[],
+  models: Model[],
+  survivors?: FieldModelSurvivors,
+): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
+  const survivorOf = (model: Model): Model => {
+    if (!survivors) return model;
+    const winner = survivors.folded.get(model);
+    return winner && !survivors.componentNames.has(winner.name) ? winner : model;
+  };
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
+    const siteModels = fieldModels.map(survivorOf);
+    const shared = siteModels.flatMap((model) => survivors?.sharedRefs.get(model) ?? []);
     return {
       qualifier: parentName,
-      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
-      models: fieldModels,
+      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName), ...shared],
+      models: siteModels,
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
+}
+
+/**
+ * What a field's site holds once the fields are settled and the operations
+ * read (`fieldInlineModelBundles` at the merges): `folded`, from
+ * `settleFieldInlineModels`, names the definition each dropped copy folded
+ * onto, so an object the component pass itself minted for the field stands
+ * in for the copy and can be renamed through the field — never a component
+ * (`componentNames`), which is never renamed; `sharedRefs`, from
+ * `extractOperations`, are the references a header, parameter or fallback
+ * body wrote by sharing such a model, which the site repoints with the
+ * field's own.
+ */
+export interface FieldModelSurvivors {
+  folded: ReadonlyMap<Model, Model>;
+  componentNames: ReadonlySet<string>;
+  sharedRefs: ReadonlyMap<Model, readonly TypeRef[]>;
 }
 
 /**
@@ -79,7 +110,8 @@ export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models:
  * included), and every inline enum — named on its `EnumRef` when the field,
  * parameter or header was typed, and only lifted into `spec.enums` after the
  * merges have run — found in any model's fields or named-union variants, or
- * anywhere on an operation.
+ * anywhere on an operation or webhook. `reservedNamesByKind` gives the same
+ * set beside the enum names among it.
  */
 export function reservedTypeNames(
   models: Model[],
@@ -89,20 +121,48 @@ export function reservedTypeNames(
   services: Service[],
   webhooks: Webhook[] = [],
 ): Set<string> {
-  const reserved = new Set<string>();
+  return reservedNamesByKind(models, enums, inlineModels, fieldInlineModels, services, webhooks).all;
+}
+
+/**
+ * `reservedTypeNames` (`all`) beside the enum names among them (`enums`):
+ * every enum in `enums` and every inline enum a model's field or variant, an
+ * operation's reference or a webhook's carries — every enum name in play,
+ * which no inline model the merge passes settle may keep
+ * (`InlineModelNaming.enums`). One walk decides both, so the two sets
+ * always agree on what an `EnumRef` names.
+ */
+export function reservedNamesByKind(
+  models: Model[],
+  enums: Enum[],
+  inlineModels: Model[],
+  fieldInlineModels: Model[],
+  services: Service[],
+  webhooks: Webhook[] = [],
+): { all: Set<string>; enums: Set<string> } {
+  const all = new Set<string>();
+  const enumNames = new Set<string>();
   const visit = (ref: TypeRef): void => {
-    walkTypeRef(ref, { enum: (r) => reserved.add(r.name) });
+    walkTypeRef(ref, {
+      enum: (r) => {
+        all.add(r.name);
+        enumNames.add(r.name);
+      },
+    });
   };
   for (const model of [...models, ...inlineModels, ...fieldInlineModels]) {
-    reserved.add(model.name);
+    all.add(model.name);
     for (const ref of collectModelTypeRefs(model)) visit(ref);
   }
-  for (const e of enums) reserved.add(e.name);
+  for (const e of enums) {
+    all.add(e.name);
+    enumNames.add(e.name);
+  }
   for (const service of services) {
     for (const op of service.operations) for (const ref of collectOperationTypeRefs(op)) visit(ref);
   }
   for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) visit(ref);
-  return reserved;
+  return { all, enums: enumNames };
 }
 
 /**
@@ -186,12 +246,12 @@ function keepLargestByName(models: Model[]): Model[] {
  *   contenders of one name without an owner are left to the pass's own choice
  *   (`keepLargestByName`).
  *
- * A contender named like one of the document's enums (`naming.enums`) with
- * no owner of that name takes a name of its own (`renameInlineCopy`)
- * whatever its shape or flag, with a note: an enum admits no model, so the
- * IR never declares a model and an enum under one name. A name both a
- * component model and a component enum hold is the document's own clash and
- * is settled as the model's.
+ * A contender named like an enum (`naming.enums`) with no owner of that
+ * name takes a name of its own whatever its shape or flag, with a note —
+ * identical copies one name per shape, as under an owner (`renameClusters`):
+ * an enum admits no model, so the IR never declares a model and an enum
+ * under one name. A name both a component model and an enum hold is the
+ * document's own clash and is settled as the model's.
  *
  * A renamed copy takes its site's qualifier prefixed (`mintQualifiedName`) —
  * `GetLegacyWidgetWidget` or `GetWidgetWidget` for a response of
@@ -244,22 +304,25 @@ function settleSharedNames(
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
     const owner = owners.get(name);
-    // A name one of the document's enums holds is no model's, whatever the
+    // A name an enum holds (`naming.enums`) is no model's, whatever the
     // copy's shape or flag: nothing admits it and nothing folds onto it, so
-    // every copy leaves the name through its site. A name both a component
-    // model and a component enum hold is the document's own clash and is
-    // settled as the model's, below.
+    // every copy leaves the name through its site, identical copies sharing
+    // one model under the new name as they do under an owner's
+    // (`renameClusters`). Live and deprecated copies never share a model
+    // (`differOnlyByDeprecation`), so each flag's copies cluster on their
+    // own. A name both a component model and an enum hold is the document's
+    // own clash and is settled as the model's, below.
     if (!owner && naming?.enums.has(name)) {
-      for (const copy of group) {
-        const bundle = bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
-          );
-          continue;
-        }
-        const renamed = renameInlineCopy(copy, name, bundle, naming);
-        console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": enum "${name}" owns the name`);
+      for (const deprecated of [false, true]) {
+        renameClusters(
+          name,
+          group.filter((copy) => !!copy.deprecated === deprecated),
+          naming,
+          bundleOf,
+          folded,
+          `enum "${name}" owns the name`,
+          `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
+        );
       }
       continue;
     }
@@ -275,10 +338,9 @@ function settleSharedNames(
     }
 
     // The copies that agree with the name's flag and that the owner does
-    // not share, clustered by shape in document order: identical copies
-    // that must leave the owner's name share one model under it, as they
-    // would share the bare name without the owner (`keepLargestByName`).
-    const clashing = new Map<string, Model[]>();
+    // not share leave the owner's name, one model per shape
+    // (`renameClusters`).
+    const clashing: Model[] = [];
     for (const copy of group) {
       if (!!copy.deprecated !== nameDeprecated || !owner) continue;
       const bundle = naming && bundleOf.get(copy);
@@ -286,35 +348,17 @@ function settleSharedNames(
         folded.set(copy, owner);
         continue;
       }
-      const shape = modelFingerprint(copy);
-      clashing.set(shape, [...(clashing.get(shape) ?? []), copy]);
+      clashing.push(copy);
     }
-    for (const cluster of clashing.values()) {
-      let renamed: string | undefined;
-      let leader: Model | undefined;
-      for (const copy of cluster) {
-        const bundle = naming && bundleOf.get(copy);
-        if (!bundle) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
-          );
-          continue;
-        }
-        if (renamed === undefined || leader === undefined) {
-          renamed = renameInlineCopy(copy, name, bundle, naming);
-          leader = copy;
-          continue;
-        }
-        repointSite(bundle, name, renamed);
-        folded.set(copy, leader);
-      }
-      if (renamed !== undefined) {
-        const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
-        console.warn(
-          `[oagen] Renamed inline model "${name}" → "${renamed}": its shape differs from component schema "${name}"${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
-        );
-      }
-    }
+    renameClusters(
+      name,
+      clashing,
+      naming,
+      bundleOf,
+      folded,
+      `its shape differs from component schema "${name}"`,
+      `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
+    );
 
     for (const copy of group) {
       if (!!copy.deprecated === nameDeprecated) continue;
@@ -387,6 +431,61 @@ function repointSite(bundle: InlineModelBundle, name: string, renamed: string): 
   for (const root of bundle.roots) renameTypeRefModels(root, renames, inlineRefAdmit(true));
   for (const model of bundle.models) renameModelRefs(model, renames, inlineRefAdmit(false));
   bundle.renamed?.(name, renamed);
+}
+
+/**
+ * Move `copies` — contenders of `name` that may not keep it, whether a
+ * component of another shape or an enum holds it — off the name, one model
+ * per shape: the copies are clustered by shape in document order
+ * (`modelFingerprint`), the first of a cluster with a site is renamed
+ * through it (`renameInlineCopy`) and every later one is repointed to that
+ * name (`repointSite`) and folded onto it, so identical copies that must
+ * leave a name share one model under the new one, as they would share the
+ * bare name with no claimant (`keepLargestByName`). Each cluster's rename is
+ * noted as `[oagen] Renamed inline model "<name>" → "<renamed>": <reason>`,
+ * with the number of sites when more than one shares it. A copy without a
+ * site cannot be renamed and is left under `name`, `noSite` said for each.
+ * The copies must agree on `deprecated`: a cluster never joins a live copy
+ * to a deprecated one (`differOnlyByDeprecation`).
+ */
+function renameClusters(
+  name: string,
+  copies: readonly Model[],
+  naming: InlineModelNaming | undefined,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+  reason: string,
+  noSite: string,
+): void {
+  const clusters = new Map<string, Model[]>();
+  for (const copy of copies) {
+    const shape = modelFingerprint(copy);
+    clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
+  }
+  for (const cluster of clusters.values()) {
+    let renamed: string | undefined;
+    let leader: Model | undefined;
+    for (const copy of cluster) {
+      const bundle = naming && bundleOf.get(copy);
+      if (!naming || !bundle) {
+        console.warn(noSite);
+        continue;
+      }
+      if (renamed === undefined || leader === undefined) {
+        renamed = renameInlineCopy(copy, name, bundle, naming);
+        leader = copy;
+        continue;
+      }
+      repointSite(bundle, name, renamed);
+      folded.set(copy, leader);
+    }
+    if (renamed !== undefined) {
+      const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+      console.warn(
+        `[oagen] Renamed inline model "${name}" → "${renamed}": ${reason}${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
+      );
+    }
+  }
 }
 
 /**
@@ -557,26 +656,38 @@ export function mergeInlineResponseModels(
  * whatever its shape, so the IR never declares a model and an enum under one
  * name. Returns the field models still competing for a name, the renamed
  * ones under their new names; the merges that follow compare them with the
- * operations' survivors only (`mergeFieldInlineModels`).
+ * operations' survivors only (`mergeFieldInlineModels`). `folded`, when
+ * given, receives each dropped copy keyed to the model it folded onto — the
+ * component, or the object the component pass itself minted for the same
+ * field — so the field's site can stand in for the survivor later
+ * (`fieldInlineModelBundles`).
  */
 export function settleFieldInlineModels(
   components: Model[],
   fieldInlineModels: Model[],
   naming?: InlineModelNaming,
+  folded?: Map<Model, Model>,
 ): Model[] {
-  return settleAgainstComponents(components, fieldInlineModels, naming);
+  return settleAgainstComponents(components, fieldInlineModels, naming, folded);
 }
 
 /**
  * `contenders` settled against `components` (`settleSharedNames`), minus
  * those that folded onto one and those still named like one — a kept copy
  * still carrying a component's name had no site to be renamed from, and the
- * component's definition stands.
+ * component's definition stands. `folded`, when given, receives each folded
+ * copy keyed to the definition that replaced it.
  */
-function settleAgainstComponents(components: Model[], contenders: Model[], naming?: InlineModelNaming): Model[] {
+function settleAgainstComponents(
+  components: Model[],
+  contenders: Model[],
+  naming?: InlineModelNaming,
+  folded?: Map<Model, Model>,
+): Model[] {
   const owners = new Map(components.map((m) => [m.name, m]));
-  const { kept } = settleSharedNames(owners, contenders, naming);
-  return kept.filter((model) => !owners.has(model.name));
+  const settled = settleSharedNames(owners, contenders, naming);
+  for (const [copy, winner] of settled.folded) folded?.set(copy, winner);
+  return settled.kept.filter((model) => !owners.has(model.name));
 }
 
 /**

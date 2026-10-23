@@ -687,7 +687,7 @@ describe('response content types', () => {
       ];
       const enums: Enum[] = [];
 
-      // Built by hand, with no error body, so the operations own none.
+      // Built by hand, with no component response, so no site is shared.
       collectInlineEnumsFromOperations(services, enums, new Set());
 
       expect(enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
