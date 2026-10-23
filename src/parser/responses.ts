@@ -588,10 +588,17 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
  * `allOf` nested inside one — and a stop field declared in any of them is
  * read. The one place the walk resolves a node, so the companions and the
  * stop field are read from the same shape, at every level, that the path
- * walk reaches the data array through. A reference is recorded before it
- * is followed, so a component that reaches itself — directly, through a
- * wrapper, or through a member — is read once; an `allOf` member's own
- * `properties` beside its `allOf` are folded in as its first member
+ * walk reaches the data array through. One `seen` runs through the whole
+ * walk: the `$ref` strings `resolveBareSchema` records as it follows them,
+ * handed to every call the walk makes, so a reference reached inside a
+ * wrapper is as seen as one written on the member; and, for an inline
+ * node, the schema object itself. No node is entered twice, under whatever
+ * wrapper or at whatever depth it reappears, so a component that reaches
+ * itself (`Base.allOf` holding `{ oneOf: [{ $ref: Base }, { type: 'null'
+ * }] }`, or `{ $ref: Base }` outright), two components that reach each
+ * other, and a document whose objects form a cycle are each read once and
+ * end the walk where they repeat. An `allOf` member's own `properties`
+ * beside its `allOf` are folded in as its first member
  * (`foldSiblingProperties`, through `unwrapNullableSchema`). A property
  * declared by more than one member keeps both declarations' shape when both
  * are inline objects — `pagination.next` from one member and
@@ -609,13 +616,15 @@ function collectEnvelopeProperties(
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
   const seenRefs = new Set<string>();
+  const seenNodes = new WeakSet<SchemaObject>();
 
   const visit = (s: SchemaObject): void => {
-    if (s.$ref) {
-      if (seenRefs.has(s.$ref)) return;
-      seenRefs.add(s.$ref);
-    }
-    const bare = resolveBareSchema(s, componentSchemas);
+    if (seenNodes.has(s)) return;
+    seenNodes.add(s);
+    const bare = resolveBareSchema(s, componentSchemas, seenRefs);
+    // A reference the walk has followed already, or one nothing resolves:
+    // the walk ends on it, as the resolver did.
+    if (bare.$ref) return;
     for (const sub of bare.allOf ?? []) visit(sub);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;

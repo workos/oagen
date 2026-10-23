@@ -1197,6 +1197,81 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       }
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it("ends the walk where a component reaches itself through a nullable allOf member (Greptile's cycle)", async () => {
+      // `Base.allOf` holds a nullable reference back to `Base`; beside it
+      // `{ data, has_more }` makes the body a recognized envelope, so the
+      // cycle is met with and without an override, and as a kept wrapper.
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const baseRef = { $ref: '#/components/schemas/Base' };
+      const Base = { allOf: [nullOf(baseRef)] };
+      const PetPage = {
+        allOf: [nullOf(baseRef), { type: 'object', properties: { data: petArray, has_more: { type: 'boolean' } } }],
+      };
+      const schemas = { Base, PetPage };
+      const unwrapped = {
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+        envelopeFields: ['has_more'],
+      };
+      const detected = onlyOperation(
+        await parseJson(
+          petsSpec(
+            { parameters: [query('page'), query('limit')], responses: jsonResponse(PetPage) },
+            { schemas: { Pet, ...schemas } },
+          ),
+        ),
+      );
+      expect(projection(detected)).toEqual(unwrapped);
+      const restated = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+      expect(projection(restated)).toEqual(unwrapped);
+      const kept = onlyOperation(
+        await parseJson(listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, schemas)),
+      );
+      expect(kept.response).toEqual({ kind: 'model', name: 'PetPage' });
+      expect(projection(kept)).toEqual({
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+      });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads the stop field once through a direct self-reference, a two-schema cycle, and an inline object that loops (Greptile)', async () => {
+      // The stop field lives in the cyclic component; the wrapper beside
+      // `data` is kept under the override, written as a `$ref` and inline.
+      const nullOf = (variant: unknown) => ({ oneOf: [variant, { type: 'null' }] });
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const hasMore = { type: 'object', properties: { has_more: { type: 'boolean' } } };
+      const cycles: Record<string, Record<string, unknown>> = {
+        directSelf: { Base: { allOf: [ref('Base'), hasMore] } },
+        nullableSelf: { Base: { allOf: [nullOf(ref('Base')), hasMore] } },
+        twoSchemas: {
+          Base: { allOf: [nullOf(ref('Other')), hasMore] },
+          Other: { allOf: [nullOf(ref('Base')), { type: 'object', properties: { page: { type: 'integer' } } }] },
+        },
+        inlineObject: {
+          Base: { type: 'object', properties: { has_more: { type: 'boolean' } }, allOf: [nullOf(ref('Base'))] },
+        },
+      };
+      const expected = {
+        dataPath: 'data',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+      };
+      for (const [label, components] of Object.entries(cycles)) {
+        const PetPage = { allOf: [nullOf(ref('Base')), { type: 'object', properties: { data: petArray } }] };
+        const schemas = { ...components, PetPage };
+        const referenced = onlyOperation(await parseJson(listOp(ref('PetPage'), { dataPath: 'data' }, schemas)));
+        expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
+        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas)));
+        expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 
   describe('operationHints[...].pagination from ParseOptions', () => {
