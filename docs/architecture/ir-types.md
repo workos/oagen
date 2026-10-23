@@ -704,7 +704,7 @@ interface Field {
   type: TypeRef;
   required: boolean;
   description?: string;
-  externalDocs?: ExternalDocs; // The field schema's own, a $ref sibling included; a bare $ref yields none (see ExternalDocs)
+  externalDocs?: ExternalDocs; // The field schema's own, a $ref sibling included; a bare $ref yields none unless it names an array component, whose link the field carries (see ExternalDocs)
   readOnly?: boolean;
   writeOnly?: boolean;
   deprecated?: boolean;

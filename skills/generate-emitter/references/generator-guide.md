@@ -101,10 +101,10 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `type` — `TypeRef`
   - `required` — `boolean`
   - `description?`, `readOnly?`, `writeOnly?`, `deprecated?` — doc text and modifier flags
-  - `externalDocs?` — the field schema's own link (a `$ref` sibling's included; a bare `$ref` yields none), for a `@see`-style tag
+  - `externalDocs?` — the field schema's own link (a `$ref` sibling's included), for a `@see`-style tag. A bare `$ref` yields none — the referenced model, union or enum carries its own — unless it names an array component, which has no model to carry it: the field then takes the component's, by the one rule `description`, `deprecated`, `externalDocs`, `extensions` and `example` / `examples` share (never `constraints`)
   - `default?`, `example?`, `examples?` — spec-declared values (`example` is the schema's `example`, else `examples[0]`)
   - `constraints?` — validation keywords on the field's schema (`Constraints`)
-  - `extensions?` — the field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none), read like `constraints`; escape a value before writing it into source
+  - `extensions?` — the field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array component, whose keys the field then carries, as it carries that component's `externalDocs`); escape a value before writing it into source
 - Output: One file per model, using the exact model pattern from the design doc
 - Use `type-map.ts` to convert field types
 
