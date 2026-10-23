@@ -18,8 +18,9 @@ import type {
  * and bare parenthetical refs: `(/path)` → `(https://example.com/path)`
  *
  * Two kinds of text are walked, each by one rule: a node's prose — its
- * `description`, and on an operation also `summary`, `responseDescription`
- * and `pagination.dataDescription` — and the `description` of a node's
+ * `description`, on an operation and a webhook also `summary` and
+ * `requestBodyDescription`, and on an operation `responseDescription` and
+ * `pagination.dataDescription` too — and the `description` of a node's
  * `externalDocs`, whose `url` is left exactly as written (OpenAPI allows it
  * to be relative to the document's own location, which is not the doc site).
  * The nodes are every one that carries them — the spec, its services,
@@ -117,11 +118,13 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
   function operation(op: Operation): Operation {
     return {
       ...op,
-      // `summary` and `responseDescription` are optional and absent (not
-      // undefined) when the document declares none; `expandText` keeps that.
+      // `summary`, `requestBodyDescription` and `responseDescription` are
+      // optional and absent (not undefined) when the document declares none;
+      // `expandText` keeps that.
       ...expandText(op, 'summary'),
       ...expandText(op, 'description'),
       ...expandExternalDocs(op),
+      ...expandText(op, 'requestBodyDescription'),
       ...expandText(op, 'responseDescription'),
       pathParams: parameters(op.pathParams),
       queryParams: parameters(op.queryParams),
@@ -152,6 +155,7 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
       ...expandText(hook, 'summary'),
       ...expandText(hook, 'description'),
       ...expandExternalDocs(hook),
+      ...expandText(hook, 'requestBodyDescription'),
       headerParams: parameters(hook.headerParams),
       queryParams: parameters(hook.queryParams),
       ...(hook.cookieParams ? { cookieParams: parameters(hook.cookieParams) } : {}),
