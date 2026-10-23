@@ -67,14 +67,21 @@ A missing kind means an entire category of types won't generate correctly.
 - `pagination` — Auto-paging iterator generation (cursor, offset, page, link-header strategies; optional `endOfIteration` stop field)
 - `requestBodyEncoding` — Content-type handling: json (`application/json` and any `+json` media type), form-data, form-urlencoded, binary, text
 - `requestBodyRequired` — Whether the body argument is mandatory or optional
-- `requestBodyDescription` — The request body's doc text (the Request Body Object's own, else its picked schema's), for the body argument's doc tag; also on `Webhook`
 - `requestBodyContentType` — The media type to send as `Content-Type` (the picked entry's essence, `application/merge-patch+json`)
-- `injectIdempotencyKey` — Whether to inject an idempotency key header
+- `injectIdempotencyKey` — Whether to inject an idempotency key header (the `Idempotency-Key` parameter is left out of `headerParams`)
+- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its `headers`, `description` and `contentTypes` / `contents`. Types the errors an operation does not list individually, and the success body of an operation with no explicit 2xx (`response` is `unknown` there)
+- `rangeResponses` — `1XX`–`5XX` range responses, each with the same fields; resolve a status as the explicit entry, then its range, then `defaultResponse`. A `4XX`/`5XX` body is an error body (`<Op>Error4Xx`); the `2XX` body is the success body when no explicit 2xx is declared
 
 #### UnionType
 
 - `discriminator` — Discriminator property and mapping for tagged unions
 - `compositionKind` — Whether the union came from allOf (inheritance), oneOf (exclusive), or anyOf (open). Emitters use this to decide serialization strategy.
+
+#### Model
+
+- `variants` — The members of a named union (a component schema that is itself a `oneOf`/`anyOf`), one `TypeRef` per non-null variant; such a model must be emitted as a union of these, not as a data class — its `fields` are only the inline variants' properties merged as optional fields
+- `compositionKind` — `oneOf` or `anyOf`, present exactly when `variants` is
+- `discriminator` — Set on a discriminated named union (an explicit `discriminator:`, or a const-pinned property every variant shares) and on an allOf+oneOf dispatcher (no `variants`; the mapping alone names them); generate a dispatcher from `property` and `mapping` (IR model names). A named union without one is an undiscriminated union of `variants`
 
 #### PrimitiveType
 
@@ -82,7 +89,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### ErrorResponse
 
-- `type` — Structured error type for typed exception/error classes
+- `type` — Structured error type for typed exception/error classes: a component model for a `$ref` body, a `<Op>Error<code>` model `generateModels` emits for an inline object body, or a `<Op>Error<code>` enum `generateEnums` emits for a body that is itself an inline enum
 - `headers` — Declared response headers (e.g. `Retry-After` on a 429) for typed error accessors
 
 ### Priority: MEDIUM (documentation — affects developer experience)
@@ -111,9 +118,8 @@ A missing kind means an entire category of types won't generate correctly.
 - `responseStatusCode` — The primary response's status code (`200`, `201`, `204`, a lone `302`), for an SDK that checks or documents the status it expects; absent when the operation declares no 2xx or 3xx response
 - `responseContentTypes` — Media types the primary response offers (`text/html` and `application/pdf`), with a type per media type in `responseContents`; drives `Accept` headers and per-format return types
 - `requestBodyContentTypes` — Media types the request body accepts (`application/json` and `text/csv`), with a type per media type in `requestBodyContents`; drives a body argument or serializer per media type
+- `requestBodyDescription` — The request body's doc text (the Request Body Object's own, else its picked schema's), for the body argument's doc tag; also on `Webhook`
 - `errors` — Error responses for exception/error documentation (each carries its own `description`)
-- `defaultResponse` — The `default` response: the body type for every status the operation does not list (typically the API's error shape), with its media types in `contentTypes` / `contents` as on a success entry
-- `rangeResponses` — `1XX`–`5XX` range responses; resolve a status as the explicit entry, then its range, then `defaultResponse` (each fallback entry carries its own `description` and media-type lists)
 - `cookieParams` — Cookie parameter handling
 - `tags` — The operation's tags in document order, present only when at least one usable entry remains; for grouping or doc comments
 - `servers` — Operation-level servers (own, else the Path Item's), present only when they differ from `ApiSpec.servers`; a request goes to `op.servers ?? spec.servers`
@@ -123,7 +129,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `type` — Every `TypeRef` kind, a model reference included: an inline object parameter (`style: deepObject`), or an array, map or union holding one, references a model the parser created (`PetsFilter`), as a response header's does
 - `description` — Parameter description content
 - `externalDocs` — The parameter schema's link (falls back to its `$ref` target), for the param doc tag
-- `deprecated` — Deprecated marker on params (first truthy of the parameter object, its inline `schema`, then the `$ref`'d component schema)
+- `deprecated` — Deprecated marker on params (`true` when any of the parameter object, its inline `schema` or the `$ref`'d component schema says `deprecated: true`)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or argument checks
@@ -178,7 +184,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.requestBodyDescription`, `\.requestBodyContentType`, `\.requestBodyContentTypes`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.requestBodyDescription`, `\.requestBodyContentType`, `\.requestBodyContentTypes`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.variants`, `\.contentType`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -243,51 +249,54 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### HIGH priority suggestions
 
-| IR Field                           | What to Generate                                                                                                                    |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Missing TypeRef kinds              | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                                 |
-| `ApiSpec.auth`                     | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                    |
-| `Operation.pagination`             | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`           |
-| `Operation.requestBodyEncoding`    | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                         |
-| `Operation.requestBodyRequired`    | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out     |
-| `Operation.requestBodyDescription` | Print it as the body argument's doc text (a `@param body` tag); `Webhook.requestBodyDescription` documents the payload the same way |
-| `Operation.requestBodyContentType` | Send it as the `Content-Type` header, producing parameters such as a multipart boundary yourself                                    |
-| `Operation.injectIdempotencyKey`   | Generate and attach `Idempotency-Key` header on applicable requests                                                                 |
-| `UnionType.discriminator`          | Tagged union deserialization using the discriminator property and mapping                                                           |
-| `UnionType.compositionKind`        | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                             |
-| `PrimitiveType.format`             | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                             |
-| `ErrorResponse.type`               | Typed exception/error classes per status code                                                                                       |
+| IR Field                           | What to Generate                                                                                                                                                           |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing TypeRef kinds              | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                                                                        |
+| `ApiSpec.auth`                     | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                                                           |
+| `Operation.pagination`             | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`                                                  |
+| `Operation.requestBodyEncoding`    | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                                                                |
+| `Operation.requestBodyRequired`    | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out                                            |
+| `Operation.requestBodyContentType` | Send it as the `Content-Type` header, producing parameters such as a multipart boundary yourself                                                                           |
+| `Operation.injectIdempotencyKey`   | Generate and attach `Idempotency-Key` header on applicable requests                                                                                                        |
+| `Operation.defaultResponse`        | Type the error raised for a status `errors` does not list from `defaultResponse.type`; use it (after the `2XX` range) as the success body when no explicit 2xx is declared |
+| `Operation.rangeResponses`         | Resolve a status as the explicit entry, then its range, then `defaultResponse`; type `4XX`/`5XX` errors and a `2XX` success body from the range entries                    |
+| `UnionType.discriminator`          | Tagged union deserialization using the discriminator property and mapping                                                                                                  |
+| `UnionType.compositionKind`        | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                                                                    |
+| `Model.variants`                   | Emit a named union as a union type of its variants (dispatched on `Model.discriminator` when set), not as a data class of `fields`                                         |
+| `PrimitiveType.format`             | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                                                                    |
+| `ErrorResponse.type`               | Typed exception/error classes per status code, with the body typed as the `<Op>Error<code>` model or enum the parser mints                                                 |
 
 ### MEDIUM priority suggestions
 
-| IR Field                        | What to Generate                                                                                                                                           |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ApiSpec.description`           | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                                |
-| `ApiSpec.servers`               | Server URL constants or configuration                                                                                                                      |
-| `ApiSpec.webhooks`              | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                                 |
-| `Operation.async`               | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                                    |
-| `Operation.successResponses`    | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                                   |
-| `Operation.responseHeaders`     | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                                         |
-| `Operation.responseContents`    | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                                 |
-| `Operation.requestBodyContents` | A body argument or serializer per media type (`requestBodyContentTypes`) when a body accepts several                                                       |
-| `Operation.cookieParams`        | Document cookie parameters                                                                                                                                 |
-| `Operation.servers`             | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                            |
-| `Parameter.description`         | Document query/header/cookie params in method doc comments                                                                                                 |
-| `Parameter.externalDocs`        | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Webhook`, `Service` and `ApiSpec` carry the same |
-| `Parameter.deprecated`          | Mark parameter as deprecated in docs                                                                                                                       |
-| `Model.deprecated`              | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                                |
-| `Enum.deprecated`               | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                                   |
-| `Enum.default`                  | Document the enum's default value                                                                                                                          |
-| `Parameter.default`             | Document default value                                                                                                                                     |
-| `Parameter.example`             | Document example value                                                                                                                                     |
-| `Parameter.examples`            | Document every example value (e.g. one `@example` tag each)                                                                                                |
-| `Field.readOnly`                | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust)            |
-| `Field.writeOnly`               | Write-only annotation in doc comments                                                                                                                      |
-| `Field.default`                 | Document default value                                                                                                                                     |
-| `Field.example`                 | Document example value                                                                                                                                     |
-| `Field.examples`                | Document every example value (e.g. one `@example` tag each)                                                                                                |
-| `Field.constraints`             | Document limits ("at most 100 characters") or validate before serializing                                                                                  |
-| `Parameter.constraints`         | Document limits on method arguments or validate before sending                                                                                             |
+| IR Field                           | What to Generate                                                                                                                                           |
+| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ApiSpec.description`              | Doc comment on the root client class (e.g., YARD `#` for Ruby, KDoc `/**` for Kotlin, `///` for Rust, docstring for Python)                                |
+| `ApiSpec.servers`                  | Server URL constants or configuration                                                                                                                      |
+| `ApiSpec.webhooks`                 | A payload type (or typed handler) per event, keyed by `name` + `httpMethod`; the payload model is already in `spec.models`                                 |
+| `Operation.async`                  | Mark method as async or add async behavior hints (e.g., `async` in TS/Rust, coroutine in Kotlin, `async def` in Python)                                    |
+| `Operation.successResponses`       | Document each 2xx entry's return type; treat a 3xx entry (`type` is `unknown`) as a redirect, not a body                                                   |
+| `Operation.responseHeaders`        | Typed accessors for declared response headers (download filename, `Location`, `ETag`, rate limits)                                                         |
+| `Operation.responseContents`       | An `Accept` option per media type (`responseContentTypes`) and a return type per media type when a response offers several                                 |
+| `Operation.requestBodyContents`    | A body argument or serializer per media type (`requestBodyContentTypes`) when a body accepts several                                                       |
+| `Operation.requestBodyDescription` | Print it as the body argument's doc text (a `@param body` tag); `Webhook.requestBodyDescription` documents the payload the same way                        |
+| `Operation.cookieParams`           | Document cookie parameters                                                                                                                                 |
+| `Operation.servers`                | Send the operation's requests to its own server (`op.servers ?? spec.servers`) instead of the client's base URL                                            |
+| `Parameter.description`            | Document query/header/cookie params in method doc comments                                                                                                 |
+| `Parameter.externalDocs`           | Link fuller documentation from the param doc tag (e.g. a `@see`); `Field`, `Model`, `Enum`, `Operation`, `Webhook`, `Service` and `ApiSpec` carry the same |
+| `Parameter.deprecated`             | Mark parameter as deprecated in docs                                                                                                                       |
+| `Model.deprecated`                 | Deprecation marker on the generated type (`@deprecated` tag, `[Obsolete]`, `#[deprecated]`)                                                                |
+| `Enum.deprecated`                  | Deprecation marker on the generated enum type, as for `Model.deprecated`                                                                                   |
+| `Enum.default`                     | Document the enum's default value                                                                                                                          |
+| `Parameter.default`                | Document default value                                                                                                                                     |
+| `Parameter.example`                | Document example value                                                                                                                                     |
+| `Parameter.examples`               | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.readOnly`                   | Read-only annotation and language-appropriate modifier (`readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, `pub` without setter in Rust)            |
+| `Field.writeOnly`                  | Write-only annotation in doc comments                                                                                                                      |
+| `Field.default`                    | Document default value                                                                                                                                     |
+| `Field.example`                    | Document example value                                                                                                                                     |
+| `Field.examples`                   | Document every example value (e.g. one `@example` tag each)                                                                                                |
+| `Field.constraints`                | Document limits ("at most 100 characters") or validate before serializing                                                                                  |
+| `Parameter.constraints`            | Document limits on method arguments or validate before sending                                                                                             |
 
 Include the specific file and approximate location where each fix should be applied.
 
