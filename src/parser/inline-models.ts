@@ -370,7 +370,7 @@ function modelShapeKey(
 }
 
 /** Field properties `fieldAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
-const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required']);
+const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required', 'deprecated']);
 
 /**
  * How `modelAdmits`, `fieldAdmits` and `typeShapeKey` read a shape before
@@ -481,15 +481,33 @@ export function modelShares(owner: Model, candidate: Model, sent = false): boole
  * `modelAdmits` applies to each field, on its own. The two agree in
  * everything but their documentation — type (through `fieldTypeAdmits`,
  * model and inline enum references read under `options.readName`), limits, default, access
- * flags, their own `deprecated` — except that `owner` may be optional where
- * `candidate` is required, and `nullable<…>` where `candidate` is not. The
- * `…Json` fold asks this of every field the base and the `…Json` model both
- * declare, since the base takes the `…Json` model's fields.
+ * flags, their own `deprecated` (`fieldFlagAgrees`: in either direction,
+ * since the owner's fields are what every site reads after a fold) — except
+ * that `owner` may be optional where `candidate` is required, and
+ * `nullable<…>` where `candidate` is not. The `…Json` fold asks this of
+ * every field the base and the `…Json` model both declare, since the base
+ * takes the `…Json` model's fields.
  */
 export function fieldAdmits(owner: Field, candidate: Field, options: ShapeReadOptions = {}): boolean {
+  if (!fieldFlagAgrees(owner, candidate)) return false;
   if (owner.required && !candidate.required) return false;
   if (!fieldTypeAdmits(owner.type, candidate.type, options)) return false;
   return stableStringify(omitKeys(owner, FIELD_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, FIELD_ADMIT_KEYS));
+}
+
+/**
+ * Whether `owner` and `candidate`, fields of one name, agree on their own
+ * `deprecated`, in either direction. A field's flag has no carrier but the
+ * field itself: after a fold every site reads the owner's fields, so an
+ * owner whose field is live would drop the notice a candidate's deprecated
+ * field gave its readers, and an owner whose field is deprecated would give
+ * a candidate's readers a notice its own schema never wrote. Read by
+ * `fieldAdmits` for every fold `modelAdmits` decides, and by the
+ * list-envelope pass's own structural comparison (`admits`), so no fold
+ * changes what any site's readers see of a field's flag.
+ */
+export function fieldFlagAgrees(owner: Field, candidate: Field): boolean {
+  return !!owner.deprecated === !!candidate.deprecated;
 }
 
 /** Whether `owner` admits every value of `candidate`'s type: the same type under the field's own nullable wrapper, which `owner` may carry where `candidate` does not. */

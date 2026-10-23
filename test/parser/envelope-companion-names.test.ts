@@ -413,4 +413,74 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
     expect(resolveEnvelopeCompanionNames([d], [component, nestedComponent])).toEqual([]);
     expect(d.field.type).toEqual({ kind: 'model', name: 'Pagination' });
   });
+
+  it('folds onto a component only when every field agrees on its own flag, whatever the root flags (Greptile, #364 round 1)', () => {
+    const live = (deprecated: boolean): Model['fields'] => [
+      { name: 'next', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    const component = (fieldDeprecated: boolean): Model => ({ name: 'Pagination', fields: live(fieldDeprecated) });
+    const onto = (comp: Model, rootDeprecated: boolean, fieldDeprecated: boolean) => {
+      const c = companion('ListA', 'Pagination', live(fieldDeprecated));
+      if (rootDeprecated) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [comp]);
+      return { ref: c.field.type, models: models.map((m) => [m.name, m.deprecated, m.fields[0]?.deprecated]) };
+    };
+    const kept = { ref: { kind: 'model', name: 'ListAPagination' } };
+    const folded = { ref: { kind: 'model', name: 'Pagination' }, models: [] };
+
+    // The copy's `next` deprecated, the component's live: the notice would
+    // vanish with the copy, so the copy keeps its name — with a deprecated
+    // root (the reviewer's case) and with a live one alike.
+    expect(onto(component(false), true, true)).toEqual({ ...kept, models: [['ListAPagination', true, true]] });
+    expect(onto(component(false), false, true)).toEqual({ ...kept, models: [['ListAPagination', undefined, true]] });
+    // The component's `next` deprecated, the copy's live: the copy's readers
+    // would gain a notice its schema never wrote, so it keeps its name too.
+    expect(onto(component(true), false, false)).toEqual({
+      ...kept,
+      models: [['ListAPagination', undefined, undefined]],
+    });
+    expect(onto(component(true), true, false)).toEqual({ ...kept, models: [['ListAPagination', true, undefined]] });
+    // Both deprecated: the fold changes nothing a reader sees.
+    expect(onto(component(true), false, true)).toEqual(folded);
+    expect(onto(component(true), true, true)).toEqual(folded);
+  });
+
+  it('keeps a model nested in the companion apart from the component when one of its fields is deprecated', () => {
+    const cursorFields = (deprecated: boolean): Model['fields'] => [
+      { name: 'after', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    const nestedField = (name: string): Model['fields'] => [
+      { name: 'cursor', type: { kind: 'model', name }, required: false },
+    ];
+    const component: Model = { name: 'Pagination', fields: nestedField('PaginationCursor') };
+    const nestedComponent: Model = { name: 'PaginationCursor', fields: cursorFields(false) };
+
+    const nested: Model = { name: 'ListAPaginationCursor', fields: cursorFields(true) };
+    const c = companion('ListA', 'Pagination', nestedField(nested.name), [nested]);
+    c.models[0].deprecated = true;
+    const models = resolveEnvelopeCompanionNames([c], [component, nestedComponent]);
+    expect(c.field.type).toEqual({ kind: 'model', name: 'ListAPagination' });
+    expect(models.map((m) => m.name)).toEqual(['ListAPagination', 'ListAPaginationCursor']);
+  });
+
+  it('never shares a bare name between two live copies that disagree on a field’s flag', () => {
+    const fields = (deprecated: boolean): Model['fields'] => [
+      { name: 'next', type: str, required: false, ...(deprecated ? { deprecated: true } : {}) },
+    ];
+    for (const [first, second] of [
+      [false, true],
+      [true, false],
+    ] as const) {
+      const a = companion('ListA', 'Pagination', fields(first));
+      const b = companion('ListB', 'Pagination', fields(second));
+      const models = resolveEnvelopeCompanionNames([a, b]);
+      // The first declared shape takes the bare name; the other keeps its own.
+      expect(models.map((m) => [m.name, m.fields[0]?.deprecated])).toEqual([
+        ['Pagination', first || undefined],
+        ['ListBPagination', second || undefined],
+      ]);
+      expect(a.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+      expect(b.field.type).toEqual({ kind: 'model', name: 'ListBPagination' });
+    }
+  });
 });
