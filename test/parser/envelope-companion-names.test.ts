@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from '../../src/parser/envelope-companion-names.js';
+import { fieldAdmits, fieldPropertiesAdmit } from '../../src/parser/inline-models.js';
 import type { Field, Model } from '../../src/ir/types.js';
 
 /**
@@ -482,5 +483,74 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
       expect(a.field.type).toEqual({ kind: 'model', name: 'Pagination' });
       expect(b.field.type).toEqual({ kind: 'model', name: 'ListBPagination' });
     }
+  });
+
+  describe('every field property a component fold preserves (Greptile, #364 round 2)', () => {
+    /** A `next` field with `over` applied — a property, or a type. */
+    const next = (over: Partial<Field> = {}): Field => ({ name: 'next', type: str, required: false, ...over });
+    /** The copy's fate beside a component whose `next` is `componentOver`, with the copy's `next` under `copyOver`. */
+    const onto = (componentOver: Partial<Field>, copyOver: Partial<Field>, rootDeprecated = true) => {
+      const component: Model = { name: 'Pagination', fields: [next(componentOver)] };
+      const c = companion('ListA', 'Pagination', [next(copyOver)]);
+      if (rootDeprecated) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [component]);
+      return { ref: (c.field.type as { name: string }).name, models: models.map((m) => m.name) };
+    };
+    const kept = { ref: 'ListAPagination', models: ['ListAPagination'] };
+    const folded = { ref: 'Pagination', models: [] };
+
+    const cases: Array<[string, Partial<Field>, Partial<Field>]> = [
+      // The reviewer's case: the component's `next` allows 8 characters, the copy's 64.
+      ['maxLength', { constraints: { maxLength: 8 } }, { constraints: { maxLength: 64 } }],
+      ['pattern', { constraints: { pattern: '^[a-z]+$' } }, { constraints: { pattern: '^[0-9]+$' } }],
+      ['default', { default: 'a' }, { default: 'b' }],
+      ['readOnly', { readOnly: true }, {}],
+      ['writeOnly', { writeOnly: true }, {}],
+      ['format', { type: { kind: 'primitive', type: 'string', format: 'uuid' } }, { type: str }],
+      ['nullable (copy only)', { type: str }, { type: { kind: 'nullable', inner: str } }],
+    ];
+    for (const [label, componentOver, copyOver] of cases) {
+      it(`keeps the copy apart when ${label} differs, with a deprecated root and with a live one, and folds it when it agrees`, () => {
+        expect(onto(componentOver, copyOver), `${label}: differs, deprecated root`).toEqual(kept);
+        expect(onto(componentOver, copyOver, false), `${label}: differs, live root`).toEqual(kept);
+        expect(onto(componentOver, componentOver), `${label}: same, deprecated root`).toEqual(folded);
+        expect(onto(componentOver, componentOver, false), `${label}: same, live root`).toEqual(folded);
+      });
+    }
+
+    it('still lets the component be nullable where the copy is not', () => {
+      expect(onto({ type: { kind: 'nullable', inner: str } }, { type: str })).toEqual(folded);
+    });
+
+    it('refuses on every property of `Field` but its documentation and type, so a new property cannot be forgotten', () => {
+      // Every property a `Field` can carry beside its name, documentation and
+      // type, each with a value: a property added to `Field` must be added
+      // here (the type is `Required`), and is then checked below on both
+      // predicates — `fieldAdmits`, which every component fold reads, and
+      // the companion pass, which reads `fieldPropertiesAdmit` on its own.
+      const every: Required<Omit<Field, 'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples'>> = {
+        domainName: 'cursor',
+        required: true,
+        readOnly: true,
+        writeOnly: true,
+        deprecated: true,
+        default: 'x',
+        constraints: { maxLength: 8 },
+      };
+      for (const key of Object.keys(every) as Array<keyof typeof every>) {
+        const withKey = next({ [key]: every[key] });
+        const without = next();
+        const where = `property "${key}"`;
+        // A property set on one side only is a different field — except
+        // requiredness, where the owner may be the looser one.
+        expect(fieldPropertiesAdmit(withKey, without), where).toBe(false);
+        expect(fieldPropertiesAdmit(without, withKey), where).toBe(key === 'required');
+        expect(fieldAdmits(withKey, without), where).toBe(false);
+        expect(fieldAdmits(without, withKey), where).toBe(key === 'required');
+        expect(onto({ [key]: every[key] }, {}), `${where}, component only`).toEqual(kept);
+        expect(onto({}, { [key]: every[key] }), `${where}, copy only`).toEqual(key === 'required' ? folded : kept);
+        expect(onto({ [key]: every[key] }, { [key]: every[key] }), `${where}, both`).toEqual(folded);
+      }
+    });
   });
 });

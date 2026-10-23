@@ -1,6 +1,6 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, renameTypeRefModels } from '../ir/types.js';
-import { fieldFlagAgrees, flagAdmits, type InlineModelBundle } from './inline-models.js';
+import { fieldPropertiesAdmit, fieldPropertiesKey, flagAdmits, type InlineModelBundle } from './inline-models.js';
 import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
@@ -64,13 +64,16 @@ export interface EnvelopeCompanion {
  *   nothing is lost — with the warning the merge passes give such a copy,
  *   and a deprecated component only a deprecated one. A model nested in the
  *   companion still folds only onto a component of the same flag, and every
- *   field's own flag must agree in either direction (`fieldFlagAgrees`,
- *   as `fieldAdmits` reads it), since the component's fields are what every
- *   site reads after the fold and nothing else carries a field's notice: a
- *   companion whose `next` is deprecated never shares a component whose
- *   `next` is live, nor the other way round, flag or no flag on the root.
- *   Among copies a field's flag is part of the shape the same way, so a copy
- *   that deprecates a field the others do not keeps its own name.
+ *   field is read in everything but its type as `fieldAdmits` reads it
+ *   (`fieldPropertiesAdmit`): its own flag must agree in either direction,
+ *   the target may be looser on requiredness only, and limits, default,
+ *   access flags and every other property must be identical, since the
+ *   target's fields are what every site reads after the fold — a companion
+ *   whose `next` is deprecated, or allows 64 characters, never shares a
+ *   component whose `next` is live, or allows 8, nor the other way round,
+ *   flag or no flag on the root. Among copies the same properties are part
+ *   of the shape (`fieldPropertiesKey`), so a copy that deprecates or limits
+ *   a field the others do not keeps its own name.
  *
  * The comparison covers the companion's whole field type, so a `oneOf`
  * companion is judged on every variant, not just the first, and a copy folds
@@ -271,11 +274,14 @@ function admits(
     for (const field of copy.fields) {
       const expected = targetFields.get(field.name);
       if (!expected) return false;
-      // A field's own flag must agree, in either direction (`fieldFlagAgrees`):
-      // the target's fields are what every site reads after a fold, and
-      // nothing else carries a field's notice.
-      if (!fieldFlagAgrees(expected, field)) return false;
-      if (expected.required && !field.required) return false;
+      // Everything but the type is read as `fieldAdmits` reads it
+      // (`fieldPropertiesAdmit`): the flag agrees in either direction, the
+      // target is no stricter on requiredness, and limits, default, access
+      // flags and every other property are identical — the target's fields
+      // are what every site reads after a fold. The type is compared by
+      // structure below, since a companion's nested models and inline enums
+      // are named per operation.
+      if (!fieldPropertiesAdmit(expected, field)) return false;
       if (!typeAdmits(expected.type, targetMap, field.type, copyMap, visiting)) return false;
     }
     // A named union is its variants — the same ones, in the same order —
@@ -337,8 +343,9 @@ function typeAdmits(
 
 /**
  * Structural fingerprint of a companion model: whether it is deprecated, its
- * field names, requiredness, each field's own deprecation (`~`) and each
- * field's shape, with models nested
+ * field names, each field's properties as `fieldPropertiesAdmit` reads them
+ * (`fieldPropertiesKey`: requiredness, its own deprecation, limits, default,
+ * access flags) and each field's shape, with models nested
  * inside the companion compared by shape rather than by (operation-qualified)
  * name, and inline enums compared by their members — each value with its
  * deprecation (`enumValueShapeKey`), so a copy deprecating a value the others
@@ -350,9 +357,7 @@ function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set
   visiting.add(model.name);
   const fields = [...model.fields]
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map(
-      (f) => `${f.name}${f.required ? '!' : '?'}${f.deprecated ? '~' : ''}:${fingerprintType(f.type, local, visiting)}`,
-    );
+    .map((f) => `${f.name}${fieldPropertiesKey(f)}:${fingerprintType(f.type, local, visiting)}`);
   // A named union's variants, in document order, and its dispatch rules are
   // part of its shape.
   const union = unionShapeKey(model, (v) => fingerprintType(v, local, visiting));
