@@ -61,12 +61,26 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * silently given the component's values. It is also the set of names a
  * renamed enum must step around (`distinctEnumName`), so pass every model of
  * the document, not only the ones to walk into.
+ *
+ * `shared` is the parser's record of every type reference a site shared
+ * through `components/responses` wrote (`OperationExtractionResult.componentSites`:
+ * the component's fallback or error body, a secondary body, a header), by
+ * identity. An enum such a site carries is named from the component alone
+ * (`CardXMode`), so on a clash it steps by number (`CardXMode2`) — never by
+ * the status code, the fallback label (`CardXModeDefault`,
+ * `CardXModeClientError`) or `Body`, which qualify an operation's own sites
+ * — and every operation that returns the component, at whatever key,
+ * settles on the one name. The IR alone cannot tell such a site from an
+ * operation's (`CardXMode` is the name wherever the component is returned),
+ * so a caller that built `services` by hand passes the references it
+ * shares, or nothing when it declares no component response.
  */
 export function collectInlineEnumsFromOperations(
   services: Service[],
   enums: Enum[],
   models: readonly Model[] = [],
   componentNames: ReadonlySet<string> = new Set(),
+  shared: ReadonlySet<TypeRef> = new Set(),
 ): void {
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
@@ -108,9 +122,14 @@ export function collectInlineEnumsFromOperations(
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
-      // an enum no emitter ever generates.
+      // an enum no emitter ever generates. A header a component response
+      // declares (`shared`) carries no status code or fallback label: its
+      // enum steps by number, the same from every site that returns the
+      // component.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
-        for (const header of headers) collectThroughModels(header.type, qualifier);
+        for (const header of headers) {
+          collectThroughModels(header.type, shared.has(header.type) ? undefined : qualifier);
+        }
       }
       // The request body and each success body are typed by `schemaToTypeRef`
       // under the operation's `<Op>Request` / `<Op>Response` name, so one that
@@ -137,9 +156,13 @@ export function collectInlineEnumsFromOperations(
       // was named (`deferredEnumName` in operations.ts), so an object `404`
       // of another operation under the same stem is the one that stepped.
       // An enum nested in an error body's model is collected with every
-      // other model's (`collectInlineEnumsFromModels`).
+      // other model's (`collectInlineEnumsFromModels`). A body a component
+      // response declares (`shared`) is the component's, not the
+      // operation's, and steps by number (`CardResponse2`) as it does at a
+      // `default` or range site.
       for (const error of op.errors) {
-        if (error.type) collectDistinctEnums(error.type, 'Body', enums, enumNames, modelNames);
+        if (!error.type) continue;
+        collectDistinctEnums(error.type, shared.has(error.type) ? undefined : 'Body', enums, enumNames, modelNames);
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -147,8 +170,9 @@ export function collectInlineEnumsFromOperations(
       // a body that is itself an inline enum, or an array of one, reaches no
       // model and is walked here; enums nested in its inline models are
       // reached through them. Its name is already operation-qualified
-      // (`ListPetsDefaultResponse`); a clash with a different value set falls
-      // back to a numeric suffix.
+      // (`ListPetsDefaultResponse`) or the component's
+      // (`CardApplicationYamlResponse`, `shared`); a clash with a different
+      // value set falls back to a numeric suffix either way.
       for (const { type } of collectResponseBodyTypes(op)) {
         collectThroughModels(type, undefined);
       }
