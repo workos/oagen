@@ -883,12 +883,24 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
   // e.g. when AuditLogSchemaJson → AuditLogSchema, also rename
   // AuditLogSchemaJsonTarget → AuditLogSchemaTarget. A child whose folded
   // name is already held collapses onto that model — pass 1 admitted every
-  // such fold (`modelAdmits`) before the candidate was kept.
+  // such fold (`modelAdmits`) before the candidate was kept. A name an
+  // earlier candidate's rename has seated a model under since pass 1 decided
+  // (two prefixes nest: `PetJsonFooBar` and `PetFooJsonBar` both fold to
+  // `PetFooBar`) is checked the same way here, and a child that model does
+  // not admit keeps its own name, with a warning, rather than resolve to a
+  // shape it does not have.
   for (const { jsonModel, baseModel } of mergeCandidates) {
+    const fold: ShapeReadOptions = { modelName: (name) => foldedName(name, jsonModel.name, baseModel.name) };
     for (const { child, newName, existing } of foldedChildren(jsonModel, baseModel.name, normalizedModels, byName)) {
       if (toRemove.has(child.name)) continue;
 
       if (existing && !toRemove.has(existing.name)) {
+        if (!modelAdmits(existing, child, fold)) {
+          console.warn(
+            `[oagen] Warning: Not renaming "${child.name}": "${newName}" was taken by a model of a different shape while "${jsonModel.name}" folded into "${baseModel.name}" — keeping its name`,
+          );
+          continue;
+        }
         toRemove.add(child.name);
         rewriteModelRefs(normalizedModels, services, child.name, newName, webhooks);
         console.warn(`[oagen] Collapsed child "${child.name}" into existing "${newName}"`);

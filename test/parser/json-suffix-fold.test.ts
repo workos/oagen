@@ -357,4 +357,39 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(nested.kept[0]?.fields.map((f) => f.name)).toEqual(['part', 'name']);
     expect(nested.kept[0]?.fields[0]?.type).toEqual(modelRef('WidgetPart'));
   });
+  it('never collapses a child by name alone, even onto a name an earlier fold took after pass 1 decided', () => {
+    // Two prefixes nest: `PetJsonFooBar` (a child of `PetJson`) and `PetFooJsonBar` (a child of
+    // `PetFooJson`) both fold to `PetFooBar`, which no model holds when pass 1 decides. Pass 3
+    // renames the first and finds the name taken for the second, which keeps its own name.
+    const models = (): Model[] => [
+      { name: 'Pet', fields: [field('a')] },
+      { name: 'PetJson', fields: [field('a'), field('b'), field('fooBar', modelRef('PetJsonFooBar'))] },
+      { name: 'PetJsonFooBar', fields: [field('x')] },
+      { name: 'PetFoo', fields: [field('c')] },
+      { name: 'PetFooJson', fields: [field('c'), field('d'), field('bar', modelRef('PetFooJsonBar'))] },
+      { name: 'PetFooJsonBar', fields: [field('y')] },
+    ];
+    const { kept, warnings } = collapse(models());
+    expect(kept.map((m) => `${m.name} {${m.fields.map((f) => f.name)}}`)).toEqual([
+      'Pet {a,b,fooBar}',
+      'PetFooBar {x}',
+      'PetFoo {c,d,bar}',
+      'PetFooJsonBar {y}',
+    ]);
+    expect(kept[0]?.fields[2]?.type).toEqual(modelRef('PetFooBar'));
+    expect(kept[2]?.fields[2]?.type).toEqual(modelRef('PetFooJsonBar'));
+    expect(warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Merged "PetFooJson" into "PetFoo" (3 fields, superset)',
+      '[oagen] Renamed child "PetJson…" → "PetFooBar"',
+      '[oagen] Warning: Not renaming "PetFooJsonBar": "PetFooBar" was taken by a model of a different shape while "PetFooJson" folded into "PetFoo" — keeping its name',
+    ]);
+
+    // The same two children of one shape collapse onto the name as any admitted child does.
+    const same = models().map((m) => (m.name === 'PetFooJsonBar' ? { ...m, fields: [field('x')] } : m));
+    const folded = collapse(same);
+    expect(folded.kept.map((m) => m.name)).toEqual(['Pet', 'PetFooBar', 'PetFoo']);
+    expect(folded.kept[2]?.fields[2]?.type).toEqual(modelRef('PetFooBar'));
+    expect(folded.warnings.at(-1)).toBe('[oagen] Collapsed child "PetFooJsonBar" into existing "PetFooBar"');
+  });
 });
