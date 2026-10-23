@@ -3,9 +3,10 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
   mergeInlineResponseModels,
+  reservedTypeNames,
   settleFieldInlineModels,
 } from '../../src/parser/normalize-inline-models.js';
-import type { Model, Service, TypeRef } from '../../src/ir/types.js';
+import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
 describe('collapseJsonSuffixModels — response content types', () => {
   it('rewrites primary, alternate-success, and error content refs when a Json-suffix model collapses', () => {
@@ -671,5 +672,62 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
     expect(settled.map((m) => m.name)).toEqual(['PetOwner2']);
     expect(pet.fields[0].type).toEqual({ kind: 'model', name: 'PetOwner2' });
     expect(notes).toEqual(['[oagen] Renamed inline model "PetOwner" → "PetOwner2": enum "PetOwner" owns the name']);
+  });
+});
+
+describe('reservedTypeNames', () => {
+  // #348 review round 2: the merge passes mint renamed models against this
+  // set, so an enum reached only through a secondary request body — the
+  // `text/csv` entry of `requestBodyContents`, which `requestBody` does not
+  // share — must be in it, or a rename could take the enum's name and force
+  // the collectors to move the enum after the fact.
+  const csvEnum = { kind: 'enum' as const, name: 'CreatePetTextCsvRequest', values: ['header', 'bare'] };
+  const body = { kind: 'model' as const, name: 'CreatePetRequest' };
+  const createPet: Operation = {
+    name: 'createPet',
+    httpMethod: 'post',
+    path: '/pets',
+    pathParams: [],
+    queryParams: [{ name: 'kind', type: { kind: 'enum', name: 'PetsKind', values: ['cat', 'dog'] }, required: false }],
+    headerParams: [],
+    requestBody: body,
+    requestBodyContentTypes: ['application/json', 'text/csv'],
+    requestBodyContents: [
+      { contentType: 'application/json', type: body },
+      { contentType: 'text/csv', type: csvEnum },
+    ],
+    response: { kind: 'primitive', type: 'unknown' },
+    errors: [{ statusCode: 404, description: 'nf', type: { kind: 'enum', name: 'CreatePetError404', values: ['x'] } }],
+    injectIdempotencyKey: false,
+  };
+  const services: Service[] = [{ name: 'Pets', operations: [createPet] }];
+
+  it('holds every enum name an operation carries, a secondary request body’s included', () => {
+    const reserved = reservedTypeNames([], [], [], [], services);
+    expect([...reserved].sort()).toEqual(['CreatePetError404', 'CreatePetTextCsvRequest', 'PetsKind']);
+  });
+
+  it('holds every model and enum name given, and the enums their fields carry', () => {
+    const models: Model[] = [
+      {
+        name: 'Pet',
+        fields: [{ name: 'mood', type: { kind: 'enum', name: 'PetMood', values: ['calm'] }, required: false }],
+      },
+    ];
+    const reserved = reservedTypeNames(
+      models,
+      [{ name: 'Color', values: [{ name: 'red', value: 'red' }] }],
+      [],
+      [],
+      services,
+    );
+    expect([...reserved].sort()).toEqual([
+      'Color',
+      'CreatePetError404',
+      'CreatePetTextCsvRequest',
+      'Pet',
+      'PetMood',
+      'PetsKind',
+    ]);
   });
 });
