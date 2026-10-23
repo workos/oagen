@@ -286,7 +286,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // every enum's, so the merge passes above (which mint against every enum
   // name an `EnumRef` carries) and the collectors never meet on one name.
   collectInlineEnumsFromModels(finalModels, enums);
-  collectInlineEnumsFromOperations(services, enums, finalModels, componentNames, componentSites);
+  collectInlineEnumsFromOperations(services, enums, componentSites, finalModels, componentNames);
   collectInlineEnumsFromWebhooks(webhooks, enums, finalModels);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
