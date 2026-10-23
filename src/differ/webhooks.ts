@@ -169,8 +169,10 @@ function diffWebhookBody(
   if (encoding) {
     changes.push(requestBodyEncodingDetails(encoding));
     // From the receiver's side: what the sender now sends must be a
-    // representation the old handler already decoded.
-    if (!ownRepresentationKept(newWebhook, oldWebhook, shapes)) breaking = true;
+    // representation the old handler already decoded. The sides stay in
+    // old → new order, with `shapes`, so the documents are read the right
+    // way round; `side` picks whose body must survive.
+    if (!ownRepresentationKept(oldWebhook, newWebhook, 'receiver', shapes)) breaking = true;
   }
 
   const wasRequired = oldWebhook.requestBodyRequired === true;
