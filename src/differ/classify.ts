@@ -1,5 +1,6 @@
+import type { Operation } from '../ir/types.js';
 import type { ModelDirection } from './direction.js';
-import type { FieldChange, ParamChange } from './types.js';
+import type { FieldChange, ParamChange, RequestBodyEncoding } from './types.js';
 
 /**
  * Whether an IR node is deprecated. The parser only ever writes `true` and
@@ -55,6 +56,49 @@ export function tagsShift(oldNode: { tags?: string[] }, newNode: { tags?: string
   const newTags = newNode.tags ?? [];
   const same = oldTags.length === newTags.length && oldTags.every((tag, i) => tag === newTags[i]);
   return same ? undefined : { oldTags, newTags };
+}
+
+/** The two sides of a `requestBodyEncoding` change, carried on the change that reports it. */
+export interface RequestBodyEncodingShift {
+  /** The node's `requestBodyEncoding` in the old spec; `undefined` when its body carried none. */
+  oldRequestBodyEncoding: RequestBodyEncoding | undefined;
+  /** The node's `requestBodyEncoding` in the new spec; `undefined` when its body carries none. */
+  newRequestBodyEncoding: RequestBodyEncoding | undefined;
+}
+
+/**
+ * `{ oldRequestBodyEncoding, newRequestBodyEncoding }` when a node's
+ * `requestBodyEncoding` differs between the two specs while both carry a
+ * `requestBody`, `undefined` otherwise. The encoding is the wire format the
+ * body is serialized as (`json`, `form-data`, `form-urlencoded`, `binary`,
+ * `text`), read from the media type the body is declared under. A body
+ * appearing or disappearing takes its encoding with it and is the body
+ * change's to report (`requestBodyChanged` on an operation, `payload added`
+ * / `payload removed` on a webhook), so neither change kind carries the two
+ * sides for it. An absent encoding beside a body is compared as a value of
+ * its own, so a body that gained or lost one is a change too. Whether a
+ * change breaks is the caller's rule — `diffOperations` and
+ * `diffWebhookBody` read it off the media types each side declares
+ * (`ownRepresentationKept`): an SDK built for the old spec keeps sending
+ * the old representation, and a handler built for it keeps decoding what
+ * it declared. Both read the encoding through this function, so an
+ * operation's body and a webhook's payload are judged alike.
+ */
+export function requestBodyEncodingShift(
+  oldNode: { requestBody?: Operation['requestBody']; requestBodyEncoding?: RequestBodyEncoding },
+  newNode: { requestBody?: Operation['requestBody']; requestBodyEncoding?: RequestBodyEncoding },
+): RequestBodyEncodingShift | undefined {
+  if (!oldNode.requestBody || !newNode.requestBody) return undefined;
+  const oldRequestBodyEncoding = oldNode.requestBodyEncoding;
+  const newRequestBodyEncoding = newNode.requestBodyEncoding;
+  return oldRequestBodyEncoding === newRequestBodyEncoding
+    ? undefined
+    : { oldRequestBodyEncoding, newRequestBodyEncoding };
+}
+
+/** The `details` a webhook change reports an encoding shift with: `encoding json → form-urlencoded`, `<none>` for no encoding. */
+export function requestBodyEncodingDetails(shift: RequestBodyEncodingShift): string {
+  return `encoding ${shift.oldRequestBodyEncoding ?? '<none>'} → ${shift.newRequestBodyEncoding ?? '<none>'}`;
 }
 
 export function classifyFieldChange(

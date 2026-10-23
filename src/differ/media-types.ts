@@ -232,9 +232,7 @@ export function diffRequestBodyContentTypes(
   shapes?: DocumentShapes,
 ): RequestBodyContentTypesChange | undefined {
   if (!declaresBody(oldBody) || !declaresBody(newBody)) return undefined;
-  const bodies = (body: RequestBodyMediaTypes): MediaTypeBody[] =>
-    mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
-  const { pairs, added, removed } = pairMediaTypeBodies(bodies(oldBody), bodies(newBody), shapes);
+  const { pairs, added, removed } = pairMediaTypeBodies(requestBodyBodies(oldBody), requestBodyBodies(newBody), shapes);
   const retyped = retypedBodies(pairs, true, shapes);
   const reparameterized = reparameterizedBodies(pairs);
   if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) {
@@ -253,4 +251,46 @@ export function diffRequestBodyContentTypes(
 /** Whether a body is declared at all: a type was read from it, or it lists media types none of which is read. */
 function declaresBody(body: RequestBodyMediaTypes): boolean {
   return body.requestBody !== undefined || body.requestBodyContentTypes !== undefined;
+}
+
+/** A request body's media types as the differ compares them, the one `requestBody` was read from marked `own`. */
+function requestBodyBodies(body: RequestBodyMediaTypes): MediaTypeBody[] {
+  return mediaTypeBodies(body.requestBodyContentTypes ?? [], body.requestBodyContents ?? [], body.requestBody);
+}
+
+/**
+ * Whether the representation one side's `requestBody` is read from — the
+ * media type, with its shape — is one the other side declares with an
+ * unchanged shape. Which side's is judged from `side`, as
+ * `diffRequestBodyContentTypes` is: for the caller (an operation), the old
+ * spec's own body must still be declared by the new spec, since an SDK
+ * built for the old spec keeps sending it; for the receiver (a webhook),
+ * the new spec's own body must already have been declared by the old spec,
+ * since the handler built for it decodes only what it declared. The two
+ * sides are always paired old against new (`pairMediaTypeBodies`, exactly
+ * as the media-type diff pairs them) and compared old against new
+ * (`sameShape` through `shapes`, the two documents' named types; by name
+ * alone without them), so the documents are never looked up the wrong way
+ * round for either side. This decides whether an encoding shift
+ * (`requestBodyEncodingShift`) breaks that side of the wire. `false` when
+ * the judged side marks no own body — no media-type lists, or none read as
+ * `requestBody` — so a hand-built IR without lists keeps the breaking
+ * reading.
+ */
+export function ownRepresentationKept(
+  oldBody: RequestBodyMediaTypes,
+  newBody: RequestBodyMediaTypes,
+  side: RequestBodySide,
+  shapes?: DocumentShapes,
+): boolean {
+  const oldBodies = requestBodyBodies(oldBody);
+  const newBodies = requestBodyBodies(newBody);
+  const own = (side === 'caller' ? oldBodies : newBodies).find((body) => body.own);
+  if (!own?.type) return false;
+  const pair = pairMediaTypeBodies(oldBodies, newBodies, shapes).pairs.find(
+    ([before, after]) => (side === 'caller' ? before : after) === own,
+  );
+  if (!pair) return false;
+  const [before, after] = pair;
+  return before.type !== undefined && after.type !== undefined && sameShape(before.type, after.type, shapes);
 }

@@ -12,6 +12,7 @@ import { resolveServerUrl } from '../ir/server-url.js';
 import { diffServers } from './servers.js';
 import {
   diffRequestBodyContentTypes,
+  ownRepresentationKept,
   mediaTypeBodies,
   pairMediaTypeBodies,
   reparameterizedBodies,
@@ -21,7 +22,13 @@ import {
 } from './media-types.js';
 import type { DocumentShapes } from './shapes.js';
 import type { Change, ParamChange, ResponseContentTypesChange } from './types.js';
-import { classifyParamChange, deprecationDetails, deprecationFlip, tagsShift } from './classify.js';
+import {
+  classifyParamChange,
+  deprecationDetails,
+  deprecationFlip,
+  requestBodyEncodingShift,
+  tagsShift,
+} from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
@@ -83,15 +90,23 @@ export function diffOperations(
     const paramChanges = diffParams(oldOp, newOp);
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response);
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
-    // Only while both sides carry a body: a body appearing or disappearing is
-    // already `requestBodyChanged`. An absent flag reads as optional, as it
-    // does in OpenAPI.
+    // The required flag and the encoding are compared only while both sides
+    // carry a body: a body appearing or disappearing is already
+    // `requestBodyChanged`, and the parser sets both beside the body, so
+    // they go with it.
+    const bothCarryBody = !!oldOp.requestBody && !!newOp.requestBody;
+    // An absent flag reads as optional, as it does in OpenAPI.
     const requestBodyRequiredChanged =
-      !!oldOp.requestBody &&
-      !!newOp.requestBody &&
-      (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
-    // Only while both sides declare a body, likewise; judged from the
-    // caller's side, which sends it.
+      bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
+    // The wire format the SDK serializes the body as, read through the
+    // function `diffWebhooks` reads a payload's encoding with, which
+    // compares only while both sides carry a body, likewise.
+    const encoding = requestBodyEncodingShift(oldOp, newOp);
+    const requestBodyEncodingChanged = encoding !== undefined;
+    // The media types callers may send the body as, only while both sides
+    // declare a body, likewise; judged from the caller's side, which sends
+    // it. A body moving from JSON to a form media type sets this beside the
+    // encoding flag: the JSON media type is removed and the form one added.
     const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller', shapes);
     const requestBodyContentTypesChanged = requestBodyContentTypeChange !== undefined;
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
@@ -145,6 +160,7 @@ export function diffOperations(
       responseChanged ||
       requestBodyChanged ||
       requestBodyRequiredChanged ||
+      requestBodyEncodingChanged ||
       requestBodyContentTypesChanged ||
       httpMethodChanged ||
       pathChanged ||
@@ -184,6 +200,15 @@ export function diffOperations(
       // are breaking. An absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
       const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
+      // requestBodyEncoding: an SDK built for the old spec keeps sending the
+      // representation that spec's body was read from. Breaking when the new
+      // spec no longer accepts it — that media type gone, or its shape
+      // changed; additive when it still does, as when a media type the
+      // parser prefers is added beside it (`application/json` beside a kept
+      // `application/x-www-form-urlencoded`). A body without media-type
+      // lists reads as breaking.
+      const requestBodyEncodingBreaking =
+        requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, 'caller', shapes);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
       // that changed shape, breaks them; one they can newly ask for, or one
@@ -204,6 +229,7 @@ export function diffOperations(
         responseChanged ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
+        requestBodyEncodingBreaking ||
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
@@ -231,6 +257,8 @@ export function diffOperations(
         responseChanged,
         requestBodyChanged,
         requestBodyRequiredChanged,
+        requestBodyEncodingChanged,
+        ...encoding,
         requestBodyContentTypesChanged,
         ...(requestBodyContentTypeChange ? { requestBodyContentTypeChange } : {}),
         httpMethodChanged,

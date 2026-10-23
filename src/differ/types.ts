@@ -1,4 +1,4 @@
-import type { SecurityRequirementSet } from '../ir/types.js';
+import type { Operation, SecurityRequirementSet } from '../ir/types.js';
 
 export interface DiffReport {
   oldVersion: string;
@@ -257,6 +257,9 @@ export interface OperationRemoved {
   classification: 'breaking';
 }
 
+/** The wire encodings a request body or webhook payload is serialized as: `Operation.requestBodyEncoding`'s values. */
+export type RequestBodyEncoding = NonNullable<Operation['requestBodyEncoding']>;
+
 export interface OperationModified {
   kind: 'operation-modified';
   serviceName: string;
@@ -274,6 +277,39 @@ export interface OperationModified {
    * is breaking (callers must now send a body); required → optional is additive.
    */
   requestBodyRequiredChanged: boolean;
+  /**
+   * The body stayed but its `requestBodyEncoding` differs: the wire format
+   * the SDK serializes it as (`json`, `form-data`, `form-urlencoded`,
+   * `binary` or `text`), read from the media type the body is declared
+   * under. An SDK built for the old spec keeps serializing and labelling the
+   * body as that spec said, so the change is breaking when the new spec no
+   * longer accepts that representation — the media type the old body was
+   * read from is gone from `requestBodyContentTypes`, or its shape changed,
+   * compared as `retyped` is (`application/json` where the server now reads only
+   * `application/x-www-form-urlencoded`) — and additive when it still does,
+   * as when a media type the parser prefers is added beside it
+   * (`application/json` added beside a kept
+   * `application/x-www-form-urlencoded`: existing callers keep sending the
+   * form body). A body without media-type lists reads as breaking. Compared
+   * only while both specs carry a body, as `requestBodyRequiredChanged` is;
+   * a body appearing or disappearing takes its encoding with it and is
+   * `requestBodyChanged` alone. Reported beside
+   * `requestBodyContentTypesChanged`, which lists the media types callers
+   * may choose from: a body moving from `application/json` to
+   * `application/x-www-form-urlencoded` sets both (the JSON media type is
+   * removed, the form one added), while a media type changing essence
+   * within one encoding (`application/json` → `application/vnd.api+json`)
+   * sets `requestBodyContentTypesChanged` alone.
+   */
+  requestBodyEncodingChanged: boolean;
+  /**
+   * Set exactly when `requestBodyEncodingChanged`: the encoding on each
+   * side, old → new. A side is `undefined` when that spec's body carries no
+   * encoding, which the parser never produces (it sets one beside every
+   * body) but a hand-built IR may.
+   */
+  oldRequestBodyEncoding?: RequestBodyEncoding;
+  newRequestBodyEncoding?: RequestBodyEncoding;
   /**
    * True when, both specs declaring a body, it gained or lost a media type
    * or a secondary media type's body type changed;
@@ -525,6 +561,20 @@ export interface WebhookModified {
    * did; `details` says which.
    */
   requestBodyChanged: boolean;
+  /**
+   * Set exactly when the payload's encoding changed (`details` reads
+   * `encoding json → form-urlencoded`): the encoding on each side, old →
+   * new, as an `operation-modified` change carries them. Breaking when the
+   * representation the sender now uses — the media type the new payload is
+   * read from, with its shape — is not one the old spec declared with that
+   * shape, so the handler decodes a wire format it never saw; additive when
+   * the old spec already declared it. A payload without media-type lists
+   * reads as breaking. Compared only while both specs declare a payload, as
+   * on an operation: a payload appearing or disappearing is `payload added`
+   * / `payload removed` in `details` and carries neither field.
+   */
+  oldRequestBodyEncoding?: RequestBodyEncoding;
+  newRequestBodyEncoding?: RequestBodyEncoding;
   /**
    * Present exactly when the payload's media types changed: which were
    * added, removed or retyped, classified from the receiver's side (see
