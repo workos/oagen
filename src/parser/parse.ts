@@ -161,6 +161,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     servers,
     version,
     options?.operationHints,
+    // A `paths` entry may be a `$ref` into this map (OpenAPI 3.1); the
+    // webhooks below resolve theirs against the same one.
+    spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
