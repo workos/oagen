@@ -19,7 +19,7 @@ const rootWithVariable: ServerEntry = { url: '/', variables: { port: { default: 
 const rootTemplate: ServerEntry = { url: '{root}', variables: { root: { default: '/' } } };
 
 describe('isDefaultServerEntry', () => {
-  it('is true for `/` without variables', () => {
+  it('is true for `/`', () => {
     expect(isDefaultServerEntry(root)).toBe(true);
   });
 
@@ -32,14 +32,21 @@ describe('isDefaultServerEntry', () => {
     expect(isDefaultServerEntry({ url: '/', variables: {} })).toBe(true);
   });
 
-  it('is false for `/` with a variable: a knob a caller can set', () => {
-    expect(isDefaultServerEntry(rootWithVariable)).toBe(false);
+  it('is true for `/` with a variable: `/` references none, so it is not a knob a caller can set (#292)', () => {
+    expect(isDefaultServerEntry(rootWithVariable)).toBe(true);
+    expect(
+      isDefaultServerEntry({
+        url: '/',
+        description: 'Same origin',
+        variables: { port: { default: '443', enum: ['443', '8443'] } },
+      }),
+    ).toBe(true);
   });
 
-  it('counts a variable named like an Object.prototype member as declared', () => {
+  it('ignores a variable named like an Object.prototype member like any other', () => {
     const variables = Object.fromEntries([['__proto__', { default: 'x' }]]);
     expect(Object.hasOwn(variables, '__proto__')).toBe(true);
-    expect(isDefaultServerEntry({ url: '/', variables })).toBe(false);
+    expect(isDefaultServerEntry({ url: '/', variables })).toBe(true);
   });
 
   it('is false for a template that merely resolves to `/`', () => {
@@ -71,8 +78,9 @@ describe('isDefaultServerList', () => {
     expect(isDefaultServerList([staging, root])).toBe(false);
   });
 
-  it('is false for `/` with a variable or a template that resolves to `/`', () => {
-    expect(isDefaultServerList([rootWithVariable])).toBe(false);
+  it('is true for `/` with a variable, which references none (#292), and false for a template that resolves to `/`', () => {
+    expect(isDefaultServerList([rootWithVariable])).toBe(true);
+    expect(isDefaultServerList([root, rootWithVariable])).toBe(true);
     expect(isDefaultServerList([rootTemplate])).toBe(false);
   });
 
@@ -89,10 +97,13 @@ describe('serversOrDefault', () => {
     expect(serversOrDefault([root])).toEqual([{ url: '/' }]);
     expect(serversOrDefault([{ url: '/', description: 'Same origin' }])).toEqual([{ url: '/' }]);
     expect(serversOrDefault([root, root])).toEqual([{ url: '/' }]);
+    // `/` references no variable, so one declared on it is still only the default (#292).
+    expect(serversOrDefault([rootWithVariable])).toEqual([{ url: '/' }]);
+    expect(serversOrDefault([root, rootWithVariable])).toEqual([{ url: '/' }]);
   });
 
   it('is the list itself, not a copy, when it declares anything beyond the default', () => {
-    for (const list of [[staging], [root, staging], [staging, root], [rootWithVariable], [rootTemplate]]) {
+    for (const list of [[staging], [root, staging], [staging, root], [rootWithVariable, staging], [rootTemplate]]) {
       expect(serversOrDefault(list)).toBe(list);
     }
   });

@@ -692,7 +692,7 @@ paths:
       expect(warnings()).toEqual([]);
     });
 
-    it('keeps `/` with a variable under a document without servers: a variable is not the default', async () => {
+    it('treats `/` with a variable under a document without servers as inheriting: `/` references none (#292)', async () => {
       const ir = await parseYaml(`
 openapi: 3.1.0
 info: { title: repro, version: '1' }
@@ -707,7 +707,9 @@ paths:
       ${ok}
 `);
 
-      expect(operation(ir, 'listNotes').servers).toEqual([{ url: '/', variables: { port: { default: '443' } } }]);
+      // The variable is kept where the document's own list is carried; on an
+      // operation it would only restate the default, so the key stays absent.
+      expect('servers' in operation(ir, 'listNotes')).toBe(false);
       expect(warnings()).toEqual([]);
     });
 

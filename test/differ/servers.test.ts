@@ -472,30 +472,34 @@ describe('diffServers', () => {
       ];
       // No entry keeps all its defaults (port moved everywhere), so the resolved
       // URL — eu or ap — pairs them; each reports its port, not a region swap,
-      // in the new document's order.
+      // in the new document's order. The template never references {port}, so
+      // neither change moves a resolved URL: additive (#292).
       const changes = diffServers(spec(old), spec(next));
       expect(changes.map((c) => (c.kind === 'server-modified' ? c.variableChanges : c.kind))).toEqual([
         [
           {
             kind: 'variable-default-changed',
             variableName: 'port',
-            classification: 'breaking',
+            classification: 'additive',
             oldDefault: '443',
             newDefault: '8443',
-            details: "default changed from '443' to '8443'",
+            details:
+              "default changed from '443' to '8443'; {port} is not in the URL template, so no resolved URL moves",
           },
         ],
         [
           {
             kind: 'variable-default-changed',
             variableName: 'port',
-            classification: 'breaking',
+            classification: 'additive',
             oldDefault: '443',
             newDefault: '9443',
-            details: "default changed from '443' to '9443'",
+            details:
+              "default changed from '443' to '9443'; {port} is not in the URL template, so no resolved URL moves",
           },
         ],
       ]);
+      expect(changes.map((c) => c.classification)).toEqual(['additive', 'additive']);
     });
   });
 });
@@ -719,23 +723,20 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
     });
   });
 
-  it('still treats `/` with a variable as a server of its own: against the implied `/`, the variable is what changes', () => {
+  it('treats `/` with a variable as the default too: `/` references no variable, so none can move it (#292)', () => {
     const rootWithPort = server('/', { port: { default: '443' } });
-    expect(diffServers(spec([rootWithPort]), spec())).toEqual([
+    expect(diffServers(spec([rootWithPort]), spec())).toEqual([]);
+    expect(diffServers(spec(), spec([rootWithPort]))).toEqual([]);
+    expect(diffServers(spec([root]), spec([rootWithPort]))).toEqual([]);
+    // Beside a named host it comes and goes like any listed `/`.
+    expect(diffServers(spec([rootWithPort, staging]), spec([staging]))).toEqual([
       {
-        kind: 'server-modified',
-        url: '/',
-        variableChanges: [{ kind: 'variable-removed', variableName: 'port', classification: 'breaking' }],
-        classification: 'breaking',
-      },
-    ]);
-    expect(diffServers(spec(), spec([rootWithPort]))).toEqual([
-      {
-        kind: 'server-modified',
-        url: '/',
-        variableChanges: [{ kind: 'variable-added', variableName: 'port', classification: 'additive' }],
+        kind: 'base-url-changed',
+        oldBaseUrl: '/',
+        newBaseUrl: 'https://staging.api.example.com',
         classification: 'additive',
       },
+      { kind: 'server-removed', url: '/', classification: 'breaking' },
     ]);
   });
 

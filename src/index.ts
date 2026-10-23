@@ -110,6 +110,7 @@ export {
   isDefaultServerList,
   resolveServerUrl,
   serverListsEqual,
+  serverUrlPlaceholders,
   serversOrDefault,
 } from './ir/server-url.js';
 

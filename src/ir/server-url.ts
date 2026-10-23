@@ -17,10 +17,11 @@ export interface ResolvedServerUrl {
  * Each `{name}` is replaced by `variables[name].default`; a placeholder with no
  * declared variable is kept verbatim and reported in `unresolved`. The same
  * variable may appear more than once, and a declared variable the template
- * never mentions is simply unused. The substituted value is spliced in as text
- * and not scanned again, so a default such as `{other}` cannot trigger a
- * second substitution. A `{` with no closing `}`, an empty `{}`, and a `{`
- * that opens another `{` before closing are all literal text.
+ * never mentions is simply unused (`serverUrlPlaceholders` lists the names the
+ * template does mention). The substituted value is spliced in as text and not
+ * scanned again, so a default such as `{other}` cannot trigger a second
+ * substitution. A `{` with no closing `}`, an empty `{}`, and a `{` that opens
+ * another `{` before closing are all literal text.
  *
  * Plain string scanning only: no pattern is built from the variable names, so
  * a name containing `.`, `+` or any other character is matched as written.
@@ -36,6 +37,62 @@ export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>)
   let url = '';
   let cursor = 0;
 
+  for (const { name, start, end } of scanPlaceholders(template)) {
+    url += template.slice(cursor, start);
+    // Own keys only: a placeholder named `constructor` or `__proto__` resolves
+    // when the document declares that variable (the parser defines it as an own
+    // data property), never to Object.prototype's member of that name.
+    if (Object.hasOwn(variables, name)) {
+      url += variables[name].default;
+    } else {
+      url += template.slice(start, end);
+      if (!unresolved.includes(name)) unresolved.push(name);
+    }
+    cursor = end;
+  }
+
+  url += template.slice(cursor);
+  return { url, unresolved };
+}
+
+/**
+ * The placeholder names a server URL template references, in order of first
+ * appearance and without repeats: `['region', 'port']` for
+ * `https://{region}.example.com:{port}/{region}`. Read from the template
+ * alone, by the same scan as `resolveServerUrl` (so the same literal-brace
+ * rules apply), whether or not the server declares a variable for each name.
+ *
+ * A declared variable whose name is not listed here is one the template never
+ * references: its default and its allowed values cannot reach any resolved
+ * URL. The differ classifies a change to such a variable as additive on that
+ * basis; an emitter that exposes a server's variables can use it to offer
+ * only the ones that take effect.
+ */
+export function serverUrlPlaceholders(url: string): string[] {
+  const names: string[] = [];
+  for (const { name } of scanPlaceholders(url)) {
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** One `{name}` in a server URL template: `start` is the index of its `{`, `end` the index just past its `}`. */
+interface Placeholder {
+  name: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Walk a template's placeholders left to right. A `{` with no closing `}`
+ * ends the scan (the rest is literal); an empty `{}` and a `{` that opens
+ * another `{` before closing are literal, and scanning resumes right after
+ * that `{` so a well-formed placeholder later in the text is still found.
+ * The one reading of braces every caller shares, so `resolveServerUrl` and
+ * `serverUrlPlaceholders` cannot disagree about what counts as one.
+ */
+function* scanPlaceholders(template: string): Generator<Placeholder> {
+  let cursor = 0;
   while (cursor < template.length) {
     const open = template.indexOf('{', cursor);
     if (open === -1) break;
@@ -44,28 +101,13 @@ export function resolveServerUrl(server: Pick<ServerEntry, 'url' | 'variables'>)
 
     const name = template.slice(open + 1, close);
     if (name === '' || name.includes('{')) {
-      // `{}` or a `{` reopened before it closed: the brace is literal. Copy it
-      // through and keep scanning from the character after it.
-      url += template.slice(cursor, open + 1);
       cursor = open + 1;
       continue;
     }
 
-    url += template.slice(cursor, open);
-    // Own keys only: a placeholder named `constructor` or `__proto__` resolves
-    // when the document declares that variable (the parser defines it as an own
-    // data property), never to Object.prototype's member of that name.
-    if (Object.hasOwn(variables, name)) {
-      url += variables[name].default;
-    } else {
-      url += template.slice(open, close + 1);
-      if (!unresolved.includes(name)) unresolved.push(name);
-    }
+    yield { name, start: open, end: close + 1 };
     cursor = close + 1;
   }
-
-  url += template.slice(cursor);
-  return { url, unresolved };
 }
 
 /**
@@ -114,15 +156,16 @@ function serverVariablesEqual(a: ServerVariable, b: ServerVariable): boolean {
 const DEFAULT_SERVER_URL = '/';
 
 /**
- * Whether a server entry is OpenAPI's default server: its `url` is `/` and
- * it declares no variables (`variables` absent or empty, by own key). Its
- * `description` does not count: the default server has none, and a
- * description changes nothing about where a request goes. An entry at `/`
- * that declares a variable is a knob a caller can set, and a template that
- * merely resolves to `/` is a template; neither is the default server.
+ * Whether a server entry is OpenAPI's default server: its `url` is `/`.
+ * Neither its `description` nor its `variables` count. The default server
+ * has neither; a description changes nothing about where a request goes; and
+ * `/` contains no placeholder (`serverUrlPlaceholders('/')` is empty), so a
+ * variable declared on it is never referenced and cannot change where it
+ * points either (#292). A template that merely resolves to `/` (a referenced
+ * variable whose default is `/`) is a template, not the default server.
  */
 export function isDefaultServerEntry(server: ServerEntry): boolean {
-  return server.url === DEFAULT_SERVER_URL && Object.keys(server.variables ?? {}).length === 0;
+  return server.url === DEFAULT_SERVER_URL;
 }
 
 /**

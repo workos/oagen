@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { resolveServerUrl } from '../../src/ir/server-url.js';
+import { resolveServerUrl, serverUrlPlaceholders } from '../../src/ir/server-url.js';
 import type { ServerVariable } from '../../src/ir/types.js';
 
 /**
  * Covers `resolveServerUrl` in isolation: how a server URL template and its
  * variables become a concrete URL. The parser's use of it for `baseUrl` is
- * covered in test/parser/servers.test.ts.
+ * covered in test/parser/servers.test.ts. `serverUrlPlaceholders`, which
+ * reads the same template by the same scan, is covered at the end.
  */
 describe('resolveServerUrl', () => {
   it("replaces a placeholder with its variable's default", () => {
@@ -152,5 +153,57 @@ describe('resolveServerUrl', () => {
 
     const resolved = resolveServerUrl({ url: 'https://{__proto__}.example.com', variables });
     expect(resolved).toEqual({ url: 'https://{__proto__}.example.com', unresolved: ['__proto__'] });
+  });
+});
+
+describe('serverUrlPlaceholders', () => {
+  it('lists the placeholder names in order of first appearance, without repeats', () => {
+    expect(serverUrlPlaceholders('https://{region}.example.com:{port}/{region}')).toEqual(['region', 'port']);
+  });
+
+  it('lists nothing for a template without placeholders, a relative one included', () => {
+    expect(serverUrlPlaceholders('https://api.example.com/v1')).toEqual([]);
+    expect(serverUrlPlaceholders('/')).toEqual([]);
+    expect(serverUrlPlaceholders('')).toEqual([]);
+  });
+
+  it('reads the template alone, whether or not a variable is declared for a name', () => {
+    const server = { url: 'https://{region}.example.com', variables: { tenant: { default: 'acme' } } };
+    // `tenant` is declared but never referenced; `region` is referenced but
+    // never declared. The placeholders are what the template says.
+    expect(serverUrlPlaceholders(server.url)).toEqual(['region']);
+    expect(resolveServerUrl(server).unresolved).toEqual(['region']);
+  });
+
+  it('reads braces as resolveServerUrl does: unclosed, empty and reopened ones are literal', () => {
+    expect(serverUrlPlaceholders('https://{region.example.com')).toEqual([]);
+    expect(serverUrlPlaceholders('https://{}.example.com')).toEqual([]);
+    expect(serverUrlPlaceholders('https://{a{region}.example.com')).toEqual(['region']);
+    // A well-formed placeholder after a literal brace is still found.
+    expect(serverUrlPlaceholders('https://{}.example.com/{version}')).toEqual(['version']);
+  });
+
+  it('keeps a name with regex metacharacters as written', () => {
+    expect(serverUrlPlaceholders('https://{a.b+c}.example.com/{a.b+c}')).toEqual(['a.b+c']);
+  });
+
+  it('lists a name like an Object.prototype member as itself', () => {
+    expect(serverUrlPlaceholders('https://{__proto__}.example.com/{constructor}/{toString}')).toEqual([
+      '__proto__',
+      'constructor',
+      'toString',
+    ]);
+  });
+
+  it('agrees with resolveServerUrl: with no variables declared, every placeholder is unresolved', () => {
+    for (const url of [
+      'https://{region}.example.com:{port}/{region}',
+      'https://{a{region}.example.com',
+      'https://{}.example.com/{version}',
+      'https://{region.example.com',
+      '{scheme}://{host}:{port}/v1',
+    ]) {
+      expect(resolveServerUrl({ url }).unresolved).toEqual(serverUrlPlaceholders(url));
+    }
   });
 });

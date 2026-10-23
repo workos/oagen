@@ -356,7 +356,8 @@ export interface OperationModified {
    * document is the document-level diff's to report. So a document that moves
    * to where an operation already pointed is not a change to that operation.
    * OpenAPI's default server is one list however it is spelled (#291): no
-   * servers and `/` alone without variables are served from the same place.
+   * servers and `/` alone — description and variables aside, since `/`
+   * references no variable — are served from the same place.
    */
   serversChanged: boolean;
   /**
@@ -714,6 +715,18 @@ export interface ServerModified {
   classification: 'additive' | 'breaking';
 }
 
+/**
+ * One variable of a `server-modified` server, matched by name. A variable
+ * added, an enum lifted (`variable-enum-removed`) and an enum value added are
+ * additive for any variable. The other four kinds — the variable removed, its
+ * default changed, an enum appearing, an enum value removed — are breaking
+ * when the server's `url` template references the variable (its `{name}` is
+ * in the template, so the resolved URL a caller built on moves) and additive
+ * when it does not: a variable the template never references cannot reach
+ * any resolved URL, so nothing a caller relied on is taken away. In that
+ * additive case — those four kinds only — `details` says so; the three kinds
+ * that are additive for any variable keep their shape.
+ */
 export interface ServerVariableChange {
   kind:
     | 'variable-added'
@@ -731,6 +744,13 @@ export interface ServerVariableChange {
   newDefault?: string;
   /** For `variable-enum-value-added` / `variable-enum-value-removed`: the value. */
   value?: string;
+  /**
+   * What changed, in words, for `variable-default-changed`,
+   * `variable-enum-added` and `variable-enum-removed`. For a variable the
+   * template never references, every change that would otherwise be breaking
+   * also carries (appended after `; ` when there is other text) `{name} is
+   * not in the URL template, so no resolved URL moves`.
+   */
   details?: string;
 }
 

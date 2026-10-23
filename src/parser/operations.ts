@@ -3798,11 +3798,13 @@ function operationLabel(op: OperationObject | undefined, path: string, method: H
  * inherits, not the Path Item's.
  *
  * OpenAPI's default server is one thing however it is spelled (#291): a list
- * that means it — no servers, `servers: []`, or nothing but `/` without
- * variables, by `isDefaultServerList` — under a document whose list means it
- * too is inherited as well. So an operation or Path Item that writes `/` out
- * under a document that declares nothing inherits, the entry's description
- * included, since the default server has none. Any other list is compared
+ * that means it — no servers, `servers: []`, or nothing but `/`, by
+ * `isDefaultServerList`, description and variables aside (the default server
+ * has neither, and `/` references no variable, so one declared on it changes
+ * nothing — #292) — under a document whose list means it too is inherited as
+ * well. So an operation or Path Item that writes `/` out under a document
+ * that declares nothing inherits, the entry's description and variables
+ * included. Any other list is compared
  * entry for entry as written, `/` entries included, because position decides
  * the default host: `/` under a document that names a host is kept, a named
  * host under a document that writes `/` out is kept, and a named host alone
