@@ -8,6 +8,7 @@ import {
   reservedTypeNames,
   settleFieldInlineModels,
 } from '../../src/parser/normalize-inline-models.js';
+import { attachSharedRefs } from '../../src/parser/operations.js';
 import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
 describe('collapseJsonSuffixModels — response content types', () => {
@@ -762,9 +763,9 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
   it('stands the object the component pass minted in for its folded copy, with the references that shared it', () => {
     // The component pass minted `PetStatus` for `Pet.status` itself; the
     // field extractor's copy folds onto it when the fields are settled
-    // (`folded`), and a `Status` header shared it in the registry
-    // (`sharedRefs`). At the merges the field's site stands for the
-    // survivor and holds the header's reference, so renaming it past a
+    // (`folded`), and a `Status` header shared it in the registry. At the
+    // merges the field's site stands for the survivor and the header's
+    // reference joins it (`attachSharedRefs`), so renaming it past a
     // `status` query enum of the name repoints the field and the header.
     const minted = body('PetStatus', 'code');
     const copy = body('PetStatus', 'code');
@@ -788,12 +789,14 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
     expect(settled).toEqual([]);
     expect(folded.get(copy)).toBe(minted);
 
-    const bundles = fieldInlineModelBundles(groups, [pet, minted], {
-      folded,
-      componentNames: new Set(['Pet']),
-      sharedRefs: new Map([[minted, [headerRef]]]),
-    });
+    // The header's site minted nothing of its own: its root shares `PetStatus`.
+    const headerSite = { qualifier: 'Pet', roots: [headerRef], models: [] };
+    const bundles = [
+      ...fieldInlineModelBundles(groups, [pet, minted], { folded, componentNames: new Set(['Pet']) }),
+      headerSite,
+    ];
     expect(bundles[0].models).toEqual([minted]);
+    attachSharedRefs(bundles, new Set(['Pet']));
     expect(bundles[0].roots).toContain(headerRef);
 
     let merged: Model[] = [];
