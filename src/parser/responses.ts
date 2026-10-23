@@ -403,8 +403,11 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
     // A companion is pagination metadata when it is one of the stop fields
     // the end-of-iteration detector reads (`hasMore`, `hasNext`, `pageCount`,
     // …) — one shared list, so an envelope that carries a stop field is
-    // always recognized — or when its name contains one of the metadata
-    // patterns (`meta`, `pagination`, `cursor`, …).
+    // always recognized — or when its name, read in any spelling, contains
+    // one of the metadata patterns (`meta`, `pagination`, `cursor`, …:
+    // `looksLikePaginationMetadata`, the recognizer the nested stop-field
+    // scan shares, so `pageInfo` marks an envelope exactly as `page_info`
+    // does and `pageInfo.hasNextPage` is then read as its stop field).
     const hasPaginationCompanion = nonArrayKeys.some(
       (key) => END_OF_ITERATION_FIELDS.includes(key) || looksLikePaginationMetadata(key),
     );
