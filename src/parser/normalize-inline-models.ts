@@ -21,17 +21,22 @@ import {
 
 /**
  * What the merge passes need to keep two definitions of one name apart — a
- * deprecated and a live one, or an inline one and a component that does not
- * admit it (see `settleSharedNames`): the site each inline model came from
- * (`bundles`), so the copy that must leave the shared name can be renamed
- * and exactly its own references repointed, and every name already in play
- * (`reserved`) — the component models and enums, and every inline model of
- * every pass — so the new name is free. A name minted here is added to
+ * deprecated and a live one, an inline one and a component that does not
+ * admit it, or an inline model and an enum (see `settleSharedNames`): the
+ * site each inline model came from (`bundles`), so the copy that must leave
+ * the shared name can be renamed and exactly its own references repointed;
+ * every name already in play (`reserved`) — the component models and enums,
+ * and every inline model of every pass — so the new name is free; and the
+ * names the document's enums hold (`enums`) — those in `spec.enums` as the
+ * passes run: the component enums, and the inline enums lifted from the
+ * component schemas' own fields, union variants and array items — which no
+ * inline model may keep, whatever its shape. A name minted here is added to
  * `reserved`, so both passes, and every mint within one, agree.
  */
 export interface InlineModelNaming {
   bundles: InlineModelBundle[];
   reserved: Set<string>;
+  enums: ReadonlySet<string>;
 }
 
 /**
@@ -193,6 +198,13 @@ function keepLargestByName(models: Model[]): Model[] {
  *   contenders of one name without an owner are left to the pass's own choice
  *   (`keepLargestByName`).
  *
+ * A contender named like one of the document's enums (`naming.enums`) with
+ * no owner of that name takes a name of its own (`renameInlineCopy`)
+ * whatever its shape or flag, with a note: an enum admits no model, so the
+ * IR never declares a model and an enum under one name. A name both a
+ * component model and a component enum hold is the document's own clash and
+ * is settled as the model's.
+ *
  * A renamed copy takes its site's qualifier prefixed (`mintQualifiedName`) —
  * `GetLegacyWidgetWidget` or `GetWidgetWidget` for a response of
  * `getLegacyWidget` or `getWidget` pinned by `object: widget`,
@@ -244,6 +256,25 @@ function settleSharedNames(
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
     const owner = owners.get(name);
+    // A name one of the document's enums holds is no model's, whatever the
+    // copy's shape or flag: nothing admits it and nothing folds onto it, so
+    // every copy leaves the name through its site. A name both a component
+    // model and a component enum hold is the document's own clash and is
+    // settled as the model's, below.
+    if (!owner && naming?.enums.has(name)) {
+      for (const copy of group) {
+        const bundle = bundleOf.get(copy);
+        if (!bundle) {
+          console.warn(
+            `[oagen] Warning: Inline model "${name}" is named like enum "${name}" and has no site to be renamed from — keeping both under the shared name`,
+          );
+          continue;
+        }
+        const renamed = renameInlineCopy(copy, name, bundle, naming);
+        console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": enum "${name}" owns the name`);
+      }
+      continue;
+    }
     let nameDeprecated: boolean;
     /** The live contenders a deprecated copy may fold onto; empty under an owner, which is never folded onto. */
     let live: Model[] = [];
@@ -467,9 +498,14 @@ function rewriteModelRefs(
  * when the component admits it (and is then dropped, its references
  * resolving to the component) and takes a qualified name otherwise, so a
  * component is never replaced; the fold below (`keepLargestByName`) only
- * ever joins inline models that agree on `deprecated`. A copy the caller
- * gave no site to rename from (`naming`) is dropped in favour of the
- * component, with the settle pass's warning.
+ * ever joins inline models that agree on `deprecated`. An inline model named
+ * like one of the document's enums (`naming.enums`) — a request body or
+ * primary response named from its operation, a model nested under one, a
+ * list-envelope companion — takes a qualified name the same way, whatever
+ * its shape. A copy the caller gave no site to rename from (`naming`) is
+ * dropped in favour of the component, with the settle pass's warning; one
+ * named like an enum is kept beside it, with a warning, since nothing
+ * stands in for it.
  */
 export function mergeInlineResponseModels(
   schemaModels: Model[],
@@ -501,8 +537,12 @@ export function mergeInlineResponseModels(
  * below then only joins models that agree on the flag, and a field model
  * named like an inline survivor of another shape is dropped in favour of the
  * survivor, with a warning naming both shapes, as the earlier definition of
- * an inline name is kept everywhere. A copy without a site to rename from
- * (`naming`) is dropped in favour of the component, with the settle pass's
+ * an inline name is kept everywhere. A field model named like one of the
+ * document's enums (`naming.enums`) — a `Pet.owner` object beside a
+ * component enum `PetOwner` — takes a qualified name (`PetOwner2`) whatever
+ * its shape, as the response pass's models do. A copy without a site to
+ * rename from (`naming`) is dropped in favour of the component, with the
+ * settle pass's warning; one named like an enum is kept beside it, with a
  * warning.
  */
 export function mergeFieldInlineModels(

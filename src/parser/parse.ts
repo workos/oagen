@@ -197,7 +197,13 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Every name in play — component models and enums, every inline model of
   // either pass, and every inline enum the collectors below will lift — so a
   // copy a merge pass must rename (a deprecated response named like a live
-  // one) takes a name nothing else has or will have, in either pass.
+  // one) takes a name nothing else has or will have, in either pass; and the
+  // names the document's enums hold, which no inline model keeps (a `getPet`
+  // body beside a component enum `GetPetResponse` steps to
+  // `GetPetResponse2`), so the IR never declares a model and an enum under
+  // one name. The deferred sites step around every enum name as they are
+  // named (`reserveEnumNamesInPlay`), and an enum the collectors lift after
+  // a model of its name steps itself (`collectDistinctEnums`).
   const naming: InlineModelNaming = {
     bundles: [...inlineModelBundles],
     reserved: reservedTypeNames(
@@ -208,6 +214,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       services,
       webhooks,
     ),
+    enums: new Set(enums.map((e) => e.name)),
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
   // The field models' sites, resolved against the models as the response

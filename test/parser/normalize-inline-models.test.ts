@@ -1,6 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { collapseJsonSuffixModels, mergeFieldInlineModels } from '../../src/parser/normalize-inline-models.js';
-import type { Model, Service } from '../../src/ir/types.js';
+import {
+  collapseJsonSuffixModels,
+  mergeFieldInlineModels,
+  mergeInlineResponseModels,
+} from '../../src/parser/normalize-inline-models.js';
+import type { Model, Service, TypeRef } from '../../src/ir/types.js';
 
 describe('collapseJsonSuffixModels — response content types', () => {
   it('rewrites primary, alternate-success, and error content refs when a Json-suffix model collapses', () => {
@@ -547,5 +551,101 @@ describe('mergeFieldInlineModels', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+describe('a name one of the document’s enums holds (issue #303)', () => {
+  const str: TypeRef = { kind: 'primitive', type: 'string' };
+  const body = (name: string, field = 'a', deprecated = false): Model => ({
+    name,
+    fields: [{ name: field, type: str, required: false }],
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  /** Run `fn`, returning every warning it printed instead of printing it. */
+  const warnings = (fn: () => void): string[] => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      fn();
+      return warnSpy.mock.calls.map(([m]) => String(m));
+    } finally {
+      warnSpy.mockRestore();
+    }
+  };
+
+  it('renames every copy off the name through its site, live or deprecated, and repoints the site’s references', () => {
+    const live = body('GetPetResponse');
+    const old = body('GetPetResponse', 'a', true);
+    const liveRef: TypeRef = { kind: 'model', name: 'GetPetResponse' };
+    const oldRef: TypeRef = { kind: 'model', name: 'GetPetResponse' };
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([], [live, old], {
+        bundles: [
+          { qualifier: 'GetPet', roots: [liveRef], models: [live] },
+          { qualifier: 'GetLegacyPet', roots: [oldRef], models: [old] },
+        ],
+        reserved: new Set(['GetPetResponse', 'GetPetResponse2']),
+        enums: new Set(['GetPetResponse']),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['GetPetResponse3', 'GetLegacyPetGetPetResponse']);
+    expect(liveRef).toEqual({ kind: 'model', name: 'GetPetResponse3' });
+    expect(oldRef).toEqual({ kind: 'model', name: 'GetLegacyPetGetPetResponse' });
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "GetPetResponse" → "GetPetResponse3": enum "GetPetResponse" owns the name',
+      '[oagen] Renamed inline model "GetPetResponse" → "GetLegacyPetGetPetResponse": enum "GetPetResponse" owns the name',
+    ]);
+  });
+
+  it('keeps a copy with no site under the shared name, with a warning', () => {
+    const copy = body('GetPetResponse');
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([], [copy], {
+        bundles: [],
+        reserved: new Set(['GetPetResponse']),
+        enums: new Set(['GetPetResponse']),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['GetPetResponse']);
+    expect(notes).toEqual([
+      '[oagen] Warning: Inline model "GetPetResponse" is named like enum "GetPetResponse" and has no site to be renamed from — keeping both under the shared name',
+    ]);
+  });
+
+  it('leaves a name a component model owns to the model rule: admitted copies fold, others take the component-schema note', () => {
+    const owner = body('GetPetResponse');
+    const admitted = body('GetPetResponse');
+    const other = body('GetPetResponse', 'b');
+    const otherRef: TypeRef = { kind: 'model', name: 'GetPetResponse' };
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([owner], [admitted, other], {
+        bundles: [{ qualifier: 'GetPet', roots: [otherRef], models: [other] }],
+        reserved: new Set(['GetPetResponse']),
+        enums: new Set(['GetPetResponse']),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['GetPetResponse', 'GetPetResponse2']);
+    expect(otherRef).toEqual({ kind: 'model', name: 'GetPetResponse2' });
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": its shape differs from component schema "GetPetResponse"',
+    ]);
+  });
+
+  it('applies in the field pass too (`PetOwner2`)', () => {
+    const field = body('PetOwner', 'name');
+    const ref: TypeRef = { kind: 'model', name: 'PetOwner' };
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeFieldInlineModels([], [field], new Set(), {
+        bundles: [{ qualifier: 'Pet', roots: [ref], models: [field] }],
+        reserved: new Set(['PetOwner']),
+        enums: new Set(['PetOwner']),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['PetOwner2']);
+    expect(ref).toEqual({ kind: 'model', name: 'PetOwner2' });
+    expect(notes).toEqual(['[oagen] Renamed inline model "PetOwner" → "PetOwner2": enum "PetOwner" owns the name']);
   });
 });
