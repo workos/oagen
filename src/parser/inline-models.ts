@@ -1655,8 +1655,17 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     inline object with no fields, as it is as a plain field or a union
  *     variant (`isInlineObjectSchema`), so its model is built with none
  *     rather than left for the reference to dangle on.
- *   - `'unwrapped'`: a single non-`$ref` member, typed and extracted as the
- *     schema itself (`unwrappedAllOfMember`).
+ *   - `'unwrapped'`: a single non-`$ref` member with nothing beside it that
+ *     adds to it, typed and extracted as the schema itself
+ *     (`unwrappedAllOfMember`, which carries the wrapper's limits, flag and
+ *     link onto it). A `required` list the wrapper writes beside a lone
+ *     member that declares properties (`declaresInlineProperties`) adds to
+ *     it: the schema is then the merged model, which reads both lists
+ *     (workos/oagen#359 review: the unwrap carried the member's `required`
+ *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
+ *     left `name` optional). Beside a member that declares none — an
+ *     array, a primitive, an enum — `required` constrains nothing, and the
+ *     member is the schema.
  *   - `'reference'`: a single `$ref` member with nothing beside it that adds
  *     to the component — a `description`, limits — is that component, and
  *     nothing is minted. A second `$ref` member, or a `required` list
@@ -1677,7 +1686,11 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
     const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
     return addsRequired ? 'merged' : 'reference';
   }
-  if (members.length === 1) return 'unwrapped';
+  if (members.length === 1) {
+    const only = members[0]!;
+    const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
+    return addsRequired ? 'merged' : 'unwrapped';
+  }
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
 }
 
@@ -1703,18 +1716,69 @@ export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject
  */
 export interface PropertyDeclarations {
   name: string;
-  /** The first always-applying declaration, with the component it is inherited from (`null` for the schema's own). */
+  /** The always-applying declaration that types the property (`combineDeclarations`), with the component it is inherited from (`null` for the schema's own). */
   unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
   /** Each branch-only declaration — a `oneOf`/`anyOf` variant's — in order. */
   conditional: SchemaObject[];
 }
 
 /**
+ * Whether a declaration says what an instance is: a `type`, a `$ref`,
+ * `properties`, `items`, an `enum` or `const`, a composition, or an
+ * `additionalProperties`/`patternProperties` map. One that declares none —
+ * a bare `description`, `title`, `example`, `deprecated`, `default`, or a
+ * validation keyword on its own (`minimum: 1`) — annotates or constrains a
+ * type another declaration gives, and is never read as the type itself
+ * (`combineDeclarations`).
+ */
+export function declaresType(schema: SchemaObject): boolean {
+  return (
+    schema.type !== undefined ||
+    schema.$ref !== undefined ||
+    schema.properties !== undefined ||
+    schema.items !== undefined ||
+    schema.enum !== undefined ||
+    schema.const !== undefined ||
+    schema.allOf !== undefined ||
+    schema.oneOf !== undefined ||
+    schema.anyOf !== undefined ||
+    schema.additionalProperties !== undefined ||
+    schema.patternProperties !== undefined
+  );
+}
+
+/**
+ * The always-applying declaration of one property once a second arrives, in
+ * document order — the one precedence rule for a name two members declare,
+ * applied by `declareProperty` for every `allOf` merge and by the envelope
+ * collector for the properties it reads (`collectEnvelopeProperties`), so a
+ * model's field and a list's stop field are typed from the same declaration.
+ * The first declaration that declares a type (`declaresType`) types the
+ * property, whatever comes after it; a declaration that declares none never
+ * does, before or after, and only fills in the keywords the typing one
+ * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
+ * member's `has_more: { description: 'More pages' }` is a described boolean
+ * whichever is read first (workos/oagen#308 review: the collector took the
+ * later declaration, so a component's own boolean, folded in first, lost
+ * its type to the description). Two typing declarations keep the first as
+ * written; the second is not conjoined into it. Returns `held` itself when
+ * `next` adds nothing to it, so a lone declaration keeps its identity.
+ */
+export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
+  if (declaresType(held) && declaresType(next)) return held;
+  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
+  return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+}
+
+/**
  * Record one declaration of `name` in `ledger`: the one precedence rule
  * every `allOf` merge applies, whether the declaration arrives from a direct
  * member, a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
- * depth. The first always-applying declaration wins, whatever is declared
- * before or after it; a branch-only declaration (`onBranch`) is only a
+ * depth. Of the always-applying declarations, the first that declares a
+ * type wins, whatever is declared before or after it, and a typeless one
+ * only annotates it (`combineDeclarations`); the entry's origin is the
+ * typing declaration's. A branch-only declaration (`onBranch`) is only a
  * fallback, kept in order for the reader to use when no member always
  * declares the name — `mergeAllOfMembers` as the union of the distinct
  * branch declarations, the component readers (`extractAllOfModel`,
@@ -1732,7 +1796,12 @@ export function declareProperty(
   let entry = ledger.get(name);
   if (!entry) ledger.set(name, (entry = { name, conditional: [] }));
   if (onBranch) entry.conditional.push(schema);
-  else entry.unconditional ??= { schema, origin };
+  else if (!entry.unconditional) entry.unconditional = { schema, origin };
+  else {
+    const held = entry.unconditional;
+    const typesIt = !declaresType(held.schema) && declaresType(schema);
+    entry.unconditional = { schema: combineDeclarations(held.schema, schema), origin: typesIt ? origin : held.origin };
+  }
 }
 
 /**
@@ -1770,8 +1839,10 @@ export function declareProperty(
  * keeps its own fields), and a union a `$ref` member's component carries is
  * not read (the component's own model dispatches or flattens it).
  *
- * A property keeps the first declaration an always-applying member gives
- * it, whatever a variant says: a variant can only narrow what every instance
+ * A property keeps the always-applying declaration `declareProperty` settles
+ * on — the first that declares a type, a typeless one before or after it
+ * only annotating it (`combineDeclarations`) — whatever a variant says: a
+ * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
  * distinct declarations (`unionOfDeclarations`): one declaration, or several
  * of one shape, is that declaration; several shapes become a `oneOf` of

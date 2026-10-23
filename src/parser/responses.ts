@@ -27,6 +27,7 @@ import {
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
   collectProperties,
+  combineDeclarations,
   extractInlineModelsFromProperties,
   mergeAllOfMembers,
   mergedObjectSchema,
@@ -702,7 +703,14 @@ function collectEnvelopeProperties(
  * `data: User[]` is not downgraded to `string[]` or `unknown[]`; the result
  * is `type: ['array', 'null']` when either declaration admits `null`, else
  * `type: 'array'`, and carries the later `description`, else the earlier.
- * Anything else takes the later declaration.
+ * These two conjoin what both declarations say about the companion object
+ * or the data array the envelope reads into. Which declaration types the
+ * property otherwise is not decided here: it is the answer every `allOf`
+ * merge gives a name two members declare (`combineDeclarations`, the rule
+ * `declareProperty` applies for a component's and a merged model's field) —
+ * the first declaration that declares a type, with a typeless one, before
+ * or after it, filling in only what it leaves unset — so a stop field is
+ * typed exactly as the wrapper model's field is.
  */
 function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
   if (isInlineObjectSchema(earlier) && isInlineObjectSchema(later)) {
@@ -729,7 +737,7 @@ function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): 
       type: declaresNull(earlier) || declaresNull(later) ? ['array', 'null'] : 'array',
     };
   }
-  return later;
+  return combineDeclarations(earlier, later);
 }
 
 /**
@@ -942,10 +950,11 @@ function extractDirectResource(
   // a copy of the component under its own name); a ref no component answers
   // is that reference too. A second `$ref`, or a `required` beside the
   // `$ref`, makes the body the merge below, as it makes a field (every
-  // component's properties and every `required` kept). A lone member is
-  // the body itself, carrying the wrapper's limits, flag and link
-  // (`unwrappedAllOfMember`), read by the branches of this function as if
-  // written in its place. Every other
+  // component's properties and every `required` kept). A lone member with
+  // nothing added to it is the body itself, carrying the wrapper's limits,
+  // flag and link (`unwrappedAllOfMember`), read by the branches of this
+  // function as if written in its place; a `required` beside a lone object
+  // member makes the body the merge too, so `name` stays required. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
