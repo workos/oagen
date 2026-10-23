@@ -60,6 +60,58 @@ describe('collectReferencedNames — response content types', () => {
   });
 });
 
+describe('collectReferencedNames — request body content types', () => {
+  it('reaches models and enums referenced only by a secondary request media type', () => {
+    const body = { kind: 'model' as const, name: 'ThingInput' };
+    const services: Service[] = [
+      {
+        name: 'Things',
+        operations: [
+          {
+            name: 'createThing',
+            httpMethod: 'post',
+            path: '/things',
+            pathParams: [],
+            queryParams: [],
+            headerParams: [],
+            requestBody: body,
+            requestBodyEncoding: 'json',
+            requestBodyContentType: 'application/json',
+            requestBodyContentTypes: ['application/json', 'application/xml', 'application/vnd.mode+json'],
+            requestBodyContents: [
+              { contentType: 'application/json', type: body },
+              { contentType: 'application/xml', type: { kind: 'model', name: 'ThingXml' } },
+              { contentType: 'application/vnd.mode+json', type: { kind: 'enum', name: 'ThingMode' } },
+            ],
+            response: { kind: 'primitive', type: 'unknown' },
+            errors: [],
+            injectIdempotencyKey: false,
+          },
+        ],
+      },
+    ];
+    const models: Model[] = [
+      { name: 'ThingInput', fields: [] },
+      {
+        name: 'ThingXml',
+        fields: [{ name: 'links', type: { kind: 'model', name: 'ThingXmlLinks' }, required: false }],
+      },
+      { name: 'ThingXmlLinks', fields: [] },
+      { name: 'Unrelated', fields: [] },
+    ];
+
+    const referenced = collectReferencedNames(services, models);
+
+    // A model reached only through a secondary request media type is emitted like the body model.
+    expect(referenced.models.has('ThingInput')).toBe(true);
+    expect(referenced.models.has('ThingXml')).toBe(true);
+    // Chased transitively through the content model's own fields.
+    expect(referenced.models.has('ThingXmlLinks')).toBe(true);
+    expect(referenced.enums.has('ThingMode')).toBe(true);
+    expect(referenced.models.has('Unrelated')).toBe(false);
+  });
+});
+
 describe('collectReferencedNames', () => {
   it('preserves discriminated models even when they are not directly referenced by operations', () => {
     const services: Service[] = [

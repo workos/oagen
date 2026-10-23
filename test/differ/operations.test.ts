@@ -71,7 +71,7 @@ describe('diffOperations — response content types', () => {
       responseContentTypeChanges: [{ added: [], removed: ['text/html'], retyped: [], classification: 'breaking' }],
       classification: 'breaking',
     });
-    // The primary of a single-2xx operation carries no status code.
+    // A hand-built lone 2xx that carries no `responseStatusCode` reports none.
     expect(
       Object.keys((changes[0] as { responseContentTypeChanges: object[] }).responseContentTypeChanges[0]),
     ).not.toContain('statusCode');
@@ -79,8 +79,9 @@ describe('diffOperations — response content types', () => {
 
   it('pairs entries by status code across a primary change, and reports a vanished 2xx as its formats removed (Greptile)', () => {
     // Old: 200 (PDF) primary, 201 (PDF + HTML). New: the 200 is gone and the 201,
-    // now the lone 2xx, dropped HTML. The IR carries no code for a lone 2xx, so
-    // the new primary pairs with the old primary (PDF vs PDF: nothing), and the
+    // now the lone 2xx, dropped HTML. This hand-built lone 2xx carries no
+    // `responseStatusCode`, so the new primary pairs with the old primary
+    // by shape (PDF vs PDF: nothing), and the
     // old 201 — which nothing else reports — is reported with its formats removed.
     const pdf = contents([['application/pdf', binary]]);
     const pdfHtml = contents([

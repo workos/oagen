@@ -11,8 +11,19 @@ import type {
 } from '../ir/types.js';
 import { foldHeaderName } from '../ir/parameter-key.js';
 import { resolveServerUrl } from '../ir/server-url.js';
-import { mediaTypeEssence } from '../utils/media-type.js';
 import { diffServers } from './servers.js';
+import {
+  diffRequestBodyContentTypes,
+  ownRepresentationKept,
+  mediaTypeBodies,
+  pairByName,
+  pairMediaTypeBodies,
+  reparameterizedBodies,
+  respelling,
+  retypedBodies,
+  type MediaTypeBody,
+} from './media-types.js';
+import type { DocumentShapes } from './shapes.js';
 import type {
   Change,
   ParamChange,
@@ -58,6 +69,7 @@ export function diffOperations(
   newOps: Operation[],
   documentServers?: DocumentServers,
   documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
 ): Change[] {
   const changes: Change[] = [];
   const oldByName = new Map(oldOps.map((o) => [o.name, o]));
@@ -101,9 +113,16 @@ export function diffOperations(
     const requestBodyRequiredChanged =
       bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     // The wire format the SDK serializes the body as, read through the
-    // function `diffWebhooks` reads a payload's encoding with.
-    const encoding = bothCarryBody ? requestBodyEncodingShift(oldOp, newOp) : undefined;
+    // function `diffWebhooks` reads a payload's encoding with, which
+    // compares only while both sides carry a body, likewise.
+    const encoding = requestBodyEncodingShift(oldOp, newOp);
     const requestBodyEncodingChanged = encoding !== undefined;
+    // The media types callers may send the body as, only while both sides
+    // declare a body, likewise; judged from the caller's side, which sends
+    // it. A body moving from JSON to a form media type sets this beside the
+    // encoding flag: the JSON media type is removed and the form one added.
+    const requestBodyContentTypeChange = diffRequestBodyContentTypes(oldOp, newOp, 'caller', shapes);
+    const requestBodyContentTypesChanged = requestBodyContentTypeChange !== undefined;
     const httpMethodChanged = oldOp.httpMethod !== newOp.httpMethod;
     const pathChanged = oldOp.path !== newOp.path;
     const paginatedChanged = !!oldOp.pagination !== !!newOp.pagination;
@@ -123,12 +142,21 @@ export function diffOperations(
     const injectIdempotencyKeyChanged = oldOp.injectIdempotencyKey !== newOp.injectIdempotencyKey;
     const errorsDiff = classifyErrorsChange(oldOp.errors, newOp.errors);
     const errorsChanged = errorsDiff !== 'none';
-    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp);
+    const responseContentTypeChanges = diffResponseContentTypes(oldOp, newOp, shapes);
     const responseContentTypesChanged = responseContentTypeChanges.length > 0;
     // The headers each response entry declares, which an SDK may expose as
     // typed accessors on a response wrapper (#296).
     const responseHeaderChanges = diffResponseHeaders(oldOp, newOp);
     const responseHeadersChanged = responseHeaderChanges.length > 0;
+    // The status code `response` is read from (`responseStatusCode`, present
+    // exactly when a 2xx or 3xx is declared), compared only while both sides
+    // carry one, as `requestBodyRequired` is while both carry a body: an
+    // operation gaining or losing its only 2xx/3xx is not a move.
+    const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
+    const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
+    const status = responseStatusCodeChanged
+      ? { oldResponseStatusCode: oldOp.responseStatusCode, newResponseStatusCode: newOp.responseStatusCode }
+      : {};
     const fallbackDiff = classifyFallbackResponsesChange(oldOp, newOp);
     const fallbackResponsesChanged = fallbackDiff !== 'none';
     // Additive either way: the operation's signature is unchanged, but a
@@ -166,6 +194,7 @@ export function diffOperations(
       requestBodyChanged ||
       requestBodyRequiredChanged ||
       requestBodyEncodingChanged ||
+      requestBodyContentTypesChanged ||
       httpMethodChanged ||
       pathChanged ||
       paginatedChanged ||
@@ -179,6 +208,7 @@ export function diffOperations(
       errorsChanged ||
       responseContentTypesChanged ||
       responseHeadersChanged ||
+      responseStatusCodeChanged ||
       fallbackResponsesChanged ||
       deprecatedChanged ||
       serversChanged ||
@@ -205,14 +235,27 @@ export function diffOperations(
       // are breaking. An absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
       const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
+      // requestBodyEncoding: an SDK built for the old spec keeps sending the
+      // representation that spec's body was read from. Breaking when the new
+      // spec no longer accepts it — that media type gone, or its shape
+      // changed; additive when it still does, as when a media type the
+      // parser prefers is added beside it (`application/json` beside a kept
+      // `application/x-www-form-urlencoded`). A body without media-type
+      // lists reads as breaking.
+      const requestBodyEncodingBreaking =
+        requestBodyEncodingChanged && !ownRepresentationKept(oldOp, newOp, 'caller', shapes);
       const errorsBreaking = errorsDiff === 'breaking';
       // A media type callers could ask for that is gone, or a secondary body
-      // that changed shape, breaks them; one they can newly ask for does not.
+      // that changed shape, breaks them; one they can newly ask for, or one
+      // that only changed a parameter, does not.
       const responseContentTypesBreaking = responseContentTypeChanges.some((c) => c.classification === 'breaking');
       // A header the SDK exposed that is gone, retyped or no longer always
       // sent breaks the code that read it; one added, respelled, deprecated
       // or now always sent does not.
       const responseHeadersBreaking = responseHeaderChanges.some((c) => c.classification === 'breaking');
+      // A media type callers could send that is gone, or a secondary body
+      // that changed shape, breaks them; one they can newly send does not.
+      const requestBodyContentTypesBreaking = requestBodyContentTypeChange?.classification === 'breaking';
       const fallbackBreaking = fallbackDiff === 'breaking';
       // servers: breaking exactly when the same edit to the document's
       // `servers` would be — a server the callers could use is gone or its
@@ -230,10 +273,7 @@ export function diffOperations(
         responseChanged ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
-        // requestBodyEncoding: breaking either way — an SDK built for the old
-        // spec serializes and labels the body as that spec said, which the
-        // server no longer reads.
-        requestBodyEncodingChanged ||
+        requestBodyEncodingBreaking ||
         httpMethodChanged ||
         pathChanged ||
         paginatedBreaking ||
@@ -249,6 +289,11 @@ export function diffOperations(
         errorsBreaking ||
         responseContentTypesBreaking ||
         responseHeadersBreaking ||
+        // responseStatusCode: breaking — the status the operation succeeds
+        // with is what an SDK checks or documents (the IR carries it for
+        // that), and the server now answers with another one.
+        responseStatusCodeChanged ||
+        requestBodyContentTypesBreaking ||
         fallbackBreaking ||
         serversBreaking ||
         securityBreaking ||
@@ -263,6 +308,8 @@ export function diffOperations(
         requestBodyRequiredChanged,
         requestBodyEncodingChanged,
         ...encoding,
+        requestBodyContentTypesChanged,
+        ...(requestBodyContentTypeChange ? { requestBodyContentTypeChange } : {}),
         httpMethodChanged,
         pathChanged,
         paginatedChanged,
@@ -278,6 +325,8 @@ export function diffOperations(
         responseContentTypeChanges,
         responseHeadersChanged,
         responseHeaderChanges,
+        responseStatusCodeChanged,
+        ...status,
         fallbackResponsesChanged,
         deprecatedChanged,
         ...deprecation,
@@ -367,89 +416,43 @@ interface ContentEntry {
   ownCoveredElsewhere: boolean;
 }
 
-/**
- * One media type a response entry declares, as the differ compares it. Media
- * types are compared by essence — `type/subtype`, case folded, parameters
- * stripped (`mediaTypeEssence`, the parser's own rule for typing a body) —
- * so `Text/HTML` is `text/html` and `application/problem+json; charset=utf-8`
- * is `application/problem+json`, while a change is reported with the key as
- * written in the document that declares it.
- */
-interface MediaTypeBody {
-  /** The key as written in its document (`Text/HTML`), which is what a change reports. */
-  mediaType: string;
-  /** `mediaTypeEssence(mediaType)`: what decides which key of the other document this one is. */
-  essence: string;
-  /** The body's type, when the entry's `contents` carry one for this key. */
-  type?: TypeRef;
-  /**
-   * Whether this is the entry's own body — the one its `type` was read from:
-   * the content entry that shares `type`'s very object (how the parser builds
-   * it), or, for an error that carries no lists, the implicit
-   * `application/json` entry restored from `type`. Never decided by
-   * structural equality, which a secondary body can coincidentally satisfy.
-   * No body is the own one for a 3xx, or in a hand-built IR without that
-   * identity.
-   */
-  own: boolean;
-}
-
 const JSON_MEDIA_TYPE = 'application/json';
-
-/**
- * The bodies of one entry, one per `contentTypes` entry, each with the
- * `contents` entry written under the same key. `ownType` marks the own body
- * by object identity; `ownEssence` is the error-only fallback for an IR
- * whose lists do not share `type`'s object: the first body of that essence
- * (`application/json`, the media type an error's `type` is read from).
- */
-function mediaTypeBodies(
-  contentTypes: string[],
-  contents: ResponseContent[],
-  ownType: TypeRef | undefined,
-  ownEssence?: string,
-): MediaTypeBody[] {
-  const own =
-    ownType &&
-    (contents.find((c) => c.type === ownType) ??
-      (ownEssence ? contents.find((c) => mediaTypeEssence(c.contentType) === ownEssence) : undefined));
-  return contentTypes.map((mediaType) => {
-    const content = contents.find((c) => c.contentType === mediaType);
-    return {
-      mediaType,
-      essence: mediaTypeEssence(mediaType),
-      ...(content ? { type: content.type } : {}),
-      own: content !== undefined && content === own,
-    };
-  });
-}
 
 /**
  * Every response entry of an operation, keyed so the two specs' entries pair
  * up by status code: every 2xx/3xx entry as `success:<code>`, every error as
  * `error:<code>`, the `default` and each range response as
  * `fallback:<key>`. The primary success response (the one `response` is the
- * body of, read from the operation's own lists) is `success:<code>` too when
- * `successResponses` lists it — with several 2xx it is the lowest-coded entry
- * whose type is the operation's `response`, the parser's own pick — so a
- * primary that changes status still pairs with the entry of its code; a lone
- * 2xx carries no code in the IR and is keyed `primary` (see
- * `pairContentEntries` for what it pairs with).
+ * body of, read from the operation's own lists) is `success:<code>` too: the
+ * entry of `responseStatusCode` when `successResponses` lists it — the
+ * parser's own pick, so a primary that changes status still pairs with the
+ * entry of its code — and, for a lone 2xx that `successResponses` does not
+ * list, `responseStatusCode` itself, the code the parser read `response`
+ * from, so a lone `201` pairs with the other spec's `201` whether that spec
+ * declares it alone or beside a `200` it added. A hand-built IR whose lone
+ * 2xx carries no code is keyed `primary` (see `pairContentEntries` for what
+ * it pairs with).
  */
 function contentEntries(op: Operation): ContentEntry[] {
   const entries: ContentEntry[] = [];
   const successes = [...(op.successResponses ?? [])].sort((a, b) => a.statusCode - b.statusCode);
-  const primaryEntry = successes.find(
-    (entry) =>
-      (op.responseContents !== undefined && entry.contents === op.responseContents) ||
-      typeRefsEqual(entry.type, op.response),
-  );
+  // The entry `response` was read from: the one of `responseStatusCode`
+  // when the IR carries it, else — a hand-built IR without the code — the
+  // one that shares `response`'s content list or type.
+  const primaryEntry =
+    successes.find((entry) => entry.statusCode === op.responseStatusCode) ??
+    successes.find(
+      (entry) =>
+        (op.responseContents !== undefined && entry.contents === op.responseContents) ||
+        typeRefsEqual(entry.type, op.response),
+    );
+  const primaryStatus = primaryEntry?.statusCode ?? op.responseStatusCode;
   // The primary's headers are `responseHeaders`, the same array as its
   // `successResponses` entry's when both exist (how the parser builds it);
   // a hand-built IR that sets only the entry's is read from the entry.
   entries.push({
-    key: primaryEntry ? `success:${primaryEntry.statusCode}` : 'primary',
-    ...(primaryEntry ? { statusCode: primaryEntry.statusCode } : {}),
+    key: primaryStatus !== undefined ? `success:${primaryStatus}` : 'primary',
+    ...(primaryStatus !== undefined ? { statusCode: primaryStatus } : {}),
     isPrimary: true,
     bodies: mediaTypeBodies(op.responseContentTypes ?? [], op.responseContents ?? [], op.response),
     headers: op.responseHeaders ?? primaryEntry?.headers ?? [],
@@ -504,64 +507,6 @@ function contentEntries(op: Operation): ContentEntry[] {
   return entries;
 }
 
-/**
- * Which item of the old list each item of the new list is, for two lists
- * whose items are matched by a folded name: an entry's media types by
- * essence, the way the parser types them — `Text/HTML` is `text/html`,
- * `application/problem+json; charset=utf-8` is `application/problem+json` —
- * and its headers by case-folded name, as HTTP compares them —
- * `X-Rate-Limit` is `x-rate-limit`. Two names of one folding declared side
- * by side (`application/json` beside `application/json; charset=utf-8`)
- * never collapse into one: a new item claims the old item spelled exactly
- * as it is, else the first old item of its folding that nothing claimed, in
- * document order. What is left on the new side was `added`; what is left on
- * the old side was `removed`. Every pair is in the new list's order.
- */
-function pairByName<T>(
-  oldItems: T[],
-  newItems: T[],
-  written: (item: T) => string,
-  folded: (item: T) => string,
-): { pairs: Array<[T, T]>; added: T[]; removed: T[] } {
-  const unclaimed = new Set(oldItems);
-  const claim = (matches: (old: T) => boolean): T | undefined => {
-    for (const old of oldItems) {
-      if (!unclaimed.has(old) || !matches(old)) continue;
-      unclaimed.delete(old);
-      return old;
-    }
-    return undefined;
-  };
-  // Exact spellings claim first, whatever their position, so a respelled
-  // name never takes the old item an unchanged name still names.
-  const bySpelling = new Map<T, T>();
-  for (const item of newItems) {
-    const old = claim((candidate) => written(candidate) === written(item));
-    if (old) bySpelling.set(item, old);
-  }
-  const pairs: Array<[T, T]> = [];
-  const added: T[] = [];
-  for (const item of newItems) {
-    const old = bySpelling.get(item) ?? claim((candidate) => folded(candidate) === folded(item));
-    if (old) pairs.push([old, item]);
-    else added.push(item);
-  }
-  return { pairs, added, removed: oldItems.filter((old) => unclaimed.has(old)) };
-}
-
-/** `pairByName` over an entry's media types: spelled as written, folded to their essence. */
-function pairMediaTypeBodies(
-  oldBodies: MediaTypeBody[],
-  newBodies: MediaTypeBody[],
-): { pairs: Array<[MediaTypeBody, MediaTypeBody]>; added: MediaTypeBody[]; removed: MediaTypeBody[] } {
-  return pairByName(
-    oldBodies,
-    newBodies,
-    (body) => body.mediaType,
-    (body) => body.essence,
-  );
-}
-
 /** `pairByName` over an entry's headers: spelled as written, folded as HTTP compares header names. */
 function pairResponseHeaders(
   oldHeaders: ResponseHeader[],
@@ -598,8 +543,9 @@ function diffResponseHeaders(oldOp: Operation, newOp: Operation): ResponseHeader
   const paired = new Set<ContentEntry>();
   const changes: ResponseHeaderChange[] = [];
   // Every change says which response entry it is about, in the position
-  // `ResponseContentTypesChange` reports an entry: a status code, or the
-  // fallback key, or neither for a lone 2xx.
+  // `ResponseContentTypesChange` reports an entry: a status code (a lone
+  // 2xx's `responseStatusCode` included), or the fallback key, or neither
+  // for a lone 2xx of a hand-built IR that carries no code.
   const at = (entry: ContentEntry, change: ResponseHeaderChange): ResponseHeaderChange => {
     const { kind, headerName, ...rest } = change;
     return {
@@ -667,23 +613,30 @@ function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseH
 
 /**
  * Per response entry both specs have, the media types the new spec added,
- * removed, or retyped. Media types are compared by essence
+ * removed, retyped or reparameterized. Media types are compared by essence
  * (`pairMediaTypeBodies`), as the parser types them, so a key that only
- * changed case, whitespace or parameters is the same media type, and each is
- * reported as written in the spec that declares it. A retype is left out
- * only when another comparison reports that very body: the entry's own body
- * on both sides, for two primaries (`responseChanged`) or two errors of one
- * code (`errorsChanged`) — never for a primary paired with an alternate 2xx.
- * Entries pair by status code (`pairContentEntries`); a primary whose code the IR does not
- * carry (a lone 2xx) pairs with the entry of the other spec that offers its
- * media types, else with that spec's primary. An error only one spec has is
- * not a media-type change — a code that came or went is the errors diff's
- * business — and neither is a 2xx the new spec adds, but a 2xx the old spec
- * declared and the new does not has no other diff to report it, so its
- * media types are reported as removed: the formats callers could ask for
- * under that code are gone.
+ * changed case, whitespace or `charset` is the same media type, and each is
+ * reported as written in the spec that declares it; a pair whose other
+ * parameters differ is reparameterized, which is additive. A retype is a
+ * body whose shape changed (`retypedBodies`), left out only when another
+ * comparison reports that very body: the entry's own body on both sides,
+ * for two primaries (`responseChanged`) or two errors of one code
+ * (`errorsChanged`) — never for a primary paired with an alternate 2xx.
+ * Entries pair by status code (`pairContentEntries`), a lone 2xx by its
+ * `responseStatusCode`; two lone primaries of different codes pair with each
+ * other, and only a lone 2xx that carries no code (a hand-built IR) pairs by
+ * the media types it offers, else with the other spec's primary. An error
+ * only one spec has is not a media-type change — a code that came or went
+ * is the errors diff's business — and neither is a 2xx the new spec adds,
+ * but a 2xx the old spec declared and the new does not has no other diff to
+ * report it, so its media types are reported as removed: the formats
+ * callers could ask for under that code are gone.
  */
-function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseContentTypesChange[] {
+function diffResponseContentTypes(
+  oldOp: Operation,
+  newOp: Operation,
+  shapes?: DocumentShapes,
+): ResponseContentTypesChange[] {
   const oldEntries = contentEntries(oldOp);
   const newEntries = contentEntries(newOp);
   const pairs = pairContentEntries(oldEntries, newEntries);
@@ -693,19 +646,17 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
     const old = pairs.get(entry);
     if (!old) continue;
     paired.add(old);
-    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies);
-    const retyped = bodies.filter(([before, after]) => {
-      if (!before.type || !after.type || typeRefsEqual(before.type, after.type)) return false;
-      const ownOnBothSides = before.own && after.own;
-      return !(ownOnBothSides && old.ownCoveredElsewhere && entry.ownCoveredElsewhere);
-    });
-    if (added.length === 0 && removed.length === 0 && retyped.length === 0) continue;
+    const { pairs: bodies, added, removed } = pairMediaTypeBodies(old.bodies, entry.bodies, shapes);
+    const retyped = retypedBodies(bodies, old.ownCoveredElsewhere && entry.ownCoveredElsewhere, shapes);
+    const reparameterized = reparameterizedBodies(bodies);
+    if (added.length === 0 && removed.length === 0 && retyped.length === 0 && reparameterized.length === 0) continue;
     changes.push({
       ...(entry.statusCode !== undefined ? { statusCode: entry.statusCode } : {}),
       ...(entry.fallback !== undefined ? { fallback: entry.fallback } : {}),
       added: added.map((body) => body.mediaType),
       removed: removed.map((body) => body.mediaType),
       retyped: retyped.map(([, after]) => after.mediaType),
+      reparameterized: reparameterized.map(respelling),
       classification: removed.length > 0 || retyped.length > 0 ? 'breaking' : 'additive',
     });
   }
@@ -718,6 +669,7 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
       added: [],
       removed: old.bodies.map((body) => body.mediaType),
       retyped: [],
+      reparameterized: [],
       classification: 'breaking',
     });
   }
@@ -725,16 +677,19 @@ function diffResponseContentTypes(oldOp: Operation, newOp: Operation): ResponseC
 }
 
 /**
- * Which old entry each new entry is compared with. Entries pair by key: a
- * status code, or `primary` for a lone 2xx, which carries no code in the IR.
- * A lone 2xx on one side only has no counterpart by key, so it pairs with
- * the 2xx entry of the other side that offers the very same media types,
- * whatever that entry's code — the response it most plausibly still is, as
- * when a spec adds a `200` beside an unchanged lone `201` — and, when none
- * does, with the other side's primary. Pairing the two primaries blindly
- * would compare that unchanged `201` with the new `200` and report every
- * format the `200` does not offer as removed. A new entry nothing pairs with
- * is left out of the map.
+ * Which old entry each new entry is compared with. Entries pair by key — a
+ * status code, a lone 2xx's `responseStatusCode` included — so a lone `201`
+ * pairs with the other spec's `201` whether that spec declares it alone or
+ * beside a `200` it added, and the added `200` pairs with nothing. When
+ * neither primary has a counterpart by code and both carry one, the primary
+ * moved (a lone `201` became a lone `200`): the two primaries pair, and
+ * `responseStatusCodeChanged` reports the move once rather than every header
+ * and media type as removed under one code and added under the other. Only
+ * a lone 2xx that carries no code (a hand-built IR, keyed `primary`) falls
+ * back to shape: it pairs with the 2xx entry of the other side that offers
+ * the very same media types, whatever that entry's code — the response it
+ * most plausibly still is — and, when none does, with the other side's
+ * primary. A new entry nothing pairs with is left out of the map.
  */
 function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
   const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
@@ -746,30 +701,42 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
   const oldPrimary = oldEntries.find((entry) => entry.isPrimary);
   const newPrimary = newEntries.find((entry) => entry.isPrimary);
   if (!oldPrimary || !newPrimary || pairs.has(newPrimary)) return pairs;
-  if (newPrimary.key === 'primary') {
+  // The old primary is some new entry's by code (a lone `201` beside a new
+  // `200`): the new primary is a 2xx the new spec adds, paired with nothing.
+  if (new Set(pairs.values()).has(oldPrimary)) return pairs;
+  if (oldPrimary.statusCode !== undefined && newPrimary.statusCode !== undefined) {
+    pairs.set(newPrimary, oldPrimary);
+  } else if (newPrimary.statusCode === undefined) {
     pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
-  } else if (oldPrimary.key === 'primary') {
+  } else {
     pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
   }
   return pairs;
 }
 
 /**
- * The 2xx entry among `others` that offers exactly `lone`'s media types — by
- * essence, order aside, so `Text/HTML` + `application/pdf` still offers
- * `application/pdf` + `text/html` — the primary when it does, if any.
+ * The 2xx entry among `others` that offers exactly `lone`'s media types,
+ * order aside: one spelled the same way first, else one that offers them by
+ * essence (`Text/HTML` + `application/pdf` still offers `application/pdf` +
+ * `text/html`) — the primary among those, if any. The shape fallback
+ * `pairContentEntries` uses for a lone 2xx that carries no
+ * `responseStatusCode`.
  */
 function survivingEntry(lone: ContentEntry, others: ContentEntry[]): ContentEntry | undefined {
-  const offered = essenceSignature(lone);
-  const sameMediaTypes = others.filter(
-    (entry) => (entry.isPrimary || entry.key.startsWith('success:')) && essenceSignature(entry) === offered,
-  );
+  const candidates = others.filter((entry) => entry.isPrimary || entry.key.startsWith('success:'));
+  // The entry spelled exactly as the lone one is the response it still is,
+  // before any that only matches by essence: a `200` added beside an
+  // unchanged `201` with `application/yaml; version=2` where the `201` has
+  // `application/yaml` must not take the `201`'s place.
+  const exact = candidates.filter((entry) => signature(entry, 'mediaType') === signature(lone, 'mediaType'));
+  const byEssence = candidates.filter((entry) => signature(entry, 'essence') === signature(lone, 'essence'));
+  const sameMediaTypes = exact.length > 0 ? exact : byEssence;
   return sameMediaTypes.find((entry) => entry.isPrimary) ?? sameMediaTypes[0];
 }
 
-/** An entry's media types as the multiset of their essences, so two entries offering the same ones compare equal. */
-function essenceSignature(entry: ContentEntry): string {
-  return JSON.stringify(entry.bodies.map((body) => body.essence).sort());
+/** An entry's media types as a multiset of their spellings or of their essences, order aside. */
+function signature(entry: ContentEntry, by: 'mediaType' | 'essence'): string {
+  return JSON.stringify(entry.bodies.map((body) => body[by]).sort());
 }
 
 function requestBodiesEqual(a: Operation['requestBody'], b: Operation['requestBody']): boolean {
