@@ -1252,6 +1252,74 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       }
     });
 
+    describe('the override is decided once, on the primary, before any success body is read (Greptile)', () => {
+      const ok = (schema: unknown) => ({ description: 'ok', content: { 'application/json': { schema } } });
+      const nested = (extra: Record<string, unknown> = {}) => ({
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: { type: 'string' } },
+          result: {
+            type: 'object',
+            properties: {
+              items: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' } } } },
+            },
+          },
+          total: { type: 'integer' },
+          ...extra,
+        },
+      });
+      const more = { more: { type: 'boolean' } };
+      const selecting = { dataPath: 'result.items', endOfIteration: { kind: 'hasMore', path: 'more' } };
+      const unwrapped = { kind: 'array', items: { kind: 'primitive', type: 'string' } };
+
+      it("a rejection on the primary reaches every 2xx: the 201 unwraps on data as detection does, not on the override's wrapper", async () => {
+        // Only the 201 declares `more`; the 200 is primary and rejects the
+        // override, so the 201 is read exactly as detection reads it.
+        const responses = { '200': ok(nested()), '201': ok(nested(more)) };
+        const { bare, overridden } = await parseBeside(selecting, undefined, responses);
+        rejected('endOfIteration path "more" does not resolve to a field in the response');
+        const op = onlyOperation(overridden);
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unwrapped],
+        ]);
+        expect(overridden.services).toEqual(bare.services);
+        expect(overridden.models).toEqual(bare.models);
+        expectSound(overridden, []);
+      });
+
+      it('an acceptance on the primary applies to every 2xx body the dataPath reaches an array in', async () => {
+        const responses = { '200': ok(nested(more)), '201': ok(nested(more)) };
+        const ir = await parseJson(issueSpec(selecting, undefined, responses));
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toMatchObject({
+          dataPath: 'result.items',
+          itemType: { kind: 'model', name: 'ListPetsResponseResultItem' },
+          endOfIteration: { kind: 'hasMore', path: 'more' },
+        });
+        // Both bodies keep the wrapper the override iterates.
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, { kind: 'model', name: 'ListPetsResponse' }],
+          [201, { kind: 'model', name: 'ListPetsResponse' }],
+        ]);
+        expectSound(ir, []);
+      });
+
+      it('an override only a secondary 2xx could satisfy is rejected, since only the primary decides', async () => {
+        const responses = { '200': ok(totalEnvelope), '201': ok(nested(more)) };
+        const { bare, overridden } = await parseBeside(selecting, undefined, responses);
+        rejected('dataPath "result.items" does not resolve to an array in the response');
+        const op = onlyOperation(overridden);
+        expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+          [200, unwrapped],
+          [201, unwrapped],
+        ]);
+        expect(overridden.services).toEqual(bare.services);
+        expect(overridden.models).toEqual(bare.models);
+      });
+    });
+
     it('checks only the shape under strategy none: there is no iterator for the other fields to serve', async () => {
       const op = onlyOperation(
         await parseJson(
