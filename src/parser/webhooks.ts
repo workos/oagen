@@ -21,6 +21,7 @@ import {
   type RequestBodyObject,
 } from './operations.js';
 import { externalDocsEntry } from './external-docs.js';
+import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
 
@@ -676,13 +677,17 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
 }
 
 /**
- * The status codes the sender expects back, in document order. Only
- * three-digit keys are carried: `default` and ranges such as `2XX` name no
- * single code a handler could return. A response written as a `$ref` into
- * `components/responses` is followed for its description, chains included; a
- * description written beside the `$ref` (OpenAPI 3.1) wins over the
- * component's. A ref that leads nowhere, or anywhere else, keeps the status
- * code without a description, with a warning. A blank description is omitted.
+ * The status codes the sender expects back, in document order. Only status
+ * code keys (three digits, 100–599, as `classifyResponseKey` decides) are
+ * carried: `default` and ranges such as `2XX` name no single code a handler
+ * could return, and an `x-` key is a specification extension, so those are
+ * skipped silently; a key OpenAPI does not define (`error`, `6XX`, `600`) is
+ * warned about and ignored, as on an operation. A response written as a
+ * `$ref` into `components/responses` is followed for its description, chains
+ * included; a description written beside the `$ref` (OpenAPI 3.1) wins over
+ * the component's. A ref that leads nowhere, or anywhere else, keeps the
+ * status code without a description, with a warning. A blank description is
+ * omitted.
  */
 function extractWebhookResponses(
   responses: OperationObject['responses'],
@@ -691,9 +696,11 @@ function extractWebhookResponses(
 ): WebhookResponse[] {
   const result: WebhookResponse[] = [];
   for (const [code, raw] of Object.entries(responses ?? {})) {
-    if (!/^\d{3}$/.test(code)) continue;
+    const responseKey = classifyResponseKey(code);
+    if (responseKey.kind === 'unrecognized') warnUnrecognizedResponseKey(code, label);
+    if (responseKey.kind !== 'status') continue;
     const description = presentText(resolveResponseDescription(raw, componentResponses, code, label));
-    result.push({ statusCode: Number(code), ...(description !== undefined ? { description } : {}) });
+    result.push({ statusCode: responseKey.code, ...(description !== undefined ? { description } : {}) });
   }
   return result;
 }

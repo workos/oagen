@@ -152,10 +152,12 @@ export interface Webhook {
   requestBodyRequired?: boolean;
   /**
    * The responses the sender expects from the receiver, in document order:
-   * one entry per three-digit status code the operation declares. `default`
-   * and range (`2XX`) keys are not carried. Body schemas on these responses
-   * are not carried either: a webhook response is an acknowledgement, and
-   * typing it would mint models no handler needs.
+   * one entry per status code key (three digits, 100–599) the operation
+   * declares. `default`, range (`2XX`) and `x-` keys are not carried; a key
+   * that is none of those (`error`, `6XX`, `600`) is ignored with a warning.
+   * Body schemas on these responses are not carried either: a webhook
+   * response is an acknowledgement, and typing it would mint models no
+   * handler needs.
    */
   responses: WebhookResponse[];
   /**
@@ -350,7 +352,10 @@ export interface Operation {
    * it `undefined` and `response` / `responseHeaders` / `responseDescription`
    * describe that single response alone. 4xx and 5xx responses go to
    * `errors`; `default` and the ranges `1XX`–`5XX` to `defaultResponse` and
-   * `rangeResponses`; an explicit 1xx code is not carried.
+   * `rangeResponses`; an explicit 1xx code is not carried. A key is a status
+   * code only when it is exactly three digits in 100–599: `6XX`, `4XXX`,
+   * `20X`, `600` and `200 ` are no status code and no range, so they are
+   * ignored with a warning, like `error`, never read from a numeric prefix.
    */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];

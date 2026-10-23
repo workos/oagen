@@ -11,7 +11,6 @@ import type {
   ResponseContent,
   DefaultResponse,
   RangeResponse,
-  StatusRange,
   Model,
   Field,
   PaginationMeta,
@@ -57,7 +56,14 @@ import {
   applyPaginationOverride,
   resolveDataPathItemType,
 } from './pagination.js';
-import { classifyAndExtractResponse, resolveDataPathFromSchema, STATUS_RANGE_LABELS } from './responses.js';
+import {
+  classifyAndExtractResponse,
+  classifyResponseKey,
+  resolveDataPathFromSchema,
+  STATUS_RANGE_LABELS,
+  warnUnrecognizedResponseKey,
+} from './responses.js';
+import type { ResponseKey } from './responses.js';
 import type { ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
@@ -3795,8 +3801,10 @@ function collectOperationConstPrefixes(
   }
   collectConstPrefixes(selectRequestBodyContent(body).schema, prefixes, 0);
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
-    const code = parseInt(statusCode, 10);
-    if (code < 200 || code >= 300) continue;
+    // Only a key `extractResponses` reads as a 2xx status code: a range, a
+    // fallback or a key OpenAPI does not define reserves nothing.
+    const responseKey = classifyResponseKey(statusCode);
+    if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
     // A `$ref` into `components/responses` has no `content` here and is not
     // followed either: its inline body is named after the component, so the
     // consts it pins never prefix a path-derived name.
@@ -4192,62 +4200,50 @@ interface FallbackResponseSink {
   rangeResponses: RangeResponse[];
 }
 
-/** The range a key names, uppercased (`4xx` → `4XX`), or undefined when it names none. */
-function statusRangeOf(key: string): StatusRange | undefined {
-  const upper = key.toUpperCase();
-  const isRange = upper.length === 3 && upper.endsWith('XX') && upper[0] >= '1' && upper[0] <= '5';
-  return isRange ? (upper as StatusRange) : undefined;
-}
-
 /**
- * Read a Responses Object key that is not a status code into `sink`, and
- * say whether it was consumed: `default` and a range are kept; an `x-` key
- * is a specification extension and carries no response; anything else
- * OpenAPI does not define is warned about, then ignored, instead of being
- * dropped silently. A numeric key returns false so the caller reads it as
- * before — `parseInt` keeps `200`, `201 ` and the like exactly as they were.
+ * Read a Responses Object key that is not a status code into `sink`:
+ * `default` and a range are kept; an `x-` key is a specification extension
+ * and carries no response; a key OpenAPI does not define (`error`, `6XX`,
+ * `600` — see `classifyResponseKey`) is warned about, then ignored, instead
+ * of being dropped silently. A status code never reaches here: the caller
+ * reads it into `successResponses` or `errors`.
  */
 function readFallbackResponse(
+  responseKey: Exclude<ResponseKey, { kind: 'status' }>,
   key: string,
   resp: ResponseObject | ReferenceObject,
   sink: FallbackResponseSink,
-): boolean {
-  if (key.startsWith('x-')) return true;
-  const range = statusRangeOf(key);
-  if (key === 'default' || range) {
-    if (range && sink.rangeResponses.some((entry) => entry.range === range)) {
-      // `4XX` and `4xx` side by side: JSON allows the pair, OpenAPI does not.
-      console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
-      return true;
-    }
-    // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
-    // Reference Object has no `headers` or `content` of its own to read.
-    const resolved = resolveResponseRef<ResponseObject>(
-      resp,
-      sink.ctx.componentResponses,
-      `${key} response of ${sink.opLabel}`,
-      sink.ctx.refSiblingDescriptions,
-    );
-    // The entry is filled in place: a deferred body's `type` lands on this
-    // very object once every operation has been read.
-    if (range) {
-      const entry: RangeResponse = { range };
-      fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink);
-      sink.rangeResponses.push(entry);
-    } else {
-      const entry: DefaultResponse = {};
-      fillFallbackResponse(entry, resolved, 'Default', sink);
-      sink.defaultResponse = entry;
-    }
-    return true;
+): void {
+  if (responseKey.kind === 'extension') return;
+  if (responseKey.kind === 'unrecognized') {
+    warnUnrecognizedResponseKey(key, sink.opLabel);
+    return;
   }
-  if (Number.isNaN(parseInt(key, 10))) {
-    console.warn(
-      `[oagen] Warning: Ignoring response key "${key}" on ${sink.opLabel}: not a status code, a 1XX–5XX range, or "default"`,
-    );
-    return true;
+  const range = responseKey.kind === 'range' ? responseKey.range : undefined;
+  if (range && sink.rangeResponses.some((entry) => entry.range === range)) {
+    // `4XX` and `4xx` side by side: JSON allows the pair, OpenAPI does not.
+    console.warn(`[oagen] Warning: Duplicate "${range}" response on ${sink.opLabel}; keeping the first`);
+    return;
   }
-  return false;
+  // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
+  // Reference Object has no `headers` or `content` of its own to read.
+  const resolved = resolveResponseRef<ResponseObject>(
+    resp,
+    sink.ctx.componentResponses,
+    `${key} response of ${sink.opLabel}`,
+    sink.ctx.refSiblingDescriptions,
+  );
+  // The entry is filled in place: a deferred body's `type` lands on this
+  // very object once every operation has been read.
+  if (range) {
+    const entry: RangeResponse = { range };
+    fillFallbackResponse(entry, resolved, STATUS_RANGE_LABELS[range], sink);
+    sink.rangeResponses.push(entry);
+  } else {
+    const entry: DefaultResponse = {};
+    fillFallbackResponse(entry, resolved, 'Default', sink);
+    sink.defaultResponse = entry;
+  }
 }
 
 /**
@@ -4506,10 +4502,17 @@ function extractResponses(
   const bodySchemas = new Map<number, SchemaObject>();
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
-    // `default` and `1XX`–`5XX` never parse as a status code (`parseInt('2XX')`
-    // is 2), so they are routed to their own fields before the numeric branches.
-    if (readFallbackResponse(statusCode, rawResponse, fallback)) continue;
-    const code = parseInt(statusCode, 10);
+    // The whole key decides what it names (`classifyResponseKey`): `default`
+    // and `1XX`–`5XX` are routed to their own fields, an `x-` extension is
+    // skipped, and a key OpenAPI does not define (`6XX`, `600`) is warned
+    // about and ignored. Only a three-digit 100–599 key reaches the branches
+    // below, so no digit-prefixed key is ever read as a status code.
+    const responseKey = classifyResponseKey(statusCode);
+    if (responseKey.kind !== 'status') {
+      readFallbackResponse(responseKey, statusCode, rawResponse, fallback);
+      continue;
+    }
+    const code = responseKey.code;
     // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
     // Reference Object has no `headers` or `content` of its own to read, so
     // the ref is resolved before either is. Only a status code one of the
