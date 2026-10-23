@@ -190,9 +190,18 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * `@api.example.com` makes `USER` a username), and `{prefix}://api.example.com`
  * and `{prefix}://api.example.com/` (a `prefix` of
  * `https://gateway.example.com/path` makes the rest a path) all stay two
- * servers. Every folding therefore applies to text whose part no variable
- * value can change, and two templates that come out as one string resolve to
- * one URL under every value of their variables. A relative reference (`/v1`,
+ * servers. From the first placeholder up to the next `/`, `?` or `#` not even
+ * percent-encoding is folded, since a value may put that text in a scheme
+ * or a port, where `%` has no meaning (`{scheme}%73://…` and `{scheme}s://…`,
+ * or `…{x}%34%34%33` and `…{x}443`, stay two servers); from that delimiter
+ * on it is a path, query or fragment whatever the value, where an
+ * unreserved character is the same encoded or not, so percent-encoding is
+ * folded again there. Every folding therefore applies to text whose part no
+ * variable value can change, and two templates that come out as one string
+ * resolve to one URL under every value of their variables. Not folded at
+ * all: dot-segments (`/v1/../v2` is compared as written) and
+ * internationalised host names (`bücher.example.com` and
+ * `xn--bcher-kva.example.com` are two hosts). A relative reference (`/v1`,
  * `//api.example.com/v1`) goes through the same rules from wherever its
  * syntax starts.
  */
@@ -201,11 +210,21 @@ export function normalizeServerUrl(url: string): string {
   // A placeholder's value may carry any delimiter, so it can change which
   // part every later character belongs to and, through a `@`, which part
   // the text before it in its authority belongs to. Nothing from the first
-  // placeholder on is folded, and a component is folded only when it is
-  // complete before that point. Percent-encoding is folded everywhere: an
-  // unreserved character is the same encoded or not in every part.
+  // placeholder on is case-folded, and a component is folded only when it is
+  // complete before that point. From the first placeholder up to the next
+  // `/`, `?` or `#` not even percent-encoding is folded, since a value may
+  // put that text in a scheme or a port, where `%` has no meaning; from that
+  // delimiter on the text is a path, query or fragment whatever the value,
+  // and there an unreserved character is the same encoded or not.
   const firstPlaceholder = units.findIndex((unit) => unit.placeholder);
   const literalEnd = firstPlaceholder === -1 ? units.length : firstPlaceholder;
+  let verbatimEnd = literalEnd;
+  while (verbatimEnd < units.length && !isLiteral(units[verbatimEnd], '/', '?', '#')) verbatimEnd++;
+  /** Units `from` to `to`: percent-encoding folded, except as written across the verbatim span. */
+  const emit = (from: number, to: number): string =>
+    render(units.slice(from, Math.min(to, literalEnd)), normalizePercentEncoding) +
+    render(units.slice(Math.max(from, literalEnd), Math.min(to, verbatimEnd)), (text) => text) +
+    render(units.slice(Math.max(from, verbatimEnd), to), normalizePercentEncoding);
   let out = '';
   let cursor = 0;
 
@@ -217,7 +236,7 @@ export function normalizeServerUrl(url: string): string {
   // may resolve to anything, so the whole template is kept as written.
   const schemeEnd = schemeLength(units);
   let scheme: string | undefined;
-  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return render(units, normalizePercentEncoding);
+  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return emit(0, units.length);
   if (schemeEnd !== undefined) {
     scheme = render(units.slice(0, schemeEnd), (text) => text.toLowerCase());
     out += scheme + ':';
@@ -234,21 +253,19 @@ export function normalizeServerUrl(url: string): string {
     const start = cursor + 2;
     cursor = start;
     while (cursor < units.length && !isLiteral(units[cursor], '/', '?', '#')) cursor++;
-    const authority = units.slice(start, cursor);
     literalAuthority = cursor <= literalEnd;
-    out +=
-      '//' + (literalAuthority ? normalizeAuthority(authority, scheme) : render(authority, normalizePercentEncoding));
+    out += '//' + (literalAuthority ? normalizeAuthority(units.slice(start, cursor), scheme) : emit(start, cursor));
   }
 
   // Path: up to the first `?` or `#`; `/` when a wholly literal authority is
   // followed by none (`…{basePath}` and `…{basePath}/` stay two templates).
   const pathStart = cursor;
   while (cursor < units.length && !isLiteral(units[cursor], '?', '#')) cursor++;
-  const path = render(units.slice(pathStart, cursor), normalizePercentEncoding);
+  const path = emit(pathStart, cursor);
   out += literalAuthority && path === '' ? '/' : path;
 
   // Query and fragment: kept as written, percent-encoding aside.
-  out += render(units.slice(cursor), normalizePercentEncoding);
+  out += emit(cursor, units.length);
   return out;
 }
 
@@ -302,7 +319,28 @@ function normalizeAuthority(units: TemplateUnit[], scheme: string | undefined): 
 function foldUserinfoAndHost(units: TemplateUnit[]): string {
   const at = units.findIndex((unit) => isLiteral(unit, '@'));
   const userinfo = at === -1 ? '' : render(units.slice(0, at), normalizePercentEncoding) + '@';
-  return userinfo + render(units.slice(at + 1), (text) => normalizePercentEncoding(text).toLowerCase());
+  return userinfo + render(units.slice(at + 1), foldHost);
+}
+
+/**
+ * A host lower-cased outside its percent-encoded octets, which keep their
+ * upper-cased hex digits (`p%C3%A9ts.EXAMPLE.com` is `p%C3%A9ts.example.com`);
+ * an octet that encodes a letter is decoded first and so lower-cased too
+ * (`%41PI` is `api`).
+ */
+function foldHost(text: string): string {
+  const encoded = normalizePercentEncoding(text);
+  let out = '';
+  for (let i = 0; i < encoded.length; i++) {
+    const char = encoded[i];
+    if (char === '%' && i + 2 < encoded.length && isHexDigit(encoded[i + 1]) && isHexDigit(encoded[i + 2])) {
+      out += encoded.slice(i, i + 3);
+      i += 2;
+    } else {
+      out += char.toLowerCase();
+    }
+  }
+  return out;
 }
 
 /** Whether a literal port, read as a decimal number, is the one `scheme` implies. */
