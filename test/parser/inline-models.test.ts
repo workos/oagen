@@ -1963,8 +1963,12 @@ describe('a field augmenting a $ref component via allOf gets its model in every 
       }),
     );
     const types = fieldTypesByModel(ir.models);
-    expect(types['Thing']).toEqual({ id: str, one: model('Base'), two: model('Base') });
-    expect(ir.models.map((m) => m.name).sort()).toEqual(['Base', 'BaseMeta', 'Other', 'Thing']);
+    // A second `$ref` adds to the first, so `two` is the merge of both
+    // components (workos/oagen#359 review: it was `Base`, `Other`'s fields
+    // gone); a lone `$ref` stays the reference.
+    expect(types['Thing']).toEqual({ id: str, one: model('Base'), two: model('ThingTwo') });
+    expect(types['ThingTwo']).toEqual({ id: str, meta: model('BaseMeta'), note: str });
+    expect(ir.models.map((m) => m.name).sort()).toEqual(['Base', 'BaseMeta', 'Other', 'Thing', 'ThingTwo']);
     expectConsistent(ir, ['Base', 'Other', 'Thing']);
   });
 

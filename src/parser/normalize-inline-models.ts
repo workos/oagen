@@ -621,24 +621,37 @@ function haveSameFields(a: Model, b: Model): boolean {
   return aSignatures.size === bSignatures.size && [...aSignatures].every((s) => bSignatures.has(s));
 }
 
-/**
- * Rename `oldName` to `newName` everywhere, by name: in every model's fields,
- * named-union variants and discriminator mapping, and in every reference an
- * operation or webhook holds — a union's mapping following its variants
- * (`renameTypeRefModels`).
- */
+/** Every type reference in play: each model's fields and variants, each operation's, each webhook's. */
+function typeRefsInPlay(
+  models: readonly Model[],
+  services: readonly Service[],
+  webhooks: readonly Webhook[],
+): TypeRef[] {
+  const refs: TypeRef[] = [];
+  for (const model of models) refs.push(...collectModelTypeRefs(model));
+  for (const service of services) for (const op of service.operations) refs.push(...collectOperationTypeRefs(op));
+  for (const webhook of webhooks) refs.push(...collectWebhookTypeRefs(webhook));
+  return refs;
+}
+
 /**
  * Repoint every model reference in `models`, `services` and `webhooks`
  * through `renames` in one pass — fields, named-union variants and
  * discriminator mappings alike — each reference read once, so a name one
- * entry vacates and another takes is never chained through.
+ * entry vacates and another takes is never chained through; and, when
+ * `inlineEnumName` is given, rename every inline enum reference — one
+ * carrying its `values`, named by the extractor after the model and field
+ * it sits in — through it the same way, returning each name so renamed with
+ * the name it was given. A component enum reference carries no values and
+ * is left as written.
  */
 function rewriteModelRefs(
   models: Model[],
   services: Service[],
   renames: ReadonlyMap<string, string>,
   webhooks: Webhook[] = [],
-): void {
+  inlineEnumName?: (name: string) => string,
+): Map<string, string> {
   for (const model of models) renameModelRefs(model, renames);
   for (const service of services) {
     for (const op of service.operations) {
@@ -658,6 +671,20 @@ function rewriteModelRefs(
   for (const webhook of webhooks) {
     for (const ref of collectWebhookTypeRefs(webhook)) renameTypeRefModels(ref, renames);
   }
+  const enumRenames = new Map<string, string>();
+  if (!inlineEnumName) return enumRenames;
+  for (const ref of typeRefsInPlay(models, services, webhooks)) {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (!r.values) return;
+        const name = inlineEnumName(r.name);
+        if (name === r.name) return;
+        enumRenames.set(r.name, name);
+        r.name = name;
+      },
+    });
+  }
+  return enumRenames;
 }
 
 /**
@@ -839,145 +866,155 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
 }
 
 /**
- * Make `target` describe `source`'s shape: its fields and its named-union
- * metadata — `variants`, `compositionKind` and `discriminator`, each present
- * or absent exactly as on `source` — so a fold never turns a named union back
- * into a plain object. A target that dispatches by rules the source does not
- * preserve is never handed here (`collapseJsonSuffixModels` refuses that
- * fold), so this only ever adds union metadata to a plain target or replaces
- * a union's with identical rules. Every site that copies one model's shape
- * onto another goes through this.
+ * The shape `base` has once `json` folds onto it, as a model of its own:
+ * `json`'s fields and its named-union metadata — `variants`,
+ * `compositionKind` and `discriminator`, each present or absent exactly as
+ * on `json`, so a fold never turns a named union back into a plain object —
+ * the two models' own limits (minProperties, dependentRequired, ...) merged
+ * with `json`'s winning where both speak, `base`'s own link or `json`'s
+ * where it has none, and `base`'s name, description and `deprecated`:
+ * deprecation names the type the SDK exposes, and that is `base`, so a
+ * deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.
+ * A base that dispatches by rules `json` does not preserve is never folded
+ * (`collapseJsonSuffixModels` refuses it), so this only ever adds union
+ * metadata to a plain base or replaces a union's with identical rules. The
+ * plan reads it to decide what the folded base admits before anything is
+ * written; `applyFold` writes it. Every site that copies one model's shape
+ * onto another goes through these two.
  */
-function adoptShape(target: Model, source: Model): void {
-  target.fields = source.fields;
-  if (source.variants) target.variants = source.variants;
-  else delete target.variants;
-  if (source.compositionKind) target.compositionKind = source.compositionKind;
-  else delete target.compositionKind;
-  if (source.discriminator) target.discriminator = source.discriminator;
-  else delete target.discriminator;
+function foldedShape(base: Model, json: Model): Model {
+  const shape: Model = { ...base, fields: json.fields };
+  delete shape.variants;
+  delete shape.compositionKind;
+  delete shape.discriminator;
+  if (json.variants) shape.variants = json.variants;
+  if (json.compositionKind) shape.compositionKind = json.compositionKind;
+  if (json.discriminator) shape.discriminator = json.discriminator;
+  if (json.constraints || base.constraints) shape.constraints = { ...base.constraints, ...json.constraints };
+  if (!base.externalDocs && json.externalDocs) shape.externalDocs = json.externalDocs;
+  return shape;
+}
+
+/** Write `foldedShape(base, json)` onto `base`, in place. */
+function applyFold(base: Model, json: Model): void {
+  const shape = foldedShape(base, json);
+  delete base.variants;
+  delete base.compositionKind;
+  delete base.discriminator;
+  Object.assign(base, shape);
+}
+
+/** A `<Name>Json` model and the `<Name>` model it may fold onto. */
+interface FoldCandidate {
+  readonly jsonModel: Model;
+  readonly baseModel: Model;
 }
 
 /**
- * `name` as the fold of `jsonName` onto `baseName` leaves it: the `…Json`
- * model itself under the base's name (pass 2), every `<Json>…`-prefixed
- * child under the base's prefix (pass 3), and any other name as it is. The
- * fold renames no enum and rewrites no literal, so an enum reference and a
- * `const` value are compared as they are: a `PetJsonState` enum beside a
- * `PetState` one, or a `PetJsonA` literal beside `PetA`, is a different
- * shape, and the base keeps the values its operations accept.
+ * How every name reads once the `accepted` folds are applied, as a function
+ * of the names the models hold now: a name that begins with an accepted
+ * `…Json` model's name is read with that prefix replaced by its base's —
+ * the longest such prefix first, then again, until no accepted `…Json` name
+ * is a prefix — so `PetJson` reads as `Pet`, `PetJsonWithA` as `PetWithA`,
+ * `PetJsonJsonThing` as `PetThing` by way of `PetJsonThing`, and
+ * `NoteJsonPetJsonToy` as `NotePetToy` under the folds of `NoteJsonPetJson`
+ * and `NoteJson`, whichever the document declares first. Every step
+ * shortens the name, so the reading ends. A name no accepted fold touches
+ * reads as it is: the fold renames no literal and no component enum.
  */
-function foldedName(name: string, jsonName: string, baseName: string): string {
-  return name.startsWith(jsonName) ? baseName + name.slice(jsonName.length) : name;
-}
-
-/**
- * One step of a `…Json` fold's plan: a model the fold renames or removes,
- * with the name every reference to it resolves to afterwards (`onto`) —
- * the `…Json` model's base; a child's folded name when the child is
- * renamed; and, when the child collapses, the name the model holding its
- * folded name (`holder`) ends under.
- */
-interface FoldStep {
-  readonly model: Model;
-  readonly newName: string;
-  readonly holder: Model | undefined;
-  readonly onto: string;
-}
-
-/**
- * The plan of folding `jsonModel` onto `baseModel`, decided in the names
- * that remain after the fold rather than the ones the models hold now: the
- * `…Json` model itself, then every model named with `jsonModel`'s name as
- * a strict prefix — a child the extractor named under it, or any other
- * model spelled that way — in document order. The set is closed under
- * references: a `<Json>…` model one of them references is spelled with the
- * prefix too, so it is in the plan and decided with it. A child whose
- * folded name (`foldedName`) no model holds is renamed to it; one whose
- * folded name a model holds collapses onto that model, by identity, and
- * ends under the name that model ends under — the holder may be a model
- * the fold leaves alone, or another child the fold renames or collapses
- * in turn (`PetJsonJsonThing` folds to `PetJsonThing`, which `PetJsonThing`
- * holds and vacates for `PetThing`, so it ends under `PetThing`, never
- * under the vacated name). A model an earlier fold removed is neither a
- * child nor a holder.
- */
-function planFold(
-  jsonModel: Model,
-  baseModel: Model,
-  models: readonly Model[],
-  byName: ReadonlyMap<string, Model>,
-  removed: ReadonlySet<string>,
-): FoldStep[] {
-  const children: Array<{ child: Model; newName: string; holder: Model | undefined }> = [];
-  for (const child of models) {
-    if (removed.has(child.name)) continue;
-    if (child.name.length <= jsonModel.name.length || !child.name.startsWith(jsonModel.name)) continue;
-    const newName = foldedName(child.name, jsonModel.name, baseModel.name);
-    children.push({ child, newName, holder: byName.get(newName) });
-  }
-  const byChild = new Map(children.map((entry) => [entry.child, entry]));
-  // The name a model ends under: a holder that is itself a child follows
-  // its own step; every step shortens the name, so the chain ends.
-  const finalNames = new Map<Model, string>();
-  const finalName = (model: Model): string => {
-    const known = finalNames.get(model);
+function foldReading(accepted: readonly FoldCandidate[]): (name: string) => string {
+  const swaps = accepted
+    .map((candidate) => [candidate.jsonModel.name, candidate.baseModel.name] as const)
+    .sort(([a], [b]) => b.length - a.length);
+  const read = new Map<string, string>();
+  const reading = (name: string): string => {
+    const known = read.get(name);
     if (known !== undefined) return known;
-    const entry = byChild.get(model);
-    const name =
-      entry === undefined
-        ? model === jsonModel
-          ? baseModel.name
-          : model.name
-        : entry.holder
-          ? finalName(entry.holder)
-          : entry.newName;
-    finalNames.set(model, name);
-    return name;
+    const swap = swaps.find(([json]) => name.startsWith(json));
+    const result = swap ? reading(swap[1] + name.slice(swap[0].length)) : name;
+    read.set(name, result);
+    return result;
   };
-  return [
-    { model: jsonModel, newName: baseModel.name, holder: baseModel, onto: baseModel.name },
-    ...children.map(({ child, newName, holder }) => ({ model: child, newName, holder, onto: finalName(child) })),
-  ];
+  return reading;
 }
 
-/** The names of the models `model` dispatches to — every model reference among its variants — read under `modelName`. */
-function variantModelNames(model: Model, modelName: (name: string) => string): Set<string> {
+/** The accepted fold whose `…Json` name is the longest prefix of `name` — the one `foldReading` applies to it first — or none when no fold renames it. */
+function innermostFold(accepted: readonly FoldCandidate[], name: string): FoldCandidate | undefined {
+  let innermost: FoldCandidate | undefined;
+  for (const candidate of accepted) {
+    if (!name.startsWith(candidate.jsonModel.name)) continue;
+    if (!innermost || candidate.jsonModel.name.length > innermost.jsonModel.name.length) innermost = candidate;
+  }
+  return innermost;
+}
+
+/** The names of the models `model` dispatches to — every model reference among its variants — read under `readName`. */
+function variantModelNames(model: Model, readName: (name: string) => string): Set<string> {
   const names = new Set<string>();
-  for (const variant of model.variants ?? []) walkTypeRef(variant, { model: (r) => names.add(modelName(r.name)) });
+  for (const variant of model.variants ?? []) walkTypeRef(variant, { model: (r) => names.add(readName(r.name)) });
   return names;
 }
 
 /**
  * Fold every `<Name>Json` model that is a superset of a `<Name>` model onto
  * it: `<Name>` takes the `…Json` model's shape, every reference to the
- * `…Json` model resolves to `<Name>`, and every `<Name>Json…` child is
- * renamed `<Name>…` — collapsed onto the model that holds that name when
- * there is one. Pass 1 decides, for each `…Json` model against the models
- * as the document left them, whether its base admits the fold at all (the
- * guards below). Pass 2 then takes each candidate in turn and plans its
- * whole fold (`planFold`) in the names that remain after it, against the
- * models as the folds before it left them — an earlier fold may have seated
- * a model under a name a later child folds to, and a child may fold to a
- * name another child of the same fold vacates; every child that collapses
- * must be admitted by the model it collapses onto (`modelAdmits`, every
- * reference read under the fold) before any part of the plan is applied,
- * and a refused child refuses the parent and leaves every model as it was.
- * The plan is then applied in one pass: every reference repointed through
- * the plan's renames together, then the names set. Nothing is collapsed
- * by name alone, in any order.
+ * `…Json` model resolves to `<Name>`, and every `<Name>Json…` child — a
+ * model the extractor named under it, or any model spelled that way, inline
+ * enums included — is renamed `<Name>…`, or collapsed onto the model that
+ * ends under that name when there is one.
+ *
+ * Pass 1 keeps, as a candidate, each `…Json` model whose base admits the
+ * fold on its own terms (the guards below, read against the models as the
+ * document left them). Pass 2 decides the candidates together, so the
+ * result depends on the document's names and shapes and never on the order
+ * it declares them in: every name is read as it ends once the accepted
+ * folds are applied (`foldReading`, every model and inline enum reference
+ * through `ShapeReadOptions.readName`), a base as the shape it takes
+ * (`foldedShape`), and
+ *
+ * - a candidate whose base dispatches by union rules the `…Json` model does
+ *   not preserve, or declares a field the `…Json` model's does not admit
+ *   (`fieldAdmits`), is refused;
+ * - the models that end under one name are one group: with a model the
+ *   folds leave under its own name among them, that model is the holder and
+ *   must admit every other (`modelAdmits`), which collapses onto it;
+ *   without one, every member must be equivalent (each admits each) and the
+ *   first declared keeps the name while the others collapse onto it. A
+ *   member not admitted refuses the fold that renames it — the innermost,
+ *   when several do — with the union-rules warning when that fold's base
+ *   dispatches to the name, else a shape warning. Two folds whose children
+ *   would end under one name with different shapes refuse each other.
+ *
+ * A refusal changes how the remaining names read, so the decision is
+ * repeated over the folds still accepted until none is refused; a fold is
+ * only ever refused, never re-admitted, so this ends. Only then is anything
+ * written: each base takes its shape (`applyFold`), every reference is
+ * repointed through the reading at once (`rewriteModelRefs`), the folded
+ * `…Json` models and the collapsed members are dropped, and the names are
+ * set. Nothing is collapsed by name alone, and nothing is half-applied.
+ *
+ * An inline enum a fold renames was lifted into `enums` under its old name
+ * by the component pass (a `…Json` component's field enum): once no
+ * reference carries that name, the entry is dropped and the collectors
+ * that run after the fold lift the renamed reference afresh — onto the
+ * base's own enum when one has its members (`PetJsonStatus` folds into
+ * `PetStatus`), under the new name otherwise (`PetJsonMode` becomes
+ * `PetMode`), stepping around a different enum of that name as they do
+ * for any inline enum. An enum in `componentNames` is declared by the
+ * document and stays whether referenced or not.
  */
-export function collapseJsonSuffixModels(models: Model[], services: Service[], webhooks: Webhook[] = []): Model[] {
+export function collapseJsonSuffixModels(
+  models: Model[],
+  services: Service[],
+  webhooks: Webhook[] = [],
+  enums: Enum[] = [],
+  componentNames: ReadonlySet<string> = new Set(),
+): Model[] {
   const normalizedModels = [...models];
   const byName = new Map(normalizedModels.map((m) => [m.name, m]));
 
-  // Pass 1: collect merge candidates. Every guard reads the models as they
-  // are before any fold, and every shape through the fold it is deciding:
-  // each model reference under the name the fold would give it
-  // (`foldedName`, as `ShapeReadOptions.modelName`), on the base's side and
-  // the Json model's alike, since the fold rewrites every reference in every
-  // model.
-  const mergeCandidates: Array<{ jsonModel: Model; baseModel: Model; fold: ShapeReadOptions }> = [];
+  // Pass 1: the candidates, each pair on its own, as the document left them.
+  const candidates: FoldCandidate[] = [];
   for (const model of normalizedModels) {
     if (!model.name.endsWith('Json')) continue;
 
@@ -985,7 +1022,7 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
     const baseModel = byName.get(baseName);
     if (!baseModel || model.fields.length <= baseModel.fields.length) continue;
 
-    const jsonFields = new Map(model.fields.map((f) => [f.name, f]));
+    const jsonFields = new Set(model.fields.map((f) => f.name));
     const isSuperset = baseModel.fields.every((f) => jsonFields.has(f.name));
     if (!isSuperset) continue;
 
@@ -1005,113 +1042,174 @@ export function collapseJsonSuffixModels(models: Model[], services: Service[], w
       continue;
     }
 
-    const fold: ShapeReadOptions = { modelName: (name) => foldedName(name, model.name, baseName) };
-
-    // Guard: the base is a union — a named union's variants, composition
-    // keyword and discriminator, or an allOf+oneOf dispatcher's mapping (such
-    // a base may have no fields at all) — that the Json model does not
-    // preserve: it has no variants or rules, or different ones. Folding would
-    // turn the dispatcher into a plain object, or swap its variants or rules,
-    // under operations that already use it (two undiscriminated unions share
-    // the rules `oneOf` while dispatching to different members). The variants
-    // and the mapping's targets are read under the fold on both sides, so
-    // `PetJsonWithName` matches `PetWithName`; an enum or a literal as it is,
-    // so a `PetJsonState` enum beside `PetState` is a different union. The
-    // models those variants name are compared in pass 2, as every folded
-    // child is. Identical shapes fold as before.
-    const baseShape = unionShapeKey(baseModel, (v) => typeShapeKey(v, fold), fold);
-    const jsonShape = unionShapeKey(model, (v) => typeShapeKey(v, fold), fold);
-    if (baseShape !== '' && baseShape !== jsonShape) {
-      console.warn(
-        `[oagen] Warning: Json-suffix model "${model.name}" does not preserve the union rules of "${baseName}" — keeping both`,
-      );
-      continue;
-    }
-
-    // Guard: a field both declare must be one the Json model's describes
-    // every value of the base's for (`fieldAdmits`: the same type, limits,
-    // default and flags, the Json model's no stricter on requiredness or
-    // nullability), since the base takes the Json model's fields under
-    // operations that already use it. A field that shares only its name —
-    // `a: integer` beside `a: string`, or required beside optional — would
-    // retype the base, so the fold is refused.
-    const retyped = baseModel.fields.find((f) => !fieldAdmits(jsonFields.get(f.name)!, f, fold));
-    if (retyped) {
-      console.warn(
-        `[oagen] Warning: Json-suffix model "${model.name}" does not preserve the shape of "${baseName}": field "${retyped.name}" has a different shape — keeping both`,
-      );
-      continue;
-    }
-
-    mergeCandidates.push({ jsonModel: model, baseModel, fold });
+    candidates.push({ jsonModel: model, baseModel });
   }
 
-  // Pass 2: plan, decide and apply each fold as a whole, in turn.
-  const removed = new Set<string>();
-  for (const { jsonModel, baseModel, fold } of mergeCandidates) {
-    if (removed.has(jsonModel.name) || removed.has(baseModel.name)) continue;
+  // Pass 2: the folds that hold together, decided as a whole.
+  const unionRulesWarning = ({ jsonModel, baseModel }: FoldCandidate): string =>
+    `[oagen] Warning: Json-suffix model "${jsonModel.name}" does not preserve the union rules of "${baseModel.name}" — keeping both`;
+  const shapeWarning = ({ jsonModel, baseModel }: FoldCandidate, detail: string): string =>
+    `[oagen] Warning: Json-suffix model "${jsonModel.name}" does not preserve the shape of "${baseModel.name}": ${detail} — keeping both`;
 
-    // Guard: a `<Json>…` child that collapses — a variant model of the
-    // union, a nested object, or any model spelled that way — must be
-    // admitted by the model it collapses onto (`modelAdmits`, both read
-    // under the fold), since the child's references then resolve to it and
-    // a field the child adds would be lost; a deprecated child collapses
-    // onto a live holder, as a deprecated `<Name>Json` folds onto a live
-    // `<Name>`, and a live child never onto a deprecated one
-    // (`flagAdmits`). One refused child refuses the
-    // whole fold before any of it is applied: a variant of another shape is
-    // a different variant even when the fold would give it the base's name,
-    // so a child the base dispatches to is refused as the union rules are;
-    // any other child as a shape the fold does not preserve.
-    const [parent, ...children] = planFold(jsonModel, baseModel, normalizedModels, byName, removed);
-    const refused = children.find(({ model, holder }) => holder !== undefined && !modelAdmits(holder, model, fold));
-    if (refused) {
-      console.warn(
-        variantModelNames(baseModel, fold.modelName!).has(refused.newName)
-          ? `[oagen] Warning: Json-suffix model "${jsonModel.name}" does not preserve the union rules of "${baseModel.name}" — keeping both`
-          : `[oagen] Warning: Json-suffix model "${jsonModel.name}" does not preserve the shape of "${baseModel.name}": "${refused.model.name}" would fold onto "${refused.newName}", which has a different shape — keeping both`,
-      );
-      continue;
+  let accepted = candidates;
+  let read = foldReading(accepted);
+  for (;;) {
+    const readName = read;
+    const options: ShapeReadOptions = { readName };
+    const jsonOf = new Map(accepted.map((candidate) => [candidate.baseModel, candidate.jsonModel]));
+    const shapeOf = (model: Model): Model => {
+      const json = jsonOf.get(model);
+      return json ? foldedShape(model, json) : model;
+    };
+    const refused = new Set<FoldCandidate>();
+    const refuse = (candidate: FoldCandidate, warning: string): void => {
+      if (refused.has(candidate)) return;
+      refused.add(candidate);
+      console.warn(warning);
+    };
+
+    for (const candidate of accepted) {
+      const { jsonModel, baseModel } = candidate;
+
+      // Guard: the base is a union — a named union's variants, composition
+      // keyword and discriminator, or an allOf+oneOf dispatcher's mapping
+      // (such a base may have no fields at all) — that the Json model does
+      // not preserve: it has no variants or rules, or different ones.
+      // Folding would turn the dispatcher into a plain object, or swap its
+      // variants or rules, under operations that already use it (two
+      // undiscriminated unions share the rules `oneOf` while dispatching to
+      // different members). The variants and the mapping's targets are read
+      // under the folds on both sides, so `PetJsonWithName` matches
+      // `PetWithName`, and an inline `PetJsonState` enum matches `PetState`
+      // with the same members and no other; a literal, or a component
+      // enum, as it is. The models the variants name are compared below, as
+      // every folded child is. Identical shapes fold as before.
+      const baseShape = unionShapeKey(baseModel, (v) => typeShapeKey(v, options), { modelName: readName });
+      const jsonShape = unionShapeKey(jsonModel, (v) => typeShapeKey(v, options), { modelName: readName });
+      if (baseShape !== '' && baseShape !== jsonShape) {
+        refuse(candidate, unionRulesWarning(candidate));
+        continue;
+      }
+
+      // Guard: a field both declare must be one the Json model's describes
+      // every value of the base's for (`fieldAdmits`: the same type, limits,
+      // default and flags, the Json model's no stricter on requiredness or
+      // nullability), since the base takes the Json model's fields under
+      // operations that already use it. A field that shares only its name
+      // — `a: integer` beside `a: string`, or required beside optional —
+      // would retype the base, so the fold is refused.
+      const jsonFields = new Map(jsonModel.fields.map((f) => [f.name, f]));
+      const retyped = baseModel.fields.find((f) => !fieldAdmits(jsonFields.get(f.name)!, f, options));
+      if (retyped) refuse(candidate, shapeWarning(candidate, `field "${retyped.name}" has a different shape`));
     }
 
-    adoptShape(baseModel, jsonModel);
-    // The base model now describes the Json schema's shape, so carry that
-    // schema's own limits (minProperties, dependentRequired, ...) with the
-    // fields; the base's keywords fill in wherever the Json model is silent.
-    if (jsonModel.constraints || baseModel.constraints) {
-      baseModel.constraints = { ...baseModel.constraints, ...jsonModel.constraints };
+    // Guard: the models that end under one name. A `<Json>…` child that
+    // collapses — a variant model of the union, a nested object, or any
+    // model spelled that way — must be admitted by the model it collapses
+    // onto (both read under the folds), since the child's references then
+    // resolve to it and a field the child adds would be lost: a variant of
+    // another shape is a different variant even when the fold would give it
+    // the base's name. The flag is read as `modelAdmits` reads it
+    // (`flagAdmits`): a deprecated child collapses onto a live holder, as a
+    // deprecated `<Name>Json` folds onto a live `<Name>`, and a live child
+    // never onto a deprecated one.
+    const folded = new Set(accepted.map((candidate) => candidate.jsonModel));
+    const groups = new Map<string, Model[]>();
+    for (const model of normalizedModels) {
+      if (folded.has(model)) continue;
+      const name = readName(model.name);
+      const group = groups.get(name);
+      if (group) group.push(model);
+      else groups.set(name, [model]);
     }
-    // The base keeps its own documentation, link included, as it keeps its
-    // description; the Json model's link only fills in where the base has none,
-    // so folding the shape never drops the one link the document gave it.
-    if (!baseModel.externalDocs && jsonModel.externalDocs) baseModel.externalDocs = jsonModel.externalDocs;
-    // `deprecated` is deliberately not carried over: it names the type the SDK
-    // exposes, and that is `baseModel.name`, which keeps its own flag. A
-    // deprecated `<Name>Json` folded into a live `<Name>` leaves `<Name>` live.
+    for (const [name, members] of groups) {
+      if (members.length < 2) continue;
+      const admits = (owner: Model, member: Model): boolean => modelAdmits(shapeOf(owner), shapeOf(member), options);
+      const refuseMember = (member: Model, detail: string): void => {
+        const fold = innermostFold(accepted, member.name)!;
+        refuse(
+          fold,
+          variantModelNames(fold.baseModel, readName).has(name) ? unionRulesWarning(fold) : shapeWarning(fold, detail),
+        );
+      };
+      const holder = members.find((member) => member.name === name);
+      if (holder) {
+        for (const member of members) {
+          if (member !== holder && !admits(holder, member)) {
+            refuseMember(member, `"${member.name}" would fold onto "${name}", which has a different shape`);
+          }
+        }
+        continue;
+      }
+      const equivalent = (a: Model, b: Model): boolean => admits(a, b) && admits(b, a);
+      for (const member of members) {
+        const other = members.find((candidate) => candidate !== member && !equivalent(member, candidate));
+        if (other) {
+          refuseMember(
+            member,
+            `"${member.name}" would fold onto "${name}" beside "${other.name}", which has a different shape`,
+          );
+        }
+      }
+    }
 
-    // Every reference through the plan at once, then the names: a vacated
-    // name is never looked up or set between two steps.
-    const steps = [parent, ...children];
-    rewriteModelRefs(normalizedModels, services, new Map(steps.map(({ model, onto }) => [model.name, onto])), webhooks);
-    for (const { model } of steps) byName.delete(model.name);
+    if (refused.size === 0) break;
+    accepted = accepted.filter((candidate) => !refused.has(candidate));
+    read = foldReading(accepted);
+  }
+
+  // Apply: shapes, then every reference at once, then names.
+  const renames = new Map<string, string>();
+  for (const model of normalizedModels) {
+    const name = read(model.name);
+    if (name !== model.name) renames.set(model.name, name);
+  }
+  for (const { baseModel, jsonModel } of accepted) applyFold(baseModel, jsonModel);
+  const enumRenames = rewriteModelRefs(normalizedModels, services, renames, webhooks, read);
+
+  const removed = new Set<Model>(accepted.map((candidate) => candidate.jsonModel));
+  // The model that keeps each name: the one the folds leave under it, else
+  // the first declared of those that end under it.
+  const keepers = new Map<string, Model>();
+  for (const model of normalizedModels) {
+    if (removed.has(model)) continue;
+    const name = read(model.name);
+    if (!keepers.has(name) || model.name === name) keepers.set(name, model);
+  }
+  for (const candidate of accepted) {
+    const { jsonModel, baseModel } = candidate;
     console.warn(
-      `[oagen] Merged "${jsonModel.name}" into "${baseModel.name}" (${jsonModel.fields.length} fields, superset)`,
+      `[oagen] Merged "${jsonModel.name}" into "${read(baseModel.name)}" (${jsonModel.fields.length} fields, superset)`,
     );
-    removed.add(jsonModel.name);
     // e.g. when AuditLogSchemaJson → AuditLogSchema, also rename
     // AuditLogSchemaJsonTarget → AuditLogSchemaTarget, or collapse it onto
     // an AuditLogSchemaTarget that already exists.
-    for (const { model, newName, holder, onto } of children) {
-      if (holder) {
-        removed.add(model.name);
-        console.warn(`[oagen] Collapsed child "${model.name}" into existing "${onto}"`);
+    for (const model of normalizedModels) {
+      if (removed.has(model) || innermostFold(accepted, model.name) !== candidate) continue;
+      const name = read(model.name);
+      if (keepers.get(name) === model) {
+        console.warn(`[oagen] Renamed child "${jsonModel.name}…" → "${name}"`);
       } else {
-        model.name = newName;
-        byName.set(newName, model);
-        console.warn(`[oagen] Renamed child "${jsonModel.name}…" → "${newName}"`);
+        removed.add(model);
+        console.warn(`[oagen] Collapsed child "${model.name}" into existing "${name}"`);
       }
     }
   }
+  for (const model of normalizedModels) if (!removed.has(model)) model.name = read(model.name);
+  const kept = normalizedModels.filter((m) => !removed.has(m));
 
-  return normalizedModels.filter((m) => !removed.has(m.name));
+  // A lifted enum the renames left unreferenced.
+  if (enumRenames.size > 0) {
+    const inPlay = new Set<string>();
+    for (const ref of typeRefsInPlay(kept, services, webhooks)) walkTypeRef(ref, { enum: (r) => inPlay.add(r.name) });
+    for (const [oldName, newName] of enumRenames) {
+      if (componentNames.has(oldName) || inPlay.has(oldName)) continue;
+      const index = enums.findIndex((e) => e.name === oldName);
+      if (index < 0) continue;
+      enums.splice(index, 1);
+      console.warn(`[oagen] Folded enum "${oldName}" into "${newName}"`);
+    }
+  }
+
+  return kept;
 }

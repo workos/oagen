@@ -10,6 +10,7 @@ import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import { classifyInlineSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
+import { readInlineAllOf } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -101,12 +102,15 @@ export function detectPagination(
 export function describeUndetectedPaging(queryParams: Parameter[]): string {
   const declared = (names: readonly string[]): string[] =>
     queryParams.filter((p) => names.includes(p.name)).map((p) => `"${p.name}"`);
+  // `"page" is` / `"offset" and "page" are` / `"a", "b" and "c" are`.
+  const listed = (names: string[]): string =>
+    names.length === 1 ? `${names[0]} is` : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} are`;
   const selectors = [...declared(OFFSET_PARAMS), ...declared(PAGE_PARAMS)];
   if (selectors.length > 0) {
-    return `${selectors.join(', ')} is declared without a page-size parameter: ${LIMIT_PARAMS.join(', ')}`;
+    return `${listed(selectors)} declared without a page-size parameter: ${LIMIT_PARAMS.join(', ')}`;
   }
   const sizes = declared(LIMIT_PARAMS);
-  if (sizes.length > 0) return `${sizes.join(', ')} is declared without a cursor, offset or page parameter`;
+  if (sizes.length > 0) return `${listed(sizes)} declared without a cursor, offset or page parameter`;
   return 'no cursor, offset or page query parameter is declared';
 }
 
@@ -253,18 +257,26 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * an obvious one. `properties` are the envelope's merged properties and
  * `dataPath` names the data array among them.
  *
- * Top-level fields are considered first, then the fields one level down
- * inside each object companion whose name says it is pagination metadata
+ * The fields beside the array are considered first: when the path is
+ * nested, the other properties of the object the array sits in, under
+ * whatever name that object has (`result.total_pages` beside
+ * `result.items`, `data.page.has_more` beside `data.page.items`), the
+ * parent reached exactly as the path itself is resolved
+ * (`resolveSchemaPath` from the merged properties), so one behind a `$ref`,
+ * an `allOf` or a nullable wrapper is read as the walk reads it. Then the
+ * top-level fields, then the fields one level down inside each top-level
+ * object companion whose name says it is pagination metadata
  * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ..., in
  * any spelling — `pageInfo` and `PageInfo` as much as `page_info`; an
  * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
  * wrapper around one), so a `stats.total` beside `pagination.page` is not
- * taken for the list's size. The path follows the `dataPath` convention —
- * `has_more` or `pagination.totalPages` — and spells each segment as the
- * document does (`pageInfo.hasNextPage`). When
- * several candidates exist, a `hasMore` boolean wins over a `totalPages`
- * integer, which wins over a `totalCount` integer; within one kind the first
- * in scan order wins. A candidate whose type does not fit its kind (a string
+ * taken for the list's size. The array itself is never a stop field,
+ * whatever it is called. The path follows the `dataPath` convention —
+ * `has_more`, `result.total_pages` or `pagination.totalPages` — and spells
+ * each segment as the document does (`pageInfo.hasNextPage`). When several
+ * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
+ * which wins over a `totalCount` integer; within one kind the first in scan
+ * order wins. A candidate whose type does not fit its kind (a string
  * `total`) is ignored.
  */
 export function detectEndOfIteration(
@@ -277,6 +289,16 @@ export function detectEndOfIteration(
     const kind = classifyEndField(name, schema, componentSchemas);
     if (kind && !found.has(kind)) found.set(kind, path);
   };
+
+  const segments = dataPath.split('.');
+  const arrayName = segments[segments.length - 1];
+  if (segments.length > 1) {
+    const parentPath = segments.slice(0, -1).join('.');
+    const parent = resolveSchemaPath({ properties }, parentPath, componentSchemas);
+    for (const [inner, innerSchema] of Object.entries(parent ? objectProperties(parent, componentSchemas) : {})) {
+      if (innerSchema && inner !== arrayName) record(inner, `${parentPath}.${inner}`, innerSchema);
+    }
+  }
 
   const companions = Object.entries(properties).filter(
     (entry): entry is [string, SchemaObject] => entry[0] !== dataPath && entry[1] !== undefined,
@@ -371,10 +393,13 @@ function isNumeric(schema: SchemaObject): boolean {
  * one definition the model side unwraps by; and an `allOf` with one member
  * that is what types the schema (`classifyInlineSchema`: a `$ref` member,
  * or an inline member with a type of its own — not an `allOf` of bare
- * limits beside the schema's own `type`) is read as that member, as
- * `schemaToTypeRef` types it (`readInlineAllOf`), so `has_more: { allOf:
- * [{ $ref: Flag }], description }` with `Flag: { type: boolean }` is a
- * boolean here as it is in the IR. The three alternate until the schema is
+ * limits beside the schema's own `type`) is read as that member exactly
+ * when `schemaToTypeRef` types the schema as it (`readInlineAllOf`:
+ * `'unwrapped'` or `'reference'`; a `required` beside a lone `$ref`
+ * member makes the schema the merged model, which is left as written), so
+ * `has_more: { allOf: [{ $ref: Flag }], description }` with `Flag: { type:
+ * boolean }` is a boolean here as it is in the IR. The three alternate
+ * until the schema is
  * none of them, so `{ oneOf: [{ $ref: 'Tags' }, { type: 'null' }] }` with
  * `Tags: { type: ['array', 'null'], items }` reaches the array. Sibling
  * `properties` are folded into the `allOf` by the unwrap
@@ -402,7 +427,10 @@ export function resolveBareSchema(
   }
   const bare = unwrapNullableSchema(schema);
   if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
-  const lone = bare.allOf?.length === 1 && classifyInlineSchema(bare) === 'allOf' ? bare.allOf[0] : undefined;
+  const lone =
+    bare.allOf?.length === 1 && classifyInlineSchema(bare) === 'allOf' && readInlineAllOf(bare.allOf, bare) !== 'merged'
+      ? bare.allOf[0]
+      : undefined;
   return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
 }
 
