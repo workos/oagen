@@ -223,25 +223,25 @@ export function classifyAndExtractResponse(
 /**
  * The field that ends an iteration of a body kept as a wrapper under an
  * explicit `dataPath`, read beside the array the path names — the one
- * reader for every kept wrapper, whatever wraps it. The body is resolved to
- * the object the path walks: a `$ref` is followed to its component and a
- * nullable wrapper of any spelling stripped, however the two alternate
- * (`resolveBareSchema`, the resolver the path walk uses for the array it
- * lands on); its properties are then merged across `allOf` branches, `$ref`
- * branches included, exactly as a recognized envelope's are
- * (`collectEnvelopeProperties`); and `detectEndOfIteration` reads them as
- * it reads an unwrapped envelope's, with the full path excluded, not its
- * root, so the array the path names is never a stop field while a stop
- * field beside a nested array (`pagination.has_more` next to
- * `pagination.items`) stays visible. `undefined` when nothing recognizable
- * is declared, or the body resolves to no object at all.
+ * reader for every kept wrapper, whatever wraps it. The wrapper's
+ * properties are collected exactly as a recognized envelope's are
+ * (`collectEnvelopeProperties`, which reads the body and every `allOf`
+ * member, however deep, through `resolveBareSchema` — the resolver the path
+ * walk uses — so a `$ref` body, a nullable wrapper around the body or
+ * around any member, and a `$ref` chain to one all reach the same object
+ * the path walked), and `detectEndOfIteration` reads them as it reads an
+ * unwrapped envelope's, with the full path excluded, not its root, so the
+ * array the path names is never a stop field while a stop field beside a
+ * nested array (`pagination.has_more` next to `pagination.items`) stays
+ * visible. `undefined` when nothing recognizable is declared, or the body
+ * resolves to no object at all.
  */
 function bodyEndOfIteration(
   schema: SchemaObject,
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration | undefined {
-  const { properties } = collectEnvelopeProperties(resolveBareSchema(schema, componentSchemas), componentSchemas);
+  const { properties } = collectEnvelopeProperties(schema, componentSchemas);
   return detectEndOfIteration(properties, dataPath, componentSchemas);
 }
 
@@ -585,18 +585,34 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
 }
 
 /**
- * Every property the envelope declares, merged across its `allOf` branches,
+ * Every property the envelope declares, merged across its `allOf` members,
  * with the `required` lists that go with them.
  *
- * A `$ref` branch is resolved against the component schemas so fields an
- * envelope inherits from a shared base (`trace_id` on every response, say)
- * are not silently dropped. A property declared by more than one branch keeps
- * both declarations' shape when both are inline objects — `pagination.next`
- * from one branch and `pagination.total` from another both belong to the
- * response — and otherwise takes the later declaration. (Envelope detection
- * reads the branches' own `properties`; a `oneOf`/`anyOf` branch declares
- * none, so it contributes nothing here. A body that is not an envelope is
- * merged by `mergeAllOfMembers`, which reads such a branch's variants.)
+ * Every node the walk meets — the body, then each `allOf` member, however
+ * deep — is read through `resolveBareSchema`, the resolver the explicit
+ * `dataPath` walk reads the document with: a `$ref` is followed to its
+ * component and a nullable wrapper of any spelling (a type list naming
+ * `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
+ * variant) is stripped, however the two alternate. So fields an envelope
+ * inherits from a shared base (`trace_id` on every response, say) are not
+ * silently dropped whether the member is written `$ref: Base`, `{ oneOf: [{
+ * $ref: Base }, { type: 'null' }] }`, a `$ref` to such a wrapper, or an
+ * `allOf` nested inside one — and a stop field declared in any of them is
+ * read. The one place the walk resolves a node, so the companions and the
+ * stop field are read from the same shape, at every level, that the path
+ * walk reaches the data array through. A reference is recorded before it
+ * is followed, so a component that reaches itself — directly, through a
+ * wrapper, or through a member — is read once; an `allOf` member's own
+ * `properties` beside its `allOf` are folded in as its first member
+ * (`foldSiblingProperties`, through `unwrapNullableSchema`). A property
+ * declared by more than one member keeps both declarations' shape when both
+ * are inline objects — `pagination.next` from one member and
+ * `pagination.total` from another both belong to the response — and
+ * otherwise takes the later declaration. (Envelope detection reads the
+ * members' own `properties`; a `oneOf`/`anyOf` member with more than one
+ * non-null variant declares none, so it contributes nothing here. A body
+ * that is not an envelope is merged by `mergeAllOfMembers`, which reads such
+ * a member's variants.)
  */
 function collectEnvelopeProperties(
   schema: SchemaObject,
@@ -610,18 +626,15 @@ function collectEnvelopeProperties(
     if (s.$ref) {
       if (seenRefs.has(s.$ref)) return;
       seenRefs.add(s.$ref);
-      const refName = s.$ref.split('/').pop();
-      const resolved = refName ? componentSchemas?.[refName] : undefined;
-      if (resolved) visit(resolved);
-      return;
     }
-    for (const sub of s.allOf ?? []) visit(sub);
-    for (const [key, prop] of Object.entries(s.properties ?? {})) {
+    const bare = resolveBareSchema(s, componentSchemas);
+    for (const sub of bare.allOf ?? []) visit(sub);
+    for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       const existing = properties[key];
       properties[key] = existing ? mergePropertyDeclarations(existing, prop) : prop;
     }
-    if (s.required) required.push(...s.required);
+    if (bare.required) required.push(...bare.required);
   };
   visit(schema);
 
