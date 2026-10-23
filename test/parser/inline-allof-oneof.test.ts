@@ -579,6 +579,77 @@ describe('the one reading of an inline allOf', () => {
     expect(merged.unresolvedRefs).toEqual(['#/components/schemas/Missing']);
   });
 
+  it('reads a nullable union member as its one variant, applying as the member does, in the merge and in a component (MichaelDeBoey)', () => {
+    const nullOf = (variant: SchemaObject): SchemaObject => ({ oneOf: [variant, { type: 'null' }] });
+    const baseRef: SchemaObject = { $ref: '#/components/schemas/Base' };
+    const flag: SchemaObject = { type: 'object', properties: { flag: { type: 'boolean' } }, required: ['flag'] };
+    // The variant's `$ref` is followed, its `required` read, its properties always-applying.
+    const merged = mergeAllOfMembers({ allOf: [nullOf(baseRef), nullOf(flag), base] }, components);
+    expect(merged.properties.map((p) => `${p.name}${p.origin ? ` (${p.origin.name})` : ''}`)).toEqual([
+      'root (Base)',
+      'id (Base)',
+      'flag',
+      'name',
+    ]);
+    expect(merged.required).toEqual(['id', 'root', 'flag', 'name']);
+    expect(merged.resolvedRefs).toEqual(['#/components/schemas/Base', '#/components/schemas/Root']);
+    // A union with more than one non-null variant is still read as branches,
+    // its `$ref` variant left to its component and its `required` unread.
+    const branches = mergeAllOfMembers(
+      {
+        allOf: [
+          { oneOf: [baseRef, { properties: { x: { type: 'string' } }, required: ['x'] }, { type: 'null' }] },
+          base,
+        ],
+      },
+      components,
+    );
+    expect(branches.properties.map((p) => p.name)).toEqual(['x', 'name']);
+    expect(branches.required).toEqual(['name']);
+    // The component model of the same shape carries the same fields.
+    const data: SchemaObject = { type: 'array', items: { type: 'string' } };
+    const { models } = extractSchemas({
+      Root: components.Root!,
+      Base: components.Base!,
+      Wrap: { allOf: [nullOf(baseRef), { type: 'object', properties: { data } }] },
+    });
+    expect(models.find((m) => m.name === 'Wrap')?.fields.map((f) => `${f.name}${f.required ? '' : '?'}`)).toEqual([
+      'root',
+      'id',
+      'data?',
+    ]);
+  });
+
+  it('types a name two members declare from the first declaration that declares a type, annotated by a typeless one (Greptile)', () => {
+    const typed: SchemaObject = { type: 'object', properties: { x: { type: 'string' } } };
+    const doc: SchemaObject = { type: 'object', properties: { x: { description: 'doc' } } };
+    // Whichever is read first, `x` is a described string.
+    for (const members of [
+      [typed, doc],
+      [doc, typed],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, components);
+      expect(merged.properties.map((p) => p.name)).toEqual(['x']);
+      expect(merged.properties[0]!.schema).toEqual({ type: 'string', description: 'doc' });
+    }
+    // Two typing declarations keep the first, as written.
+    const two = mergeAllOfMembers(
+      { allOf: [typed, { type: 'object', properties: { x: { type: 'integer' } } }] },
+      components,
+    );
+    expect(two.properties[0]!.schema).toBe(typed.properties!.x);
+    // A component declaring the name typeless beside an `allOf` member that
+    // types it — and the reverse — is a described string field either way.
+    const { models } = extractSchemas({
+      DocFirst: { properties: { x: { description: 'doc' } }, allOf: [typed] },
+      TypeFirst: { properties: { x: { type: 'string' } }, allOf: [doc] },
+    });
+    for (const name of ['DocFirst', 'TypeFirst']) {
+      const [field] = models.find((m) => m.name === name)!.fields;
+      expect(field, name).toMatchObject({ name: 'x', type: { kind: 'primitive', type: 'string' }, description: 'doc' });
+    }
+  });
+
   it('schemaToTypeRef, mintedInlineNameEntries and the field extractor agree that a oneOf member mints the merged model', () => {
     const refPlusUnion: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, union] };
     const unionPlusLimits: SchemaObject = { allOf: [union, { maxProperties: 3 }] };
@@ -1394,5 +1465,59 @@ describe('round 4: every shape under a discriminated variant is built as the fie
     });
     expect(fieldsOf(models['NodeCreatedDataNullableItem'])).toEqual(['a: string', 'x?: string']);
     expectSound(ir, ['Base', 'Event']);
+  });
+});
+
+describe('the origin of an inherited field is the component whose model carries it (Greptile, #308 round 4)', () => {
+  const meta: SchemaObject = { type: 'object', properties: { page: { type: 'integer' } } };
+  const Base: SchemaObject = { type: 'object', properties: { meta }, required: ['meta'] };
+  const nullOf = (variant: SchemaObject): SchemaObject => ({ oneOf: [variant, { type: 'null' }] });
+  const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+  const inline: SchemaObject = { type: 'object', properties: { x: { type: 'string' } } };
+  const holder = (member: SchemaObject) => ({ type: 'object', properties: { value: { allOf: [member, inline] } } });
+  const doc = (schemas: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {},
+    components: { schemas: { Base, ...schemas } },
+  });
+
+  it("types a field inherited through a nullable alias under the component that declares it (Greptile's case)", async () => {
+    // `Alias` declares nothing and builds no model, so `HolderValue.meta` is
+    // `BaseMeta` — the model `Base` builds — never `AliasMeta`.
+    const Alias = nullOf(ref('Base'));
+    const merged = mergeAllOfMembers({ allOf: [ref('Alias'), inline] }, { Base, Alias });
+    expect(merged.properties.map((p) => `${p.name} (${p.origin?.name ?? 'own'})`)).toEqual(['meta (Base)', 'x (own)']);
+    const ir = await parseWithoutWarnings(doc({ Alias, Holder: holder(ref('Alias')) }));
+    expect(fieldsOf(modelsByName(ir)['HolderValue'])).toEqual(['meta: BaseMeta', 'x?: string']);
+    expectSound(ir, ['Base', 'Alias', 'Holder']);
+  });
+
+  it('follows a two-hop alias — a bare $ref to a nullable alias — to the declaring component', async () => {
+    const Alias = nullOf(ref('Base'));
+    const Hop = ref('Alias');
+    const merged = mergeAllOfMembers({ allOf: [ref('Hop'), inline] }, { Base, Alias, Hop });
+    expect(merged.properties.map((p) => `${p.name} (${p.origin?.name ?? 'own'})`)).toEqual(['meta (Base)', 'x (own)']);
+    const ir = await parseWithoutWarnings(doc({ Alias, Hop, Holder: holder(ref('Hop')) }));
+    expect(fieldsOf(modelsByName(ir)['HolderValue'])).toEqual(['meta: BaseMeta', 'x?: string']);
+    expectSound(ir, ['Base', 'Alias', 'Hop', 'Holder']);
+  });
+
+  it('keeps an allOf component as the origin when the alias is one of its members: its own model carries the field', async () => {
+    // `Comp` inherits through the alias, so its model types `meta` as
+    // `CompMeta` and builds it; a merge naming `Comp` references that.
+    const Alias = nullOf(ref('Base'));
+    const Comp: SchemaObject = { allOf: [ref('Alias'), { type: 'object', properties: { y: { type: 'string' } } }] };
+    const merged = mergeAllOfMembers({ allOf: [ref('Comp'), inline] }, { Base, Alias, Comp });
+    expect(merged.properties.map((p) => `${p.name} (${p.origin?.name ?? 'own'})`)).toEqual([
+      'meta (Comp)',
+      'y (Comp)',
+      'x (own)',
+    ]);
+    const ir = await parseWithoutWarnings(doc({ Alias, Comp, Holder: holder(ref('Comp')) }));
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['Comp'])).toEqual(['meta: CompMeta', 'y?: string']);
+    expect(fieldsOf(models['HolderValue'])).toEqual(['meta: CompMeta', 'y?: string', 'x?: string']);
+    expectSound(ir, ['Base', 'Alias', 'Comp', 'Holder']);
   });
 });

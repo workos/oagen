@@ -3450,20 +3450,34 @@ type AllOfDiscriminator = { property: string; mapping: Record<string, string> };
 /**
  * Read one member of a component's `allOf` into `ledger` and `required`,
  * each declaration with its provenance (`declareProperty`). A `$ref` member
- * is resolved to its component. An `allOf` member — a component composed
- * with `allOf`, or an inline wrapper — is read by `readComponentAllOf`, so a
- * declaration it makes under a `oneOf`/`anyOf` variant stays branch-only
- * however deep it sits; its own discriminator, if any, is its own model's
- * and is not returned (the model reading it carries the base fields only).
- * Every member contributes its own `properties` as always-applying and its
- * own `required` — beside a `oneOf`/`anyOf` too. A member's
+ * is resolved to its component, through a chain of references; a component
+ * met again on the chain declares nothing more. An `allOf` member — a
+ * component composed with `allOf`, or an inline wrapper — is read by
+ * `readComponentAllOf`, so a declaration it makes under a `oneOf`/`anyOf`
+ * variant stays branch-only however deep it sits; its own discriminator, if
+ * any, is its own model's and is not returned (the model reading it carries
+ * the base fields only). Every member contributes its own `properties` as
+ * always-applying and its own `required` — beside a `oneOf`/`anyOf` too. A
+ * member's `oneOf`/`anyOf` with exactly one non-null variant beside `null`
+ * is a nullable wrapper, not a union — decided by `nullableUnionBranch`, the
+ * definition `unwrapNullableSchema` collapses by, which `mergeAllOfMembers`
+ * reads an inline member through and the envelope collector reads every
+ * member through (`resolveBareSchema`) — and that variant is read as one
+ * more member, in this member's own capacity: `{ oneOf: [{ $ref: Base }, {
+ * type: 'null' }] }` applies `Base` whole, its `$ref` followed and its
+ * `required` read, since an instance that is not null is a `Base` and
+ * beside an object member it is never null (workos/oagen#308: read as a
+ * union, `Base`'s `has_more` ended the operation's iteration but was
+ * missing from the model); the wrapper itself is recorded as read, so a
+ * component that wraps a reference to itself ends there. A member's
  * `oneOf`/`anyOf` whose variants pin one property to distinct consts is a
  * dispatcher (`detectAllOfVariantDiscriminator`): its variants' properties
  * are not read, and the discriminator is returned; otherwise every
  * variant's properties are read as branch-only, and a variant's `required`
  * is not read, since its properties are present only on that branch. With
  * `readVariants` false the union is not read at all — the dispatcher base
- * reads the variant axis for its own properties only. Shared by
+ * reads the variant axis for its own properties only — while a nullable
+ * wrapper, never a variant axis, is still applied. Shared by
  * `extractAllOfModel` and the dispatcher base of
  * `extractDiscriminatedAllOfVariantModels`, so the two read a member alike.
  */
@@ -3476,12 +3490,16 @@ function readComponentAllOfMember(
   seen: Set<SchemaObject>,
   readVariants = true,
 ): AllOfDiscriminator | undefined {
-  // Resolve $ref sub-schemas by looking up the referenced component schema
   let resolved = member;
-  if (member.$ref && schemas) {
-    const segments = member.$ref.split('/');
+  const chain = new Set<SchemaObject>();
+  while (resolved.$ref) {
+    const segments = resolved.$ref.split('/');
     const refName = segments[segments.length - 1];
-    if (refName && Object.hasOwn(schemas, refName)) resolved = schemas[refName]!;
+    if (!schemas || !refName || !Object.hasOwn(schemas, refName)) break;
+    const target = schemas[refName]!;
+    if (seen.has(target) || chain.has(target)) return undefined;
+    chain.add(target);
+    resolved = target;
   }
   if (resolved.allOf) {
     readComponentAllOf(name, resolved, schemas, ledger, required, seen);
@@ -3496,7 +3514,17 @@ function readComponentAllOfMember(
     if (value) declareProperty(ledger, key, value, null, false);
   }
   const variants = resolved.oneOf ?? resolved.anyOf;
-  if (!variants || !readVariants) return undefined;
+  if (!variants) return undefined;
+  // A nullable wrapper is its one non-null variant, read as one more member
+  // in this member's own capacity (`nullableUnionBranch`); the wrapper is
+  // recorded so a component that wraps a reference to itself ends here.
+  const branch = nullableUnionBranch(resolved);
+  if (branch) {
+    if (seen.has(resolved)) return undefined;
+    seen.add(resolved);
+    return readComponentAllOfMember(name, branch, schemas, ledger, required, seen, readVariants);
+  }
+  if (!readVariants) return undefined;
   // Detect discriminated union: every variant pins the same property to a
   // distinct const value (e.g. EventSchema where each variant has event: const).
   // When detected, store the discriminator instead of flattening variant fields —
@@ -3544,8 +3572,10 @@ function readComponentAllOf(
 }
 
 /**
- * The schema that types a property a component declares: the first
- * always-applying declaration (`declareProperty`), else the first branch's.
+ * The schema that types a property a component declares: the always-applying
+ * declaration `declareProperty` settles on — the first that declares a type,
+ * a typeless one only annotating it (`combineDeclarations`) — else the first
+ * branch's.
  * A component flattens a union's branches as written; the union of distinct
  * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
  * built here, since no pass would materialize its inline variants under a
@@ -3565,8 +3595,10 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
  * typed under the component's own name with one sibling set
  * (`collectProperties`), from the one declaration
- * `declaredComponentProperty` picks: the first always-applying declaration,
- * the component's own first, whatever a `oneOf`/`anyOf` variant declares
+ * `declaredComponentProperty` picks: the always-applying declaration
+ * `declareProperty` settles on — the first that declares a type, the
+ * component's own first, a typeless one only annotating it — whatever a
+ * `oneOf`/`anyOf` variant declares
  * before or after it and at whatever depth — the precedence
  * `declareProperty` gives `mergeAllOfMembers` too — and `required` is the
  * union of every always-applying member's list and the component's own; a

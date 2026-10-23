@@ -15,6 +15,7 @@ import {
   markComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
+  nullableUnionBranch,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -953,13 +954,17 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Every property the object described by `schema` exposes, by name: its own
  * `properties`, those of its `allOf` members (following a member's `$ref`
- * into `schemas` when given, as `extractAllOfModel` does), and those of
- * inline `oneOf`/`anyOf` variants, whose fields the model extractors flatten
- * in — in the order first declared, each name with the declaration
- * `declareProperty`'s precedence picks: the first always-applying one, else
- * the first variant's. This is the sibling set `elementContextName` decides
- * from; the TypeRef builder and every extractor derive it through this one
- * function so they agree.
+ * into `schemas` when given, as `extractAllOfModel` does), those of a
+ * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
+ * member it wraps (`nullableUnionBranch`, the definition the model walks
+ * resolve a member by, so a nullable `$ref` member's component is followed
+ * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
+ * those of every other inline `oneOf`/`anyOf` variant, whose fields the
+ * model extractors flatten in — in the order first declared, each name with
+ * the declaration `declareProperty`'s precedence picks: the first
+ * always-applying one, else the first variant's. This is the sibling set
+ * `elementContextName` decides from; the TypeRef builder and every extractor
+ * derive it through this one function so they agree.
  */
 export function collectProperties(
   schema: SchemaObject,
@@ -978,7 +983,9 @@ export function collectProperties(
       if (value) declareProperty(ledger, key, value, null, onBranch);
     }
     for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
-    for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false, true);
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, followRef, onBranch);
+    else for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false, true);
   };
   visit(schema, false, false);
   return new Map(
@@ -1709,18 +1716,69 @@ export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject
  */
 export interface PropertyDeclarations {
   name: string;
-  /** The first always-applying declaration, with the component it is inherited from (`null` for the schema's own). */
+  /** The always-applying declaration that types the property (`combineDeclarations`), with the component it is inherited from (`null` for the schema's own). */
   unconditional?: { schema: SchemaObject; origin: MergedProperty['origin'] };
   /** Each branch-only declaration — a `oneOf`/`anyOf` variant's — in order. */
   conditional: SchemaObject[];
 }
 
 /**
+ * Whether a declaration says what an instance is: a `type`, a `$ref`,
+ * `properties`, `items`, an `enum` or `const`, a composition, or an
+ * `additionalProperties`/`patternProperties` map. One that declares none —
+ * a bare `description`, `title`, `example`, `deprecated`, `default`, or a
+ * validation keyword on its own (`minimum: 1`) — annotates or constrains a
+ * type another declaration gives, and is never read as the type itself
+ * (`combineDeclarations`).
+ */
+export function declaresType(schema: SchemaObject): boolean {
+  return (
+    schema.type !== undefined ||
+    schema.$ref !== undefined ||
+    schema.properties !== undefined ||
+    schema.items !== undefined ||
+    schema.enum !== undefined ||
+    schema.const !== undefined ||
+    schema.allOf !== undefined ||
+    schema.oneOf !== undefined ||
+    schema.anyOf !== undefined ||
+    schema.additionalProperties !== undefined ||
+    schema.patternProperties !== undefined
+  );
+}
+
+/**
+ * The always-applying declaration of one property once a second arrives, in
+ * document order — the one precedence rule for a name two members declare,
+ * applied by `declareProperty` for every `allOf` merge and by the envelope
+ * collector for the properties it reads (`collectObjectProperties`), so a
+ * model's field and a list's stop field are typed from the same declaration.
+ * The first declaration that declares a type (`declaresType`) types the
+ * property, whatever comes after it; a declaration that declares none never
+ * does, before or after, and only fills in the keywords the typing one
+ * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
+ * member's `has_more: { description: 'More pages' }` is a described boolean
+ * whichever is read first (workos/oagen#308 review: the collector took the
+ * later declaration, so a component's own boolean, folded in first, lost
+ * its type to the description). Two typing declarations keep the first as
+ * written; the second is not conjoined into it. Returns `held` itself when
+ * `next` adds nothing to it, so a lone declaration keeps its identity.
+ */
+export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
+  if (declaresType(held) && declaresType(next)) return held;
+  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
+  return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+}
+
+/**
  * Record one declaration of `name` in `ledger`: the one precedence rule
  * every `allOf` merge applies, whether the declaration arrives from a direct
  * member, a nested `allOf` member or a `oneOf`/`anyOf` variant, at any
- * depth. The first always-applying declaration wins, whatever is declared
- * before or after it; a branch-only declaration (`onBranch`) is only a
+ * depth. Of the always-applying declarations, the first that declares a
+ * type wins, whatever is declared before or after it, and a typeless one
+ * only annotates it (`combineDeclarations`); the entry's origin is the
+ * typing declaration's. A branch-only declaration (`onBranch`) is only a
  * fallback, kept in order for the reader to use when no member always
  * declares the name — `mergeAllOfMembers` as the union of the distinct
  * branch declarations, the component readers (`extractAllOfModel`,
@@ -1738,7 +1796,12 @@ export function declareProperty(
   let entry = ledger.get(name);
   if (!entry) ledger.set(name, (entry = { name, conditional: [] }));
   if (onBranch) entry.conditional.push(schema);
-  else entry.unconditional ??= { schema, origin };
+  else if (!entry.unconditional) entry.unconditional = { schema, origin };
+  else {
+    const held = entry.unconditional;
+    const typesIt = !declaresType(held.schema) && declaresType(schema);
+    entry.unconditional = { schema: combineDeclarations(held.schema, schema), origin: typesIt ? origin : held.origin };
+  }
 }
 
 /**
@@ -1759,6 +1822,13 @@ export function declareProperty(
  * (`componentAllOfMembers`) — tagged with that component's model name, so the merged
  * model can type them exactly as the component's own model does; a ref no
  * component answers contributes nothing and is listed in `unresolvedRefs`.
+ * The component tagged is the one whose own model carries the field under
+ * its name: an `allOf` component that inherits it stays the origin of
+ * everything reached inside its chain (`DogMeta`), while a bare alias
+ * (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref: Base
+ * }, { type: 'null' }] }`) or a chain of either declares nothing of its own
+ * and builds no model, so a reference met inside one starts its own origin
+ * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for a `oneOf`/`anyOf` it carries, those of every
  * variant that declares properties inline — read through the variant's own
@@ -1776,8 +1846,10 @@ export function declareProperty(
  * keeps its own fields), and a union a `$ref` member's component carries is
  * not read (the component's own model dispatches or flattens it).
  *
- * A property keeps the first declaration an always-applying member gives
- * it, whatever a variant says: a variant can only narrow what every instance
+ * A property keeps the always-applying declaration `declareProperty` settles
+ * on — the first that declares a type, a typeless one before or after it
+ * only annotating it (`combineDeclarations`) — whatever a variant says: a
+ * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
  * distinct declarations (`unionOfDeclarations`): one declaration, or several
  * of one shape, is that declaration; several shapes become a `oneOf` of
@@ -1821,9 +1893,19 @@ export function mergeAllOfMembers(
       const refs = target ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
       if (!target) return;
-      // A ref inside a component's own allOf chain stays that component's;
-      // a top-level ref member is the component the properties belong to.
-      visit(target, origin ?? { name: resolveSchemaName(rawName), schema: target }, onBranch);
+      // The component the properties belong to is the one whose own model
+      // carries them under its name. A ref inside an `allOf` component's own
+      // chain stays that component's: its model inherits through its
+      // members, nullable ones included, and types their fields under its
+      // own name (`DogMeta`). Any other component met on the way declares
+      // nothing of its own that this reference adds to — a bare alias
+      // (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref:
+      // Base }, { type: 'null' }] }`), a chain of either — and builds no
+      // model for the fields, so the reference starts its own origin, as a
+      // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
+      // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
+      const owner = origin?.schema.allOf ? origin : { name: resolveSchemaName(rawName), schema: target };
+      visit(target, owner, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
@@ -1831,9 +1913,22 @@ export function mergeAllOfMembers(
     }
     if (s.required && !onBranch) required.push(...s.required);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
-    // An inline union is flattened; one a `$ref` member's component carries
-    // belongs to that component's model.
-    if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
+    // A nullable union wrapper — one non-null variant beside `null`, decided
+    // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
+    // collapses by, which `readComponentAllOfMember` reads a component's
+    // member through and the envelope collector reads every member through
+    // (`resolveBareSchema`) — is that variant, applying as the member does:
+    // an instance that is not null is the variant, and beside an object
+    // member it is never null. So the variant is read in the member's own
+    // capacity — its `$ref` followed, its `required` read, its properties
+    // always-applying — wherever the member sits, a `$ref` member's
+    // component included (workos/oagen#308: read as a branch, `Base`'s
+    // `has_more` ended the iteration but was missing from the model). Any
+    // other inline union is flattened; one a `$ref` member's component
+    // carries belongs to that component's model.
+    const branch = nullableUnionBranch(s);
+    if (branch) visit(branch, origin, onBranch);
+    else if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
   };
   visit(schema, null, false);
   const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>
