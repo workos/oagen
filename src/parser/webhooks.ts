@@ -102,8 +102,11 @@ type MintedShape = Pick<
  * with a cycle guard) by `resolvePathItemRef`, the resolver a `paths` entry
  * goes through too; one that points anywhere else, or that cannot be
  * resolved, is warned about and skipped rather than failing the parse, as is
- * an entry that is not an object. A `webhooks` value that is not an object
- * at all is warned about and ignored. Nothing is read from `x-webhooks`, the
+ * an entry that is not an object. A key starting with `x-` is a
+ * specification extension, not a webhook, and is stepped over without a
+ * warning whatever its value, as `extractOperations` steps over one under
+ * `paths`. A `webhooks` value that is not an object at all is warned about
+ * and ignored. Nothing is read from `x-webhooks`, the
  * pre-3.1 convention: the parser reads the standard key only.
  *
  * Parameters and request bodies go through the same resolvers and extractors
@@ -230,6 +233,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function collectWebhookEntries(webhooks: Record<string, unknown>, components: WebhookComponents): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
   for (const [name, raw] of Object.entries(webhooks)) {
+    // A specification extension, never a webhook: stepped over whatever its
+    // value, as `resolvePathItems` steps over one under `paths`.
+    if (name.startsWith('x-')) continue;
     // The same resolver `extractOperations` reads a `paths` entry through, so
     // a `$ref` into `components/pathItems` is followed the same way here.
     const pathItem = resolvePathItemRef(raw, components.pathItems, { kind: 'webhook', key: name }) as
