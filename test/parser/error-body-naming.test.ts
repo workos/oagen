@@ -514,6 +514,150 @@ describe('a taken name steps by `Body`, as `<Op>Error<code>` does', () => {
   });
 });
 
+describe('an enum body shared through components/responses steps by number at every site, never by `Body`', () => {
+  const enumOf = (values: string[]): Doc => ({ type: 'string', enum: values });
+  const problemRef = { $ref: '#/components/responses/Problem' };
+  const noteOp = (operationId: string, responses: Doc): Doc => ({
+    get: { operationId, responses: { '200': ok, ...responses } },
+  });
+  /** `Problem`, whose JSON body is an inline enum. */
+  const problemEnum = { description: 'p', content: json(enumOf(['wait', 'later'])) };
+  /** `Problem`, whose JSON body is an object and whose YAML body is an inline enum. */
+  const problemYamlEnum = {
+    description: 'p',
+    content: { ...json(obj({ title: str })), ...yaml(enumOf(['wait', 'later'])) },
+  };
+  const enumsOf = (spec: ApiSpec): string[] =>
+    spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value).join(',')}]`).sort();
+
+  it.each([
+    ['a 4XX and a default', { '4XX': problemRef }, { default: problemRef }],
+    ['a 404 and a default', { '404': problemRef }, { default: problemRef }],
+    ['a 404 and a 4XX', { '404': problemRef }, { '4XX': problemRef }],
+    ['a 5XX and a 200', { '5XX': problemRef }, { '200': problemRef }],
+  ])('settles on one enum from %s, past a component enum of its name', async (_label, first: Doc, second: Doc) => {
+    const spec = await parseWithoutWarnings(
+      doc(
+        { '/a': noteOp('opA', first), '/b': noteOp('opB', second) },
+        { ProblemResponse: enumOf(['old', 'new']) },
+        { Problem: problemEnum },
+      ),
+    );
+    const ops = operations(spec);
+
+    // Before: the error site stepped by `Body` (`ProblemResponseBody`) and
+    // the fallback site by number (`ProblemResponse2`): two enums for one
+    // component body.
+    expect(enumsOf(spec)).toEqual(['ProblemResponse [old,new]', 'ProblemResponse2 [wait,later]']);
+    for (const op of ops.values()) {
+      const bodies = [
+        ...op.errors.map((e) => e.type),
+        op.defaultResponse?.type,
+        ...(op.rangeResponses ?? []).map((r) => r.type),
+        ...(op.successResponses?.map((s) => s.type) ?? []),
+        op.response,
+      ].filter((t) => t?.kind === 'enum');
+      expect(bodies.length, op.name).toBeGreaterThan(0);
+      for (const body of bodies)
+        expect(body, op.name).toEqual({ kind: 'enum', name: 'ProblemResponse2', values: ['wait', 'later'] });
+    }
+    expectSound(spec);
+  });
+
+  it('steps by number, never by `Body`, when the component is reached through a chain of refs at a 4XX and at a 404', async () => {
+    // A chain is named after the component the operation wrote (`Alias` →
+    // `AliasResponse`, see `sharedResponseModelName`), so the two sites of
+    // the chain share one enum, and neither steps by `Body` past the
+    // component enum of that name.
+    const aliasRef = { $ref: '#/components/responses/Alias' };
+    const spec = await parseWithoutWarnings(
+      doc(
+        { '/a': noteOp('opA', { '4XX': aliasRef }), '/b': noteOp('opB', { '404': aliasRef, default: problemRef }) },
+        { AliasResponse: enumOf(['old', 'new']) },
+        { Alias: problemRef, Problem: problemEnum },
+      ),
+    );
+    const ops = operations(spec);
+
+    expect(enumsOf(spec)).toEqual([
+      'AliasResponse [old,new]',
+      'AliasResponse2 [wait,later]',
+      'ProblemResponse [wait,later]',
+    ]);
+    expect(typeName(ops.get('opA')!.rangeResponses![0].type)).toBe('AliasResponse2');
+    expect(typeName(ops.get('opB')!.errors[0].type)).toBe('AliasResponse2');
+    expect(typeName(ops.get('opB')!.defaultResponse!.type)).toBe('ProblemResponse');
+    expectSound(spec);
+  });
+
+  it.each([
+    ['a 404 and a 200', { '404': problemRef }, { '200': problemRef }],
+    ['a 4XX and a default', { '4XX': problemRef }, { default: problemRef }],
+    ['a 5XX and a 404', { '5XX': problemRef }, { '404': problemRef }],
+  ])(
+    'shares one model and one enum for the secondary media type of a component returned at %s',
+    async (_label, first: Doc, second: Doc) => {
+      const spec = await parseWithoutWarnings(
+        doc(
+          { '/a': noteOp('opA', first), '/b': noteOp('opB', second) },
+          { ProblemApplicationYamlResponse: enumOf(['old', 'new']) },
+          { Problem: problemYamlEnum },
+        ),
+      );
+
+      // Before: `ProblemApplicationYamlResponseBody` at the error site beside
+      // `ProblemApplicationYamlResponse2` at the other.
+      expect(modelNames(spec)).toEqual(['Note', 'ProblemResponse']);
+      expect(enumsOf(spec)).toEqual([
+        'ProblemApplicationYamlResponse [old,new]',
+        'ProblemApplicationYamlResponse2 [wait,later]',
+      ]);
+      for (const op of operations(spec).values()) {
+        // The one entry of each operation that returns `Problem`: the `200`
+        // of the other paths is `Note`, under `application/json` alone.
+        const entries = [
+          ...op.errors,
+          ...(op.defaultResponse ? [op.defaultResponse] : []),
+          ...(op.rangeResponses ?? []),
+          ...(op.successResponses ?? [{ contents: op.responseContents }]),
+        ].filter((entry) => entry.contents?.some((content) => content.contentType === 'application/yaml'));
+        expect(entries.length, op.name).toBe(1);
+        expect(contentsOf(entries[0]), op.name).toEqual([
+          'application/json: ProblemResponse',
+          'application/yaml: ProblemApplicationYamlResponse2',
+        ]);
+      }
+      expectSound(spec);
+    },
+  );
+
+  it('still steps an operation-owned enum body by `Body` beside a shared one', async () => {
+    const spec = await parseWithoutWarnings(
+      doc(
+        {
+          '/a': noteOp('opA', { '4XX': problemRef, '5XX': { description: 'down', content: json(enumOf(['x', 'y'])) } }),
+          '/b': noteOp('opB', { default: problemRef }),
+        },
+        { ProblemResponse: enumOf(['old', 'new']), OpAError5Xx: enumOf(['old', 'new']) },
+        { Problem: problemEnum },
+      ),
+    );
+    const opA = operations(spec).get('opA')!;
+
+    expect(enumsOf(spec)).toEqual([
+      'OpAError5Xx [old,new]',
+      'OpAError5XxBody [x,y]',
+      'ProblemResponse [old,new]',
+      'ProblemResponse2 [wait,later]',
+    ]);
+    expect(opA.rangeResponses!.map((r) => `${r.range}: ${typeName(r.type)}`)).toEqual([
+      '4XX: ProblemResponse2',
+      '5XX: OpAError5XxBody',
+    ]);
+    expectSound(spec);
+  });
+});
+
 describe('an error body that is itself an inline enum', () => {
   const enumOf = (values: string[]): Doc => ({ type: 'string', enum: values });
 

@@ -1602,7 +1602,8 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  * The one decision every site makes of an inline `allOf` — `schemaToTypeRef`
  * when it types the schema, `mintedInlineNameEntries` when it predicts the
  * names, the field extractor and `extractInlineModelDeep` when they build
- * the models — so a model is built exactly when a reference names it:
+ * the models, `extractDirectResource` when it reads a primary response body
+ * — so a model is built exactly when a reference names it:
  *
  *   - `'merged'`: a `$ref` member beside an inline object member
  *     (`isInlineAllOfMember`), or, without a `$ref`, several members one of
@@ -1654,8 +1655,9 @@ export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject
  * Members are read in document order, the wrapper's own `properties` and
  * `required` first. A `$ref` member is resolved against `componentSchemas`
  * by its component name, as `extractAllOfModel` does, and contributes its
- * component's `properties` — those of the component's own nested `allOf`
- * chain included — tagged with that component's model name, so the merged
+ * component's `properties` — its own, written beside its `allOf`, and those
+ * of its `allOf` chain, in the order `extractAllOfModel` reads them
+ * (`componentAllOfMembers`) — tagged with that component's model name, so the merged
  * model can type them exactly as the component's own model does; a ref no
  * component answers contributes nothing and is listed in `unresolvedRefs`.
  * An inline member contributes its `properties`, those of its nested

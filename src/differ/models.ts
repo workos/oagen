@@ -56,20 +56,36 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
 /**
  * Changes to a named union's `variants` and `discriminator`. A variant is
  * matched by type equality (`typeRefsEqual`), not by position, so reordering
- * reports nothing. An added variant is additive, like a new enum value — a
- * value the API may now produce or accept; a removed variant is breaking,
- * since callers may construct or match it. Any discriminator change (the
- * property, or an entry of its mapping) is breaking: it changes how a
- * payload is dispatched to a variant, and so is a change of composition
- * keyword between two unions (`anyOf` → `oneOf` rejects values that match
- * more than one branch; the reverse loosens what callers may receive). A
- * model that gains or loses `variants` altogether reports each variant added
- * or removed, not a composition change.
+ * reports nothing. A model whose `variants` is absent while its discriminator
+ * mapping names its variants (an allOf+oneOf dispatcher) is read as a union of
+ * the mapping's targets (`dispatchedVariants`), so both forms report alike.
+ *
+ * An added variant is additive, like a new enum value, from either side of the
+ * wire: a caller may now construct it but need not, and a reader may now
+ * receive it as it may a new enum value; a required field the union model
+ * itself gains is judged by `diffFields` on its own, by direction. A removed
+ * variant is breaking, since callers may construct or match it.
+ *
+ * A mapping entry that comes with an added variant — a new key whose target is
+ * a variant the old union did not dispatch to — or goes with a removed one is
+ * part of that variant's change: it is carried as the variant entry's
+ * `details` (`mapping added for 'bird'`, `mapping removed for 'dog'`), not
+ * reported on its own, so a variant added to a discriminated union is additive
+ * whether the spec writes the `mapping` or the parser derives it
+ * (`diffMapping`). Every other discriminator change is breaking, since it
+ * changes how an existing payload is dispatched: the discriminator added,
+ * removed or moved to another property, a key retargeted, a key added for a
+ * variant the old union already had (or for no variant), or a key removed
+ * while its variant stays. So is a change of composition keyword between two
+ * unions (`anyOf` → `oneOf` rejects values that match more than one branch;
+ * the reverse loosens what callers may receive). A model that gains or loses
+ * `variants` altogether reports each variant added or removed, not a
+ * composition change.
  */
 function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
   const changes: VariantChange[] = [];
-  const oldVariants = oldModel.variants ?? [];
-  const newVariants = newModel.variants ?? [];
+  const oldVariants = dispatchedVariants(oldModel);
+  const newVariants = dispatchedVariants(newModel);
 
   if (oldModel.compositionKind && newModel.compositionKind && oldModel.compositionKind !== newModel.compositionKind) {
     changes.push({
@@ -80,19 +96,35 @@ function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
     });
   }
 
-  for (const variant of newVariants) {
-    if (!oldVariants.some((v) => typeRefsEqual(v, variant))) {
-      changes.push({ kind: 'variant-added', variant: variantLabel(variant), classification: 'additive' });
-    }
-  }
-  for (const variant of oldVariants) {
-    if (!newVariants.some((v) => typeRefsEqual(v, variant))) {
-      changes.push({ kind: 'variant-removed', variant: variantLabel(variant), classification: 'breaking' });
-    }
-  }
+  const added = newVariants.filter((variant) => !oldVariants.some((v) => typeRefsEqual(v, variant)));
+  const removed = oldVariants.filter((variant) => !newVariants.some((v) => typeRefsEqual(v, variant)));
 
   const oldDisc = oldModel.discriminator;
   const newDisc = newModel.discriminator;
+  // The mapping is compared entry by entry only while both sides dispatch on
+  // the same property; a discriminator added, removed or moved is one change.
+  const mapping =
+    oldDisc && newDisc && oldDisc.property === newDisc.property
+      ? diffMapping(oldDisc.mapping, newDisc.mapping, added, removed)
+      : { added: new Map<string, string[]>(), removed: new Map<string, string[]>(), changed: [] };
+
+  for (const variant of added) {
+    changes.push({
+      kind: 'variant-added',
+      variant: variantLabel(variant),
+      classification: 'additive',
+      ...mappingDetails('added', mapping.added, variant),
+    });
+  }
+  for (const variant of removed) {
+    changes.push({
+      kind: 'variant-removed',
+      variant: variantLabel(variant),
+      classification: 'breaking',
+      ...mappingDetails('removed', mapping.removed, variant),
+    });
+  }
+
   if (oldDisc || newDisc) {
     if (!oldDisc || !newDisc) {
       changes.push({
@@ -108,26 +140,125 @@ function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
         classification: 'breaking',
         details: `property changed from '${oldDisc.property}' to '${newDisc.property}'`,
       });
-    } else {
-      // Own keys only, so a value spelled like an inherited property
-      // (`constructor`) on one side is compared against nothing, not against
-      // `Object.prototype`'s.
-      const own = (mapping: Record<string, string>, key: string): string | undefined =>
-        Object.hasOwn(mapping, key) ? mapping[key] : undefined;
-      const keys = new Set([...Object.keys(oldDisc.mapping), ...Object.keys(newDisc.mapping)]);
-      const differing = [...keys].filter((k) => own(oldDisc.mapping, k) !== own(newDisc.mapping, k)).sort();
-      if (differing.length > 0) {
-        changes.push({
-          kind: 'discriminator-changed',
-          variant: newDisc.property,
-          classification: 'breaking',
-          details: `mapping changed for ${differing.map((k) => `'${k}'`).join(', ')}`,
-        });
-      }
+    } else if (mapping.changed.length > 0) {
+      changes.push({
+        kind: 'discriminator-changed',
+        variant: newDisc.property,
+        classification: 'breaking',
+        details: `mapping changed for ${quoteKeys(mapping.changed)}`,
+      });
     }
   }
 
   return changes;
+}
+
+/**
+ * The variants a model dispatches to: its `variants` when it has them, else —
+ * for an allOf+oneOf dispatcher, whose `variants` is absent and whose
+ * `discriminator.mapping` alone names them — one model ref per distinct
+ * mapping target, in mapping order. A model with neither has none.
+ */
+function dispatchedVariants(model: Model): TypeRef[] {
+  if (model.variants) return model.variants;
+  const names = new Set(Object.values(model.discriminator?.mapping ?? {}));
+  return [...names].map((name) => ({ kind: 'model', name }));
+}
+
+/**
+ * The model names a discriminator mapping can dispatch `ref` to: the model
+ * itself, or the models under a nullable or multi-type variant's wrapper (the
+ * parser keeps the wrapper around the model it extracts for such a variant).
+ * A primitive, enum, literal, array or map variant is never a mapping target.
+ */
+function variantModelNames(ref: TypeRef): string[] {
+  switch (ref.kind) {
+    case 'model':
+      return [ref.name];
+    case 'nullable':
+      return variantModelNames(ref.inner);
+    case 'union':
+      return ref.variants.flatMap(variantModelNames);
+    case 'primitive':
+    case 'enum':
+    case 'literal':
+    case 'array':
+    case 'map':
+      return [];
+  }
+  return assertNever(ref);
+}
+
+/** How the two mappings of one discriminator property differ, each key read once. */
+interface MappingDiff {
+  /** Keys the new mapping adds for a variant added in this diff, by that variant's model name. */
+  added: Map<string, string[]>;
+  /** Keys the old mapping had for a variant removed in this diff, by that variant's model name. */
+  removed: Map<string, string[]>;
+  /** Keys added, removed or retargeted on their own, sorted: each changes how an existing payload is dispatched. */
+  changed: string[];
+}
+
+/**
+ * Compare two mappings key by key and sort each differing key into the
+ * variant addition or removal it belongs to, or into `changed`. A key only
+ * the new mapping has belongs to an added variant when its target names one
+ * (`variantModelNames`); a key only the old mapping has belongs to a removed
+ * variant the same way; a key on both sides with different targets, or on one
+ * side for a variant the other side still dispatches to (or for none), is
+ * `changed`. Keys are visited sorted, so the lists are deterministic whatever
+ * the document order.
+ */
+function diffMapping(
+  oldMapping: Record<string, string>,
+  newMapping: Record<string, string>,
+  added: TypeRef[],
+  removed: TypeRef[],
+): MappingDiff {
+  const addedNames = new Set(added.flatMap(variantModelNames));
+  const removedNames = new Set(removed.flatMap(variantModelNames));
+  const diff: MappingDiff = { added: new Map(), removed: new Map(), changed: [] };
+  const push = (into: Map<string, string[]>, name: string, key: string): void => {
+    into.set(name, [...(into.get(name) ?? []), key]);
+  };
+  // Own keys only, so a value spelled like an inherited property
+  // (`constructor`) on one side is compared against nothing, not against
+  // `Object.prototype`'s.
+  const own = (mapping: Record<string, string>, key: string): string | undefined =>
+    Object.hasOwn(mapping, key) ? mapping[key] : undefined;
+  const keys = [...new Set([...Object.keys(oldMapping), ...Object.keys(newMapping)])].sort();
+  for (const key of keys) {
+    const oldTarget = own(oldMapping, key);
+    const newTarget = own(newMapping, key);
+    if (oldTarget === newTarget) continue;
+    if (oldTarget === undefined && newTarget !== undefined && addedNames.has(newTarget)) {
+      push(diff.added, newTarget, key);
+    } else if (newTarget === undefined && oldTarget !== undefined && removedNames.has(oldTarget)) {
+      push(diff.removed, oldTarget, key);
+    } else {
+      diff.changed.push(key);
+    }
+  }
+  return diff;
+}
+
+/**
+ * The `details` a `variant-added` / `variant-removed` entry carries when
+ * mapping keys came or went with the variant (`mapping added for 'bird'`,
+ * `mapping removed for 'dog'`); nothing when none did, so an undiscriminated
+ * union's entries carry no `details` key.
+ */
+function mappingDetails(
+  change: 'added' | 'removed',
+  keysByName: ReadonlyMap<string, string[]>,
+  variant: TypeRef,
+): { details: string } | Record<string, never> {
+  const keys = variantModelNames(variant).flatMap((name) => keysByName.get(name) ?? []);
+  return keys.length > 0 ? { details: `mapping ${change} for ${quoteKeys(keys)}` } : {};
+}
+
+function quoteKeys(keys: readonly string[]): string {
+  return keys.map((k) => `'${k}'`).join(', ');
 }
 
 /** A short, human-readable label for a union variant in a change report. */
