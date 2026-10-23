@@ -47,6 +47,7 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
+  inlineEnumSchemaName,
   isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
@@ -430,6 +431,16 @@ export interface OperationExtractionResult {
    * `resolveEnvelopeCompanionNames` settles their names once and for all.
    */
   inlineModelBundles: InlineModelBundle[];
+  /**
+   * The references a deferred site wrote by sharing a document model — a
+   * component, or an object a component's field minted — keyed by that
+   * model (`attachSharedDeferredRefs`): a header, parameter or fallback body
+   * whose shape matched it referenced it and minted nothing, so no site of
+   * the operations holds the reference. A field model's site repoints them
+   * with the field's own when a merge pass renames the model
+   * (`fieldInlineModelBundles`); a component is never renamed.
+   */
+  sharedDocumentModelRefs: Map<Model, TypeRef[]>;
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -458,7 +469,7 @@ export function extractOperations(
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [] };
+  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], sharedDocumentModelRefs: new Map() };
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // `components/pathItems` item its `$ref` leads to, with an entry that
@@ -664,6 +675,17 @@ export function extractOperations(
   for (const [op, qualifier] of qualifierOf) {
     reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
   }
+  // An enum a deferred site itself types — a body that is an inline enum, or
+  // an array of one — is named only when the site is resolved, after the
+  // models of every site before it in the document; reserved now
+  // (`deferredEnumName`), a deferred object body of the same name steps
+  // past it whichever of the two the document declares first
+  // (`GetPetError404Body`), as it steps past every other enum in play, so a
+  // model never keeps an enum's name.
+  for (const item of deferred) {
+    const enumName = deferredEnumName(item);
+    if (enumName !== undefined) reserveEnumNames(registry, [enumName], item.operationQualifier);
+  }
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // Each deferred schema is a site of its own (the references it wrote, the
@@ -673,11 +695,7 @@ export function extractOperations(
   // model (a deprecated copy named like a live one) repoints the `default`
   // response or header that shares it along with the site's own references.
   inlineModelBundles.push(...deferredTypes.bundles);
-  attachSharedDeferredRefs(
-    deferredTypes.bundles,
-    inlineModelBundles,
-    new Set(registeredModels.map((model) => model.name)),
-  );
+  const sharedDocumentModelRefs = attachSharedDeferredRefs(deferredTypes.bundles, inlineModelBundles, registeredModels);
 
   // The API root each operation's path sits under, for every step below: none
   // for a tagged operation, whose service is its tag.
@@ -710,7 +728,7 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles };
+  return { services, inlineModels, inlineModelBundles, sharedDocumentModelRefs };
 }
 
 /**
@@ -4104,12 +4122,14 @@ interface ResponseTypingContext {
  * enum, an enum nested in a model it minted) as it is resolved, so the
  * earlier site keeps the name and a later one that derives it steps (an
  * `X-Mode` header parameter object after an earlier operation's `X-Mode`
- * response-header enum is `PetsGetPetXMode`; `getPet`'s object 404 after
- * `get-pet`'s enum 404 is `GetPetError404Body`), while an enum typed after
- * a model of its name steps in the collectors instead
- * (`collectDistinctEnums`, `GetPetError404Body` when the object 404 comes
- * first). So the IR never declares a model and an enum under one name.
- * Returns the models materialized, having set each target's `type`.
+ * response-header enum is `PetsGetPetXMode`) — except that the enum a body
+ * itself is (an error, fallback or secondary body that is an inline enum,
+ * or an array of one) is reserved before any of these sites is named
+ * (`deferredEnumName`), so `getPet`'s object 404 is `GetPetError404Body`
+ * whether `get-pet`'s enum 404 comes before or after it. So the IR never
+ * declares a model and an enum under one name, and the model is always
+ * the one that steps. Returns the models materialized, having set each
+ * target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -4160,28 +4180,39 @@ function resolveDeferredInlineTypes(
  * the old name, which the live copy then takes. The first site to mint a
  * name owns it, as the registry decided; the references the deferred site's
  * roots and its own models' fields make to that name are added to the
- * owner's roots, so they are repointed with the owner's own. A component is
- * never renamed, so a reference to one is left alone.
+ * owner's roots, so they are repointed with the owner's own. A reference to
+ * a document model (`documentModels`: a component, or an object a
+ * component's field minted) has no site here; it is returned keyed by the
+ * model, so the field's site can take it (`fieldInlineModelBundles`) — a
+ * component is never renamed, so a reference to one is left alone there.
  */
 function attachSharedDeferredRefs(
   deferredBundles: readonly InlineModelBundle[],
   bundles: readonly InlineModelBundle[],
-  componentNames: ReadonlySet<string>,
-): void {
+  documentModels: readonly Model[],
+): Map<Model, TypeRef[]> {
+  const documentModelOf = new Map(documentModels.map((model) => [model.name, model]));
   const siteOf = new Map<string, InlineModelBundle>();
   for (const bundle of bundles) {
     for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
   }
+  const shared = new Map<Model, TypeRef[]>();
   for (const bundle of deferredBundles) {
     const refs = [...bundle.roots, ...bundle.models.flatMap((model) => collectModelTypeRefs(model))];
     for (const ref of refs) {
       for (const name of collectModelRefs(ref)) {
-        if (componentNames.has(name)) continue;
+        const documentModel = documentModelOf.get(name);
+        if (documentModel) {
+          const sharing = shared.get(documentModel) ?? [];
+          if (!sharing.includes(ref)) shared.set(documentModel, [...sharing, ref]);
+          continue;
+        }
         const site = siteOf.get(name);
         if (site && site !== bundle && !site.roots.includes(ref)) site.roots.push(ref);
       }
     }
   }
+  return shared;
 }
 
 /**
@@ -4292,6 +4323,18 @@ function materializeDeferredType(
 /** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
 function isSentSite(item: DeferredInlineType): boolean {
   return item.kind === 'request' || item.kind === 'param';
+}
+
+/**
+ * The enum name a deferred body typed as an inline enum — an error, fallback
+ * or secondary body whose schema is an `enum:` list, or an array of one — is
+ * lifted under when its site is resolved: its first candidate
+ * (`deferredNamingStem`) as `schemaToTypeRef` names an enum under it, the
+ * site's parent qualifying it as a header's does (`inlineEnumSchemaName`);
+ * undefined for every other shape, which mints models or nothing.
+ */
+function deferredEnumName(item: DeferredInlineType): string | undefined {
+  return inlineEnumSchemaName(item.schema, deferredNamingStem(item)(0, []), item.parentName);
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
