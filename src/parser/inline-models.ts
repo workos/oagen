@@ -339,12 +339,12 @@ function fieldShapeKey(field: Field): string {
 /**
  * A model's shape beside its fields: its limits, type parameters,
  * `deprecated`, variants (through `readShape`) and dispatch rules, the
- * mapping's targets read under `options.modelName` as the variants are.
+ * mapping's targets read under `options.readName` as the variants are.
  */
 function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
   const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
   if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
-  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.modelName);
+  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.readName);
   return stableStringify(rest);
 }
 
@@ -357,19 +357,24 @@ const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type'
  */
 export interface ShapeReadOptions {
   /**
-   * The name every model reference is read under, on both sides, before the
-   * shapes are compared — in a field's type, a union's variants and a
-   * discriminator's mapping targets alike. Absent, a reference is read under
-   * the name it carries, so a nested inline model that was renamed keeps a
-   * parent from being admitted by one whose child was not. A pass about to
-   * rename models hands the name its renaming gives each one, so two shapes
-   * compare as that renaming leaves them: the `…Json` fold
-   * (`collapseJsonSuffixModels`) reads `<Name>Json…` as `<Name>…`, so a child
-   * it will rename counts as its namesake, while a reference it will not
-   * rename is still read as it is. An enum reference is never renamed by any
-   * pass and is always read as it is.
+   * The name every model reference, and every inline enum reference, is
+   * read under on both sides before the shapes are compared — in a field's
+   * type, a union's variants and a discriminator's mapping targets alike.
+   * Absent, a reference is read under the name it carries, so a nested
+   * inline model that was renamed keeps a parent from being admitted by one
+   * whose child was not. A pass about to rename models hands the name its
+   * renaming gives each one, so two shapes compare as that renaming leaves
+   * them: the `…Json` fold (`collapseJsonSuffixModels`) reads `<Name>Json…`
+   * as `<Name>…`, so a child it will rename counts as its namesake, while a
+   * reference it will not rename is still read as it is. An inline enum
+   * reference — one carrying its `values`, named by the extractor after the
+   * model and field it sits in — is read the same way, so `PetJsonStatus`
+   * with the members of `PetStatus` counts as `PetStatus`, and with other
+   * members does not, since the members are compared with the name. A
+   * component enum reference carries no values and is never renamed by any
+   * pass, so it is always read as it is.
    */
-  readonly modelName?: (name: string) => string;
+  readonly readName?: (name: string) => string;
 }
 
 /**
@@ -385,7 +390,7 @@ export interface ShapeReadOptions {
  * read that way; a wrapper deeper down (an array's items) must agree. The
  * models' own limits, type parameters, variants, dispatch rules and
  * `deprecated` must agree, and a model reference is compared by name — the
- * name it carries, or the one `options.modelName` reads it under: a nested
+ * name it carries, or the one `options.readName` reads it under: a nested
  * inline model keeps its name, so a parent whose child was renamed is not
  * admitted by one whose child was not. An identical shape is admitted.
  *
@@ -417,7 +422,7 @@ export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOp
  * Whether `owner` admits `candidate` as the field of its name: the rule
  * `modelAdmits` applies to each field, on its own. The two agree in
  * everything but their documentation — type (through `fieldTypeAdmits`,
- * model references read under `options.modelName`), limits, default, access
+ * model and inline enum references read under `options.readName`), limits, default, access
  * flags, their own `deprecated` — except that `owner` may be optional where
  * `candidate` is required, and `nullable<…>` where `candidate` is not. The
  * `…Json` fold asks this of every field the base and the `…Json` model both
@@ -439,23 +444,32 @@ function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef, options: ShapeReadO
 /**
  * A type's shape as the admit predicates read it — every inline enum with
  * its per-value deprecation (`shapeWithEnumFlags`), every model reference
- * under `options.modelName` — stable-stringified, so two types compare by
- * string equality. The `…Json` fold compares a base union's variants with
- * the `…Json` model's through this, both read under the fold.
+ * and inline enum reference under `options.readName` — stable-stringified,
+ * so two types compare by string equality. The `…Json` fold compares a
+ * base union's variants with the `…Json` model's through this, both read
+ * under the fold.
  */
 export function typeShapeKey(ref: TypeRef, options: ShapeReadOptions = {}): string {
   return stableStringify(readShape(ref, options));
 }
 
-/** `shapeWithEnumFlags(ref)`, with every model reference renamed by `options.modelName` on a copy — the flags are read first, since the copy has no identity in the enum side table. */
+/**
+ * `shapeWithEnumFlags(ref)`, with every model reference and every inline
+ * enum reference (one carrying its `values`) renamed by `options.readName`
+ * on a copy — the flags are read first, since the copy has no identity in
+ * the enum side table.
+ */
 function readShape(ref: TypeRef, options: ShapeReadOptions): unknown {
   const shape = shapeWithEnumFlags(ref);
-  const { modelName } = options;
-  if (!modelName) return shape;
+  const { readName } = options;
+  if (!readName) return shape;
   const read = structuredClone(shape) as TypeRef;
   walkTypeRef(read, {
     model: (r) => {
-      (r as { name: string }).name = modelName(r.name);
+      (r as { name: string }).name = readName(r.name);
+    },
+    enum: (r) => {
+      if (r.values) r.name = readName(r.name);
     },
   });
   return read;
