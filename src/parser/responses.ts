@@ -230,10 +230,10 @@ export function classifyAndExtractResponse(
  * walk uses — so a `$ref` body, a nullable wrapper around the body or
  * around any member, and a `$ref` chain to one all reach the same object
  * the path walked), and `detectEndOfIteration` reads them as it reads an
- * unwrapped envelope's, with the full path excluded, not its root, so the
- * array the path names is never a stop field while a stop field beside a
- * nested array (`pagination.has_more` next to `pagination.items`) stays
- * visible. `undefined` when nothing recognizable is declared, or the body
+ * unwrapped envelope's: the fields beside the array the path names first,
+ * under a parent of any name (`result.total_pages` next to `result.items`),
+ * then the top level, then the metadata companions, and never the array
+ * itself. `undefined` when nothing recognizable is declared, or the body
  * resolves to no object at all.
  */
 function bodyEndOfIteration(
@@ -901,13 +901,16 @@ function extractDirectResource(
   // allOf — read the one way every site reads an inline `allOf`
   // (`readInlineAllOf`), when the `allOf` is what types the body
   // (`classifyInlineSchema`; an `allOf` of bare limits leaves the body to
-  // its own keywords below). `$ref` members with nothing inline beside them
-  // are a reference to the first component, and nothing is minted — as a
-  // field of the same schema is typed (workos/oagen#307: the body was a
-  // copy of the component under its own name); a ref no component answers
-  // is that reference too. A lone member is the body itself, carrying the
-  // wrapper's limits, flag and link (`unwrappedAllOfMember`), read by the
-  // branches of this function as if written in its place. Every other
+  // its own keywords below). A single `$ref` member with nothing beside it
+  // that adds to the component is that component, and nothing is minted —
+  // as a field of the same schema is typed (workos/oagen#307: the body was
+  // a copy of the component under its own name); a ref no component answers
+  // is that reference too. A second `$ref`, or a `required` beside the
+  // `$ref`, makes the body the merge below, as it makes a field (every
+  // component's properties and every `required` kept). A lone member is
+  // the body itself, carrying the wrapper's limits, flag and link
+  // (`unwrappedAllOfMember`), read by the branches of this function as if
+  // written in its place. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
@@ -918,7 +921,7 @@ function extractDirectResource(
   // member's plain `kind` stays the enum here as it does in a field or an
   // array's items.
   if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
-    const reading = readInlineAllOf(schema.allOf);
+    const reading = readInlineAllOf(schema.allOf, schema);
     if (reading === 'reference') {
       return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
     }

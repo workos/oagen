@@ -240,16 +240,24 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * an obvious one. `properties` are the envelope's merged properties and
  * `dataPath` names the data array among them.
  *
- * Top-level fields are considered first, then the fields one level down
- * inside each object companion whose name says it is pagination metadata
+ * The fields beside the array are considered first: when the path is
+ * nested, the other properties of the object the array sits in, under
+ * whatever name that object has (`result.total_pages` beside
+ * `result.items`, `data.page.has_more` beside `data.page.items`), the
+ * parent reached exactly as the path itself is resolved
+ * (`resolveSchemaPath` from the merged properties), so one behind a `$ref`,
+ * an `allOf` or a nullable wrapper is read as the walk reads it. Then the
+ * top-level fields, then the fields one level down inside each top-level
+ * object companion whose name says it is pagination metadata
  * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ...; an
  * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
  * wrapper around one), so a `stats.total` beside `pagination.page` is not
- * taken for the list's size. The path follows the `dataPath` convention: `has_more` or
- * `pagination.totalPages`. When
- * several candidates exist, a `hasMore` boolean wins over a `totalPages`
- * integer, which wins over a `totalCount` integer; within one kind the first
- * in scan order wins. A candidate whose type does not fit its kind (a string
+ * taken for the list's size. The array itself is never a stop field,
+ * whatever it is called. The path follows the `dataPath` convention:
+ * `has_more`, `result.total_pages` or `pagination.totalPages`. When several
+ * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
+ * which wins over a `totalCount` integer; within one kind the first in scan
+ * order wins. A candidate whose type does not fit its kind (a string
  * `total`) is ignored.
  */
 export function detectEndOfIteration(
@@ -262,6 +270,16 @@ export function detectEndOfIteration(
     const kind = classifyEndField(name, schema, componentSchemas);
     if (kind && !found.has(kind)) found.set(kind, path);
   };
+
+  const segments = dataPath.split('.');
+  const arrayName = segments[segments.length - 1];
+  if (segments.length > 1) {
+    const parentPath = segments.slice(0, -1).join('.');
+    const parent = resolveSchemaPath({ properties }, parentPath, componentSchemas);
+    for (const [inner, innerSchema] of Object.entries(parent ? objectProperties(parent, componentSchemas) : {})) {
+      if (innerSchema && inner !== arrayName) record(inner, `${parentPath}.${inner}`, innerSchema);
+    }
+  }
 
   const companions = Object.entries(properties).filter(
     (entry): entry is [string, SchemaObject] => entry[0] !== dataPath && entry[1] !== undefined,
