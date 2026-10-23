@@ -1,10 +1,21 @@
 import { createHash } from 'node:crypto';
-import type { Enum, HttpMethod, Model, Parameter, Service, TypeRef, Webhook, WebhookResponse } from '../ir/types.js';
-import { collectResponseHeaders, walkTypeRef } from '../ir/types.js';
+import type {
+  Enum,
+  HttpMethod,
+  Model,
+  Parameter,
+  RequestBodyContent,
+  Service,
+  TypeRef,
+  Webhook,
+  WebhookResponse,
+} from '../ir/types.js';
+import { collectModelTypeRefs, collectResponseHeaders, walkTypeRef } from '../ir/types.js';
 import { toPascalCase } from '../utils/naming.js';
+import { mediaTypeNameFragment } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
-import { schemaToTypeRef } from './schemas.js';
-import { extractInlineModelsFromProperties } from './inline-models.js';
+import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
+import { extractInlineModelsFromProperties, modelFingerprint, qualifyInlineModelName } from './inline-models.js';
 import {
   HTTP_METHODS,
   extractParams,
@@ -14,7 +25,10 @@ import {
   resolveOperationDocs,
   resolveParameterRef,
   resolveRequestBodyRef,
+  schemalessRequestBodyType,
+  schemalessRequestContentType,
   selectRequestBodyContent,
+  warnUnreadRequestBody,
   type OperationObject,
   type ParameterObject,
   type PathItem,
@@ -76,6 +90,9 @@ interface MintedWebhook {
   cookieParams: Parameter[];
   requestBody?: TypeRef;
   requestBodyEncoding?: Webhook['requestBodyEncoding'];
+  requestBodyContentType?: string;
+  requestBodyContentTypes?: string[];
+  requestBodyContents?: RequestBodyContent[];
   inlineModels: Model[];
   /** Every model and inline-enum name the webhook minted (see `mintSchema`). */
   names: Set<string>;
@@ -84,7 +101,14 @@ interface MintedWebhook {
 /** The part of a minting a `Webhook` carries: its typed parameters and payload. */
 type MintedShape = Pick<
   MintedWebhook,
-  'headerParams' | 'queryParams' | 'cookieParams' | 'requestBody' | 'requestBodyEncoding'
+  | 'headerParams'
+  | 'queryParams'
+  | 'cookieParams'
+  | 'requestBody'
+  | 'requestBodyEncoding'
+  | 'requestBodyContentType'
+  | 'requestBodyContentTypes'
+  | 'requestBodyContents'
 >;
 
 /**
@@ -121,12 +145,15 @@ type MintedShape = Pick<
  * `extractParams` references it by (`<Stem>XMeta`).
  *
  * `reservedNames` is every model and enum name already decided — see
- * `collectExistingNames` — so a webhook never mints a name one of them owns.
+ * `collectExistingNames` — so a webhook never mints a name one of them owns,
+ * and `reservedEnumNames` the enums among them (`collectExistingEnumNames`),
+ * which no webhook model may take even where the stem cannot move it.
  */
 export function extractWebhooks(
   webhooks: unknown,
   components: WebhookComponents = {},
   reservedNames: Iterable<string> = [],
+  reservedEnumNames: Iterable<string> = [],
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [] };
   if (!isRecord(webhooks)) {
@@ -136,11 +163,12 @@ export function extractWebhooks(
 
   const entries = collectWebhookEntries(webhooks, components);
   const { groups, groupOf } = groupEntries(entries);
-  const stems = resolveWebhookModelStems(groups, new Set(reservedNames), components);
+  const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
+  const stems = resolveWebhookModelStems(groups, reserved, components);
   const inlineModels: Model[] = [];
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
   for (const group of groups) {
-    const minted = mintWebhook(group.owner, stems.get(group)!, components);
+    const minted = mintWebhook(group.owner, stems.get(group)!, components, reserved);
     inlineModels.push(...minted.inlineModels);
     mintedByGroup.set(group, minted);
   }
@@ -159,6 +187,9 @@ export function extractWebhooks(
       cookieParams: minted.cookieParams,
       requestBody: minted.requestBody,
       requestBodyEncoding: minted.requestBodyEncoding,
+      requestBodyContentType: minted.requestBodyContentType,
+      requestBodyContentTypes: minted.requestBodyContentTypes,
+      requestBodyContents: minted.requestBodyContents,
     };
     result.push(buildWebhook(entry, entry === group.owner ? shape : structuredClone(shape), components));
   }
@@ -177,15 +208,49 @@ export function extractWebhooks(
  * what.
  */
 export function collectExistingNames(models: Model[], services: Service[], enums: Enum[]): Set<string> {
+  return collectExistingNamesByKind(models, services, enums).all;
+}
+
+/**
+ * The enum names among `collectExistingNames`: each enum's name, and every
+ * enum a model field or an operation refers to, inline enums included. A
+ * webhook model may never take one of these (`mintSchema`): a model and an
+ * enum under one name would reach an emitter as one public symbol.
+ */
+export function collectExistingEnumNames(models: Model[], services: Service[], enums: Enum[]): Set<string> {
+  return collectExistingNamesByKind(models, services, enums).enums;
+}
+
+/** The names a webhook's minting must step around: every decided name, and among them the enums'. */
+interface ReservedNames {
+  all: ReadonlySet<string>;
+  enums: ReadonlySet<string>;
+}
+
+function collectExistingNamesByKind(
+  models: Model[],
+  services: Service[],
+  enums: Enum[],
+): { all: Set<string>; enums: Set<string> } {
   const names = new Set<string>();
+  const enumNames = new Set<string>();
   const collect = (ref: TypeRef): void => {
-    walkTypeRef(ref, { model: (r) => names.add(r.name), enum: (r) => names.add(r.name) });
+    walkTypeRef(ref, {
+      model: (r) => names.add(r.name),
+      enum: (r) => {
+        names.add(r.name);
+        enumNames.add(r.name);
+      },
+    });
   };
   for (const model of models) {
     names.add(model.name);
     for (const field of model.fields) collect(field.type);
   }
-  for (const e of enums) names.add(e.name);
+  for (const e of enums) {
+    names.add(e.name);
+    enumNames.add(e.name);
+  }
   for (const service of services) {
     for (const op of service.operations) {
       for (const param of [
@@ -208,7 +273,7 @@ export function collectExistingNames(models: Model[], services: Service[], enums
       for (const header of collectResponseHeaders(op)) collect(header.type);
     }
   }
-  return names;
+  return { all: names, enums: enumNames };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -254,6 +319,9 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
         params.push(param);
       }
       const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label);
+      // Reported here, once per webhook: the mint below runs twice for each
+      // (`resolveWebhookModelStems`, then the build), so it must not report.
+      warnUnreadRequestBody(body, label);
       entries.push({ name, method, op, pathItem, params, body, label, methodCount: methods.length });
     }
   }
@@ -396,25 +464,29 @@ function resolveComponentRef(
  * order, and a key that stops colliding returns to its plain stem.
  *
  * A name that does not embed the stem — a title-mapped union variant, which
- * is context-free by design — cannot be moved by the hash; such a clash is
- * left to the model merge, which shares an identical shape and warns about
- * a different one, as it does for operations.
+ * is context-free by design — cannot be moved by the hash. One named like a
+ * decided enum is renamed under the payload's root instead
+ * (`PetAdoptedPayloadCircle`, see `mintSchema`), since a model and an enum
+ * under one name would reach an emitter as one symbol; one named like a
+ * decided model, or like another webhook's variant, is left to the model
+ * merge, which shares an identical shape and warns about a different one, as
+ * it does for operations.
  */
 function resolveWebhookModelStems(
   groups: WebhookGroup[],
-  reserved: ReadonlySet<string>,
+  reserved: ReservedNames,
   components: WebhookComponents,
 ): Map<WebhookGroup, string> {
   const minted = new Map<WebhookGroup, Set<string>>();
   for (const group of groups) {
-    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components).names);
+    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components, reserved).names);
   }
 
   const stems = new Map<WebhookGroup, string>();
   for (const group of groups) {
     const names = minted.get(group)!;
     const taken = [...names].some(
-      (name) => reserved.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name)),
+      (name) => reserved.all.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name)),
     );
     const { owner } = group;
     const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? owner.name) : '';
@@ -503,7 +575,12 @@ function webhookDisambiguator(name: string): string {
  * the document. `names` carries everything the webhook minted, for the stem
  * decision in `resolveWebhookModelStems`.
  */
-function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookComponents): MintedWebhook {
+function mintWebhook(
+  entry: WebhookEntry,
+  stem: string,
+  components: WebhookComponents,
+  reserved: ReservedNames,
+): MintedWebhook {
   const { params, body, label } = entry;
   const parent = toPascalCase(stem);
   const inlineModels: Model[] = [];
@@ -518,10 +595,13 @@ function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookCompo
     names,
   };
 
-  const payload = mintPayload(body, stem, components.schemas);
+  const payload = mintPayload(body, stem, components.schemas, reserved);
   if (payload) {
     minted.requestBody = payload.ref;
     minted.requestBodyEncoding = payload.encoding;
+    minted.requestBodyContentType = payload.contentType;
+    minted.requestBodyContentTypes = payload.contentTypes;
+    minted.requestBodyContents = payload.contents;
     inlineModels.push(...payload.models);
     for (const name of payload.names) names.add(name);
   }
@@ -537,10 +617,14 @@ function mintWebhook(entry: WebhookEntry, stem: string, components: WebhookCompo
   for (const param of params) {
     const ir = typed.get(`${param.in}:${param.name}`);
     if (!ir || !param.schema) continue;
-    const { property, ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas);
-    // `extractParams` typed the parameter under its own name; a parameter
-    // moved to a qualified property is re-typed so the reference matches.
-    if (property !== param.name) ir.type = ref;
+    const { ref, models, names: own } = mintParameter(param, param.schema, parent, names, components.schemas, reserved);
+    // `extractParams` typed the parameter from its schema alone; the minted
+    // reference is the one whose models exist — it differs when the parameter
+    // moved to a qualified property, and when a variant was renamed past a
+    // decided enum (`mintSchema`) under the parameter's own name — so it
+    // always replaces the extracted type, variants and discriminator mapping
+    // included, whether or not the property name changed.
+    ir.type = ref;
     inlineModels.push(...models);
     for (const name of own) names.add(name);
   }
@@ -554,24 +638,123 @@ interface MintedSchema {
   names: Set<string>;
 }
 
-/** The payload typed and materialized as the `payload` property of `stem`; `undefined` when there is no usable body. */
+/** What a webhook's body mints: the picked payload's reference and encoding, every media type with its type, and the models behind them. */
+interface MintedPayload {
+  /** The picked entry's type (`Webhook.requestBody`); absent when no media type is read. */
+  ref?: TypeRef;
+  encoding?: Webhook['requestBodyEncoding'];
+  /** The picked entry's essence (`Webhook.requestBodyContentType`); set exactly when `ref` is. */
+  contentType?: string;
+  contentTypes: string[];
+  contents: RequestBodyContent[];
+  models: Model[];
+  names: Set<string>;
+}
+
+/**
+ * The payload typed and materialized as the `payload` property of `stem`,
+ * read from the content entry the operation body pick chooses
+ * (`selectRequestBodyContent`, by media type essence), plus one entry per
+ * media type the body declares, as `Operation.requestBodyContents` carries
+ * them: the picked entry shares `ref`; every other entry with a schema is
+ * typed and materialized as the `<MediaType>Payload` property of the stem
+ * (`PetAdoptedTextCsvPayload`, named the way the body's own
+ * `<Stem>Payload` is), and one without is typed as
+ * `schemalessRequestContentType` types it. `undefined` when the body
+ * declares no media type at all. A body none of whose media types is read
+ * as `ref` is reported where the webhook's entry is built
+ * (`warnUnreadRequestBody`), not here: the mint runs twice per webhook and
+ * the warning fires once.
+ */
 function mintPayload(
   body: RequestBodyObject | undefined,
   stem: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
-): (MintedSchema & { encoding: Webhook['requestBodyEncoding'] }) | undefined {
-  if (!body?.content) return undefined;
-  const { encoding, schema } = selectRequestBodyContent(body);
-  if (!schema) {
-    if (encoding === 'binary') {
-      return { ref: { kind: 'primitive', type: 'string', format: 'binary' }, encoding, models: [], names: new Set() };
-    }
-    if (encoding === 'text') {
-      return { ref: { kind: 'primitive', type: 'string' }, encoding, models: [], names: new Set() };
-    }
-    return undefined;
+  reserved: ReservedNames,
+): MintedPayload | undefined {
+  const content = body?.content;
+  if (!content) return undefined;
+  const contentTypes = Object.keys(content);
+  if (contentTypes.length === 0) return undefined;
+  const minted: MintedPayload = { contentTypes, contents: [], models: [], names: new Set() };
+  const absorb = ({ ref, models, names }: MintedSchema): TypeRef => {
+    minted.models.push(...models);
+    for (const name of names) minted.names.add(name);
+    return ref;
+  };
+
+  const selected = selectRequestBodyContent(body);
+  if (selected) {
+    minted.encoding = selected.encoding;
+    minted.contentType = selected.essence;
+    // Only a binary or text pick comes without a schema; it is a primitive.
+    minted.ref = selected.schema
+      ? absorb(mintSchema(selected.schema, 'payload', stem, componentSchemas, reserved))
+      : schemalessRequestBodyType(selected.encoding);
   }
-  return { ...mintSchema(schema, 'payload', stem, componentSchemas), encoding };
+  for (const contentType of contentTypes) {
+    const schema = content[contentType]?.schema;
+    const type =
+      selected && contentType === selected.contentType && minted.ref
+        ? minted.ref
+        : schema
+          ? absorb(mintSecondaryPayload(schema, contentType, contentTypes, stem, minted, componentSchemas, reserved))
+          : schemalessRequestContentType(contentType);
+    minted.contents.push({ contentType, type });
+  }
+  return minted;
+}
+
+/**
+ * A secondary payload entry typed and materialized under the first
+ * `<Fragment>Payload` property whose minted names are free of everything the
+ * payload has minted so far — `<Fragment>Payload`, then `<Fragment>Payload2`,
+ * `…Payload3`, … — the fragment coming from the media type's essence and,
+ * when another key of the same essence sits beside it, its parameters
+ * (`mediaTypeNameFragment`), so `application/xml` and `APPLICATION/XML;
+ * charset=utf-8` take `…ApplicationXmlPayload` and
+ * `…ApplicationXmlCharsetUtf8Payload` before any candidate is tried. A
+ * candidate whose names are all taken by models of the very shape this entry
+ * mints shares them and mints nothing, as the operation registry shares an
+ * identical shape; a name taken by a different shape (`application/xml` and
+ * `APPLICATION/XML` with other fields) steps on, so no two entries of one
+ * payload ever point at a model with the other's fields. When a candidate
+ * changes none of the clashing names (a title-mapped variant, which embeds
+ * no property), no candidate can clear them: the earliest trial is kept,
+ * under `<Fragment>Payload`, and the clash left to the model merge, as
+ * `mintParameter` does.
+ */
+function mintSecondaryPayload(
+  schema: SchemaObject,
+  contentType: string,
+  siblings: readonly string[],
+  stem: string,
+  minted: MintedPayload,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  reserved: ReservedNames,
+): MintedSchema {
+  const fragment = mediaTypeNameFragment(contentType, siblings);
+  const own = new Map(minted.models.map((model) => [model.name, model]));
+  let previous: { trial: MintedSchema; clashing: string } | undefined;
+  for (let attempt = 0; ; attempt++) {
+    const property = attempt === 0 ? `${fragment}Payload` : `${fragment}Payload${attempt + 1}`;
+    const trial = mintSchema(schema, property, stem, componentSchemas, reserved);
+    const taken = [...trial.names].filter((name) => minted.names.has(name));
+    if (taken.length === 0) return trial;
+    const sharesShape =
+      taken.length === trial.names.size &&
+      trial.models.every((model) => {
+        const owner = own.get(model.name);
+        return owner !== undefined && modelFingerprint(owner) === modelFingerprint(model);
+      });
+    if (sharesShape) return { ref: trial.ref, models: [], names: new Set() };
+    // Judged on the clashing names alone: a name that embeds the property (a
+    // variant renamed past a decided enum) changes with every candidate.
+    const clashing = taken.sort().join('\n');
+    if (previous !== undefined && previous.clashing === clashing) return previous.trial;
+    if (attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return trial;
+    previous = { trial, clashing };
+  }
 }
 
 /**
@@ -579,11 +762,14 @@ function mintPayload(
  * property whose minted names are all free: the parameter's own name, then
  * `<in>_<name>`, then `<in>_<name>_2`, `<in>_<name>_3`, …. A schema that
  * mints nothing (a primitive, a `$ref`) keeps the parameter's name at once.
- * When a candidate changes none of the minted names — they do not embed the
- * property, as a title-mapped union variant does not — no candidate can
- * avoid the clash, so the last one is kept and the clash is left to the
- * model merge, as for operations; `MAX_PARAMETER_PROPERTY_ATTEMPTS` is a
- * backstop behind that rule.
+ * When a candidate changes none of the clashing names — they do not embed
+ * the property, as a title-mapped union variant does not — no candidate can
+ * avoid the clash, so the earliest trial is kept, under the parameter's own
+ * name, and the clash is left to the model merge, as for operations;
+ * `MAX_PARAMETER_PROPERTY_ATTEMPTS` is a backstop behind that rule. The
+ * caller always takes the returned reference, whether or not the property
+ * moved: a variant renamed past a decided enum (`PetAdoptedFilterCircle`,
+ * see `mintSchema`) is referenced only by the minted type.
  */
 function mintParameter(
   param: ParameterObject,
@@ -591,25 +777,31 @@ function mintParameter(
   parent: string,
   taken: ReadonlySet<string>,
   componentSchemas: Record<string, SchemaObject> | undefined,
-): MintedSchema & { property: string } {
-  let previous: MintedSchema | undefined;
+  reserved: ReservedNames,
+): MintedSchema {
+  let previous: { minted: MintedSchema; clashing: string } | undefined;
   for (let attempt = 0; ; attempt++) {
     const property =
       attempt === 0 ? param.name : attempt === 1 ? `${param.in}_${param.name}` : `${param.in}_${param.name}_${attempt}`;
-    const minted = mintSchema(schema, property, parent, componentSchemas);
-    const free = [...minted.names].every((name) => !taken.has(name));
-    const stuck = previous !== undefined && sameNames(previous.names, minted.names);
-    if (free || stuck || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return { ...minted, property };
-    previous = minted;
+    const minted = mintSchema(schema, property, parent, componentSchemas, reserved);
+    const clashing = [...minted.names]
+      .filter((name) => taken.has(name))
+      .sort()
+      .join('\n');
+    if (clashing === '' || attempt >= MAX_PARAMETER_PROPERTY_ATTEMPTS) return minted;
+    // The clash did not move with the property: what clashes are names that
+    // do not embed it (a title-mapped variant), which no candidate can clear
+    // — keep the earliest trial, under the parameter's own name, and leave
+    // the clash to the model merge. Judged on the clashing names alone, since
+    // a name that does embed the property (a variant renamed past a decided
+    // enum, `PetAdoptedXShapeCircle`) changes with every candidate.
+    if (previous !== undefined && previous.clashing === clashing) return previous.minted;
+    previous = { minted, clashing };
   }
 }
 
 /** Hard cap on the properties `mintParameter` tries; the no-progress rule stops it long before in practice. */
 const MAX_PARAMETER_PROPERTY_ATTEMPTS = 64;
-
-function sameNames(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
-  return a.size === b.size && [...a].every((name) => b.has(name));
-}
 
 /**
  * Type `schema` as the synthetic property `property` of `parent` and
@@ -618,16 +810,44 @@ function sameNames(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * to a component enum carries none and is a reference, not a minting) in the
  * reference and in the models' fields. Component references are deliberately
  * not names: a payload that refers to `AdoptionEvent` names nothing new.
+ * A model minted under a name among `reserved.enums` — a title-mapped union
+ * variant `Circle` beside a component enum `Circle`, which a property of the
+ * same payload may reference — is renamed under the minted root
+ * (`PetAdoptedPayloadCircle`; numbered when that is taken too, by anything
+ * in `reserved.all` or minted here) with every reference among the models
+ * and in the returned type rewritten, as `materializeInlineSchema` renames
+ * one under a response body's root; an explicit `$ref` to a component model
+ * of the name is never touched, and the enum reference is an `EnumRef`,
+ * which no rename reaches. A model and an enum under one name would reach an
+ * emitter as one public symbol. A variant named like a decided MODEL is left
+ * to the stem hash and the model merge, as before: the names minted here are
+ * not reserved from the extractor, so a stem-embedded clash still hashes the
+ * stem and a context-free one still reaches the merge.
  */
 function mintSchema(
   schema: SchemaObject,
   property: string,
   parent: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  reserved: ReservedNames,
 ): MintedSchema {
   const models: Model[] = [];
   extractInlineModelsFromProperties({ properties: { [property]: schema } }, models, parent, componentSchemas);
   const ref = schemaToTypeRef(schema, property, parent);
+  const root = qualifyInlineModelName(toPascalCase(property), parent);
+  const taken = new Set([...reserved.all, ...models.map((model) => model.name)]);
+  for (const model of models) {
+    if (!reserved.enums.has(model.name)) continue;
+    const from = model.name;
+    let to = `${root}${from}`;
+    for (let n = 2; taken.has(to); n++) to = `${root}${from}${n}`;
+    taken.add(to);
+    model.name = to;
+    for (const other of models) {
+      for (const typeRef of collectModelTypeRefs(other)) repointMintedRefs(typeRef, from, to);
+    }
+    repointMintedRefs(ref, from, to);
+  }
   const names = new Set<string>();
   const collectEnums = (typeRef: TypeRef): void => {
     walkTypeRef(typeRef, {
@@ -644,9 +864,49 @@ function mintSchema(
   return { ref, models, names };
 }
 
+/**
+ * Repoint every reference to the minted model `from` within `ref` to `to`,
+ * an explicit `$ref` to a component of that name excepted
+ * (`isComponentModelRef`); a discriminator mapping naming the model follows.
+ */
+function repointMintedRefs(ref: TypeRef, from: string, to: string): void {
+  switch (ref.kind) {
+    case 'model':
+      if (ref.name === from && !isComponentModelRef(ref)) (ref as { name: string }).name = to;
+      return;
+    case 'array':
+      repointMintedRefs(ref.items, from, to);
+      return;
+    case 'nullable':
+      repointMintedRefs(ref.inner, from, to);
+      return;
+    case 'map':
+      repointMintedRefs(ref.valueType, from, to);
+      if (ref.keyType) repointMintedRefs(ref.keyType, from, to);
+      return;
+    case 'union':
+      for (const variant of ref.variants) repointMintedRefs(variant, from, to);
+      for (const [value, target] of Object.entries(ref.discriminator?.mapping ?? {})) {
+        if (target === from) ref.discriminator!.mapping[value] = to;
+      }
+      return;
+    default:
+      return;
+  }
+}
+
 function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: WebhookComponents): Webhook {
   const { name, method, op, pathItem, body, label } = entry;
-  const { headerParams, queryParams, cookieParams, requestBody, requestBodyEncoding } = minted;
+  const {
+    headerParams,
+    queryParams,
+    cookieParams,
+    requestBody,
+    requestBodyEncoding,
+    requestBodyContentType,
+    requestBodyContentTypes,
+    requestBodyContents,
+  } = minted;
   // Read as an operation's are: the operation's own `summary` and
   // `description`, or the path item's for each it declares none for.
   const { summary, description } = resolveOperationDocs(op, pathItem);
@@ -670,7 +930,10 @@ function buildWebhook(entry: WebhookEntry, minted: MintedShape, components: Webh
     ...(cookieParams.length > 0 ? { cookieParams } : {}),
     ...(requestBody ? { requestBody } : {}),
     ...(requestBodyEncoding ? { requestBodyEncoding } : {}),
+    ...(requestBodyContentType ? { requestBodyContentType } : {}),
     ...(body?.required === true ? { requestBodyRequired: true } : {}),
+    // Every media type the body declares, present only when there is one, as on an operation.
+    ...(requestBodyContentTypes ? { requestBodyContentTypes, requestBodyContents } : {}),
     responses: extractWebhookResponses(op.responses, components.responses, label),
     ...(security !== undefined ? { security } : {}),
   };

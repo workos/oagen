@@ -13,6 +13,8 @@ export type {
   ResponseHeader,
   ResponseContent,
   ResponseBodyType,
+  RequestBodyContent,
+  RequestBodyType,
   DefaultResponse,
   RangeResponse,
   StatusRange,
@@ -57,6 +59,8 @@ export {
   collectRequestBodyModels,
   collectResponseHeaders,
   collectResponseBodyTypes,
+  collectAlternateRequestBodyContents,
+  collectRequestBodyTypes,
   collectFallbackResponseTypes,
   collectWebhookTypeRefs,
 } from './ir/types.js';

@@ -2,6 +2,7 @@ import type { Enum, EnumValue, Model, Operation, ResponseHeader, Service, TypeRe
 import {
   walkTypeRef,
   collectModelTypeRefs,
+  collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectModelRefs,
   collectWebhookTypeRefs,
@@ -129,6 +130,13 @@ export function collectInlineEnumsFromOperations(
       for (const { type } of collectResponseBodyTypes(op)) {
         collectThroughModels(type, undefined);
       }
+      // A request body declared only for a secondary media type (`text/csv`
+      // next to `application/json`) is typed like one, with its name already
+      // operation-qualified (`ReplaceWidgetTextCsvRequest`), so its inline
+      // enums are promoted the same way.
+      for (const { type } of collectRequestBodyTypes(op)) {
+        collectThroughModels(type, undefined);
+      }
     }
   }
 }
@@ -200,11 +208,16 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
  * named like the header, or a webhook parameter named like a component enum,
  * collides the same way. When the name is already taken by a different
  * member set — other values, or the same values with a different one
- * deprecated (`sameEnumShape`) — the ref is renamed to a distinct name
- * before it is promoted. A taken name with the same members is shared, as
- * before; the first lifted copy's value descriptions and link are the
- * enum's. `modelNames` are the names the distinct name must also step
- * around.
+ * deprecated (`sameEnumShape`) — or by a model, the ref is renamed to a
+ * distinct name before it is promoted: an enum and a model under one name
+ * reach an emitter as one public symbol, so the name is checked against the
+ * union of every model name (`modelNames`, every model of the document) and
+ * every enum name (`enums`) before any minted enum keeps it, on every path
+ * that promotes one — a field, a parameter, a response header, an error or
+ * secondary body, a webhook parameter or payload. A taken name with the same
+ * members is shared, as before; the first lifted copy's value descriptions
+ * and link are the enum's. A component enum declared under a component
+ * model's name is the document's own clash and is left as declared.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -218,7 +231,9 @@ function collectDistinctEnums(
       if (!ref.values) return;
       const values = enumValuesOf(ref);
       const existing = enums.find((e) => e.name === ref.name);
-      if (existing && !sameEnumShape(existing.values, values)) {
+      const ownedByOtherMembers = existing !== undefined && !sameEnumShape(existing.values, values);
+      const ownedByModel = existing === undefined && modelNames.has(ref.name);
+      if (ownedByOtherMembers || ownedByModel) {
         ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
