@@ -44,6 +44,7 @@ import {
   type RequestBodyObject,
 } from './operations.js';
 import { externalDocsEntry } from './external-docs.js';
+import { resolveComponentRef, resolvePathItemRef } from './path-item-refs.js';
 import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
@@ -135,10 +136,14 @@ type MintedShape = Pick<
  * Each key names a path item, and each HTTP method on it is one `Webhook`,
  * in document order. The key is kept verbatim as `Webhook.name`. An entry
  * that is a `$ref` into `components/pathItems` is resolved (chains included,
- * with a cycle guard); one that points anywhere else, or that cannot be
+ * with a cycle guard) by `resolvePathItemRef`, the resolver a `paths` entry
+ * goes through too; one that points anywhere else, or that cannot be
  * resolved, is warned about and skipped rather than failing the parse, as is
- * an entry that is not an object. A `webhooks` value that is not an object
- * at all is warned about and ignored. Nothing is read from `x-webhooks`, the
+ * an entry that is not an object. A key starting with `x-` is a
+ * specification extension, not a webhook, and is stepped over without a
+ * warning whatever its value, as `extractOperations` steps over one under
+ * `paths`. A `webhooks` value that is not an object at all is warned about
+ * and ignored. Nothing is read from `x-webhooks`, the
  * pre-3.1 convention: the parser reads the standard key only.
  *
  * Parameters and request bodies go through the same resolvers and extractors
@@ -306,7 +311,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function collectWebhookEntries(webhooks: Record<string, unknown>, components: WebhookComponents): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
   for (const [name, raw] of Object.entries(webhooks)) {
-    const pathItem = resolveWebhookPathItem(name, raw, components.pathItems);
+    // A specification extension, never a webhook: stepped over whatever its
+    // value, as `resolvePathItems` steps over one under `paths`.
+    if (name.startsWith('x-')) continue;
+    // The same resolver `extractOperations` reads a `paths` entry through, so
+    // a `$ref` into `components/pathItems` is followed the same way here.
+    const pathItem = resolvePathItemRef(raw, components.pathItems, { kind: 'webhook', key: name }) as
+      | PathItem
+      | undefined;
     if (!pathItem) continue;
     // The path item's own key order, as the IR promises document order; an
     // entry declaring `put` before `post` keeps `put` first.
@@ -372,69 +384,6 @@ function collectWebhookEntries(webhooks: Record<string, unknown>, components: We
     );
   }
   return entries;
-}
-
-/**
- * The path item a `webhooks` entry denotes: the entry itself, or the
- * `components/pathItems` component a `$ref` chain leads to. Fields written
- * beside a `$ref` are not merged in — OpenAPI leaves a conflict between them
- * and the referenced item undefined, so the referenced item is taken whole.
- * Returns `undefined`, after a warning, for an entry that is not an object,
- * a ref outside `components/pathItems`, a dangling ref, or a cycle.
- */
-function resolveWebhookPathItem(
-  name: string,
-  raw: unknown,
-  componentPathItems: Record<string, Record<string, unknown>> | undefined,
-): PathItem | undefined {
-  const seenRefs = new Set<string>();
-  let current: unknown = raw;
-  while (true) {
-    if (!isRecord(current)) {
-      console.warn(`[oagen] Warning: Webhook "${name}" is not a path item object; skipping it.`);
-      return undefined;
-    }
-    const ref = current.$ref;
-    if (ref === undefined) return current as PathItem;
-    if (typeof ref !== 'string') {
-      console.warn(`[oagen] Warning: Webhook "${name}" has a non-string $ref; skipping it.`);
-      return undefined;
-    }
-    if (seenRefs.has(ref)) {
-      console.warn(
-        `[oagen] Warning: Circular path item $ref chain starting at "${ref}" for webhook "${name}"; skipping it.`,
-      );
-      return undefined;
-    }
-    seenRefs.add(ref);
-    const resolved = resolveComponentRef(ref, 'pathItems', componentPathItems);
-    if (!resolved) {
-      console.warn(
-        `[oagen] Warning: Unresolved path item $ref "${ref}" for webhook "${name}": ` +
-          'no matching entry under components/pathItems. Skipping the webhook.',
-      );
-      return undefined;
-    }
-    current = resolved;
-  }
-}
-
-/**
- * The component a `#/components/<section>/<name>` pointer names, or
- * `undefined` when it points anywhere else or at nothing. The whole pointer
- * is matched, so a ref into another section never resolves off a same-named
- * entry of this one.
- */
-function resolveComponentRef(
-  ref: string,
-  section: 'pathItems' | 'responses',
-  components: Record<string, Record<string, unknown>> | undefined,
-): Record<string, unknown> | undefined {
-  const prefix = `#/components/${section}/`;
-  if (!ref.startsWith(prefix)) return undefined;
-  // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-  const refName = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
-  return refName === '' ? undefined : components?.[refName];
 }
 
 /**

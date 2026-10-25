@@ -236,9 +236,10 @@ export interface Operation {
   /**
    * The `summary` alone: the OpenAPI operation's own, or — when the operation
    * declares none with non-whitespace content — the `summary` of the Path
-   * Item it sits on, which OpenAPI applies to every operation on that path.
-   * Present only when one of the two has content; a summary that is not a
-   * string, or is empty or whitespace-only, is treated as absent at either
+   * Item it sits on (the `paths` entry, or the `components/pathItems` item a
+   * `$ref` entry leads to), which OpenAPI applies to every operation on that
+   * path. Present only when one of the two has content; a summary that is not
+   * a string, or is empty or whitespace-only, is treated as absent at either
    * level. Read this to use the
    * summary as a one-line label; `description` below still carries the
    * combined form, so emitters that only print `description` are unchanged.
