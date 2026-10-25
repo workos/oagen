@@ -77,32 +77,28 @@ export function fieldInlineModelBundles(
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
-    const siteModels = fieldModels.map(survivorOf);
-    const shared = siteModels.flatMap((model) => survivors?.sharedRefs.get(model) ?? []);
     return {
       qualifier: parentName,
-      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName), ...shared],
-      models: siteModels,
+      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
+      models: fieldModels.map(survivorOf),
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
 }
 
 /**
- * What a field's site holds once the fields are settled and the operations
- * read (`fieldInlineModelBundles` at the merges): `folded`, from
+ * What a field's site stands for once the fields are settled and the
+ * operations read (`fieldInlineModelBundles` at the merges): `folded`, from
  * `settleFieldInlineModels`, names the definition each dropped copy folded
  * onto, so an object the component pass itself minted for the field stands
  * in for the copy and can be renamed through the field — never a component
- * (`componentNames`), which is never renamed; `sharedRefs`, from
- * `extractOperations`, are the references a header, parameter or fallback
- * body wrote by sharing such a model, which the site repoints with the
- * field's own.
+ * (`componentNames`), which is never renamed. The references a header,
+ * parameter or fallback body wrote by sharing such an object join the
+ * field's site afterwards (`attachSharedRefs`), so a rename reaches them too.
  */
 export interface FieldModelSurvivors {
   folded: ReadonlyMap<Model, Model>;
   componentNames: ReadonlySet<string>;
-  sharedRefs: ReadonlyMap<Model, readonly TypeRef[]>;
 }
 
 /**

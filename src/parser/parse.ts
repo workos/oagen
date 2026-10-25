@@ -8,7 +8,7 @@ import {
   clearSchemaNameTransform,
   resolveSchemaName,
 } from './schemas.js';
-import { extractOperations } from './operations.js';
+import { attachSharedRefs, extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import {
@@ -179,7 +179,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     fieldFolds,
   );
 
-  const { services, inlineModels, inlineModelBundles, sharedDocumentModelRefs, componentSites } = extractOperations(
+  const { services, inlineModels, inlineModelBundles, componentSites } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -266,18 +266,19 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       ...webhookInlineModelBundles,
       // Each field's site stands for whatever survived the early settle — the
       // object the component pass minted for the field, when the extracted
-      // copy folded onto it — and holds the references the deferred sites
-      // wrote by sharing that model, so a rename here repoints all of them.
-      ...fieldInlineModelBundles(fieldInlineModelGroups, models, {
-        folded: fieldFolds,
-        componentNames,
-        sharedRefs: sharedDocumentModelRefs,
-      }),
+      // copy folded onto it — so a rename here reaches it; the references a
+      // header or fallback body wrote by sharing that object join the site
+      // below (`attachSharedRefs`) and follow the rename.
+      ...fieldInlineModelBundles(fieldInlineModelGroups, models, { folded: fieldFolds, componentNames }),
     ],
     reserved: reserved.all,
     enums: reserved.enums,
   };
   const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
+  // An operation's array items that share a component field's model
+  // (`typeInlineItems`) join that field's site, so a rename of the field's
+  // model reaches the array too (`attachSharedRefs`).
+  attachSharedRefs(naming.bundles, componentNames);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks, enums, componentNames);
   applyFieldHints(finalModels, options?.fieldHints);
