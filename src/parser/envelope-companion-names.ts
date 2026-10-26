@@ -1,6 +1,13 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, renameTypeRefModels } from '../ir/types.js';
-import { fieldPropertiesAdmit, fieldPropertiesKey, flagAdmits, type InlineModelBundle } from './inline-models.js';
+import {
+  fieldPropertiesAdmit,
+  fieldPropertiesKey,
+  flagAdmits,
+  modelPropertiesAdmit,
+  modelPropertiesKey,
+  type InlineModelBundle,
+} from './inline-models.js';
 import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { unionRulesKey, unionShapeKey } from './union-shape.js';
 
@@ -63,17 +70,23 @@ export interface EnvelopeCompanion {
  *   envelope field keeps the flag the schema wrote (`Field.deprecated`), so
  *   nothing is lost — with the warning the merge passes give such a copy,
  *   and a deprecated component only a deprecated one. A model nested in the
- *   companion still folds only onto a component of the same flag, and every
- *   field is read in everything but its type as `fieldAdmits` reads it
+ *   companion still folds only onto a component of the same flag; the
+ *   model's own properties beside the flag — its limits (`minProperties`,
+ *   `dependentRequired`, …), type parameters, whatever else the IR adds —
+ *   are read as every component fold reads them (`modelPropertiesAdmit`):
+ *   identical, so a companion declaring `minProperties: 1` never shares a
+ *   component declaring `2`, nor the reverse; and every field is read in
+ *   everything but its type as `fieldAdmits` reads it
  *   (`fieldPropertiesAdmit`): its own flag must agree in either direction,
  *   the target may be looser on requiredness only, and limits, default,
  *   access flags and every other property must be identical, since the
- *   target's fields are what every site reads after the fold — a companion
- *   whose `next` is deprecated, or allows 64 characters, never shares a
- *   component whose `next` is live, or allows 8, nor the other way round,
- *   flag or no flag on the root. Among copies the same properties are part
- *   of the shape (`fieldPropertiesKey`), so a copy that deprecates or limits
- *   a field the others do not keeps its own name.
+ *   target's definition is what every site reads after the fold — a
+ *   companion whose `next` is deprecated, or allows 64 characters, never
+ *   shares a component whose `next` is live, or allows 8, nor the other way
+ *   round, flag or no flag on the root. Among copies the same properties are
+ *   part of the shape (`modelPropertiesKey`, `fieldPropertiesKey`), so a
+ *   copy that deprecates or limits itself or a field as the others do not
+ *   keeps its own name.
  *
  * The comparison covers the companion's whole field type, so a `oneOf`
  * companion is judged on every variant, not just the first, and a copy folds
@@ -265,10 +278,18 @@ function admits(
   if (visiting.has(key)) return true;
   visiting.add(key);
   try {
-    // Deprecation is part of the shape: a live target must not absorb a
-    // deprecated copy (its flag would vanish), and a deprecated target must
-    // not absorb a live one (a live operation would then reference it).
+    // Deprecation is part of the shape among copies: a live target must not
+    // absorb a deprecated copy (its flag would vanish), and a deprecated
+    // target must not absorb a live one (a live operation would then
+    // reference it). Beside a component the caller has already read the
+    // root flag by `flagAdmits` and stripped it from the copy.
     if (!!target.deprecated !== !!copy.deprecated) return false;
+    // Every other property of the model itself — its limits
+    // (`minProperties`, `dependentRequired`, …), type parameters, whatever
+    // else the IR adds — is read as every component fold reads it
+    // (`modelPropertiesAdmit`): identical, since the target's definition is
+    // what every site reads after a fold.
+    if (!modelPropertiesAdmit(target, copy)) return false;
     if (target.fields.length !== copy.fields.length) return false;
     const targetFields = new Map(target.fields.map((f) => [f.name, f]));
     for (const field of copy.fields) {
@@ -342,8 +363,10 @@ function typeAdmits(
 }
 
 /**
- * Structural fingerprint of a companion model: whether it is deprecated, its
- * field names, each field's properties as `fieldPropertiesAdmit` reads them
+ * Structural fingerprint of a companion model: the model's own properties as
+ * `modelPropertiesAdmit` reads them (`modelPropertiesKey`: whether it is
+ * deprecated, its limits, its type parameters), its field names, each
+ * field's properties as `fieldPropertiesAdmit` reads them
  * (`fieldPropertiesKey`: requiredness, its own deprecation, limits, default,
  * access flags) and each field's shape, with models nested
  * inside the companion compared by shape rather than by (operation-qualified)
@@ -362,7 +385,7 @@ function fingerprintModel(model: Model, local: Map<string, Model>, visiting: Set
   // part of its shape.
   const union = unionShapeKey(model, (v) => fingerprintType(v, local, visiting));
   visiting.delete(model.name);
-  return `${model.deprecated ? 'deprecated' : ''}{${fields.join(',')}}${union}`;
+  return `${modelPropertiesKey(model)}{${fields.join(',')}}${union}`;
 }
 
 function fingerprintType(ref: TypeRef, local: Map<string, Model>, visiting: Set<string>): string {
