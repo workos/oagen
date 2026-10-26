@@ -141,7 +141,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `description` — Model-level doc comment
 - `externalDocs` — The schema's link, for the model doc comment (an `Enum` carries one the same way, component or lifted inline)
-- `deprecated` — Deprecation marker on models (the schema's own top-level keyword, normalized to a literal `true`; never an `allOf` member's)
+- `deprecated` — Deprecation marker on models (present, and `true`, only when the schema the model was built from says `deprecated: true` — the literal `true`, any other value sets nothing; never an `allOf` member's)
 - `typeParams` — Generic type parameters
 - `constraints` — Object-level limits (`minProperties`, `maxProperties`, `dependentRequired`)
 - `extensions` — The `x-*` keys of the schema the model was built from, as written, less `x-enum-descriptions` / `x-enumDescriptions`; for a key the SDK knows (`x-since` → an `@since` tag)
@@ -164,7 +164,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `description` — Enum doc comment (the enum schema's own `description`: a component enum's, or the inline schema's the enum was lifted from; a collapsed nullable or single-member `allOf` wrapper's text wins over its branch's)
 - `default` — The schema's `default:` value, for a default-value annotation
 - `externalDocs` — Link to external documentation, for a `@see`-style tag
-- `deprecated` — Deprecation marker on enums (the component enum schema's own keyword, normalized to a literal `true`)
+- `deprecated` — Deprecation marker on enums (present, and `true`, only when the component enum schema says `deprecated: true` — the literal `true`, any other value sets nothing; an inline enum carries no flag of its own)
 - `extensions` — The `x-*` keys of the schema that declares the members (a component enum's own, or the inline schema's the enum was lifted from), as written, less `x-enum-descriptions` / `x-enumDescriptions`; for a key the SDK knows
 
 #### EnumValue
