@@ -11,6 +11,8 @@ import {
   flagAdmits,
   modelAdmits,
   modelFingerprint,
+  modelPropertiesAdmit,
+  modelPropertiesKey,
   modelShares,
   shapeFingerprint,
 } from '../../src/parser/inline-models.js';
@@ -679,6 +681,144 @@ describe('every site a deprecated inline schema identical to a live component ca
     expect(both.spec.models.map((m) => m.name).sort()).toEqual(['ListMetadata', 'User']);
     expect(both.warnings).toEqual([folded('ListMetadata')]);
     expectSound(both.spec, ['User', 'ListMetadata']);
+  });
+
+  it('a copy whose own limit differs keeps its name beside a live component, at every site (Greptile, #364 merge round)', async () => {
+    // The reviewer's shape: a live component declaring two optional fields
+    // and `minProperties: 2`, a deprecated copy declaring the same fields
+    // with `minProperties: 1`. The component's definition is what every
+    // site reads after a fold, so a copy whose own limit differs keeps its
+    // name and its limit — a list envelope's companion, a field object and
+    // a request body alike — while the same limit folds.
+    const shape = (minProperties: number | undefined, extra: Record<string, unknown> = {}) =>
+      obj({ before: str, after: str }, { ...(minProperties === undefined ? {} : { minProperties }), ...extra });
+    const limitOf = (spec: ApiSpec, name: string) =>
+      spec.models.find((m) => m.name === name)?.constraints?.minProperties;
+
+    // The companion.
+    const companionDoc = (component: Record<string, unknown>, companion: Record<string, unknown>) =>
+      specDoc(
+        { User: obj({ id: str }), ListMetadata: component },
+        {
+          '/legacy-users': {
+            get: {
+              operationId: 'listLegacyUsers',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: {
+                    'application/json': {
+                      schema: {
+                        allOf: [
+                          obj({ object: { type: 'string', const: 'list' }, list_metadata: companion }),
+                          obj({ data: { type: 'array', items: { $ref: '#/components/schemas/User' } } }),
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      );
+    const metaOf = (spec: ApiSpec) =>
+      opsOf(spec).listLegacyUsers?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+    for (const [label, component, companion] of [
+      ['copy looser', 2, 1],
+      ['copy stricter', 1, 2],
+      ['component only', 2, undefined],
+      ['copy only', undefined, 1],
+    ] as const) {
+      const kept = await parse(
+        `companion-model-limit-${label.replace(/\W+/g, '-')}`,
+        companionDoc(shape(component), shape(companion, { deprecated: true })),
+      );
+      expect(metaOf(kept.spec)?.type, label).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      expect(metaOf(kept.spec)?.deprecated, label).toBe(true);
+      expect(limitOf(kept.spec, 'ListLegacyUsersListMetadata'), label).toBe(companion);
+      expect(limitOf(kept.spec, 'ListMetadata'), label).toBe(component);
+      expect(kept.warnings, label).toEqual([]);
+      expectSound(kept.spec, ['User', 'ListMetadata']);
+    }
+    const companionFolds = await parse(
+      'companion-model-limit-same',
+      companionDoc(shape(2), shape(2, { deprecated: true })),
+    );
+    expect(metaOf(companionFolds.spec)?.type).toEqual({ kind: 'model', name: 'ListMetadata' });
+    expect(limitOf(companionFolds.spec, 'ListMetadata')).toBe(2);
+    expect(companionFolds.spec.models.map((m) => m.name).sort()).toEqual(['ListMetadata', 'User']);
+    expect(companionFolds.warnings).toEqual([folded('ListMetadata')]);
+    expectSound(companionFolds.spec, ['User', 'ListMetadata']);
+
+    // A field object and a request body, through the merge passes.
+    const siteDoc = (component: number | undefined, copy: number | undefined) =>
+      specDoc(
+        {
+          Pet: obj({ owner: shape(copy, { deprecated: true }) }),
+          PetOwner: shape(component),
+          CreateNoteRequest: shape(component),
+        },
+        {
+          '/pets/{id}': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+          '/notes': postOp('createNote', shape(copy, { deprecated: true })),
+        },
+      );
+    for (const [label, component, copy] of [
+      ['copy looser', 2, 1],
+      ['copy stricter', 1, 2],
+      ['component only', 2, undefined],
+      ['copy only', undefined, 1],
+    ] as const) {
+      const kept = await parse(`site-model-limit-${label.replace(/\W+/g, '-')}`, siteDoc(component, copy));
+      const byName = Object.fromEntries(kept.spec.models.map((m) => [m.name, m]));
+      expect(byName.Pet?.fields[0]?.type, label).toEqual({ kind: 'model', name: 'PetOwner2' });
+      expect(byName.Pet?.fields[0]?.deprecated, label).toBe(true);
+      expect(opsOf(kept.spec).createNote?.requestBody, label).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+      expect([byName.PetOwner2?.deprecated, byName.CreateNoteRequest2?.deprecated], label).toEqual([true, true]);
+      expect([limitOf(kept.spec, 'PetOwner'), limitOf(kept.spec, 'PetOwner2')], label).toEqual([component, copy]);
+      expect([limitOf(kept.spec, 'CreateNoteRequest'), limitOf(kept.spec, 'CreateNoteRequest2')], label).toEqual([
+        component,
+        copy,
+      ]);
+      expect(kept.warnings, label).toEqual([
+        '[oagen] Renamed inline model "PetOwner" → "PetOwner2": it is deprecated while "PetOwner" is live',
+        '[oagen] Renamed inline model "CreateNoteRequest" → "CreateNoteRequest2": it is deprecated while "CreateNoteRequest" is live',
+      ]);
+      // The body's own schema wrote the flag, so its reference is the document's own.
+      expectSound(kept.spec, ['Pet', 'PetOwner', 'CreateNoteRequest'], ['createNote.requestBody → CreateNoteRequest2']);
+    }
+    const siteFolds = await parse('site-model-limit-same', siteDoc(2, 2));
+    expect(siteFolds.spec.models.find((m) => m.name === 'Pet')?.fields[0]?.type).toEqual({
+      kind: 'model',
+      name: 'PetOwner',
+    });
+    expect(opsOf(siteFolds.spec).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+    expect(siteFolds.spec.models.map((m) => m.name).sort()).toEqual(['CreateNoteRequest', 'Pet', 'PetOwner']);
+    expect(siteFolds.warnings).toEqual([folded('PetOwner'), folded('CreateNoteRequest')]);
+    expectSound(siteFolds.spec, ['Pet', 'PetOwner', 'CreateNoteRequest']);
+
+    // The predicate itself: a model's own properties beside the flag must be identical, in either direction.
+    const model = (extra: Partial<Model> = {}): Model => ({
+      name: 'M',
+      fields: [{ name: 'a', type: { kind: 'primitive', type: 'string' }, required: false }],
+      ...extra,
+    });
+    const strict = model({ constraints: { minProperties: 2 } });
+    const loose = model({ constraints: { minProperties: 1 }, deprecated: true });
+    expect(modelPropertiesAdmit(strict, loose)).toBe(false);
+    expect(modelPropertiesAdmit(loose, strict)).toBe(false);
+    expect(modelPropertiesAdmit(strict, model({ constraints: { minProperties: 2 }, deprecated: true }))).toBe(true);
+    expect(modelPropertiesKey(strict)).not.toBe(modelPropertiesKey(loose));
+    expect(modelPropertiesKey(strict)).toBe(modelPropertiesKey(model({ constraints: { minProperties: 2 } })));
+    for (const sent of [false, true]) {
+      expect(modelShares(strict, loose, sent), `sent: ${sent}`).toBe(false);
+      expect(
+        modelShares(strict, model({ constraints: { minProperties: 2 }, deprecated: true }), sent),
+        `sent: ${sent}`,
+      ).toBe(true);
+    }
   });
 
   it('a list envelope’s companion whose field limit differs keeps its name beside a live component (Greptile, #364 round 2)', async () => {
