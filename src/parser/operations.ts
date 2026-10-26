@@ -50,6 +50,7 @@ import {
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSchemaName,
+  isComponentModelRef,
   isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
@@ -63,8 +64,15 @@ import {
   collectOperationTypeRefs,
   renameModelRefs,
   renameTypeRefModels,
+  walkTypeRef,
+  type ModelRef,
 } from '../ir/types.js';
-import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
+import {
+  collectProperties,
+  extractInlineModelsFromProperties,
+  isInheritedModelRef,
+  type InlineModelBundle,
+} from './inline-models.js';
 import {
   detectPagination,
   derivePageStart,
@@ -6432,9 +6440,14 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * when a name it would give is kept, or owned in the spec-wide registry by
  * a component or another operation, under a shape the owner does not share
  * (`ownerShares`); an identical shape shares the name, as it always did.
- * Returns whether anything moved: nothing does when no reached model
- * clashes, or when the clash is on a model the context does not name, which
- * the caller then reports as before.
+ * Only references the body itself minted are repointed — by identity, never
+ * by name alone: an explicit `$ref` to a same-named component
+ * (`isComponentModelRef`) and a reference an `allOf` merge copied from
+ * another component's field (`isInheritedModelRef`) stay as written, the
+ * filter the merge passes hand the same rewriters. Returns whether anything
+ * moved: nothing does when no reached model clashes, or when the clash is
+ * on a model the context does not name, which the caller then reports as
+ * before.
  */
 function stepSecondaryBody(
   result: ResponseExtractionResult,
@@ -6467,16 +6480,29 @@ function stepSecondaryBody(
   const named = [...own].filter((model) => namedByContext(model.name));
   if (!named.some((model) => clashes(model, model.name))) return false;
 
+  // Only a reference the body itself minted moves with it, by the
+  // reference's identity rather than its name: an explicit `$ref` to a
+  // same-named component (`isComponentModelRef`) and a reference an `allOf`
+  // merge copied from another component's field (`isInheritedModelRef`)
+  // stay as written, so `original: { $ref: CreatePetResponseOwner }` beside
+  // an inline `owner` of that name keeps naming the component.
+  const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
+  const mintedNames = (ref: TypeRef): string[] => {
+    const found: string[] = [];
+    walkTypeRef(ref, { model: (modelRef) => void (admit(modelRef) && found.push(modelRef.name)) });
+    return found;
+  };
   // What moves: every model the context names, except one a kept model
   // already holds under the same shape, which stays shared — unless it
-  // references a model that moves, since its shape then differs after all.
+  // references, by a minted reference, a model that moves, since its shape
+  // then differs after all.
   const moving = new Set(named.filter((model) => !sharedByKept(model, model.name)));
   for (let grew = true; grew;) {
     grew = false;
     for (const model of named) {
       if (moving.has(model)) continue;
       const movingNames = new Set([...moving].map((m) => m.name));
-      if (collectModelTypeRefs(model).some((ref) => collectModelRefs(ref).some((name) => movingNames.has(name)))) {
+      if (collectModelTypeRefs(model).some((ref) => mintedNames(ref).some((name) => movingNames.has(name)))) {
         moving.add(model);
         grew = true;
       }
@@ -6490,12 +6516,13 @@ function stepSecondaryBody(
   for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) names = under(`${context}${n}`);
 
   // Every reference moves through the one rewriter every rename site uses
-  // (`renameTypeRefModels`, `renameModelRefs`), so a union's
-  // `discriminator.mapping` follows the variant it belongs to and never
-  // keeps naming the model that moved.
+  // (`renameTypeRefModels`, `renameModelRefs`), under the identity filter
+  // above, so a union's `discriminator.mapping` follows the variant it
+  // belongs to and never keeps naming the model that moved, and a `$ref`
+  // left in place keeps its mapping entry.
   const byOldName = new Map([...names].map(([model, name]) => [model.name, name]));
-  renameTypeRefModels(result.response, byOldName);
-  for (const model of own) renameModelRefs(model, byOldName);
+  renameTypeRefModels(result.response, byOldName, admit);
+  for (const model of own) renameModelRefs(model, byOldName, admit);
   for (const [model, name] of names) model.name = name;
   return true;
 }
