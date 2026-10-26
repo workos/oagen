@@ -924,7 +924,11 @@ export interface Model {
    * schema that shares the name of a model the document declares has no
    * model of its own: a deprecated schema identical to a live component
    * keeps its flag on the `Field`, `Parameter` or envelope field that wrote
-   * it, and a request body or response it typed carries none.
+   * it, and a site with no node of its own carries none — a request body or
+   * response, an array's items, a `oneOf` variant, a webhook payload
+   * variant, an error or secondary body — so deprecating only the items of
+   * `Pet.owners` beside a live component of their shape leaves no trace in
+   * the IR, as it leaves none when two inline copies fold.
    */
   deprecated?: boolean;
   fields: Field[];
