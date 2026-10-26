@@ -1089,6 +1089,72 @@ describe('review round 2', () => {
   });
 });
 
+describe('merge round 1: a shared items model follows its rename', () => {
+  // Two array bodies share one deprecated, title-named `Circle` variant model;
+  // a direct response then mints a live `Circle` of other fields. The merge
+  // renames the deprecated copy and must repoint both arrays — the second
+  // shared the model and minted nothing (`attachSharedRefs`).
+  const shapes: SchemaObject = {
+    oneOf: [
+      obj({ kind: { const: 'circle' }, radius: str }, { title: 'Circle', deprecated: true, required: ['kind'] }),
+      obj({ kind: { const: 'square' }, side: str }, { title: 'Square', required: ['kind'] }),
+    ],
+  };
+  const arrays = {
+    '/a': { get: { operationId: 'listA', responses: ok({ type: 'array', items: shapes }) } },
+    '/b': { get: { operationId: 'listB', responses: ok({ type: 'array', items: shapes }) } },
+  };
+  const direct = {
+    '/circle': {
+      get: { operationId: 'getCircle', responses: ok(obj({ object: { const: 'circle' }, diameter: str })) },
+    },
+  };
+
+  it('repoints every array that shares the deprecated model when the live copy takes its name', async () => {
+    const { spec, warnings } = await parse('shared-renamed', specDoc({ ...arrays, ...direct }));
+    const ops = opsOf(spec);
+    const live = modelOf(spec, 'Circle');
+    expect(live.deprecated).toBeUndefined();
+    expect(live.fields.map((f) => f.name)).toEqual(['object', 'diameter']);
+    expect(show(ops.getCircle.response)).toBe('Circle');
+    // Both arrays reference one model: the renamed deprecated copy, not the live one.
+    const [variantA] = (ops.listA.response as { items: { variants: TypeRef[] } }).items.variants;
+    const [variantB] = (ops.listB.response as { items: { variants: TypeRef[] } }).items.variants;
+    expect(variantA).toEqual(variantB);
+    expect(variantA.kind === 'model' && variantA.name).not.toBe('Circle');
+    const shared = modelOf(spec, (variantA as { name: string }).name);
+    expect(shared.deprecated).toBe(true);
+    expect(shared.fields.map((f) => f.name)).toEqual(['kind', 'radius']);
+    expect(show(ops.listA.response)).toBe(show(ops.listB.response));
+    expect(show(ops.listA.response)).toBe(`(${shared.name} | Square)[]`);
+    expect(spec.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+    expect(warnings.filter((w) => w.includes('Renamed inline model "Circle"'))).toHaveLength(1);
+    expectSound(spec);
+  });
+
+  it('steps each array off a live name the direct response minted first, in the other order', async () => {
+    // The live `Circle` owns the title, so each array's variant takes its
+    // context-qualified name from its own stem — two identical deprecated
+    // copies with the right fields, nothing to rename and nothing shared.
+    const { spec, warnings } = await parse('shared-stepped', specDoc({ ...direct, ...arrays }));
+    const ops = opsOf(spec);
+    expect(modelOf(spec, 'Circle').fields.map((f) => f.name)).toEqual(['object', 'diameter']);
+    expect(show(ops.listA.response)).toBe('(CircleListAItem | Square)[]');
+    expect(show(ops.listB.response)).toBe('(CircleListBItem | Square)[]');
+    for (const name of ['CircleListAItem', 'CircleListBItem']) {
+      const copy = modelOf(spec, name);
+      expect(copy.deprecated, name).toBe(true);
+      expect(
+        copy.fields.map((f) => f.name),
+        name,
+      ).toEqual(['kind', 'radius']);
+    }
+    expect(spec.models.filter((m) => m.name === 'Square')).toHaveLength(1);
+    expect(warnings).toEqual([]);
+    expectSound(spec);
+  });
+});
+
 describe('(3) a nullable array is the array it is, however the null is written', () => {
   const spellings: Record<string, SchemaObject> = {
     typeList: { type: ['array', 'null'], items: pet },
