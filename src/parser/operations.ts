@@ -67,9 +67,11 @@ import {
   type ModelRef,
 } from '../ir/types.js';
 import {
+  agreedExtensions,
   collectProperties,
   extractInlineModelsFromProperties,
   isInheritedModelRef,
+  withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
 import {
@@ -3996,31 +3998,42 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
   }
 
   const variantCount = variants.length;
-  const mergedProps: Record<string, SchemaObject> = {};
+  // Every declaration each property receives, in variant order; the first
+  // types the field, and the extensions are the ones every declaration
+  // agrees on (`agreedExtensions`, the one rule for a property several
+  // declarations give — workos/oagen#369 review: the discriminator was
+  // rebuilt from `type`, `enum` and `description` alone, and a shared field
+  // took the first variant's keys as written).
+  const declarations = new Map<string, SchemaObject[]>([[discProp, []]]);
   const requiredCounts: Record<string, number> = {};
-  const order: string[] = [discProp]; // discriminator leads the merged object
 
   for (const variant of variants) {
     const required = new Set(variant.required ?? []);
     for (const [name, propSchema] of Object.entries(variant.properties!)) {
-      if (name === discProp || !propSchema) continue;
-      if (!(name in mergedProps)) {
-        mergedProps[name] = propSchema as SchemaObject;
-        order.push(name);
-      }
-      if (required.has(name)) requiredCounts[name] = (requiredCounts[name] ?? 0) + 1;
+      if (!propSchema) continue;
+      let declared = declarations.get(name);
+      if (!declared) declarations.set(name, (declared = []));
+      declared.push(propSchema as SchemaObject);
+      if (name !== discProp && required.has(name)) requiredCounts[name] = (requiredCounts[name] ?? 0) + 1;
     }
   }
-
-  // The discriminator collapses to an enum of the pinned values.
-  mergedProps[discProp] = {
-    type: 'string',
-    enum: discValues,
-    ...(discPropSchema?.description ? { description: discPropSchema.description } : {}),
-  };
+  const order = [...declarations.keys()]; // discriminator leads the merged object
 
   const properties: Record<string, SchemaObject> = {};
-  for (const name of order) properties[name] = mergedProps[name];
+  for (const name of order) {
+    const declared = declarations.get(name)!;
+    properties[name] =
+      name === discProp
+        ? // The discriminator collapses to an enum of the pinned values,
+          // documented by the first variant's and carrying the agreed keys.
+          {
+            type: 'string',
+            enum: discValues,
+            ...(discPropSchema?.description ? { description: discPropSchema.description } : {}),
+            ...agreedExtensions(declared),
+          }
+        : withAgreedExtensions(declared[0]!, agreedExtensions(declared));
+  }
 
   // Required only when required in every variant; the discriminator is always
   // required.

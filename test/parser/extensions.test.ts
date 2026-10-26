@@ -608,6 +608,162 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expectSound(spec, ['Pet', 'Dog']);
     });
 
+    describe('every site that rebuilds or widens a property from several declarations carries the agreed keys (Greptile, merge round 1)', () => {
+      /** Two branches declaring `name` as a string with `x-since` `1` and `2`, plus `x-shared` agreed. */
+      const disputed = [
+        { type: 'object', properties: { name: { type: 'string', 'x-since': '1', 'x-shared': true } } },
+        { type: 'object', properties: { name: { type: 'string', 'x-since': '2', 'x-shared': true } } },
+      ];
+      const agreeing = [
+        { type: 'object', properties: { name: { type: 'string', 'x-since': '1' } } },
+        { type: 'object', properties: { name: { type: 'string', 'x-since': '1' } } },
+      ];
+
+      it('a component’s variant-only property: two same-shape branches, in a bare oneOf component and as an allOf member', async () => {
+        const spec = await parseDocument(
+          document(
+            {
+              '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+              '/dogs': getOp('getDog', { $ref: '#/components/schemas/Dog' }),
+              '/cats': getOp('getCat', { $ref: '#/components/schemas/Cat' }),
+              '/cows': getOp('getCow', { $ref: '#/components/schemas/Cow' }),
+            },
+            {
+              components: {
+                schemas: {
+                  Pet: { oneOf: disputed },
+                  Dog: { allOf: [{ type: 'object', properties: { id: { type: 'string' } } }, { oneOf: disputed }] },
+                  Cat: { oneOf: agreeing },
+                  Cow: { allOf: [{ type: 'object', properties: { id: { type: 'string' } } }, { oneOf: agreeing }] },
+                },
+              },
+            },
+          ),
+        );
+        for (const model of ['Pet', 'Dog']) {
+          const name = fieldOf(byName(spec.models, model), 'name');
+          expect(name.type, model).toEqual({ kind: 'primitive', type: 'string' });
+          expect(name.extensions, model).toEqual({ 'x-shared': true });
+        }
+        for (const model of ['Cat', 'Cow']) {
+          expect(fieldOf(byName(spec.models, model), 'name').extensions, model).toEqual({ 'x-since': '1' });
+        }
+        expectSound(spec, ['Pet', 'Dog', 'Cat', 'Cow']);
+      });
+
+      it('nested sub-branches of a discriminated allOf+oneOf variant, widened from boolean or string consts', async () => {
+        /** A variant pinning `kind` with nested sub-branches declaring `flag` and `mode` as consts, each with `since`. */
+        const variant = (kind: string, since: [string, string]) => ({
+          title: kind,
+          allOf: [
+            { type: 'object', properties: { kind: { type: 'string', const: kind } }, required: ['kind'] },
+            {
+              oneOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    flag: { type: 'boolean', const: true, 'x-since': since[0], 'x-shared': true },
+                    mode: { type: 'string', const: 'fast', 'x-since': since[0], 'x-shared': true },
+                  },
+                },
+                {
+                  type: 'object',
+                  properties: {
+                    flag: { type: 'boolean', const: false, 'x-since': since[1], 'x-shared': true },
+                    mode: { type: 'string', const: 'slow', 'x-since': since[1], 'x-shared': true },
+                  },
+                },
+              ],
+            },
+          ],
+        });
+        const spec = await parseDocument(
+          document(
+            { '/events': getOp('getEvent', { $ref: '#/components/schemas/Event' }) },
+            {
+              components: {
+                schemas: {
+                  Event: {
+                    allOf: [
+                      { type: 'object', properties: { id: { type: 'string' } } },
+                      // `Agreed`'s sub-branches share `x-since`; `Disputed`'s differ.
+                      { oneOf: [variant('agreed', ['1', '1']), variant('disputed', ['1', '2'])] },
+                    ],
+                  },
+                },
+              },
+            },
+          ),
+        );
+        const event = byName(spec.models, 'Event');
+        expect(event.discriminator?.property).toBe('kind');
+        const variantModel = (kind: string) => byName(spec.models, event.discriminator!.mapping[kind]!);
+        for (const [kind, since] of [
+          ['agreed', { 'x-since': '1', 'x-shared': true }],
+          ['disputed', { 'x-shared': true }],
+        ] as const) {
+          const model = variantModel(kind);
+          // Widened to a plain boolean and a plain string, carrying the agreed keys.
+          expect(fieldOf(model, 'flag').type, kind).toEqual({ kind: 'primitive', type: 'boolean' });
+          expect(fieldOf(model, 'flag').extensions, kind).toEqual(since);
+          expect(fieldOf(model, 'mode').type, kind).toEqual({ kind: 'primitive', type: 'string' });
+          expect(fieldOf(model, 'mode').extensions, kind).toEqual(since);
+        }
+        expectSound(spec, ['Event']);
+      });
+
+      it('a discriminated inline request body: the rebuilt discriminator, its lifted enum, and a property every variant declares', async () => {
+        /** Variants pinning `kind` to distinct consts, each `kind` and `note` carrying `since`; `only` is one variant's own. */
+        const body = (since: [string, string]) => ({
+          discriminator: { propertyName: 'kind' },
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', const: 'a', 'x-since': since[0], 'x-shared': true },
+                note: { type: 'string', 'x-since': since[0], 'x-shared': true },
+                only: { type: 'string', 'x-since': since[0] },
+              },
+              required: ['kind'],
+            },
+            {
+              type: 'object',
+              properties: {
+                kind: { type: 'string', const: 'b', 'x-since': since[1], 'x-shared': true },
+                note: { type: 'string', 'x-since': since[1], 'x-shared': true },
+              },
+              required: ['kind'],
+            },
+          ],
+        });
+        const spec = await parseDocument(
+          document({
+            '/agreed': postOp('createAgreed', body(['1', '1'])),
+            '/disputed': postOp('createDisputed', body(['1', '2'])),
+          }),
+        );
+        for (const [name, since] of [
+          ['Agreed', { 'x-since': '1', 'x-shared': true }],
+          ['Disputed', { 'x-shared': true }],
+        ] as const) {
+          const model = byName(spec.models, `Create${name}Request`);
+          const kind = fieldOf(model, 'kind');
+          expect(kind.type, name).toMatchObject({ kind: 'enum', name: `Create${name}RequestKind` });
+          expect(kind.extensions, name).toEqual(since);
+          // The enum lifted from the rebuilt discriminator carries the same keys.
+          expect(
+            byName(spec.enums, `Create${name}RequestKind`).values.map((v) => v.value),
+            name,
+          ).toEqual(['a', 'b']);
+          expect(byName(spec.enums, `Create${name}RequestKind`).extensions, name).toEqual(since);
+          expect(fieldOf(model, 'note').extensions, name).toEqual(since);
+          // A property one variant alone declares keeps its own keys.
+          expect(fieldOf(model, 'only').extensions, name).toEqual({ 'x-since': '1' });
+        }
+        expectSound(spec);
+      });
+    });
+
     it('a property several allOf members always declare is typed by the first typing declaration, its keys included; a typeless one fills in what it leaves unset', async () => {
       const spec = await parseDocument(
         document({
