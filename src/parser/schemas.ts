@@ -3786,7 +3786,11 @@ function readComponentAllOf(
  * The schema that types a property a component declares: the always-applying
  * declaration `declareProperty` settles on — the first that declares a type,
  * a typeless one only annotating it (`combineDeclarations`) — else the first
- * branch's.
+ * branch's, carrying the extensions every branch agrees on in place of its
+ * own (`agreedExtensions`, the one agreement rule a property only variants
+ * declare follows, inline or under a component; workos/oagen#369 review: a
+ * component's `kind` took the first variant's `x-since` while the inline
+ * twin left a disputed key off).
  * A component flattens a union's branches as written; the union of distinct
  * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
  * built here, since no pass would materialize its inline variants under a
@@ -3794,7 +3798,8 @@ function readComponentAllOf(
  * field or a model nested under one, so they agree on the declaration.
  */
 export function declaredComponentProperty(entry: PropertyDeclarations): SchemaObject {
-  return entry.unconditional?.schema ?? entry.conditional[0]!;
+  if (entry.unconditional) return entry.unconditional.schema;
+  return withAgreedExtensions(entry.conditional[0]!, agreedExtensions(entry.conditional));
 }
 
 /**
@@ -4850,6 +4855,8 @@ import {
   markContestedTitles,
   readInlineAllOf,
   unwrappedAllOfMember,
+  agreedExtensions,
+  withAgreedExtensions,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
