@@ -323,11 +323,34 @@ describe('normalizeServerUrl', () => {
       normalizeServerUrl('https://notes.example.com{x}443'),
     );
     expect(normalizeServerUrl('https://{host}%7e')).toBe('https://{host}%7e');
-    // From the next delimiter on the text is a path, query or fragment, so
-    // percent-encoding folds again there; before the placeholder it always did.
-    expect(normalizeServerUrl('https://{host}/%7e?%7e#%7e')).toBe('https://{host}/~?~#~');
-    expect(normalizeServerUrl('https://api.example.com/%7e{x}%7e/%7e')).toBe('https://api.example.com/~{x}%7e/~');
-    expect(normalizeServerUrl('{x}%7e/%7e')).toBe('{x}%7e/~');
+    // Nothing from the first placeholder on is folded, even past a `/`: a
+    // value such as `https:/` can make the text after it an authority with a
+    // port, and one ending in `%` can join with it into another octet.
+    // Before the placeholder, in a path, a complete octet folds.
+    expect(normalizeServerUrl('https://{host}/%7e?%7e#%7e')).toBe('https://{host}/%7e?%7e#%7e');
+    expect(normalizeServerUrl('https://api.example.com/%7e{x}%7e/%7e')).toBe('https://api.example.com/~{x}%7e/%7e');
+    expect(normalizeServerUrl('{x}%7e/%7e')).toBe('{x}%7e/%7e');
+  });
+
+  it('folds nothing a placeholder value could join or re-part, in the authority or after a `/` (Greptile, merge round)', () => {
+    // `port` = `43`: `:443` vs the invalid `:%3443`, so the text before the
+    // placeholder in its authority is kept as written too.
+    expect(normalizeServerUrl('https://api.example.com:4{port}')).toBe('https://api.example.com:4{port}');
+    expect(normalizeServerUrl('https://api.example.com:%34{port}')).toBe('https://api.example.com:%34{port}');
+    expect(normalizeServerUrl('https://api.example.com:4{port}')).not.toBe(
+      normalizeServerUrl('https://api.example.com:%34{port}'),
+    );
+    // A placeholder scheme leaves the `//…` an authority whose port is not decoded.
+    expect(normalizeServerUrl('{scheme}://host:%34%34%33')).toBe('{scheme}://host:%34%34%33');
+    expect(normalizeServerUrl('{scheme}://host:%34%34%33')).not.toBe(normalizeServerUrl('{scheme}://host:443'));
+    // `x` = `%`: `/%7e` vs `/%%37e`, so text beside a later placeholder is kept as written.
+    expect(normalizeServerUrl('https://{host}/{x}7e')).toBe('https://{host}/{x}7e');
+    expect(normalizeServerUrl('https://{host}/{x}%37e')).toBe('https://{host}/{x}%37e');
+    expect(normalizeServerUrl('https://{host}/{x}7e')).not.toBe(normalizeServerUrl('https://{host}/{x}%37e'));
+    // Mirrors: a complete octet before the first placeholder in a path, and a
+    // literal authority's port, still fold.
+    expectSame('https://api.example.com/~{x}', ['https://api.example.com/%7e{x}', 'https://api.example.com/~{x}']);
+    expectSame('https://api.example.com/{x}', ['https://api.example.com:443/{x}', 'HTTPS://API.example.com/{x}']);
   });
 
   it('never folds two templates to one that resolve apart under some allowed value (soundness)', () => {
@@ -371,6 +394,15 @@ describe('normalizeServerUrl', () => {
       'https://notes.example.com{x}443',
       'https://p%C3%A9ts.EXAMPLE.com',
       'https://P%c3%a9TS.example.com',
+      'https://api.example.com:4{port}',
+      'https://api.example.com:%34{port}',
+      '{scheme}://host:%34%34%33',
+      '{scheme}://host:443',
+      'https://{host}/{x}7e',
+      'https://{host}/{x}%37e',
+      'https://api.example.com/{x}/%7e',
+      'https://api.example.com/{x}/~',
+      'https://api.example.com/{x}/7e',
       'https://USER:pw@API.example.com',
       'https://[2001:DB8::1]:443/{x}',
       '//{host}/v1',
@@ -397,8 +429,13 @@ describe('normalizeServerUrl', () => {
       ':',
       'http',
       'https',
+      'https:/',
       '%',
+      '%3',
+      '%7',
       '7e',
+      '43',
+      'e',
     ];
     const names = ['basePath', 'host', 'suffix', 'prefix', 'region', 'port', 'version', 'x', 'v', 'a', 'b', 'scheme'];
     const variables = Object.fromEntries(names.map((name) => [name, { default: 'x', enum: values }]));
