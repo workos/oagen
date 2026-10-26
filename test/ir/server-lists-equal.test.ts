@@ -99,6 +99,31 @@ describe('serverListsEqual', () => {
         [{ url: 'https://notes.example.com{x}443', variables: colon }],
       ),
     ).toBe(false);
+    // Greptile, merge round: encoded port digits before a placeholder in its
+    // authority (`port` = `43`: `:443` vs `:%3443`), a port under a placeholder
+    // scheme, and text a value ending in `%` could join into another octet
+    // (`x` = `%`: `/%7e` vs `/%%37e`).
+    const port = { port: { default: '43' } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://api.example.com:4{port}', variables: port }],
+        [{ url: 'https://api.example.com:%34{port}', variables: port }],
+      ),
+    ).toBe(false);
+    const https = { scheme: { default: 'https' } };
+    expect(
+      serverListsEqual(
+        [{ url: '{scheme}://host:%34%34%33', variables: https }],
+        [{ url: '{scheme}://host:443', variables: https }],
+      ),
+    ).toBe(false);
+    const percent = { host: { default: 'api.example.com' }, x: { default: '%' } };
+    expect(
+      serverListsEqual(
+        [{ url: 'https://{host}/{x}7e', variables: percent }],
+        [{ url: 'https://{host}/{x}%37e', variables: percent }],
+      ),
+    ).toBe(false);
     // After a placeholder the authority is kept as written, so a port or `/`
     // that a placeholder value could turn into path text is a difference
     // (Greptile): `host` = `api.example.com/v1` gives `/v1:443/v2` vs `/v1/v2`.
