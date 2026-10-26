@@ -623,7 +623,8 @@ export interface PaginationMeta {
    * First page number the API expects; set for the `page` strategy only. The
    * page parameter's integer `default`, else its `minimum`, else 1 — read
    * from the parameter's schema as written, through a `$ref`, `allOf`
-   * members and nullable wrappers — or the value an override sets. An
+   * members and nullable wrappers — or the value an override sets (an
+   * override may set it under the `page` strategy only). An
    * iterator sends `pageStart` first and `pageStart + n` after `n` pages;
    * `PaginationEndOfIteration` shows how the base enters the `totalPages`
    * stop rule, so emitters never re-derive it.
@@ -673,7 +674,8 @@ export interface PaginationMeta {
    * field is preferred over a
    * `totalPages` one, which is preferred over a count. The operation's
    * `x-pagination` extension or its `operationHints` entry can set it
-   * explicitly. Absent when nothing recognizable is declared; an emitter then
+   * explicitly, to a field of the primary response whose type fits the kind.
+   * Absent when nothing recognizable is declared; an emitter then
    * stops on an empty page (and, for `cursor`, on a missing next cursor).
    */
   endOfIteration?: PaginationEndOfIteration;
