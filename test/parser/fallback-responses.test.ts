@@ -1530,7 +1530,10 @@ describe('a fallback written as a $ref into components/responses', () => {
     ]);
   });
 
-  it('materializes an inline body declared in the component response under the operation name', async () => {
+  it("materializes an inline body declared in the component response under the component's name (issue #301)", async () => {
+    // Named after the component, as at an explicit status code, so every
+    // operation that returns `Problem` — as `default`, in a range or at a
+    // status code — shares the one `ProblemResponse`.
     const ir = await parseWithoutWarnings(
       withResponses(
         { '200': ok, default: { $ref: '#/components/responses/Problem' } },
@@ -1539,11 +1542,12 @@ describe('a fallback written as a $ref into components/responses', () => {
     );
 
     expect(only(ir).defaultResponse).toEqual({
-      type: model('ListPetsDefaultResponse'),
-      ...jsonBody(model('ListPetsDefaultResponse')),
+      type: model('ProblemResponse'),
+      ...jsonBody(model('ProblemResponse')),
       description: 'p',
     });
-    expect(fieldTypesByModel(ir.models)['ListPetsDefaultResponse']).toEqual({ code: str });
+    expect(fieldTypesByModel(ir.models)['ProblemResponse']).toEqual({ code: str });
+    expect(ir.models.map((m) => m.name)).not.toContain('ListPetsDefaultResponse');
     expectConsistent(ir);
   });
 
