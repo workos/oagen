@@ -314,8 +314,12 @@ export function schemaShapeKey(schema: SchemaObject): string {
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
 /** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
-/** `MODEL_IDENTITY_KEYS` and the model's own `deprecated`, which the admit predicates read on its own (`flagAdmits`) rather than as part of the shape. */
-const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, 'deprecated']);
+/** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readName`. */
+const MODEL_STRUCTURE_KEYS: ReadonlySet<string> = new Set(['variants', 'compositionKind', 'discriminator']);
+/** Model properties outside `modelPropertiesKey`: the identity, the fields and the union structure, each read on its own. */
+const MODEL_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, ...MODEL_STRUCTURE_KEYS]);
+/** `MODEL_PROPERTY_KEYS_OMITTED` and the model's own `deprecated`, which `modelPropertiesAdmit` reads on its own (`flagAdmits`); every other property is compared verbatim. */
+const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_PROPERTY_KEYS_OMITTED, 'deprecated']);
 
 /**
  * Shape of a model, independent of field order, name and documentation:
@@ -361,15 +365,56 @@ export function shapeFingerprint(model: Model): string {
  * (through `readShape`) and dispatch rules, the mapping's targets read under
  * `options.readName` as the variants are.
  */
-function modelShapeKey(
-  model: Model,
-  options: ShapeReadOptions = {},
-  omit: ReadonlySet<string> = MODEL_IDENTITY_KEYS,
-): string {
-  const rest = omitKeys(model, omit);
-  if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
-  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.readName);
-  return stableStringify(rest);
+function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
+  return `${modelPropertiesKey(model)}${modelStructureKey(model, options)}`;
+}
+
+/**
+ * A model's union structure as one string — its composition keyword, its
+ * variants (through `readShape`) and its dispatch rules, the mapping's
+ * targets read under `options.readName` as the variants are. What
+ * `modelAdmits` compares beside the fields and the model's properties
+ * (`modelPropertiesAdmit`); the list-envelope pass compares the same parts
+ * by structure on its own.
+ */
+function modelStructureKey(model: Model, options: ShapeReadOptions = {}): string {
+  const structure: Record<string, unknown> = {};
+  if (model.compositionKind) structure.compositionKind = model.compositionKind;
+  if (model.variants) structure.variants = model.variants.map((variant) => readShape(variant, options));
+  if (model.discriminator) structure.discriminator = readDiscriminator(model.discriminator, options.readName);
+  return stableStringify(structure);
+}
+
+/**
+ * A model's own properties as `modelPropertiesAdmit` reads them, as one
+ * string: everything but its identity (name and documentation), its fields
+ * and its union structure — `deprecated`, limits (`constraints`), type
+ * parameters, whatever else the IR adds to a model. `modelFingerprint`
+ * carries it beside the fields and the structure, and the list-envelope
+ * pass keys a companion's shape by it (`fingerprintModel`), so the shapes
+ * it counts agree with the folds it allows.
+ */
+export function modelPropertiesKey(model: Model): string {
+  return stableStringify(omitKeys(model, MODEL_PROPERTY_KEYS_OMITTED));
+}
+
+/**
+ * Whether `owner` admits `candidate` in the model's own properties — what
+ * `modelAdmits` reads beside the fields and the union structure: the two
+ * agree on `deprecated` as `flagAdmits` reads it (a live owner admits either
+ * flag, a deprecated owner only a deprecated candidate), and every other
+ * property — the model's limits (`minProperties`, `dependentRequired`, …),
+ * its type parameters, whatever else the IR adds to a model — is identical,
+ * since the owner's definition is what every site reads after a fold.
+ * `MODEL_ADMIT_KEYS` names the properties read on their own, so a property
+ * added to `Model` is compared verbatim until it is listed there. The one
+ * definition of a model's properties a fold must preserve: `modelAdmits`
+ * applies it with the structure read by key, and the list-envelope pass
+ * (`admits`) with the structure compared on its own.
+ */
+export function modelPropertiesAdmit(owner: Model, candidate: Model): boolean {
+  if (!flagAdmits(owner, candidate)) return false;
+  return stableStringify(omitKeys(owner, MODEL_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, MODEL_ADMIT_KEYS));
 }
 
 /** Field properties `fieldAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
@@ -414,16 +459,19 @@ export interface ShapeReadOptions {
  * optional on `owner`, and a field type `candidate` leaves non-null may be
  * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
  * read that way; a wrapper deeper down (an array's items) must agree. The
- * models' own limits, type parameters, variants and dispatch rules must
- * agree, and a model reference is compared by name — the name it carries, or
- * the one `options.readName` reads it under: a nested inline model keeps its
- * name, so a parent whose child was renamed is not admitted by one whose
- * child was not. The models' own `deprecated` is read apart from the shape
- * (`flagAdmits`): a live `owner` admits a deprecated `candidate` — the flag
- * stays on the field, parameter or envelope field that wrote the candidate's
- * schema, not on a second model of the same shape — and a deprecated `owner`
- * admits only a deprecated one, so no live reference comes to resolve to a
- * deprecated model by folding. An identical shape is admitted.
+ * models' own properties — limits, type parameters, whatever else the IR
+ * adds to a model — must be identical (`modelPropertiesAdmit`), their union
+ * structure — variants and dispatch rules — must agree
+ * (`modelStructureKey`), and a model reference is compared by name — the
+ * name it carries, or the one `options.readName` reads it under: a nested
+ * inline model keeps its name, so a parent whose child was renamed is not
+ * admitted by one whose child was not. The models' own `deprecated` is read
+ * apart from the shape (`flagAdmits`, through `modelPropertiesAdmit`): a
+ * live `owner` admits a deprecated `candidate` — the flag stays on the
+ * field, parameter or envelope field that wrote the candidate's schema, not
+ * on a second model of the same shape — and a deprecated `owner` admits only
+ * a deprecated one, so no live reference comes to resolve to a deprecated
+ * model by folding. An identical shape is admitted.
  *
  * The one rule by which an inline model folds onto a model the document
  * declares — a component schema, or a model a component's field minted — in
@@ -441,14 +489,14 @@ export interface ShapeReadOptions {
  * `flagAdmits` as well.
  */
 export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
-  if (!flagAdmits(owner, candidate)) return false;
+  if (!modelPropertiesAdmit(owner, candidate)) return false;
   if (owner.fields.length !== candidate.fields.length) return false;
   const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
   for (const field of candidate.fields) {
     const own = ownerFields.get(field.name);
     if (!own || !fieldAdmits(own, field, options)) return false;
   }
-  return modelShapeKey(owner, options, MODEL_ADMIT_KEYS) === modelShapeKey(candidate, options, MODEL_ADMIT_KEYS);
+  return modelStructureKey(owner, options) === modelStructureKey(candidate, options);
 }
 
 /**
