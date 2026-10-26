@@ -31,6 +31,25 @@ let activeSchemaNameTransform: SchemaNameTransform | null = null;
 let activeComponentSchemaKeys: Set<string> = new Set();
 
 /**
+ * The document's `components/schemas`, by raw key, while they are read —
+ * for a reader that resolves a `$ref` but is handed no map of its own
+ * (`schemaToTypeRef`, `mintedInlineNameEntries`), so it decides exactly as
+ * the extractors, which are handed the map, decide (`readInlineAllOf`).
+ * Set by `extractSchemas`, cleared with the name transform.
+ */
+let activeComponentSchemas: Record<string, SchemaObject> | undefined;
+
+/** The component schema a `$ref` names, from `componentSchemas` when given, else from the document being read. */
+export function componentSchemaOf(
+  ref: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | undefined {
+  const key = ref.split('/').pop() ?? '';
+  const map = componentSchemas ?? activeComponentSchemas;
+  return map && Object.hasOwn(map, key) ? map[key] : undefined;
+}
+
+/**
  * Module-level set of resolved schema names whose components/schemas entry is
  * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
  * string consts). Populated by extractSchemas() so schemaToTypeRef()
@@ -801,6 +820,7 @@ export function extractSchemas(
   // below (including the collision probe) can tell a real component key from
   // a name oagen synthesised.
   activeComponentSchemaKeys = new Set(Object.keys(schemas));
+  activeComponentSchemas = schemas;
   // A new document: the references an `allOf` merge inherits from a
   // component's property (`inheritedModelRefsOf`) are recorded per document,
   // and so are the unions whose uncarried `properties` were reported.
@@ -1033,6 +1053,7 @@ export function clearSchemaNameTransform(): void {
   activeNullableEnumSchemaNames = new Set();
   activeNullableUnionSchemaNames = new Set();
   activeComponentSchemaKeys = new Set();
+  activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
   activeArrayComponentPlans = new Map();
   markContestedTitles(undefined);
@@ -1232,7 +1253,7 @@ export function componentPropertyLedger(
     if (value) declareProperty(ledger, key, value, null, false);
   }
   if (ledger.size === 0) {
-    for (const variant of schema.oneOf ?? schema.anyOf ?? []) {
+    for (const variant of unionVariantsOf(schema) ?? []) {
       for (const [key, value] of Object.entries(variant.properties ?? {})) {
         if (value) declareProperty(ledger, key, value, null, true);
       }
@@ -3050,7 +3071,7 @@ export function isArrayComponentEntry(
   };
   if (folded.$ref) return aliasOf(folded.$ref);
   if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
-  const reading = readInlineAllOf(folded.allOf, folded);
+  const reading = readInlineAllOf(folded.allOf, folded, schemas);
   if (reading === 'reference') return aliasOf(folded.allOf.find((member) => member.$ref)?.$ref);
   if (reading === 'unwrapped') {
     return isArrayComponentEntry(unwrappedAllOfMember(folded, folded.allOf[0]), schemas, seen);
@@ -3493,6 +3514,23 @@ function extractNamedUnionVariantModels(
 type AllOfDiscriminator = { property: string; mapping: Record<string, string> };
 
 /**
+ * The variants of the union a schema carries — `oneOf`, else `anyOf` — or
+ * `undefined` for a schema carrying none. The one keyword test every
+ * reader of a component's `allOf` + union applies: the member reader that
+ * detects a dispatcher or flattens the variants (`readComponentAllOfMember`),
+ * the variant builder (`extractDiscriminatedAllOfVariantModels`, its axis
+ * and its variant loop), a pure union's flattening
+ * (`componentPropertyLedger`) and a variant's nested unions
+ * (`flattenVariantForExtraction`) — so a union detected as a dispatcher is
+ * the union whose variant models are built, whichever keyword spells it
+ * (workos/oagen#359 review: an `anyOf` axis was dispatched but its variants
+ * were not built, and the mapping named a model nothing created).
+ */
+export function unionVariantsOf(schema: SchemaObject): SchemaObject[] | undefined {
+  return schema.oneOf ?? schema.anyOf;
+}
+
+/**
  * Read one member of a component's `allOf` into `ledger` and `required`,
  * each declaration with its provenance (`declareProperty`). A `$ref` member
  * is resolved to its component, through a chain of references; a component
@@ -3558,8 +3596,6 @@ function readComponentAllOfMember(
   for (const [key, value] of Object.entries(resolved.properties ?? {})) {
     if (value) declareProperty(ledger, key, value, null, false);
   }
-  const variants = resolved.oneOf ?? resolved.anyOf;
-  if (!variants) return undefined;
   // A nullable wrapper is its one non-null variant, read as one more member
   // in this member's own capacity (`nullableUnionBranch`); the wrapper is
   // recorded so a component that wraps a reference to itself ends here.
@@ -3569,7 +3605,8 @@ function readComponentAllOfMember(
     seen.add(resolved);
     return readComponentAllOfMember(name, branch, schemas, ledger, required, seen, readVariants);
   }
-  if (!readVariants) return undefined;
+  const variants = unionVariantsOf(resolved);
+  if (!variants || !readVariants) return undefined;
   // Detect discriminated union: every variant pins the same property to a
   // distinct const value (e.g. EventSchema where each variant has event: const).
   // When detected, store the discriminator instead of flattening variant fields —
@@ -3793,15 +3830,19 @@ function extractDiscriminatedAllOfVariantModels(
   // name (`Map`, `Object.fromEntries`), so a base property named
   // `constructor`, `toString` or `__proto__` reaches every variant.
   const members = componentAllOfMembers(schema);
-  // The variant axis: a `oneOf` member whose variants pin one property to
-  // distinct consts — the reading `extractAllOfModel` makes of it
-  // (`detectAllOfVariantDiscriminator`) — so a variant model exists exactly
-  // when the component's model dispatches to it. A union that is not an
-  // axis is flattened into the model and builds no variant model here
-  // (workos/oagen#359 review: it did, and a model nested under such a
+  // The variant axis: a `oneOf`/`anyOf` member (`unionVariantsOf`, the
+  // keyword test `readComponentAllOfMember` makes) whose variants pin one
+  // property to distinct consts — the reading `extractAllOfModel` makes of
+  // it (`detectAllOfVariantDiscriminator`) — so a variant model exists
+  // exactly when the component's model dispatches to it. A union that is
+  // not an axis is flattened into the model and builds no variant model
+  // here (workos/oagen#359 review: it did, and a model nested under such a
   // variant took the name of the flattened field's own model).
   const axes = new Set(
-    members.filter((m) => m.oneOf !== undefined && detectAllOfVariantDiscriminator(m.oneOf, fallbackName) !== null),
+    members.filter((m) => {
+      const variants = unionVariantsOf(m);
+      return variants !== undefined && detectAllOfVariantDiscriminator(variants, fallbackName) !== null;
+    }),
   );
   if (axes.size === 0) return models;
   const ledger = new Map<string, PropertyDeclarations>();
@@ -3836,7 +3877,7 @@ function extractDiscriminatedAllOfVariantModels(
   );
 
   for (const subSchema of axes) {
-    for (const variant of subSchema.oneOf ?? []) {
+    for (const variant of unionVariantsOf(subSchema) ?? []) {
       // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
       // OAuth branch is `allOf: [{ properties: {…} }, { oneOf: [first-party
       // sub-variants] }]`). The flattened object has merged properties and
@@ -3911,7 +3952,8 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
     if (s.allOf) {
       for (const sub of s.allOf) collect(sub);
     }
-    if (s.oneOf) nestedOneOfs.push(s.oneOf);
+    const nested = unionVariantsOf(s);
+    if (nested) nestedOneOfs.push(nested);
   };
   collect(variant);
 
