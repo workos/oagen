@@ -4301,7 +4301,7 @@ export function schemaToTypeRef(
   // extractors dispatch on, so the models they build are the ones referenced.
   // A schema no branch below types is `unknown` — decided by
   // `typesAsUnknown`, the one answer a reader that must know before typing
-  // asks (`bodyIsTyped`, for the primary response) — with a warning for a
+  // asks (`bodyTypesAsUnknown`, for the primary response) — with a warning for a
   // shape the parser does not read; an empty `{}` describes nothing on
   // purpose and is not reported.
   if (typesAsUnknown(schema)) {
@@ -4687,8 +4687,9 @@ function describesNothing(schema: SchemaObject): boolean {
  * Whether `schemaToTypeRef` types `schema` as the bare `unknown` primitive,
  * decided without typing it — the one answer, which `schemaToTypeRef`
  * itself returns on, so a reader that must know before a body is typed
- * (`bodyIsTyped`, choosing the primary response) never disagrees with the
- * type it then gets. It holds for a schema no branch of `schemaToTypeRef`
+ * (`bodyTypesAsUnknown`, choosing the primary response, which asks here
+ * only where classification ends on `schemaToTypeRef`) never disagrees
+ * with the type it then gets. It holds for a schema no branch of `schemaToTypeRef`
  * types: no `$ref`; no type list except one naming a single type without
  * `null` (an empty list is `nullable<unknown>`, `null` beside one type is
  * nullable, several types are a union); no `nullable: true` beside a
