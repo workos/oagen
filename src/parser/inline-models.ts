@@ -1254,6 +1254,25 @@ export interface InlineModelBundle {
    * object, whose direction the document does not say.
    */
   sent?: boolean;
+  /**
+   * The sites of the copies that folded onto one of `models` (`foldOnto` in
+   * the merge passes), each keyed to the model it folded onto (`owner`): the
+   * copy's references name the owner from then on, so when the owner is
+   * renamed — and only then, by the owner's identity, never by name — the
+   * references in those roots and models that carry the owner's name are
+   * repointed with the site's own (`repointSite`). A rename of another model
+   * of this site leaves them alone: a model of the carried site under that
+   * name is that site's own, decided on its own. Absent until a copy folds
+   * onto one of `models`.
+   */
+  carried?: CarriedSite[];
+}
+
+/** One copy's site, carried into the site of the model it folded onto (`InlineModelBundle.carried`). */
+export interface CarriedSite {
+  owner: Model;
+  roots: TypeRef[];
+  models: Model[];
 }
 
 /**
@@ -1312,10 +1331,36 @@ export function inheritedModelRefsOf(parentName: string, fieldName: string): Mod
   return inheritedModelRefsByField.get(`${parentName}.${fieldName}`) ?? [];
 }
 
-/** Forget every inherited reference and field-model rename recorded so far: a new document is being read. */
+/**
+ * The models the schema pass lifts from a component field's own inline
+ * schema (`collectNestedInlineModels` in `extractSchemas`: a nested object,
+ * array items or a union variant, named as the field extractor names them),
+ * keyed `Parent.field` by the field each was read from. The field's site
+ * claims them by that origin (`fieldInlineModelBundles`), never by name:
+ * `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`, only one of
+ * them is lifted, and the other field's site must not touch it. Reset per
+ * document with the inherited references.
+ */
+const liftedFieldModels = new Map<string, Model[]>();
+
+/** Record that the schema pass lifted `model` from `fieldName` of the component resolved to `parentName`. */
+export function recordLiftedFieldModel(parentName: string, fieldName: string, model: Model): void {
+  const key = `${parentName}.${fieldName}`;
+  const lifted = liftedFieldModels.get(key) ?? [];
+  lifted.push(model);
+  liftedFieldModels.set(key, lifted);
+}
+
+/** The models the schema pass lifted from `fieldName` of the component resolved to `parentName`, in the order it lifted them. */
+export function liftedFieldModelsOf(parentName: string, fieldName: string): Model[] {
+  return liftedFieldModels.get(`${parentName}.${fieldName}`) ?? [];
+}
+
+/** Forget every inherited reference, field-model rename and lifted field model recorded so far: a new document is being read. */
 export function resetInheritedModelRefs(): void {
   inheritedModelRefsByField.clear();
   fieldModelRenames.clear();
+  liftedFieldModels.clear();
 }
 
 function recordInheritedModelRefs(type: TypeRef, parentName: string, fieldName: string): void {

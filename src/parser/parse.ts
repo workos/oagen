@@ -1,4 +1,4 @@
-import type { ApiSpec, AuthScheme, Model } from '../ir/types.js';
+import type { ApiSpec, AuthScheme } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -16,6 +16,7 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
   fieldInlineModelBundles,
+  refreshFieldInlineModelBundles,
   reservedNamesByKind,
   reservedTypeNames,
   settleFieldInlineModels,
@@ -164,20 +165,23 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // yet, takes it when the merges below settle the fields again against
   // every enum name in play.
   const enumNames: ReadonlySet<string> = new Set(enums.map((e) => e.name));
-  // Each copy dropped here, keyed to what replaced it: a component, or the
-  // object the component pass minted for the same field, which the field's
-  // site then stands for at the merges below (`fieldInlineModelBundles`).
-  const fieldFolds = new Map<Model, Model>();
-  const fieldInlineModels = settleFieldInlineModels(
-    models,
-    extractedFieldModels,
-    {
-      bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
-      reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
-      enums: enumNames,
-    },
-    fieldFolds,
-  );
+  // The names every merge pass mints, shared across the passes so a later
+  // one can tell a parent whose child an earlier pass renamed
+  // (`InlineModelNaming.minted`). Each field's site already holds the object
+  // the schema pass lifted from the field's own schema
+  // (`fieldInlineModelBundles`, `liftedFieldModelsOf`), so a copy dropped
+  // here for it needs no record.
+  const mintedNames = new Set<string>();
+  // The field sites, kept for the merges below (`refreshFieldInlineModelBundles`):
+  // what a fold carries onto a site here must still be there when a later
+  // pass renames the model it was carried onto.
+  const fieldInlineModelBundlesBySite = fieldInlineModelBundles(fieldInlineModelGroups, models);
+  const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
+    bundles: fieldInlineModelBundlesBySite,
+    reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
+    enums: enumNames,
+    minted: mintedNames,
+  });
 
   const { services, inlineModels, inlineModelBundles, componentSites } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
@@ -264,17 +268,28 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     bundles: [
       ...inlineModelBundles,
       ...webhookInlineModelBundles,
-      // Each field's site stands for whatever survived the early settle — the
-      // object the component pass minted for the field, when the extracted
-      // copy folded onto it — so a rename here reaches it; the references a
+      // The field sites from the settle, brought up to date: each holds the
+      // object the schema pass lifted from the field's own schema, which the
+      // extracted copy folded onto at the settle, and whatever a fold carried
+      // onto it there, so a rename here reaches all of it; the references a
       // header or fallback body wrote by sharing that object join the site
       // below (`attachSharedRefs`) and follow the rename.
-      ...fieldInlineModelBundles(fieldInlineModelGroups, models, { folded: fieldFolds, componentNames }),
+      ...refreshFieldInlineModelBundles(fieldInlineModelBundlesBySite, fieldInlineModelGroups, fieldInlineModels),
     ],
     reserved: reserved.all,
     enums: reserved.enums,
+    minted: mintedNames,
   };
-  const responseNormalizedModels = mergeInlineResponseModels(models, [...inlineModels, ...webhookInlineModels], naming);
+  // The components' field models, settled above, own their names here as
+  // the components do (`declared`), so a nested object of a response named
+  // like one is decided against it before its parent is compared — never
+  // passed for it by name under a parent the lifted model admits.
+  const responseNormalizedModels = mergeInlineResponseModels(
+    models,
+    [...inlineModels, ...webhookInlineModels],
+    naming,
+    fieldInlineModels,
+  );
   // An operation's array items that share a component field's model
   // (`typeInlineItems`) join that field's site, so a rename of the field's
   // model reaches the array too (`attachSharedRefs`).

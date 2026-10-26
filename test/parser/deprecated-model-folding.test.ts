@@ -80,7 +80,20 @@ function operationRefs(op: Operation): Array<[string, TypeRef, boolean]> {
   for (const p of [...op.pathParams, ...op.queryParams, ...op.headerParams, ...(op.cookieParams ?? [])]) {
     refs.push([`${op.name}(${p.name})`, p.type, !!p.deprecated]);
   }
+  if (op.defaultResponse?.type) refs.push([`${op.name}.default`, op.defaultResponse.type, false]);
+  for (const r of op.rangeResponses ?? []) if (r.type) refs.push([`${op.name}.${r.range}`, r.type, false]);
   return refs;
+}
+
+/** Every model name a model references: its fields, its named-union variants and its discriminator mapping's targets. */
+function modelRefs(model: Model): Array<[string, string]> {
+  const names: Array<[string, string]> = [];
+  for (const field of model.fields) for (const name of collectModelRefs(field.type)) names.push([field.name, name]);
+  for (const [i, variant] of (model.variants ?? []).entries()) {
+    for (const name of collectModelRefs(variant)) names.push([`variant${i}`, name]);
+  }
+  for (const target of Object.values(model.discriminator?.mapping ?? {})) names.push(['discriminator', target]);
+  return names;
 }
 
 /**
@@ -111,7 +124,7 @@ function deprecatedReferences(spec: ApiSpec): string[] {
   return found.sort();
 }
 
-/** Every model reference, from operations and model fields alike, that names no model. */
+/** Every model reference — from operations, model fields, named-union variants and discriminator mappings alike — that names no model. */
 function unresolvedReferences(spec: ApiSpec): string[] {
   const names = new Set(spec.models.map((m) => m.name));
   const found: string[] = [];
@@ -121,33 +134,36 @@ function unresolvedReferences(spec: ApiSpec): string[] {
     }
   }
   for (const model of spec.models) {
-    for (const field of model.fields) {
-      for (const name of collectModelRefs(field.type))
-        if (!names.has(name)) found.push(`${model.name}.${field.name} → ${name}`);
-    }
+    for (const [where, name] of modelRefs(model)) if (!names.has(name)) found.push(`${model.name}.${where} → ${name}`);
   }
   return found.sort();
 }
 
-/** Every model that is neither a component nor referenced by any operation or model field. */
+/** Every model that is neither a component nor referenced by any operation, model field, named-union variant or discriminator mapping. */
 function orphanedModels(spec: ApiSpec, componentNames: string[]): string[] {
   const referenced = new Set<string>();
   for (const op of Object.values(opsOf(spec))) {
     for (const [, ref] of operationRefs(op)) for (const name of collectModelRefs(ref)) referenced.add(name);
   }
-  for (const model of spec.models) {
-    for (const field of model.fields) for (const name of collectModelRefs(field.type)) referenced.add(name);
-  }
+  for (const model of spec.models) for (const [, name] of modelRefs(model)) referenced.add(name);
   return spec.models
     .map((m) => m.name)
     .filter((name) => !componentNames.includes(name) && !referenced.has(name))
     .sort();
 }
 
-/** The invariants every case below holds: nothing dangles, nothing is orphaned, no model is named like an enum, and no undeclared reference reaches a deprecated model. */
+/**
+ * The invariants every case below holds, the ones the `…Json` fold's tests
+ * hold it to (`json-suffix-fold.test.ts`) read off a parsed document: every
+ * reference resolves, every model that is not a component is referenced,
+ * no two models share a name, no model is named like an enum, and no
+ * undeclared reference reaches a deprecated model.
+ */
 function expectSound(spec: ApiSpec, componentNames: string[], declaredDeprecated: string[] = []): void {
   expect(unresolvedReferences(spec)).toEqual([]);
   expect(orphanedModels(spec, componentNames)).toEqual([]);
+  const names = spec.models.map((m) => m.name);
+  expect(names.filter((name, i) => names.indexOf(name) !== i)).toEqual([]);
   const enumNames = new Set(spec.enums.map((e) => e.name));
   expect(spec.models.map((m) => m.name).filter((name) => enumNames.has(name))).toEqual([]);
   expect(deprecatedReferences(spec)).toEqual([...declaredDeprecated].sort());
@@ -1249,6 +1265,562 @@ describe('review round 2', () => {
       const required = byName.Widget?.fields.filter((f) => f.required).map((f) => f.name);
       expect(required, order).toEqual(order === 'x-first' ? ['a'] : ['b']);
       expectSound(spec, [], ['getZ.response → GetZWidget']);
+    }
+  });
+});
+
+describe('a renamed nested model goes with the parent that references it (issue #313)', () => {
+  const str = { type: 'string' };
+  const obj = (props: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    type: 'object',
+    ...extra,
+    properties: props,
+  });
+  const refTo = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const widget = (owner: unknown, extra: Record<string, unknown> = {}) =>
+    obj({ object: { type: 'string', const: 'widget' }, owner, ...extra });
+  const petWidget = (owner: unknown) => obj({ object: { type: 'string', const: 'pet_widget' }, owner });
+  const fieldRef = (spec: ApiSpec, model: string, field: string): TypeRef | undefined =>
+    spec.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.type;
+  const fieldDeprecated = (spec: ApiSpec, model: string, field: string): boolean | undefined =>
+    spec.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.deprecated;
+
+  async function parseWithWarnings(name: string, doc: unknown): Promise<{ spec: ApiSpec; warnings: string[] }> {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const spec = await parseSpec(await writeSpec(name, doc));
+      return { spec, warnings: warn.mock.calls.map(([m]) => String(m)) };
+    } finally {
+      warn.mockRestore();
+    }
+  }
+
+  it('folds the deprecated `Pet.owner.address` onto the live component and keeps `Pet.owner` with it (the issue’s `field.json`)', async () => {
+    const schemas = {
+      Pet: obj({ owner: obj({ address: obj({ city: str }, { deprecated: true }) }) }),
+      PetOwner: obj({ address: refTo('PetOwnerAddress') }),
+      PetOwnerAddress: obj({ city: str }),
+    };
+    const { spec, warnings } = await parseWithWarnings(
+      'issue-field.json',
+      specDoc(schemas, { '/pets/{id}': getOp('getPet', refTo('Pet')) }),
+    );
+    // No `PetOwnerAddress2` and no note for it: the nested copy is identical
+    // to the live component but for the flag and folds onto it. `Pet.owner`
+    // keeps a model of its own only because the document deprecates its
+    // `address` field while `PetOwner.address` is live — a field flag the
+    // component does not admit — and that model references the component.
+    expect(describeModels(spec)).toEqual([
+      { deprecated: undefined, fields: ['owner: PetOwner2'], name: 'Pet', required: [] },
+      { deprecated: undefined, fields: ['address: PetOwnerAddress'], name: 'PetOwner', required: [] },
+      { deprecated: undefined, fields: ['city: string'], name: 'PetOwnerAddress', required: [] },
+      { deprecated: undefined, fields: ['address: PetOwnerAddress'], name: 'PetOwner2', required: [] },
+    ]);
+    expect(fieldDeprecated(spec, 'PetOwner2', 'address')).toBe(true);
+    expect(opsOf(spec).getPet?.response).toEqual({ kind: 'model', name: 'Pet' });
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Warning: Inline model "PetOwnerAddress" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+      '[oagen] Renamed inline model "PetOwner" → "PetOwner2": its shape differs from component schema "PetOwner"',
+    ]);
+  });
+
+  it('folds the deprecated `owner` of an inline response onto the live component and keeps the response with it (the issue’s `response.json`)', async () => {
+    const schemas = { Widget: widget(refTo('WidgetOwner')), WidgetOwner: obj({ city: str }) };
+    const { spec, warnings } = await parseWithWarnings(
+      'issue-response.json',
+      specDoc(schemas, {
+        '/legacy-widgets/{id}': getOp('getLegacyWidget', widget(obj({ city: str }, { deprecated: true }))),
+      }),
+    );
+    expect(describeModels(spec)).toEqual([
+      { deprecated: undefined, fields: ['object: literal', 'owner: WidgetOwner'], name: 'Widget', required: [] },
+      { deprecated: undefined, fields: ['city: string'], name: 'WidgetOwner', required: [] },
+      {
+        deprecated: undefined,
+        fields: ['object: literal', 'owner: WidgetOwner'],
+        name: 'GetLegacyWidgetWidget',
+        required: [],
+      },
+    ]);
+    expect(fieldDeprecated(spec, 'GetLegacyWidgetWidget', 'owner')).toBe(true);
+    expect(opsOf(spec).getLegacyWidget?.response).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Warning: Inline model "WidgetOwner" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+      '[oagen] Renamed inline model "Widget" → "GetLegacyWidgetWidget": its shape differs from component schema "Widget"',
+    ]);
+  });
+
+  it('qualifies a live twin whose child was renamed instead of folding it by name, in either order', async () => {
+    // `getA` and `getB` both mint `Widget`; only `getB`'s `owner` is
+    // deprecated, with a field of its own, so it becomes `GetBWidgetOwner`
+    // and `getB`'s `Widget` references it. Folded by name onto `getA`'s
+    // `Widget` ("keeping the first definition"), the child would be
+    // referenced by nothing; `getB`'s `Widget` leaves the name by its site.
+    const live = widget(obj({ city: str }));
+    const legacy = widget(obj({ city: str, zip: str }, { deprecated: true }));
+    for (const { order, spec, warnings } of await parseBothOrders('renamed-child-twins', {}, [
+      ['/a/{id}', getOp('getA', live)],
+      ['/b/{id}', getOp('getB', legacy)],
+    ])) {
+      const ops = opsOf(spec);
+      expect(ops.getA?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(ops.getB?.response, order).toEqual({ kind: 'model', name: 'GetBWidget' });
+      expect(
+        describeModels(spec).sort((a, b) => a.name.localeCompare(b.name)),
+        order,
+      ).toEqual([
+        {
+          deprecated: undefined,
+          fields: ['object: literal', 'owner: GetBWidgetOwner'],
+          name: 'GetBWidget',
+          required: [],
+        },
+        { deprecated: true, fields: ['city: string', 'zip: string'], name: 'GetBWidgetOwner', required: [] },
+        { deprecated: undefined, fields: ['object: literal', 'owner: WidgetOwner'], name: 'Widget', required: [] },
+        { deprecated: undefined, fields: ['city: string'], name: 'WidgetOwner', required: [] },
+      ]);
+      expect(fieldDeprecated(spec, 'GetBWidget', 'owner'), order).toBe(true);
+      expectSound(spec, []);
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "WidgetOwner" → "GetBWidgetOwner": it is deprecated while "WidgetOwner" is live',
+        '[oagen] Renamed inline model "Widget" → "GetBWidget": it references a renamed model and "Widget" keeps another definition',
+      ]);
+    }
+  });
+
+  it('never lets the twin with the renamed deprecated child win the shared name by field count', async () => {
+    // `getB`'s `Widget` has one field more; kept under the shared name
+    // ("keeping the one with more fields"), it would hand `getA` the
+    // deprecated `GetBWidgetOwner` and orphan `getA`'s `WidgetOwner`.
+    const live = widget(obj({ city: str }));
+    const legacy = widget(obj({ city: str, zip: str }, { deprecated: true }), { extra: str });
+    const { spec } = await parseWithWarnings(
+      'larger-twin.json',
+      specDoc({}, { '/a/{id}': getOp('getA', live), '/b/{id}': getOp('getB', legacy) }),
+    );
+    const ops = opsOf(spec);
+    expect(ops.getA?.response).toEqual({ kind: 'model', name: 'Widget' });
+    expect(ops.getB?.response).toEqual({ kind: 'model', name: 'GetBWidget' });
+    expect(fieldRef(spec, 'Widget', 'owner')).toEqual({ kind: 'model', name: 'WidgetOwner' });
+    expect(fieldRef(spec, 'GetBWidget', 'owner')).toEqual({ kind: 'model', name: 'GetBWidgetOwner' });
+    expect(spec.models.find((m) => m.name === 'GetBWidget')?.fields.map((f) => f.name)).toEqual([
+      'object',
+      'owner',
+      'extra',
+    ]);
+    expectSound(spec, []);
+  });
+
+  it('keeps a renamed leader under its name when a later pass reads it again (identical twins beside a component of another shape)', async () => {
+    // Both responses leave the component's names together, `getB` repointed
+    // onto `getA`'s `GetAWidget`; the field merge reads `GetAWidget`, which
+    // references the renamed `GetAWidgetOwner`, and must not move it to
+    // `GetAWidget2` behind `getB`'s back.
+    const schemas = { Widget: widget(refTo('WidgetOwner'), { extra: str }), WidgetOwner: obj({ city: str }) };
+    const shape = widget(obj({ city: str, zip: str }));
+    const { spec, warnings } = await parseWithWarnings(
+      'leader.json',
+      specDoc(schemas, { '/a/{id}': getOp('getA', shape), '/b/{id}': getOp('getB', shape) }),
+    );
+    const ops = opsOf(spec);
+    expect(ops.getA?.response).toEqual({ kind: 'model', name: 'GetAWidget' });
+    expect(ops.getB?.response).toEqual({ kind: 'model', name: 'GetAWidget' });
+    expect(spec.models.map((m) => m.name)).toEqual(['Widget', 'WidgetOwner', 'GetAWidget', 'GetAWidgetOwner']);
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "WidgetOwner" → "GetAWidgetOwner": its shape differs from component schema "WidgetOwner" (shared by 2 sites)',
+      '[oagen] Renamed inline model "Widget" → "GetAWidget": its shape differs from component schema "Widget" (shared by 2 sites)',
+    ]);
+  });
+
+  it('qualifies every twin that follows a rename, each by its site, beside the one that keeps the name', async () => {
+    const live = widget(obj({ city: str }));
+    const legacy = widget(obj({ city: str, zip: str }, { deprecated: true }));
+    const { spec } = await parseWithWarnings(
+      'three-twins.json',
+      specDoc(
+        {},
+        { '/a/{id}': getOp('getA', live), '/b/{id}': getOp('getB', legacy), '/c/{id}': getOp('getC', legacy) },
+      ),
+    );
+    const ops = opsOf(spec);
+    expect(ops.getA?.response).toEqual({ kind: 'model', name: 'Widget' });
+    expect(fieldRef(spec, 'Widget', 'owner')).toEqual({ kind: 'model', name: 'WidgetOwner' });
+    expect(ops.getB?.response).toEqual({ kind: 'model', name: 'GetBWidget' });
+    // `getC`'s copies are identical to `getB`'s; whether they share
+    // `getB`'s models or take names of their own (issue #314), `getC` never
+    // resolves to `Widget`, and its `owner` is a deprecated `{ city, zip }`.
+    const c = ops.getC?.response;
+    expect(c?.kind).toBe('model');
+    const cName = c?.kind === 'model' ? c.name : '';
+    expect(cName).not.toBe('Widget');
+    const cOwner = fieldRef(spec, cName, 'owner');
+    const cOwnerName = cOwner?.kind === 'model' ? cOwner.name : '';
+    expect(spec.models.find((m) => m.name === cOwnerName)?.deprecated).toBe(true);
+    expect(spec.models.find((m) => m.name === cOwnerName)?.fields.map((f) => f.name)).toEqual(['city', 'zip']);
+    expectSound(spec, []);
+  });
+
+  it('settles an operation’s nested object against the component field’s model of its name before its parent (lifted twin beside an operation)', async () => {
+    // `Pet.widget` is read twice: the schema pass lifts `PetWidget` into the
+    // models, the field extractor reads `PetWidget` and `PetWidgetOwner`
+    // (deprecated). `getPetWidget` mints a live `PetWidgetOwner` with a field
+    // more. The operation's nested object is decided against the field's
+    // model first (bottom-up), so its parent no longer passes for the lifted
+    // `PetWidget` by the child's name — and, as on `main`, a live copy owns
+    // the shared name: the deprecated field model yields it and takes the
+    // suffix (`PetWidgetOwner2`), `Pet.widget` keeping the deprecated owner
+    // the document gave it under that name, never the operation's live one.
+    const schemas = { Pet: obj({ widget: petWidget(obj({ city: str }, { deprecated: true })) }) };
+    const { spec, warnings } = await parseWithWarnings(
+      'lifted-twin.json',
+      specDoc(schemas, {
+        '/pets/{id}': getOp('getPet', refTo('Pet')),
+        '/pet-widgets/{id}': getOp('getPetWidget', petWidget(obj({ city: str, zip: str }))),
+      }),
+    );
+    expect(fieldRef(spec, 'Pet', 'widget')).toEqual({ kind: 'model', name: 'PetWidget' });
+    expect(fieldRef(spec, 'PetWidget', 'owner')).toEqual({ kind: 'model', name: 'PetWidgetOwner2' });
+    expect(fieldDeprecated(spec, 'PetWidget', 'owner')).toBe(true);
+    expect(opsOf(spec).getPetWidget?.response).toEqual({ kind: 'model', name: 'GetPetWidgetPetWidget' });
+    expect(fieldRef(spec, 'GetPetWidgetPetWidget', 'owner')).toEqual({ kind: 'model', name: 'PetWidgetOwner' });
+    expect(
+      describeModels(spec)
+        .filter((m) => m.name.startsWith('PetWidgetOwner'))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    ).toEqual([
+      { deprecated: undefined, fields: ['city: string', 'zip: string'], name: 'PetWidgetOwner', required: [] },
+      { deprecated: true, fields: ['city: string'], name: 'PetWidgetOwner2', required: [] },
+    ]);
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "PetWidgetOwner" → "PetWidgetOwner2": it is deprecated while "PetWidgetOwner" is live',
+      '[oagen] Renamed inline model "PetWidget" → "GetPetWidgetPetWidget": its shape differs from component schema "PetWidget"',
+    ]);
+  });
+
+  it('lets the field’s copy fold onto its lifted twin after a child was renamed at the settle (component or enum of the child’s name)', async () => {
+    // Without the twin in the field's site, `Pet.widget`'s copy no longer
+    // matched the lifted `PetWidget` once its child became `PetWidgetOwner2`,
+    // took the name `PetWidget2`, and left the lifted `PetWidget` referenced
+    // by nothing — beside a component enum, still referencing the enum's name.
+    const deprecatedOwner = obj({ city: str }, { deprecated: true });
+    for (const [label, component, owner] of [
+      ['component of another shape', obj({ street: str }), deprecatedOwner],
+      ['component enum', { type: 'string', enum: ['a', 'b'] }, obj({ city: str })],
+    ] as const) {
+      const schemas = { Pet: obj({ widget: petWidget(owner) }), PetWidgetOwner: component };
+      const { spec } = await parseWithWarnings(
+        `lifted-${label.replace(/\W+/g, '-')}.json`,
+        specDoc(schemas, { '/pets/{id}': getOp('getPet', refTo('Pet')) }),
+      );
+      expect(fieldRef(spec, 'Pet', 'widget'), label).toEqual({ kind: 'model', name: 'PetWidget' });
+      expect(fieldRef(spec, 'PetWidget', 'owner'), label).toEqual({ kind: 'model', name: 'PetWidgetOwner2' });
+      expect(spec.models.map((m) => m.name).sort(), label).toEqual(
+        [
+          ...Object.keys(schemas).filter((name) => label !== 'component enum' || name !== 'PetWidgetOwner'),
+          'PetWidget',
+          'PetWidgetOwner2',
+        ].sort(),
+      );
+      expectSound(spec, Object.keys(schemas));
+    }
+  });
+
+  it('keeps a component field’s model under its name against a same-named response, after a child of it was renamed at the settle', async () => {
+    // `Pet.widget.owner` (`PetWidgetOwner`) has an `address` renamed when
+    // the fields are settled, against a component `PetWidgetOwnerAddress` of
+    // another shape; `getOwner`'s response, pinned by `object:
+    // pet_widget_owner`, takes `PetWidgetOwner` too. The field's model is
+    // the document's: it keeps the name, the response is qualified by its
+    // operation, and `Pet.widget.owner` is neither retyped to the response's
+    // shape nor left with an orphaned address.
+    for (const [label, address] of [
+      ['deprecated address', obj({ city: str }, { deprecated: true })],
+      ['live address', obj({ city: str })],
+    ] as const) {
+      const schemas = {
+        Pet: obj({ widget: petWidget(obj({ object: { type: 'string', const: 'pet_widget_owner' }, address })) }),
+        PetWidgetOwnerAddress: obj({ street: str }),
+      };
+      const { spec, warnings } = await parseWithWarnings(
+        `cross-pass-${label.replace(/\W+/g, '-')}.json`,
+        specDoc(schemas, {
+          '/pets/{id}': getOp('getPet', refTo('Pet')),
+          '/owners/{id}': getOp('getOwner', obj({ object: { type: 'string', const: 'pet_widget_owner' } })),
+        }),
+      );
+      expect(fieldRef(spec, 'PetWidget', 'owner'), label).toEqual({ kind: 'model', name: 'PetWidgetOwner' });
+      expect(fieldRef(spec, 'PetWidgetOwner', 'address'), label).toEqual({
+        kind: 'model',
+        name: 'PetWidgetOwnerAddress2',
+      });
+      expect(spec.models.find((m) => m.name === 'PetWidgetOwnerAddress2')?.deprecated, label).toBe(
+        label === 'deprecated address' ? true : undefined,
+      );
+      expect(opsOf(spec).getOwner?.response, label).toEqual({ kind: 'model', name: 'GetOwnerPetWidgetOwner' });
+      expect(
+        spec.models.find((m) => m.name === 'GetOwnerPetWidgetOwner')?.fields.map((f) => f.name),
+        label,
+      ).toEqual(['object']);
+      expectSound(spec, Object.keys(schemas));
+      expect(warnings, label).toEqual([
+        label === 'deprecated address'
+          ? '[oagen] Renamed inline model "PetWidgetOwnerAddress" → "PetWidgetOwnerAddress2": it is deprecated while "PetWidgetOwnerAddress" is live'
+          : '[oagen] Renamed inline model "PetWidgetOwnerAddress" → "PetWidgetOwnerAddress2": its shape differs from component schema "PetWidgetOwnerAddress"',
+        '[oagen] Renamed inline model "PetWidgetOwner" → "GetOwnerPetWidgetOwner": its shape differs from component schema "PetWidgetOwner"',
+      ]);
+    }
+  });
+
+  it('claims a lifted model for the field it was read from, never for a homonymous field (`Foo.barThing` and `FooBar.thing`, review round 1)', async () => {
+    // Both fields spell `FooBarThing`; the schema pass lifts one of them —
+    // the last component's, `FooBar.thing`, when `Foo` is declared first.
+    // Renaming `Foo.barThing`'s deprecated owner must not repoint the lifted
+    // model's `owner`, which is `FooBar.thing`'s live one: `FooBar.thing`
+    // keeps `FooBarThing`, only the deprecated site is renamed, and nothing
+    // is orphaned.
+    const thing = (owner: unknown) => obj({ object: { type: 'string', const: 'thing' }, owner });
+    const foo = obj({ barThing: thing(obj({ city: str, zip: str }, { deprecated: true })) });
+    const fooBar = obj({ thing: thing(obj({ city: str })) });
+    const { spec, warnings } = await parseWithWarnings(
+      'homonyms.json',
+      specDoc(
+        { Foo: foo, FooBar: fooBar },
+        { '/foo': getOp('getFoo', refTo('Foo')), '/foo-bar': getOp('getFooBar', refTo('FooBar')) },
+      ),
+    );
+    expect(fieldRef(spec, 'FooBar', 'thing')).toEqual({ kind: 'model', name: 'FooBarThing' });
+    expect(fieldRef(spec, 'FooBarThing', 'owner')).toEqual({ kind: 'model', name: 'FooBarThingOwner' });
+    expect(fieldDeprecated(spec, 'FooBarThing', 'owner')).toBeUndefined();
+    expect(fieldRef(spec, 'Foo', 'barThing')).toEqual({ kind: 'model', name: 'FooBarThing2' });
+    expect(fieldRef(spec, 'FooBarThing2', 'owner')).toEqual({ kind: 'model', name: 'FooBarThingOwner2' });
+    expect(fieldDeprecated(spec, 'FooBarThing2', 'owner')).toBe(true);
+    expect(
+      describeModels(spec)
+        .filter((m) => m.name.startsWith('FooBarThingOwner'))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    ).toEqual([
+      { deprecated: undefined, fields: ['city: string'], name: 'FooBarThingOwner', required: [] },
+      { deprecated: true, fields: ['city: string', 'zip: string'], name: 'FooBarThingOwner2', required: [] },
+    ]);
+    expectSound(spec, ['Foo', 'FooBar']);
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "FooBarThingOwner" → "FooBarThingOwner2": it is deprecated while "FooBarThingOwner" is live',
+      '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": its shape differs from component schema "FooBarThing"',
+    ]);
+
+    // Declared the other way round, the schema pass lifts `Foo.barThing`'s
+    // model instead: that site keeps `FooBarThing`, referencing its renamed
+    // owner, and `FooBar.thing` is the one qualified — each field resolves
+    // to a model of its own shape either way.
+    const mirrored = await parseWithWarnings(
+      'homonyms-mirrored.json',
+      specDoc(
+        { FooBar: fooBar, Foo: foo },
+        { '/foo': getOp('getFoo', refTo('Foo')), '/foo-bar': getOp('getFooBar', refTo('FooBar')) },
+      ),
+    );
+    expect(fieldRef(mirrored.spec, 'Foo', 'barThing')).toEqual({ kind: 'model', name: 'FooBarThing' });
+    expect(fieldRef(mirrored.spec, 'FooBarThing', 'owner')).toEqual({ kind: 'model', name: 'FooBarThingOwner2' });
+    expect(fieldDeprecated(mirrored.spec, 'FooBarThing', 'owner')).toBe(true);
+    expect(fieldRef(mirrored.spec, 'FooBar', 'thing')).toEqual({ kind: 'model', name: 'FooBarThing2' });
+    expect(fieldRef(mirrored.spec, 'FooBarThing2', 'owner')).toEqual({ kind: 'model', name: 'FooBarThingOwner' });
+    expect(fieldDeprecated(mirrored.spec, 'FooBarThing2', 'owner')).toBeUndefined();
+    expectSound(mirrored.spec, ['Foo', 'FooBar']);
+    expect(mirrored.warnings).toEqual([
+      '[oagen] Renamed inline model "FooBarThingOwner" → "FooBarThingOwner2": it is deprecated while "FooBarThingOwner" is live',
+      '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": its shape differs from component schema "FooBarThing"',
+    ]);
+
+    // Two live, identical homonymous fields share one model, as before.
+    const same = await parseWithWarnings(
+      'homonyms-same.json',
+      specDoc(
+        { Foo: obj({ barThing: thing(obj({ city: str })) }), FooBar: fooBar },
+        { '/foo': getOp('getFoo', refTo('Foo')), '/foo-bar': getOp('getFooBar', refTo('FooBar')) },
+      ),
+    );
+    expect(fieldRef(same.spec, 'Foo', 'barThing')).toEqual({ kind: 'model', name: 'FooBarThing' });
+    expect(fieldRef(same.spec, 'FooBar', 'thing')).toEqual({ kind: 'model', name: 'FooBarThing' });
+    expect(same.spec.models.map((m) => m.name).sort()).toEqual(['Foo', 'FooBar', 'FooBarThing', 'FooBarThingOwner']);
+    expectSound(same.spec, ['Foo', 'FooBar']);
+    expect(same.warnings).toEqual([]);
+  });
+
+  it('carries a response folded onto a field model along when the field merge moves that model off an enum’s name (review round 2)', async () => {
+    // `Pet.entries` is a map whose values mint `PetEntry`; `getEntry`'s
+    // response is the same shape, pinned by `object: pet_entry`, and folds
+    // onto the field model in the response merge; a `Pet` query enum
+    // `entry` lifts the enum `PetEntry`, known only once the operations are
+    // read, so the field merge moves the field model to `PetEntry2`. The
+    // response's reference joined the field's site when it folded, so it
+    // follows: one model, named off the enum, referenced by both.
+    const entry = obj({ object: { type: 'string', const: 'pet_entry' }, label: str });
+    const schemas = { Pet: obj({ entries: { type: 'object', additionalProperties: entry } }) };
+    const search = {
+      get: {
+        operationId: 'searchPets',
+        tags: ['Pet'],
+        parameters: [{ name: 'entry', in: 'query', schema: { type: 'string', enum: ['a', 'b'] } }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: str } } } },
+      },
+    };
+    for (const { order, spec, warnings } of await parseBothOrders('map-value-enum', schemas, [
+      ['/pets/{id}', getOp('getPet', refTo('Pet'))],
+      ['/entries/{id}', getOp('getEntry', entry)],
+      ['/search', search],
+    ])) {
+      expect(
+        spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+        order,
+      ).toEqual([['PetEntry', ['a', 'b']]]);
+      expect(fieldRef(spec, 'Pet', 'entries'), order).toEqual({
+        kind: 'map',
+        valueType: { kind: 'model', name: 'PetEntry2' },
+      });
+      expect(opsOf(spec).getEntry?.response, order).toEqual({ kind: 'model', name: 'PetEntry2' });
+      expect(
+        opsOf(spec).searchPets?.queryParams.map((p) => p.type),
+        order,
+      ).toEqual([{ kind: 'enum', name: 'PetEntry', values: ['a', 'b'] }]);
+      expect(spec.models.map((m) => m.name).sort(), order).toEqual(['Pet', 'PetEntry2']);
+      expectSound(spec, Object.keys(schemas));
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "PetEntry" → "PetEntry2": enum "PetEntry" owns the name',
+      ]);
+    }
+  });
+
+  it('keeps what a fold carried onto a field’s site at the settle through the merges (homonymous fields folded onto one lifted twin, merge review)', async () => {
+    // `Foo.barThing` and `FooBar.thing` both inline `{ code }` and both spell
+    // `FooBarThing`; the schema pass lifts one of them, and both field copies
+    // fold onto it at the settle — the other field's reference carried onto
+    // the twin's site. A `thing` query enum on a `FooBar` service lifts the
+    // enum `FooBarThing`, known only once the operations are read, so the
+    // field merge moves the twin to `FooBarThing2`: both fields must follow,
+    // whichever component was declared first.
+    const code = obj({ code: str });
+    const search = {
+      get: {
+        operationId: 'searchFooBars',
+        tags: ['FooBar'],
+        parameters: [{ name: 'thing', in: 'query', schema: { type: 'string', enum: ['a', 'b'] } }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: str } } } },
+      },
+    };
+    for (const order of ['foo-first', 'foobar-first'] as const) {
+      const foo = obj({ barThing: code });
+      const fooBar = obj({ thing: code });
+      const schemas = order === 'foo-first' ? { Foo: foo, FooBar: fooBar } : { FooBar: fooBar, Foo: foo };
+      const { spec, warnings } = await parseWithWarnings(
+        `homonyms-enum-${order}.json`,
+        specDoc(schemas, {
+          '/foo': getOp('getFoo', refTo('Foo')),
+          '/foo-bar': getOp('getFooBar', refTo('FooBar')),
+          '/search': search,
+        }),
+      );
+      expect(
+        spec.enums.map((e) => e.name),
+        order,
+      ).toEqual(['FooBarThing']);
+      expect(fieldRef(spec, 'Foo', 'barThing'), order).toEqual({ kind: 'model', name: 'FooBarThing2' });
+      expect(fieldRef(spec, 'FooBar', 'thing'), order).toEqual({ kind: 'model', name: 'FooBarThing2' });
+      expect(spec.models.map((m) => m.name).sort(), order).toEqual(['Foo', 'FooBar', 'FooBarThing2']);
+      expectSound(spec, ['Foo', 'FooBar']);
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": enum "FooBarThing" owns the name',
+      ]);
+    }
+  });
+
+  it('uses the field merge’s own winner among homonymous field models as the owner a response is measured against (merge review)', async () => {
+    // `Foo.barThings` and `FooBar.things` are maps whose values both mint
+    // `FooBarThing`, pinned by `object: foo_bar_thing`, with `alpha` on the
+    // first and `beta` on the second. The field merge keeps the first on a
+    // tie; so does the settle now, before the response merge measures
+    // `getThing` against it: a response of the losing shape takes its own
+    // name and keeps its fields, and one of the winning shape folds.
+    const thing = (extra: Record<string, unknown>) =>
+      obj({ object: { type: 'string', const: 'foo_bar_thing' }, ...extra });
+    const foo = obj({ barThings: { type: 'object', additionalProperties: thing({ alpha: str }) } });
+    const fooBar = obj({ things: { type: 'object', additionalProperties: thing({ beta: str }) } });
+    const paths = {
+      '/foo': getOp('getFoo', refTo('Foo')),
+      '/foo-bar': getOp('getFooBar', refTo('FooBar')),
+      '/things/{id}': getOp('getThing', thing({ beta: str })),
+    };
+    const fieldsOf = (spec: ApiSpec, name: string) =>
+      spec.models.find((m) => m.name === name)?.fields.map((f) => f.name);
+    const first = await parseWithWarnings('homonym-maps-foo-first.json', specDoc({ Foo: foo, FooBar: fooBar }, paths));
+    expect(fieldRef(first.spec, 'Foo', 'barThings')).toEqual({
+      kind: 'map',
+      valueType: { kind: 'model', name: 'FooBarThing' },
+    });
+    expect(fieldRef(first.spec, 'FooBar', 'things')).toEqual({
+      kind: 'map',
+      valueType: { kind: 'model', name: 'FooBarThing' },
+    });
+    expect(fieldsOf(first.spec, 'FooBarThing')).toEqual(['object', 'alpha']);
+    expect(opsOf(first.spec).getThing?.response).toEqual({ kind: 'model', name: 'GetThingFooBarThing' });
+    expect(fieldsOf(first.spec, 'GetThingFooBarThing')).toEqual(['object', 'beta']);
+    expectSound(first.spec, ['Foo', 'FooBar']);
+    expect(first.warnings).toEqual([
+      '[oagen] Warning: Inline model "FooBarThing" has more than one definition with different fields or field types (2 vs 2) — keeping the first definition',
+      '[oagen] Renamed inline model "FooBarThing" → "GetThingFooBarThing": its shape differs from component schema "FooBarThing"',
+    ]);
+
+    const second = await parseWithWarnings(
+      'homonym-maps-foobar-first.json',
+      specDoc({ FooBar: fooBar, Foo: foo }, paths),
+    );
+    expect(fieldsOf(second.spec, 'FooBarThing')).toEqual(['object', 'beta']);
+    expect(opsOf(second.spec).getThing?.response).toEqual({ kind: 'model', name: 'FooBarThing' });
+    expect(fieldRef(second.spec, 'Foo', 'barThings')).toEqual({
+      kind: 'map',
+      valueType: { kind: 'model', name: 'FooBarThing' },
+    });
+    expect(second.spec.models.map((m) => m.name).sort()).toEqual(['Foo', 'FooBar', 'FooBarThing']);
+    expectSound(second.spec, ['Foo', 'FooBar']);
+    expect(second.warnings).toEqual([
+      '[oagen] Warning: Inline model "FooBarThing" has more than one definition with different fields or field types (2 vs 2) — keeping the first definition',
+    ]);
+  });
+
+  it('lets a deprecated field model yield the shared name to a live operation object, as on `main` (MichaelDeBoey, 5bdc60d)', async () => {
+    // `Pet.note.owner` is a deprecated `{ city, zip }`; `getA`'s response of
+    // the same `object` has a live `{ city }` owner. A live copy owns a
+    // shared name: `getA`'s owner keeps `PetNoteOwner` and the field's takes
+    // `PetNoteOwner2`, exactly as before the field models became owners in
+    // the response merge — the document never hit the bug, so no name
+    // changes.
+    const note = (owner: unknown) => obj({ object: { type: 'string', const: 'pet_note' }, owner });
+    const schemas = { Pet: obj({ note: note(obj({ city: str, zip: str }, { deprecated: true })) }) };
+    for (const { order, spec, warnings } of await parseBothOrders('deprecated-field-owner', schemas, [
+      ['/pets/{id}', getOp('getPet', refTo('Pet'))],
+      ['/a', getOp('getA', note(obj({ city: str })))],
+    ])) {
+      expect(fieldRef(spec, 'PetNote', 'owner'), order).toEqual({ kind: 'model', name: 'PetNoteOwner2' });
+      expect(fieldDeprecated(spec, 'PetNote', 'owner'), order).toBe(true);
+      expect(opsOf(spec).getA?.response, order).toEqual({ kind: 'model', name: 'GetAPetNote' });
+      expect(fieldRef(spec, 'GetAPetNote', 'owner'), order).toEqual({ kind: 'model', name: 'PetNoteOwner' });
+      expect(
+        describeModels(spec)
+          .filter((m) => m.name.startsWith('PetNoteOwner'))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+        order,
+      ).toEqual([
+        { deprecated: undefined, fields: ['city: string'], name: 'PetNoteOwner', required: [] },
+        { deprecated: true, fields: ['city: string', 'zip: string'], name: 'PetNoteOwner2', required: [] },
+      ]);
+      expectSound(spec, Object.keys(schemas));
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "PetNoteOwner" → "PetNoteOwner2": it is deprecated while "PetNoteOwner" is live',
+        '[oagen] Renamed inline model "PetNote" → "GetAPetNote": its shape differs from component schema "PetNote"',
+      ]);
     }
   });
 });
