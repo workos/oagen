@@ -1797,6 +1797,47 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    it('names a stop field the wrapper model declares when two members declare the parent object (Greptile)', async () => {
+      // Two `allOf` members declare `result`: the first with the array, the
+      // second with the stop field. The model's `result` conjoins both, as the
+      // stop-field read does, so `result.total_pages` is a field it has.
+      const withItems = { type: 'object', properties: { result: { type: 'object', properties: { items: petArray } } } };
+      const withTotal = {
+        type: 'object',
+        properties: { result: { type: 'object', properties: { total_pages: { type: 'integer' } } } },
+      };
+      const expected = {
+        dataPath: 'result.items',
+        itemType: { kind: 'model', name: 'Pet' },
+        endOfIteration: { kind: 'totalPages', path: 'result.total_pages' },
+      };
+      for (const members of [
+        [withItems, withTotal],
+        [withTotal, withItems],
+      ]) {
+        const PetPage = { allOf: members };
+        const schemas = { PetPage };
+        const resultFields = (ir: ApiSpec, model: string) =>
+          ir.models.find((m) => m.name === model)?.fields.map((f) => f.name);
+        const referencedIr = await parseJson(
+          listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'result.items' }, schemas),
+        );
+        const referenced = onlyOperation(referencedIr);
+        expect(referenced.pagination, '$ref wrapper').toMatchObject(expected);
+        expect(resultFields(referencedIr, 'PetPage'), '$ref wrapper').toEqual(['result']);
+        expect(resultFields(referencedIr, 'PetPageResult')?.sort(), '$ref wrapper').toEqual(['items', 'total_pages']);
+        const inlineIr = await parseJson(listOp(PetPage, { dataPath: 'result.items' }, schemas));
+        const inline = onlyOperation(inlineIr);
+        expect(inline.pagination, 'inline wrapper').toMatchObject(expected);
+        expect(resultFields(inlineIr, 'ListPetsResponse'), 'inline wrapper').toEqual(['result']);
+        expect(resultFields(inlineIr, 'ListPetsResponseResult')?.sort(), 'inline wrapper').toEqual([
+          'items',
+          'total_pages',
+        ]);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it('reads the stop field beside a nested array under a parent of any name, before the top level (MichaelDeBoey)', async () => {
       const boolean = { type: 'boolean' };
       const nested = (fields: Record<string, unknown>) => ({

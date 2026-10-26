@@ -14,6 +14,8 @@ import {
   extractConstraints,
   isComponentModelRef,
   markComponentModelRef,
+  arraySchemaOf,
+  declaresNull,
   isInlineObjectSchema,
   isNullSchema,
   nullableUnionBranch,
@@ -1937,26 +1939,70 @@ export function declaresType(schema: SchemaObject): boolean {
 
 /**
  * The always-applying declaration of one property once a second arrives, in
- * document order — the one precedence rule for a name two members declare,
- * applied by `declareProperty` for every `allOf` merge and by the envelope
- * collector for the properties it reads (`collectObjectProperties`), so a
- * model's field and a list's stop field are typed from the same declaration.
+ * document order — the one rule for a name two members declare, applied by
+ * `declareProperty` for every `allOf` merge (a merged model's, a component's)
+ * and by the one property walk (`collectObjectProperties`) for a list
+ * envelope's companions, a wrapper's stop field and every `dataPath`
+ * segment, so a model's field and a list's stop field are typed from the
+ * same declaration (workos/oagen#308 merge review: the walk conjoined two
+ * `result` objects while the model kept the first, so `endOfIteration`
+ * named `result.total_pages` on a model whose `result` had no such field).
+ *
  * The first declaration that declares a type (`declaresType`) types the
  * property, whatever comes after it; a declaration that declares none never
  * does, before or after, and only fills in the keywords the typing one
  * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
  * member's `has_more: { description: 'More pages' }` is a described boolean
- * whichever is read first (workos/oagen#308 review: the collector took the
- * later declaration, so a component's own boolean, folded in first, lost
- * its type to the description). Two typing declarations keep the first as
- * written; the second is not conjoined into it. Returns `held` itself when
- * `next` adds nothing to it, so a lone declaration keeps its identity.
+ * whichever is read first. Two typing declarations conjoin as JSON Schema
+ * applies both: two inline objects (`isInlineObjectSchema`) merge their
+ * properties — a name both declare by this same rule — and unite their
+ * `required`, the later's other keywords (a `description`) over the
+ * earlier's; two arrays, each under a nullable wrapper of any spelling or
+ * none (`arraySchemaOf`), merge as the bare arrays they wrap, so the `items`
+ * land in the one array that is then read, whichever declaration wore the
+ * wrapper: the later `items` when they say something and the earlier when
+ * the later declaration only constrains the array (`minItems: 1`) or allows
+ * any item (`items: {}`), so `data: User[]` is not downgraded in either
+ * order; the later's other keywords over the earlier's; and `type:
+ * ['array', 'null']` when either admits `null` (`declaresNull`), else
+ * `type: 'array'`. Any other pair keeps the first as written. Returns
+ * `held` itself when `next` adds nothing to it, so a lone declaration keeps
+ * its identity.
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
-  if (declaresType(held) && declaresType(next)) return held;
+  if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
   const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
   return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+}
+
+/** Two typing declarations of one property, conjoined as `combineDeclarations` describes; `first` when they do not combine. */
+function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): SchemaObject {
+  if (isInlineObjectSchema(first) && isInlineObjectSchema(second)) {
+    const properties: Record<string, SchemaObject | undefined> = { ...first.properties };
+    for (const [key, schema] of Object.entries(second.properties ?? {})) {
+      if (!schema) continue;
+      const held = properties[key];
+      properties[key] = held ? combineDeclarations(held, schema) : schema;
+    }
+    const required = [...new Set([...(first.required ?? []), ...(second.required ?? [])])];
+    return { ...first, ...second, properties, ...(required.length > 0 && { required }) };
+  }
+  const firstArray = arraySchemaOf(first);
+  const secondArray = firstArray && arraySchemaOf(second);
+  if (firstArray && secondArray) {
+    const says = (items: SchemaObject | undefined): boolean => items !== undefined && Object.keys(items).length > 0;
+    const items = says(secondArray.items) ? secondArray.items : firstArray.items;
+    const { nullable: _firstFlag, ...firstBare } = firstArray;
+    const { nullable: _secondFlag, ...secondBare } = secondArray;
+    return {
+      ...firstBare,
+      ...secondBare,
+      ...(items !== undefined && { items }),
+      type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
+    };
+  }
+  return first;
 }
 
 /**
@@ -1987,8 +2033,14 @@ export function declareProperty(
   else if (!entry.unconditional) entry.unconditional = { schema, origin };
   else {
     const held = entry.unconditional;
+    const combined = combineDeclarations(held.schema, schema);
+    // The origin is the typing declaration's. A declaration conjoined from
+    // two components' (`combined` is neither as written) is no component's
+    // own — no component model builds what it nests — so it becomes the
+    // merged model's own, built under its name like a union of branches.
     const typesIt = !declaresType(held.schema) && declaresType(schema);
-    entry.unconditional = { schema: combineDeclarations(held.schema, schema), origin: typesIt ? origin : held.origin };
+    const conjoined = combined !== held.schema && combined !== schema && held.origin?.name !== origin?.name;
+    entry.unconditional = { schema: combined, origin: conjoined ? null : typesIt ? origin : held.origin };
   }
 }
 
@@ -2036,7 +2088,9 @@ export function declareProperty(
  *
  * A property keeps the always-applying declaration `declareProperty` settles
  * on — the first that declares a type, a typeless one before or after it
- * only annotating it (`combineDeclarations`) — whatever a variant says: a
+ * only annotating it, two typing objects or arrays conjoined
+ * (`combineDeclarations`); a declaration conjoined from two components' is
+ * the merged model's own — whatever a variant says: a
  * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
  * distinct declarations (`unionOfDeclarations`): one declaration, or several
