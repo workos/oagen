@@ -11,6 +11,7 @@ import {
 import { attachSharedRefs, extractOperations } from './operations.js';
 import type { FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
+import { siblingDocsMode } from './reference-objects.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
@@ -228,6 +229,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     },
     collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
     collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
+    // Text beside a `$ref` is read by the document's version, as for operations.
+    siblingDocsMode(version),
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 

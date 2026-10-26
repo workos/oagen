@@ -90,12 +90,12 @@ export function resolvePathItemRef(
  * The component a `#/components/<section>/<name>` pointer names, or
  * `undefined` when it points anywhere else or at nothing. The whole pointer
  * is matched, so a ref into another section never resolves off a same-named
- * entry of this one. Shared by the path item resolution above and the
- * webhook response resolution (`resolveResponseDescription` in `webhooks.ts`).
+ * entry of this one. Shared by the path item resolution above and every
+ * Reference Object resolver (`followReference` in `reference-objects.ts`).
  */
 export function resolveComponentRef(
   ref: string,
-  section: 'pathItems' | 'responses',
+  section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'examples',
   components: Record<string, Record<string, unknown>> | undefined,
 ): Record<string, unknown> | undefined {
   const prefix = `#/components/${section}/`;

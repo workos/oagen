@@ -114,6 +114,7 @@ import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
 import { resolvePathItemRef } from './path-item-refs.js';
+import { followReference, siblingDocsMode, type SiblingDocs } from './reference-objects.js';
 
 export interface PathItem {
   /**
@@ -234,9 +235,11 @@ export type RawParameterObject = ParameterObject | { $ref: string };
 
 /**
  * Resolve a raw parameter entry to a concrete Parameter Object, following
- * `$ref`s into `components/parameters` when present. Follows chains of refs
- * (a component that itself is a `$ref` to another component), with a cycle
- * guard for a spec that refs itself.
+ * `$ref`s into `components/parameters` when present — chains included, with
+ * a cycle guard — through `followReference`, the walk every Reference Object
+ * takes. A `description` written beside a ref is the parameter's own under
+ * `siblingDocs: 'override'` (OAS 3.1), the outermost with content winning
+ * along a chain, and is ignored under `'ignore'` (OAS 3.0).
  *
  * Throws when a `$ref` can't be resolved so a malformed spec fails loudly at
  * parse time instead of silently losing the parameter (see `extractParams`,
@@ -247,34 +250,22 @@ export function resolveParameterRef(
   raw: RawParameterObject,
   componentParameters: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
+  siblingDocs: SiblingDocs = 'override',
 ): ParameterObject {
-  const seenRefs = new Set<string>();
-  let current: RawParameterObject = raw;
-
-  while ('$ref' in current) {
-    if (seenRefs.has(current.$ref)) {
-      throw new Error(`Circular parameter $ref chain starting at "${current.$ref}" in ${operationContext}.`);
-    }
-    seenRefs.add(current.$ref);
-
-    // Match the whole pointer, not just its last token: a ref into any other
-    // section must not resolve off a same-named parameter component.
-    const match = /^#\/components\/parameters\/(.+)$/.exec(current.$ref);
-    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
-    const resolved = refName ? componentParameters?.[refName] : undefined;
-    if (!resolved) {
-      throw new Error(
-        `Unresolved parameter $ref "${current.$ref}" in ${operationContext}: no matching entry under components/parameters.`,
-      );
-    }
-    current = resolved as unknown as RawParameterObject;
+  const followed = followReference<ParameterObject>(raw, 'parameters', componentParameters, siblingDocs);
+  if (followed.outcome === 'circular') {
+    throw new Error(`Circular parameter $ref chain starting at "${followed.ref}" in ${operationContext}.`);
   }
-
-  return current;
+  if (followed.outcome !== 'resolved') {
+    throw new Error(
+      `Unresolved parameter $ref "${followed.ref}" in ${operationContext}: no matching entry under components/parameters.`,
+    );
+  }
+  return followed.value;
 }
 
 export interface RequestBodyObject {
+  description?: string;
   required?: boolean;
   content?: Record<string, { schema?: SchemaObject }>;
 }
@@ -288,39 +279,33 @@ export type RawRequestBodyObject = RequestBodyObject | { $ref: string };
 
 /**
  * Resolve a raw request body to a concrete Request Body Object, following
- * `$ref` chains into `components/requestBodies` with a cycle guard. Throws on
- * an unresolvable ref so a malformed spec fails at parse time instead of
- * silently losing the body — and with it the body-ownership rule that keeps
- * duplicated secrets out of the query string.
+ * `$ref` chains into `components/requestBodies` with a cycle guard, through
+ * `followReference`, the walk every Reference Object takes. A `description`
+ * written beside a ref is the body's own under `siblingDocs: 'override'`
+ * (OAS 3.1), the outermost with content winning along a chain, and is
+ * ignored under `'ignore'` (OAS 3.0) — so `requestBodyDescriptionOf` reads
+ * it ahead of the shared body's. Throws on an unresolvable ref so a
+ * malformed spec fails at parse time instead of silently losing the body —
+ * and with it the body-ownership rule that keeps duplicated secrets out of
+ * the query string.
  */
 export function resolveRequestBodyRef(
   raw: RawRequestBodyObject | undefined,
   componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
+  siblingDocs: SiblingDocs = 'override',
 ): RequestBodyObject | undefined {
   if (!raw) return undefined;
-  const seenRefs = new Set<string>();
-  let current: RawRequestBodyObject = raw;
-
-  while ('$ref' in current) {
-    if (seenRefs.has(current.$ref)) {
-      throw new Error(`Circular request body $ref chain starting at "${current.$ref}" in ${operationContext}.`);
-    }
-    seenRefs.add(current.$ref);
-
-    const match = /^#\/components\/requestBodies\/(.+)$/.exec(current.$ref);
-    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
-    const resolved = refName ? componentRequestBodies?.[refName] : undefined;
-    if (!resolved) {
-      throw new Error(
-        `Unresolved request body $ref "${current.$ref}" in ${operationContext}: no matching entry under components/requestBodies.`,
-      );
-    }
-    current = resolved as unknown as RawRequestBodyObject;
+  const followed = followReference<RequestBodyObject>(raw, 'requestBodies', componentRequestBodies, siblingDocs);
+  if (followed.outcome === 'circular') {
+    throw new Error(`Circular request body $ref chain starting at "${followed.ref}" in ${operationContext}.`);
   }
-
-  return current;
+  if (followed.outcome !== 'resolved') {
+    throw new Error(
+      `Unresolved request body $ref "${followed.ref}" in ${operationContext}: no matching entry under components/requestBodies.`,
+    );
+  }
+  return followed.value;
 }
 
 /**
@@ -346,7 +331,11 @@ type RawHeaderObject = HeaderObject | { $ref: string; description?: string };
 
 /**
  * Resolve a raw response header to a concrete Header Object, following `$ref`
- * chains into `components/headers` with a cycle guard.
+ * chains into `components/headers` with a cycle guard, through
+ * `followReference`, the walk every Reference Object takes. A `description`
+ * written beside a ref is the header's own under `siblingDocs: 'override'`
+ * (OAS 3.1), the outermost with content winning along a chain, and is
+ * ignored under `'ignore'` (OAS 3.0).
  *
  * Unlike parameters and request bodies, a header that cannot be resolved is
  * warned about and dropped rather than failing the parse: a response header
@@ -358,41 +347,24 @@ function resolveHeaderRef(
   componentHeaders: Record<string, Record<string, unknown>> | undefined,
   headerName: string,
   operationContext: string,
+  siblingDocs: SiblingDocs = 'override',
 ): HeaderObject | undefined {
-  const seenRefs = new Set<string>();
-  let current: RawHeaderObject = raw;
-  // Each ref in a chain overrides whatever it points at, so the outermost
-  // sibling `description` wins over any inner one and over the component's.
-  let description: string | undefined;
-
-  while ('$ref' in current) {
-    if (description === undefined && typeof current.description === 'string') description = current.description;
-    if (seenRefs.has(current.$ref)) {
-      console.warn(
-        `[oagen] Warning: Circular header $ref chain starting at "${current.$ref}" for response header ` +
-          `"${headerName}" in ${operationContext}. Skipping the header.`,
-      );
-      return undefined;
-    }
-    seenRefs.add(current.$ref);
-
-    // Match the whole pointer, not just its last token: a ref into any other
-    // section must not resolve off a same-named header component.
-    const match = /^#\/components\/headers\/(.+)$/.exec(current.$ref);
-    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
-    const resolved = refName ? componentHeaders?.[refName] : undefined;
-    if (!resolved) {
-      console.warn(
-        `[oagen] Warning: Unresolved header $ref "${current.$ref}" for response header "${headerName}" ` +
-          `in ${operationContext}: no matching entry under components/headers. Skipping the header.`,
-      );
-      return undefined;
-    }
-    current = resolved as unknown as RawHeaderObject;
+  const followed = followReference<HeaderObject>(raw, 'headers', componentHeaders, siblingDocs);
+  if (followed.outcome === 'circular') {
+    console.warn(
+      `[oagen] Warning: Circular header $ref chain starting at "${followed.ref}" for response header ` +
+        `"${headerName}" in ${operationContext}. Skipping the header.`,
+    );
+    return undefined;
   }
-
-  return description === undefined ? current : { ...current, description };
+  if (followed.outcome !== 'resolved') {
+    console.warn(
+      `[oagen] Warning: Unresolved header $ref "${followed.ref}" for response header "${headerName}" ` +
+        `in ${operationContext}: no matching entry under components/headers. Skipping the header.`,
+    );
+    return undefined;
+  }
+  return followed.value;
 }
 
 export interface ResponseObject {
@@ -498,9 +470,11 @@ export function extractOperations(
   // resolves to nothing left out after one warning (see resolvePathItems).
   const resolvedPaths = resolvePathItems(paths, componentPathItems);
 
-  // OAS 3.0 ignores properties beside a `$ref`; 3.1 lets a sibling
-  // `description` override the referenced response's. Unknown is read as 3.1.
-  const refSiblingDescriptions = openapiVersion?.startsWith('3.0') ? 'ignore' : 'override';
+  // Whether text written beside a `$ref` overrides the referenced component's
+  // (OAS 3.1, and a version not recognised) or is ignored (OAS 3.0), for every
+  // Reference Object the operations resolve (`followReference`): parameters,
+  // request bodies, responses, headers and examples alike.
+  const refSiblingDescriptions = siblingDocsMode(openapiVersion);
 
   // Operations without an operationId name their inline models from the
   // path, and two distinct paths — or a path and an operationId, component
@@ -2543,7 +2517,7 @@ function buildOperation(
   deferred: DeferredInlineType[] = [],
   apiRootLength = 0,
   servers?: ServerEntry[],
-  refSiblingDescriptions: 'override' | 'ignore' = 'override',
+  refSiblingDescriptions: SiblingDocs = 'override',
   componentResponseModelNames?: ReadonlyMap<string, string>,
   paginationHint?: unknown,
   componentModels?: Model[],
@@ -2561,7 +2535,12 @@ function buildOperation(
   const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
-  const requestBodyObject = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
+  const requestBodyObject = resolveRequestBodyRef(
+    op.requestBody,
+    componentRequestBodies,
+    opLabel,
+    refSiblingDescriptions,
+  );
   // An operation-level parameter overrides a path-level one with the same
   // identity — `parameterKey`: location and name, a header's name
   // case-folded, so a path-level `X-Pet-Token` and an operation-level
@@ -2571,7 +2550,7 @@ function buildOperation(
   // preserved.
   const paramsByIdentity = new Map<string, ParameterObject>();
   for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
-    const param = resolveParameterRef(raw, componentParameters, opLabel);
+    const param = resolveParameterRef(raw, componentParameters, opLabel, refSiblingDescriptions);
     paramsByIdentity.set(parameterKey(param.in, param.name), param);
   }
   const allParams = [...paramsByIdentity.values()];
@@ -2638,7 +2617,15 @@ function buildOperation(
   // the operation types keeps the name it has.
   const pendingParams: Array<[raw: ParameterObject[], typed: Parameter[], location: ParameterObject['in']]> = [];
   const extract = (location: ParameterObject['in'], source: ParameterObject[] = wireParams): Parameter[] => {
-    const params = extractParams(source, location, opContext, componentSchemas, componentExamples, opLabel);
+    const params = extractParams(
+      source,
+      location,
+      opContext,
+      componentSchemas,
+      componentExamples,
+      opLabel,
+      refSiblingDescriptions,
+    );
     pendingParams.push([source.filter((p) => p.in === location), params, location]);
     return params;
   };
@@ -2666,6 +2653,7 @@ function buildOperation(
     body: requestBody,
     encoding: requestBodyEncoding,
     contentType: requestBodyContentType,
+    description: requestBodyDescription,
     contentTypes: requestBodyContentTypes,
     contents: requestBodyContents,
   } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
@@ -2882,6 +2870,9 @@ function buildOperation(
     // Added only when the operation has a body so bodiless operations keep
     // their shape.
     ...(requestBodyRequired !== undefined && { requestBodyRequired }),
+    // The body's doc text, present only when the document gives it some —
+    // the Request Body Object's own, else its picked schema's.
+    ...(requestBodyDescription !== undefined && { requestBodyDescription }),
     // Every media type the body declares, present only when there is one —
     // the request-side twin of `responseContentTypes` / `responseContents`.
     ...(requestBodyContentTypes && { requestBodyContentTypes, requestBodyContents }),
@@ -3155,6 +3146,7 @@ export function extractParams(
   componentSchemas?: Record<string, SchemaObject>,
   componentExamples?: Record<string, Record<string, unknown>>,
   opLabel?: string,
+  siblingDocs: SiblingDocs = 'override',
 ): Parameter[] {
   return params
     .filter((p) => p.in === location)
@@ -3172,12 +3164,15 @@ export function extractParams(
       // can't mask the parameter's own `examples` map, and an explicit `null`
       // at any level is kept rather than fallen through.
       const { example, examples } = resolveExamples([
-        { example: p.example, examples: exampleObjectValues(p.examples, componentExamples, exampleContext) },
+        {
+          example: p.example,
+          examples: exampleObjectValues(p.examples, componentExamples, exampleContext, siblingDocs),
+        },
         ...(media
           ? [
               {
                 example: media.example,
-                examples: exampleObjectValues(media.examples, componentExamples, exampleContext),
+                examples: exampleObjectValues(media.examples, componentExamples, exampleContext, siblingDocs),
               },
             ]
           : []),
@@ -3248,11 +3243,12 @@ function exampleObjectValues(
   examples: Record<string, ExampleObject> | undefined,
   componentExamples: Record<string, Record<string, unknown>> | undefined,
   context: string,
+  siblingDocs: SiblingDocs = 'override',
 ): unknown[] | undefined {
   if (!examples || typeof examples !== 'object' || Array.isArray(examples)) return undefined;
   const values: unknown[] = [];
   for (const raw of Object.values(examples)) {
-    const entry = resolveExampleRef(raw, componentExamples, context);
+    const entry = resolveExampleRef(raw, componentExamples, context, siblingDocs);
     if (!entry || typeof entry !== 'object') continue;
     if (entry.externalValue !== undefined || entry.value === undefined) continue;
     values.push(entry.value);
@@ -3274,27 +3270,24 @@ function resolveExampleRef(
   raw: ExampleObject | undefined,
   componentExamples: Record<string, Record<string, unknown>> | undefined,
   context: string,
+  siblingDocs: SiblingDocs = 'override',
 ): ExampleObject | undefined {
-  const seenRefs = new Set<string>();
-  let current = raw;
-  while (current && typeof current === 'object' && current.$ref !== undefined) {
-    const ref = current.$ref;
-    if (seenRefs.has(ref)) {
-      console.warn(`[oagen] Warning: Circular example $ref chain starting at "${ref}" on ${context}; skipping`);
-      return undefined;
-    }
-    seenRefs.add(ref);
-    const match = /^#\/components\/examples\/(.+)$/.exec(ref);
-    // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-    const refName = match?.[1].replace(/~1/g, '/').replace(/~0/g, '~');
-    const resolved = refName ? componentExamples?.[refName] : undefined;
-    if (!resolved) {
-      console.warn(`[oagen] Warning: Unresolved example $ref "${ref}" on ${context}; skipping`);
-      return undefined;
-    }
-    current = resolved as ExampleObject;
+  // An entry that is not an object is no example; the caller skips it.
+  if (!raw || typeof raw !== 'object') return undefined;
+  // The walk every Reference Object takes (`followReference`): a `summary`
+  // or `description` written beside a ref overrides the component's under
+  // `'override'` (OAS 3.1) and is ignored under `'ignore'` (OAS 3.0), though
+  // only the example's `value` is read into the IR (`exampleObjectValues`).
+  const followed = followReference<ExampleObject>(raw, 'examples', componentExamples, siblingDocs);
+  if (followed.outcome === 'circular') {
+    console.warn(`[oagen] Warning: Circular example $ref chain starting at "${followed.ref}" on ${context}; skipping`);
+    return undefined;
   }
-  return current;
+  if (followed.outcome !== 'resolved') {
+    console.warn(`[oagen] Warning: Unresolved example $ref "${followed.ref}" on ${context}; skipping`);
+    return undefined;
+  }
+  return followed.value;
 }
 
 /**
@@ -3494,6 +3487,27 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
 }
 
 /**
+ * The doc text an operation or a webhook carries for its request body
+ * (`Operation.requestBodyDescription`, `Webhook.requestBodyDescription`): the
+ * Request Body Object's own `description` — `body` is read after a
+ * `components/requestBodies` `$ref` is resolved — when it has non-whitespace
+ * content, else the `description` written on the schema of the content entry
+ * the pick reads (`selected`, from `selectRequestBodyContent`), as it stands
+ * there: a `$ref` is not followed, so a component's text stays on its model,
+ * while a `description` written beside the `$ref` is read, as a field reads
+ * one. `undefined` when neither has content; a body none of whose media
+ * types is read has no `selected` and carries its own text alone. The text
+ * is kept verbatim. Every reader of a body — the operation extractor and the
+ * webhook builder — takes the body's doc text from here.
+ */
+export function requestBodyDescriptionOf(
+  body: RequestBodyObject | undefined,
+  selected: SelectedRequestBodyContent | undefined,
+): string | undefined {
+  return presentText(body?.description) ?? presentText(selected?.schema?.description);
+}
+
+/**
  * The type of a picked request body that declares no schema: a binary body is
  * a binary string, a text body a string. A JSON or form body is picked only
  * with a schema (`REQUEST_BODY_MEDIA_TYPES`), so for those encodings this is
@@ -3576,10 +3590,12 @@ interface RequestTypingContext {
   componentSchemas?: Record<string, SchemaObject>;
 }
 
-/** The request body an operation carries: the picked entry typed, and every declared media type with its type. */
+/** The request body an operation carries: the picked entry typed, every declared media type with its type, and its doc text. */
 interface ExtractedRequestBody {
   body?: TypeRef;
   encoding?: RequestBodyEncoding;
+  /** The body's doc text (`Operation.requestBodyDescription`, `requestBodyDescriptionOf`); absent when there is none. */
+  description?: string;
   /** The picked entry's essence (`Operation.requestBodyContentType`); set exactly when `body` is. */
   contentType?: string;
   contentTypes?: string[];
@@ -3614,9 +3630,10 @@ function requestModelStem(op: OperationObject | undefined, pathModelBaseName: st
  * Read an operation's request body: the content entry the pick chooses
  * (`selectRequestBodyContent`) typed as `body` with its `encoding`, and every
  * media type the body declares as `contentTypes` / `contents`, the picked
- * entry sharing `body`'s TypeRef (`extractRequestBodyContents`). A body none
+ * entry sharing `body`'s TypeRef (`extractRequestBodyContents`), and the
+ * body's doc text as `description` (`requestBodyDescriptionOf`). A body none
  * of whose media types is read is reported once and carried in `contents`
- * alone.
+ * alone, with its own `description` when it declares one.
  */
 function extractRequestBody(
   body: RequestBodyObject | undefined,
@@ -3637,7 +3654,8 @@ function extractRequestBody(
     requestModelStem(op, pathModelBaseName),
     ctx,
   );
-  return { ...primary, ...contents };
+  const description = requestBodyDescriptionOf(body, selected);
+  return { ...primary, ...contents, ...(description !== undefined && { description }) };
 }
 
 /**
@@ -3770,7 +3788,7 @@ function typePickedRequestBody(
     }
     inlineModels.push({
       name: contextName,
-      description: undefined,
+      description: schema.description,
       ...externalDocsEntry(schema.externalDocs),
       fields,
       ...deprecatedEntry(schema),
@@ -4196,10 +4214,11 @@ interface ResponseTypingContext {
   /** `components/responses`, for a response written as a Reference Object. */
   componentResponses?: Record<string, Record<string, unknown>>;
   /**
-   * Whether a `description` written beside a response `$ref` overrides the
-   * component's (OAS 3.1) or is ignored (OAS 3.0); see `resolveResponseRef`.
+   * Whether a `description` written beside a response or header `$ref`
+   * overrides the component's (OAS 3.1) or is ignored (OAS 3.0); see
+   * `followReference`. Absent, it overrides.
    */
-  refSiblingDescriptions?: 'override' | 'ignore';
+  refSiblingDescriptions?: SiblingDocs;
   /**
    * The model name each component response's inline body is shared under
    * (`resolveComponentResponseModelNames`). Absent, every component keeps
@@ -4658,7 +4677,7 @@ function extractResponseHeaders(
     // media type is already carried by the response's `content` map.
     if (folded === 'content-type') continue;
 
-    const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel);
+    const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel, ctx.refSiblingDescriptions);
     if (!header) continue;
 
     // A Header Object declares `schema` or a single-entry `content` map; the

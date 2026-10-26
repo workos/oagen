@@ -67,6 +67,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `pagination` — Auto-paging iterator generation (cursor, offset, page, link-header strategies; optional `endOfIteration` stop field)
 - `requestBodyEncoding` — Content-type handling: json (`application/json` and any `+json` media type), form-data, form-urlencoded, binary, text
 - `requestBodyRequired` — Whether the body argument is mandatory or optional
+- `requestBodyDescription` — The request body's doc text (the Request Body Object's own, else its picked schema's), for the body argument's doc tag; also on `Webhook`
 - `requestBodyContentType` — The media type to send as `Content-Type` (the picked entry's essence, `application/merge-patch+json`)
 - `injectIdempotencyKey` — Whether to inject an idempotency key header
 
@@ -177,7 +178,7 @@ For each IR field from Step 2, search for references to the field name in the em
 - The field is used in conditional logic or output generation
 - The field is iterated over (e.g., `op.cookieParams`, `op.successResponses`)
 
-Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.requestBodyContentType`, `\.requestBodyContentTypes`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
+Use `Grep` with patterns like `\.description`, `\.externalDocs`, `\.readOnly`, `\.writeOnly`, `\.deprecated`, `\.default`, `\.example`, `\.examples`, `\.async`, `\.cookieParams`, `\.successResponses`, `\.responseHeaders`, `\.responseDescription`, `\.responseContentTypes`, `\.defaultResponse`, `\.rangeResponses`, `\.servers`, `\.webhooks`, `\.typeParams`, `\.pagination`, `\.auth`, `\.requestBodyEncoding`, `\.requestBodyRequired`, `\.requestBodyDescription`, `\.requestBodyContentType`, `\.requestBodyContentTypes`, `\.injectIdempotencyKey`, `\.discriminator`, `\.compositionKind`, `\.format`, `\.constraints` scoped to the emitter source directory.
 
 ### 3c: Intentional Skips
 
@@ -242,19 +243,20 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 
 ### HIGH priority suggestions
 
-| IR Field                           | What to Generate                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Missing TypeRef kinds              | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                             |
-| `ApiSpec.auth`                     | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                |
-| `Operation.pagination`             | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`       |
-| `Operation.requestBodyEncoding`    | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                     |
-| `Operation.requestBodyRequired`    | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out |
-| `Operation.requestBodyContentType` | Send it as the `Content-Type` header, producing parameters such as a multipart boundary yourself                                |
-| `Operation.injectIdempotencyKey`   | Generate and attach `Idempotency-Key` header on applicable requests                                                             |
-| `UnionType.discriminator`          | Tagged union deserialization using the discriminator property and mapping                                                       |
-| `UnionType.compositionKind`        | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                         |
-| `PrimitiveType.format`             | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                         |
-| `ErrorResponse.type`               | Typed exception/error classes per status code                                                                                   |
+| IR Field                           | What to Generate                                                                                                                    |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Missing TypeRef kinds              | Add cases to type-mapping switch; use `assertNever` for compile-time exhaustiveness                                                 |
+| `ApiSpec.auth`                     | Client constructor auth configuration (API key header, bearer token, OAuth flow)                                                    |
+| `Operation.pagination`             | Auto-paging iterator/generator that handles cursor, offset, page, or link-header strategies and stops on `endOfIteration`           |
+| `Operation.requestBodyEncoding`    | Set correct Content-Type header; use multipart handling for form-data, raw bytes for binary                                         |
+| `Operation.requestBodyRequired`    | Make the body argument mandatory when `true`; when `false`, make it optional and omit the body only if the caller leaves it out     |
+| `Operation.requestBodyDescription` | Print it as the body argument's doc text (a `@param body` tag); `Webhook.requestBodyDescription` documents the payload the same way |
+| `Operation.requestBodyContentType` | Send it as the `Content-Type` header, producing parameters such as a multipart boundary yourself                                    |
+| `Operation.injectIdempotencyKey`   | Generate and attach `Idempotency-Key` header on applicable requests                                                                 |
+| `UnionType.discriminator`          | Tagged union deserialization using the discriminator property and mapping                                                           |
+| `UnionType.compositionKind`        | Distinguish allOf (merge/inherit) from oneOf (exclusive union) from anyOf (open union) in serialization                             |
+| `PrimitiveType.format`             | Map formats to language types (e.g., `date-time` → `DateTime`/`OffsetDateTime`/`Time`, `uuid` → `UUID`)                             |
+| `ErrorResponse.type`               | Typed exception/error classes per status code                                                                                       |
 
 ### MEDIUM priority suggestions
 

@@ -161,6 +161,14 @@ export interface Webhook {
   /** Present, and `true`, only when the document marks the request body `required`. */
   requestBodyRequired?: boolean;
   /**
+   * Doc text for the payload, read as `Operation.requestBodyDescription`
+   * is: the Request Body Object's own `description`, else the `description`
+   * written on the schema of the content entry `requestBody` is read from (a
+   * `$ref` is not followed). Present only when one of the two has
+   * non-whitespace content, kept verbatim.
+   */
+  requestBodyDescription?: string;
+  /**
    * Media types the payload declares under `content`, in document order and
    * exactly as written, read as `Operation.requestBodyContentTypes` is.
    * Present only when at least one is declared.
@@ -336,6 +344,25 @@ export interface Operation {
    * `requestBody` is; an operation without a body has no entry.
    */
   requestBodyRequired?: boolean;
+  /**
+   * Doc text for the request body, e.g. "The pet to add to the shelter." —
+   * what an emitter prints for the body argument, as `responseDescription`
+   * is what it prints for the return. The Request Body Object's own
+   * `description`, read after a `components/requestBodies` `$ref` is
+   * resolved; when that has no non-whitespace content, the `description`
+   * written on the schema of the content entry `requestBody` is read from,
+   * as it stands there: a `$ref` is not followed, so a component's text
+   * stays on its model, while a `description` written beside the `$ref` is
+   * read. When both have content the body's own wins. The schema's text is
+   * also the `description` of the model an inline object body is
+   * materialized as (`<Op>Request`); for a body no single model carries —
+   * an inline `oneOf`, an array, a primitive, an inline enum — this field
+   * is the only place that text reaches. Present only when one of the two
+   * has non-whitespace content, kept verbatim. The body's own text is
+   * carried whether or not a media type is read as `requestBody`; the
+   * schema's is read only from the entry that is.
+   */
+  requestBodyDescription?: string;
   /**
    * Media types the request body declares under `content`, in document
    * order and exactly as written (`application/json; charset=utf-8`,
