@@ -894,8 +894,14 @@ describe('modelAdmits', () => {
     expect(modelAdmits(base, model([{ ...field('a', false), default: 'x' }]))).toBe(false);
     expect(modelAdmits(base, model([{ ...field('a', false), constraints: { minLength: 1 } }]))).toBe(false);
     expect(modelAdmits(base, model([{ ...field('a', false), deprecated: true }]))).toBe(false);
-    expect(modelAdmits(base, model([field('a', false)], { deprecated: true }))).toBe(false);
     expect(modelAdmits(base, model([field('a', false)], { constraints: { minProperties: 1 } }))).toBe(false);
+    // The model's own flag is not shape (issue #312): a live owner admits a
+    // deprecated candidate, a deprecated owner only a deprecated one.
+    expect(modelAdmits(base, model([field('a', false)], { deprecated: true }))).toBe(true);
+    expect(modelAdmits(model([field('a', false)], { deprecated: true }), base)).toBe(false);
+    expect(
+      modelAdmits(model([field('a', false)], { deprecated: true }), model([field('a', false)], { deprecated: true })),
+    ).toBe(true);
     // Documentation is not shape.
     expect(modelAdmits(base, model([{ ...field('a', false), description: 'doc' }], { description: 'doc' }))).toBe(true);
   });

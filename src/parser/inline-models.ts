@@ -314,6 +314,12 @@ export function schemaShapeKey(schema: SchemaObject): string {
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'example', 'examples']);
 /** Model properties outside its shape: the name, its documentation (description and link), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', 'description', 'externalDocs', 'fields']);
+/** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readName`. */
+const MODEL_STRUCTURE_KEYS: ReadonlySet<string> = new Set(['variants', 'compositionKind', 'discriminator']);
+/** Model properties outside `modelPropertiesKey`: the identity, the fields and the union structure, each read on its own. */
+const MODEL_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, ...MODEL_STRUCTURE_KEYS]);
+/** `MODEL_PROPERTY_KEYS_OMITTED` and the model's own `deprecated`, which `modelPropertiesAdmit` reads on its own (`flagAdmits`); every other property is compared verbatim. */
+const MODEL_ADMIT_KEYS: ReadonlySet<string> = new Set([...MODEL_PROPERTY_KEYS_OMITTED, 'deprecated']);
 
 /**
  * Shape of a model, independent of field order, name and documentation:
@@ -343,19 +349,78 @@ function fieldShapeKey(field: Field): string {
 }
 
 /**
+ * `modelFingerprint` read without the model's own `deprecated`: the shape a
+ * deprecated copy and a live one of one schema share. What a shape the SDK
+ * sends must agree with a declared model on (`modelShares`), and what the
+ * merge passes compare two inline copies of one name by when only the flag
+ * tells them apart (`differOnlyByDeprecation`).
+ */
+export function shapeFingerprint(model: Model): string {
+  return modelFingerprint({ ...model, deprecated: undefined });
+}
+
+/**
  * A model's shape beside its fields: its limits, type parameters,
- * `deprecated`, variants (through `readShape`) and dispatch rules, the
- * mapping's targets read under `options.readName` as the variants are.
+ * `deprecated` (unless `omit` leaves it out, as `modelAdmits` does), variants
+ * (through `readShape`) and dispatch rules, the mapping's targets read under
+ * `options.readName` as the variants are.
  */
 function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
-  const rest = omitKeys(model, MODEL_IDENTITY_KEYS);
-  if (model.variants) rest.variants = model.variants.map((variant) => readShape(variant, options));
-  if (model.discriminator) rest.discriminator = readDiscriminator(model.discriminator, options.readName);
-  return stableStringify(rest);
+  return `${modelPropertiesKey(model)}${modelStructureKey(model, options)}`;
+}
+
+/**
+ * A model's union structure as one string — its composition keyword, its
+ * variants (through `readShape`) and its dispatch rules, the mapping's
+ * targets read under `options.readName` as the variants are. What
+ * `modelAdmits` compares beside the fields and the model's properties
+ * (`modelPropertiesAdmit`); the list-envelope pass compares the same parts
+ * by structure on its own.
+ */
+function modelStructureKey(model: Model, options: ShapeReadOptions = {}): string {
+  const structure: Record<string, unknown> = {};
+  if (model.compositionKind) structure.compositionKind = model.compositionKind;
+  if (model.variants) structure.variants = model.variants.map((variant) => readShape(variant, options));
+  if (model.discriminator) structure.discriminator = readDiscriminator(model.discriminator, options.readName);
+  return stableStringify(structure);
+}
+
+/**
+ * A model's own properties as `modelPropertiesAdmit` reads them, as one
+ * string: everything but its identity (name and documentation), its fields
+ * and its union structure — `deprecated`, limits (`constraints`), type
+ * parameters, whatever else the IR adds to a model. `modelFingerprint`
+ * carries it beside the fields and the structure, and the list-envelope
+ * pass keys a companion's shape by it (`fingerprintModel`), so the shapes
+ * it counts agree with the folds it allows.
+ */
+export function modelPropertiesKey(model: Model): string {
+  return stableStringify(omitKeys(model, MODEL_PROPERTY_KEYS_OMITTED));
+}
+
+/**
+ * Whether `owner` admits `candidate` in the model's own properties — what
+ * `modelAdmits` reads beside the fields and the union structure: the two
+ * agree on `deprecated` as `flagAdmits` reads it (a live owner admits either
+ * flag, a deprecated owner only a deprecated candidate), and every other
+ * property — the model's limits (`minProperties`, `dependentRequired`, …),
+ * its type parameters, whatever else the IR adds to a model — is identical,
+ * since the owner's definition is what every site reads after a fold.
+ * `MODEL_ADMIT_KEYS` names the properties read on their own, so a property
+ * added to `Model` is compared verbatim until it is listed there. The one
+ * definition of a model's properties a fold must preserve: `modelAdmits`
+ * applies it with the structure read by key, and the list-envelope pass
+ * (`admits`) with the structure compared on its own.
+ */
+export function modelPropertiesAdmit(owner: Model, candidate: Model): boolean {
+  if (!flagAdmits(owner, candidate)) return false;
+  return stableStringify(omitKeys(owner, MODEL_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, MODEL_ADMIT_KEYS));
 }
 
 /** Field properties `fieldAdmits` reads on their own — the type and the requiredness — beside the documentation it ignores; every other property is compared verbatim. */
-const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required']);
+const FIELD_ADMIT_KEYS: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type', 'required', 'deprecated']);
+/** Field properties outside `fieldPropertiesKey`: the documentation and the type, which the list-envelope pass compares by structure on its own. */
+const FIELD_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...FIELD_DOC_KEYS, 'type']);
 
 /**
  * How `modelAdmits`, `fieldAdmits` and `typeShapeKey` read a shape before
@@ -394,34 +459,74 @@ export interface ShapeReadOptions {
  * optional on `owner`, and a field type `candidate` leaves non-null may be
  * `nullable<…>` on `owner`. Only the field type's own nullable wrapper is
  * read that way; a wrapper deeper down (an array's items) must agree. The
- * models' own limits, type parameters, variants, dispatch rules and
- * `deprecated` must agree, and a model reference is compared by name — the
+ * models' own properties — limits, type parameters, whatever else the IR
+ * adds to a model — must be identical (`modelPropertiesAdmit`), their union
+ * structure — variants and dispatch rules — must agree
+ * (`modelStructureKey`), and a model reference is compared by name — the
  * name it carries, or the one `options.readName` reads it under: a nested
  * inline model keeps its name, so a parent whose child was renamed is not
- * admitted by one whose child was not. An identical shape is admitted.
+ * admitted by one whose child was not. The models' own `deprecated` is read
+ * apart from the shape (`flagAdmits`, through `modelPropertiesAdmit`): a
+ * live `owner` admits a deprecated `candidate` — the flag stays on the
+ * field, parameter or envelope field that wrote the candidate's schema, not
+ * on a second model of the same shape — and a deprecated `owner` admits only
+ * a deprecated one, so no live reference comes to resolve to a deprecated
+ * model by folding. An identical shape is admitted.
  *
  * The one rule by which an inline model folds onto a model the document
  * declares — a component schema, or a model a component's field minted — in
  * the merge passes (`settleSharedNames`) and in the shape registry of
- * `materializeInlineSchema` (`ownerShares`), and by which the `…Json` fold
- * (`collapseJsonSuffixModels`) collapses a `<Name>Json…` child onto the
- * `<Name>…` model that already holds its folded name, every reference read
- * under the fold; two inline models share a name on an identical fingerprint
- * only. A shape the SDK sends — a request body, a parameter — is the
- * callers' exception (`ownerShares`, `settleSharedNames`): it shares a
+ * `materializeInlineSchema` (`ownerShares`), both through `modelShares`, and
+ * by which the `…Json` fold (`collapseJsonSuffixModels`) collapses a
+ * `<Name>Json…` child onto the `<Name>…` model that already holds its folded
+ * name, every reference read under the fold; two inline models share a name
+ * on an identical fingerprint only. A shape the SDK sends — a request body,
+ * a parameter — is the callers' exception (`modelShares`): it shares a
  * component on an identical shape only, since typed as a looser component a
  * caller could leave out what the operation requires. The list-envelope pass
  * compares its companions by a structural rule of its own, since a
- * companion's nested models are named per operation.
+ * companion's nested models are named per operation; it reads the flag by
+ * `flagAdmits` as well.
  */
 export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
+  if (!modelPropertiesAdmit(owner, candidate)) return false;
   if (owner.fields.length !== candidate.fields.length) return false;
   const ownerFields = new Map(owner.fields.map((field) => [field.name, field]));
   for (const field of candidate.fields) {
     const own = ownerFields.get(field.name);
     if (!own || !fieldAdmits(own, field, options)) return false;
   }
-  return modelShapeKey(owner, options) === modelShapeKey(candidate, options);
+  return modelStructureKey(owner, options) === modelStructureKey(candidate, options);
+}
+
+/**
+ * Whether `owner`'s own `deprecated` admits `candidate`'s: a live `owner`
+ * admits a candidate of either flag, and a deprecated `owner` only a
+ * deprecated one. The flag is not part of the shape a fold compares: a
+ * deprecated inline schema identical to a live model it is named like shares
+ * that model, its flag carried by the site that wrote the schema (a
+ * `Field`, a `Parameter`, an envelope field) rather than by a second model
+ * of the same shape, while a live site never resolves to a deprecated model
+ * through a fold. Read by `modelAdmits` and `modelShares`, and by the
+ * list-envelope pass for a companion beside a component.
+ */
+export function flagAdmits(owner: Model, candidate: Model): boolean {
+  return !owner.deprecated || !!candidate.deprecated;
+}
+
+/**
+ * Whether `owner`, a model the document declares — a component schema, or a
+ * model a component's field minted — shares its name with `candidate`, an
+ * inline model: when it admits the shape (`modelAdmits`), or, for a shape
+ * the SDK sends (`sent`: a request body, a parameter), when the two are
+ * identical but for the model's own `deprecated` (`shapeFingerprint`), which
+ * is read as `modelAdmits` reads it (`flagAdmits`). The one question the
+ * merge passes (`settleSharedNames`) and the shape registry (`ownerShares`)
+ * ask of a declared model.
+ */
+export function modelShares(owner: Model, candidate: Model, sent = false): boolean {
+  if (!sent) return modelAdmits(owner, candidate);
+  return flagAdmits(owner, candidate) && shapeFingerprint(owner) === shapeFingerprint(candidate);
 }
 
 /**
@@ -429,15 +534,63 @@ export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOp
  * `modelAdmits` applies to each field, on its own. The two agree in
  * everything but their documentation — type (through `fieldTypeAdmits`,
  * model and inline enum references read under `options.readName`), limits, default, access
- * flags, their own `deprecated` — except that `owner` may be optional where
- * `candidate` is required, and `nullable<…>` where `candidate` is not. The
+ * flags, their own `deprecated` (`fieldFlagAgrees`: in either direction,
+ * since the owner's fields are what every site reads after a fold) — except
+ * that `owner` may be optional where `candidate` is required, and
+ * `nullable<…>` where `candidate` is not. Everything but the type is
+ * `fieldPropertiesAdmit`, which the list-envelope pass reads as well. The
  * `…Json` fold asks this of every field the base and the `…Json` model both
  * declare, since the base takes the `…Json` model's fields.
  */
 export function fieldAdmits(owner: Field, candidate: Field, options: ShapeReadOptions = {}): boolean {
+  return fieldPropertiesAdmit(owner, candidate) && fieldTypeAdmits(owner.type, candidate.type, options);
+}
+
+/**
+ * Whether `owner` admits `candidate` as the field of its name in everything
+ * but the type — what `fieldAdmits` reads beside `fieldTypeAdmits`: the two
+ * agree on their own `deprecated` (`fieldFlagAgrees`), `owner` is no
+ * stricter on requiredness (a field `candidate` requires may be optional on
+ * `owner`, never the reverse), and every other property — limits, default,
+ * access flags, whatever else the IR adds to a field — is identical
+ * (`FIELD_ADMIT_KEYS` names the ones read on their own, so a property added
+ * to `Field` is compared verbatim until it is listed there). The one
+ * definition of a field's properties a fold must preserve: `fieldAdmits`
+ * applies it with the type read by shape key, and the list-envelope pass
+ * (`admits`) with the type compared by structure, since a companion's nested
+ * models are named per operation.
+ */
+export function fieldPropertiesAdmit(owner: Field, candidate: Field): boolean {
+  if (!fieldFlagAgrees(owner, candidate)) return false;
   if (owner.required && !candidate.required) return false;
-  if (!fieldTypeAdmits(owner.type, candidate.type, options)) return false;
   return stableStringify(omitKeys(owner, FIELD_ADMIT_KEYS)) === stableStringify(omitKeys(candidate, FIELD_ADMIT_KEYS));
+}
+
+/**
+ * A field's properties as `fieldPropertiesAdmit` reads them, as one string:
+ * everything but its documentation and its type — requiredness, its own
+ * `deprecated`, limits, default, access flags. Two fields with the same key
+ * admit each other in everything but the type; the list-envelope pass keys
+ * a companion's shape by it (`fingerprintModel`) beside the structural key
+ * of the type, so the shapes it counts agree with the folds it allows.
+ */
+export function fieldPropertiesKey(field: Field): string {
+  return stableStringify(omitKeys(field, FIELD_PROPERTY_KEYS_OMITTED));
+}
+
+/**
+ * Whether `owner` and `candidate`, fields of one name, agree on their own
+ * `deprecated`, in either direction. A field's flag has no carrier but the
+ * field itself: after a fold every site reads the owner's fields, so an
+ * owner whose field is live would drop the notice a candidate's deprecated
+ * field gave its readers, and an owner whose field is deprecated would give
+ * a candidate's readers a notice its own schema never wrote. Read by
+ * `fieldAdmits` for every fold `modelAdmits` decides, and by the
+ * list-envelope pass's own structural comparison (`admits`), so no fold
+ * changes what any site's readers see of a field's flag.
+ */
+export function fieldFlagAgrees(owner: Field, candidate: Field): boolean {
+  return !!owner.deprecated === !!candidate.deprecated;
 }
 
 /** Whether `owner` admits every value of `candidate`'s type: the same type under the field's own nullable wrapper, which `owner` may carry where `candidate` does not. */

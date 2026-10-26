@@ -17,8 +17,8 @@ import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import {
   extractInlineModelsFromProperties,
-  modelAdmits,
   modelFingerprint,
+  modelShares,
   qualifyInlineModelName,
 } from './inline-models.js';
 
@@ -49,7 +49,7 @@ export interface InlineModelOwner {
   /**
    * The owner itself, for a model the document declares — a component schema
    * or a model a component's field minted — which shares its name with every
-   * shape it admits (`modelAdmits`). Absent for an operation's model, which
+   * shape it admits (`modelShares`). Absent for an operation's model, which
    * shares its name on an identical fingerprint only.
    */
   model?: Model;
@@ -57,16 +57,19 @@ export interface InlineModelOwner {
 
 /**
  * Whether the owner of a name shares it with `model`, whose fingerprint is
- * `fingerprint`: a declared model (`owner.model`) when it admits the shape —
- * the same fields and types, the owner no stricter on requiredness or
- * nullability, everything else identical — and an operation's model when the
- * fingerprints agree. A shape the SDK sends (`sent`: a request body, a
- * parameter) shares a declared model's name on an identical fingerprint
- * only: typed as a looser component, a caller could leave out what the
- * operation requires. The one question every clash check below asks.
+ * `fingerprint`: a declared model (`owner.model`) when it admits the shape
+ * (`modelShares`: the same fields and types, the owner no stricter on
+ * requiredness or nullability, everything else identical, the model's own
+ * `deprecated` read apart — a live owner shares with a deprecated copy, a
+ * deprecated owner only with a deprecated one), and an operation's model
+ * when the fingerprints agree, flag included. A shape the SDK sends (`sent`:
+ * a request body, a parameter) shares a declared model's name on an
+ * identical shape only, the flag read the same way: typed as a looser
+ * component, a caller could leave out what the operation requires. The one
+ * question every clash check below asks.
  */
 export function ownerShares(owner: InlineModelOwner, model: Model, fingerprint: string, sent = false): boolean {
-  return owner.model && !sent ? modelAdmits(owner.model, model) : owner.fingerprint === fingerprint;
+  return owner.model ? modelShares(owner.model, model, sent) : owner.fingerprint === fingerprint;
 }
 
 /**
@@ -445,7 +448,9 @@ function sameNames(a: string[], b: string[]): boolean {
  * is shared only when the owner shares it (`ownerShares`) — decided on the
  * trial's final models, after every rename — so a model whose references were
  * rewritten is never dropped as "already defined" in favour of an owner that
- * no longer matches it. The trial has no such clash left when it gets here
+ * no longer matches it. A deprecated model a live declared owner shares its
+ * name with is dropped the same way, with the warning the merge passes give
+ * such a copy, once per site. The trial has no such clash left when it gets here
  * (`runTrial` found none, or `renameClashing` cleared them all), so the
  * remaining branch is a guard against a regression, not an expected path.
  * The site's settlement — the stem it settled on and the renames made under
@@ -456,7 +461,16 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
   for (const model of trial.models) {
     const fingerprint = trial.fingerprints.get(model)!;
     const owner = options.registry.get(model.name);
-    if (owner && ownerShares(owner, model, fingerprint, options.sent)) continue;
+    if (owner && ownerShares(owner, model, fingerprint, options.sent)) {
+      // A deprecated copy a live declared model admits is announced once per
+      // site, as the merge passes announce one (`settleSharedNames`).
+      if (model.deprecated && owner.model && !owner.model.deprecated) {
+        console.warn(
+          `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
+        );
+      }
+      continue;
+    }
     if (owner !== undefined) {
       throw new Error(
         `Inline model "${model.name}" would overwrite a model of another shape; this is a bug in materializeInlineSchema.`,
