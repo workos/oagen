@@ -549,8 +549,11 @@ export function resolveDataPathFromSchema(
  * `<Op>Item3`, …, the first candidate that clashes with nothing; a shape
  * identical to a name's owner shares it and mints nothing, so items matching
  * a component `ListPetsItem` reference the component. The models minted are
- * recorded under the operation. Without `settle` — a dry run that only
- * reads names, a direct call — the items take `<Op>Item` as written.
+ * recorded under the operation; a reference written by sharing another
+ * site's model joins that site (`attachSharedRefs`), so a later rename of
+ * the shared model — a deprecated copy named like a live one — reaches this
+ * array too. Without `settle` — a dry run that only reads names, a direct
+ * call — the items take `<Op>Item` as written.
  */
 function typeInlineItems(
   items: SchemaObject,

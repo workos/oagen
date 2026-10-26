@@ -1859,14 +1859,19 @@ export function declareProperty(
  * never typed from one variant's value alone. Properties keep the order they
  * were first declared in.
  *
- * A schema reached twice is read once in each capacity: a reading under a
- * variant does not stand in for an always-applying one, so a schema shared
- * between a variant and a member — a YAML anchor, an object a `transformSpec`
- * reuses, a `$ref` written twice — still contributes its `required` and is
- * still followed when the member is reached (`done`). The walk reads
- * property lists only — it never descends into a property — so it is finite
- * for any component graph: a schema already read in the same capacity is not
- * read again, which is what stops a component that extends itself.
+ * A schema reached twice is read once in each capacity it is reached in —
+ * as an inline member (the merged model's own, unions included), through a
+ * `$ref` member (inherited, unions left to the component) or under a
+ * variant (`required` unread, `$ref`s not followed) — and only an inline
+ * reading stands for the others: a schema shared between a variant and a
+ * member (a YAML anchor, an object a `transformSpec` hook reuses, a `$ref`
+ * written twice) still contributes its `required` and is still followed
+ * when the member is reached, and a component's own object reused as an
+ * inline member still has its union read after the `$ref` reading left it
+ * to the component (`done`). The walk reads property lists only — it never
+ * descends into a property — so it is finite for any component graph: a
+ * schema already read in the same capacity is not read again, which is what
+ * stops a component that extends itself. `required` lists each name once.
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
@@ -1876,16 +1881,29 @@ export function mergeAllOfMembers(
   const required: string[] = [];
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
-  // The schemas read so far, by capacity. An always-applying reading is
-  // complete; a reading under a variant is not, so the same schema reached
-  // again as a member is read once more for its `required` and its `$ref`s.
-  const done = { unconditional: new Set<SchemaObject>(), conditional: new Set<SchemaObject>() };
+  // The schemas read so far, by capacity: `inline` (an always-applying
+  // member read as the merged model's own, unions included), `inherited`
+  // (reached through a `$ref` member, its unions left to its component) and
+  // `conditional` (under a variant, `required` unread and `$ref`s not
+  // followed). An inline reading is complete, so it stands for every
+  // capacity; an inherited or conditional reading is not, so the same schema
+  // reached again in another capacity is read once more for what that
+  // capacity contributes — a component's own object reused as an inline
+  // member (an object a `transformSpec` hook shares) still has its union
+  // read, a variant's object reused as a member still has its `required`
+  // read. A schema already read in the same capacity is not read again,
+  // which is what stops a component that extends itself.
+  const done = {
+    inline: new Set<SchemaObject>(),
+    inherited: new Set<SchemaObject>(),
+    conditional: new Set<SchemaObject>(),
+  };
   // `onBranch`: inside a `oneOf`/`anyOf` variant, whose properties are
   // optional and whose `$ref`s are not followed.
   const visit = (s: SchemaObject, origin: MergedProperty['origin'], onBranch: boolean): void => {
-    const mode = onBranch ? 'conditional' : 'unconditional';
-    if (done.unconditional.has(s) || done[mode].has(s)) return;
-    done[mode].add(s);
+    const capacity = onBranch ? 'conditional' : origin === null ? 'inline' : 'inherited';
+    if (done.inline.has(s) || done[capacity].has(s)) return;
+    done[capacity].add(s);
     if (s.$ref) {
       if (onBranch) return;
       const rawName = s.$ref.split('/').pop() ?? '';
@@ -1911,7 +1929,7 @@ export function mergeAllOfMembers(
     for (const [key, value] of Object.entries(s.properties ?? {})) {
       if (value) declareProperty(declared, key, value, origin, onBranch);
     }
-    if (s.required && !onBranch) required.push(...s.required);
+    if (s.required && !onBranch) for (const r of s.required) if (!required.includes(r)) required.push(r);
     for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
     // A nullable union wrapper — one non-null variant beside `null`, decided
     // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
