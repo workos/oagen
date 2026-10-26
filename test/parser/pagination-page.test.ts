@@ -951,9 +951,12 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
       // by that type.
       pair: { allOf: [{ type: 'boolean' }, { type: 'boolean' }] },
       bounded: { type: 'integer', allOf: [{ minimum: 0 }] },
-      // A `required` beside a lone `$ref` member makes the merged model the
-      // IR builds, not the component: left as written, as `readInlineAllOf` reads it.
-      withRequired: { allOf: [{ $ref: '#/components/schemas/Flag' }], required: ['x'] },
+      // A `required` beside a lone `$ref` member to a component that declares
+      // properties makes the merged model the IR builds, not the component:
+      // left as written, as `readInlineAllOf` reads it. Beside a `$ref` to a
+      // boolean it constrains nothing, and the member is the boolean.
+      withRequired: { allOf: [{ $ref: '#/components/schemas/Meta' }], required: ['total'] },
+      flagWithRequired: { allOf: [{ $ref: '#/components/schemas/Flag' }], required: ['x'] },
     };
     const body: SchemaObject = { type: 'object', properties };
     expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'has_more' }, body, schemas)).toBeUndefined();
@@ -966,6 +969,7 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'withRequired' }, body, schemas)).toBe(
       'endOfIteration path "withRequired" is not a boolean field, as kind "hasMore" requires',
     );
+    expect(bodyEndOfIterationProblem({ kind: 'hasMore', path: 'flagWithRequired' }, body, schemas)).toBeUndefined();
     // Detection reads `has_more` through the same member.
     expect(detectEndOfIteration(properties, 'data', schemas)).toEqual({ kind: 'hasMore', path: 'has_more' });
   });
