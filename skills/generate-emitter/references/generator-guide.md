@@ -90,7 +90,9 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `deprecated?` — present and `true` when the schema says `deprecated: true`
   - `fields` — `Field[]`
   - `typeParams?` — generic type parameters (`name`, `default?: TypeRef`)
-  - `discriminator?` — `{ property, mapping }` when the model is a discriminated union; generate a dispatcher instead of a data class
+  - `variants?` — `TypeRef[]` when the model is a named union (a component schema that is itself a `oneOf`/`anyOf`): one entry per non-null variant, in document order; emit the model as a union of these, not as a data class — `fields` then holds only the inline variants' properties merged as optional fields. A `$ref` to a named union that admits `null` arrives as `nullable<model>`
+  - `compositionKind?` — `oneOf` | `anyOf`, the keyword that produced `variants`; present exactly when `variants` is
+  - `discriminator?` — `{ property, mapping }` when the model is a discriminated union: a named `oneOf` or `anyOf` with an explicit `discriminator:` keyword (its `mapping` taken as written, or paired from each variant's const on the property when the keyword declares none); a named `oneOf` without the keyword whose variants are all nameable (a `$ref`, or an inline object) and pin distinct string constants on one property — an `anyOf` is never inferred, so an `anyOf` of `Cat` and `Dog` with distinct `kind` consts carries no `discriminator`; or an allOf+oneOf dispatcher (no `variants`; the mapping alone names the variant models). Generate a dispatcher instead of a data class; `mapping` values are IR model names. A named union without one is emitted as an undiscriminated union of `variants`
   - `constraints?` — the object schema's own `minProperties` / `maxProperties` / `dependentRequired`
   - `extensions?` — the `x-*` keys of the schema the model was built from, keys as written and values verbatim, less `x-enum-descriptions` / `x-enumDescriptions`; read the keys you know (`x-since`) and escape a value before writing it into source, as you escape a description
 - Each `Field` has:
@@ -99,9 +101,10 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `type` — `TypeRef`
   - `required` — `boolean`
   - `description?`, `readOnly?`, `writeOnly?`, `deprecated?` — doc text and modifier flags
+  - `externalDocs?` — the field schema's own link (a `$ref` sibling's included), for a `@see`-style tag. A bare `$ref` yields none — the referenced model, union or enum carries its own — unless it names an array component, which has no model to carry it: the field then takes the component's, by the one rule `description`, `deprecated`, `externalDocs`, `extensions` and `example` / `examples` share (never `constraints`)
   - `default?`, `example?`, `examples?` — spec-declared values (`example` is the schema's `example`, else `examples[0]`)
   - `constraints?` — validation keywords on the field's schema (`Constraints`)
-  - `extensions?` — the field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none), read like `constraints`; escape a value before writing it into source
+  - `extensions?` — the field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array component, whose keys the field then carries, as it carries that component's `externalDocs`); escape a value before writing it into source
 - Output: One file per model, using the exact model pattern from the design doc
 - Use `type-map.ts` to convert field types
 
@@ -142,7 +145,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `externalDocs?` — the operation's own link, when usable
   - `httpMethod` — `get` | `post` | `put` | `patch` | `delete` | `head` | `options` | `trace`
   - `path` — e.g. `/organizations/{id}`
-  - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty. Each `name` is as the spec wrote it; a parameter's identity is its location plus name, a header's name compared case-insensitively (`parameterKey` from `@workos/oagen`), so one list never holds two headers that differ in case alone
+  - `pathParams`, `queryParams`, `headerParams` — `Parameter[]` per location; always present, possibly empty. Each `name` is as the spec wrote it; a parameter's identity is its location plus name, a header's name compared case-insensitively (`parameterKey` from `@workos/oagen`), so one list never holds two headers that differ in case alone. An `Idempotency-Key` header parameter (any case) is not in `headerParams`: it sets `injectIdempotencyKey` instead, and its `description`, `required` and schema do not reach the IR
   - `bodyOwnedQueryParams?` — query declarations the request body also owns; never serialize these to the URL
   - `cookieParams?` — `Parameter[]`, present only when the operation declares cookie parameters
   - `requestBody?` — `TypeRef` of the request body, read from one `content` entry by media type essence (parameters and case aside): `application/json`, else a `+json` media type, else `multipart/form-data`, else `application/x-www-form-urlencoded` (each only with a schema), else `application/octet-stream`, else `text/plain`; absent, with a parser warning, when none of the declared media types is read
@@ -159,15 +162,16 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `successResponses?` — every declared 2xx and 3xx response (`statusCode`, `type`, `headers?`, `description?`, `contentTypes?`, `contents?`), set only when more than one is declared; a 3xx entry's `type` is `unknown`
   - `errors` — `ErrorResponse[]` for 4xx/5xx (`statusCode`, `type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; the two lists only when they say something `type` does not)
   - `defaultResponse?`, `rangeResponses?` — the `default` response and the `1XX`–`5XX` range responses (`type?`, `headers?`, `description?`, `contentTypes?`, `contents?`; a range entry also carries `range`), present only when declared. Resolve a status as the explicit entry, then its range, then `defaultResponse`: an operation declaring only `2XX` or `default` has `response` as `unknown`, and its real body type lives here
-  - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `link-header`), `param`, `limitParam?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`
-  - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header
-  - `deprecated?`, `async?` — method markers
+  - `pagination?` — `PaginationMeta` when the operation is paginated: `strategy` (`cursor` | `offset` | `page` | `link-header`), `param`, `limitParam?`, `pageStart?`, `dataPath?`, `dataDescription?`, `itemType`, `envelopeFields?`, `endOfIteration?`. To reach the next page: `cursor` sends the cursor the previous response returned in `param`; `offset` adds the items received to `param` and sends the page size in `limitParam`; `page` sends `pageStart` first and adds exactly one per request; `link-header` follows the `Link: <…>; rel="next"` response header. Every iterator stops on an empty page; `endOfIteration` (`{ kind: 'hasMore' | 'totalPages' | 'totalCount', path }`), when present, names the response field that ends it one request sooner, whatever the strategy: `hasMore` — stop when it is `false`; `totalPages` — stop once the pages fetched so far reach it (`page - pageStart + 1 >= totalPages` under `page`, `floor(offset / limit) + 1 >= totalPages` under `offset`, the number of requests made under `cursor`); `totalCount` — stop once the items received so far reach it
+  - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header parameter on the operation, which is then left out of `headerParams`: generate and send the header yourself
+  - `deprecated?` — present, and `true`, only when the Operation Object says `deprecated: true`
+  - `async?` — the Operation Object's `x-oagen-async` extension, carried as the document writes it (no test or coercion, so a non-boolean value such as `'yes'` arrives as that string); test `=== true`
   - `tags?` — the operation's `tags` in document order, present only when at least one usable entry remains; for grouping or doc comments (the parser already named the service from the first tag)
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
   - `extensions?` — the Operation Object's own `x-*` keys, keys as written and values verbatim, less the ones the parser reads into typed fields (`x-pagination`, `x-oagen-async`, `x-mutually-exclusive-parameter-groups`, `x-mutually-exclusive-body-groups`); read the keys you know (`x-idempotent`, `x-since`) and escape a value before writing it into source
-- Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `default?`, `example?`, `examples?`, `style?`, `explode?`, `contentType?` (the `content` key a `content`-declared parameter is serialized under, e.g. `application/json`: serialize the value in that media type instead of by `style`/`explode`), `constraints?`
+- Each `Parameter` has `name`, `type`, `required`, `description?`, `deprecated?`, `externalDocs?` (the parameter schema's link, else its `$ref` target's), `default?`, `example?`, `examples?`, `style?`, `explode?`, `contentType?` (the `content` key a `content`-declared parameter is serialized under, e.g. `application/json`: serialize the value in that media type instead of by `style`/`explode`), `constraints?`
   - `type` may reference a model the parser created for an inline object parameter (`style: deepObject` → `PetsFilter`), or an array, map or union of such, exactly as a response header's does; render it as that model and serialize it per `style`/`explode`
 - Output: One file per service/resource
 - Handle:
@@ -201,6 +205,7 @@ Mostly static code with namespace interpolation. Must include:
 - HTTP request method accepting: HTTP method, path, optional query params, optional body, a model type for deserialization, a page type for paginated responses, an optional idempotency key, and per-request options. Use the target language's idiomatic parameter passing convention.
 - Model and page parameters for response deserialization
 - Response handling: null/void model type returns nil/null, page type creates paginated response, model type creates model instance
+- Response media types: `Operation.response` is the body of one media type, the parser's fixed-order pick, while `responseContentTypes` / `responseContents` (and `contentTypes` / `contents` on each `SuccessResponse`, `ErrorResponse`, `DefaultResponse` and `RangeResponse`) list every media type the response declares with a type per media type. When a response offers several, send the picked one as `Accept` — or expose an option per media type and decode the body by the `Content-Type` the server returns — rather than assuming one body type per response
 - HTTP request method dispatching (GET/POST/PUT/PATCH/DELETE)
 - Exponential backoff retry with jitter, capped at a reasonable maximum (see the language's SDK design doc for the specific formula)
 - Retryable statuses: 429, 500, 502, 503, 504
@@ -228,6 +233,12 @@ Without these, `oagen verify` will fail with "No entry point found" because the 
 Mostly static code with namespace interpolation. Required error types:
 
 - `APIError` (base), `AuthenticationError` (401), `NotFoundError` (404), `UnprocessableEntityError` (422), `RateLimitExceededError` (429), `ServerError` (500+), `NetworkError` (connection failures), `ConfigurationError` (missing API key)
+
+Type the error bodies the spec declares, not only the status codes:
+
+- `ErrorResponse.type` on each `Operation.errors` entry is the body of that status code: a `$ref` body references the component model; an inline object body is a model the parser mints as `<Op>Error<code>` (`GetPetError404`, nested objects `GetPetError404Details`) that `generateModels` emits; a body that is itself an inline enum (or an array of one) is an `Enum` of the same name in `spec.enums` that `generateEnums` emits. Give the raised error a typed `body` (or a typed subclass per status code) from it
+- `Operation.defaultResponse` (the `default` response) and `Operation.rangeResponses` (`1XX`–`5XX`) type the statuses an operation does not list: resolve a status as the explicit entry, then its range, then `defaultResponse`. In practice `defaultResponse.type` is the API's error shape, so an error for a status not in `errors` can still carry a typed body; a `4XX`/`5XX` range body is named `<Op>Error4Xx` / `<Op>Error5Xx`. These two fields also hold the success body of an operation with no explicit 2xx (`response` is `unknown` there; use the `2XX` range's `type`, then `defaultResponse.type`)
+- Each error, `default` and range entry carries its `headers` (`Retry-After` on a 429) and `description` for the error's accessors and doc comment. Read `contentTypes` / `contents` whenever present, even for a single media type: `type` is the JSON body alone (`application/json`, else the first `+json` media type), so a body offered only as `text/plain` or another non-JSON media type leaves `type` unset and its type lives in `contents[0].type`
 
 **For Scenario A:** Match the existing SDK's error class names and hierarchy exactly. If the SDK names it `BadRequestException` instead of `UnprocessableEntityError`, use the SDK's name.
 
