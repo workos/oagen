@@ -583,6 +583,43 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
 }
 
 /**
+ * The array schema `schema` is, once a nullable wrapper of any spelling is
+ * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
+ * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
+ * written with or without `items` beside it — and `undefined` when it is
+ * not an array: `unwrapNullableSchema`, the one definition the model side
+ * unwraps by, then `isArraySchema`, the one test every site makes. So a
+ * list envelope's data array, an array response body and an `allOf`-merged
+ * array property are arrays here whatever wrapper they wear, as
+ * `schemaToTypeRef` types them `nullable<array<…>>`. A `$ref` is a reference
+ * and is not looked through: a `$ref` to an array component is typed as the
+ * array the component declares by `schemaToTypeRef` itself, with the items
+ * the component pass built (`isArrayComponentRef` says whether a property
+ * is one), and the explicit `dataPath` walk (`resolveBareSchema`) is the one
+ * place any other reference is followed.
+ */
+export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
+  const bare = unwrapNullableSchema(schema);
+  return isArraySchema(bare) ? bare : undefined;
+}
+
+/**
+ * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
+ * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
+ * `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to
+ * one non-null variant (`nullableUnionBranch`). The one test for the places
+ * the response path builds an array TypeRef itself (`nullableIf`) or merges
+ * two array declarations (`combineDeclarations`).
+ */
+export function declaresNull(schema: SchemaObject): boolean {
+  return (
+    (Array.isArray(schema.type) && schema.type.includes('null')) ||
+    (schema.nullable === true && schema.type !== undefined) ||
+    nullableUnionBranch(schema) !== undefined
+  );
+}
+
+/**
  * `unwrapNullableSchema` for a schema a model is built from, carrying the
  * wrapper's limits, `deprecated` and `externalDocs` onto the branch it
  * unwraps to. The type-array and `nullable: true` forms unwrap by spreading,
@@ -3573,17 +3610,8 @@ function readComponentAllOfMember(
   seen: Set<SchemaObject>,
   readVariants = true,
 ): AllOfDiscriminator | undefined {
-  let resolved = member;
-  const chain = new Set<SchemaObject>();
-  while (resolved.$ref) {
-    const segments = resolved.$ref.split('/');
-    const refName = segments[segments.length - 1];
-    if (!schemas || !refName || !Object.hasOwn(schemas, refName)) break;
-    const target = schemas[refName]!;
-    if (seen.has(target) || chain.has(target)) return undefined;
-    chain.add(target);
-    resolved = target;
-  }
+  const resolved = followMemberRefs(member, schemas, seen);
+  if (!resolved) return undefined;
   if (resolved.allOf) {
     readComponentAllOf(name, resolved, schemas, ledger, required, seen);
     return undefined;
@@ -3805,6 +3833,66 @@ function detectAllOfVariantDiscriminator(
   return { property: candidateProperty, mapping };
 }
 
+/**
+ * The component an `allOf` member names, followed through a chain of
+ * references (`Hop: { $ref: Alias }`), or the member itself when it is no
+ * reference; `undefined` when the chain repeats or reaches a component
+ * already read on this walk (`seen`), which then declares nothing more. The
+ * one reference-following every reader of a component's member shares:
+ * `readComponentAllOfMember` reads the member it lands on, and `memberUnion`
+ * finds the union it carries.
+ */
+function followMemberRefs(
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject>,
+): SchemaObject | undefined {
+  let resolved = member;
+  const chain = new Set<SchemaObject>();
+  while (resolved.$ref) {
+    const segments = resolved.$ref.split('/');
+    const refName = segments[segments.length - 1];
+    if (!schemas || !refName || !Object.hasOwn(schemas, refName)) break;
+    const target = schemas[refName]!;
+    if (seen.has(target) || chain.has(target)) return undefined;
+    chain.add(target);
+    resolved = target;
+  }
+  return resolved;
+}
+
+/**
+ * The union a component's `allOf` member carries, read through every wrapper
+ * `readComponentAllOfMember` reads the member through — a chain of
+ * references (`followMemberRefs`), then a nullable union wrapper
+ * (`nullableUnionBranch`) to its one non-null variant, the two alternating
+ * — and `undefined` for a member that carries none, or an `allOf` member
+ * (read as a component composed with `allOf`, never as a variant axis). The
+ * one way the variant builder (`extractDiscriminatedAllOfVariantModels`)
+ * finds a variant axis, so a union the member reader detects as a
+ * dispatcher is the union whose variant models are built, whichever wrapper
+ * it sits under (workos/oagen#308 merge review: a dispatcher detected
+ * through `{ oneOf: [{ oneOf: [A, B] }, { type: 'null' }] }` mapped its
+ * tags to models nothing built, since the builder looked at each direct
+ * member's union only).
+ */
+function memberUnion(
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): SchemaObject[] | undefined {
+  const seen = new Set<SchemaObject>();
+  let resolved: SchemaObject | undefined = member;
+  for (;;) {
+    resolved = followMemberRefs(resolved, schemas, seen);
+    if (!resolved || resolved.allOf) return undefined;
+    const branch = nullableUnionBranch(resolved);
+    if (!branch) return unionVariantsOf(resolved);
+    if (seen.has(resolved)) return undefined;
+    seen.add(resolved);
+    resolved = branch;
+  }
+}
+
 function extractDiscriminatedAllOfVariantModels(
   schema: SchemaObject,
   fallbackName: string,
@@ -3830,20 +3918,23 @@ function extractDiscriminatedAllOfVariantModels(
   // name (`Map`, `Object.fromEntries`), so a base property named
   // `constructor`, `toString` or `__proto__` reaches every variant.
   const members = componentAllOfMembers(schema);
-  // The variant axis: a `oneOf`/`anyOf` member (`unionVariantsOf`, the
-  // keyword test `readComponentAllOfMember` makes) whose variants pin one
-  // property to distinct consts — the reading `extractAllOfModel` makes of
-  // it (`detectAllOfVariantDiscriminator`) — so a variant model exists
-  // exactly when the component's model dispatches to it. A union that is
-  // not an axis is flattened into the model and builds no variant model
-  // here (workos/oagen#359 review: it did, and a model nested under such a
+  // The variant axis: a member carrying a `oneOf`/`anyOf` — read through a
+  // reference chain and a nullable wrapper exactly as `readComponentAllOfMember`
+  // reads it (`memberUnion`) — whose variants pin one property to distinct
+  // consts — the reading `extractAllOfModel` makes of it
+  // (`detectAllOfVariantDiscriminator`) — so a variant model exists exactly
+  // when the component's model dispatches to it. A union that is not an
+  // axis is flattened into the model and builds no variant model here
+  // (workos/oagen#359 review: it did, and a model nested under such a
   // variant took the name of the flattened field's own model).
-  const axes = new Set(
-    members.filter((m) => {
-      const variants = unionVariantsOf(m);
-      return variants !== undefined && detectAllOfVariantDiscriminator(variants, fallbackName) !== null;
-    }),
-  );
+  const axisVariants = new Map<SchemaObject, SchemaObject[]>();
+  for (const m of members) {
+    const variants = memberUnion(m, schemas);
+    if (variants !== undefined && detectAllOfVariantDiscriminator(variants, fallbackName) !== null) {
+      axisVariants.set(m, variants);
+    }
+  }
+  const axes = new Set(axisVariants.keys());
   if (axes.size === 0) return models;
   const ledger = new Map<string, PropertyDeclarations>();
   const baseRequired = new Set<string>();
@@ -3876,8 +3967,8 @@ function extractDiscriminatedAllOfVariantModels(
     [...ledger.values()].map((entry) => [entry.name, declaredComponentProperty(entry)]),
   );
 
-  for (const subSchema of axes) {
-    for (const variant of unionVariantsOf(subSchema) ?? []) {
+  for (const variants of axisVariants.values()) {
+    for (const variant of variants) {
       // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
       // OAuth branch is `allOf: [{ properties: {…} }, { oneOf: [first-party
       // sub-variants] }]`). The flattened object has merged properties and

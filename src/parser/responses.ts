@@ -1,9 +1,7 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
 import { toPascalCase, singularize } from '../utils/naming.js';
 import {
-  arraySchemaOf,
   collectObjectProperties,
-  declaresNull,
   detectEndOfIteration,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
@@ -12,6 +10,8 @@ import {
 } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
+  arraySchemaOf,
+  declaresNull,
   schemaToTypeRef,
   buildFieldFromSchema,
   classifyInlineSchema,
