@@ -14,6 +14,7 @@ import {
   resetInheritedModelRefs,
   type InlineModelBundle,
 } from '../../src/parser/inline-models.js';
+import { attachSharedRefs } from '../../src/parser/operations.js';
 import { collectModelRefs } from '../../src/ir/types.js';
 import type { Model, Operation, Service, TypeRef } from '../../src/ir/types.js';
 
@@ -770,10 +771,10 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
     // The schema pass lifted `PetStatus` from `Pet.status` itself
     // (`recordLiftedFieldModel`); the field extractor's copy folds onto it
     // when the fields are settled, and a `Status` header shared it in the
-    // registry (`sharedRefs`). The field's site holds the lifted object from
-    // the start and, at the merges, the header's reference too, so renaming
-    // it past a `status` query enum of the name repoints the field and the
-    // header.
+    // registry. The field's site holds the lifted object from the start,
+    // and the header's reference joins it once the operations are read
+    // (`attachSharedRefs`), so renaming it past a `status` query enum of
+    // the name repoints the field and the header.
     resetInheritedModelRefs();
     try {
       const lifted = body('PetStatus', 'code');
@@ -793,10 +794,11 @@ describe('a name one of the document’s enums holds (issue #303)', () => {
       });
       expect(settled).toEqual([]);
 
-      const bundles = fieldInlineModelBundles(groups, [pet, lifted], {
-        sharedRefs: new Map([[lifted, [headerRef]]]),
-      });
+      // The header's site minted nothing of its own: its root shares `PetStatus`.
+      const headerSite = { qualifier: 'Pet', roots: [headerRef], models: [] };
+      const bundles = [...fieldInlineModelBundles(groups, [pet, lifted]), headerSite];
       expect(bundles[0].models).toEqual([copy, lifted]);
+      attachSharedRefs(bundles, new Set(['Pet']));
       expect(bundles[0].roots).toContain(headerRef);
 
       let merged: Model[] = [];

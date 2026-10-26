@@ -583,6 +583,50 @@ describe('one name on one path: two methods never share it unless they are PUT a
     ]);
   });
 
+  it('never lands a renamed action on a name another operation on its path holds', () => {
+    // The action takes `createPets` back from `POST /pets`, but the GET on
+    // its path carries that operationId: the next free name is the one it
+    // has without the action rule.
+    expect(
+      names({
+        '/pets': { post: ok },
+        '/pets/create': { post: ok, get: { ...ok, operationId: 'createPets' } },
+      }),
+    ).toEqual([
+      'Pets.create                    POST   /pets',
+      'Pets.createPets                GET    /pets/create',
+      'Pets.createCreate              POST   /pets/create',
+    ]);
+    // The mirror: the GET is path-named and no action, the POST carries the operationId.
+    expect(
+      names({
+        '/pets': { post: ok },
+        '/pets/create': { get: ok, post: { ...ok, operationId: 'createPets' } },
+      }),
+    ).toEqual([
+      'Pets.create                    POST   /pets',
+      'Pets.listCreate                GET    /pets/create',
+      'Pets.createPets                POST   /pets/create',
+    ]);
+  });
+
+  it('skips a name a later pass would land on an operationId of the same path, and numbers the plain name', () => {
+    // The service noun restored to `GET /api/notes` beside `operationId: list`
+    // would be the POST's operationId on its own path, so it is not taken
+    // (#288): the GET keeps `list` and, with no qualifier left, is `list2`,
+    // never `listNotes2`, which reads as a variant of the POST.
+    expect(
+      names({
+        '/api/notes': { get: ok, post: { ...ok, operationId: 'listNotes' } },
+        '/api/{teamId}/notes': { get: { ...item('teamId'), operationId: 'list' } },
+      }),
+    ).toEqual([
+      'Notes.list2                    GET    /api/notes',
+      'Notes.listNotes                POST   /api/notes',
+      'Notes.list                     GET    /api/{teamId}/notes',
+    ]);
+  });
+
   it('holds across every method on every action and singleton shape', () => {
     const every = { get: ok, post: ok, put: ok, patch: ok, delete: ok, head: ok };
     const everyItem = Object.fromEntries(Object.keys(every).map((m) => [m, item('id')]));

@@ -869,53 +869,72 @@ export function extractSchemas(
     }
   }
 
-  // The array components, planned once the sets above are complete. Every
-  // item tree is first read in isolation under `item` (`arrayComponentMints`);
-  // then the plans are decided one at a time, in the order of their keys
+  // The array components, planned once the sets above are complete, in
+  // rounds until the plans settle. Every tree starts under `item`. A round
+  // registers every tree under its current context — so a `$ref` to an
+  // array component resolves to its array in every rehearsal, the typing the
+  // real pass uses, which tells `{ value: { $ref: Notes } }` from `{ value:
+  // { $ref: Note } }` as `array<Note>` and `Note` — reads every name every
+  // other entry takes (`componentMints`) and every tree's names under its
+  // context (`arrayComponentMints`; the names a tree mints are read with
+  // none registered, so another component's items are never counted as its
+  // own), then decides the trees one at a time in the order of their keys
   // sorted by code point — never the document's — each against every
-  // component, every other named union's variants, the names every plan
-  // decided before it settled on and the names every plan after it would
-  // mint under `item` (`planArrayComponent`), so no two trees end on one
-  // name for different shapes, whatever the document's order. Nothing is
-  // registered until every plan is decided, so no rehearsal resolves a
-  // `$ref` to another array component. A `$ref` to an array component —
-  // from a component field, a named union's variant, an operation or a
-  // webhook — is then typed from its plan, by the key it names.
+  // component and every other tree's current names (`planArrayComponent`),
+  // re-registering a tree that moves so the trees after it resolve its
+  // items under its new name. A round that moves nothing is the last: every
+  // shape was then compared under the names the plans settle on, so a tree
+  // whose items reference another tree is never shared on a provisional
+  // name (`array<PaletteItem>`) that the other tree then steps away from
+  // (`array<PaletteItemItem>`), and no two trees end on one name for
+  // different shapes, whatever the document's order. A `$ref` to an array
+  // component — from a component field, a named union's variant, an
+  // operation or a webhook — is then typed from its plan, by the key it
+  // names.
   activeArrayComponentPlans = new Map();
   const arrayComponents = Object.entries(schemas)
     .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   if (arrayComponents.length > 0) {
-    // While the plans are decided, every array component is registered
-    // provisionally under `item`, so a `$ref` to one resolves to its array in
-    // every rehearsal — the typing the real pass uses, which tells
-    // `{ value: { $ref: Notes } }` from `{ value: { $ref: Note } }` as
-    // `array<Note>` and `Note` — and the shapes compared below are the real
-    // ones; the names a tree mints are read with none registered
-    // (`withoutArrayComponents`), so another component's items are never
-    // counted as its own.
-    activeArrayComponentPlans = new Map(
-      arrayComponents.map(([key, schema]) => [key, provisionalArrayComponentPlan(key, schema)] as const),
-    );
-    // Every name every other entry will take, read off a rehearsal of the
-    // passes that take them (`componentMints`), once for all the plans.
-    const minted = new Map(Object.entries(schemas).map(([key, schema]) => [key, componentMints(key, schema, schemas)]));
-    const isolated = new Map(
-      arrayComponents.map(
-        ([key, schema]) => [key, arrayComponentMints(resolveSchemaName(key), schema, schemas, 'item')] as const,
-      ),
-    );
-    const settled = new Map<string, ArrayComponentMints>();
-    const plans = new Map<string, ArrayComponentPlan>();
-    for (const [key, schema] of arrayComponents) {
-      const own = isolated.get(key)!;
-      const others = new Map([...isolated, ...settled]);
-      others.delete(key);
-      const plan = planArrayComponent(key, resolveSchemaName(key), schema, schemas, own, others, minted);
-      plans.set(key, plan);
-      settled.set(key, plan.context === 'item' ? own : arrayComponentMints(plan.name, schema, schemas, plan.context));
+    const contexts = new Map(arrayComponents.map(([key]) => [key, 'item']));
+    const register = (): void => {
+      activeArrayComponentPlans = new Map(
+        arrayComponents.map(([key, schema]) => [key, arrayComponentPlan(key, schema, contexts.get(key)!)] as const),
+      );
+    };
+    let settled = false;
+    for (let round = 0; round < MAX_ARRAY_COMPONENT_ROUNDS && !settled; round++) {
+      register();
+      const minted = new Map(
+        Object.entries(schemas).map(([key, schema]) => [key, componentMints(key, schema, schemas)] as const),
+      );
+      const current = new Map(
+        arrayComponents.map(
+          ([key, schema]) =>
+            [key, arrayComponentMints(resolveSchemaName(key), schema, schemas, contexts.get(key)!)] as const,
+        ),
+      );
+      settled = true;
+      for (const [key, schema] of arrayComponents) {
+        const name = resolveSchemaName(key);
+        const own =
+          contexts.get(key) === 'item' ? current.get(key)! : arrayComponentMints(name, schema, schemas, 'item');
+        const others = new Map(current);
+        others.delete(key);
+        const context = planArrayComponent(name, schema, schemas, own, others, minted);
+        if (context === contexts.get(key)) continue;
+        settled = false;
+        contexts.set(key, context);
+        activeArrayComponentPlans.set(key, arrayComponentPlan(key, schema, context));
+        current.set(key, arrayComponentMints(name, schema, schemas, context));
+      }
     }
-    activeArrayComponentPlans = plans;
+    if (!settled) {
+      console.warn(
+        `[oagen] Warning: The item names of the array components did not settle in ${MAX_ARRAY_COMPONENT_ROUNDS} rounds — keeping the last decision`,
+      );
+    }
+    register();
   }
 
   const modelsByCleanName = new Map<string, Model>();
@@ -3049,30 +3068,30 @@ function componentKeyOf(ref: string): string | undefined {
  * a name another tree keeps or steps to, in either direction.
  */
 function planArrayComponent(
-  key: string,
   name: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject>,
   own: ArrayComponentMints,
   others: ReadonlyMap<string, ArrayComponentMints>,
   minted: ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>,
-): ArrayComponentPlan {
-  const claims = arrayComponentClaims(key, others, minted);
-  const contested = [...mintedShapes(own)].some(([name, shape]) =>
-    (claims.get(name) ?? []).some((rival) => rival !== shape),
+): string {
+  const claims = arrayComponentClaims(others, minted);
+  const contested = [...mintedShapes(own)].some(([minted, shape]) =>
+    (claims.get(minted) ?? []).some((rival) => rival !== shape),
   );
+  if (!contested) return 'item';
   const names = (mints: ArrayComponentMints): string[] => [...mintedShapes(mints).keys()];
-  const context = contested
-    ? firstFreeElementContext(
-        'item',
-        'item',
-        new Set(claims.keys()),
-        (candidate) => names(arrayComponentMints(name, schema, schemas, candidate)),
-        names(own),
-      ).context
-    : 'item';
-  return { key, name, schema, context, properties: new Map([[context, schema]]), warnedSelfReference: false };
+  return firstFreeElementContext(
+    'item',
+    'item',
+    new Set(claims.keys()),
+    (candidate) => names(arrayComponentMints(name, schema, schemas, candidate)),
+    names(own),
+  ).context;
 }
+
+/** The rounds `extractSchemas` gives the array components' plans to settle; two suffice unless trees chase each other's names. */
+const MAX_ARRAY_COMPONENT_ROUNDS = 8;
 
 /** The shape key of every name a tree mints: a model's fingerprint, an inline enum's members. */
 function mintedShapes(mints: ArrayComponentMints): Map<string, string> {
@@ -3143,20 +3162,19 @@ function liftedEnums(refs: readonly TypeRef[]): Map<string, EnumValue[]> {
 }
 
 /**
- * The plan an array component is given while the plans are decided: its
- * tree under `item`. A `$ref` to it then resolves to its array in every
- * rehearsal, as the real pass types it. The nested names that array carries
- * are provisional — the tree may still step — but a shape is read the same
- * way on both sides of every comparison, so the sharing decision is the one
- * the real extraction would make.
+ * The plan of an array component under `context`: what `extractSchemas`
+ * registers for a tree while the plans are decided — so a `$ref` to it
+ * resolves to its array in every rehearsal, as the real pass types it, under
+ * the names the tree carries at that point — and, once a round moves
+ * nothing, for good.
  */
-function provisionalArrayComponentPlan(key: string, schema: SchemaObject): ArrayComponentPlan {
+function arrayComponentPlan(key: string, schema: SchemaObject, context: string): ArrayComponentPlan {
   return {
     key,
     name: resolveSchemaName(key),
     schema,
-    context: 'item',
-    properties: new Map([['item', schema]]),
+    context,
+    properties: new Map([[context, schema]]),
     warnedSelfReference: false,
   };
 }
@@ -3259,7 +3277,6 @@ function componentMints(
  * model is emitted.
  */
 function arrayComponentClaims(
-  key: string,
   others: ReadonlyMap<string, ArrayComponentMints>,
   minted: ReadonlyMap<string, ReadonlyMap<string, readonly string[]>>,
 ): Map<string, string[]> {
@@ -3267,8 +3284,7 @@ function arrayComponentClaims(
   const claim = (claimant: string, shape: string): void => {
     claims.set(claimant, [...(claims.get(claimant) ?? []), shape]);
   };
-  for (const [other, names] of minted) {
-    if (other === key) continue;
+  for (const names of minted.values()) {
     for (const [name, shapes] of names) for (const shape of shapes) claim(name, shape);
   }
   for (const mints of others.values()) {
