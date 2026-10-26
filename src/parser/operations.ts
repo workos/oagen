@@ -375,8 +375,7 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
  * a specification extension of the Paths Object, not a path, and is
  * stepped over without a warning whatever its value, as
  * `collectWebhookEntries` steps over one under `webhooks`. Resolved once,
- * before any
- * pass reads the map, so the model-name reservation
+ * before any pass reads the map, so the model-name reservation
  * (`resolvePathModelBaseNames`), the API root (`documentApiRoot`) and the
  * operation loop all see the same items, and a referenced item's
  * operations, `parameters`, `servers`, `summary` and `description` are read
