@@ -1315,6 +1315,49 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       const unknown = { kind: 'primitive', type: 'unknown' };
       const hasMore = { endOfIteration: { kind: 'hasMore', path: 'more' } };
 
+      it.each([
+        [
+          'a single-entry type list naming array',
+          { type: ['array'], items: { type: 'string' } },
+          { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+        ],
+        [
+          'a single-entry type list naming object',
+          { type: ['object'], properties: { id: { type: 'string' } } },
+          { kind: 'model', name: 'ListPetsResponse' },
+        ],
+        [
+          'a nullable type list, array first',
+          { type: ['array', 'null'], items: { type: 'string' } },
+          { kind: 'nullable', inner: { kind: 'array', items: { kind: 'primitive', type: 'string' } } },
+        ],
+        [
+          'a nullable type list, null first',
+          { type: ['null', 'array'], items: { type: 'string' } },
+          { kind: 'nullable', inner: { kind: 'array', items: { kind: 'primitive', type: 'string' } } },
+        ],
+      ])(
+        'keeps a 200 typed by classification as primary over a typed 201, without any override: %s (Greptile)',
+        async (_label, schema, type) => {
+          // Typed-ness is read the way classification reads the body, not the
+          // way `schemaToTypeRef` alone types it: `type: ['array']` is an
+          // array to classification, so the 200 is primary and the 201 string
+          // never becomes `Operation.response`.
+          const ir = await parseJson(
+            issueSpec(undefined, undefined, { '200': ok(schema), '201': ok({ type: 'string' }) }),
+          );
+          const op = onlyOperation(ir);
+          expect(warn).not.toHaveBeenCalled();
+          expect(op.responseStatusCode).toBe(200);
+          expect(op.response).toEqual(type);
+          expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+            [200, type],
+            [201, { kind: 'primitive', type: 'string' }],
+          ]);
+          expectSound(ir, []);
+        },
+      );
+
       it('is decided against the primary Operation.response describes: a 200 whose schema describes nothing yields to the typed 201 (Greptile)', async () => {
         const ir = await parseJson(issueSpec(hasMore, undefined, { '200': ok({}), '201': ok(nested(more)) }));
         const op = onlyOperation(ir);
