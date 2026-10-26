@@ -2244,14 +2244,78 @@ function buildSyntheticEnumRef(
   parentModelName: string | undefined,
   rawExternalDocs: unknown,
 ): TypeRef {
+  return inlineEnumRef(inlineEnumName(contextName, parentModelName), members, rawExternalDocs);
+}
+
+/**
+ * The name `schemaToTypeRef` gives an inline enum typed under `contextName`
+ * (`GetPetError404`; `status` → `Status`): qualified by `parentModelName`
+ * with its list-item markers stripped (`DirectoryListItem` + `State` →
+ * `DirectoryState`) unless the name already starts with it (`Connection` +
+ * `ConnectionType` → `ConnectionType`), then passed through the active
+ * `schemaNameTransform` as a component's name is, so a project's rename map
+ * (`RadarAction` → `RadarListAction` in `oagen.config.ts`) reaches inline
+ * enums too. One rule for every inline enum: an `enum:` list, a `oneOf` of
+ * consts (`buildSyntheticEnumRef`), and the name a deferred body that is an
+ * enum is reserved under before it is typed (`inlineEnumSchemaName`).
+ */
+export function inlineEnumName(contextName: string | undefined, parentModelName: string | undefined): string {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
   const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
-  // Run the same `schemaNameTransform` we apply to component-schema names so
-  // a project-level rename map (e.g. `RadarAction` → `RadarListAction` in
-  // `oagen.config.ts`) catches inline parameter enums too.
-  const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-  return inlineEnumRef(finalName, members, rawExternalDocs);
+  return activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
+}
+
+/**
+ * How `schemaToTypeRef` types a schema as an inline enum, when it does. The
+ * one decision both the typer's enum branches and `inlineEnumSchemaName`
+ * read, so the name a pass reserves before a schema is typed and the name
+ * the schema is typed under can never disagree. Decided on the schema as
+ * the typer sees it at those branches — its nullable wrappers removed, so
+ * callers unwrap first (`unwrapNullableSchema`): a `oneOf`/`anyOf` whose
+ * non-null variants are string `const` schemas (`constUnionEnumMembers`)
+ * with two or more members, or any number beside an `enum:` list that
+ * restricts them, is a `const-union` enum of those members; an `enum:` list
+ * of any count of non-null members but one is an `enum-list` enum, one
+ * alone being a literal; every other shape — a `$ref`, an `allOf`, a union
+ * of other variants, an object, an array — is not an enum here (an array's
+ * items are the array's question, `inlineEnumSchemaName`).
+ */
+export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | undefined {
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'union') {
+    const members = constUnionEnumMembers(schema);
+    if (members !== null && (members.length >= 2 || Array.isArray(schema.enum))) {
+      return { spelling: 'const-union', members };
+    }
+    return undefined;
+  }
+  if (kind === 'enum' && nonNullEnumValues(schema.enum).length !== 1) return { spelling: 'enum-list' };
+  return undefined;
+}
+
+/** The two spellings of an inline enum `schemaToTypeRef` lifts (`inlineEnumSpelling`), with the const union's members. */
+export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
+
+/**
+ * The enum name `schemaToTypeRef` types `schema` under — a schema it types
+ * as an inline enum in either spelling (`inlineEnumSpelling`), under any
+ * nullable wrapper, or an array of one, which is lifted under the array's
+ * own name — or undefined when it types the schema as something else. Lets
+ * a pass reserve the enum's name before the schema is typed
+ * (`extractOperations`), whatever the document order of the sites.
+ */
+export function inlineEnumSchemaName(
+  schema: SchemaObject,
+  contextName: string | undefined,
+  parentModelName: string | undefined,
+): string | undefined {
+  const inner = unwrapNullableSchema(schema);
+  if (classifyInlineSchema(inner) === 'array') {
+    const items = inner.items;
+    return items && !Array.isArray(items) ? inlineEnumSchemaName(items, contextName, parentModelName) : undefined;
+  }
+  return inlineEnumSpelling(inner) ? inlineEnumName(contextName, parentModelName) : undefined;
 }
 
 /**
@@ -4004,9 +4068,11 @@ export function schemaToTypeRef(
     // decided first. Without a list, a union of fewer than two consts keeps
     // the shape the branches below give it (a lone const beside
     // `type: 'null'` is a nullable literal).
-    const constMembers = constUnionEnumMembers(schema);
-    if (constMembers !== null && (constMembers.length >= 2 || Array.isArray(schema.enum))) {
-      const enumRef = buildSyntheticEnumRef(constMembers, contextName, parentModelName, schema.externalDocs);
+    // Whether this union is such an enum is the one decision the predictor
+    // that reserves enum names before typing reads too (`inlineEnumSpelling`).
+    const constUnion = inlineEnumSpelling(schema);
+    if (constUnion?.spelling === 'const-union') {
+      const enumRef = buildSyntheticEnumRef(constUnion.members, contextName, parentModelName, schema.externalDocs);
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
       return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
@@ -4186,24 +4252,22 @@ export function schemaToTypeRef(
     return enumAdmitsNull ? asNullable(literal) : literal;
   }
 
-  // Handle enum
-  if (inlineKind === 'enum') {
-    const baseName = toPascalCase(contextName ?? 'UnknownEnum');
-    // Strip ListItem/ByExternalId markers from parent name so enum names are clean:
-    // e.g., DirectoryListItem + State → Directory + State = DirectoryState
-    const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
-    // Avoid redundant prefix: Connection + ConnectionType → ConnectionType
-    const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
-    // Run `schemaNameTransform` so project-level rename maps in
-    // `oagen.config.ts` reach inline parameter/field enums too — without
-    // this, `RadarAction` (built from path param `action` on the Radar
-    // service) couldn't be redirected to `RadarListAction` from config.
-    const finalName = activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
-    // The schema's link and each value's `x-enum-descriptions` /
+  // Handle enum — the `enum-list` spelling of the one decision the predictor
+  // that reserves enum names before typing reads too (`inlineEnumSpelling`);
+  // the single-member list was returned as a literal above.
+  if (inlineEnumSpelling(schema)?.spelling === 'enum-list') {
+    // Named by the one rule every inline enum follows (`inlineEnumName`):
+    // qualified by the parent with its list-item markers stripped, no
+    // redundant prefix, the project's `schemaNameTransform` applied. The
+    // schema's link and each value's `x-enum-descriptions` /
     // `x-enumDescriptions` entry are recorded against the ref so the lifted
     // `Enum` carries them (`collectInlineEnumFromRef`); the nullable unwraps
     // above spread the schema, so a wrapped enum's link reaches here too.
-    const enumRef = inlineEnumRef(finalName, enumListMembers(schema) ?? [], schema.externalDocs);
+    const enumRef = inlineEnumRef(
+      inlineEnumName(contextName, parentModelName),
+      enumListMembers(schema) ?? [],
+      schema.externalDocs,
+    );
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
 
