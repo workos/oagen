@@ -190,15 +190,19 @@ const DEFAULT_PORTS: Readonly<Record<string, number>> = { http: 80, https: 443, 
  * `@api.example.com` makes `USER` a username), and `{prefix}://api.example.com`
  * and `{prefix}://api.example.com/` (a `prefix` of
  * `https://gateway.example.com/path` makes the rest a path) all stay two
- * servers. From the first placeholder up to the next `/`, `?` or `#` not even
- * percent-encoding is folded, since a value may put that text in a scheme
- * or a port, where `%` has no meaning (`{scheme}%73://…` and `{scheme}s://…`,
- * or `…{x}%34%34%33` and `…{x}443`, stay two servers); from that delimiter
- * on it is a path, query or fragment whatever the value, where an
- * unreserved character is the same encoded or not, so percent-encoding is
- * folded again there. Every folding therefore applies to text whose part no
- * variable value can change, and two templates that come out as one string
- * resolve to one URL under every value of their variables. Not folded at
+ * servers. From the first placeholder on not even percent-encoding is
+ * folded, and neither is it in an authority the placeholder sits in: a value
+ * may put the text in a scheme or a port, where `%` has no meaning
+ * (`{scheme}%73://…` and `{scheme}s://…`, `…{x}%34%34%33` and `…{x}443`,
+ * `https://api.example.com:4{port}` and `https://api.example.com:%34{port}`,
+ * `{scheme}://host:%34%34%33` and `{scheme}://host:443` stay two servers),
+ * or end in a `%` that joins with the text after it into a different octet
+ * (`https://{host}/{x}7e` and `https://{host}/{x}%37e` stay two servers).
+ * Percent-encoding before the first placeholder in a path, query or
+ * fragment is folded, since a complete octet there is a complete octet under
+ * every value. Every folding therefore applies to text whose part and bytes
+ * no variable value can change, and two templates that come out as one
+ * string resolve to one URL under every value of their variables. Not folded at
  * all: dot-segments (`/v1/../v2` is compared as written) and
  * internationalised host names (`bücher.example.com` and
  * `xn--bcher-kva.example.com` are two hosts). A relative reference (`/v1`,
@@ -209,22 +213,21 @@ export function normalizeServerUrl(url: string): string {
   const units = templateUnits(url);
   // A placeholder's value may carry any delimiter, so it can change which
   // part every later character belongs to and, through a `@`, which part
-  // the text before it in its authority belongs to. Nothing from the first
-  // placeholder on is case-folded, and a component is folded only when it is
-  // complete before that point. From the first placeholder up to the next
-  // `/`, `?` or `#` not even percent-encoding is folded, since a value may
-  // put that text in a scheme or a port, where `%` has no meaning; from that
-  // delimiter on the text is a path, query or fragment whatever the value,
-  // and there an unreserved character is the same encoded or not.
+  // the text before it in its authority belongs to; it may also end in a `%`
+  // or a partial escape that joins with the text after it into a different
+  // percent-encoded octet. So from the first placeholder on nothing is
+  // folded, not even percent-encoding, and a component before it is folded
+  // only when it is complete before that point. Percent-encoding before the
+  // first placeholder in a path, query or fragment is folded: a complete
+  // octet there is a complete octet under every value.
   const firstPlaceholder = units.findIndex((unit) => unit.placeholder);
   const literalEnd = firstPlaceholder === -1 ? units.length : firstPlaceholder;
-  let verbatimEnd = literalEnd;
-  while (verbatimEnd < units.length && !isLiteral(units[verbatimEnd], '/', '?', '#')) verbatimEnd++;
-  /** Units `from` to `to`: percent-encoding folded, except as written across the verbatim span. */
+  /** Units `from` to `to` as written. */
+  const verbatim = (from: number, to: number): string => render(units.slice(from, to), (text) => text);
+  /** Units `from` to `to`: percent-encoding folded before the first placeholder, as written from it on. */
   const emit = (from: number, to: number): string =>
     render(units.slice(from, Math.min(to, literalEnd)), normalizePercentEncoding) +
-    render(units.slice(Math.max(from, literalEnd), Math.min(to, verbatimEnd)), (text) => text) +
-    render(units.slice(Math.max(from, verbatimEnd), to), normalizePercentEncoding);
+    verbatim(Math.max(from, literalEnd), to);
   let out = '';
   let cursor = 0;
 
@@ -236,7 +239,7 @@ export function normalizeServerUrl(url: string): string {
   // may resolve to anything, so the whole template is kept as written.
   const schemeEnd = schemeLength(units);
   let scheme: string | undefined;
-  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return emit(0, units.length);
+  if (schemeEnd !== undefined && schemeEnd >= literalEnd) return verbatim(0, units.length);
   if (schemeEnd !== undefined) {
     scheme = render(units.slice(0, schemeEnd), (text) => text.toLowerCase());
     out += scheme + ':';
@@ -247,14 +250,16 @@ export function normalizeServerUrl(url: string): string {
   // that end comes before the first placeholder: a placeholder inside the
   // authority may resolve to a host suffix, a port, a path, or a `@` that
   // makes the text before it a username, so an authority with one is kept
-  // as written and gets no `/` for an empty path.
+  // as written from its `//` on — the text before the placeholder included,
+  // which may be a port (`:4{port}`), where `%` is not decoded — and gets no
+  // `/` for an empty path.
   let literalAuthority = false;
   if (isLiteral(units[cursor], '/') && isLiteral(units[cursor + 1], '/')) {
     const start = cursor + 2;
     cursor = start;
     while (cursor < units.length && !isLiteral(units[cursor], '/', '?', '#')) cursor++;
     literalAuthority = cursor <= literalEnd;
-    out += '//' + (literalAuthority ? normalizeAuthority(units.slice(start, cursor), scheme) : emit(start, cursor));
+    out += '//' + (literalAuthority ? normalizeAuthority(units.slice(start, cursor), scheme) : verbatim(start, cursor));
   }
 
   // Path: up to the first `?` or `#`; `/` when a wholly literal authority is

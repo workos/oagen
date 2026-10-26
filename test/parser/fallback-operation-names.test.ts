@@ -15,9 +15,34 @@ const item = (name: string) => ({ ...ok, ...idParam(name) });
 
 type Method = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head';
 
+type Services = ReturnType<typeof extractOperations>['services'];
+
+/**
+ * Sound after every pass: within a service, two operations share a name only
+ * when they sit on one path and are its PUT and PATCH (both `update`). The
+ * differ keys a service's operations by name, so any other sharing hides one.
+ */
+function expectUniqueNames(services: Services): void {
+  for (const service of services) {
+    const byName = new Map<string, Services[number]['operations']>();
+    for (const op of service.operations) byName.set(op.name, [...(byName.get(op.name) ?? []), op]);
+    for (const [name, ops] of byName) {
+      if (ops.length < 2) continue;
+      const shape = { paths: [...new Set(ops.map((op) => op.path))], methods: ops.map((op) => op.httpMethod).sort() };
+      expect({ service: service.name, name, ...shape }).toEqual({
+        service: service.name,
+        name,
+        paths: [ops[0].path],
+        methods: ['patch', 'put'],
+      });
+    }
+  }
+}
+
 /** `name METHOD path` for every operation, sorted by path (code units) then method. */
 function names(paths: Record<string, Partial<Record<Method, unknown>>>) {
   const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
+  expectUniqueNames(services);
   const key = (op: { path: string; httpMethod: string }) => `${op.path}\0${op.httpMethod}`;
   return services
     .flatMap((s) => s.operations)
