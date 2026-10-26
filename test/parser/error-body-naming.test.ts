@@ -713,3 +713,77 @@ describe('an error body that is itself an inline enum', () => {
     expectSound(spec);
   });
 });
+
+describe('past two taken names an error-site enum numbers under `Body`, as the object bodies do', () => {
+  const enumOf = (values: string[]): Doc => ({ type: 'string', enum: values });
+  /** Component enums owning both `<name>` and `<name>Body`, with other members than the inline body. */
+  const twoTakenEnums = (name: string): Doc => ({
+    [name]: enumOf(['old', 'new']),
+    [`${name}Body`]: enumOf(['older', 'newer']),
+  });
+  /** Component schemas owning both `<name>` and `<name>Body`, with other shapes than the inline body. */
+  const twoTakenModels = (name: string): Doc => ({
+    [name]: obj({ message: str }),
+    [`${name}Body`]: obj({ other: str }),
+  });
+
+  const sites: Array<[label: string, name: string, pick: (op: Operation) => TypeRef | undefined]> = [
+    ['a 404', 'GetNoteError404', (op) => op.errors[0].type],
+    ['a 5XX range', 'GetNoteError5Xx', (op) => op.rangeResponses![0].type],
+    ['a secondary media type of a 404', 'GetNoteError404ApplicationYaml', (op) => op.errors[0].contents![1].type],
+  ];
+  /** The site's responses, its body `schema` under JSON (or under YAML beside a JSON object, for the secondary site). */
+  const responsesOf = (label: string, schema: Doc): Doc =>
+    label === 'a 5XX range'
+      ? { '5XX': { description: 'down', content: json(schema) } }
+      : label === 'a 404'
+        ? { '404': { description: 'gone', content: json(schema) } }
+        : { '404': { description: 'gone', content: { ...json(obj({ a: str })), ...yaml(schema) } } };
+
+  it.each(sites)('an enum body at %s is `<name>Body2`, not `<name>2`', async (label, name, pick) => {
+    const spec = await parseWithoutWarnings(
+      doc(getNote(responsesOf(label, enumOf(['gone', 'missing']))), twoTakenEnums(name)),
+    );
+
+    // Before: `Body` was tried once and the numbers went on the bare name
+    // (`GetNoteError5Xx2`), while an object body in the same spot took
+    // `GetNoteError5XxBody2`.
+    expect(pick(only(spec))).toEqual({ kind: 'enum', name: `${name}Body2`, values: ['gone', 'missing'] });
+    expect(enumValues(spec, name)).toEqual(['old', 'new']);
+    expect(enumValues(spec, `${name}Body`)).toEqual(['older', 'newer']);
+    expect(enumValues(spec, `${name}Body2`)).toEqual(['gone', 'missing']);
+    expect(spec.enums.map((e) => e.name)).not.toContain(`${name}2`);
+    expectSound(spec);
+  });
+
+  it.each(sites)('an object body at %s takes the same `<name>Body2`', async (label, name, pick) => {
+    const spec = await parseWithoutWarnings(doc(getNote(responsesOf(label, obj({ code: str }))), twoTakenModels(name)));
+
+    expect(typeName(pick(only(spec)))).toBe(`${name}Body2`);
+    expect(fieldsOf(spec, `${name}Body2`)).toEqual(['code']);
+    expect(modelNames(spec)).not.toContain(`${name}2`);
+    expectSound(spec, ['Note', name, `${name}Body`]);
+  });
+
+  it.each(sites)(
+    'an enum body at %s shares a `<name>Body2` that already holds its members',
+    async (label, name, pick) => {
+      const spec = await parseWithoutWarnings(
+        doc(getNote(responsesOf(label, enumOf(['gone', 'missing']))), {
+          ...twoTakenEnums(name),
+          [`${name}Body2`]: enumOf(['gone', 'missing']),
+        }),
+      );
+
+      // A numbered step under `Body` with the same members is shared, never
+      // followed by a `…Body3`.
+      expect(pick(only(spec))).toEqual({ kind: 'enum', name: `${name}Body2`, values: ['gone', 'missing'] });
+      expect(spec.enums.filter((e) => e.name.startsWith(name)).map((e) => e.name)).toEqual([
+        name,
+        `${name}Body`,
+        `${name}Body2`,
+      ]);
+      expectSound(spec);
+    },
+  );
+});
