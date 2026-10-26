@@ -2393,14 +2393,14 @@ function agreedDeclarationKeys(declarations: readonly SchemaObject[], keys: Iter
  * key OpenAPI gives no meaning to, and an emitter may act on it, so a key
  * the declarations dispute is nobody's.
  */
-function agreedExtensions(declarations: readonly SchemaObject[]): Extensions | undefined {
+export function agreedExtensions(declarations: readonly SchemaObject[]): Extensions | undefined {
   const keys = Object.keys(extensionsOf(declarations[0]!, SCHEMA_CONSUMED_EXTENSIONS) ?? {});
   const agreed = agreedDeclarationKeys(declarations, keys);
   return Object.keys(agreed).length > 0 ? agreed : undefined;
 }
 
 /** `schema` with `extensions` in place of its own (consumed keys kept where they are); `schema` itself when neither has any. */
-function withAgreedExtensions(schema: SchemaObject, extensions: Extensions | undefined): SchemaObject {
+export function withAgreedExtensions(schema: SchemaObject, extensions: Extensions | undefined): SchemaObject {
   const own = extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS);
   if (!own && !extensions) return schema;
   const kept = Object.entries(schema).filter(([key]) => !(own && Object.hasOwn(own, key)));

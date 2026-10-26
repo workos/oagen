@@ -1115,7 +1115,9 @@ export interface Field {
    * declaration, keys included (a typeless one fills in what it leaves
    * unset); a property only variants declare carries exactly the keys
    * every declaration as written agrees on, value for value, whether or
-   * not the declarations share one shape. Present only when at least one
+   * not the declarations share one shape — in an inline `allOf` and under
+   * a component (a bare `oneOf` component, a union member of a component
+   * `allOf`) alike. Present only when at least one
    * key remains. Not shape: two fields that differ only here are one shape.
    */
   extensions?: Extensions;

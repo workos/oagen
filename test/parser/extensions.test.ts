@@ -545,6 +545,69 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expectSound(spec);
     });
 
+    it('a component’s variant-only property carries the agreed keys too — a bare oneOf component, an allOf member, and the inline twin alike (MichaelDeBoey review)', async () => {
+      // The reviewer's case: three variants declare `kind` with `x-since`
+      // `1`, `2` and `1`. The inline `allOf` body already left the disputed
+      // key off; the same variants as a component typed `kind` from the
+      // first branch as written and gave it `x-since: 1`. One rule now:
+      // `agreedExtensions` over every branch, in `declaredComponentProperty`
+      // as in `unionOfDeclarations`.
+      // No `const`: variants pinning `kind` to distinct consts would make
+      // the union a discriminator axis of the `allOf` component, which
+      // dispatches to variant models instead of flattening `kind`.
+      const variants = [
+        { type: 'object', properties: { kind: { type: 'string', 'x-since': '1', 'x-shared': true } } },
+        { type: 'object', properties: { kind: { type: 'string', 'x-since': '2', 'x-shared': true } } },
+        { type: 'object', properties: { kind: { type: 'integer', 'x-since': '1', 'x-shared': true } } },
+      ];
+      const spec = await parseDocument(
+        document(
+          {
+            '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+            '/dogs': getOp('getDog', { $ref: '#/components/schemas/Dog' }),
+            '/toys': postOp('createToy', {
+              allOf: [{ type: 'object', properties: { name: { type: 'string' } } }, { oneOf: variants }],
+            }),
+          },
+          {
+            components: {
+              schemas: {
+                // A bare `oneOf` component: its variants flatten to one optional `kind`.
+                Pet: { oneOf: variants },
+                // The same union as a member of a component `allOf`.
+                Dog: { allOf: [{ type: 'object', properties: { name: { type: 'string' } } }, { oneOf: variants }] },
+              },
+            },
+          },
+        ),
+      );
+      for (const name of ['Pet', 'Dog', 'CreateToyRequest']) {
+        const kind = fieldOf(byName(spec.models, name), 'kind');
+        expect(kind.required, name).toBe(false);
+        expect(kind.extensions, name).toEqual({ 'x-shared': true });
+      }
+      // A key every branch writes the same way, with no dispute, is kept whole.
+      const agreed = await parseDocument(
+        document(
+          { '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }) },
+          {
+            components: {
+              schemas: {
+                Pet: {
+                  oneOf: [
+                    { type: 'object', properties: { kind: { type: 'string', 'x-since': '1' } } },
+                    { type: 'object', properties: { kind: { type: 'integer', 'x-since': '1' } } },
+                  ],
+                },
+              },
+            },
+          },
+        ),
+      );
+      expect(fieldOf(byName(agreed.models, 'Pet'), 'kind').extensions).toEqual({ 'x-since': '1' });
+      expectSound(spec, ['Pet', 'Dog']);
+    });
+
     it('a property several allOf members always declare is typed by the first typing declaration, its keys included; a typeless one fills in what it leaves unset', async () => {
       const spec = await parseDocument(
         document({
