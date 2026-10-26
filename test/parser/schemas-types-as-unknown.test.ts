@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { schemaToTypeRef, typesAsUnknown } from '../../src/parser/schemas.js';
+import { bodyTypesAsUnknown, classifyAndExtractResponse } from '../../src/parser/responses.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 import type { TypeRef } from '../../src/ir/types.js';
 
@@ -80,5 +81,49 @@ describe('typesAsUnknown agrees with schemaToTypeRef', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('bodyTypesAsUnknown agrees with response classification', () => {
+  // Shapes classification reads its own way — `extractDirectResource` reads a
+  // single-entry type list as an array through `isArraySchema`, and recurses
+  // into a lone `allOf` member — beside the ones `schemaToTypeRef` decides.
+  const classifiedAsTyped: Array<[string, SchemaObject]> = [
+    ['a single-entry type list naming array, with items', { type: ['array'], items: { type: 'string' } }],
+    ['a nullable type list naming array, with items', { type: ['array', 'null'], items: { type: 'string' } }],
+    ['a nullable type list, null first', { type: ['null', 'array'], items: { type: 'string' } }],
+    [
+      'a single-entry type list naming object, with properties',
+      { type: ['object'], properties: { id: { type: 'string' } } },
+    ],
+    ['a lone allOf member that is such an array', { allOf: [{ type: ['array'], items: { type: 'string' } }] }],
+    [
+      'a list envelope',
+      {
+        type: 'object',
+        properties: { data: { type: 'array', items: { type: 'string' } }, total: { type: 'integer' } },
+      },
+    ],
+    ['a reference', { $ref: Pet }],
+    ['a union', { oneOf: [{ type: 'string' }, { type: 'integer' }] }],
+    ['a primitive', { type: ['string'] }],
+    ['an allOf merge', { allOf: [{ $ref: Pet }, { properties: { x: { type: 'string' } } }] }],
+  ];
+  const classifiedAsUnknown: Array<[string, SchemaObject]> = [
+    ['an empty schema', {}],
+    ['a type no rule knows', { type: 'weird' }],
+    ['a single-entry type list naming array, without items', { type: ['array'] }],
+    ['nullable without a type', { nullable: true }],
+    ['a lone allOf member that is empty', { allOf: [{}] }],
+  ];
+
+  it.each(classifiedAsTyped)('%s is typed before classification and after', (_label, schema) => {
+    expect(bodyTypesAsUnknown(schema)).toBe(false);
+    expect(isUnknown(classifyAndExtractResponse(schema, 'Body').response)).toBe(false);
+  });
+
+  it.each(classifiedAsUnknown)('%s is unknown before classification and after', (_label, schema) => {
+    expect(bodyTypesAsUnknown(schema)).toBe(true);
+    expect(isUnknown(classifyAndExtractResponse(schema, 'Body').response)).toBe(true);
   });
 });
