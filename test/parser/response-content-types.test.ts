@@ -2530,6 +2530,99 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       expectSound(spec, []);
     });
 
+    describe('an explicit $ref to a same-named component stays as written when the body steps (Greptile, merge round 1)', () => {
+      // The stepping repoints only references the body itself minted, by
+      // identity (`isComponentModelRef`), never a `$ref` that happens to name
+      // the component the inline model clashes with.
+      const component = { CreatePetResponseOwner: obj({ id: str }) };
+      const componentRef = { $ref: '#/components/schemas/CreatePetResponseOwner' };
+      const fieldTypes = (spec: ApiSpec, model: string) =>
+        Object.fromEntries(spec.models.find((m) => m.name === model)!.fields.map((f) => [f.name, name(f.type)]));
+
+      it("Greptile's case: the 201 body's `original` keeps naming the component while its `owner` moves", async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }) })),
+              '201': json(obj({ owner: obj({ name: str }), original: componentRef }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        // The 200's inline `owner: { id }` is the component's shape and folds onto it.
+        expect(fieldTypes(spec, 'CreatePetResponse')).toEqual({ owner: 'CreatePetResponseOwner' });
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({
+          owner: 'CreatePetResponse201Owner',
+          original: 'CreatePetResponseOwner',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(fieldTypes(spec, 'CreatePetResponse201Owner')).toEqual({ name: 'primitive' });
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+
+      it('the mirror: the 200 body references the component and the 201 steps past it', async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }), original: componentRef })),
+              '201': json(obj({ owner: obj({ name: str }) }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        expect(fieldTypes(spec, 'CreatePetResponse')).toEqual({
+          owner: 'CreatePetResponseOwner',
+          original: 'CreatePetResponseOwner',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({ owner: 'CreatePetResponse201Owner' });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(fieldTypes(spec, 'CreatePetResponse201Owner')).toEqual({ name: 'primitive' });
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+
+      it('a stepped body whose only reference to that name is the $ref keeps it', async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }) })),
+              '201': json(obj({ owner: componentRef, extra: str }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({
+          owner: 'CreatePetResponseOwner',
+          extra: 'primitive',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(spec.models.map((m) => m.name).sort()).toEqual(
+          ['CreatePetResponse', 'CreatePetResponse201', 'CreatePetResponseOwner'].sort(),
+        );
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+    });
+
     it('shares a nested model the stepped copy and the primary hold alike, stepping the root only (#309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
