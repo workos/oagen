@@ -9,6 +9,7 @@ import type {
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import { resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import { combineDeclarations } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -216,16 +217,24 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * an obvious one. `properties` are the envelope's merged properties and
  * `dataPath` names the data array among them.
  *
- * Top-level fields are considered first, then the fields one level down
- * inside each object companion whose name says it is pagination metadata
+ * The fields beside the array are considered first: when the path is
+ * nested, the other properties of the object the array sits in, under
+ * whatever name that object has (`result.total_pages` beside
+ * `result.items`, `data.page.has_more` beside `data.page.items`), the
+ * parent reached exactly as the path itself is resolved
+ * (`resolveSchemaPath` from the merged properties), so one behind a `$ref`,
+ * an `allOf` or a nullable wrapper is read as the walk reads it. Then the
+ * top-level fields, then the fields one level down inside each top-level
+ * object companion whose name says it is pagination metadata
  * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ...; an
  * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
  * wrapper around one), so a `stats.total` beside `pagination.page` is not
- * taken for the list's size. The path follows the `dataPath` convention: `has_more` or
- * `pagination.totalPages`. When
- * several candidates exist, a `hasMore` boolean wins over a `totalPages`
- * integer, which wins over a `totalCount` integer; within one kind the first
- * in scan order wins. A candidate whose type does not fit its kind (a string
+ * taken for the list's size. The array itself is never a stop field,
+ * whatever it is called. The path follows the `dataPath` convention:
+ * `has_more`, `result.total_pages` or `pagination.totalPages`. When several
+ * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
+ * which wins over a `totalCount` integer; within one kind the first in scan
+ * order wins. A candidate whose type does not fit its kind (a string
  * `total`) is ignored.
  */
 export function detectEndOfIteration(
@@ -238,6 +247,16 @@ export function detectEndOfIteration(
     const kind = classifyEndField(name, schema, componentSchemas);
     if (kind && !found.has(kind)) found.set(kind, path);
   };
+
+  const segments = dataPath.split('.');
+  const arrayName = segments[segments.length - 1];
+  if (segments.length > 1) {
+    const parentPath = segments.slice(0, -1).join('.');
+    const parent = resolveSchemaPath({ properties }, parentPath, componentSchemas);
+    for (const [inner, innerSchema] of Object.entries(parent ? objectProperties(parent, componentSchemas) : {})) {
+      if (innerSchema && inner !== arrayName) record(inner, `${parentPath}.${inner}`, innerSchema);
+    }
+  }
 
   const companions = Object.entries(properties).filter(
     (entry): entry is [string, SchemaObject] => entry[0] !== dataPath && entry[1] !== undefined,
@@ -320,31 +339,92 @@ function isNullSchema(schema: SchemaObject): boolean {
 }
 
 /**
- * The properties of an object schema: its own, merged with those of its
- * `allOf` members, following `$ref`s to component schemas and looking through
- * a nullable `oneOf`/`anyOf` wrapper with a single non-null variant. Anything
- * that is not an object yields none.
+ * The properties of an object schema as `collectObjectProperties` collects
+ * them — the one walk through `$ref`s, `allOf` members and nullable wrappers,
+ * with a name two members declare settled by `combineDeclarations` — for a
+ * site that reads the properties alone. Anything that is not an object
+ * yields none.
  */
 function objectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-  seen: Set<string> = new Set(),
 ): Record<string, SchemaObject | undefined> {
-  if (schema.$ref) {
-    if (seen.has(schema.$ref)) return {};
-    seen.add(schema.$ref);
-    const resolved = resolveComponentSchemaRef(schema, componentSchemas);
-    return resolved ? objectProperties(resolved, componentSchemas, seen) : {};
-  }
-  const variants = schema.oneOf ?? schema.anyOf;
-  if (variants && !schema.properties && !schema.allOf) {
-    const nonNull = variants.filter((variant) => !isNullSchema(variant));
-    return nonNull.length === 1 ? objectProperties(nonNull[0], componentSchemas, seen) : {};
-  }
-  const out: Record<string, SchemaObject | undefined> = {};
-  for (const member of schema.allOf ?? []) Object.assign(out, objectProperties(member, componentSchemas, seen));
-  if (schema.properties) Object.assign(out, schema.properties);
-  return out;
+  return collectObjectProperties(schema, componentSchemas).properties;
+}
+
+/**
+ * Every property the object `schema` describes declares, merged across its
+ * `allOf` members, with the `required` lists that go with them — the one
+ * walk through a composite schema: a list envelope's companions
+ * (`extractListResponse`), a kept wrapper's stop field
+ * (`bodyEndOfIteration`), a metadata companion's fields and the object
+ * beside a nested array (`detectEndOfIteration`) and every segment of a
+ * `dataPath` (`resolveSchemaPath`) are all read through it, so they see one
+ * shape at every level.
+ *
+ * Every node the walk meets — the body, then each `allOf` member, however
+ * deep — is read through `resolveBareSchema`, the resolver the explicit
+ * `dataPath` walk reads the document with: a `$ref` is followed to its
+ * component and a nullable wrapper of any spelling (a type list naming
+ * `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf` with one non-null
+ * variant) is stripped, however the two alternate. So fields an envelope
+ * inherits from a shared base (`trace_id` on every response, say) are not
+ * silently dropped whether the member is written `$ref: Base`, `{ oneOf: [{
+ * $ref: Base }, { type: 'null' }] }`, a `$ref` to such a wrapper, or an
+ * `allOf` nested inside one — and a stop field declared in any of them is
+ * read. The one place the walk resolves a node, so the companions and the
+ * stop field are read from the same shape, at every level, that the path
+ * walk reaches the data array through. One `seen` runs through the whole
+ * walk: the `$ref` strings `resolveBareSchema` records as it follows them,
+ * handed to every call the walk makes, so a reference reached inside a
+ * wrapper is as seen as one written on the member; and, for an inline
+ * node, the schema object itself. No node is entered twice, under whatever
+ * wrapper or at whatever depth it reappears, so a component that reaches
+ * itself (`Base.allOf` holding `{ oneOf: [{ $ref: Base }, { type: 'null'
+ * }] }`, or `{ $ref: Base }` outright), two components that reach each
+ * other, and a document whose objects form a cycle are each read once and
+ * end the walk where they repeat. An `allOf` member's own `properties`
+ * beside its `allOf` are folded in as its first member
+ * (`foldSiblingProperties`, through `unwrapNullableSchema`). A property
+ * declared by more than one member is settled exactly as every `allOf`
+ * merge settles it for a model's field (`combineDeclarations`): two inline
+ * objects merge their properties — `pagination.next` from one member and
+ * `pagination.total` from another both belong to the response, as they do
+ * to the wrapper's model — two arrays keep the `items` that say something,
+ * and otherwise the first declaration that declares a type types it, a
+ * typeless one only annotating it. (Envelope detection reads the
+ * members' own `properties`; a `oneOf`/`anyOf` member with more than one
+ * non-null variant declares none, so it contributes nothing here. A body
+ * that is not an envelope is merged by `mergeAllOfMembers`, which reads such
+ * a member's variants.)
+ */
+export function collectObjectProperties(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): { properties: Record<string, SchemaObject>; required: string[] } {
+  const properties: Record<string, SchemaObject> = {};
+  const required: string[] = [];
+  const seenRefs = new Set<string>();
+  const seenNodes = new WeakSet<SchemaObject>();
+
+  const visit = (s: SchemaObject): void => {
+    if (seenNodes.has(s)) return;
+    seenNodes.add(s);
+    const bare = resolveBareSchema(s, componentSchemas, seenRefs);
+    // A reference the walk has followed already, or one nothing resolves:
+    // the walk ends on it, as the resolver did.
+    if (bare.$ref) return;
+    for (const sub of bare.allOf ?? []) visit(sub);
+    for (const [key, prop] of Object.entries(bare.properties ?? {})) {
+      if (!prop) continue;
+      const existing = properties[key];
+      properties[key] = existing ? combineDeclarations(existing, prop) : prop;
+    }
+    if (bare.required) required.push(...bare.required);
+  };
+  visit(schema);
+
+  return { properties, required };
 }
 
 // ---------------------------------------------------------------------------

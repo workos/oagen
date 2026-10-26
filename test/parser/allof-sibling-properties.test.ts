@@ -810,13 +810,17 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       for (const [i, order] of orders.entries()) {
         const name = `Nest${i}`;
         const label = `${name}: ${order.join(' > ')}`;
-        const chosen = order.find((kind) => kind === 'a' || kind === 'b')!;
+        const always = order.filter((kind) => kind === 'a' || kind === 'b');
         const child = modelOf(spec, name).fields.find((f) => f.name === 'child')!.type;
         expect(show(child), label).toBe(`${name}Child`);
         expect(fieldsOf(spec, name), label).toContain(`child: ${name}Child`);
-        // The one model of that name has the chosen declaration's field; the
-        // other member's declaration minted nothing.
-        expect(fieldsOf(spec, `${name}Child`), label).toEqual([`${chosen}Field?: string`]);
+        // The one model of that name is built from the declaration the field
+        // is typed from: the two always-applying declarations conjoined, in
+        // their order, as JSON Schema applies both (workos/oagen#308 merge
+        // review: the first alone was kept, so a stop field the second
+        // declared was read but not a field of the model); the branch
+        // declarations contribute nothing, and no other model is minted.
+        expect(fieldsOf(spec, `${name}Child`), label).toEqual(always.map((kind) => `${kind}Field?: string`));
         expect(
           modelNames(spec).filter((n) => n === `${name}Child`),
           label,

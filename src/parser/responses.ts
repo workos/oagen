@@ -1,6 +1,7 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
 import { toPascalCase, singularize } from '../utils/naming.js';
 import {
+  collectObjectProperties,
   detectEndOfIteration,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
@@ -9,6 +10,8 @@ import {
 } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
 import {
+  arraySchemaOf,
+  declaresNull,
   schemaToTypeRef,
   buildFieldFromSchema,
   classifyInlineSchema,
@@ -17,15 +20,13 @@ import {
   foldSiblingProperties,
   isArrayComponentRef,
   isArraySchema,
-  isInlineObjectSchema,
   collapsedNullableBranch,
-  nullableUnionBranch,
-  unwrapNullableSchema,
   warnOnUncarriedProperties,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
   collectProperties,
+  combineDeclarations,
   extractInlineModelsFromProperties,
   mergeAllOfMembers,
   mergedObjectSchema,
@@ -69,9 +70,12 @@ export interface ResponseExtractionResult {
    */
   envelopeFields?: Field[];
   /**
-   * The envelope field that ends an iteration, when the envelope declares an
-   * obvious one (see `PaginationMeta.endOfIteration`). Set only for a list
-   * envelope.
+   * The field that ends an iteration, when the body declares an obvious one
+   * (see `PaginationMeta.endOfIteration`): read beside the array a list
+   * envelope was unwrapped on, and beside the array an explicit `dataPath`
+   * names in a body kept as a wrapper — a `$ref` to a component, an envelope
+   * detection would unwrap on another array, an inline body detection did
+   * not recognize (`bodyEndOfIteration`). Unset for every other body.
    */
   endOfIteration?: PaginationEndOfIteration;
   /**
@@ -92,13 +96,17 @@ export interface ResponseClassificationOptions {
    */
   paginationDisabled?: boolean;
   /**
-   * An explicit `dataPath` (already known to reach an array in the body) that
-   * names another array than the one a list envelope would be unwrapped on.
-   * Detection was wrong for this operation, so the envelope is kept as a
-   * wrapper exactly as under `paginationDisabled` — `response` is what the
-   * wire returns, the override says where the items are in it, and the
-   * wrapper carries the companions — except that its stop field is still
-   * read, with the override's root property as the data property.
+   * An explicit `dataPath`, already known to reach an array in the body. One
+   * that restates the path a list envelope is unwrapped on changes nothing.
+   * Any other keeps the body as the wrapper the override iterates — a
+   * recognized envelope, kept exactly as under `paginationDisabled` since
+   * detection was wrong for this operation; an inline body detection did not
+   * recognize; a `$ref` to a component — so `response` is what the wire
+   * returns, the override says where the items are in it, and the wrapper
+   * carries the companions. The wrapper's stop field is still read, keyed by
+   * the override, whatever the wrapper is (`bodyEndOfIteration`). Read only
+   * when `paginationDisabled` is not set: `strategy: 'none'` leaves no
+   * iterator to stop.
    */
   dataPathOverride?: string;
   /**
@@ -187,6 +195,57 @@ export function classifyAndExtractResponse(
   componentSchemas?: Record<string, SchemaObject>,
   options: ResponseClassificationOptions = {},
 ): ResponseExtractionResult {
+  const body = classifyBody(schema, contextName, componentSchemas, options);
+  // Under an explicit `dataPath`, a body that was not unwrapped on that path
+  // is the wrapper the override iterates — a `$ref` to a component, an
+  // envelope detection would unwrap on another array, an inline body
+  // detection did not recognize — and its stop field is read here, once for
+  // every such shape, keyed by the path. A path that restates the one the
+  // envelope was unwrapped on (`isPaginated`) has had it read by
+  // `extractListResponse`; under `paginationDisabled` there is no iterator
+  // to stop.
+  const override = options.dataPathOverride;
+  if (override === undefined || options.paginationDisabled || body.isPaginated) return body;
+  const endOfIteration = bodyEndOfIteration(schema, override, componentSchemas);
+  return endOfIteration ? { ...body, endOfIteration } : body;
+}
+
+/**
+ * The field that ends an iteration of a body kept as a wrapper under an
+ * explicit `dataPath`, read beside the array the path names — the one
+ * reader for every kept wrapper, whatever wraps it. The wrapper's
+ * properties are collected exactly as a recognized envelope's are
+ * (`collectObjectProperties`, which reads the body and every `allOf`
+ * member, however deep, through `resolveBareSchema` — the resolver the path
+ * walk uses — so a `$ref` body, a nullable wrapper around the body or
+ * around any member, and a `$ref` chain to one all reach the same object
+ * the path walked), and `detectEndOfIteration` reads them as it reads an
+ * unwrapped envelope's: the fields beside the array the path names first,
+ * under a parent of any name (`result.total_pages` next to `result.items`),
+ * then the top level, then the metadata companions, and never the array
+ * itself. `undefined` when nothing recognizable is declared, or the body
+ * resolves to no object at all.
+ */
+function bodyEndOfIteration(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): PaginationEndOfIteration | undefined {
+  const { properties } = collectObjectProperties(schema, componentSchemas);
+  return detectEndOfIteration(properties, dataPath, componentSchemas);
+}
+
+/**
+ * Classify one body: a `$ref` names its component; an inline body is a list
+ * envelope — unwrapped on its data array, unless an explicit `dataPath`
+ * names another array in it — a single-resource wrapper, or a plain model.
+ */
+function classifyBody(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  options: ResponseClassificationOptions,
+): ResponseExtractionResult {
   // 1. If schema is a $ref, resolve to model name (Phase 1)
   if (schema.$ref) {
     return { response: schemaToTypeRef(schema, contextName), inlineModels: [], isPaginated: false };
@@ -211,15 +270,12 @@ export function classifyAndExtractResponse(
       if (override === undefined || override === envelope.dataPath) {
         return extractListResponse(schema, contextName, envelope.dataPath!, componentSchemas, options.settle);
       }
-      // The full path is excluded, not its root: a stop field beside the
-      // nested array (`pagination.has_more` next to `pagination.items`) stays
-      // visible, and the array itself is never a stop field.
-      const { properties } = collectEnvelopeProperties(schema, componentSchemas);
-      const endOfIteration = detectEndOfIteration(properties, override, componentSchemas);
-      return {
-        ...extractDirectResource(schema, contextName, componentSchemas, options.settle),
-        ...(endOfIteration && { endOfIteration }),
-      };
+      // The override names another array than the one the envelope would be
+      // unwrapped on: detection was wrong for this operation, so the envelope
+      // is kept as a wrapper, exactly as under `paginationDisabled`. Its stop
+      // field is read by the caller (`bodyEndOfIteration`), as every kept
+      // wrapper's is.
+      return extractDirectResource(schema, contextName, componentSchemas, options.settle);
     }
   }
 
@@ -253,10 +309,18 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
 
   if (propSources.length === 0) return { isEnvelope: false, dataPath: null };
 
-  // Merge all properties into a single view
-  const mergedProps: Record<string, SchemaObject | undefined> = {};
+  // Merge all properties into a single view. A name two members declare is
+  // settled as every `allOf` merge settles it (`combineDeclarations`): the
+  // first declaration that declares a type, a typeless one only annotating
+  // it, so `data: { type: 'array' }` beside a later `data: { description }`
+  // is still the array detection looks for.
+  const mergedProps: Record<string, SchemaObject> = {};
   for (const source of propSources) {
-    Object.assign(mergedProps, source);
+    for (const [key, prop] of Object.entries(source)) {
+      if (!prop) continue;
+      const existing = mergedProps[key];
+      mergedProps[key] = existing ? combineDeclarations(existing, prop) : prop;
+    }
   }
 
   // Find array properties — typed, `items` with no `type`, or either under a
@@ -315,7 +379,7 @@ function extractListResponse(
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
-  const { properties, required } = collectEnvelopeProperties(schema, componentSchemas);
+  const { properties, required } = collectObjectProperties(schema, componentSchemas);
 
   const dataProp = properties[dataPath];
   // The property's own text, as `buildFieldFromSchema` keeps it for every
@@ -362,7 +426,9 @@ function extractListResponse(
   );
 
   // The field that says the list is exhausted — `has_more`, `total_pages`,
-  // `pagination.totalPages` — so an iterator can stop without a wasted request.
+  // `pagination.totalPages` — so an iterator can stop without a wasted
+  // request: the read `bodyEndOfIteration` makes for a kept wrapper, on the
+  // properties already collected above.
   const endOfIteration = detectEndOfIteration(properties, dataPath, componentSchemas);
 
   return {
@@ -422,27 +488,6 @@ export function resolveDataPathFromSchema(
   const array = resolveBareSchema(target, componentSchemas);
   if (!isArraySchema(array) || !array.items) return undefined;
   return typeInlineItems(array.items, inlineItemNameForPath(contextName, dataPath), componentSchemas, settle);
-}
-
-/**
- * The array schema `schema` is, once a nullable wrapper of any spelling is
- * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
- * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
- * written with or without `items` beside it — and `undefined` when it is
- * not an array: `unwrapNullableSchema`, the one definition the model side
- * unwraps by, then `isArraySchema`, the one test every site makes. So a
- * list envelope's data array, an array response body and an `allOf`-merged
- * array property are arrays here whatever wrapper they wear, as
- * `schemaToTypeRef` types them `nullable<array<…>>`. A `$ref` is a reference
- * and is not looked through: a `$ref` to an array component is typed as the
- * array the component declares by `schemaToTypeRef` itself, with the items
- * the component pass built (`isArrayComponentRef` says whether a property
- * is one), and the explicit `dataPath` walk (`resolveBareSchema`) is the one
- * place any other reference is followed.
- */
-function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
-  const bare = unwrapNullableSchema(schema);
-  return isArraySchema(bare) ? bare : undefined;
 }
 
 /**
@@ -516,107 +561,6 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
     .join('');
   const own = singularize(toPascalCase(segments[segments.length - 1]));
   return contextName.replace(/Response$/, '') + parents + own;
-}
-
-/**
- * Every property the envelope declares, merged across its `allOf` branches,
- * with the `required` lists that go with them.
- *
- * A `$ref` branch is resolved against the component schemas so fields an
- * envelope inherits from a shared base (`trace_id` on every response, say)
- * are not silently dropped. A property declared by more than one branch keeps
- * both declarations' shape when both are inline objects — `pagination.next`
- * from one branch and `pagination.total` from another both belong to the
- * response — and otherwise takes the later declaration. (Envelope detection
- * reads the branches' own `properties`; a `oneOf`/`anyOf` branch declares
- * none, so it contributes nothing here. A body that is not an envelope is
- * merged by `mergeAllOfMembers`, which reads such a branch's variants.)
- */
-function collectEnvelopeProperties(
-  schema: SchemaObject,
-  componentSchemas?: Record<string, SchemaObject>,
-): { properties: Record<string, SchemaObject>; required: string[] } {
-  const properties: Record<string, SchemaObject> = {};
-  const required: string[] = [];
-  const seenRefs = new Set<string>();
-
-  const visit = (s: SchemaObject): void => {
-    if (s.$ref) {
-      if (seenRefs.has(s.$ref)) return;
-      seenRefs.add(s.$ref);
-      const refName = s.$ref.split('/').pop();
-      const resolved = refName ? componentSchemas?.[refName] : undefined;
-      if (resolved) visit(resolved);
-      return;
-    }
-    for (const sub of s.allOf ?? []) visit(sub);
-    for (const [key, prop] of Object.entries(s.properties ?? {})) {
-      if (!prop) continue;
-      const existing = properties[key];
-      properties[key] = existing ? mergePropertyDeclarations(existing, prop) : prop;
-    }
-    if (s.required) required.push(...s.required);
-  };
-  visit(schema);
-
-  return { properties, required };
-}
-
-/**
- * Combine two `allOf` declarations of one property. Inline objects merge their
- * fields. Two arrays, each under a nullable wrapper of any spelling or none
- * (`arraySchemaOf`), merge as the bare arrays they wrap, so the `items` land
- * in the one array that is then read, whichever declaration wore the wrapper:
- * the later declaration's keywords over the earlier's, the later `items` when
- * it narrows them and the earlier `items` when the later declaration only
- * constrains the array (`minItems: 1`) or allows any item (`items: {}`), so
- * `data: User[]` is not downgraded to `string[]` or `unknown[]`; the result
- * is `type: ['array', 'null']` when either declaration admits `null`, else
- * `type: 'array'`, and carries the later `description`, else the earlier.
- * Anything else takes the later declaration.
- */
-function mergePropertyDeclarations(earlier: SchemaObject, later: SchemaObject): SchemaObject {
-  if (isInlineObjectSchema(earlier) && isInlineObjectSchema(later)) {
-    return {
-      ...earlier,
-      ...later,
-      properties: { ...earlier.properties, ...later.properties },
-      required: [...(earlier.required ?? []), ...(later.required ?? [])],
-    };
-  }
-  const earlierArray = arraySchemaOf(earlier);
-  const laterArray = earlierArray && arraySchemaOf(later);
-  if (earlierArray && laterArray) {
-    const narrows = laterArray.items !== undefined && Object.keys(laterArray.items).length > 0;
-    const items = narrows ? laterArray.items : earlierArray.items;
-    const description = later.description ?? earlier.description;
-    const { nullable: _earlierFlag, ...earlierBare } = earlierArray;
-    const { nullable: _laterFlag, ...laterBare } = laterArray;
-    return {
-      ...earlierBare,
-      ...laterBare,
-      ...(items !== undefined && { items }),
-      ...(description !== undefined && { description }),
-      type: declaresNull(earlier) || declaresNull(later) ? ['array', 'null'] : 'array',
-    };
-  }
-  return later;
-}
-
-/**
- * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
- * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
- * `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to
- * one non-null variant (`nullableUnionBranch`). The one test for the places
- * the response path builds an array TypeRef itself (`nullableIf`) or merges
- * two array declarations (`mergePropertyDeclarations`).
- */
-function declaresNull(schema: SchemaObject): boolean {
-  return (
-    (Array.isArray(schema.type) && schema.type.includes('null')) ||
-    (schema.nullable === true && schema.type !== undefined) ||
-    nullableUnionBranch(schema) !== undefined
-  );
 }
 
 /**
