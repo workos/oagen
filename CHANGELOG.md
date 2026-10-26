@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.1](https://github.com/workos/oagen/compare/v0.32.0...v0.32.1) (2026-10-26)
+
+
+### Bug Fixes
+
+* **parser:** name a kept list envelope for its operation, not `List` ([#419](https://github.com/workos/oagen/issues/419)) ([0d1b818](https://github.com/workos/oagen/commit/0d1b8186314772d0dcc7a45e7953b2d9786bf7a9))
+
 ## [0.32.0](https://github.com/workos/oagen/compare/v0.31.0...v0.32.0) (2026-10-26)
 
 
