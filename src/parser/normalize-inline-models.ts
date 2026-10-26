@@ -90,43 +90,25 @@ export interface InlineModelNaming {
  * the twin as in the copy, and the copy still folds onto it rather than
  * take a name of its own and leave the twin referenced by nothing. A direct
  * caller whose schemas were not read by `extractSchemas` has no twins, and
- * its groups are bundled with their own models alone.
- *
- * At the merges, `survivors` adds the references the deferred sites wrote
- * by sharing one of the site's models (`sharedRefs`), so a rename repoints
- * them with the field's own.
+ * its groups are bundled with their own models alone. The twin is among the
+ * bundle's `models`, so a reference a header, parameter or fallback body
+ * wrote by sharing it joins the field's site like one sharing a field model
+ * (`attachSharedRefs`, run over the bundles once the operations are read)
+ * and follows the site's renames.
  */
-export function fieldInlineModelBundles(
-  groups: FieldInlineModelGroup[],
-  models: Model[],
-  survivors?: FieldModelSurvivors,
-): InlineModelBundle[] {
+export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
     const field = parent?.fields.find((f) => f.name === fieldName);
     const own = field ? [field.type] : (parent?.fields.map((f) => f.type) ?? []);
-    const siteModels = [...fieldModels, ...liftedFieldModelsOf(parentName, fieldName)];
-    const shared = siteModels.flatMap((model) => survivors?.sharedRefs.get(model) ?? []);
     return {
       qualifier: parentName,
-      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName), ...shared],
-      models: siteModels,
+      roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
+      models: [...fieldModels, ...liftedFieldModelsOf(parentName, fieldName)],
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
     };
   });
-}
-
-/**
- * What a field's site holds once the operations are read
- * (`fieldInlineModelBundles` at the merges): `sharedRefs`, from
- * `extractOperations`, are the references a header, parameter or fallback
- * body wrote by sharing one of the site's models — a field model, or the
- * twin the schema pass lifted from the same schema — which the site repoints
- * with the field's own.
- */
-export interface FieldModelSurvivors {
-  sharedRefs: ReadonlyMap<Model, readonly TypeRef[]>;
 }
 
 /**
