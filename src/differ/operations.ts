@@ -26,6 +26,7 @@ import {
 import type { DocumentShapes } from './shapes.js';
 import type {
   Change,
+  FieldChange,
   ParamChange,
   ParamLocation,
   ResponseContentTypesChange,
@@ -34,10 +35,12 @@ import type {
 } from './types.js';
 import { locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
+  classifyFieldChange,
   classifyParamChange,
   classifyResponseHeaderChange,
   deprecationDetails,
   deprecationFlip,
+  extensionsShift,
   parameterNameShift,
   requestBodyEncodingShift,
   tagsShift,
@@ -190,6 +193,17 @@ export function diffOperations(
     // a caller compiles against, but a changelog has to say it.
     const tags = tagsShift(oldOp, newOp);
     const tagsChanged = tags !== undefined;
+    // Additive always, as a flipped flag is: the operation's own extensions
+    // are not shape, but an emitter may read one, so a changelog has to say
+    // it. The flag is present only when they differ (`extensionsShift`).
+    const extensions = extensionsShift(oldOp, newOp);
+    const extensionsChanged = extensions !== undefined;
+    // The list envelope's fields, matched by name while both specs paginate:
+    // a scalar companion (`has_more`) sits on no model `diffModels` reads, so
+    // its extensions are compared here; a companion object's model is
+    // compared in the models diff (workos/oagen#369 round 2).
+    const envelopeFieldChanges = bothPaginated ? diffEnvelopeFieldExtensions(oldPagination, newPagination) : [];
+    const envelopeFieldsChanged = envelopeFieldChanges.length > 0;
 
     const hasChanges =
       paramChanges.length > 0 ||
@@ -216,7 +230,9 @@ export function diffOperations(
       deprecatedChanged ||
       serversChanged ||
       securityChanged ||
-      tagsChanged;
+      tagsChanged ||
+      extensionsChanged ||
+      envelopeFieldsChanged;
 
     if (hasChanges) {
       // paginated: false→true is additive (SDK gains pagination helper)
@@ -335,11 +351,36 @@ export function diffOperations(
         ...security,
         tagsChanged,
         ...tags,
+        ...(extensions ? { extensionsChanged: true, ...extensions } : {}),
+        ...(envelopeFieldsChanged ? { envelopeFieldChanges } : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
   }
 
+  return changes;
+}
+
+/**
+ * The envelope fields (`PaginationMeta.envelopeFields`) whose `extensions`
+ * differ between two paginated versions, matched by field name: one
+ * `field-extensions-changed` entry each, additive, with the two sides
+ * beside it (`extensionsShift`). A field only one side declares is not
+ * reported here — nothing else about an envelope field is compared by the
+ * differ — and a companion object's model is compared in `diffModels`.
+ */
+function diffEnvelopeFieldExtensions(
+  oldPagination: Operation['pagination'],
+  newPagination: Operation['pagination'],
+): FieldChange[] {
+  const oldFields = new Map((oldPagination?.envelopeFields ?? []).map((field) => [field.name, field]));
+  const changes: FieldChange[] = [];
+  for (const field of newPagination?.envelopeFields ?? []) {
+    const before = oldFields.get(field.name);
+    if (!before) continue;
+    const shift = extensionsShift(before, field);
+    if (shift) changes.push({ ...classifyFieldChange('field-extensions-changed', field.name), ...shift });
+  }
   return changes;
 }
 

@@ -6,10 +6,12 @@ import type {
   DeprecatedNode,
   DiffReport,
   EnumValueChange,
+  ExtensionsChanged,
+  ExtensionsNode,
   SecurityChanged,
   SecurityNode,
 } from './types.js';
-import { deprecationDetails, deprecationFlip } from './classify.js';
+import { deprecationDetails, deprecationFlip, extensionsShift, type ExtensionsShift } from './classify.js';
 import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
 import { classifySecurityChange, securityEqual, type DocumentSecurity, type SecuritySide } from './security.js';
@@ -107,6 +109,14 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     newDeprecated: change.newDeprecated === true,
     classification: 'additive',
   });
+  // An extensions change, the two sides copied from the change as the flip's are.
+  const extended = (node: ExtensionsNode, change: ExtensionsShift): ExtensionsChanged => ({
+    kind: 'extensions-changed',
+    ...node,
+    ...(change.oldExtensions ? { oldExtensions: change.oldExtensions } : {}),
+    ...(change.newExtensions ? { newExtensions: change.newExtensions } : {}),
+    classification: 'additive',
+  });
   const shifted = (
     node: SecurityNode,
     change: { oldSecurity?: SecurityRequirementSet[]; newSecurity?: SecurityRequirementSet[] },
@@ -133,15 +143,18 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
 
     if (c.kind === 'model-modified') {
       if (c.deprecatedChanged) out.push(flipped({ node: 'model', modelName: c.name }, c));
+      if (c.extensionsChanged) out.push(extended({ node: 'model', modelName: c.name }, c));
       for (const fc of c.fieldChanges) {
-        if (fc.kind !== 'field-deprecated-changed') continue;
-        out.push(flipped({ node: 'field', modelName: c.name, fieldName: fc.fieldName }, fc));
+        const field: ExtensionsNode = { node: 'field', modelName: c.name, fieldName: fc.fieldName };
+        if (fc.kind === 'field-deprecated-changed') out.push(flipped(field, fc));
+        else if (fc.kind === 'field-extensions-changed') out.push(extended(field, fc));
       }
       continue;
     }
 
     if (c.kind === 'enum-modified') {
       if (c.deprecatedChanged) out.push(flipped({ node: 'enum', enumName: c.name }, c));
+      if (c.extensionsChanged) out.push(extended({ node: 'enum', enumName: c.name }, c));
       for (const vc of c.valueChanges) {
         if (vc.kind !== 'value-deprecated-changed') continue;
         out.push(flipped({ node: 'enum-value', enumName: c.name, valueName: vc.valueName }, vc));
@@ -177,6 +190,25 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     if (c.kind !== 'operation-modified') continue;
     if (c.deprecatedChanged) {
       out.push(flipped({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c));
+    }
+    if (c.extensionsChanged) {
+      out.push(extended({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c));
+    }
+    // A list envelope's field, which no model carries, named by the
+    // operation it belongs to.
+    for (const fc of c.envelopeFieldChanges ?? []) {
+      if (fc.kind !== 'field-extensions-changed') continue;
+      out.push(
+        extended(
+          {
+            node: 'envelope-field',
+            serviceName: c.serviceName,
+            operationName: c.operationName,
+            fieldName: fc.fieldName,
+          },
+          fc,
+        ),
+      );
     }
     if (c.securityChanged) {
       out.push(
@@ -258,7 +290,9 @@ function diffEnums(oldEnums: Enum[], newEnums: Enum[]): Change[] {
     // A flipped flag alone is a change: the values are unchanged, but a
     // changelog has to say it.
     const deprecation = deprecationFlip(oldEnum, newEnum);
-    if (valueChanges.length > 0 || deprecation) {
+    // So is a change to the enum's own extensions (`extensionsShift`).
+    const extensions = extensionsShift(oldEnum, newEnum);
+    if (valueChanges.length > 0 || deprecation || extensions) {
       const hasBreaking = valueChanges.some((vc) => vc.classification === 'breaking');
       changes.push({
         kind: 'enum-modified',
@@ -266,6 +300,7 @@ function diffEnums(oldEnums: Enum[], newEnums: Enum[]): Change[] {
         valueChanges,
         deprecatedChanged: deprecation !== undefined,
         ...deprecation,
+        ...(extensions ? { extensionsChanged: true, ...extensions } : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }

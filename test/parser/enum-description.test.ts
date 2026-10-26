@@ -542,7 +542,7 @@ describe('Enum.description on inline enums', () => {
                     description: 'Outer nullable.',
                     allOf: [{ oneOf: [{ type: 'string', enum: ['n1', 'n2'] }, { type: 'null' }] }],
                   },
-                  // An object member's model keeps the member's own text.
+                  // An object member's model takes the wrapper's text too, by the one wrapper rule (#352 round 3).
                   objectUnder: {
                     description: 'Outer object.',
                     allOf: [{ type: 'object', properties: { a: { type: 'string' } }, description: 'Inner object.' }],
@@ -584,8 +584,11 @@ describe('Enum.description on inline enums', () => {
       kind: 'nullable',
       inner: { kind: 'enum', name: 'PetNullableUnder', values: ['n1', 'n2'] },
     });
-    // Model descriptions are untouched: the object member's own text.
-    expect(byName(spec.models, 'PetObjectUnder').description).toBe('Inner object.');
+    // The model built from the object member documents itself by the same
+    // wrapper rule as the enums above (`withWrapperDocs` in
+    // `unwrappedAllOfMember`): the wrapper's text, the member's own only
+    // when the wrapper has none (#352 round 3).
+    expect(byName(spec.models, 'PetObjectUnder').description).toBe('Outer object.');
     expectEnumsSound(spec);
   });
 

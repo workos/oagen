@@ -1,4 +1,4 @@
-import type { Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
+import type { Extensions, Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
 import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
@@ -26,7 +26,7 @@ export interface DiffReport {
   };
 }
 
-export type BehaviorChange = ParamDefaultChanged | DeprecatedChanged | SecurityChanged;
+export type BehaviorChange = ParamDefaultChanged | DeprecatedChanged | SecurityChanged | ExtensionsChanged;
 
 export interface ParamDefaultChanged {
   kind: 'param-default-changed';
@@ -120,6 +120,38 @@ export type SecurityNode =
   | { node: 'operation'; serviceName: string; operationName: string }
   | { node: 'webhook'; name: string; httpMethod: string };
 
+/**
+ * An IR node's `extensions` — the `x-*` keys of the object it was built
+ * from — changed: a key added, removed or given another value (compared
+ * deeply, key order aside; an absent key and an empty object are the
+ * same). The node is still there with the same shape, so nothing a caller
+ * compiles against changes and the event is additive; it is surfaced here,
+ * beside the `extensionsChanged` flag or `field-extensions-changed` entry
+ * on the owning change, since an emitter may derive behavior from a key it
+ * knows (`x-idempotent`, say) and a changelog has to say it.
+ * `oldExtensions`/`newExtensions` are copied from that change: each is the
+ * node's `extensions` on that side, absent when the node had none there.
+ */
+export type ExtensionsChanged = {
+  kind: 'extensions-changed';
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
+  classification: 'additive';
+} & ExtensionsNode;
+
+/**
+ * Which IR node an `extensions-changed` entry is about, named the way the
+ * owning change names it. One entry kind per carrier of `extensions`: an
+ * operation, a model, a model's field, an enum, and a list envelope's field
+ * (`Operation.pagination.envelopeFields`, which sits on no model).
+ */
+export type ExtensionsNode =
+  | { node: 'operation'; serviceName: string; operationName: string }
+  | { node: 'model'; modelName: string }
+  | { node: 'field'; modelName: string; fieldName: string }
+  | { node: 'enum'; enumName: string }
+  | { node: 'envelope-field'; serviceName: string; operationName: string; fieldName: string };
+
 export type Change =
   | ModelAdded
   | ModelRemoved
@@ -171,6 +203,16 @@ export interface ModelModified {
   /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
+  /**
+   * Present, and `true`, only when the model's own `extensions` differ
+   * (see `ExtensionsChanged`). Additive: the model and its fields are
+   * unchanged. A model whose only change is this is still reported, with
+   * an empty `fieldChanges`.
+   */
+  extensionsChanged?: true;
+  /** Present exactly when `extensionsChanged`, each when the model had extensions on that side: old → new. */
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
   classification: 'additive' | 'breaking';
 }
 
@@ -213,12 +255,16 @@ export interface FieldChange {
     | 'field-format-changed'
     | 'field-required-changed'
     | 'field-access-changed'
-    | 'field-deprecated-changed';
+    | 'field-deprecated-changed'
+    | 'field-extensions-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
   /** For `field-deprecated-changed`: the flag's two sides, old → new. */
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
+  /** For `field-extensions-changed` (additive, see `ExtensionsChanged`): the field's `extensions` on each side, each when it had any there. */
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
   /** For `field-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
   details?: string;
 }
@@ -248,6 +294,15 @@ export interface EnumModified {
   /** Present exactly when `deprecatedChanged`: the flag's two sides, old → new. */
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
+  /**
+   * Present, and `true`, only when the enum's own `extensions` differ (see
+   * `ExtensionsChanged`). Additive: the values are unchanged. An enum whose
+   * only change is this is still reported, with an empty `valueChanges`.
+   */
+  extensionsChanged?: true;
+  /** Present exactly when `extensionsChanged`, each when the enum had extensions on that side: old → new. */
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
   classification: 'additive' | 'breaking';
 }
 
@@ -460,6 +515,26 @@ export interface OperationModified {
   /** Present exactly when `tagsChanged`: the lists on each side, old → new, `[]` for none. */
   oldTags?: string[];
   newTags?: string[];
+  /**
+   * Present, and `true`, only when the operation's `extensions` differ (see
+   * `ExtensionsChanged`). Additive: the operation's signature is unchanged.
+   * A change whose only content is this is still reported.
+   */
+  extensionsChanged?: true;
+  /** Present exactly when `extensionsChanged`, each when the operation had extensions on that side: old → new. */
+  oldExtensions?: Extensions;
+  newExtensions?: Extensions;
+  /**
+   * The fields of the list envelope (`Operation.pagination.envelopeFields`)
+   * whose `extensions` differ, one `field-extensions-changed` entry each
+   * with the two sides beside it, matched by field name while both specs
+   * paginate. Present only when there is at least one. A scalar companion
+   * (`has_more`) sits on no model `diffModels` reads, so this is where its
+   * change is reported; a companion object's model is compared in the
+   * models diff like any model. No other property of an envelope field is
+   * compared by the differ.
+   */
+  envelopeFieldChanges?: FieldChange[];
   /**
    * True when a response entry gained or lost a media type, or a secondary
    * media type's body type changed; `responseContentTypeChanges` says which.

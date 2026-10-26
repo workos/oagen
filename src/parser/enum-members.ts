@@ -1,4 +1,4 @@
-import type { EnumRef, EnumValue, ExternalDocs, TypeRef } from '../ir/types.js';
+import type { EnumRef, EnumValue, Extensions, ExternalDocs, TypeRef } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import { toUpperSnakeCase } from '../utils/naming.js';
 import { readExternalDocs } from './external-docs.js';
@@ -35,6 +35,8 @@ interface InlineEnumMeta {
   members: EnumMember[];
   description?: string;
   externalDocs?: ExternalDocs;
+  /** The schema's own `x-*` keys, less the consumed ones (`extensionsOf`), read like its link. */
+  extensions?: Extensions;
 }
 
 const inlineEnumMeta = new WeakMap<EnumRef, InlineEnumMeta>();
@@ -60,6 +62,7 @@ export function inlineEnumRef(
   members: readonly EnumMember[],
   rawExternalDocs: unknown,
   rawDescription?: unknown,
+  extensions?: Extensions,
 ): EnumRef {
   const ref: EnumRef = { kind: 'enum', name, values: members.map((member) => member.value) };
   const description = textWithContent(rawDescription);
@@ -68,6 +71,10 @@ export function inlineEnumRef(
     members: [...members],
     ...(description !== undefined ? { description } : {}),
     ...(externalDocs ? { externalDocs } : {}),
+    // The schema's extensions, already read by the caller (`extensionsOf`,
+    // the consumed keys left out), so the lifted enum carries them as it
+    // carries the link.
+    ...(extensions ? { extensions } : {}),
   });
   return ref;
 }
@@ -80,6 +87,11 @@ export function inlineEnumDescriptionOf(ref: EnumRef): string | undefined {
 /** The link recorded for an inline enum ref by `inlineEnumRef`; none for a ref built any other way. */
 export function inlineEnumExternalDocsOf(ref: EnumRef): ExternalDocs | undefined {
   return inlineEnumMeta.get(ref)?.externalDocs;
+}
+
+/** The extensions recorded for an inline enum ref by `inlineEnumRef`; none for a ref built any other way, or from a schema that declares none. */
+export function inlineEnumExtensionsOf(ref: EnumRef): Extensions | undefined {
+  return inlineEnumMeta.get(ref)?.extensions;
 }
 
 /** Give `to`, a copy of `from`, the members, description and link recorded for `from`: a copy made any other way is a bare name to every pass that reads them (`cloneTypeRef`). */

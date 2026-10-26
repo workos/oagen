@@ -1,11 +1,13 @@
-import type { Model, ModelRef, Enum, EnumValue, Field, TypeRef, Constraints } from '../ir/types.js';
+import type { Model, ModelRef, Enum, EnumValue, Extensions, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords } from '../utils/naming.js';
-import { externalDocsEntry, readExternalDocs, withWrapperExternalDocs, type RawExternalDocs } from './external-docs.js';
+import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
+import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import {
   enumShapeKey,
   enumValuesOf,
   inlineEnumDescriptionOf,
+  inlineEnumExtensionsOf,
   inlineEnumExternalDocsOf,
   inlineEnumRef,
   toEnumValue,
@@ -541,8 +543,20 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
  * variant — so extraction dispatches on the same shape the TypeRef was built
  * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
  * `schemaToTypeRef` passes both through each of these wrappers unchanged.
+ *
+ * `carry` is applied at each union level, to the branch with the wrapper
+ * it collapses from, before the branch is unwrapped in turn — so a caller
+ * that builds a model from the result (`unwrapNullableField`) composes the
+ * wrappers' documentation outermost-first through every level
+ * (`withWrapperDocs`). The default keeps the branch as written, which is
+ * what every site that only dispatches on the unwrapped shape needs. The
+ * type-array and `nullable: true` forms unwrap by spreading, so every
+ * keyword of theirs survives without it.
  */
-export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
+export function unwrapNullableSchema(
+  schema: SchemaObject,
+  carry: (branch: SchemaObject, wrapper: SchemaObject) => SchemaObject = (branch) => branch,
+): SchemaObject {
   if (schema.$ref) return schema;
   // `properties` beside a typing composition are folded into it before any
   // wrapper is stripped (`foldSiblingProperties`), so a nullable union
@@ -552,16 +566,16 @@ export function unwrapNullableSchema(schema: SchemaObject): SchemaObject {
   if (Array.isArray(folded.type)) {
     const nonNullTypes = folded.type.filter((t) => t !== 'null');
     if (nonNullTypes.length !== 1) return folded;
-    return unwrapNullableSchema({ ...folded, type: nonNullTypes[0], nullable: false });
+    return unwrapNullableSchema({ ...folded, type: nonNullTypes[0], nullable: false }, carry);
   }
   if (folded.nullable && folded.type) {
-    return unwrapNullableSchema({ ...folded, nullable: false });
+    return unwrapNullableSchema({ ...folded, nullable: false }, carry);
   }
   // A nullable union collapses onto its one non-null variant — decided by
   // `nullableUnionBranch`, the same definition `collapsedNullableBranch`
   // checks, so the check and the unwrap cannot disagree.
   const branch = nullableUnionBranch(folded);
-  return branch ? unwrapNullableSchema(branch) : folded;
+  return branch ? unwrapNullableSchema(carry(branch, folded), carry) : folded;
 }
 
 /**
@@ -622,15 +636,18 @@ export function declaresNull(schema: SchemaObject): boolean {
 
 /**
  * `unwrapNullableSchema` for a schema a model is built from, carrying the
- * wrapper's limits, `deprecated` and `externalDocs` onto the branch it
- * unwraps to. The type-array and `nullable: true` forms unwrap by spreading,
- * so every keyword survives; the union form swaps in the bare branch, which
- * would drop a `minProperties` or `deprecated: true` written beside
+ * wrappers' limits, the outermost's `deprecated` and every collapsed
+ * level's documentation onto the branch it unwraps to. The type-array and
+ * `nullable: true` forms unwrap by spreading, so every keyword survives;
+ * the union form swaps in the bare branch, which would drop a
+ * `minProperties` or `deprecated: true` written beside
  * `anyOf: [{ type: 'object', … }, { type: 'null' }]`. `extractConstraints`
- * conjoins that wrapper's own keywords with its branch's as the field's
- * limits, and `Field.deprecated` is the wrapper's, so the model built from the
- * branch must carry the same ones or it would disagree with its field; the
- * wrapper's link rides along the same way (`withWrapperExternalDocs`). Every
+ * conjoins each wrapper's own keywords with its branch's as the field's
+ * limits, and `Field.deprecated` is the outermost wrapper's, so the model
+ * built from the branch must carry the same ones or it would disagree with
+ * its field; the documentation — text, link, examples, extensions — rides
+ * along level by level, outermost first, by the one wrapper rule
+ * (`withWrapperDocs`, applied by `unwrapNullableSchema` at each level). Every
  * extractor that builds a model from a nullable wrapper's branch — the field
  * extractor, `extractNestedSchema`, `extractInlineModelDeep`, the request-body
  * and wrapped-response paths — goes through this one function, so the
@@ -642,9 +659,15 @@ export function declaresNull(schema: SchemaObject): boolean {
  * branch; `collapsedNullableBranch` does.
  */
 export function unwrapNullableField(schema: SchemaObject): SchemaObject {
-  const inner = unwrapNullableSchema(schema);
+  // The documentation of every collapsed level rides onto the branch as it
+  // is unwrapped, outermost first (`withWrapperDocs` through
+  // `unwrapNullableSchema`), so an inner wrapper's text, link or key reaches
+  // the model wherever the outer has none; the limits conjoin through every
+  // level too (`extractConstraints`), and the flag is the outermost
+  // wrapper's alone, as `Field.deprecated` reads it.
+  const inner = unwrapNullableSchema(schema, withWrapperDocs);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return withWrapperExternalDocs(withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema), schema);
+  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
 }
 
 /**
@@ -683,26 +706,44 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
 }
 
 /**
- * `inner` carrying the wrapper's documentation — its `description` and its
- * link — for the type `schemaToTypeRef` builds from it. A wrapper the
- * builder collapses (a nullable `oneOf`/`anyOf`, a single-member `allOf`) is
- * the schema the document wrote for the property, parameter, header or
- * body, so an inline enum lifted from the branch documents itself by the
- * wrapper's text and link when the wrapper has them, and by the branch's
- * own only when it does not: the same precedence for both keys, decided
- * here once. The text counts when it has non-whitespace content, as
- * `inlineEnumRef` reads it; the link when it is usable
- * (`withWrapperExternalDocs`). Read by the two wrapper sites of
- * `schemaToTypeRef` and by the response path where it types the member of
- * a single-member `allOf` body it unwrapped itself (`extractDirectResource`).
- * The model extractors unwrap through `unwrapNullableField` and
- * `unwrappedAllOfMember`, which carry the link and leave the branch's own
- * `description` on the model.
+ * `inner` carrying the wrapper's documentation layer — every keyword that
+ * documents a schema without shaping it, the schema-side counterpart of a
+ * Field's documentation (`FIELD_DOC_KEYS` in inline-models.ts): its
+ * `description` when it has non-whitespace content (as `inlineEnumRef` and
+ * `Model.description` read text), its `externalDocs` when usable
+ * (`readExternalDocs`), its `example` when the key is present (an explicit
+ * `null` is a value, as `Field.example` keeps it), its `examples` when a
+ * non-empty list, and its `x-*` keys one by one (`extensionsOf`, the
+ * consumed keys left where they are read). The wrapper's value wins
+ * wherever both declare one; the branch keeps its own where the wrapper
+ * has none; `inner` itself comes back when the wrapper carries nothing.
+ *
+ * The one rule for a wrapper the parser collapses — a nullable
+ * `oneOf`/`anyOf`, a single-member `allOf` — which is the schema the
+ * document wrote for the property, parameter, header or body, so what it
+ * unwraps to must document itself by the wrapper first. Applied at every
+ * collapse step, so nested wrappers compose outermost-first: an outer
+ * wrapper's keys land on the inner wrapper before the inner wrapper's land
+ * on the branch, and an inner wrapper's key survives wherever the outer has
+ * none (workos/oagen#369 round 3: the model path restored the outermost
+ * wrapper's keys after unwrapping every level at once, so an inner
+ * wrapper's were lost). Read by the type builder's two wrapper sites
+ * (`schemaToTypeRef`), by the model extractors (`unwrapNullableField`
+ * through `unwrapNullableSchema`, `unwrappedAllOfMember`) and by the
+ * response path (`extractDirectResource`), so a model, an enum and a field
+ * built from one wrapper document themselves alike.
  */
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
-  const linked = withWrapperExternalDocs(inner, wrapper);
-  const described = typeof wrapper.description === 'string' && wrapper.description.trim() !== '';
-  return described ? { ...linked, description: wrapper.description } : linked;
+  const carried: SchemaObject = {};
+  if (typeof wrapper.description === 'string' && wrapper.description.trim() !== '') {
+    carried.description = wrapper.description;
+  }
+  const externalDocs = readExternalDocs(wrapper.externalDocs);
+  if (externalDocs) carried.externalDocs = wrapper.externalDocs;
+  if (Object.hasOwn(wrapper, 'example')) carried.example = wrapper.example;
+  if (Array.isArray(wrapper.examples) && wrapper.examples.length > 0) carried.examples = wrapper.examples;
+  Object.assign(carried, extensionsOf(wrapper, SCHEMA_CONSUMED_EXTENSIONS));
+  return Object.keys(carried).length === 0 ? inner : { ...inner, ...carried };
 }
 
 /** Keywords where the stricter of two declarations is the larger value. */
@@ -1143,11 +1184,13 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
         seen.add(r.name);
         const description = inlineEnumDescriptionOf(r);
         const externalDocs = inlineEnumExternalDocsOf(r);
+        const extensions = inlineEnumExtensionsOf(r);
         enums.push({
           name: r.name,
           ...(description !== undefined ? { description } : {}),
           values: enumValuesOf(r),
           ...(externalDocs ? { externalDocs } : {}),
+          ...(extensions ? { extensions } : {}),
         });
       }
     },
@@ -1417,6 +1460,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(source),
         ...constraintsEntry(source),
+        ...schemaExtensionsEntry(source),
       });
     }
     return models;
@@ -1439,6 +1483,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(schema),
         ...constraintsEntry(schema),
+        ...schemaExtensionsEntry(schema),
       },
     ];
   }
@@ -1463,6 +1508,7 @@ function extractNestedSchema(
         fields,
         ...deprecatedEntry(schema.items),
         ...constraintsEntry(schema.items),
+        ...schemaExtensionsEntry(schema.items),
       },
     ];
   }
@@ -2352,6 +2398,9 @@ export function buildFieldFromSchema(
   // `example`. A `$ref` to a model, named union or enum leaves them on it.
   const alias = refTarget !== undefined && isArrayComponentRef(fieldSchema) ? refTarget : undefined;
   const externalDocs = readExternalDocs(fieldSchema.externalDocs) ?? readExternalDocs(alias?.externalDocs);
+  const extensions =
+    extensionsOf(fieldSchema, SCHEMA_CONSUMED_EXTENSIONS) ??
+    (alias ? extensionsOf(alias, SCHEMA_CONSUMED_EXTENSIONS) : undefined);
   return {
     name: fieldName,
     type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
@@ -2372,6 +2421,10 @@ export function buildFieldFromSchema(
     // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
     // a bare `$ref` declares none, and the referenced model carries its limits.
     ...constraintsEntry(fieldSchema),
+    // The schema's own `x-*` keys, read the same way; a `$ref` to an array
+    // component that declares none takes the component's, as it takes its
+    // `description`.
+    ...(extensions ? { extensions } : {}),
   };
 }
 
@@ -2388,8 +2441,15 @@ function buildSyntheticEnumRef(
   parentModelName: string | undefined,
   rawExternalDocs: unknown,
   rawDescription: unknown,
+  extensions: Extensions | undefined,
 ): TypeRef {
-  return inlineEnumRef(inlineEnumName(contextName, parentModelName), members, rawExternalDocs, rawDescription);
+  return inlineEnumRef(
+    inlineEnumName(contextName, parentModelName),
+    members,
+    rawExternalDocs,
+    rawDescription,
+    extensions,
+  );
 }
 
 /**
@@ -2669,6 +2729,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
     default: def,
     ...externalDocsEntry(schema.externalDocs),
     ...deprecatedEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
@@ -2728,6 +2789,7 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
     ...deprecatedEntry(schema),
     ...namedUnionEntry(name, schema, schemas),
     ...constraintsEntry(schema),
+    ...schemaExtensionsEntry(schema),
   };
 }
 
@@ -3724,7 +3786,11 @@ function readComponentAllOf(
  * The schema that types a property a component declares: the always-applying
  * declaration `declareProperty` settles on — the first that declares a type,
  * a typeless one only annotating it (`combineDeclarations`) — else the first
- * branch's.
+ * branch's, carrying the extensions every branch agrees on in place of its
+ * own (`agreedExtensions`, the one agreement rule a property only variants
+ * declare follows, inline or under a component; workos/oagen#369 review: a
+ * component's `kind` took the first variant's `x-since` while the inline
+ * twin left a disputed key off).
  * A component flattens a union's branches as written; the union of distinct
  * branch declarations `mergeAllOfMembers` builds for an inline `allOf` is not
  * built here, since no pass would materialize its inline variants under a
@@ -3732,7 +3798,8 @@ function readComponentAllOf(
  * field or a model nested under one, so they agree on the declaration.
  */
 export function declaredComponentProperty(entry: PropertyDeclarations): SchemaObject {
-  return entry.unconditional?.schema ?? entry.conditional[0]!;
+  if (entry.unconditional) return entry.unconditional.schema;
+  return withAgreedExtensions(entry.conditional[0]!, agreedExtensions(entry.conditional));
 }
 
 /**
@@ -3781,6 +3848,9 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
     // members keep theirs on the referenced model.
     ...constraintsEntry(schema),
+    // The wrapper's own extensions, as its flag and link: a member's stay on
+    // that member, a `$ref` member's on its component.
+    ...schemaExtensionsEntry(schema),
   };
 }
 
@@ -4038,8 +4108,9 @@ function extractDiscriminatedAllOfVariantModels(
         ...deprecatedEntry(variant),
         ...combineConstraints(baseConstraints, extractConstraints(variant)),
         // The variant's own link rides along like its keywords, so the model
-        // built from the rebuilt schema carries it.
+        // built from the rebuilt schema carries it; so do its own extensions.
         ...externalDocsEntry(variant.externalDocs),
+        ...extensionsOf(variant, SCHEMA_CONSUMED_EXTENSIONS),
       };
 
       const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
@@ -4124,23 +4195,29 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
  * occurrence is a boolean const, widen to plain boolean; if every occurrence
  * is a distinct string const, widen to plain string. Otherwise return the
  * first occurrence — emitters that build their own widened types (e.g. the
- * Node discriminated-models module) re-derive from the raw spec.
+ * Node discriminated-models module) re-derive from the raw spec. Whichever
+ * way, the result carries exactly the extensions every occurrence agrees on
+ * (`agreedExtensions`, the one rule for a property several declarations
+ * give; workos/oagen#369 review: a widened field kept `type` and
+ * `description` alone, so a shared `x-since` was lost, and the first
+ * occurrence was returned with its own keys, disputed or not).
  */
 function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
   if (schemas.length === 0) return {};
   if (schemas.length === 1) return schemas[0];
+  const extensions = agreedExtensions(schemas);
 
   const allBoolConst = schemas.every((s) => s.type === 'boolean' && typeof s.const === 'boolean');
   if (allBoolConst) {
-    return { type: 'boolean', description: schemas[0].description };
+    return { type: 'boolean', description: schemas[0].description, ...extensions };
   }
   const allStringConst = schemas.every((s) => s.type === 'string' && typeof s.const === 'string');
   if (allStringConst) {
     const values = schemas.map((s) => s.const as string);
-    if (new Set(values).size === 1) return schemas[0];
-    return { type: 'string', description: schemas[0].description };
+    if (new Set(values).size === 1) return withAgreedExtensions(schemas[0], extensions);
+    return { type: 'string', description: schemas[0].description, ...extensions };
   }
-  return schemas[0];
+  return withAgreedExtensions(schemas[0], extensions);
 }
 
 function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: string): string {
@@ -4427,6 +4504,7 @@ export function schemaToTypeRef(
         parentModelName,
         schema.externalDocs,
         schema.description,
+        extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
       );
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
@@ -4615,16 +4693,17 @@ export function schemaToTypeRef(
     // Named by the one rule every inline enum follows (`inlineEnumName`):
     // qualified by the parent with its list-item markers stripped, no
     // redundant prefix, the project's `schemaNameTransform` applied. The
-    // schema's `description` and link and each value's `x-enum-descriptions`
-    // / `x-enumDescriptions` entry are recorded against the ref so the lifted
-    // `Enum` carries them (`collectInlineEnumFromRef`); the nullable unwraps
-    // above spread the schema, so a wrapped enum's text and link reach here
-    // too.
+    // schema's `description`, link and extensions and each value's
+    // `x-enum-descriptions` / `x-enumDescriptions` entry are recorded against
+    // the ref so the lifted `Enum` carries them (`collectInlineEnumFromRef`);
+    // the nullable unwraps above spread the schema, so a wrapped enum's text,
+    // link and keys reach here too.
     const enumRef = inlineEnumRef(
       inlineEnumName(contextName, parentModelName),
       enumListMembers(schema) ?? [],
       schema.externalDocs,
       schema.description,
+      extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
     );
     return enumAdmitsNull ? asNullable(enumRef) : enumRef;
   }
@@ -4782,6 +4861,8 @@ import {
   markContestedTitles,
   readInlineAllOf,
   unwrappedAllOfMember,
+  agreedExtensions,
+  withAgreedExtensions,
   type MintedInlineName,
   mintedInlineNameEntries,
   mintedInlineNames,
