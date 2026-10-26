@@ -9,7 +9,19 @@ import {
 } from '../ir/types.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { enumValuesOf, sameEnumShape } from './enum-members.js';
-import { STATUS_RANGE_LABELS } from './responses.js';
+import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
+
+/**
+ * The step an operation-owned error body's enum takes past a taken name:
+ * `<Op>Error<code>` → `<Op>Error<code>Body`, then `…Body2`, `…Body3`, … —
+ * numbered under `Body`, the way the error models step in the shape
+ * registry (`deferredNamingStem`, kind `error`), so an enum body and an
+ * object body in the same spot take the same name (`distinctEnumName`).
+ * Every error site passes it, and only an error site (`ownedErrorBodies`);
+ * a status code or fallback label qualifies the other sites and numbers on
+ * the bare name.
+ */
+const ERROR_BODY_STEP = 'Body';
 
 /**
  * Promote the inline enums a model's fields and named-union variants
@@ -65,23 +77,39 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * `shared` is the parser's record of every type reference a site shared
  * through `components/responses` wrote (`OperationExtractionResult.componentSites`:
  * the component's fallback or error body, a secondary body, a header), by
- * identity. An enum such a site carries is named from the component alone
- * (`CardXMode`), so on a clash it steps by number (`CardXMode2`) — never by
- * the status code, the fallback label (`CardXModeDefault`,
- * `CardXModeClientError`) or `Body`, which qualify an operation's own sites
- * — and every operation that returns the component, at whatever key,
- * settles on the one name. The IR alone cannot tell such a site from an
+ * identity — the one record of which sites an operation owns and which a
+ * component does. An enum such a site carries is named from the component
+ * alone (`CardXMode`, `ProblemResponse`), so on a clash it steps by number
+ * (`CardXMode2`, `ProblemResponse2`) — never by the status code, the
+ * fallback label (`CardXModeDefault`, `CardXModeClientError`) or `Body`,
+ * which qualify an operation's own sites — and every operation that returns
+ * the component, at whatever key, settles on the one name. An error site
+ * the record does not hold — `errors[].type`, a secondary body of an error
+ * entry, a `4XX`/`5XX` range's body or secondary body — is the operation's
+ * own, written as `<Op>Error<code>…`, and steps by `Body`
+ * (`ownedErrorBodies`). The IR alone cannot tell a shared site from an
  * operation's (`CardXMode` is the name wherever the component is returned),
- * so a caller that built `services` by hand passes the references it
- * shares, or nothing when it declares no component response.
+ * so the record is required: a caller that built `services` by hand passes
+ * the references it shares, or an empty set when it declares no component
+ * response.
  */
 export function collectInlineEnumsFromOperations(
   services: Service[],
   enums: Enum[],
+  shared: ReadonlySet<TypeRef>,
   models: readonly Model[] = [],
   componentNames: ReadonlySet<string> = new Set(),
-  shared: ReadonlySet<TypeRef> = new Set(),
 ): void {
+  // The record moved from the last argument to the third (workos/oagen#356),
+  // so a caller still on the old order hands the models list here and the
+  // record where `componentNames` is read; fail on the mismatch, by name,
+  // rather than inside `models.map` or, worse, silently.
+  if (!(shared instanceof Set)) {
+    throw new TypeError(
+      'collectInlineEnumsFromOperations(services, enums, shared, models?, componentNames?): `shared` must be the Set of ' +
+        `component-site references (\`OperationExtractionResult.componentSites\`), got ${describeArgument(shared)}`,
+    );
+  }
   const enumNames = new Set(enums.map((e) => e.name));
   const modelsByName = new Map(models.map((model) => [model.name, model]));
   const modelNames = new Set(modelsByName.keys());
@@ -149,20 +177,28 @@ export function collectInlineEnumsFromOperations(
       // An error body that is itself an inline enum, or an array of one, is
       // typed by `schemaToTypeRef` and reaches no model, so it is promoted
       // here — after the headers, so a header enum of the same name keeps it
-      // as a header model would. The name is already operation-qualified
-      // (`GetPetError404`); one a component, header or earlier error enum
-      // owns with other members steps to `GetPetError404Body`. No inline
-      // model holds it: the registry reserved it before any deferred model
-      // was named (`deferredEnumName` in operations.ts), so an object `404`
-      // of another operation under the same stem is the one that stepped.
-      // An enum nested in an error body's model is collected with every
-      // other model's (`collectInlineEnumsFromModels`). A body a component
-      // response declares (`shared`) is the component's, not the
+      // as a header model would. An operation-owned body's name is already
+      // operation-qualified (`GetPetError404`); one a component, header or
+      // earlier error enum owns with other members steps to
+      // `GetPetError404Body`. No inline model holds it: the registry
+      // reserved it before any deferred model was named (`deferredEnumName`
+      // in operations.ts), so an object `404` of another operation under
+      // the same stem is the one that stepped. An enum nested in an error
+      // body's model is collected with every other model's
+      // (`collectInlineEnumsFromModels`). A body a component response
+      // declares (`shared`, so not in `owned`) is the component's, not the
       // operation's, and steps by number (`CardResponse2`) as it does at a
       // `default` or range site.
+      const owned = ownedErrorBodies(op, shared);
       for (const error of op.errors) {
         if (!error.type) continue;
-        collectDistinctEnums(error.type, shared.has(error.type) ? undefined : 'Body', enums, enumNames, modelNames);
+        collectDistinctEnums(
+          error.type,
+          owned.has(error.type) ? ERROR_BODY_STEP : undefined,
+          enums,
+          enumNames,
+          modelNames,
+        );
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -172,9 +208,13 @@ export function collectInlineEnumsFromOperations(
       // reached through them. Its name is already operation-qualified
       // (`ListPetsDefaultResponse`) or the component's
       // (`CardApplicationYamlResponse`, `shared`); a clash with a different
-      // value set falls back to a numeric suffix either way.
+      // value set falls back to a numeric suffix either way — except for an
+      // operation-owned error body (`owned`: a 4xx/5xx or `4XX`/`5XX` body
+      // under a secondary media type, a `4XX`/`5XX` range's body), named
+      // `<Op>Error<code>…` like `errors[].type`, which steps to `…Body` as
+      // that does.
       for (const { type } of collectResponseBodyTypes(op)) {
-        collectThroughModels(type, undefined);
+        collectThroughModels(type, owned.has(type) ? ERROR_BODY_STEP : undefined);
       }
       // A request body declared only for a secondary media type (`text/csv`
       // next to `application/json`) is typed like one, with its name already
@@ -214,6 +254,43 @@ export function collectInlineEnumsFromWebhooks(
   }
 }
 
+/** What a misplaced argument is, for the signature error: `an array`, `undefined`, `an object`, … */
+function describeArgument(value: unknown): string {
+  if (Array.isArray(value)) return 'an array';
+  if (value === null) return 'null';
+  if (value === undefined) return 'undefined';
+  return `${/^[aeiou]/i.test(typeof value) ? 'an' : 'a'} ${typeof value}`;
+}
+
+/**
+ * Every error body of one operation that the operation named itself, by
+ * identity: its error sites — each `errors` entry's `type` and secondary
+ * bodies, and the body and secondary bodies of each `4XX`/`5XX` range
+ * (`isErrorStatusRange`) — less the ones a `components/responses` entry
+ * declares (`shared`, `OperationExtractionResult.componentSites`). Each is
+ * written as `<Op>Error<code>…` (`GetPetError404`,
+ * `GetPetError404ApplicationYaml`, `GetPetError4Xx`), so an enum among them
+ * steps by the same `Body` qualifier (`GetPetError4XxBody`); a shared body
+ * among those sites is the component's (`ProblemResponse`) and steps by
+ * number, as it does at a `default` site, so the one record decides both.
+ */
+function ownedErrorBodies(op: Operation, shared: ReadonlySet<TypeRef>): ReadonlySet<TypeRef> {
+  const types = new Set<TypeRef>();
+  const own = (type: TypeRef | undefined): void => {
+    if (type && !shared.has(type)) types.add(type);
+  };
+  for (const error of op.errors) {
+    own(error.type);
+    for (const content of error.contents ?? []) own(content.type);
+  }
+  for (const range of op.rangeResponses ?? []) {
+    if (!isErrorStatusRange(range.range)) continue;
+    own(range.type);
+    for (const content of range.contents ?? []) own(content.type);
+  }
+  return types;
+}
+
 /**
  * Header lists to walk, each with the status-code qualifier that keeps a
  * colliding enum name apart. When `successResponses` exists the primary list
@@ -236,7 +313,9 @@ function responseHeaderGroups(op: Operation): Array<{ headers: ResponseHeader[];
     if (error.headers) groups.push({ headers: error.headers, qualifier: String(error.statusCode) });
   }
   // A fallback response has no status code to qualify by; its label
-  // (`Default`, `ClientError`) is what names its inline models too.
+  // (`Default`, `ClientError`) qualifies its header models and enums, and
+  // names the inline body of a `default` or `1XX`–`3XX` response (a `4XX`
+  // or `5XX` body is named by its range key, `<Op>Error4Xx`).
   if (op.defaultResponse?.headers) groups.push({ headers: op.defaultResponse.headers, qualifier: 'Default' });
   for (const range of op.rangeResponses ?? []) {
     if (range.headers) groups.push({ headers: range.headers, qualifier: STATUS_RANGE_LABELS[range.range] });
@@ -310,12 +389,16 @@ function collectDistinctEnums(
 }
 
 /**
- * A name the base was already stepped to that holds the same members
+ * A name the stem was already stepped to that holds the same members
  * (`isNumericStep`), else the first name not taken by a different member set,
  * nor by a model: the base qualified by the status code
  * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
- * `DocumentsXPolicy3`, ...). Deterministic for a given spec, since it depends
- * only on declaration order. The collectors
+ * `DocumentsXPolicy3`, ...). An error body (`ERROR_BODY_STEP`) steps to
+ * `GetPetError404Body` and then numbers under it (`GetPetError404Body2`,
+ * `GetPetError404Body3`, ...), as the error models do in the shape registry,
+ * never on the bare name (`GetPetError4042` is what a parameter named
+ * `error404` steps to, a different site). Deterministic for a given spec,
+ * since it depends only on declaration order. The collectors
  * run after every model is named, and the merge passes mint against every
  * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
  * names chosen here, so this is the side that steps around the other: a
@@ -336,20 +419,25 @@ function distinctEnumName(
     const taken = enums.find((e) => e.name === name);
     return !taken || sameEnumShape(taken.values, values);
   };
+  // The stem the numbered steps extend: the bare name, or `<base>Body` for
+  // an error body, whose numbers come under `Body` so an enum body and an
+  // object body past the same two taken names agree (`…Body2`).
+  const stem = qualifier === ERROR_BODY_STEP ? `${base}${qualifier}` : base;
   // A name this stem already stepped to for the same members — another
   // status code's body or header (`…200` when this is the 202's), or an
-  // earlier numeric step — is shared before a new one is minted, so
-  // identical members on two status codes never become two enums once their
-  // plain name is taken. Only a digit-qualified name is a step of this stem:
-  // `…Body` and the fallback labels (`…Default`) qualify other sites.
+  // earlier numeric step (`…Body2` for an error body) — is shared before a
+  // new one is minted, so identical members on two status codes never
+  // become two enums once their plain name is taken. Only a digit-qualified
+  // name is a step of this stem: the fallback labels (`…Default`) qualify
+  // other sites, and `…Body` itself is shared through `isUsable` below.
   const stepped = enums.find(
-    (e) => isNumericStep(e.name, base) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
+    (e) => isNumericStep(e.name, stem) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
   );
   if (stepped) return stepped.name;
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;
   let suffix = 2;
-  while (!isUsable(`${base}${suffix}`)) suffix++;
-  return `${base}${suffix}`;
+  while (!isUsable(`${stem}${suffix}`)) suffix++;
+  return `${stem}${suffix}`;
 }
 
 /** Whether `name` is `base` followed by one or more digits: a status-code or numeric-suffix step of the stem. */

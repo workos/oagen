@@ -111,9 +111,13 @@ export interface ResponseClassificationOptions {
 
 /**
  * The word that stands in for a range key wherever a status code would
- * qualify a name: the inline body model of a `4XX` response is
- * `<Op>ClientErrorResponse`, its header models and enums `…ClientError`.
- * The key itself cannot be used — `toPascalCase('4XX')` is `4Xx`.
+ * qualify a name: the header models and enums of a `4XX` response are
+ * `…ClientError`, and the inline body of a `1XX`–`3XX` response is
+ * `<Op><Label>Response` (`<Op>SuccessResponse`), as a `default` body is
+ * `<Op>DefaultResponse`. The key itself cannot be used in these names —
+ * `toPascalCase('4XX')` is `4Xx`. The inline body of a `4XX` or `5XX`
+ * response is an error body (`isErrorStatusRange`), named `<Op>Error4Xx`
+ * from the key itself, as a 404's is `<Op>Error404`.
  */
 export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
   '1XX': 'Informational',
@@ -122,6 +126,19 @@ export const STATUS_RANGE_LABELS: Record<StatusRange, string> = {
   '4XX': 'ClientError',
   '5XX': 'ServerError',
 };
+
+/**
+ * Whether a range response is an error response: `4XX` and `5XX` are, as
+ * every status code they cover is an error (400–599); `1XX`–`3XX` are not.
+ * The one answer for every place a range body is named: its inline body is
+ * named and stepped as an explicit error status code's body is
+ * (`<Op>Error4Xx`, then `<Op>Error4XxBody`; `<Op>Error4Xx<MediaType>` under
+ * a secondary media type), while a `1XX`–`3XX` body keeps the range's label
+ * (`<Op>SuccessResponse`).
+ */
+export function isErrorStatusRange(range: StatusRange): boolean {
+  return range === '4XX' || range === '5XX';
+}
 
 /**
  * What a Responses Object key names. OpenAPI defines four kinds of key:

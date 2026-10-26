@@ -424,7 +424,7 @@ describe('response headers', () => {
     });
 
     it('promotes an inline header enum to a top-level enum', () => {
-      const { services } = extractOperations(
+      const { services, componentSites } = extractOperations(
         getWithResponses({
           '200': {
             description: 'ok',
@@ -433,7 +433,7 @@ describe('response headers', () => {
         }) as never,
       );
       const enums: Enum[] = [];
-      collectInlineEnumsFromOperations(services, enums);
+      collectInlineEnumsFromOperations(services, enums, componentSites);
 
       expect(services[0].operations[0].responseHeaders?.[0].type).toMatchInlineSnapshot(`
         {
@@ -1398,9 +1398,9 @@ components:
 
 describe('inline header enums', () => {
   function extractWithEnums(paths: Record<string, unknown>, seed: Enum[] = []): { op: Operation; enums: Enum[] } {
-    const { services } = extractOperations(paths as never);
+    const { services, componentSites } = extractOperations(paths as never);
     const enums = [...seed];
-    collectInlineEnumsFromOperations(services, enums);
+    collectInlineEnumsFromOperations(services, enums, componentSites);
     return { op: services[0].operations[0], enums };
   }
   const policy = (values: string[]) => ({ schema: { type: 'string', enum: values } });

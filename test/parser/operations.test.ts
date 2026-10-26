@@ -1671,7 +1671,7 @@ describe('body-owned query parameters keep their inline enums', () => {
       },
     };
 
-    const { services } = extractOperations(paths);
+    const { services, componentSites } = extractOperations(paths);
     const op = services[0].operations[0];
     expect(op.queryParams).toEqual([]);
     expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['grant_type']);
@@ -1679,7 +1679,7 @@ describe('body-owned query parameters keep their inline enums', () => {
     // The published SDKs already ship this enum under the query-derived name;
     // dropping the declaration from queryParams must not remove the type.
     const enums: Enum[] = [];
-    collectInlineEnumsFromOperations(services, enums);
+    collectInlineEnumsFromOperations(services, enums, componentSites);
     expect(enums.map((e) => e.name)).toEqual(['SSOGrantType']);
     expect(enums[0].values.map((v) => v.value)).toEqual([
       'authorization_code',
