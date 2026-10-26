@@ -392,7 +392,7 @@ describe('request body descriptions (issue #316)', () => {
       expectSound(spec);
     });
 
-    it('describes a oneOf, an array, a primitive and an inline enum body on the operation alone', async () => {
+    it('describes a oneOf, an array and a primitive body on the operation alone, and an inline enum body on its enum too', async () => {
       const spec = await parseDocument(
         document({
           '/unions': post('createUnion', jsonBody(inlineUnion('Union text.'))),
@@ -420,8 +420,8 @@ describe('request body descriptions (issue #316)', () => {
       expect(ops.createText.requestBody).toEqual({ kind: 'primitive', type: 'string' });
       expect(ops.createMode.requestBodyDescription).toBe('Enum text.');
       expect(ops.createMode.requestBody).toMatchObject({ kind: 'enum', name: 'CreateModeRequest' });
-      // An enum lifted from an inline schema carries no description of its own.
-      expect(spec.enums.find((e) => e.name === 'CreateModeRequest')?.description).toBeUndefined();
+      // The enum lifted from the inline schema carries the schema's text too (issue #351).
+      expect(spec.enums.find((e) => e.name === 'CreateModeRequest')?.description).toBe('Enum text.');
       expectSound(spec);
     });
 

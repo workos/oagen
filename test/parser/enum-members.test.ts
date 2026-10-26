@@ -297,8 +297,9 @@ describe('enum value description and deprecation (issue #265)', () => {
 
     expect(enumByName(spec, 'Kind').description).toBe('What kind of pet');
     expect(enumByName(spec, 'Blank')).not.toHaveProperty('description');
-    // The lifted inline enum carries none: the text belongs to the field.
-    expect(enumByName(spec, 'PetSize')).not.toHaveProperty('description');
+    // The lifted inline enum carries its schema's text too (issue #351); the
+    // field keeps it as well, since the schema is the field's.
+    expect(enumByName(spec, 'PetSize').description).toBe('How big');
     expect(spec.models[0].fields.find((f) => f.name === 'size')?.description).toBe('How big');
   });
 });

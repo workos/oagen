@@ -24,6 +24,7 @@ import {
   collapsedNullableBranch,
   typesAsUnknown,
   warnOnUncarriedProperties,
+  withWrapperDocs,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
@@ -852,11 +853,25 @@ function directResourceTypesAsUnknown(schema: SchemaObject, componentSchemas?: R
   return reading.kind === 'typeRef' && typesAsUnknown(schema);
 }
 
+/**
+ * `wrapper` is the single-member `allOf` wrapper the body was unwrapped
+ * from, when it was (the `'unwrapped'` reading below): the schema the
+ * document wrote for the body, whose `description` and link the type built
+ * from the member takes, as `schemaToTypeRef` gives the same wrapper on a
+ * field or a parameter (`withWrapperDocs`). It reaches only the one site
+ * that types the member itself, the fall-through at the end, so an inline
+ * enum body under the wrapper lifts with the wrapper's text; a model built
+ * from an object member keeps the member's own `description`, as a field's
+ * does. Through nested wrappers the outermost text wins, then the next, then
+ * the member's own: each level composes its own wrapper with the one handed
+ * down before passing it on.
+ */
 function extractDirectResource(
   schema: SchemaObject,
   contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
   settle?: ItemSettlement,
+  wrapper?: SchemaObject,
 ): ResponseExtractionResult {
   const inlineModels: Model[] = [];
   const reading = directResourceReading(schema, componentSchemas);
@@ -889,8 +904,10 @@ function extractDirectResource(
   // component's properties and every `required` kept). A lone member with
   // nothing added to it is the body itself, carrying the wrapper's limits,
   // flag and link (`unwrappedAllOfMember`), read by the branches of this
-  // function as if written in its place; a `required` beside a lone object
-  // member makes the body the merge too, so `name` stays required. Every other
+  // function as if written in its place, and the type built from it takes
+  // the wrapper's text and link too (`wrapper`, see above); a `required`
+  // beside a lone object member makes the body the merge too, so `name`
+  // stays required. Every other
   // `allOf` is merged into a single model through `mergeAllOfMembers`: $ref
   // branches are resolved against component schemas so the referenced
   // model's fields are merged rather than silently dropped, and the inline
@@ -904,7 +921,8 @@ function extractDirectResource(
     return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
   }
   if (reading.kind === 'unwrapped') {
-    return extractDirectResource(reading.member, contextName, componentSchemas, settle);
+    const outer = wrapper ? withWrapperDocs(schema, wrapper) : schema;
+    return extractDirectResource(reading.member, contextName, componentSchemas, settle, outer);
   }
   if (reading.kind === 'merged') {
     const merged = mergeAllOfMembers(schema, componentSchemas);
@@ -1003,8 +1021,13 @@ function extractDirectResource(
     known.add(model.name);
     inlineModels.push(model);
   }
+  // The one site that types the unwrapped member itself: it carries the
+  // wrapper's text and link, as the type builder gives the same wrapper on
+  // a field (`withWrapperDocs`), so an inline enum lifted here documents
+  // itself by the wrapper. The models materialized above are built from the
+  // member as written.
   return {
-    response: schemaToTypeRef(schema, contextName),
+    response: schemaToTypeRef(wrapper ? withWrapperDocs(schema, wrapper) : schema, contextName),
     inlineModels,
     isPaginated: false,
   };
