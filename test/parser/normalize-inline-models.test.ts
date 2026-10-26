@@ -4,6 +4,7 @@ import {
   fieldInlineModelBundles,
   mergeFieldInlineModels,
   mergeInlineResponseModels,
+  refreshFieldInlineModelBundles,
   reservedNamesByKind,
   reservedTypeNames,
   settleFieldInlineModels,
@@ -1178,6 +1179,155 @@ describe('a fold carries the copy’s references into the winner’s site (issue
     expect(notes).toEqual([
       '[oagen] Renamed inline model "WidgetOwner" → "GetAWidgetOwner": its shape differs from component schema "WidgetOwner" (shared by 2 sites)',
       '[oagen] Renamed inline model "Widget" → "GetAWidget": its shape differs from component schema "Widget" (shared by 2 sites)',
+    ]);
+  });
+
+  it('carries the site of a same-named copy the pass’s own choice drops onto the definition it keeps', () => {
+    // Two field models mint `FooBarThing` (`Foo.barThings`, `FooBar.things`);
+    // the settle keeps the first, as the field merge would, and carries the
+    // second's site onto it, so a later rename of the winner (an enum of its
+    // name among the operations) repoints `FooBar.things` as well.
+    const alpha: Model = { name: 'FooBarThing', fields: [field('object'), field('alpha')] };
+    const beta: Model = { name: 'FooBarThing', fields: [field('object'), field('beta')] };
+    const foo: Model = {
+      name: 'Foo',
+      fields: [field('barThings', { kind: 'map', valueType: modelRef('FooBarThing') })],
+    };
+    const fooBar: Model = {
+      name: 'FooBar',
+      fields: [field('things', { kind: 'map', valueType: modelRef('FooBarThing') })],
+    };
+    const fooBundle: InlineModelBundle = { qualifier: 'Foo', roots: [foo.fields[0]!.type], models: [alpha] };
+    const fooBarBundle: InlineModelBundle = { qualifier: 'FooBar', roots: [fooBar.fields[0]!.type], models: [beta] };
+    const naming: InlineModelNaming = {
+      bundles: [fooBundle, fooBarBundle],
+      reserved: new Set(['Foo', 'FooBar', 'FooBarThing']),
+      enums: new Set(),
+    };
+    let settled: Model[] = [];
+    const notes = warnings(() => {
+      settled = settleFieldInlineModels([foo, fooBar], [alpha, beta], naming);
+    });
+    expect(settled).toEqual([alpha]);
+    expect(fooBundle.carried).toEqual([{ owner: alpha, roots: [fooBar.fields[0]!.type], models: [] }]);
+    expect(notes).toEqual([
+      '[oagen] Warning: Inline model "FooBarThing" has more than one definition with different fields or field types (2 vs 2) — keeping the first definition',
+    ]);
+
+    const later = warnings(() => {
+      mergeFieldInlineModels([foo, fooBar], settled, new Set(['Foo', 'FooBar']), {
+        ...naming,
+        enums: new Set(['FooBarThing']),
+      });
+    });
+    expect(later).toEqual([
+      '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": enum "FooBarThing" owns the name',
+    ]);
+    expect(foo.fields[0]!.type).toEqual({ kind: 'map', valueType: modelRef('FooBarThing2') });
+    expect(fooBar.fields[0]!.type).toEqual({ kind: 'map', valueType: modelRef('FooBarThing2') });
+  });
+
+  it('refreshes the field sites for the merges in place: new inherited references join, folded copies leave, carried sites stay', () => {
+    resetInheritedModelRefs();
+    try {
+      // `Foo.barThing` and `FooBar.thing` both spell `FooBarThing`; the schema
+      // pass lifted `FooBar.thing`'s. Both copies fold onto it at the settle,
+      // `Foo.barThing`'s site carried onto the twin's.
+      const lifted: Model = { name: 'FooBarThing', fields: [field('code')] };
+      const fooCopy: Model = { name: 'FooBarThing', fields: [field('code')] };
+      const fooBarCopy: Model = { name: 'FooBarThing', fields: [field('code')] };
+      const foo: Model = { name: 'Foo', fields: [field('barThing', modelRef('FooBarThing'))] };
+      const fooBar: Model = { name: 'FooBar', fields: [field('thing', modelRef('FooBarThing'))] };
+      recordLiftedFieldModel('FooBar', 'thing', lifted);
+      const groups = [
+        { parentName: 'Foo', fieldName: 'barThing', models: [fooCopy] },
+        { parentName: 'FooBar', fieldName: 'thing', models: [fooBarCopy] },
+      ];
+      const bundles = fieldInlineModelBundles(groups, [foo, fooBar, lifted]);
+      const settled = settleFieldInlineModels([foo, fooBar, lifted], [fooCopy, fooBarCopy], {
+        bundles,
+        reserved: new Set(['Foo', 'FooBar', 'FooBarThing']),
+        enums: new Set(),
+      });
+      expect(settled).toEqual([]);
+      expect(bundles[1]!.carried).toEqual([{ owner: lifted, roots: [foo.fields[0]!.type], models: [] }]);
+
+      const refreshed = refreshFieldInlineModelBundles(bundles, groups, settled);
+      // The same objects, the folded copies gone, the twin and the carried site kept.
+      expect(refreshed).toBe(bundles);
+      expect(refreshed[0]!.models).toEqual([]);
+      expect(refreshed[1]!.models).toEqual([lifted]);
+      expect(refreshed[1]!.carried).toEqual([{ owner: lifted, roots: [foo.fields[0]!.type], models: [] }]);
+
+      // A later rename of the twin, through its own site, reaches both fields.
+      const notes = warnings(() => {
+        mergeFieldInlineModels([foo, fooBar, lifted], settled, new Set(['Foo', 'FooBar']), {
+          bundles: refreshed,
+          reserved: new Set(['Foo', 'FooBar', 'FooBarThing']),
+          enums: new Set(['FooBarThing']),
+        });
+      });
+      expect(notes).toEqual([
+        '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": enum "FooBarThing" owns the name',
+      ]);
+      expect(foo.fields[0]!.type).toEqual(modelRef('FooBarThing2'));
+      expect(fooBar.fields[0]!.type).toEqual(modelRef('FooBarThing2'));
+    } finally {
+      resetInheritedModelRefs();
+    }
+  });
+
+  it('lets a deprecated declared owner yield its name to a live copy, through its own site, and never a component', () => {
+    // The field model `PetNoteOwner` (deprecated `{ city, zip }`) stands in
+    // for a component in the response merge; `getA`'s live `{ city }` owner
+    // takes the shared name and the field model leaves through its site.
+    const fieldOwner: Model = { name: 'PetNoteOwner', deprecated: true, fields: [field('city'), field('zip')] };
+    const petNote: Model = {
+      name: 'PetNote',
+      fields: [{ ...field('owner', modelRef('PetNoteOwner')), deprecated: true }],
+    };
+    const copy: Model = { name: 'PetNoteOwner', fields: [field('city')] };
+    const responseRef = modelRef('PetNoteOwner');
+    const fieldBundle: InlineModelBundle = { qualifier: 'Pet', roots: [petNote.fields[0]!.type], models: [fieldOwner] };
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels(
+        [petNote],
+        [copy],
+        {
+          bundles: [fieldBundle, { qualifier: 'GetA', roots: [responseRef], models: [copy] }],
+          reserved: new Set(['PetNote', 'PetNoteOwner']),
+          enums: new Set(),
+        },
+        [fieldOwner],
+      );
+    });
+    expect(merged).toEqual([petNote, copy]);
+    expect(copy.name).toBe('PetNoteOwner');
+    expect(fieldOwner.name).toBe('PetNoteOwner2');
+    expect(petNote.fields[0]!.type).toEqual(modelRef('PetNoteOwner2'));
+    expect(responseRef).toEqual(modelRef('PetNoteOwner'));
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "PetNoteOwner" → "PetNoteOwner2": it is deprecated while "PetNoteOwner" is live',
+    ]);
+
+    // A deprecated component of the name is the document's own and holds it:
+    // the live copy is the one renamed.
+    const component: Model = { name: 'PetNoteOwner', deprecated: true, fields: [field('city')] };
+    const live: Model = { name: 'PetNoteOwner', fields: [field('city')] };
+    const liveRef = modelRef('PetNoteOwner');
+    const componentNotes = warnings(() => {
+      merged = mergeInlineResponseModels([component], [live], {
+        bundles: [{ qualifier: 'GetA', roots: [liveRef], models: [live] }],
+        reserved: new Set(['PetNoteOwner']),
+        enums: new Set(),
+      });
+    });
+    expect(merged.map((m) => m.name)).toEqual(['PetNoteOwner', 'GetAPetNoteOwner']);
+    expect(component.name).toBe('PetNoteOwner');
+    expect(liveRef).toEqual(modelRef('GetAPetNoteOwner'));
+    expect(componentNotes).toEqual([
+      '[oagen] Renamed inline model "PetNoteOwner" → "GetAPetNoteOwner": it is live while "PetNoteOwner" is deprecated',
     ]);
   });
 });

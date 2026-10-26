@@ -112,6 +112,38 @@ export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models:
 }
 
 /**
+ * The same field sites (`fieldInlineModelBundles`, one per group in order)
+ * brought up to date for the merges, in place, once the operations and
+ * webhooks are read: each site's roots gain the references an `allOf` merge
+ * has copied from the field since (`inheritedModelRefsOf`), and its models
+ * are the field models that survived the settle (`kept`) and the twins the
+ * schema pass lifted — a copy that folded at the settle is dropped from the
+ * site, so a site is never taken for the owner of a name it lost
+ * (`attachSharedRefs` reads a site's names off its models: `Foo.barThing`
+ * and `FooBar.thing` both folded onto the one lifted `FooBarThing`, and
+ * `Foo.barThing`'s reference must reach that twin's site). The site objects
+ * are kept rather than rebuilt, so what a fold carried onto one at the
+ * settle (`InlineModelBundle.carried`) is still there when the field merge
+ * renames the model it was carried onto.
+ */
+export function refreshFieldInlineModelBundles(
+  bundles: InlineModelBundle[],
+  groups: FieldInlineModelGroup[],
+  kept: readonly Model[],
+): InlineModelBundle[] {
+  const survivors = new Set(kept);
+  groups.forEach(({ parentName, fieldName }, i) => {
+    const bundle = bundles[i];
+    if (!bundle) return;
+    for (const ref of inheritedModelRefsOf(parentName, fieldName))
+      if (!bundle.roots.includes(ref)) bundle.roots.push(ref);
+    const twins = liftedFieldModelsOf(parentName, fieldName);
+    bundle.models = bundle.models.filter((model) => survivors.has(model) || twins.includes(model));
+  });
+  return bundles;
+}
+
+/**
  * Every type name the document will have minted by the time the IR is
  * finished, so a merge pass that must rename an inline model takes a name
  * nothing else has: the component models and enums, every inline model of
@@ -188,7 +220,29 @@ function inlineRefAdmit(includeInherited: boolean): (ref: ModelRef) => boolean {
   return (ref) => !isComponentModelRef(ref) && (includeInherited || !isInheritedModelRef(ref));
 }
 
-function keepLargestByName(models: Model[]): Model[] {
+/** The site each inline model of `naming` came from, by identity (`InlineModelBundle.models`). */
+function bundlesByModel(naming: InlineModelNaming | undefined): Map<Model, InlineModelBundle> {
+  const bundleOf = new Map<Model, InlineModelBundle>();
+  for (const bundle of naming?.bundles ?? []) {
+    for (const model of bundle.models) bundleOf.set(model, bundle);
+  }
+  return bundleOf;
+}
+
+/**
+ * One definition per name among `models`, the pass's own choice: the one
+ * with the most fields, the first declared on a tie, with a warning when
+ * the definitions differ. Every other copy of the name is folded onto it
+ * (`foldOnto`): with `naming`, the copy's site is carried onto the winner,
+ * so a later rename of the winner through its own site repoints the copy's
+ * references too — a component field's model that lost its name to a
+ * homonymous field's larger model (`Foo.barThings` and `FooBar.things` both
+ * minting `FooBarThing`) still follows that model off an enum's name. The
+ * rule the final field merge applies, applied as soon as the field models
+ * are settled, so the model a later pass meets under a name is the one that
+ * survives it.
+ */
+function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[] {
   const byName = new Map<string, Model>();
   for (const model of models) {
     const existing = byName.get(model.name);
@@ -208,6 +262,12 @@ function keepLargestByName(models: Model[]): Model[] {
     if (!existing || model.fields.length > existing.fields.length) {
       byName.set(model.name, model);
     }
+  }
+  const bundleOf = bundlesByModel(naming);
+  const folded = new Map<Model, Model>();
+  for (const model of models) {
+    const winner = byName.get(model.name)!;
+    if (winner !== model) foldOnto(model, winner, bundleOf, folded);
   }
   return [...byName.values()];
 }
@@ -320,9 +380,10 @@ function keepLargestByName(models: Model[]): Model[] {
  * one was.
  */
 function settleSharedNames(
-  owners: ReadonlyMap<string, Model>,
+  owners: Map<string, Model>,
   contenders: Model[],
   naming: InlineModelNaming | undefined,
+  yielding?: ReadonlySet<Model>,
 ): { kept: Model[]; folded: Map<Model, Model> } {
   const byName = new Map<string, Model[]>();
   for (const model of contenders) {
@@ -330,10 +391,7 @@ function settleSharedNames(
     group.push(model);
     byName.set(model.name, group);
   }
-  const bundleOf = new Map<Model, InlineModelBundle>();
-  for (const bundle of naming?.bundles ?? []) {
-    for (const model of bundle.models) bundleOf.set(model, bundle);
-  }
+  const bundleOf = bundlesByModel(naming);
   const flag = (m: Model): string => (m.deprecated ? 'deprecated' : 'live');
   // Every name the merge passes have minted so far (`renameInlineCopy`),
   // shared with the passes before and after this one through `naming`.
@@ -368,7 +426,24 @@ function settleSharedNames(
 
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
-    const owner = owners.get(name);
+    let owner = owners.get(name);
+    // An owner that may yield (`yielding`: a component field's model standing
+    // in for a component in the response merge) does not hold its name
+    // against a live copy when it is deprecated itself: a live copy owns a
+    // shared name, so the owner leaves through its own site, with the note a
+    // deprecated copy gets (`PetNoteOwner2` for `Pet.note.owner` beside
+    // `getA`'s live owner), and the live copies settle the name among
+    // themselves as they would with no owner. A component is never yielded;
+    // its name and flag are the document's.
+    if (owner && yielding?.has(owner) && owner.deprecated && group.some((m) => !m.deprecated)) {
+      const bundle = naming && bundleOf.get(owner);
+      if (bundle) {
+        const renamed = renameInlineCopy(owner, name, bundle, naming);
+        console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": it is deprecated while "${name}" is live`);
+        owners.delete(name);
+        owner = undefined;
+      }
+    }
     // A name an enum holds (`naming.enums`) is no model's, whatever the
     // copy's shape or flag: nothing admits it and nothing folds onto it, so
     // every copy leaves the name through its site, identical copies sharing
@@ -829,7 +904,7 @@ export function mergeInlineResponseModels(
 ): Model[] {
   return [
     ...schemaModels,
-    ...keepLargestByName(settleAgainstComponents([...schemaModels, ...declared], inlineModels, naming)),
+    ...settleAgainstComponents([...schemaModels, ...declared], inlineModels, naming, new Set(declared)),
   ];
 }
 
@@ -873,12 +948,25 @@ export function settleFieldInlineModels(
  * `contenders` settled against `components` (`settleSharedNames`), minus
  * those that folded onto one and those still named like one — a kept copy
  * still carrying a component's name had no site to be renamed from, and the
- * component's definition stands.
+ * component's definition stands — then one definition per name among what
+ * is left (`keepLargestByName`, the pass's own choice, the folded copies'
+ * sites carried), so what the caller returns, and what a later pass meets
+ * under a name, is the definition that survives. `yielding` names the
+ * components that are field models standing in for components, which yield
+ * a name to a live copy when deprecated (`settleSharedNames`).
  */
-function settleAgainstComponents(components: Model[], contenders: Model[], naming?: InlineModelNaming): Model[] {
+function settleAgainstComponents(
+  components: Model[],
+  contenders: Model[],
+  naming?: InlineModelNaming,
+  yielding?: ReadonlySet<Model>,
+): Model[] {
   const owners = new Map(components.map((m) => [m.name, m]));
-  const { kept } = settleSharedNames(owners, contenders, naming);
-  return kept.filter((model) => !owners.has(model.name));
+  const { kept } = settleSharedNames(owners, contenders, naming, yielding);
+  return keepLargestByName(
+    kept.filter((model) => !owners.has(model.name)),
+    naming,
+  );
 }
 
 /**
@@ -968,7 +1056,7 @@ export function mergeFieldInlineModels(
     return false;
   });
 
-  return [...retainedModels, ...keepLargestByName(deduplicatedFieldModels)];
+  return [...retainedModels, ...keepLargestByName(deduplicatedFieldModels, naming)];
 }
 
 function hasModelConstDiscriminant(model: Model): boolean {
