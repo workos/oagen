@@ -1059,6 +1059,9 @@ function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
 
 function deriveModelName(schema: SchemaObject, fallback: string): string {
   if (!schema.properties) return toPascalCase(fallback);
+  // A list envelope's const (`object: 'list'`) names the envelope's kind, which
+  // every envelope of the API shares, not what it lists (workos/oagen#418).
+  if (detectListEnvelope(schema).isEnvelope) return toPascalCase(fallback);
 
   // Prefer well-known discriminant properties for backward compatibility
   const preferred = ['object', 'type'];
