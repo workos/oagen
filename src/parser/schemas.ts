@@ -4195,23 +4195,29 @@ function flattenVariantForExtraction(variant: SchemaObject): SchemaObject {
  * occurrence is a boolean const, widen to plain boolean; if every occurrence
  * is a distinct string const, widen to plain string. Otherwise return the
  * first occurrence — emitters that build their own widened types (e.g. the
- * Node discriminated-models module) re-derive from the raw spec.
+ * Node discriminated-models module) re-derive from the raw spec. Whichever
+ * way, the result carries exactly the extensions every occurrence agrees on
+ * (`agreedExtensions`, the one rule for a property several declarations
+ * give; workos/oagen#369 review: a widened field kept `type` and
+ * `description` alone, so a shared `x-since` was lost, and the first
+ * occurrence was returned with its own keys, disputed or not).
  */
 function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
   if (schemas.length === 0) return {};
   if (schemas.length === 1) return schemas[0];
+  const extensions = agreedExtensions(schemas);
 
   const allBoolConst = schemas.every((s) => s.type === 'boolean' && typeof s.const === 'boolean');
   if (allBoolConst) {
-    return { type: 'boolean', description: schemas[0].description };
+    return { type: 'boolean', description: schemas[0].description, ...extensions };
   }
   const allStringConst = schemas.every((s) => s.type === 'string' && typeof s.const === 'string');
   if (allStringConst) {
     const values = schemas.map((s) => s.const as string);
-    if (new Set(values).size === 1) return schemas[0];
-    return { type: 'string', description: schemas[0].description };
+    if (new Set(values).size === 1) return withAgreedExtensions(schemas[0], extensions);
+    return { type: 'string', description: schemas[0].description, ...extensions };
   }
-  return schemas[0];
+  return withAgreedExtensions(schemas[0], extensions);
 }
 
 function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: string): string {
