@@ -598,7 +598,7 @@ describe('review: one rule — the model steps wherever an enum of its name exis
     expectSound(shared.spec, ['Pet']);
   });
 
-  it('an object `404` body and an enum `404` body under one stem: the object steps (`GetPetError404Body`) in either order', async () => {
+  it('an object `404` body and an enum `404` body under one stem: the object steps (`GetPetError404Body`) in either order, for either spelling of the enum', async () => {
     const objectBody = {
       '/pets/{id}': {
         get: {
@@ -609,31 +609,40 @@ describe('review: one rule — the model steps wherever an enum of its name exis
         },
       },
     };
-    const enumBody = {
+    const enumBody = (schema: SchemaObject) => ({
       '/pet/{petId}': {
         get: {
           operationId: 'get-pet',
           tags: ['pets'],
           parameters: [{ ...idParam, name: 'petId' }],
-          responses: { '200': { description: 'ok' }, '404': response(en(['absent', 'unknown'])) },
+          responses: { '200': { description: 'ok' }, '404': response(schema) },
         },
       },
-    };
-    for (const [label, paths] of [
-      ['object-first', { ...objectBody, ...enumBody }],
-      ['enum-first', { ...enumBody, ...objectBody }],
-    ] as const) {
-      const { spec, warnings } = await parse(label, specDoc(paths));
-      expect(warnings).toEqual([]);
-      expect(bothKinds(spec)).toEqual([]);
-      expect(enumsOf(spec)).toEqual(['GetPetError404 [absent,unknown]']);
-      expect(modelsOf(spec)).toEqual(['GetPetError404Body {reason}']);
-      expect(opsIn(spec).map((op) => errorsOf(op)[0])).toEqual(
-        label === 'object-first'
-          ? ['404: model GetPetError404Body', '404: enum GetPetError404']
-          : ['404: enum GetPetError404', '404: model GetPetError404Body'],
-      );
-      expectSound(spec);
+    });
+    // Both spellings `schemaToTypeRef` lifts as an enum reserve the name
+    // before any deferred model is named (`inlineEnumSpelling`): an `enum:`
+    // list, and a `oneOf` of string consts (Greptile, merge round 1).
+    const spellings: Array<[string, SchemaObject]> = [
+      ['enum-list', en(['absent', 'unknown'])],
+      ['const-union', { oneOf: [{ const: 'absent' }, { const: 'unknown' }] } as SchemaObject],
+    ];
+    for (const [spelling, schema] of spellings) {
+      for (const [order, paths] of [
+        ['object-first', { ...objectBody, ...enumBody(schema) }],
+        ['enum-first', { ...enumBody(schema), ...objectBody }],
+      ] as const) {
+        const { spec, warnings } = await parse(`${spelling}-${order}`, specDoc(paths));
+        expect(warnings).toEqual([]);
+        expect(bothKinds(spec)).toEqual([]);
+        expect(enumsOf(spec)).toEqual(['GetPetError404 [absent,unknown]']);
+        expect(modelsOf(spec)).toEqual(['GetPetError404Body {reason}']);
+        expect(opsIn(spec).map((op) => errorsOf(op)[0])).toEqual(
+          order === 'object-first'
+            ? ['404: model GetPetError404Body', '404: enum GetPetError404']
+            : ['404: enum GetPetError404', '404: model GetPetError404Body'],
+        );
+        expectSound(spec);
+      }
     }
   });
 });
