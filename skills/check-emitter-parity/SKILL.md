@@ -81,7 +81,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `variants` — The members of a named union (a component schema that is itself a `oneOf`/`anyOf`), one `TypeRef` per non-null variant; such a model must be emitted as a union of these, not as a data class — its `fields` are only the inline variants' properties merged as optional fields
 - `compositionKind` — `oneOf` or `anyOf`, present exactly when `variants` is
-- `discriminator` — Set on a discriminated named union (an explicit `discriminator:`, or a const-pinned property every variant shares) and on an allOf+oneOf dispatcher (no `variants`; the mapping alone names them); generate a dispatcher from `property` and `mapping` (IR model names). A named union without one is an undiscriminated union of `variants`
+- `discriminator` — Set on a discriminated named union (a `oneOf` or `anyOf` with an explicit `discriminator:` keyword, or a `oneOf` without the keyword whose variants are all nameable and pin distinct string constants on one property; an `anyOf` is never discriminated implicitly) and on an allOf+oneOf dispatcher (no `variants`; the mapping alone names them); generate a dispatcher from `property` and `mapping` (IR model names). A named union without one is an undiscriminated union of `variants`
 
 #### PrimitiveType
 
