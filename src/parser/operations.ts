@@ -37,7 +37,6 @@ import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameF
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
-  typesAsUnknown,
   buildFieldFromSchema,
   nameInlineVariant,
   resolveSchemaName,
@@ -86,6 +85,7 @@ import {
 import {
   BODY_READINGS,
   bodyEndOfIterationProblem,
+  bodyTypesAsUnknown,
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
@@ -5156,24 +5156,29 @@ interface SuccessEntry {
  * the lowest declared code (an untyped 2xx, or a 3xx when there is no 2xx).
  * `undefined` when no 2xx or 3xx is declared.
  */
-function primaryResponseEntry(entries: readonly SuccessEntry[]): SuccessEntry | undefined {
+function primaryResponseEntry(
+  entries: readonly SuccessEntry[],
+  componentSchemas?: Record<string, SchemaObject>,
+): SuccessEntry | undefined {
   const sorted = [...entries].sort((a, b) => a.code - b.code);
-  return sorted.find((entry) => entry.code < 300 && bodyIsTyped(entry.pick)) ?? sorted[0];
+  return sorted.find((entry) => entry.code < 300 && bodyIsTyped(entry.pick, componentSchemas)) ?? sorted[0];
 }
 
 /**
  * Whether a 2xx body will type as anything but `unknown` once classified: a
  * media type typed without a schema (binary, text), or a schema
- * `schemaToTypeRef` types as something (`typesAsUnknown`, the decision
- * `schemaToTypeRef` itself returns on, asked here before any body is typed
- * and without its warning). Every classification reading of a body ends
- * on a model, an array or a union — a list envelope, a single-resource
- * wrapper, an object, a composition, a union (`classifyBody`,
- * `extractDirectResource`) — or on `schemaToTypeRef` itself, so a body is
+ * classification types as something — asked of classification's own
+ * reading of the body (`bodyTypesAsUnknown`: the same `$ref`, fold,
+ * envelope, wrapper and `extractDirectResource` dispatch, ending on
+ * `typesAsUnknown` where classification ends on `schemaToTypeRef`), before
+ * any body is typed and without the warnings typing issues, so a body is
  * `unknown` after classification exactly when this says so before it.
  */
-function bodyIsTyped(pick: ReturnType<typeof primaryBodySchema>): boolean {
-  return pick.type !== undefined || (pick.schema !== undefined && !typesAsUnknown(pick.schema));
+function bodyIsTyped(
+  pick: ReturnType<typeof primaryBodySchema>,
+  componentSchemas?: Record<string, SchemaObject>,
+): boolean {
+  return pick.type !== undefined || (pick.schema !== undefined && !bodyTypesAsUnknown(pick.schema, componentSchemas));
 }
 
 /**
@@ -6080,7 +6085,7 @@ function extractResponses(
     .map(([statusCode, resp]) => ({ code: Number(statusCode), resp }))
     .filter(({ code }) => code < 400)
     .map(({ code, resp }) => ({ code, pick: code < 300 ? primaryBodySchema(resp) : {} }));
-  const primaryEntry = primaryResponseEntry(successEntries);
+  const primaryEntry = primaryResponseEntry(successEntries, componentSchemas);
   const overrideDecision = decidePaginationOverride(pagination, primaryEntry, operationBodyName, componentSchemas);
   // The one reason the override cannot apply to the response, decided
   // before any body is read. It is reported from every exit below: an

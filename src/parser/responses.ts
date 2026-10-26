@@ -22,6 +22,7 @@ import {
   isArrayComponentRef,
   isArraySchema,
   collapsedNullableBranch,
+  typesAsUnknown,
   warnOnUncarriedProperties,
   withWrapperDocs,
 } from './schemas.js';
@@ -782,6 +783,77 @@ function extractWrappedResource(
 }
 
 /**
+ * How `extractDirectResource` reads a body that is no `$ref`, list envelope
+ * or single-resource wrapper — the one dispatch it branches on and
+ * `bodyTypesAsUnknown` predicts by, so a shape is read one way by both:
+ * an object declaring properties of its own (`type: 'object'` or none;
+ * `composedWithoutFields` leaves an empty `properties: {}` beside a
+ * composition to the composition); an `allOf` that types the schema
+ * (`classifyInlineSchema`), read as `readInlineAllOf` reads it — a
+ * `reference`, a lone `unwrapped` member carried with the wrapper's limits,
+ * flag and link (`unwrappedAllOfMember`), or a `merged` model; an array
+ * with items under a nullable wrapper of any spelling, a single-entry type
+ * list included (`arraySchemaOf`: `type: ['array']` is an array here as
+ * `isArraySchema` reads it); and otherwise `typeRef`, typed by
+ * `schemaToTypeRef` — a union, a primitive, a map, or `unknown`.
+ */
+type DirectResourceReading =
+  | { kind: 'object' }
+  | { kind: 'reference' }
+  | { kind: 'unwrapped'; member: SchemaObject }
+  | { kind: 'merged' }
+  | { kind: 'array'; items: SchemaObject }
+  | { kind: 'typeRef' };
+
+function directResourceReading(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): DirectResourceReading {
+  if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
+    return { kind: 'object' };
+  }
+  if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
+    const reading = readInlineAllOf(schema.allOf, schema, componentSchemas);
+    if (reading === 'reference') return { kind: 'reference' };
+    if (reading === 'unwrapped') return { kind: 'unwrapped', member: unwrappedAllOfMember(schema, schema.allOf[0]!) };
+    return { kind: 'merged' };
+  }
+  const array = arraySchemaOf(schema);
+  if (array?.items) return { kind: 'array', items: array.items };
+  return { kind: 'typeRef' };
+}
+
+/**
+ * Whether classification types a body as the bare `unknown` — the reading
+ * `classifyAndExtractResponse` makes, without making it: a `$ref` is a
+ * reference; the body is folded as classification folds it
+ * (`foldSiblingProperties`, without the warning it then issues); a list
+ * envelope and a single-resource wrapper are typed; and what is left takes
+ * `extractDirectResource`'s own dispatch (`directResourceReading`): an
+ * object, an `allOf` read as a reference or a merge, and an array are
+ * typed, a lone `allOf` member is read as the member exactly as
+ * `extractDirectResource` recurses into it, and a `typeRef` reading is
+ * typed by `schemaToTypeRef` and is `unknown` exactly when `typesAsUnknown`
+ * holds. The one answer a reader that must know before any body is read
+ * asks (`bodyIsTyped`, choosing the primary response), so no shape is typed
+ * by classification and unknown to it, or the reverse — `type: ['array']`
+ * with items is an array to both.
+ */
+export function bodyTypesAsUnknown(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  if (schema.$ref) return false;
+  const folded = foldSiblingProperties(schema);
+  if (detectListEnvelope(folded).isEnvelope || isSingleResourceWrapper(folded)) return false;
+  return directResourceTypesAsUnknown(folded, componentSchemas);
+}
+
+/** `bodyTypesAsUnknown` from `extractDirectResource`'s dispatch on, where its recursion into a lone `allOf` member lands. */
+function directResourceTypesAsUnknown(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  const reading = directResourceReading(schema, componentSchemas);
+  if (reading.kind === 'unwrapped') return directResourceTypesAsUnknown(reading.member, componentSchemas);
+  return reading.kind === 'typeRef' && typesAsUnknown(schema);
+}
+
+/**
  * `wrapper` is the single-member `allOf` wrapper the body was unwrapped
  * from, when it was (the `'unwrapped'` reading below): the schema the
  * document wrote for the body, whose `description` and link the type built
@@ -802,6 +874,7 @@ function extractDirectResource(
   wrapper?: SchemaObject,
 ): ResponseExtractionResult {
   const inlineModels: Model[] = [];
+  const reading = directResourceReading(schema, componentSchemas);
 
   // Direct object with properties (with or without explicit type: 'object').
   // An empty `properties: {}` beside a composition that types the schema is
@@ -809,7 +882,7 @@ function extractDirectResource(
   // (`hasFoldableProperties`) and the `allOf` or `oneOf` branch below reads
   // it, as `{ allOf: [Pet] }` alone is read — so a body declaring no field of
   // its own never becomes an empty model that drops the composition.
-  if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
+  if (reading.kind === 'object') {
     const modelName = deriveModelName(schema, contextName);
     inlineModels.push(...extractInlineModel(modelName, schema, componentSchemas));
     return {
@@ -844,16 +917,14 @@ function extractDirectResource(
   // places the body's own properties first, so an own `kind` enum beside a
   // member's plain `kind` stays the enum here as it does in a field or an
   // array's items.
-  if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
-    const reading = readInlineAllOf(schema.allOf, schema, componentSchemas);
-    if (reading === 'reference') {
-      return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
-    }
-    if (reading === 'unwrapped') {
-      const member = unwrappedAllOfMember(schema, schema.allOf[0]!);
-      const outer = wrapper ? withWrapperDocs(schema, wrapper) : schema;
-      return extractDirectResource(member, contextName, componentSchemas, settle, outer);
-    }
+  if (reading.kind === 'reference') {
+    return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
+  }
+  if (reading.kind === 'unwrapped') {
+    const outer = wrapper ? withWrapperDocs(schema, wrapper) : schema;
+    return extractDirectResource(reading.member, contextName, componentSchemas, settle, outer);
+  }
+  if (reading.kind === 'merged') {
     const merged = mergeAllOfMembers(schema, componentSchemas);
     const mergedRefFields = merged.resolvedRefs.length > 0;
 
@@ -901,9 +972,13 @@ function extractDirectResource(
   // would give the array. Read before the `oneOf` branch below, which
   // would otherwise materialize a nullable array's items a second time
   // under the response's own name.
-  const array = arraySchemaOf(schema);
-  if (array?.items) {
-    const typed = typeInlineItems(array.items, contextName.replace(/Response$/, '') + 'Item', componentSchemas, settle);
+  if (reading.kind === 'array') {
+    const typed = typeInlineItems(
+      reading.items,
+      contextName.replace(/Response$/, '') + 'Item',
+      componentSchemas,
+      settle,
+    );
     return {
       response: nullableIf(schema, { kind: 'array', items: typed.itemType }),
       inlineModels: [...inlineModels, ...typed.inlineModels],
