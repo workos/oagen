@@ -403,7 +403,8 @@ function isNumeric(schema: SchemaObject): boolean {
  * limits beside the schema's own `type`) is read as that member exactly
  * when `schemaToTypeRef` types the schema as it (`readInlineAllOf`:
  * `'unwrapped'` or `'reference'`; a `required` beside a lone `$ref`
- * member makes the schema the merged model, which is left as written), so
+ * member to a component that declares properties makes the schema the
+ * merged model, which is left as written), so
  * `has_more: { allOf: [{ $ref: Flag }], description }` with `Flag: { type:
  * boolean }` is a boolean here as it is in the IR. The three alternate
  * until the schema is
@@ -435,7 +436,9 @@ export function resolveBareSchema(
   const bare = unwrapNullableSchema(schema);
   if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
   const lone =
-    bare.allOf?.length === 1 && classifyInlineSchema(bare) === 'allOf' && readInlineAllOf(bare.allOf, bare) !== 'merged'
+    bare.allOf?.length === 1 &&
+    classifyInlineSchema(bare) === 'allOf' &&
+    readInlineAllOf(bare.allOf, bare, componentSchemas) !== 'merged'
       ? bare.allOf[0]
       : undefined;
   return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
