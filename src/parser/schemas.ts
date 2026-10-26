@@ -2414,12 +2414,43 @@ export function inlineEnumName(contextName: string | undefined, parentModelName:
 }
 
 /**
- * The enum name `schemaToTypeRef` types `schema` under — an inline `enum:`
- * list of two or more non-null members, under any nullable wrapper, or an
- * array of one, which is lifted under the array's own name — or undefined
- * when it types the schema as something else: a single-member list is a
- * literal, a `oneOf` of consts a union read on its own. Lets a pass reserve
- * the enum's name before the schema is typed (`extractOperations`).
+ * How `schemaToTypeRef` types a schema as an inline enum, when it does. The
+ * one decision both the typer's enum branches and `inlineEnumSchemaName`
+ * read, so the name a pass reserves before a schema is typed and the name
+ * the schema is typed under can never disagree. Decided on the schema as
+ * the typer sees it at those branches — its nullable wrappers removed, so
+ * callers unwrap first (`unwrapNullableSchema`): a `oneOf`/`anyOf` whose
+ * non-null variants are string `const` schemas (`constUnionEnumMembers`)
+ * with two or more members, or any number beside an `enum:` list that
+ * restricts them, is a `const-union` enum of those members; an `enum:` list
+ * of any count of non-null members but one is an `enum-list` enum, one
+ * alone being a literal; every other shape — a `$ref`, an `allOf`, a union
+ * of other variants, an object, an array — is not an enum here (an array's
+ * items are the array's question, `inlineEnumSchemaName`).
+ */
+export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | undefined {
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'union') {
+    const members = constUnionEnumMembers(schema);
+    if (members !== null && (members.length >= 2 || Array.isArray(schema.enum))) {
+      return { spelling: 'const-union', members };
+    }
+    return undefined;
+  }
+  if (kind === 'enum' && nonNullEnumValues(schema.enum).length !== 1) return { spelling: 'enum-list' };
+  return undefined;
+}
+
+/** The two spellings of an inline enum `schemaToTypeRef` lifts (`inlineEnumSpelling`), with the const union's members. */
+export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
+
+/**
+ * The enum name `schemaToTypeRef` types `schema` under — a schema it types
+ * as an inline enum in either spelling (`inlineEnumSpelling`), under any
+ * nullable wrapper, or an array of one, which is lifted under the array's
+ * own name — or undefined when it types the schema as something else. Lets
+ * a pass reserve the enum's name before the schema is typed
+ * (`extractOperations`), whatever the document order of the sites.
  */
 export function inlineEnumSchemaName(
   schema: SchemaObject,
@@ -2427,13 +2458,11 @@ export function inlineEnumSchemaName(
   parentModelName: string | undefined,
 ): string | undefined {
   const inner = unwrapNullableSchema(schema);
-  const kind = classifyInlineSchema(inner);
-  if (kind === 'array') {
+  if (classifyInlineSchema(inner) === 'array') {
     const items = inner.items;
     return items && !Array.isArray(items) ? inlineEnumSchemaName(items, contextName, parentModelName) : undefined;
   }
-  if (kind !== 'enum' || nonNullEnumValues(inner.enum).length < 2) return undefined;
-  return inlineEnumName(contextName, parentModelName);
+  return inlineEnumSpelling(inner) ? inlineEnumName(contextName, parentModelName) : undefined;
 }
 
 /**
@@ -4321,10 +4350,12 @@ export function schemaToTypeRef(
     // decided first. Without a list, a union of fewer than two consts keeps
     // the shape the branches below give it (a lone const beside
     // `type: 'null'` is a nullable literal).
-    const constMembers = constUnionEnumMembers(schema);
-    if (constMembers !== null && (constMembers.length >= 2 || Array.isArray(schema.enum))) {
+    // Whether this union is such an enum is the one decision the predictor
+    // that reserves enum names before typing reads too (`inlineEnumSpelling`).
+    const constUnion = inlineEnumSpelling(schema);
+    if (constUnion?.spelling === 'const-union') {
       const enumRef = buildSyntheticEnumRef(
-        constMembers,
+        constUnion.members,
         contextName,
         parentModelName,
         schema.externalDocs,
@@ -4511,8 +4542,10 @@ export function schemaToTypeRef(
     return enumAdmitsNull ? asNullable(literal) : literal;
   }
 
-  // Handle enum
-  if (inlineKind === 'enum') {
+  // Handle enum — the `enum-list` spelling of the one decision the predictor
+  // that reserves enum names before typing reads too (`inlineEnumSpelling`);
+  // the single-member list was returned as a literal above.
+  if (inlineEnumSpelling(schema)?.spelling === 'enum-list') {
     // Named by the one rule every inline enum follows (`inlineEnumName`):
     // qualified by the parent with its list-item markers stripped, no
     // redundant prefix, the project's `schemaNameTransform` applied. The
