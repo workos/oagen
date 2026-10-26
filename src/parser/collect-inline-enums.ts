@@ -12,6 +12,18 @@ import { enumValuesOf, sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
 
 /**
+ * The step an operation-owned error body's enum takes past a taken name:
+ * `<Op>Error<code>` → `<Op>Error<code>Body`, then `…Body2`, `…Body3`, … —
+ * numbered under `Body`, the way the error models step in the shape
+ * registry (`deferredNamingStem`, kind `error`), so an enum body and an
+ * object body in the same spot take the same name (`distinctEnumName`).
+ * Every error site passes it, and only an error site (`ownedErrorBodies`);
+ * a status code or fallback label qualifies the other sites and numbers on
+ * the bare name.
+ */
+const ERROR_BODY_STEP = 'Body';
+
+/**
  * Promote the inline enums a model's fields and named-union variants
  * declare to top-level enums. A field enum is named from its model and field alone
  * (`GetReportResponseStatus`, `ListPetsDefaultResponseStatus`), a name a
@@ -180,7 +192,13 @@ export function collectInlineEnumsFromOperations(
       const owned = ownedErrorBodies(op, shared);
       for (const error of op.errors) {
         if (!error.type) continue;
-        collectDistinctEnums(error.type, owned.has(error.type) ? 'Body' : undefined, enums, enumNames, modelNames);
+        collectDistinctEnums(
+          error.type,
+          owned.has(error.type) ? ERROR_BODY_STEP : undefined,
+          enums,
+          enumNames,
+          modelNames,
+        );
       }
       // A body declared only for a secondary media type (`text/plain` next to
       // `application/json`), or for a `default` or range response, is typed
@@ -196,7 +214,7 @@ export function collectInlineEnumsFromOperations(
       // `<Op>Error<code>…` like `errors[].type`, which steps to `…Body` as
       // that does.
       for (const { type } of collectResponseBodyTypes(op)) {
-        collectThroughModels(type, owned.has(type) ? 'Body' : undefined);
+        collectThroughModels(type, owned.has(type) ? ERROR_BODY_STEP : undefined);
       }
       // A request body declared only for a secondary media type (`text/csv`
       // next to `application/json`) is typed like one, with its name already
@@ -371,12 +389,16 @@ function collectDistinctEnums(
 }
 
 /**
- * A name the base was already stepped to that holds the same members
+ * A name the stem was already stepped to that holds the same members
  * (`isNumericStep`), else the first name not taken by a different member set,
  * nor by a model: the base qualified by the status code
  * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
- * `DocumentsXPolicy3`, ...). Deterministic for a given spec, since it depends
- * only on declaration order. The collectors
+ * `DocumentsXPolicy3`, ...). An error body (`ERROR_BODY_STEP`) steps to
+ * `GetPetError404Body` and then numbers under it (`GetPetError404Body2`,
+ * `GetPetError404Body3`, ...), as the error models do in the shape registry,
+ * never on the bare name (`GetPetError4042` is what a parameter named
+ * `error404` steps to, a different site). Deterministic for a given spec,
+ * since it depends only on declaration order. The collectors
  * run after every model is named, and the merge passes mint against every
  * enum name an `EnumRef` carries (`reservedTypeNames`) — but not against the
  * names chosen here, so this is the side that steps around the other: a
@@ -397,20 +419,25 @@ function distinctEnumName(
     const taken = enums.find((e) => e.name === name);
     return !taken || sameEnumShape(taken.values, values);
   };
+  // The stem the numbered steps extend: the bare name, or `<base>Body` for
+  // an error body, whose numbers come under `Body` so an enum body and an
+  // object body past the same two taken names agree (`…Body2`).
+  const stem = qualifier === ERROR_BODY_STEP ? `${base}${qualifier}` : base;
   // A name this stem already stepped to for the same members — another
   // status code's body or header (`…200` when this is the 202's), or an
-  // earlier numeric step — is shared before a new one is minted, so
-  // identical members on two status codes never become two enums once their
-  // plain name is taken. Only a digit-qualified name is a step of this stem:
-  // `…Body` and the fallback labels (`…Default`) qualify other sites.
+  // earlier numeric step (`…Body2` for an error body) — is shared before a
+  // new one is minted, so identical members on two status codes never
+  // become two enums once their plain name is taken. Only a digit-qualified
+  // name is a step of this stem: the fallback labels (`…Default`) qualify
+  // other sites, and `…Body` itself is shared through `isUsable` below.
   const stepped = enums.find(
-    (e) => isNumericStep(e.name, base) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
+    (e) => isNumericStep(e.name, stem) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
   );
   if (stepped) return stepped.name;
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;
   let suffix = 2;
-  while (!isUsable(`${base}${suffix}`)) suffix++;
-  return `${base}${suffix}`;
+  while (!isUsable(`${stem}${suffix}`)) suffix++;
+  return `${stem}${suffix}`;
 }
 
 /** Whether `name` is `base` followed by one or more digits: a status-code or numeric-suffix step of the stem. */
