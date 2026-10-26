@@ -49,6 +49,7 @@ import {
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSchemaName,
+  isComponentModelRef,
   isInlineObjectSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
@@ -60,11 +61,21 @@ import {
   collectModelTypeRefs,
   collectEnumRefs,
   collectOperationTypeRefs,
+  renameModelRefs,
+  renameTypeRefModels,
+  walkTypeRef,
+  type ModelRef,
 } from '../ir/types.js';
-import { collectProperties, extractInlineModelsFromProperties, type InlineModelBundle } from './inline-models.js';
+import {
+  collectProperties,
+  extractInlineModelsFromProperties,
+  isInheritedModelRef,
+  type InlineModelBundle,
+} from './inline-models.js';
 import {
   detectPagination,
   derivePageStart,
+  describeUndetectedPaging,
   paginatedItemType,
   resolvePaginationOverride,
   resolveOverrideParams,
@@ -72,6 +83,7 @@ import {
   resolveDataPathItemType,
 } from './pagination.js';
 import {
+  BODY_READINGS,
   classifyAndExtractResponse,
   composedWithoutFields,
   classifyResponseKey,
@@ -86,6 +98,7 @@ import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
+  ownerShares,
   registerInlineModels,
   reserveEnumNames,
   type InlineModelRegistry,
@@ -2674,29 +2687,47 @@ function buildOperation(
   const pageStartOf = (param: Parameter | undefined): number =>
     derivePageStart(param, param && querySchemas.get(param.name), componentSchemas);
 
+  // Whether an override was written at all, usable or not: an envelope that
+  // ends up with no iterator is warned about only when none was, since a
+  // rejected override has already been warned about by name.
+  const overrideGiven = op['x-pagination'] !== undefined || paginationHint !== undefined;
   // The explicit pagination override — config hint over `x-pagination` — is
   // validated before the response is classified: `strategy: 'none'` must keep
   // a list envelope from being unwrapped into a bare array, and an explicit
   // `dataPath` is resolved against the response while its schema is at hand.
   let paginationOverride = resolvePaginationOverride({ extension: op['x-pagination'], hint: paginationHint }, opLabel);
   const paginationDisabled = paginationOverride?.hint.strategy === 'none';
+  // The pagination the query parameters alone yield, read before the
+  // response is: `UNKNOWN_RESPONSE` stands in for the response, whose item
+  // type this read never uses.
+  const paginationFromParamsAlone =
+    detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined;
   // Whether the override can apply is decided here, before the response is
   // read: one that would be rejected (a `param` the operation does not
   // declare, no strategy from anywhere) must not keep an envelope as a
   // wrapper that detection then reads as the list. What it is checked
-  // against is the pagination the query parameters alone yield — the
-  // envelope fallback's invented `after` never makes an override usable.
+  // against is the pagination the query parameters alone yield — a
+  // parameter the operation does not declare never makes an override usable.
   if (paginationOverride && !paginationDisabled) {
-    const resolved = resolveOverrideParams(
-      detectPagination(UNKNOWN_RESPONSE, queryParams, undefined, { pageStartOf }) ?? undefined,
-      paginationOverride.hint,
-      queryParams,
-    );
+    const resolved = resolveOverrideParams(paginationFromParamsAlone, paginationOverride.hint, queryParams);
     if ('problem' in resolved) {
       console.warn(`[oagen] Warning: ${paginationOverride.source} on ${opLabel}${resolved.problem}`);
       paginationOverride = undefined;
     }
   }
+  // What drives the iterator, if anything: a query parameter the operation
+  // declares — the one detection found, or the one a usable override names
+  // (checked above). With neither there is nothing to page with, so a list
+  // envelope is not unwrapped for an iterator that never comes: it is kept as
+  // a plain response model, the wire shape, exactly as `strategy: 'none'`
+  // keeps it.
+  const iteratorSource: 'parameters' | 'override' | undefined = paginationDisabled
+    ? undefined
+    : paginationFromParamsAlone
+      ? 'parameters'
+      : paginationOverride
+        ? 'override'
+        : undefined;
   const {
     response,
     responseHeaders,
@@ -2717,10 +2748,12 @@ function buildOperation(
     endOfIteration: responseEndOfIteration,
     overrideItemType,
     envelopeCompanions,
+    unpagedEnvelope,
   } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
-    disabled: paginationDisabled,
+    disabled: iteratorSource === undefined,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
     componentModels,
+    overrideOnly: iteratorSource === 'override',
   });
   const inlineModels = [...responseModels, ...reqBodyModels];
 
@@ -2746,40 +2779,57 @@ function buildOperation(
     paginationOverride = undefined;
   }
 
-  // Build structured pagination metadata from response classification and
-  // query param detection, then let the override correct or disable it.
+  // Build structured pagination metadata from query param detection and
+  // response classification, then let the override correct or disable it.
   const paginationFromParams = detectPagination(response, queryParams, responseDataPath, { pageStartOf });
-  let detectedPagination: PaginationMeta | undefined;
-  if (isPaginated) {
-    const itemType = responseItemType ?? paginatedItemType(response);
-    detectedPagination = {
-      strategy: paginationFromParams?.strategy ?? 'cursor',
-      param: paginationFromParams?.param ?? 'after',
-      limitParam: paginationFromParams?.limitParam,
-      ...(paginationFromParams?.pageStart !== undefined && { pageStart: paginationFromParams.pageStart }),
-      dataPath: responseDataPath ?? paginationFromParams?.dataPath,
-      ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
-      itemType,
-      envelopeFields,
-      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
-    };
-  } else if (paginationFromParams) {
-    // A stop field is also read from a body kept as a wrapper under an
-    // explicit `dataPath` — a `$ref`, an envelope detection would unwrap on
-    // another array, an inline body detection did not recognize (see
-    // `ResponseClassificationOptions.dataPathOverride`).
-    detectedPagination = {
-      ...paginationFromParams,
-      ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
-    };
-  }
+  // The list envelope the response was unwrapped on, whichever parameter
+  // drives the iterator: where the items are, their type, and the companions.
+  const envelope = isPaginated
+    ? {
+        dataPath: responseDataPath,
+        ...(responseDataDescription !== undefined && { dataDescription: responseDataDescription }),
+        itemType: responseItemType ?? paginatedItemType(response),
+        envelopeFields,
+      }
+    : undefined;
+  // An iterator is built around a parameter the operation declares, never an
+  // invented one: with none recognized, nothing is detected, and only an
+  // override can create the iterator — around the same envelope, which it
+  // receives below. An envelope nothing pages was kept as a plain response
+  // model above, so `isPaginated` never holds here without a parameter or a
+  // usable override. The stop field is read beside the unwrapped envelope,
+  // or beside a body kept as a wrapper under an explicit `dataPath` — a
+  // `$ref`, an envelope detection would unwrap on another array, an inline
+  // body detection did not recognize (see
+  // `ResponseClassificationOptions.dataPathOverride`).
+  const detectedPagination: PaginationMeta | undefined = paginationFromParams
+    ? {
+        ...paginationFromParams,
+        ...envelope,
+        ...(responseEndOfIteration && { endOfIteration: responseEndOfIteration }),
+      }
+    : undefined;
   const pagination = applyPaginationOverride(detectedPagination, paginationOverride, queryParams, response, opLabel, {
     overrideItemType,
     // Read from the response above, so an override that creates the iterator
-    // where detection found none still stops on it.
+    // where detection found none still iterates the envelope and stops on
+    // its stop field.
+    envelope,
     endOfIteration: responseEndOfIteration,
     pageStartOf,
   });
+  // One warning per operation whose list envelope nothing pages: the cause
+  // is a missing query parameter, and the fix is to declare it or to name a
+  // declared one through an override. An override that was written and
+  // rejected has been warned about by name already.
+  if (unpagedEnvelope && !overrideGiven) {
+    console.warn(
+      `[oagen] Warning: ${opLabel} returns a list envelope but no query parameter drives an iterator ` +
+        `(${describeUndetectedPaging(queryParams)}) — keeping the body as a plain response model with no ` +
+        'pagination; declare the parameter, set x-pagination / operationHints pagination naming a query ' +
+        'parameter the operation declares, or set strategy "none" to accept the plain model',
+    );
+  }
 
   // Per-operation security requirements; undefined means "inherit ApiSpec.security"
   const security = extractSecurityRequirements(op.security, opLabel);
@@ -5030,12 +5080,25 @@ function resolveOverrideItemType(
 
 /** What the explicit pagination override asks of response extraction. */
 interface PaginationExtractionOptions {
-  /** `strategy: 'none'`: keep a list envelope as a plain response model instead of unwrapping it. */
+  /**
+   * Nothing pages the operation — `strategy: 'none'`, or no query parameter
+   * drives an iterator and no override names one: keep a list envelope as a
+   * plain response model instead of unwrapping it.
+   */
   disabled?: boolean;
   /** An explicit `dataPath` to resolve to the element type of the array it names. */
   dataPath?: string;
   /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
   componentModels?: Model[];
+  /**
+   * The override is the only source of an iterator: no query parameter
+   * yields one. A body its `dataPath` reaches no array in is then kept as a
+   * plain response model too, since the override will be dropped
+   * (`buildOperation` warns) and nothing else pages the body. For the
+   * primary body that is exactly the case in which the override is dropped;
+   * a secondary 2xx body the path does not reach is kept the same way.
+   */
+  overrideOnly?: boolean;
 }
 
 /**
@@ -5115,8 +5178,13 @@ interface ComponentResponseNaming {
  * other field types, silently; and naming such a body per operation instead
  * would hand two shared bodies of one operation (`OwnerCard` at 200,
  * `NewOwner` at 201) the same `<Op>Response`. The names are read with the
- * extractor the operation will use, under the candidate name, so the whole
- * body moves together and the reference and the models agree by
+ * extractor the operation will use, under the candidate name and under
+ * every reading an operation can give the body — a list envelope unwrapped
+ * for an iterator (`NotePageItem`) or kept as the wire shape
+ * (`NotePageResponse`, `NotePageResponseData`), since which one an
+ * operation takes (`iteratorSource`) is known only when it is read and two
+ * operations returning the same body can differ — so the whole body moves
+ * together and the reference and the models agree by
  * construction; a chain of refs is followed to the body silently, since the
  * operation declaring the ref reports a bad one when it reads it. A clash the
  * stem does not reach — a titled variant, named the same under any stem —
@@ -5181,17 +5249,28 @@ function componentResponseBodySchema(
   return primaryBodySchema(resolved).schema;
 }
 
-/** Every model name a response body mints under `contextName`: the extractor's models and its envelope companions'. */
+/**
+ * Every model name a response body mints under `contextName`, under every
+ * reading an operation can give it (`BODY_READINGS`): the extractor's models
+ * and its envelope companions' when a list envelope is unwrapped
+ * (`NotePageItem`), and the plain model's nested models when it is kept as
+ * the wire shape (`NotePageResponse`, `NotePageResponseData`). Which reading
+ * each operation takes is decided when it is read (`iteratorSource`), and two
+ * operations returning one component response can take different ones, so
+ * both sets are reserved and the stem steps when either clashes.
+ */
 function bodyModelNames(
   schema: SchemaObject,
   contextName: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): string[] {
-  const body = classifyAndExtractResponse(schema, contextName, componentSchemas);
-  return [
-    ...body.inlineModels.map((model) => model.name),
-    ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models.map((model) => model.name)),
-  ];
+  const names = new Set<string>();
+  for (const reading of BODY_READINGS) {
+    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+    for (const model of body.inlineModels) names.add(model.name);
+    for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
+  }
+  return [...names];
 }
 
 /**
@@ -5802,6 +5881,8 @@ function extractResponses(
   /** Element type of the array the override's `dataPath` names; unset when it does not resolve. */
   overrideItemType?: TypeRef;
   envelopeCompanions?: EnvelopeCompanion[];
+  /** The primary body is a list envelope kept as a plain response model because nothing pages it (`ResponseExtractionResult.unpagedEnvelope`). */
+  unpagedEnvelope?: boolean;
 } {
   const errors: ErrorResponse[] = [];
   let response: TypeRef = undescribedBodyType();
@@ -5818,6 +5899,7 @@ function extractResponses(
   let endOfIteration: PaginationEndOfIteration | undefined;
   let overrideItemType: TypeRef | undefined;
   let envelopeCompanions: EnvelopeCompanion[] | undefined;
+  let unpagedEnvelope: boolean | undefined;
 
   // An operation without a `responses` object declares no success response,
   // so `response` is `unknown` here as it is for one that declares only
@@ -5841,6 +5923,10 @@ function extractResponses(
   // Each classified body's schema, for resolving an overridden `dataPath`
   // through the document when the IR cannot answer.
   const bodySchemas = new Map<number, SchemaObject>();
+  // The context each 2xx body's models were named under — `<Op>Response`,
+  // or the component's shared name — the stem a later status code's body
+  // steps from when a kept model holds one of its names (`stepSecondaryBody`).
+  const bodyContexts = new Map<number, string>();
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
@@ -5919,17 +6005,25 @@ function extractResponses(
           !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
             ? undefined
             : pagination.dataPath;
+        // When only the override can drive an iterator and its `dataPath`
+        // reaches no array in this body, nothing will page the body: a list
+        // envelope in it is kept as a plain response model, as under
+        // `disabled`, rather than unwrapped for an iterator that never comes.
+        const paginationDisabled =
+          pagination.disabled === true ||
+          (pagination.overrideOnly === true && pagination.dataPath !== undefined && dataPathOverride === undefined);
         // The primary body's array items are settled against the registry
         // (`typeInlineItems`); the dry run that reads a component response's
         // names (`bodyModelNames`) passes none and mints nothing into it.
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
-          paginationDisabled: pagination.disabled,
+          paginationDisabled,
           dataPathOverride,
           ...(ctx.registry && { settle: { registry: ctx.registry, operation: ctx.operationQualifier } }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
         bodySchemas.set(code, bodySchema);
+        bodyContexts.set(code, contextName);
       }
       const contents = extractResponseContents(
         resp.content,
@@ -6045,22 +6139,25 @@ function extractResponses(
     envelopeFields = primaryBody.envelopeFields;
     endOfIteration = primaryBody.endOfIteration;
     envelopeCompanions = primaryBody.envelopeCompanions;
+    unpagedEnvelope = primaryBody.unpagedEnvelope;
   }
 
   // Keep the models of every 2xx body: `successResponses` references each of
   // them, so keeping only one body's would leave the others dangling. Every
-  // status derives the same `<Op>Response` context name, so on a name clash
-  // the primary's definition — the one `response` points at — goes first and
-  // wins; the other bodies follow in status order.
-  // A dropped model whose shape differs from the kept one is warned about,
-  // since its status then points at a shape it did not declare. The models
-  // only that dropped copy referenced go with it (`reachedModels`): the
+  // status derives the same `<Op>Response` context name, so the primary's
+  // definition — the one `response` points at — goes first; the other bodies
+  // follow in status order, and a model of theirs the kept one shares
+  // (`modelFingerprint`) resolves to the kept definition silently. A later
+  // body that reaches a model the kept ones hold under another shape is
+  // re-derived under its own stem first — `<Op>Response<code>`, then a
+  // number (`stepSecondaryBody`) — so its `successResponses` entry keeps the
+  // shape its status code declared; only a clash on a model the stem does
+  // not name is still resolved to the kept definition, with a warning. The
+  // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
   // `successResponses` entry, so of its models only those the entry's type
-  // still reaches are kept; `CreatePetResponseOwner` under a 201
-  // `CreatePetResponse` the 200's `{ id }` replaced is not, rather than kept
-  // with nothing referencing it.
+  // still reaches are kept, rather than kept with nothing referencing them.
   const bodiesByPrimacy = [...bodyResults.entries()].sort(([a], [b]) => {
     if (a === primaryStatus) return -1;
     if (b === primaryStatus) return 1;
@@ -6068,6 +6165,9 @@ function extractResponses(
   });
   const keptByName = new Map<string, { model: Model; status: number }>();
   for (const [status, result] of bodiesByPrimacy) {
+    if (status !== primaryStatus) {
+      stepSecondaryBody(result, bodyContexts.get(status) ?? operationBodyName, status, keptByName, ctx.registry);
+    }
     const reached =
       status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
     for (const model of result.inlineModels) {
@@ -6137,6 +6237,7 @@ function extractResponses(
     endOfIteration,
     overrideItemType,
     envelopeCompanions,
+    unpagedEnvelope,
   };
 }
 
@@ -6173,6 +6274,113 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
     for (const field of resolved.fields) queue.push(...collectModelRefs(field.type));
   }
   return reached;
+}
+
+/**
+ * Re-derive a later status code's body under its own stem when a model it
+ * reaches is already kept — by the primary, or by an earlier status code —
+ * under another shape, so its `successResponses` entry keeps the shape the
+ * status code declared instead of resolving to the kept model's: a 201
+ * `{ owner: { id } }` beside a 200 `{ id }`, or a list envelope kept at a
+ * 201 beside a 200 `{ id }` (`{ data, total_pages }`, no paging parameter).
+ * The stem steps as a secondary media-type body's does (`deferredNamingStem`):
+ * the status code first (`CreatePetResponse201`), then a number
+ * (`CreatePetResponse2`, `…3`, …). Every model the body reaches that its
+ * context names moves with it (`CreatePetResponse201Owner`) — except one a
+ * kept model already holds under the same shape, which stays shared (the
+ * 201's `{ owner: { id } }` beside the 200's keeps `CreatePetResponseOwner`),
+ * unless it references a model that moves — the entry's type and the
+ * models' fields rewritten in place, so the `contents` entry that shares
+ * the type follows; a model named outside the context (a settled item,
+ * `CreatePetItem`; a titled variant) keeps its name. A candidate is taken
+ * when a name it would give is kept, or owned in the spec-wide registry by
+ * a component or another operation, under a shape the owner does not share
+ * (`ownerShares`); an identical shape shares the name, as it always did.
+ * Only references the body itself minted are repointed — by identity, never
+ * by name alone: an explicit `$ref` to a same-named component
+ * (`isComponentModelRef`) and a reference an `allOf` merge copied from
+ * another component's field (`isInheritedModelRef`) stay as written, the
+ * filter the merge passes hand the same rewriters. Returns whether anything
+ * moved: nothing does when no reached model clashes, or when the clash is
+ * on a model the context does not name, which the caller then reports as
+ * before.
+ */
+function stepSecondaryBody(
+  result: ResponseExtractionResult,
+  context: string,
+  status: number,
+  kept: ReadonlyMap<string, { model: Model; status: number }>,
+  registry: InlineModelRegistry | undefined,
+): boolean {
+  const sharedByKept = (model: Model, name: string): boolean => {
+    const keptModel = kept.get(name)?.model;
+    return keptModel !== undefined && modelFingerprint(keptModel) === modelFingerprint(model);
+  };
+  const clashes = (model: Model, name: string): boolean => {
+    const fingerprint = modelFingerprint(model);
+    const keptModel = kept.get(name)?.model;
+    if (keptModel && modelFingerprint(keptModel) !== fingerprint) return true;
+    const owner = registry?.get(name);
+    return owner !== undefined && !ownerShares(owner, model, fingerprint);
+  };
+  // Reached through the body's own models, not the kept ones: the body
+  // keeps its root once it steps, so everything under that root is its.
+  const own = reachedModels(result.response, result.inlineModels, new Map());
+  // A model the context names carries it: as a prefix (the root, a nested
+  // object `…Owner`, a nested variant `…Shape`), as a suffix (a const-named
+  // variant, `Square…` — `deriveModelName`) or in between (a const-named
+  // nested variant, `Square…Shape`); it moves by that one occurrence. A
+  // settled item (`<Op>Item`) and a titled variant do not carry it.
+  const namedByContext = (name: string): boolean => name.includes(context);
+  const movedTo = (name: string, stem: string): string => name.replace(context, stem);
+  const named = [...own].filter((model) => namedByContext(model.name));
+  if (!named.some((model) => clashes(model, model.name))) return false;
+
+  // Only a reference the body itself minted moves with it, by the
+  // reference's identity rather than its name: an explicit `$ref` to a
+  // same-named component (`isComponentModelRef`) and a reference an `allOf`
+  // merge copied from another component's field (`isInheritedModelRef`)
+  // stay as written, so `original: { $ref: CreatePetResponseOwner }` beside
+  // an inline `owner` of that name keeps naming the component.
+  const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
+  const mintedNames = (ref: TypeRef): string[] => {
+    const found: string[] = [];
+    walkTypeRef(ref, { model: (modelRef) => void (admit(modelRef) && found.push(modelRef.name)) });
+    return found;
+  };
+  // What moves: every model the context names, except one a kept model
+  // already holds under the same shape, which stays shared — unless it
+  // references, by a minted reference, a model that moves, since its shape
+  // then differs after all.
+  const moving = new Set(named.filter((model) => !sharedByKept(model, model.name)));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const model of named) {
+      if (moving.has(model)) continue;
+      const movingNames = new Set([...moving].map((m) => m.name));
+      if (collectModelTypeRefs(model).some((ref) => mintedNames(ref).some((name) => movingNames.has(name)))) {
+        moving.add(model);
+        grew = true;
+      }
+    }
+  }
+  const under = (stem: string): Map<Model, string> =>
+    new Map([...moving].map((model) => [model, movedTo(model.name, stem)]));
+  let names = under(`${context}${status}`);
+  // Unbounded on purpose: the kept names and the registry are finite and
+  // every step is a new number, so a free stem is always reached.
+  for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) names = under(`${context}${n}`);
+
+  // Every reference moves through the one rewriter every rename site uses
+  // (`renameTypeRefModels`, `renameModelRefs`), under the identity filter
+  // above, so a union's `discriminator.mapping` follows the variant it
+  // belongs to and never keeps naming the model that moved, and a `$ref`
+  // left in place keeps its mapping entry.
+  const byOldName = new Map([...names].map(([model, name]) => [model.name, name]));
+  renameTypeRefModels(result.response, byOldName, admit);
+  for (const model of own) renameModelRefs(model, byOldName, admit);
+  for (const [model, name] of names) model.name = name;
+  return true;
 }
 
 /**

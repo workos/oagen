@@ -12,6 +12,7 @@ import {
   collectResponseBodyTypes,
   collectModelRefs,
   collectEnumRefs,
+  collectOperationTypeRefs,
   assignModelsToServices,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -1956,9 +1957,11 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       ({ contents, statusCode }) =>
         `${statusCode}: ${contents!.map(({ contentType, type }) => `${contentType} → ${name(type)}`).join(', ')}`,
     );
-  const createPet = (responses: Record<string, unknown>) => ({
-    '/pets': { post: { operationId: 'createPet', responses } },
+  const createPet = (responses: Record<string, unknown>, operation: Record<string, unknown> = {}) => ({
+    '/pets': { post: { operationId: 'createPet', ...operation, responses } },
   });
+  /** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
+  const afterParam = { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] };
   /** A response with `{ id }` under application/json and the given schema under the vendor media type. */
   const withVendor = (vendor: unknown, description = 'ok') => ({
     description,
@@ -2355,7 +2358,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       content: { 'application/json': { schema } },
     });
 
-    it('takes the models only it referenced with it, with the one warning (the issue repro)', async () => {
+    it('steps a 201 body of another shape to its status code, its nested models with it (the issue repro, #309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2363,20 +2366,23 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }']);
+      // The 201 declared `{ owner }`, not `{ id }`: it keeps that shape under
+      // `CreatePetResponse201`, with `CreatePetResponse201Owner` moved with it,
+      // instead of resolving to the 200's model.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { id }',
+      ]);
       expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
         'CreatePetResponse',
-        'CreatePetResponse',
+        'CreatePetResponse201',
       ]);
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining(
-          'Inline model "CreatePetResponse" from the 201 response has different fields than the 200 response\'s',
-        ),
-      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
-    it('keeps a nested model the primary body holds under the same name, and compares the replaced copy of it', async () => {
+    it('steps a 201 body whose nested model differs from the one the primary holds under that name (#309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2387,18 +2393,237 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
-      // Both roots read `owner` as the model named `CreatePetResponseOwner`, so their shapes agree and the 201's
-      // root is shared silently; its `owner` is reached through that root, so its copy is compared and warned about.
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining(
-          'Inline model "CreatePetResponseOwner" from the 201 response has different fields than the 200 response\'s',
-        ),
+      // Both roots read `owner` as `CreatePetResponseOwner`, so the roots alone
+      // would share; the 201's `owner` differs, so the whole 201 body steps —
+      // root and nested model together — and each status code keeps its shape.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { owner }',
+        'CreatePetResponseOwner { id }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { name }',
       ]);
+      expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponse201',
+      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
-    it('shares a nested model the replaced copy and the primary hold alike, warning for the root only', async () => {
+    /** Every `discriminator.mapping` target, on a union type anywhere in the operations or on a model, is one of that union's variants. */
+    function expectMappingsConsistent(spec: ApiSpec): void {
+      const unions: Array<{ variants: TypeRef[]; mapping?: Record<string, string> }> = [];
+      const visit = (ref: TypeRef): void => {
+        if (ref.kind === 'union') {
+          unions.push({ variants: ref.variants, mapping: ref.discriminator?.mapping });
+          for (const variant of ref.variants) visit(variant);
+        } else if (ref.kind === 'array') visit(ref.items);
+        else if (ref.kind === 'nullable') visit(ref.inner);
+        else if (ref.kind === 'map') visit(ref.valueType);
+      };
+      for (const op of spec.services.flatMap((s) => s.operations))
+        for (const ref of collectOperationTypeRefs(op)) visit(ref);
+      for (const model of spec.models) {
+        for (const field of model.fields) visit(field.type);
+        if (model.variants) unions.push({ variants: model.variants, mapping: model.discriminator?.mapping });
+      }
+      expect(unions.length).toBeGreaterThan(0);
+      for (const { variants, mapping } of unions) {
+        if (!mapping) continue;
+        const variantNames = new Set(variants.flatMap((variant) => collectModelRefs(variant)));
+        for (const [value, target] of Object.entries(mapping)) {
+          expect(variantNames.has(target), `mapping ${value} → ${target} names no variant`).toBe(true);
+        }
+      }
+    }
+
+    it("steps a 201 discriminated union with its mapping, so each entry follows its variant (Greptile's case, #309)", async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              {
+                oneOf: [
+                  obj({ kind: { type: 'string', const: 'a' }, x: str }),
+                  obj({ kind: { type: 'string', const: 'b' }, y: str }),
+                ],
+              },
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      // The first variant took the bare `CreatePetResponse` with another shape
+      // than the 200's `{ id }`; it steps to the status code, the const-named
+      // second variant (`B` + the context) moves with it, and the mapping
+      // follows each variant instead of still naming the 200's model under `a`.
+      expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreatePetResponse201' },
+          { kind: 'model', name: 'BCreatePetResponse201' },
+        ],
+        discriminator: { property: 'kind', mapping: { a: 'CreatePetResponse201', b: 'BCreatePetResponse201' } },
+      });
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { kind, x }',
+        'BCreatePetResponse201 { kind, y }',
+      ]);
+      expect(warnings(warn)).toEqual([]);
+      expectMappingsConsistent(spec);
+      expectSound(spec, []);
+    });
+
+    it('steps a nested discriminated union under the 201 body, mapping included (#309)', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(
+              obj({
+                owner: obj({ id: str }),
+                shape: {
+                  oneOf: [
+                    obj({ kind: { type: 'string', const: 'circle' }, radius: str }),
+                    obj({ kind: { type: 'string', const: 'square' }, side: str }),
+                  ],
+                },
+              }),
+              'created',
+            ),
+          }),
+        ),
+      );
+
+      expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
+        kind: 'model',
+        name: 'CreatePetResponse201',
+      });
+      const root = spec.models.find((m) => m.name === 'CreatePetResponse201')!;
+      expect(root.fields.find((f) => f.name === 'shape')?.type).toEqual({
+        kind: 'union',
+        compositionKind: 'oneOf',
+        variants: [
+          { kind: 'model', name: 'CreatePetResponse201Shape' },
+          { kind: 'model', name: 'SquareCreatePetResponse201Shape' },
+        ],
+        discriminator: {
+          property: 'kind',
+          mapping: { circle: 'CreatePetResponse201Shape', square: 'SquareCreatePetResponse201Shape' },
+        },
+      });
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { owner, shape }',
+        'CreatePetResponse201Owner { id }',
+        'CreatePetResponse201Shape { kind, radius }',
+        'SquareCreatePetResponse201Shape { kind, side }',
+      ]);
+      expect(warnings(warn)).toEqual([]);
+      expectMappingsConsistent(spec);
+      expectSound(spec, []);
+    });
+
+    describe('an explicit $ref to a same-named component stays as written when the body steps (Greptile, merge round 1)', () => {
+      // The stepping repoints only references the body itself minted, by
+      // identity (`isComponentModelRef`), never a `$ref` that happens to name
+      // the component the inline model clashes with.
+      const component = { CreatePetResponseOwner: obj({ id: str }) };
+      const componentRef = { $ref: '#/components/schemas/CreatePetResponseOwner' };
+      const fieldTypes = (spec: ApiSpec, model: string) =>
+        Object.fromEntries(spec.models.find((m) => m.name === model)!.fields.map((f) => [f.name, name(f.type)]));
+
+      it("Greptile's case: the 201 body's `original` keeps naming the component while its `owner` moves", async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }) })),
+              '201': json(obj({ owner: obj({ name: str }), original: componentRef }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        // The 200's inline `owner: { id }` is the component's shape and folds onto it.
+        expect(fieldTypes(spec, 'CreatePetResponse')).toEqual({ owner: 'CreatePetResponseOwner' });
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({
+          owner: 'CreatePetResponse201Owner',
+          original: 'CreatePetResponseOwner',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(fieldTypes(spec, 'CreatePetResponse201Owner')).toEqual({ name: 'primitive' });
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+
+      it('the mirror: the 200 body references the component and the 201 steps past it', async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }), original: componentRef })),
+              '201': json(obj({ owner: obj({ name: str }) }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        expect(fieldTypes(spec, 'CreatePetResponse')).toEqual({
+          owner: 'CreatePetResponseOwner',
+          original: 'CreatePetResponseOwner',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({ owner: 'CreatePetResponse201Owner' });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(fieldTypes(spec, 'CreatePetResponse201Owner')).toEqual({ name: 'primitive' });
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+
+      it('a stepped body whose only reference to that name is the $ref keeps it', async () => {
+        const warn = silence();
+        const spec = await parseDocument(
+          document(
+            createPet({
+              '200': json(obj({ owner: obj({ id: str }) })),
+              '201': json(obj({ owner: componentRef, extra: str }), 'created'),
+            }),
+            component,
+          ),
+        );
+
+        expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+          'CreatePetResponse',
+          'CreatePetResponse201',
+        ]);
+        expect(fieldTypes(spec, 'CreatePetResponse201')).toEqual({
+          owner: 'CreatePetResponseOwner',
+          extra: 'primitive',
+        });
+        expect(fieldTypes(spec, 'CreatePetResponseOwner')).toEqual({ id: 'primitive' });
+        expect(spec.models.map((m) => m.name).sort()).toEqual(
+          ['CreatePetResponse', 'CreatePetResponse201', 'CreatePetResponseOwner'].sort(),
+        );
+        expect(warnings(warn)).toEqual([]);
+        expectSound(spec, ['CreatePetResponseOwner']);
+      });
+    });
+
+    it('shares a nested model the stepped copy and the primary hold alike, stepping the root only (#309)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2409,10 +2634,18 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { owner }', 'CreatePetResponseOwner { id }']);
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
+      // The 201's root differs (`extra`) and steps; its `owner` is the shape
+      // the 200 already holds under `CreatePetResponseOwner`, so it is shared.
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { owner }',
+        'CreatePetResponseOwner { id }',
+        'CreatePetResponse201 { owner, extra }',
       ]);
+      expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponse201',
+      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
@@ -2432,24 +2665,25 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      // The first variant takes the bare `CreatePetResponse` and is replaced by the 200's, its `owner` with it;
-      // the second variant and the item model under it are reached from the 201 entry's union and kept.
+      // The first variant takes the bare `CreatePetResponse` with another shape than the 200's, so the
+      // whole 201 body steps to its status code (#309): both variants, the `owner` and the item model under
+      // `tags` move together, and the union references the moved names.
       expect(modelsOf(spec)).toEqual([
         'CreatePetResponse { id }',
-        'CreatePetResponseWithTags { tags }',
-        'CreatePetResponseWithTagsTags { label }',
+        'CreatePetResponse201 { owner }',
+        'CreatePetResponse201Owner { id }',
+        'CreatePetResponse201WithTags { tags }',
+        'CreatePetResponse201WithTagsTags { label }',
       ]);
       expect(findOp(spec, 'createPet').successResponses![1].type).toEqual({
         kind: 'union',
         compositionKind: 'oneOf',
         variants: [
-          { kind: 'model', name: 'CreatePetResponse' },
-          { kind: 'model', name: 'CreatePetResponseWithTags' },
+          { kind: 'model', name: 'CreatePetResponse201' },
+          { kind: 'model', name: 'CreatePetResponse201WithTags' },
         ],
       });
-      expect(warnings(warn)).toEqual([
-        expect.stringContaining('Inline model "CreatePetResponse" from the 201 response'),
-      ]);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
 
@@ -2457,16 +2691,19 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
-          createPet({
-            '200': json(obj({ id: str })),
-            '201': json(
-              obj({
-                data: { type: 'array', items: obj({ id: str }) },
-                list_metadata: obj({ before: str, after: str }),
-              }),
-              'created',
-            ),
-          }),
+          createPet(
+            {
+              '200': json(obj({ id: str })),
+              '201': json(
+                obj({
+                  data: { type: 'array', items: obj({ id: str }) },
+                  list_metadata: obj({ before: str, after: str }),
+                }),
+                'created',
+              ),
+            },
+            afterParam,
+          ),
         ),
       );
 

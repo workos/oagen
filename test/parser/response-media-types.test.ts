@@ -288,12 +288,15 @@ describe('response media types are matched by essence (issue #237)', () => {
 
   describe('several 2xx bodies', () => {
     /** Extract the only operation of a GET /pets/{petId} with the given `responses`. */
-    function getPetWith(responses: Record<string, unknown>): { op: Operation; inlineModels: Model[] } {
+    function getPetWith(
+      responses: Record<string, unknown>,
+      parameters: unknown[] = [],
+    ): { op: Operation; inlineModels: Model[] } {
       const paths = {
         '/pets/{petId}': {
           get: {
             operationId: 'getPet',
-            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }, ...parameters],
             responses,
           },
         },
@@ -354,45 +357,56 @@ describe('response media types are matched by essence (issue #237)', () => {
         },
       });
       expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
-      // Both statuses derive `GetPetResponse`; the primary's definition is the one kept.
+      // Both statuses derive `GetPetResponse`; the primary's definition keeps the name.
       expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['owner']);
       const names = inlineModels.map((m) => m.name);
       expect(new Set(names).size).toBe(names.length);
       expect(names).toContain('GetPetResponseOwner');
-      // The 201's `tags` item model was referenced only by the 201's own
-      // `GetPetResponse`, which the 200's replaced, so it goes with it rather
-      // than staying behind with nothing referencing it (issue #280).
+      // The 201's body is another shape, so it steps to its status code with
+      // its `tags` item model (#309); nothing of it is left under the bare
+      // stem with nothing referencing it (issue #280).
       expect(names.some((n) => n.startsWith('GetPetResponseTag'))).toBe(false);
+      expect(fieldNames(inlineModels, 'GetPetResponse201')).toEqual(['tags']);
+      expect(names).toContain('GetPetResponse201Tags');
       expectClosed(op, inlineModels);
     });
 
     it('reads the paging fields from the primary response, not the last body read', () => {
-      const baseline = getPetWith({
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-      });
+      // The envelope is unwrapped only for an iterator a declared parameter drives (#309).
+      const after = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
+      const baseline = getPetWith(
+        { '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } } },
+        after,
+      );
       expect(baseline.op.pagination).toBeDefined();
 
-      const laterPlain = getPetWith({
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
-      });
+      const laterPlain = getPetWith(
+        {
+          '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+          '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+        },
+        after,
+      );
       expect(laterPlain.op.response).toEqual(baseline.op.response);
       expect(laterPlain.op.pagination).toEqual(baseline.op.pagination);
       expectClosed(laterPlain.op, laterPlain.inlineModels);
 
       // Document order does not matter: the lowest 2xx with a body is primary.
-      const declaredFirst = getPetWith({
-        '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
-        '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
-      });
+      const declaredFirst = getPetWith(
+        {
+          '201': { description: 'created', content: { 'application/json': { schema: PET_SCHEMA } } },
+          '200': { description: 'ok', content: { 'application/json': { schema: ENVELOPE } } },
+        },
+        after,
+      );
       expect(declaredFirst.op.response).toEqual(baseline.op.response);
       expect(declaredFirst.op.pagination).toEqual(baseline.op.pagination);
     });
 
-    it('warns when a secondary body drops a model whose fields differ from the kept one', () => {
+    it('steps a secondary body whose fields differ from the kept one to its status code, keeping both (#309)', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        const { inlineModels } = getPetWith({
+        const { op, inlineModels } = getPetWith({
           '200': { description: 'ok', content: { 'application/json': { schema: PET_SCHEMA } } },
           '201': {
             description: 'created',
@@ -400,11 +414,13 @@ describe('response media types are matched by essence (issue #237)', () => {
           },
         });
         expect(fieldNames(inlineModels, 'GetPetResponse')).toEqual(['name']);
-        expect(warn.mock.calls.map((call) => String(call[0]))).toContainEqual(
-          expect.stringContaining(
-            'Inline model "GetPetResponse" from the 201 response has different fields than the 200',
-          ),
-        );
+        expect(fieldNames(inlineModels, 'GetPetResponse201')).toEqual(['age']);
+        expect(op.successResponses?.map((r) => r.type)).toEqual([
+          { kind: 'model', name: 'GetPetResponse' },
+          { kind: 'model', name: 'GetPetResponse201' },
+        ]);
+        expectClosed(op, inlineModels);
+        expect(warn).not.toHaveBeenCalled();
       } finally {
         warn.mockRestore();
       }
