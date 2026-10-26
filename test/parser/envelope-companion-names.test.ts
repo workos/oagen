@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from '../../src/parser/envelope-companion-names.js';
-import { fieldAdmits, fieldPropertiesAdmit } from '../../src/parser/inline-models.js';
+import {
+  fieldAdmits,
+  fieldPropertiesAdmit,
+  modelAdmits,
+  modelPropertiesAdmit,
+} from '../../src/parser/inline-models.js';
 import type { Field, Model } from '../../src/ir/types.js';
 
 /**
@@ -550,6 +555,96 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
         expect(onto({ [key]: every[key] }, {}), `${where}, component only`).toEqual(kept);
         expect(onto({}, { [key]: every[key] }), `${where}, copy only`).toEqual(key === 'required' ? folded : kept);
         expect(onto({ [key]: every[key] }, { [key]: every[key] }), `${where}, both`).toEqual(folded);
+      }
+    });
+  });
+
+  describe('every property of the model itself a component fold preserves (Greptile, #364 merge round)', () => {
+    const fields = (): Model['fields'] => [
+      { name: 'before', type: str, required: false },
+      { name: 'after', type: str, required: false },
+    ];
+    /** The copy's fate beside a component carrying `componentOver`, with the copy's own model under `copyOver`. */
+    const onto = (componentOver: Partial<Model>, copyOver: Partial<Model>, rootDeprecated = true) => {
+      const component: Model = { name: 'Pagination', fields: fields(), ...componentOver };
+      const c = companion('ListA', 'Pagination', fields());
+      Object.assign(c.models[0], copyOver);
+      if (rootDeprecated) c.models[0].deprecated = true;
+      const models = resolveEnvelopeCompanionNames([c], [component]);
+      return {
+        ref: (c.field.type as { name: string }).name,
+        models: models.map((m) => [m.name, m.constraints?.minProperties]),
+      };
+    };
+    const folded = { ref: 'Pagination', models: [] };
+
+    it('keeps the copy apart when the model’s own limit differs (the reviewer’s case), with a deprecated root and with a live one, and folds it when it agrees', () => {
+      // `Pagination` declares two optional fields and `minProperties: 2`;
+      // the companion the same fields with `minProperties: 1`. Folded, the
+      // copy's readers would be held to the stricter limit.
+      const strict = { constraints: { minProperties: 2 } };
+      const loose = { constraints: { minProperties: 1 } };
+      expect(onto(strict, loose), 'copy looser, deprecated root').toEqual({
+        ref: 'ListAPagination',
+        models: [['ListAPagination', 1]],
+      });
+      expect(onto(strict, loose, false), 'copy looser, live root').toEqual({
+        ref: 'ListAPagination',
+        models: [['ListAPagination', 1]],
+      });
+      expect(onto(loose, strict), 'copy stricter').toEqual({
+        ref: 'ListAPagination',
+        models: [['ListAPagination', 2]],
+      });
+      expect(onto(strict, {}), 'component only').toEqual({
+        ref: 'ListAPagination',
+        models: [['ListAPagination', undefined]],
+      });
+      expect(onto({}, loose), 'copy only').toEqual({ ref: 'ListAPagination', models: [['ListAPagination', 1]] });
+      expect(onto(strict, strict), 'same, deprecated root').toEqual(folded);
+      expect(onto(strict, strict, false), 'same, live root').toEqual(folded);
+    });
+
+    it('refuses on every property of `Model` but its identity, fields and union structure, so a new property cannot be forgotten', () => {
+      // Every property a `Model` can carry beside its name, documentation,
+      // fields and named-union parts, each with a value: a property added to
+      // `Model` must be added here (the type is `Required`), and is then
+      // checked below on every predicate — `modelPropertiesAdmit` and
+      // `modelAdmits`, which every component fold reads, and the companion
+      // pass, which reads `modelPropertiesAdmit` on its own. The flag is the
+      // one property read apart: a live owner admits a deprecated candidate.
+      const every: Required<
+        Omit<
+          Model,
+          'name' | 'description' | 'externalDocs' | 'fields' | 'variants' | 'compositionKind' | 'discriminator'
+        >
+      > = {
+        deprecated: true,
+        typeParams: [{ name: 'T' }],
+        constraints: { minProperties: 1 },
+      };
+      const base: Model = { name: 'M', fields: fields() };
+      for (const key of Object.keys(every) as Array<keyof typeof every>) {
+        const withKey: Model = { ...base, [key]: every[key] };
+        const where = `property "${key}"`;
+        const flag = key === 'deprecated';
+        expect(modelPropertiesAdmit(withKey, base), where).toBe(false);
+        expect(modelPropertiesAdmit(base, withKey), where).toBe(flag);
+        expect(modelAdmits(withKey, base), where).toBe(false);
+        expect(modelAdmits(base, withKey), where).toBe(flag);
+        expect(modelPropertiesAdmit(withKey, withKey), where).toBe(true);
+        // Beside a component, the companion pass reads the root flag by
+        // `flagAdmits` as well and every other property verbatim.
+        expect(onto({ [key]: every[key] }, {}, false), `${where}, component only`).toEqual({
+          ref: 'ListAPagination',
+          models: [['ListAPagination', undefined]],
+        });
+        expect(onto({}, { [key]: every[key] }, false), `${where}, copy only`).toEqual(
+          flag
+            ? folded
+            : { ref: 'ListAPagination', models: [['ListAPagination', key === 'constraints' ? 1 : undefined]] },
+        );
+        expect(onto({ [key]: every[key] }, { [key]: every[key] }, false), `${where}, both`).toEqual(folded);
       }
     });
   });
