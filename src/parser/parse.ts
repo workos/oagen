@@ -17,6 +17,7 @@ import {
   collapseJsonSuffixModels,
   mergeFieldInlineModels,
   fieldInlineModelBundles,
+  refreshFieldInlineModelBundles,
   reservedNamesByKind,
   reservedTypeNames,
   settleFieldInlineModels,
@@ -172,8 +173,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // (`fieldInlineModelBundles`, `liftedFieldModelsOf`), so a copy dropped
   // here for it needs no record.
   const mintedNames = new Set<string>();
+  // The field sites, kept for the merges below (`refreshFieldInlineModelBundles`):
+  // what a fold carries onto a site here must still be there when a later
+  // pass renames the model it was carried onto.
+  const fieldInlineModelBundlesBySite = fieldInlineModelBundles(fieldInlineModelGroups, models);
   const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
-    bundles: fieldInlineModelBundles(fieldInlineModelGroups, models),
+    bundles: fieldInlineModelBundlesBySite,
     reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
     enums: enumNames,
     minted: mintedNames,
@@ -266,12 +271,13 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     bundles: [
       ...inlineModelBundles,
       ...webhookInlineModelBundles,
-      // Each field's site holds the object the schema pass lifted from the
-      // field's own schema, which the extracted copy folded onto at the early
-      // settle, so a rename here reaches it; the references a header or
-      // fallback body wrote by sharing that object join the site below
-      // (`attachSharedRefs`) and follow the rename.
-      ...fieldInlineModelBundles(fieldInlineModelGroups, models),
+      // The field sites from the settle, brought up to date: each holds the
+      // object the schema pass lifted from the field's own schema, which the
+      // extracted copy folded onto at the settle, and whatever a fold carried
+      // onto it there, so a rename here reaches all of it; the references a
+      // header or fallback body wrote by sharing that object join the site
+      // below (`attachSharedRefs`) and follow the rename.
+      ...refreshFieldInlineModelBundles(fieldInlineModelBundlesBySite, fieldInlineModelGroups, fieldInlineModels),
     ],
     reserved: reserved.all,
     enums: reserved.enums,
