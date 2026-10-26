@@ -828,7 +828,7 @@ function extractDirectResource(
   // member's plain `kind` stays the enum here as it does in a field or an
   // array's items.
   if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
-    const reading = readInlineAllOf(schema.allOf, schema);
+    const reading = readInlineAllOf(schema.allOf, schema, componentSchemas);
     if (reading === 'reference') {
       return { response: schemaToTypeRef(schema, contextName), inlineModels, isPaginated: false };
     }

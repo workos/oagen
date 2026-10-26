@@ -6,6 +6,7 @@ import {
   buildFieldFromSchema,
   classifyInlineSchema,
   componentPropertyLedger,
+  componentSchemaOf,
   declaredComponentProperty,
   nonObjectVariantContexts,
   constraintsEntry,
@@ -1369,7 +1370,7 @@ export function extractInlineModelsFromProperties(
     //  - `'reference'` — `$ref` members only: a plain reference to the first
     //    component, nothing to materialize.
     if (kind === 'allOf' && fieldSchema.allOf) {
-      const reading = readInlineAllOf(fieldSchema.allOf, fieldSchema);
+      const reading = readInlineAllOf(fieldSchema.allOf, fieldSchema, componentSchemas);
       if (reading === 'merged') {
         const modelName = qualifyInlineModelName(toPascalCase(fieldName), parentName);
         materializeMergedAllOf(modelName, fieldSchema, results, componentSchemas);
@@ -1666,17 +1667,33 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     merged model, which carries every component's properties and every
  *     `required` (workos/oagen#359 review: `allOf: [{ $ref: Pet },
  *     { $ref: Owner }]` was `Pet`, `Owner`'s fields gone; `allOf: [{ $ref:
- *     Pet }], required: [name]` was `Pet` with `name` optional).
+ *     Pet }], required: [name]` was `Pet` with `name` optional). A
+ *     `required` adds to the component only when the component declares
+ *     properties the merge would read — its own, or its `allOf` chain's
+ *     (`refContributesProperties`): JSON Schema applies `required` to an
+ *     object instance only, so beside a `$ref` to an array, a primitive, an
+ *     enum or a union component it constrains nothing, and the reference
+ *     stands (the same review: `{ allOf: [{ $ref: Pets }], required: [name] }`
+ *     with `Pets` an array became an empty object model). A ref no
+ *     component answers declares nothing here, and stays the reference.
  *
  * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
  * schema the `allOf` is written on, for its own `required`; a site reading
- * bare members passes none.
+ * bare members passes none. `componentSchemas` resolves the `$ref`; a site
+ * handed none reads the document's components (`componentSchemaOf`), so
+ * every site decides alike.
  */
-export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: SchemaObject): InlineAllOfReading {
-  const refs = members.filter((m) => m.$ref).length;
-  if (refs > 0) {
-    if (members.some(isInlineAllOfMember) || refs > 1) return 'merged';
-    const addsRequired = [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0);
+export function readInlineAllOf(
+  members: readonly SchemaObject[],
+  wrapper?: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): InlineAllOfReading {
+  const refs = members.filter((m) => m.$ref !== undefined);
+  if (refs.length > 0) {
+    if (members.some(isInlineAllOfMember) || refs.length > 1) return 'merged';
+    const addsRequired =
+      [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0) &&
+      refContributesProperties(refs[0]!.$ref!, componentSchemas);
     return addsRequired ? 'merged' : 'reference';
   }
   if (members.length === 1) {
@@ -1685,6 +1702,27 @@ export function readInlineAllOf(members: readonly SchemaObject[], wrapper?: Sche
     return addsRequired ? 'merged' : 'unwrapped';
   }
   return members.some(declaresInlineProperties) ? 'merged' : 'reference';
+}
+
+/**
+ * Whether the component `ref` names contributes properties to an `allOf`
+ * merge — declares `properties` of its own, or through its `allOf` chain
+ * (a member's `$ref` followed the same way), the reading `mergeAllOfMembers`
+ * makes of a `$ref` member; a union the component carries is not read
+ * there, so it does not count. False for an array, a primitive, an enum, a
+ * union-only component, and for a ref no component answers. A chain that
+ * returns to a schema it has read declares nothing more.
+ */
+function refContributesProperties(ref: string, componentSchemas?: Record<string, SchemaObject>): boolean {
+  const seen = new Set<SchemaObject>();
+  const declares = (schema: SchemaObject | undefined): boolean => {
+    if (!schema || seen.has(schema)) return false;
+    seen.add(schema);
+    if (schema.$ref) return declares(componentSchemaOf(schema.$ref, componentSchemas));
+    if (Object.keys(schema.properties ?? {}).length > 0) return true;
+    return (schema.allOf ?? []).some(declares);
+  };
+  return declares(componentSchemaOf(ref, componentSchemas));
 }
 
 /**

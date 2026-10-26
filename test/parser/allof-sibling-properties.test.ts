@@ -161,7 +161,11 @@ function allRefs(spec: ApiSpec): Array<[string, TypeRef]> {
   const refs: Array<[string, TypeRef]> = [];
   for (const op of Object.values(opsOf(spec))) refs.push(...operationRefs(op));
   for (const w of spec.webhooks ?? []) for (const r of collectWebhookTypeRefs(w)) refs.push([`webhook ${w.name}`, r]);
-  for (const m of spec.models) for (const f of m.fields) refs.push([`${m.name}.${f.name}`, f.type]);
+  for (const m of spec.models) {
+    for (const f of m.fields) refs.push([`${m.name}.${f.name}`, f.type]);
+    // A named union references its variants through `variants`, not a field.
+    for (const v of m.variants ?? []) refs.push([`${m.name}.variants`, v]);
+  }
   return refs;
 }
 
@@ -1070,6 +1074,76 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(fieldsOf(spec, show(opsOf(spec).getThing!.response))).toEqual(['name?: string']);
       expect(warnings).toEqual([]);
       expectSound(spec, ['Holder']);
+    });
+  });
+
+  describe('on main (merge round 1)', () => {
+    it('`required` beside a $ref adds to the component only when it declares properties: an array, enum or union component stays the reference', async () => {
+      const listRequired: SchemaObject = { allOf: [ref('Pets')], required: ['name'] };
+      const { spec, warnings } = await parse(
+        'required-beside-array-ref',
+        specDoc(
+          { '/pets': getOp('listPets', listRequired) },
+          {
+            Pet: pet,
+            Pets: { type: 'array', items: ref('Pet') },
+            Kind: { type: 'string', enum: ['a', 'b'] },
+            Either: { oneOf: [obj({ a: str }), obj({ b: str })] },
+            Holder: obj({
+              pets: listRequired,
+              kind: { allOf: [ref('Kind')], required: ['x'] },
+              either: { allOf: [ref('Either')], required: ['a'] },
+              // An object component declares properties: the `required` adds to it.
+              pet: { allOf: [ref('Pet')], required: ['name'] },
+            }),
+          },
+        ),
+      );
+      // Greptile's case: an array stayed an array before the review rounds and does again.
+      expect(fieldsOf(spec, 'Holder')).toEqual(['pets?: Pet[]', 'kind?: Kind', 'either?: Either', 'pet?: HolderPet']);
+      expect(fieldsOf(spec, 'HolderPet')).toEqual(['name: string']);
+      expect(show(opsOf(spec).listPets!.response)).toBe('Pet[]');
+      expect(modelNames(spec)).not.toContain('ListPetsResponse');
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Either', 'Holder']);
+    });
+
+    it('an anyOf axis dispatches and builds its variants exactly as a oneOf axis does, one variant or several', async () => {
+      const only = obj({ kind: { const: 'only' }, value: str });
+      const { spec, warnings } = await parse(
+        'anyof-dispatch',
+        specDoc(
+          {},
+          {
+            Pet: pet,
+            AnyOne: { allOf: [{ anyOf: [only] }] },
+            OneOne: { allOf: [{ oneOf: [only] }] },
+            // Consts of more than one letter: `deriveDiscriminatedVariantName` hands
+            // a variant the parent's own name when the parent starts with the const
+            // (`AnyTwo` starts with `A`), a naming rule this PR leaves as it is.
+            AnyTwo: {
+              allOf: [
+                ref('Pet'),
+                { anyOf: [obj({ kind: { const: 'cat' }, a: str }), obj({ kind: { const: 'dog' }, b: str })] },
+              ],
+            },
+          },
+        ),
+      );
+      for (const name of ['AnyOne', 'OneOne']) {
+        expect(fieldsOf(spec, name), name).toEqual([]);
+        expect(modelOf(spec, name).discriminator, name).toEqual({ property: 'kind', mapping: { only: `${name}Only` } });
+        expect(fieldsOf(spec, `${name}Only`), name).toEqual(['kind?: "only"', 'value?: string']);
+      }
+      expect(fieldsOf(spec, 'AnyTwo')).toEqual(['name: string']);
+      expect(modelOf(spec, 'AnyTwo').discriminator).toEqual({
+        property: 'kind',
+        mapping: { cat: 'AnyTwoCat', dog: 'AnyTwoDog' },
+      });
+      expect(fieldsOf(spec, 'AnyTwoCat')).toEqual(['name: string', 'kind?: "cat"', 'a?: string']);
+      expect(fieldsOf(spec, 'AnyTwoDog')).toEqual(['name: string', 'kind?: "dog"', 'b?: string']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'AnyOne', 'OneOne', 'AnyTwo']);
     });
   });
 });
