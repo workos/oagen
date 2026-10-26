@@ -980,11 +980,13 @@ describe('review round 2', () => {
     expect(typeOf('nested')).toBe('(HolderNested | HolderNestedWithText)');
     expect(fieldsOf(spec, 'HolderEither')).toEqual(['name']);
     // At a body root the composition is read too, never an empty model: an
-    // `allOf` response is the merge it always was, a `oneOf` the union, and a
-    // request body the reference or union a field of the same schema is.
+    // `allOf` of a lone `$ref` is the reference a field of the same schema is
+    // (workos/oagen#307: a response body was a copy of `Pet` under its own
+    // name), a `oneOf` the union, and a request body the reference or union
+    // a field of the same schema is.
     const ops = opsOf(spec);
-    expect(show(ops.getThing.response)).toBe('GetThingResponse');
-    expect(fieldsOf(spec, 'GetThingResponse')).toEqual(['name']);
+    expect(show(ops.getThing.response)).toBe('Pet');
+    expect(spec.models.map((m) => m.name)).not.toContain('GetThingResponse');
     expect(show(ops.createThing.requestBody!)).toBe('Pet');
     expect(show(ops.createThing.response)).toBe('(CreateThingResponse | CreateThingResponseWithText)');
     expect(fieldsOf(spec, 'CreateThingResponse')).toEqual(['name']);
