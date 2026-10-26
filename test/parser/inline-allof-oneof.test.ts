@@ -84,7 +84,11 @@ function allRefs(spec: ApiSpec): Array<[string, TypeRef]> {
   for (const op of Object.values(opsOf(spec))) refs.push(...operationRefs(op));
   for (const w of spec.webhooks ?? [])
     for (const ref of collectWebhookTypeRefs(w)) refs.push([`webhook ${w.name}`, ref]);
-  for (const m of spec.models) for (const f of m.fields) refs.push([`${m.name}.${f.name}`, f.type]);
+  for (const m of spec.models) {
+    for (const f of m.fields) refs.push([`${m.name}.${f.name}`, f.type]);
+    // A named union references its variant models through `variants`.
+    for (const [i, variant] of (m.variants ?? []).entries()) refs.push([`${m.name} variant ${i}`, variant]);
+  }
   return refs;
 }
 
@@ -1465,6 +1469,148 @@ describe('round 4: every shape under a discriminated variant is built as the fie
     });
     expect(fieldsOf(models['NodeCreatedDataNullableItem'])).toEqual(['a: string', 'x?: string']);
     expectSound(ir, ['Base', 'Event']);
+  });
+});
+
+describe('a dispatcher detected through a nullable member builds its variants (Greptile, #308 merge round)', () => {
+  const tagged = (tag: string): SchemaObject => ({
+    type: 'object',
+    properties: { kind: { type: 'string', const: tag }, [tag]: { type: 'string' } },
+    required: ['kind'],
+  });
+  const base: SchemaObject = { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] };
+  const union = (keyword: 'oneOf' | 'anyOf'): SchemaObject => ({ [keyword]: [tagged('a'), tagged('b')] });
+  const nullable = (keyword: 'oneOf' | 'anyOf', inner: SchemaObject): SchemaObject => ({
+    [keyword]: [inner, { type: 'null' }],
+  });
+
+  const expectDispatcher = (ir: ApiSpec, components: string[]) => {
+    const models = modelsByName(ir);
+    const event = models['Event']!;
+    expect(event.discriminator?.property).toBe('kind');
+    expect(Object.keys(event.discriminator?.mapping ?? {}).sort()).toEqual(['a', 'b']);
+    for (const tag of ['a', 'b']) {
+      const variant = models[event.discriminator!.mapping[tag]!];
+      expect(variant, `variant for ${tag}`).toBeDefined();
+      expect(fieldsOf(variant)).toEqual(['id: string', 'kind: literal', `${tag}?: string`]);
+    }
+    expectSound(ir, components);
+  };
+
+  it.each([
+    ['oneOf', 'oneOf'],
+    ['oneOf', 'anyOf'],
+    ['anyOf', 'oneOf'],
+    ['anyOf', 'anyOf'],
+  ] as const)("Greptile's case, the wrapper spelled %s around a %s", async (wrapper, inner) => {
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: { schemas: { Event: { allOf: [base, nullable(wrapper, union(inner))] } } },
+    });
+    expectDispatcher(ir, ['Event']);
+  });
+
+  it('finds the axis through a $ref member to a nullable-wrapped union component, and through a chain to one', async () => {
+    const Axis = nullable('oneOf', union('oneOf'));
+    const direct = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: { schemas: { Axis, Event: { allOf: [base, { $ref: '#/components/schemas/Axis' }] } } },
+    });
+    expectDispatcher(direct, ['Event', 'Axis']);
+    const chained = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Axis,
+          Hop: { $ref: '#/components/schemas/Axis' },
+          Event: { allOf: [base, { $ref: '#/components/schemas/Hop' }] },
+        },
+      },
+    });
+    expectDispatcher(chained, ['Event', 'Axis', 'Hop']);
+  });
+});
+
+describe('two typing declarations of one name conjoin as JSON Schema applies both (Greptile, #308 merge round)', () => {
+  const obj = (properties: Record<string, SchemaObject>, required: string[] = []): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...(required.length > 0 && { required }),
+  });
+  const items = obj({ items: { type: 'array', items: { type: 'string' } } }, ['items']);
+  const total = obj({ total_pages: { type: 'integer' } });
+
+  it('merges two inline objects, a name both declare by the same rule, and unites their required', () => {
+    for (const members of [
+      [obj({ result: items }), obj({ result: total })],
+      [obj({ result: total }), obj({ result: items })],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, undefined);
+      const [result] = merged.properties;
+      expect(result?.name).toBe('result');
+      expect(Object.keys(result!.schema.properties ?? {}).sort()).toEqual(['items', 'total_pages']);
+      expect(result!.schema.required).toEqual(['items']);
+    }
+    // A name both objects declare is settled inside the conjunction too: the
+    // typing declaration, annotated by the typeless one.
+    const typed = obj({ meta: obj({ page: { type: 'integer' } }) });
+    const described = obj({ meta: obj({ page: { description: 'Page number' } }) });
+    const merged = mergeAllOfMembers({ allOf: [described, typed] }, undefined);
+    expect(merged.properties[0]!.schema.properties?.page).toEqual({ type: 'integer', description: 'Page number' });
+  });
+
+  it('keeps the items that say something when two arrays meet, in either order; two primitives keep the first', () => {
+    const typedArray: SchemaObject = { type: 'array', items: { $ref: '#/components/schemas/User' } };
+    const bounded: SchemaObject = { type: ['array', 'null'], minItems: 1 };
+    for (const members of [
+      [obj({ data: typedArray }), obj({ data: bounded })],
+      [obj({ data: bounded }), obj({ data: typedArray })],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, undefined);
+      expect(merged.properties[0]!.schema).toEqual({
+        type: ['array', 'null'],
+        items: { $ref: '#/components/schemas/User' },
+        minItems: 1,
+      });
+    }
+    const first = mergeAllOfMembers(
+      { allOf: [obj({ n: { type: 'string' } }), obj({ n: { type: 'integer' } })] },
+      undefined,
+    );
+    expect(first.properties[0]!.schema).toEqual({ type: 'string' });
+  });
+
+  it("builds a conjoined object as the merged model's own and the component's own, so the field names a model that has both parts", async () => {
+    const A = obj({ result: items });
+    const B = obj({ result: total });
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          A,
+          B,
+          // Conjoined across two components: no component model nests the
+          // whole, so it is the merged model's own.
+          Holder: obj({ value: { allOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }] } }),
+          // Conjoined within one component: its own model nests the whole.
+          Page: { allOf: [A, B] },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    expect(fieldsOf(models['HolderValue'])).toEqual(['result?: HolderValueResult']);
+    expect(fieldsOf(models['HolderValueResult'])).toEqual(['items: array', 'total_pages?: integer']);
+    expect(fieldsOf(models['Page'])).toEqual(['result?: PageResult']);
+    expect(fieldsOf(models['PageResult'])).toEqual(['items: array', 'total_pages?: integer']);
+    expectSound(ir, ['A', 'B', 'Holder', 'Page']);
   });
 });
 
