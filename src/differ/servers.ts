@@ -38,9 +38,10 @@ import type { ServerChange, ServerVariableChange } from './types.js';
  * matched pair, variables are matched by name and every difference is
  * collected on one `server-modified` carrying the new document's spelling of
  * the template; a change to a variable the template never references is
- * additive whatever its kind, since no resolved URL can move (see
- * `diffServerVariables`). Descriptions are not compared, as nowhere else in
- * the differ.
+ * additive whatever its kind, since no resolved URL can move, and so is a
+ * changed default that leaves the resolved URL the same in its RFC 3986 form
+ * (see `diffServerVariables`). Descriptions are not compared, as nowhere else
+ * in the differ.
  *
  * OpenAPI's default server is one thing however a document spells it (#291):
  * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (description and
@@ -234,14 +235,18 @@ function sameResolvedUrl(a: ServerEntry, b: ServerEntry): boolean {
  * the variable. A `{name}` in the template is filled from that variable's
  * `default`, or from a value the caller picks, so removing the variable,
  * changing its default or narrowing its values moves a resolved URL some
- * caller was built on: breaking. A declared variable the template never
- * references (`serverUrlPlaceholders` does not list it; the parser keeps it
- * as written) cannot reach any resolved URL, so the same differences take
- * nothing away from any caller and are additive, with `details` saying why.
- * The template is the same on both sides, since entries are matched on it, so
- * one reading of it serves the pair. The kinds that are additive for any
- * variable (a variable added, an enum lifted, an enum value added) are not
- * affected.
+ * caller was built on: breaking. A changed default moves nothing, though,
+ * when the old entry with only the new default swapped in resolves to the
+ * same URL through `normalizeServerUrl`, as when only the host's case
+ * changed (#406): that change is additive, with `details` saying why, and
+ * is still reported, since defaults are compared as written. A declared
+ * variable the template never references (`serverUrlPlaceholders` does not
+ * list it; the parser keeps it as written) cannot reach any resolved URL, so
+ * the same differences take nothing away from any caller and are additive,
+ * with `details` saying why. The template is the same on both sides, since
+ * entries are matched on it, so one reading of it serves the pair. The kinds
+ * that are additive for any variable (a variable added, an enum lifted, an
+ * enum value added) are not affected.
  */
 function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): ServerVariableChange[] {
   const changes: ServerVariableChange[] = [];
@@ -271,20 +276,29 @@ function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): Se
     if (!oldVar) continue;
 
     if (oldVar.default !== newVar.default) {
+      const change: Omit<ServerVariableChange, 'classification'> = {
+        kind: 'variable-default-changed',
+        variableName: name,
+        oldDefault: oldVar.default,
+        newDefault: newVar.default,
+        details: `default changed from '${oldVar.default}' to '${newVar.default}'`,
+      };
       // The default is what a caller gets without choosing, so when the
       // template references the variable this moves the server's resolved
-      // URL whether or not it is servers[0].
+      // URL whether or not it is servers[0], unless swapping in the new
+      // default alone leaves that URL the same in its RFC 3986 form, as one
+      // that only changes the host's case does (#406).
+      const sameUrl =
+        referenced.has(name) &&
+        sameResolvedUrl(oldServer, { url: oldServer.url, variables: { ...oldServer.variables, [name]: newVar } });
       changes.push(
-        breakingIfReferenced(
-          {
-            kind: 'variable-default-changed',
-            variableName: name,
-            oldDefault: oldVar.default,
-            newDefault: newVar.default,
-            details: `default changed from '${oldVar.default}' to '${newVar.default}'`,
-          },
-          referenced,
-        ),
+        sameUrl
+          ? {
+              ...change,
+              classification: 'additive',
+              details: `${change.details}; either default resolves to the same URL in its RFC 3986 form`,
+            }
+          : breakingIfReferenced(change, referenced),
       );
     }
 

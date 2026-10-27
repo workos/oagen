@@ -223,6 +223,33 @@ describe("diffOperations – a server change's classification (issue #299)", () 
         classification: 'additive',
       });
     });
+
+    it("a referenced default that only changed the host's case, as on the document (#406)", () => {
+      const oldServers = [regional({ default: 'EU' })];
+      const newServers = [regional({ default: 'eu' })];
+      const change = modified(withServers(oldServers), withServers(newServers));
+      expect(change).toMatchObject({
+        serversChanged: true,
+        serverChanges: [
+          {
+            kind: 'server-modified',
+            url: 'https://{region}.notes.example.com',
+            variableChanges: [
+              {
+                kind: 'variable-default-changed',
+                variableName: 'region',
+                oldDefault: 'EU',
+                newDefault: 'eu',
+                classification: 'additive',
+              },
+            ],
+            classification: 'additive',
+          },
+        ],
+        classification: 'additive',
+      });
+      expect(change.serverChanges).toEqual(diffServers(spec(oldServers), spec(newServers)));
+    });
   });
 
   describe('breaking: a server the caller could use is gone or its resolved URL moved', () => {

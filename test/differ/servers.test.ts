@@ -673,6 +673,107 @@ describe('diffServers', () => {
       expect(diffServers(spec([old]), spec([next])).map((c) => c.kind)).toEqual(['server-modified']);
     });
   });
+
+  describe('a referenced default that only changes the URL in spelling (issue #406)', () => {
+    const url = 'https://{region}.pets.example.com';
+    const upper = server(url, { region: { default: 'EU' } });
+    const lower = server(url, { region: { default: 'eu' } });
+    /** The one change `EU` → `eu` gives, wherever the server sits. */
+    const hostCase = {
+      kind: 'server-modified',
+      url,
+      variableChanges: [
+        {
+          kind: 'variable-default-changed',
+          variableName: 'region',
+          classification: 'additive',
+          oldDefault: 'EU',
+          newDefault: 'eu',
+          details: "default changed from 'EU' to 'eu'; either default resolves to the same URL in its RFC 3986 form",
+        },
+      ],
+      classification: 'additive',
+    };
+
+    it("reports the issue's `EU` → `eu` as an additive default change: the resolved host only changed case", () => {
+      expect(diffServers(spec([upper]), spec([lower]))).toEqual([hostCase]);
+    });
+
+    it('classifies it the same on a server after the first', () => {
+      expect(diffServers(spec([staging, upper]), spec([staging, lower]))).toEqual([hostCase]);
+    });
+
+    it("classifies any other spelling the RFC 3986 form folds the same, such as the scheme's default port dropped", () => {
+      const changes = diffServers(
+        spec([server('https://{host}', { host: { default: 'api.example.com:443' } })]),
+        spec([server('https://{host}', { host: { default: 'api.example.com' } })]),
+      );
+      expect(changes.map((c) => [c.kind, c.classification])).toEqual([['server-modified', 'additive']]);
+    });
+
+    it('still reports a default that only changed case in the path as breaking: the path is case-sensitive', () => {
+      const versioned = 'https://api.example.com/{version}';
+      expect(
+        diffServers(
+          spec([server(versioned, { version: { default: 'V1' } })]),
+          spec([server(versioned, { version: { default: 'v1' } })]),
+        ),
+      ).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: 'https://api.example.com/V1',
+          newBaseUrl: 'https://api.example.com/v1',
+          classification: 'breaking',
+        },
+        {
+          kind: 'server-modified',
+          url: versioned,
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'version',
+              classification: 'breaking',
+              oldDefault: 'V1',
+              newDefault: 'v1',
+              details: "default changed from 'V1' to 'v1'",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('classifies each changed default on its own', () => {
+      const twoVariables = 'https://{region}.api.example.com/{version}';
+      const changes = diffServers(
+        spec([server(twoVariables, { region: { default: 'EU' }, version: { default: 'v1' } })]),
+        spec([server(twoVariables, { region: { default: 'eu' }, version: { default: 'v2' } })]),
+      );
+      // `version` moved the URL; `region` alone would not have.
+      expect(changes.map((c) => [c.kind, c.classification])).toEqual([
+        ['base-url-changed', 'breaking'],
+        ['server-modified', 'breaking'],
+      ]);
+      expect(
+        changes[1].kind === 'server-modified' &&
+          changes[1].variableChanges.map((vc) => [vc.variableName, vc.classification]),
+      ).toEqual([
+        ['region', 'additive'],
+        ['version', 'breaking'],
+      ]);
+
+      // Two defaults that resolve to the same URL only together each move it
+      // for a caller who picks the other: `{a}` = `foo` gives `fooyz`, then `fooz`.
+      const joined = 'https://{a}{b}.example.com';
+      const together = diffServers(
+        spec([server(joined, { a: { default: 'x' }, b: { default: 'yz' } })]),
+        spec([server(joined, { a: { default: 'xy' }, b: { default: 'z' } })]),
+      );
+      expect(
+        together.map((c) => (c.kind === 'server-modified' ? c.variableChanges.map((vc) => vc.classification) : c.kind)),
+      ).toEqual([['breaking', 'breaking']]);
+    });
+  });
 });
 
 describe('diffSpecs — servers', () => {
@@ -781,6 +882,40 @@ describe('diffSpecs — servers', () => {
       expect(diff.changes).toEqual([]);
       expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0, behaviorChanges: 0 });
       expect(diffSpecs(after, before).changes).toEqual([]);
+    });
+  });
+
+  describe("the issue's documents (#406)", () => {
+    it("reports a default that only changed the host's case as one additive change, either way round", async () => {
+      const [before, after] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-region-case-before.json')),
+        parseSpec(resolve(fixtures, 'servers-region-case-after.json')),
+      ]);
+      expect(before.baseUrl).toBe('https://EU.pets.example.com');
+      expect(after.baseUrl).toBe('https://eu.pets.example.com');
+
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'server-modified',
+          url: 'https://{region}.pets.example.com',
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'region',
+              classification: 'additive',
+              oldDefault: 'EU',
+              newDefault: 'eu',
+              details:
+                "default changed from 'EU' to 'eu'; either default resolves to the same URL in its RFC 3986 form",
+            },
+          ],
+          classification: 'additive',
+        },
+      ]);
+      // `oagen diff` exits 1, not 2.
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 0 });
+      expect(diffSpecs(after, before).changes.map((c) => c.classification)).toEqual(['additive']);
     });
   });
 });

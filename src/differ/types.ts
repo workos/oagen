@@ -454,10 +454,12 @@ export interface OperationModified {
    * or its resolved URL moved: the first entry's resolved URL changed or
    * disappeared (`base-url-changed`), an entry removed (`server-removed`),
    * or, on a `server-modified`, a variable the template references removed,
-   * its default changed, an enum put on it or a value taken off it.
-   * Additive otherwise: an entry added, a first entry appearing where there
-   * was none, a variable added, an enum lifted or a value added to it, and
-   * any change to a variable the template never references. The operation
+   * its default changed so that the resolved URL moves, an enum put on it or
+   * a value taken off it. Additive otherwise: an entry added, a first entry
+   * appearing where there was none, a variable added, an enum lifted or a
+   * value added to it, a default changed to one that resolves to the same URL
+   * in its RFC 3986 form (a host that only changed case, #406), and any
+   * change to a variable the template never references. The operation
    * is breaking for its servers exactly when one entry of `serverChanges`
    * is. A webhook carries no `servers` in the IR (`Webhook` has no such
    * field), so a `webhook-modified` change has no such flag.
@@ -1018,7 +1020,11 @@ export interface ServerModified {
  * when it does not: a variable the template never references cannot reach
  * any resolved URL, so nothing a caller relied on is taken away. In that
  * additive case — those four kinds only — `details` says so; the three kinds
- * that are additive for any variable keep their shape.
+ * that are additive for any variable keep their shape. A referenced
+ * variable's default changed is additive too when it moves nothing: when the
+ * old entry with only the new default swapped in resolves to the same URL in
+ * its RFC 3986 form (`normalizeServerUrl`), as when only the host's case
+ * changed (#406). `details` then says so.
  */
 export interface ServerVariableChange {
   kind:
@@ -1042,7 +1048,10 @@ export interface ServerVariableChange {
    * `variable-enum-added` and `variable-enum-removed`. For a variable the
    * template never references, every change that would otherwise be breaking
    * also carries (appended after `; ` when there is other text) `{name} is
-   * not in the URL template, so no resolved URL moves`.
+   * not in the URL template, so no resolved URL moves`. A default changed on a
+   * referenced variable without moving the resolved URL carries `either
+   * default resolves to the same URL in its RFC 3986 form` after its text the
+   * same way.
    */
   details?: string;
 }
