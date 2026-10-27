@@ -54,6 +54,16 @@ describe('looksLikePaginationMetadata', () => {
       expect(looksLikePaginationMetadata(name)).toBe(false);
     }
   });
+
+  it('reads a name that runs its words together as one word, which no multi-word pattern matches (#438)', () => {
+    for (const name of ['pageinfo', 'PAGEINFO', 'Pageinfo', 'hasmore', 'HASMORE', 'nextpage', 'previouspage']) {
+      expect(looksLikePaginationMetadata(name)).toBe(false);
+    }
+    // A one-word pattern is still found inside such a name.
+    for (const name of ['listmetadata', 'LISTMETADATA', 'pagetotal']) {
+      expect(looksLikePaginationMetadata(name)).toBe(true);
+    }
+  });
 });
 
 describe('detectEndOfIteration — companion object in any spelling', () => {
@@ -129,6 +139,210 @@ describe('classifyAndExtractResponse — envelope companion in any spelling', ()
     expect(result.isPaginated).toBe(false);
     expect(result.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
     expect(result.endOfIteration).toBeUndefined();
+  });
+
+  it.each<[string, SchemaObject, string]>([
+    ['HasMore', boolean, 'hasMore'],
+    ['has-more', boolean, 'hasMore'],
+    ['HasNext', boolean, 'hasMore'],
+    ['has-next', boolean, 'hasMore'],
+    ['PageCount', integer, 'totalPages'],
+    ['page-count', integer, 'totalPages'],
+  ])(
+    'unwraps { data, %s } as a list envelope and stops on it, as on its listed spelling (#438)',
+    (name, schema, kind) => {
+      const result = classifyAndExtractResponse(envelope({ [name]: schema }), 'ListPetsResponse');
+      expect(result.isPaginated).toBe(true);
+      expect(result.dataPath).toBe('data');
+      expect(result.response).toEqual({ kind: 'array', items: { kind: 'primitive', type: 'string' } });
+      expect(result.envelopeFields?.map((f) => f.name)).toEqual([name]);
+      expect(result.endOfIteration).toEqual({ kind, path: name });
+    },
+  );
+
+  it.each(['hasmore', 'hasnext', 'HASNEXT', 'pagecount'])(
+    'keeps { data, %s } as a plain model: a name that runs its words together is no stop field (#438)',
+    (name) => {
+      const result = classifyAndExtractResponse(envelope({ [name]: boolean }), 'ListPetsResponse');
+      expect(result.isPaginated).toBe(false);
+      expect(result.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(result.endOfIteration).toBeUndefined();
+    },
+  );
+});
+
+describe('detectEndOfIteration — stop field in any spelling (#438)', () => {
+  it('reads a top-level stop field in any spelling that separates its words, its path spelled as written', () => {
+    for (const name of ['has_more', 'hasMore', 'HasMore', 'has-more', 'HAS_MORE']) {
+      expect(detectEndOfIteration({ data, [name]: boolean }, 'data')).toEqual({ kind: 'hasMore', path: name });
+    }
+  });
+
+  it('reads a stop field inside a metadata companion, whichever spelling each is written in', () => {
+    expect(detectEndOfIteration({ data, PageInfo: companion({ HasNextPage: boolean }) }, 'data')).toEqual({
+      kind: 'hasMore',
+      path: 'PageInfo.HasNextPage',
+    });
+    expect(detectEndOfIteration({ data, 'page-info': companion({ 'has-next-page': boolean }) }, 'data')).toEqual({
+      kind: 'hasMore',
+      path: 'page-info.has-next-page',
+    });
+    expect(detectEndOfIteration({ data, pagination: companion({ 'Total-Pages': integer }) }, 'data')).toEqual({
+      kind: 'totalPages',
+      path: 'pagination.Total-Pages',
+    });
+  });
+
+  it('gives every stop field its kind in any spelling', () => {
+    const spellings: Record<string, string[]> = {
+      hasMore: ['HasNext', 'has-next', 'HasNextPage', 'HAS_NEXT_PAGE'],
+      totalPages: ['TotalPages', 'total-pages', 'PageCount', 'page-count', 'PAGE_COUNT'],
+      totalCount: ['Total', 'TOTAL', 'TotalCount', 'total-count', 'TotalItems', 'total-items', 'TotalResults'],
+    };
+    for (const [kind, names] of Object.entries(spellings)) {
+      const schema = kind === 'hasMore' ? boolean : integer;
+      for (const name of names) {
+        expect(detectEndOfIteration({ data, [name]: schema }, 'data')).toEqual({ kind, path: name });
+      }
+    }
+  });
+
+  it('still prefers hasMore over totalPages over a count, whatever each is spelled', () => {
+    expect(detectEndOfIteration({ data, Total: integer, 'has-more': boolean }, 'data')).toEqual({
+      kind: 'hasMore',
+      path: 'has-more',
+    });
+    expect(detectEndOfIteration({ data, TOTAL: integer, PageCount: integer }, 'data')).toEqual({
+      kind: 'totalPages',
+      path: 'PageCount',
+    });
+  });
+
+  it('tests the type of a stop field in a new spelling as in a listed one', () => {
+    expect(detectEndOfIteration({ data, HasMore: integer }, 'data')).toBeUndefined();
+    expect(detectEndOfIteration({ data, 'total-pages': { type: 'string' } }, 'data')).toBeUndefined();
+  });
+
+  it('reads no stop field, and looks inside no companion, whose name runs its words together', () => {
+    for (const name of ['hasmore', 'HASMORE', 'Hasmore', 'hasnextpage']) {
+      expect(detectEndOfIteration({ data, [name]: boolean }, 'data')).toBeUndefined();
+    }
+    for (const name of ['totalpages', 'TOTALCOUNT', 'pagecount']) {
+      expect(detectEndOfIteration({ data, [name]: integer }, 'data')).toBeUndefined();
+    }
+    for (const name of ['pageinfo', 'PAGEINFO']) {
+      expect(detectEndOfIteration({ data, [name]: companion({ hasNextPage: boolean }) }, 'data')).toBeUndefined();
+    }
+  });
+});
+
+describe('parseSpec — the issue #438 repro end to end', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  /** `GET /pets` (`listPets`) with an `after` query parameter, returning `{ data: string[] }` plus `companions`. */
+  async function listPets(companions: Record<string, unknown>): Promise<ApiSpec> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-438-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'repro.json');
+    const schema = {
+      type: 'object',
+      properties: { data: { type: 'array', items: { type: 'string' } }, ...companions },
+    };
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+              responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+            },
+          },
+        },
+      }),
+    );
+    return parseSpec(file);
+  }
+
+  /** The issue's projection: the response, then the iterator's `dataPath`, envelope field names and stop field. */
+  function projection(spec: ApiSpec) {
+    const [{ pagination, response }] = spec.services.flatMap(({ operations }) => operations);
+    const { dataPath, endOfIteration, envelopeFields = [] } = pagination!;
+    const type =
+      response.kind === 'model'
+        ? response.name
+        : response.kind === 'array' && response.items.kind === 'primitive'
+          ? `${response.items.type}[]`
+          : response.kind;
+    return [type, dataPath, envelopeFields.map(({ name }) => name), endOfIteration];
+  }
+
+  const flag = { type: 'boolean' };
+  const pageInfo = (name: string, stop: string) => ({ [name]: { type: 'object', properties: { [stop]: flag } } });
+
+  it('reads a stop field in every spelling that separates its words, and no name that runs them together', async () => {
+    const documents: Record<string, Record<string, unknown>> = {
+      camel: pageInfo('pageInfo', 'hasNextPage'),
+      pascal: pageInfo('PageInfo', 'HasNextPage'),
+      kebab: pageInfo('page-info', 'has-next-page'),
+      'top-pascal': { HasMore: flag },
+      'top-kebab': { 'has-more': flag },
+      flat: pageInfo('pageinfo', 'hasNextPage'),
+      'flat-upper': pageInfo('PAGEINFO', 'hasNextPage'),
+      'top-flat': { hasmore: flag },
+    };
+    const projected: Record<string, unknown> = {};
+    for (const [file, companions] of Object.entries(documents))
+      projected[file] = projection(await listPets(companions));
+    expect(projected).toEqual({
+      camel: ['string[]', 'data', ['pageInfo'], { kind: 'hasMore', path: 'pageInfo.hasNextPage' }],
+      pascal: ['string[]', 'data', ['PageInfo'], { kind: 'hasMore', path: 'PageInfo.HasNextPage' }],
+      kebab: ['string[]', 'data', ['page-info'], { kind: 'hasMore', path: 'page-info.has-next-page' }],
+      'top-pascal': ['string[]', 'data', ['HasMore'], { kind: 'hasMore', path: 'HasMore' }],
+      'top-kebab': ['string[]', 'data', ['has-more'], { kind: 'hasMore', path: 'has-more' }],
+      flat: ['ListPetsResponse', undefined, [], undefined],
+      'flat-upper': ['ListPetsResponse', undefined, [], undefined],
+      'top-flat': ['ListPetsResponse', undefined, [], undefined],
+    });
+  });
+
+  it('names the stop field by the wire names the IR carries, so the path walks the envelope fields and model', async () => {
+    for (const [name, stop] of [
+      ['PageInfo', 'HasNextPage'],
+      ['page-info', 'has-next-page'],
+    ]) {
+      const spec = await listPets(pageInfo(name, stop));
+      const [op] = spec.services.flatMap((s) => s.operations);
+      expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: `${name}.${stop}` });
+      expect(op.pagination?.envelopeFields).toEqual([
+        { name, type: { kind: 'model', name: 'PageInfo' }, required: false },
+      ]);
+      expect(spec.models.find((m) => m.name === 'PageInfo')?.fields).toEqual([
+        { name: stop, type: { kind: 'primitive', type: 'boolean' }, required: false },
+      ]);
+    }
+  });
+
+  it('unwraps an envelope whose only companion is a stop field in a new spelling, as one in a listed spelling', async () => {
+    expect(projection(await listPets({ HasNext: flag }))).toEqual([
+      'string[]',
+      'data',
+      ['HasNext'],
+      { kind: 'hasMore', path: 'HasNext' },
+    ]);
+    expect(projection(await listPets({ 'page-count': { type: 'integer' } }))).toEqual([
+      'string[]',
+      'data',
+      ['page-count'],
+      { kind: 'totalPages', path: 'page-count' },
+    ]);
+    expect(projection(await listPets({ hasnext: flag }))).toEqual(['ListPetsResponse', undefined, [], undefined]);
   });
 });
 

@@ -203,10 +203,10 @@ export const TOTAL_COUNT_FIELDS: readonly string[] = [
   'totalResults',
 ];
 /**
- * Every companion name that can end an iteration. List-envelope detection
- * treats a companion with one of these names as pagination metadata, and
- * `detectEndOfIteration` reads it, so the two can never disagree about which
- * envelopes carry a stop field.
+ * Every companion name that can end an iteration, each in any spelling
+ * (`spellsOneOf`). List-envelope detection treats a companion with one of
+ * these names as pagination metadata, and `detectEndOfIteration` reads it,
+ * so the two can never disagree about which envelopes carry a stop field.
  */
 export const END_OF_ITERATION_FIELDS: readonly string[] = [
   ...HAS_MORE_FIELDS,
@@ -243,13 +243,33 @@ export const PAGINATION_METADATA_PATTERNS: readonly string[] = [
  * name is read by its words, so case and separators do not matter —
  * `page_info`, `pageInfo`, `PageInfo` and `page-info` are all `page_info` —
  * while a pattern never straddles a word boundary: `nameTag` is `name_tag`,
- * which does not contain `meta`. The one recognizer for list-envelope
+ * which does not contain `meta`. A name that runs its words together is one
+ * word, so a pattern of several is not found in it (`pageinfo` and
+ * `PAGEINFO` are no `page_info`), while a one-word pattern still is
+ * (`listmetadata` holds `meta`). The one recognizer for list-envelope
  * detection and the nested stop-field scan, so the two cannot disagree
  * about which companions are pagination metadata.
  */
 export function looksLikePaginationMetadata(name: string): boolean {
   const spelled = toSnakeCase(name);
   return PAGINATION_METADATA_PATTERNS.some((pattern) => spelled.includes(pattern));
+}
+
+/**
+ * Whether `name` is one of `fields` in some spelling: read by its words, in
+ * the snake_case spelling `looksLikePaginationMetadata` reads a companion's
+ * name in (`toSnakeCase`), it is a listed name read the same way. Case and
+ * separators do not matter, so `has_more`, `hasMore`, `HasMore`, `has-more`
+ * and `HAS_MORE` are all `has_more`, while a name that runs its words
+ * together is one word: `hasmore` is no `has_more` and `totalpages` no
+ * `total_pages`. The one test of a stop field's name, for list-envelope
+ * detection (`END_OF_ITERATION_FIELDS`) and for `detectEndOfIteration`
+ * (each kind's list), so the two cannot disagree about which companion is
+ * a stop field.
+ */
+export function spellsOneOf(name: string, fields: readonly string[]): boolean {
+  const spelled = toSnakeCase(name);
+  return fields.some((field) => toSnakeCase(field) === spelled);
 }
 
 /**
@@ -276,7 +296,10 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * or an object on the way to it — is ever a stop field, whatever it is
  * called. The path follows the `dataPath` convention — `has_more`,
  * `result.total_pages` or `pagination.totalPages` — and spells each
- * segment as the document does (`pageInfo.hasNextPage`). When several
+ * segment as the document does (`pageInfo.hasNextPage`). A candidate is a
+ * stop field by its name in any spelling (`spellsOneOf`), so `HasMore` and
+ * `PageInfo.HasNextPage` are read as `has_more` and
+ * `page_info.has_next_page` are, each kept as written. When several
  * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
  * which wins over a `totalCount` integer; within one kind the first in scan
  * order wins. A candidate whose type does not fit its kind (a string
@@ -327,13 +350,14 @@ function classifyEndField(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration['kind'] | undefined {
-  // The name decides the kind, and only a named stop field has its schema
-  // read: a companion of any other name is never resolved at all.
-  const kind: PaginationEndOfIteration['kind'] | undefined = HAS_MORE_FIELDS.includes(name)
+  // The name decides the kind, in any spelling (`spellsOneOf`), and only a
+  // named stop field has its schema read: a companion of any other name is
+  // never resolved at all.
+  const kind: PaginationEndOfIteration['kind'] | undefined = spellsOneOf(name, HAS_MORE_FIELDS)
     ? 'hasMore'
-    : TOTAL_PAGES_FIELDS.includes(name)
+    : spellsOneOf(name, TOTAL_PAGES_FIELDS)
       ? 'totalPages'
-      : TOTAL_COUNT_FIELDS.includes(name)
+      : spellsOneOf(name, TOTAL_COUNT_FIELDS)
         ? 'totalCount'
         : undefined;
   if (!kind) return undefined;

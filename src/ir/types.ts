@@ -724,7 +724,8 @@ export interface PaginationMeta {
    * Where the response says the iteration is over (see
    * `PaginationEndOfIteration`). Detected from a recognized list envelope
    * when it carries an obvious field — a boolean `has_more`/`hasMore`, an
-   * integer `total_pages`/`totalPages`, or an integer `total`/`total_count` —
+   * integer `total_pages`/`totalPages`, or an integer `total`/`total_count`,
+   * each in any spelling that separates its words (`HasMore`, `has-more`) —
    * beside the array a nested `dataPath` names (`result.total_pages`), beside
    * each object the path passes through on its way there, nearest the array
    * first, at the top level, or one level down inside a pagination companion
