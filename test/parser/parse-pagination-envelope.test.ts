@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * End-to-end coverage for `PaginationMeta.envelopeFields` (#183): a list
@@ -452,6 +452,97 @@ describe('parseSpec — pagination envelope fields', () => {
       expect(op.pagination, op.name).toBeDefined();
       expect(op.pagination?.envelopeFields, op.name).toBeUndefined();
     }
+  });
+
+  describe('a data array written as an allOf schemaToTypeRef reads as its member', () => {
+    const pet = { $ref: '#/components/schemas/Pet' };
+    const array = { type: 'array', items: pet };
+    const nullableArray = { oneOf: [array, { type: 'null' }] };
+    const pets: TypeRef = { kind: 'array', items: { kind: 'model', name: 'Pet' } };
+
+    const parseList = (body: unknown): Promise<ApiSpec> =>
+      parseJson({
+        openapi: '3.1.0',
+        info: { title: 'repro', version: '1' },
+        paths: { '/pets': listOp({}, 'listPets', [{ name: 'after', in: 'query', schema: { type: 'string' } }], body) },
+        components: {
+          schemas: {
+            Pet: { type: 'object', properties: { name: { type: 'string' } } },
+            Pets: { type: 'array', items: pet },
+          },
+        },
+      });
+    const envelope = (data: unknown) => ({
+      type: 'object',
+      properties: { data, list_metadata: { type: 'object', properties: { after: { type: 'string' } } } },
+    });
+
+    it('is the envelope array, paged and typed as the array it wraps (#395 repro)', async () => {
+      const cases: Array<[unknown, unknown, TypeRef]> = [
+        [{ allOf: [array] }, array, pets],
+        [{ allOf: [nullableArray] }, nullableArray, { kind: 'nullable', inner: pets }],
+      ];
+      for (const [data, plain, response] of cases) {
+        const ir = await parseList(envelope(data));
+        const [op] = ir.services.flatMap((s) => s.operations);
+        expect(op.pagination?.dataPath, JSON.stringify(data)).toBe('data');
+        expect(op.response, JSON.stringify(data)).toEqual(response);
+        expect(ir, JSON.stringify(data)).toEqual(await parseList(envelope(plain)));
+      }
+    });
+
+    it('is read through nested allOfs, nullable wrappers on either side and a $ref to an array component', async () => {
+      const cases: Array<[unknown, unknown]> = [
+        [{ allOf: [{ allOf: [array] }] }, array],
+        [
+          { allOf: [array], description: 'The pets' },
+          { ...array, description: 'The pets' },
+        ],
+        [{ allOf: [{ items: pet }] }, { items: pet }],
+        [{ allOf: [{ type: ['array', 'null'], items: pet }] }, { type: ['array', 'null'], items: pet }],
+        [{ oneOf: [{ allOf: [array] }, { type: 'null' }] }, nullableArray],
+        [{ allOf: [{ $ref: '#/components/schemas/Pets' }] }, { $ref: '#/components/schemas/Pets' }],
+        [{ allOf: [{ $ref: '#/components/schemas/Pets' }, { maxItems: 10 }] }, { $ref: '#/components/schemas/Pets' }],
+      ];
+      for (const [data, plain] of cases) {
+        const ir = await parseList(envelope(data));
+        expect(ir.services[0].operations[0].pagination?.dataPath, JSON.stringify(data)).toBe('data');
+        expect(ir, JSON.stringify(data)).toEqual(await parseList(envelope(plain)));
+      }
+    });
+
+    it('merges with a second allOf declaration of data as the arrays the two wrap, null kept', async () => {
+      const wrapped = { allOf: [{ type: ['array', 'null'], items: pet }] };
+      const limits = { type: 'array', minItems: 1 };
+      const metadata = { list_metadata: { type: 'object', properties: { after: { type: 'string' } } } };
+      for (const [first, second] of [
+        [wrapped, limits],
+        [limits, wrapped],
+      ]) {
+        const ir = await parseList({
+          allOf: [
+            { type: 'object', properties: { data: first, ...metadata } },
+            { type: 'object', properties: { data: second } },
+          ],
+        });
+        const [op] = ir.services.flatMap((s) => s.operations);
+        expect(op.pagination?.dataPath).toBe('data');
+        expect(op.response).toEqual({ kind: 'nullable', inner: pets });
+      }
+    });
+
+    it('counts a second array written so as an array too: two arrays make no envelope, as when written plainly', async () => {
+      const tags = { type: 'array', items: { type: 'string' } };
+      const withTags = (spelling: unknown) => ({
+        type: 'object',
+        properties: { ...envelope(array).properties, tags: spelling },
+      });
+      const ir = await parseList(withTags({ allOf: [tags] }));
+      const [op] = ir.services.flatMap((s) => s.operations);
+      expect(op.pagination?.dataPath).toBeUndefined();
+      expect(op.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+      expect(ir).toEqual(await parseList(withTags(tags)));
+    });
   });
 });
 
