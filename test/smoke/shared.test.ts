@@ -262,6 +262,39 @@ describe('getExpectedStatuses / isUnexpectedStatus (issue #274)', () => {
     expect(isUnexpectedStatus(500, op)).toBe(true);
   });
 
+  it('covers nothing for an operation that declares no responses, so any status it returns is unexpected', async () => {
+    const noResponsesKey = onlyOperation(
+      await parseSpec(
+        await writeSpec({
+          openapi: '3.1.0',
+          info: { title: 'pets', version: '1' },
+          paths: { '/pets': { get: { operationId: 'listPets' } } },
+        }),
+      ),
+    );
+    const emptyResponses = await parseOnlyOperation('get', {});
+
+    for (const op of [noResponsesKey, emptyResponses]) {
+      expect(getExpectedStatuses(op)).toEqual({ codes: [], ranges: [], hasDefault: false });
+      expect([200, 302, 404].map((status) => isUnexpectedStatus(status, op))).toEqual([true, true, true]);
+      // The raw runner's summary line reads `got 200, expected none (no responses declared)`.
+      expect(formatExpectedStatuses(getExpectedStatuses(op))).toBe('none (no responses declared)');
+    }
+  });
+
+  it('does not see an explicit 1xx code, which the IR does not carry: a 1XX range covers a 101, a declared 101 does not', async () => {
+    const feed = {
+      '200': { description: 'The feed', content: { 'application/json': { schema: { type: 'string' } } } },
+    };
+    const explicit = await parseOnlyOperation('get', { ...feed, '101': { description: 'Switching protocols' } });
+    const range = await parseOnlyOperation('get', { ...feed, '1XX': { description: 'Switching protocols' } });
+
+    expect(formatExpectedStatuses(getExpectedStatuses(explicit))).toBe('200');
+    expect(isUnexpectedStatus(101, explicit)).toBe(true);
+    expect(formatExpectedStatuses(getExpectedStatuses(range))).toBe('200/1XX');
+    expect(isUnexpectedStatus(101, range)).toBe(false);
+  });
+
   it('never reports status 0, which marks a skipped call or a network error', async () => {
     const op = await parseOnlyOperation('get', { '200': { description: 'OK' } });
     expect(isUnexpectedStatus(0, op)).toBe(false);
@@ -317,6 +350,10 @@ describe('formatExpectedStatuses', () => {
       '200/404/5XX/4XX/default',
     );
     expect(formatExpectedStatuses({ codes: [201], ranges: [], hasDefault: false })).toBe('201');
+  });
+
+  it('says that nothing is declared instead of printing an empty list', () => {
+    expect(formatExpectedStatuses({ codes: [], ranges: [], hasDefault: false })).toBe('none (no responses declared)');
   });
 });
 
