@@ -67,22 +67,39 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
  * The document-level `security` compared between the two documents: one
  * `security-changed` change when the lists differ as sets of alternatives,
  * nothing otherwise. `[]` and an undeclared list both mean no authentication
- * and compare equal. Classified from each side that actually reads the
- * default: the caller's when an operation in either document declares no
- * `security` of its own, the receiver's when a webhook does — breaking if
- * any such side breaks. When nothing inherits it, no request reads the
- * default, so the change is additive.
+ * and compare equal. Classified from each side that inherits the default in
+ * both documents: the caller's when an operation does, the receiver's when a
+ * webhook does, each paired across the documents as its own change is —
+ * breaking if any such side breaks. No other node reads both defaults:
+ * `securityShift` compares one that declares its own list on either side,
+ * and one only one document has is reported as added or removed. When
+ * nothing inherits it in both documents, no request reads both defaults, so
+ * the change is additive.
  */
 function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
   const oldSecurity = oldSpec.security ?? [];
   const newSecurity = newSpec.security ?? [];
   if (securityEqual(oldSecurity, newSecurity)) return [];
-  const inherits = (nodes: Array<{ security?: SecurityRequirementSet[] }>): boolean =>
-    nodes.some((node) => node.security === undefined);
-  const operations = (spec: ApiSpec) => spec.services.flatMap((service) => service.operations);
+  // The nodes that declare no `security`, keyed as the diff pairs them across
+  // the two documents: an operation by its service and name, a webhook by its
+  // method and name.
+  const operations = (spec: ApiSpec): Set<string> =>
+    new Set(
+      spec.services.flatMap((service) =>
+        service.operations.filter((op) => op.security === undefined).map((op) => `${service.name}.${op.name}`),
+      ),
+    );
+  const webhooks = (spec: ApiSpec): Set<string> =>
+    new Set(
+      (spec.webhooks ?? [])
+        .filter((webhook) => webhook.security === undefined)
+        .map((webhook) => `${webhook.httpMethod} ${webhook.name}`),
+    );
+  const inheritsTwice = (oldKeys: Set<string>, newKeys: Set<string>): boolean =>
+    [...newKeys].some((key) => oldKeys.has(key));
   const sides: SecuritySide[] = [];
-  if (inherits(operations(oldSpec)) || inherits(operations(newSpec))) sides.push('caller');
-  if (inherits(oldSpec.webhooks ?? []) || inherits(newSpec.webhooks ?? [])) sides.push('receiver');
+  if (inheritsTwice(operations(oldSpec), operations(newSpec))) sides.push('caller');
+  if (inheritsTwice(webhooks(oldSpec), webhooks(newSpec))) sides.push('receiver');
   const breaking = sides.some((side) => classifySecurityChange(oldSecurity, newSecurity, side) === 'breaking');
   return [{ kind: 'security-changed', oldSecurity, newSecurity, classification: breaking ? 'breaking' : 'additive' }];
 }
