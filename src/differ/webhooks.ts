@@ -1,6 +1,6 @@
 import type { Webhook } from '../ir/types.js';
 import type { Change, ParamChange, RequestBodyContentTypesChange } from './types.js';
-import { locatedParams, paramKey, parameterContentTypeShift } from './params.js';
+import { jsonEncodedOnBothSides, locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
   deprecationDetails,
   deprecationFlip,
@@ -288,15 +288,17 @@ function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChang
       }
     }
 
-    // The media type the value is serialized in (`Parameter.contentType`)
-    // moved: the handler decodes the value the sender now encodes another
-    // way, so breaking from the receiver's side too, like a type change.
+    // The media type the value is serialized in (`Parameter.contentType`,
+    // or the one an unread `content` map declares) moved: the handler
+    // decodes the value the sender now encodes another way, so breaking from
+    // the receiver's side too, like a type change — unless both sides are
+    // read from a JSON media type, which the handler decodes alike.
     const reencoded = parameterContentTypeShift(oldParam, newParam);
     if (reencoded) {
       changes.push({
         kind: 'param-content-type-changed',
         paramName: name,
-        classification: 'breaking',
+        classification: jsonEncodedOnBothSides(oldParam, newParam) ? 'additive' : 'breaking',
         paramLocation: loc,
         ...reencoded,
       });

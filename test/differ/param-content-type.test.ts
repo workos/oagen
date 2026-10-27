@@ -7,16 +7,19 @@
  * between two media types that differ in essence, changes what a caller must
  * send even when the type did not move, so `diffParams` and
  * `diffWebhookParams` report it as a breaking `param-content-type-changed` —
- * beside, not instead of, whatever else changed about the parameter.
+ * beside, not instead of, whatever else changed about the parameter. A
+ * `content` map none of whose media types is read is compared by the media
+ * type it declares (`Parameter.contentTypes`), not taken for `schema`, and a
+ * move between two JSON media types the parser reads is additive (#410).
  */
-import { describe, it, expect, vi, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterAll, afterEach, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffWebhooks } from '../../src/differ/webhooks.js';
-import { parameterContentTypeShift } from '../../src/differ/params.js';
+import { jsonEncodedOnBothSides, parameterContentTypeShift } from '../../src/differ/params.js';
 import { classifyParamChange } from '../../src/differ/classify.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
@@ -119,6 +122,64 @@ describe('parameterContentTypeShift', () => {
       classification: 'breaking',
     });
   });
+
+  it('reads a content map none of whose media types is read as the media type it declares, not as `schema` (#410)', () => {
+    // Typed as a string on every side: only the declaration moves.
+    const schema = filter({ type: string });
+    const xml = filter({ type: string, contentTypes: ['application/xml'] });
+    const json = filter({ type: string, contentType: 'application/json', contentTypes: ['application/json'] });
+    expect(parameterContentTypeShift(schema, xml)).toEqual({
+      oldContentType: null,
+      newContentType: 'application/xml',
+      details: 'content type <schema> → application/xml (unread)',
+    });
+    expect(parameterContentTypeShift(xml, schema)).toEqual({
+      oldContentType: 'application/xml',
+      newContentType: null,
+      details: 'content type application/xml (unread) → <schema>',
+    });
+    expect(parameterContentTypeShift(json, xml)).toEqual({
+      oldContentType: 'application/json',
+      newContentType: 'application/xml',
+      details: 'content type application/json → application/xml (unread)',
+    });
+    // A JSON entry that loses its schema keeps its media type but is no
+    // longer read, so its value is sent as written rather than JSON-encoded.
+    expect(parameterContentTypeShift(json, filter({ type: string, contentTypes: ['application/json'] }))).toEqual({
+      oldContentType: 'application/json',
+      newContentType: 'application/json',
+      details: 'content type application/json → application/json (unread)',
+    });
+    // Compared by essence, as a media type that is read is.
+    expect(
+      parameterContentTypeShift(xml, filter({ type: string, contentTypes: ['APPLICATION/XML; charset=utf-8'] })),
+    ).toBeUndefined();
+    expect(parameterContentTypeShift(xml, xml)).toBeUndefined();
+  });
+
+  it('tells a move between two JSON media types the parser reads, which encode the value alike, additive (#410)', () => {
+    const json = filter({ contentType: 'application/json' });
+    const vnd = filter({ contentType: 'application/vnd.notes+json' });
+    expect(jsonEncodedOnBothSides(json, vnd)).toBe(true);
+    expect(jsonEncodedOnBothSides(vnd, json)).toBe(true);
+    expect(jsonEncodedOnBothSides(vnd, filter({ contentType: 'application/merge-patch+json; charset=utf-8' }))).toBe(
+      true,
+    );
+    expect(jsonEncodedOnBothSides(json, filter({ contentType: 'text/plain' }))).toBe(false);
+    expect(jsonEncodedOnBothSides(filter(), json)).toBe(false);
+    // A `+json` entry without a schema is not read: its value is sent as written.
+    expect(jsonEncodedOnBothSides(json, filter({ type: string, contentTypes: ['application/vnd.notes+json'] }))).toBe(
+      false,
+    );
+    expect(classifyParamChange('param-content-type-changed', 'filter', true)).toEqual({
+      kind: 'param-content-type-changed',
+      paramName: 'filter',
+      classification: 'additive',
+    });
+    expect(classifyParamChange('param-content-type-changed', 'filter', false)).toMatchObject({
+      classification: 'breaking',
+    });
+  });
 });
 
 describe('diffOperations / diffWebhooks – param-content-type-changed', () => {
@@ -190,6 +251,71 @@ describe('diffOperations / diffWebhooks – param-content-type-changed', () => {
         [noteAdded(filter({ contentType: 'application/json; charset=utf-8' }))],
       ),
     ).toEqual([]);
+  });
+
+  it('reports a move between two JSON media types as additive, on an operation and on a webhook (#410)', () => {
+    const json = filter({ contentType: 'application/json' });
+    const vnd = filter({ contentType: 'application/vnd.notes+json' });
+    const api = filter({ contentType: 'application/vnd.api+json' });
+    const additive = (oldContentType: string, newContentType: string) => ({
+      ...reencoded(oldContentType, newContentType),
+      classification: 'additive',
+    });
+
+    const changes = diffOperations('Notes', [listNotes(json)], [listNotes(vnd)]);
+    expect(paramChangesOf(changes)).toEqual([additive('application/json', 'application/vnd.notes+json')]);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'additive' });
+    expect(paramChangesOf(diffOperations('Notes', [listNotes(vnd)], [listNotes(json)]))).toEqual([
+      additive('application/vnd.notes+json', 'application/json'),
+    ]);
+    expect(paramChangesOf(diffOperations('Notes', [listNotes(vnd)], [listNotes(api)]))).toEqual([
+      additive('application/vnd.notes+json', 'application/vnd.api+json'),
+    ]);
+
+    const webhookChanges = diffWebhooks([noteAdded(json)], [noteAdded(vnd)]);
+    expect(webhookParamChangesOf(webhookChanges)).toEqual([additive('application/json', 'application/vnd.notes+json')]);
+    expect(webhookChanges[0]).toMatchObject({ kind: 'webhook-modified', classification: 'additive' });
+  });
+
+  it('keeps a move from a JSON media type to one that is not, or one the parser does not read, breaking (#410)', () => {
+    const json = filter({ contentType: 'application/json' });
+    // A `+json` entry without a schema: not read, so typed as a string and sent as written.
+    const unreadVnd = filter({ type: string, contentTypes: ['application/vnd.notes+json'] });
+    expect(
+      paramChangesOf(diffOperations('Notes', [listNotes(json)], [listNotes(filter({ contentType: 'text/plain' }))])),
+    ).toEqual([reencoded('application/json', 'text/plain')]);
+    expect(paramChangesOf(diffOperations('Notes', [listNotes(json)], [listNotes(unreadVnd)]))).toEqual([
+      { kind: 'param-type-changed', paramName: 'filter', classification: 'breaking', paramLocation: 'query' },
+      {
+        ...reencoded('application/json', 'application/vnd.notes+json'),
+        details: 'content type application/json → application/vnd.notes+json (unread)',
+      },
+    ]);
+    expect(webhookParamChangesOf(diffWebhooks([noteAdded(json)], [noteAdded(unreadVnd)]))).toContainEqual({
+      ...reencoded('application/json', 'application/vnd.notes+json'),
+      details: 'content type application/json → application/vnd.notes+json (unread)',
+    });
+  });
+
+  it('reports a move to or from a content map none of whose media types is read, breaking, naming the media type (#410)', () => {
+    const schema = filter({ type: string });
+    const xml = filter({ type: string, contentTypes: ['application/xml'] });
+    const toXml = {
+      ...reencoded(null, 'application/xml'),
+      details: 'content type <schema> → application/xml (unread)',
+    };
+    const fromXml = {
+      ...reencoded('application/xml', null),
+      details: 'content type application/xml (unread) → <schema>',
+    };
+
+    const changes = diffOperations('Notes', [listNotes(schema)], [listNotes(xml)]);
+    expect(paramChangesOf(changes)).toEqual([toXml]);
+    expect(changes[0]).toMatchObject({ kind: 'operation-modified', classification: 'breaking' });
+    expect(paramChangesOf(diffOperations('Notes', [listNotes(xml)], [listNotes(schema)]))).toEqual([fromXml]);
+    expect(webhookParamChangesOf(diffWebhooks([noteAdded(schema)], [noteAdded(xml)]))).toEqual([toXml]);
+    expect(webhookParamChangesOf(diffWebhooks([noteAdded(xml)], [noteAdded(schema)]))).toEqual([fromXml]);
+    expect(diffOperations('Notes', [listNotes(xml)], [listNotes(xml)])).toEqual([]);
   });
 
   it('is not mirrored into behaviorChanges, as param-type-changed is not', () => {
@@ -303,5 +429,111 @@ describe('diffSpecs – end to end (issue #297 review, point 3)', () => {
     expect(diffSpecs(await parse('before.json', before), await parse('after.json', before)).changes).toEqual([]);
     expect(await exitCodeOf(before, respelled)).toBe(0);
     expect(await exitCodeOf(before, before)).toBe(0);
+  });
+
+  describe('a content map the parser does not read, and a move between JSON media types (issue #410)', () => {
+    /** `GET /notes` (`listNotes`) with the query parameter `filter`, declared by `declaration`. */
+    const notes = (declaration: Record<string, unknown>) => ({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            parameters: [{ name: 'filter', in: 'query', ...declaration }],
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+    });
+    const text = { type: 'string' };
+    const owner = { type: 'object', properties: { owner: { type: 'string' } } };
+    // The issue's `schema.json`, `json.json` and `xml.json`.
+    const documents = {
+      schema: notes({ schema: text }),
+      json: notes(byContent('application/json')(text)),
+      xml: notes(byContent('application/xml')(text)),
+    };
+    const paramChangesBetween = async (from: keyof typeof documents, to: keyof typeof documents) =>
+      diffSpecs(await parse(`${from}.json`, documents[from]), await parse(`${to}.json`, documents[to])).changes.flatMap(
+        (change) => ('paramChanges' in change ? change.paramChanges : []),
+      );
+
+    beforeEach(() => {
+      // `application/xml` is not read; the parser says so on every parse.
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+
+    it('reports schema → xml as a breaking move to content, naming application/xml, exit 2', async () => {
+      expect(await paramChangesBetween('schema', 'xml')).toEqual([
+        {
+          kind: 'param-content-type-changed',
+          paramName: 'filter',
+          classification: 'breaking',
+          paramLocation: 'query',
+          oldContentType: null,
+          newContentType: 'application/xml',
+          details: 'content type <schema> → application/xml (unread)',
+        },
+      ]);
+      expect(await paramChangesBetween('xml', 'schema')).toEqual([
+        {
+          kind: 'param-content-type-changed',
+          paramName: 'filter',
+          classification: 'breaking',
+          paramLocation: 'query',
+          oldContentType: 'application/xml',
+          newContentType: null,
+          details: 'content type application/xml (unread) → <schema>',
+        },
+      ]);
+      expect(await exitCodeOf(documents.schema, documents.xml)).toBe(2);
+      expect(await exitCodeOf(documents.xml, documents.schema)).toBe(2);
+    });
+
+    it('names application/xml as the new side of json → xml, not <schema>', async () => {
+      expect(await paramChangesBetween('json', 'xml')).toEqual([
+        {
+          kind: 'param-content-type-changed',
+          paramName: 'filter',
+          classification: 'breaking',
+          paramLocation: 'query',
+          oldContentType: 'application/json',
+          newContentType: 'application/xml',
+          details: 'content type application/json → application/xml (unread)',
+        },
+      ]);
+      expect(await paramChangesBetween('xml', 'xml')).toEqual([]);
+    });
+
+    it('reports application/json → application/vnd.notes+json as additive, exit 1, and the same between two +json types', async () => {
+      const before = notes(byContent('application/json')(owner));
+      const after = notes(byContent('application/vnd.notes+json')(owner));
+      const diff = diffSpecs(await parse('before.json', before), await parse('after.json', after));
+      // The inline object keeps its model on both sides: the operation is the only change.
+      expect(diff.changes.map((c) => c.kind)).toEqual(['operation-modified']);
+      expect(paramChangesOf(diff.changes as ReturnType<typeof diffOperations>)).toEqual([
+        { ...reencoded('application/json', 'application/vnd.notes+json'), classification: 'additive' },
+      ]);
+      expect(diff.summary.breaking).toBe(0);
+      expect(await exitCodeOf(before, after)).toBe(1);
+
+      const api = notes(byContent('application/vnd.api+json; charset=utf-8')(owner));
+      expect(
+        paramChangesOf(
+          diffSpecs(await parse('after.json', after), await parse('api.json', api)).changes as ReturnType<
+            typeof diffOperations
+          >,
+        ),
+      ).toEqual([
+        {
+          ...reencoded('application/vnd.notes+json', 'application/vnd.api+json; charset=utf-8'),
+          classification: 'additive',
+        },
+      ]);
+      expect(await exitCodeOf(after, api)).toBe(1);
+    });
   });
 });

@@ -3099,6 +3099,8 @@ export interface ParameterTyping {
   media?: ParameterMediaTypeObject;
   /** The `content` key `media` sits under, as written; set exactly when `media` is. */
   contentType?: string;
+  /** Every `content` key, as written and in document order, read or not; set when the declaration has no `schema` and the map declares at least one. */
+  contentTypes?: string[];
 }
 
 /**
@@ -3108,6 +3110,8 @@ export interface ParameterTyping {
  * beside it for the examples it may carry. `schema` is absent — and the
  * value a string — when the declaration has neither, when the picked
  * `text/plain` entry declares no schema, or when nothing in the map is read.
+ * Every key the map declares comes back as `contentTypes`, read or not, so
+ * an unread map keeps the media type it declares the value in.
  * A `schema` beside a `content` map wins and the map is not consulted.
  * Every pass that asks what a parameter's schema is reads it through this
  * one resolution: the typing (`extractParams`), the model deferral
@@ -3117,8 +3121,12 @@ export interface ParameterTyping {
  */
 export function parameterTyping(declaration: SchemaOrContent): ParameterTyping {
   if (declaration.schema) return { schema: declaration.schema };
+  const contentTypes = Object.keys(declaration.content ?? {});
+  const declared = contentTypes.length > 0 ? { contentTypes } : {};
   const picked = selectParameterContent(declaration.content);
-  return picked ? { schema: picked.media.schema, media: picked.media, contentType: picked.contentType } : {};
+  return picked
+    ? { schema: picked.media.schema, media: picked.media, contentType: picked.contentType, ...declared }
+    : declared;
 }
 
 /** The schema `parameterTyping` resolves, alone. */
@@ -3166,7 +3174,7 @@ export function extractParams(
       // `content` entry's (`parameterTyping`) — and that entry's Media Type
       // Object for the examples it may carry. Every read below goes through
       // `schema`, so a parameter declared either way is typed by one rule.
-      const { schema, media, contentType } = parameterTyping(p);
+      const { schema, media, contentType, contentTypes } = parameterTyping(p);
       const refTarget = resolveComponentSchemaRef(schema, componentSchemas);
       const exampleContext = `parameter "${p.name}" in ${opLabel ?? location}`;
       // Each level is resolved on its own — the parameter's declaration, the
@@ -3227,6 +3235,9 @@ export function extractParams(
         // The media type the value is serialized in, for a parameter read
         // from `content`; a `schema` parameter is serialized by style/explode.
         ...(contentType !== undefined ? { contentType } : {}),
+        // Every media type the `content` map declares, read or not, so a map
+        // none of whose media types is read keeps the one it declares.
+        ...(contentTypes !== undefined ? { contentTypes } : {}),
         ...(constraints ? { constraints } : {}),
       };
     });
