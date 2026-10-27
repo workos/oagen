@@ -360,7 +360,9 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * field it would not see is not there for an override either. `end.path` is
  * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
  * through `$ref`s, `allOf` members and nullable wrappers at every further
- * segment), and the field it lands on must fit `end.kind` by the test
+ * segment), and through each non-null variant of a `oneOf`/`anyOf` on the
+ * way that does not declare the next segment itself (`fieldsAtPath`), so it
+ * lands on one field per variant; each must fit `end.kind` by the test
  * detection applies to a field it names (`endFieldFits`), under
  * `resolveBareSchema` as a detected one is. With no `properties` — an
  * operation whose primary response declares no body — the path resolves to
@@ -374,11 +376,46 @@ export function endOfIterationProblem(
   properties: Record<string, SchemaObject | undefined> | undefined,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  const target = properties && resolveSchemaPath({ properties }, end.path, componentSchemas);
-  if (!target) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
-  if (endFieldFits(end.kind, resolveBareSchema(target, componentSchemas))) return undefined;
+  const fields = properties && fieldsAtPath({ properties }, end.path.split('.'), componentSchemas);
+  if (!fields) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
+  if (fields.every((field) => endFieldFits(end.kind, resolveBareSchema(field, componentSchemas)))) return undefined;
   const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
   return `endOfIteration path "${end.path}" is not ${expected} field, as kind "${end.kind}" requires`;
+}
+
+/**
+ * Every field `segments` lands on below `schema`. Each segment is looked up
+ * among the properties of the object the path has reached, as
+ * `resolveSchemaPath` looks it up — through `$ref`s, `allOf` members and
+ * nullable wrappers — and, when that object does not declare it but is a
+ * `oneOf`/`anyOf`, in each of its non-null variants instead: whichever
+ * variant the wire carries, the field must be there, so the path goes on in
+ * every one and lands on one field per variant (`meta.has_more` with `meta`
+ * a `oneOf` of two objects that each declare `has_more`). `undefined` when
+ * the object, or any of its variants, lacks the segment. A variant that is
+ * itself such a union declares no properties of its own
+ * (`objectProperties`), so it lacks every segment.
+ */
+function fieldsAtPath(
+  schema: SchemaObject,
+  segments: readonly string[],
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject[] | undefined {
+  if (segments.length === 0) return [schema];
+  const [segment, ...rest] = segments;
+  const own = objectProperties(schema, componentSchemas)[segment];
+  if (own) return fieldsAtPath(own, rest, componentSchemas);
+  const bare = resolveBareSchema(schema, componentSchemas);
+  const variants = (bare.oneOf ?? bare.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+  if (variants.length === 0) return undefined;
+  const fields: SchemaObject[] = [];
+  for (const variant of variants) {
+    const field = objectProperties(variant, componentSchemas)[segment];
+    const reached = field && fieldsAtPath(field, rest, componentSchemas);
+    if (!reached) return undefined;
+    fields.push(...reached);
+  }
+  return fields;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {

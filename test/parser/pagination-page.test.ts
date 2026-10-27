@@ -1059,4 +1059,64 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     );
     expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'total' }, schema)).toBeUndefined();
   });
+
+  it('walks every variant of a oneOf/anyOf on the path, each of which must declare a field of the fitting type (#437)', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const boolean: SchemaObject = { type: 'boolean' };
+    const integer: SchemaObject = { type: 'integer' };
+    const schemas: Record<string, SchemaObject> = {
+      PageMeta: object({ has_more: boolean, page: object({ last: boolean }), total: { type: 'number' } }),
+    };
+    const pageMeta: SchemaObject = { $ref: '#/components/schemas/PageMeta' };
+    const problem = (meta: SchemaObject, kind: 'hasMore' | 'totalCount', path: string) =>
+      bodyEndOfIterationProblem(
+        { kind, path },
+        object({ data: { type: 'array', items: { type: 'string' } }, meta }),
+        schemas,
+      );
+    const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
+
+    // Every variant declares it: a `$ref` or inline, beside a `null` variant,
+    // under `anyOf`, a union again one segment down, an integer beside a
+    // number for a count, and `properties` written beside the `oneOf`, which
+    // every inline variant carries.
+    expect(problem({ oneOf: [pageMeta, object({ has_more: boolean })] }, 'hasMore', 'meta.has_more')).toBeUndefined();
+    expect(
+      problem(
+        { anyOf: [object({ has_more: { type: ['boolean', 'null'] } }), pageMeta, { type: 'null' }] },
+        'hasMore',
+        'meta.has_more',
+      ),
+    ).toBeUndefined();
+    const pages = (...variants: SchemaObject[]) => ({ oneOf: [pageMeta, object({ page: { oneOf: variants } })] });
+    expect(
+      problem(pages(object({ last: boolean }), object({ last: boolean, size: integer })), 'hasMore', 'meta.page.last'),
+    ).toBeUndefined();
+    expect(problem({ oneOf: [pageMeta, object({ total: integer })] }, 'totalCount', 'meta.total')).toBeUndefined();
+    expect(
+      problem(
+        { properties: { has_more: boolean }, oneOf: [object({ a: integer }), object({ b: integer })] },
+        'hasMore',
+        'meta.has_more',
+      ),
+    ).toBeUndefined();
+
+    // A field only some variants declare resolves to no field; one a variant
+    // types otherwise is not of the kind's type; a union of nulls declares none.
+    expect(problem({ oneOf: [pageMeta, object({ next: integer })] }, 'hasMore', 'meta.has_more')).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem(pages(object({ last: boolean }), object({ size: integer })), 'hasMore', 'meta.page.last')).toBe(
+      missing('meta.page.last'),
+    );
+    expect(problem({ oneOf: [{ type: 'null' }, { type: 'null' }] }, 'hasMore', 'meta.has_more')).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem({ oneOf: [pageMeta, object({ has_more: { type: 'string' } })] }, 'hasMore', 'meta.has_more')).toBe(
+      'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(problem({ oneOf: [pageMeta, object({ total: { type: 'string' } })] }, 'totalCount', 'meta.total')).toBe(
+      'endOfIteration path "meta.total" is not an integer or number field, as kind "totalCount" requires',
+    );
+  });
 });
