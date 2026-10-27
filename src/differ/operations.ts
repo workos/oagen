@@ -26,7 +26,6 @@ import {
 import type { DocumentShapes } from './shapes.js';
 import type {
   Change,
-  FieldChange,
   ParamChange,
   ParamLocation,
   ResponseContentTypesChange,
@@ -35,7 +34,6 @@ import type {
 } from './types.js';
 import { locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
-  classifyFieldChange,
   classifyParamChange,
   classifyResponseHeaderChange,
   deprecationDetails,
@@ -45,7 +43,13 @@ import {
   requestBodyEncodingShift,
   tagsShift,
 } from './classify.js';
-import { addedUnionVariants, formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+import {
+  addedUnionVariants,
+  diffFields,
+  formatChangeDetails,
+  primitivesDifferOnlyByFormat,
+  typeRefsEqual,
+} from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
 /**
@@ -203,11 +207,19 @@ export function diffOperations(
     // it. The flag is present only when they differ (`extensionsShift`).
     const extensions = extensionsShift(oldOp, newOp);
     const extensionsChanged = extensions !== undefined;
-    // The list envelope's fields, matched by name while both specs paginate:
-    // a scalar companion (`has_more`) sits on no model `diffModels` reads, so
-    // its extensions are compared here; a companion object's model is
-    // compared in the models diff (workos/oagen#369 round 2).
-    const envelopeFieldChanges = bothPaginated ? diffEnvelopeFieldExtensions(oldPagination, newPagination) : [];
+    // The list envelope's fields, matched by name while both specs paginate,
+    // compared as a model's fields are: they sit on no model `diffModels`
+    // reads, and the envelope an emitter types from them gains, loses or
+    // retypes a property with them (#439). The envelope is only ever read,
+    // so it is judged as a response-only model is. A companion object's own
+    // fields are compared in the models diff (workos/oagen#369 round 2).
+    const envelopeFieldChanges = bothPaginated
+      ? diffFields(
+          { fields: oldPagination?.envelopeFields ?? [] },
+          { fields: newPagination?.envelopeFields ?? [] },
+          'response',
+        )
+      : [];
     const envelopeFieldsChanged = envelopeFieldChanges.length > 0;
 
     const hasChanges =
@@ -303,6 +315,9 @@ export function diffOperations(
       const securityBreaking =
         security !== undefined &&
         classifySecurityChange(security.oldSecurity, security.newSecurity, 'caller') === 'breaking';
+      // envelope fields: breaking when an entry is (a field removed or
+      // retyped, say), as a model is for its fields.
+      const envelopeFieldsBreaking = envelopeFieldChanges.some((c) => c.classification === 'breaking');
 
       const hasBreaking =
         responseBreaking ||
@@ -328,6 +343,7 @@ export function diffOperations(
         fallbackBreaking ||
         serversBreaking ||
         securityBreaking ||
+        envelopeFieldsBreaking ||
         paramChanges.some((pc) => pc.classification === 'breaking');
       changes.push({
         kind: 'operation-modified',
@@ -374,29 +390,6 @@ export function diffOperations(
     }
   }
 
-  return changes;
-}
-
-/**
- * The envelope fields (`PaginationMeta.envelopeFields`) whose `extensions`
- * differ between two paginated versions, matched by field name: one
- * `field-extensions-changed` entry each, additive, with the two sides
- * beside it (`extensionsShift`). A field only one side declares is not
- * reported here — nothing else about an envelope field is compared by the
- * differ — and a companion object's model is compared in `diffModels`.
- */
-function diffEnvelopeFieldExtensions(
-  oldPagination: Operation['pagination'],
-  newPagination: Operation['pagination'],
-): FieldChange[] {
-  const oldFields = new Map((oldPagination?.envelopeFields ?? []).map((field) => [field.name, field]));
-  const changes: FieldChange[] = [];
-  for (const field of newPagination?.envelopeFields ?? []) {
-    const before = oldFields.get(field.name);
-    if (!before) continue;
-    const shift = extensionsShift(before, field);
-    if (shift) changes.push({ ...classifyFieldChange('field-extensions-changed', field.name), ...shift });
-  }
   return changes;
 }
 

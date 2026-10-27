@@ -343,7 +343,16 @@ function variantLabel(ref: TypeRef): string {
   return assertNever(ref);
 }
 
-function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection = 'unknown'): FieldChange[] {
+/**
+ * What changed between two field lists, matched by name: a model's fields, or
+ * a list envelope's (`PaginationMeta.envelopeFields`, which `diffOperations`
+ * compares the same way, #439).
+ */
+export function diffFields(
+  oldModel: Pick<Model, 'fields'>,
+  newModel: Pick<Model, 'fields'>,
+  direction: ModelDirection = 'unknown',
+): FieldChange[] {
   const changes: FieldChange[] = [];
   const oldByName = new Map(oldModel.fields.map((f) => [f.name, f]));
   const newByName = new Map(newModel.fields.map((f) => [f.name, f]));
