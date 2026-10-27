@@ -262,12 +262,14 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * separators do not matter, so `has_more`, `hasMore`, `HasMore`, `has-more`
  * and `HAS_MORE` are all `has_more`, while a name that runs its words
  * together is one word: `hasmore` is no `has_more` and `totalpages` no
- * `total_pages`. The one test of a stop field's name, for list-envelope
- * detection (`END_OF_ITERATION_FIELDS`) and for `detectEndOfIteration`
- * (each kind's list), so the two cannot disagree about which companion is
- * a stop field.
+ * `total_pages`. A name holding a `.` is none of them: a stop field's path
+ * is dotted, so `has.more` would be read as `more` inside `has`. The one
+ * test of a stop field's name, for list-envelope detection
+ * (`END_OF_ITERATION_FIELDS`) and for `detectEndOfIteration` (each kind's
+ * list), so the two cannot disagree about which companion is a stop field.
  */
 export function spellsOneOf(name: string, fields: readonly string[]): boolean {
+  if (name.includes('.')) return false;
   const spelled = toSnakeCase(name);
   return fields.some((field) => toSnakeCase(field) === spelled);
 }
@@ -299,7 +301,9 @@ export function spellsOneOf(name: string, fields: readonly string[]): boolean {
  * segment as the document does (`pageInfo.hasNextPage`). A candidate is a
  * stop field by its name in any spelling (`spellsOneOf`), so `HasMore` and
  * `PageInfo.HasNextPage` are read as `has_more` and
- * `page_info.has_next_page` are, each kept as written. When several
+ * `page_info.has_next_page` are, each kept as written; a name holding a
+ * `.` is neither a stop field nor a companion looked inside, since the
+ * dotted path could not address it (`has.more`, `page.info`). When several
  * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
  * which wins over a `totalCount` integer; within one kind the first in scan
  * order wins. A candidate whose type does not fit its kind (a string
@@ -332,7 +336,8 @@ export function detectEndOfIteration(
   );
   for (const [name, schema] of companions) record(name, name, schema);
   for (const [name, schema] of companions) {
-    if (!looksLikePaginationMetadata(name)) continue;
+    // A `.` in the name would split the path inside it.
+    if (name.includes('.') || !looksLikePaginationMetadata(name)) continue;
     for (const [inner, innerSchema] of Object.entries(objectProperties(schema, componentSchemas))) {
       if (innerSchema) record(inner, `${name}.${inner}`, innerSchema);
     }

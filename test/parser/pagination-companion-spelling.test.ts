@@ -160,6 +160,13 @@ describe('classifyAndExtractResponse — envelope companion in any spelling', ()
     },
   );
 
+  it('keeps { data, has.next } as a plain model: a name with a `.` is no stop field', () => {
+    const result = classifyAndExtractResponse(envelope({ 'has.next': boolean }), 'ListPetsResponse');
+    expect(result.isPaginated).toBe(false);
+    expect(result.response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+    expect(result.endOfIteration).toBeUndefined();
+  });
+
   it.each(['hasmore', 'hasnext', 'HASNEXT', 'pagecount'])(
     'keeps { data, %s } as a plain model: a name that runs its words together is no stop field (#438)',
     (name) => {
@@ -233,6 +240,19 @@ describe('detectEndOfIteration — stop field in any spelling (#438)', () => {
     for (const name of ['pageinfo', 'PAGEINFO']) {
       expect(detectEndOfIteration({ data, [name]: companion({ hasNextPage: boolean }) }, 'data')).toBeUndefined();
     }
+  });
+
+  it('reads no stop field from, and looks inside no companion named with, a `.` the dotted path cannot address', () => {
+    // `has.more` would be read as `more` inside `has`, so the valid `total` beside it stays the stop.
+    expect(detectEndOfIteration({ data, 'has.more': boolean, total: integer }, 'data')).toEqual({
+      kind: 'totalCount',
+      path: 'total',
+    });
+    expect(detectEndOfIteration({ data, 'has.more': boolean }, 'data')).toBeUndefined();
+    expect(detectEndOfIteration({ data, pagination: companion({ 'total.pages': integer }) }, 'data')).toBeUndefined();
+    expect(detectEndOfIteration({ data, 'page.info': companion({ hasNextPage: boolean }) }, 'data')).toBeUndefined();
+    const nested = { result: companion({ items: data, 'has.more': boolean }) };
+    expect(detectEndOfIteration(nested, 'result.items')).toBeUndefined();
   });
 });
 
@@ -343,6 +363,15 @@ describe('parseSpec — the issue #438 repro end to end', () => {
       { kind: 'totalPages', path: 'page-count' },
     ]);
     expect(projection(await listPets({ hasnext: flag }))).toEqual(['ListPetsResponse', undefined, [], undefined]);
+  });
+
+  it('stops on a field the dotted path can address, never on one whose name holds a `.`', async () => {
+    expect(projection(await listPets({ 'has.more': flag, total: { type: 'integer' } }))).toEqual([
+      'string[]',
+      'data',
+      ['has.more', 'total'],
+      { kind: 'totalCount', path: 'total' },
+    ]);
   });
 });
 
