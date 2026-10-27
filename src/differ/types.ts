@@ -958,8 +958,12 @@ export interface BaseUrlChanged {
   newBaseUrl: string;
   /**
    * Breaking when the default host moves or disappears. Additive when the old
-   * document's default address was `''` or `/`: every existing caller had to
-   * name a host themselves and still can.
+   * document declared nothing beyond OpenAPI's default server — no `servers`,
+   * `servers: []`, or nothing but `/` (`isDefaultServerList`): every existing
+   * caller had to name a host themselves and still can. A `/` the old
+   * document listed first beside another server is the address a caller got
+   * without naming one, so a host taking the front from it is breaking
+   * (#405).
    */
   classification: 'additive' | 'breaking';
 }

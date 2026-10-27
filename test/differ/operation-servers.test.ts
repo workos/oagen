@@ -486,6 +486,31 @@ describe("diffOperations – servers: OpenAPI's default (issue #291)", () => {
     ).toMatchObject({ kind: 'operation-modified', serversChanged: true, classification: 'additive' });
   });
 
+  it('reports an operation that moves its host in front of the `/` it lists as breaking, as the document would (#405)', () => {
+    expect(
+      change(
+        diffOperations(
+          'Pets',
+          [withServers([...root, ...pets])],
+          [withServers([...pets, ...root])],
+          documents(undefined, undefined),
+        ),
+      ),
+    ).toMatchObject({
+      kind: 'operation-modified',
+      serversChanged: true,
+      serverChanges: [
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://pets.example.com',
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
+  });
+
   it('reports an operation that keeps `/` while its document moves from nothing to a named host', () => {
     // Served from `/` on both sides; the document-level diff reports the document.
     expect(diffOperations('Pets', [withServers(root)], [withServers(root)], documents(undefined, api))).toHaveLength(0);
