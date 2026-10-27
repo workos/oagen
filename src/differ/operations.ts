@@ -45,7 +45,7 @@ import {
   requestBodyEncodingShift,
   tagsShift,
 } from './classify.js';
-import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+import { addedUnionVariants, formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 
 /**
@@ -108,9 +108,8 @@ export function diffOperations(
     // `response` is `unknown` both for a 2xx/3xx without a body (a lone `204`
     // or `302`) and for none at all, so the operation gaining or losing its
     // only 2xx/3xx is told by `responseStatusCode` appearing or disappearing.
-    const responseChanged =
-      !typeRefsEqual(oldOp.response, newOp.response) ||
-      (oldOp.responseStatusCode === undefined) !== (newOp.responseStatusCode === undefined);
+    const successGainedOrLost = (oldOp.responseStatusCode === undefined) !== (newOp.responseStatusCode === undefined);
+    const responseChanged = !typeRefsEqual(oldOp.response, newOp.response) || successGainedOrLost;
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
     // The required flag and the encoding are compared only while both sides
     // carry a body: a body appearing or disappearing is already
@@ -257,9 +256,20 @@ export function diffOperations(
       // requestBody: a body appearing as optional is additive — callers gain an
       // argument they may leave out, like an optional `param-added`. A body
       // appearing as required, a body disappearing, and a body changing type
-      // are breaking. An absent flag reads as optional, as it does in OpenAPI.
+      // are breaking, except a body written as an inline union that only
+      // gained variants: callers may send the new variant but need not, as
+      // for a named union's `variant-added` (`addedUnionVariants`, #428). An
+      // absent flag reads as optional, as it does in OpenAPI.
       const optionalRequestBodyAdded = !oldOp.requestBody && !!newOp.requestBody && !newOp.requestBodyRequired;
-      const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded;
+      const requestBodyWidened =
+        oldOp.requestBody && newOp.requestBody ? !!addedUnionVariants(oldOp.requestBody, newOp.requestBody) : false;
+      const requestBodyBreaking = requestBodyChanged && !optionalRequestBodyAdded && !requestBodyWidened;
+      // response: a new type is breaking, except a response written as an
+      // inline union that only gained variants, which a reader may now
+      // receive as it may a new enum value (#428); gaining or losing the only
+      // 2xx/3xx is breaking whatever the body.
+      const responseBreaking =
+        responseChanged && (successGainedOrLost || !addedUnionVariants(oldOp.response, newOp.response));
       // requestBodyEncoding: an SDK built for the old spec keeps sending the
       // representation that spec's body was read from. Breaking when the new
       // spec no longer accepts it — that media type gone, or its shape
@@ -295,7 +305,7 @@ export function diffOperations(
         classifySecurityChange(security.oldSecurity, security.newSecurity, 'caller') === 'breaking';
 
       const hasBreaking =
-        responseChanged ||
+        responseBreaking ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
         requestBodyEncodingBreaking ||

@@ -1,4 +1,4 @@
-import type { Model, TypeRef } from '../ir/types.js';
+import type { Model, TypeRef, UnionType } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange, VariantChange } from './types.js';
 import { classifyFieldChange, deprecationDetails, deprecationFlip, extensionsShift } from './classify.js';
@@ -57,6 +57,9 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
   return changes;
 }
 
+/** What `diffVariants` reads of a union: a named union's `Model`, or an inline `UnionType`. */
+type UnionSource = Pick<Model, 'variants' | 'discriminator'> & Pick<UnionType, 'compositionKind'>;
+
 /**
  * Changes to a named union's `variants` and `discriminator`. A variant is
  * matched by type equality (`typeRefsEqual`), not by position, so reordering
@@ -85,9 +88,10 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
  * change of composition keyword between two unions (`anyOf` → `oneOf` rejects
  * values that match more than one branch; the reverse loosens what callers may
  * receive). A model that gains or loses `variants` altogether reports each
- * variant added or removed, not a composition change.
+ * variant added or removed, not a composition change. An inline union is read
+ * the same way (`addedUnionVariants`).
  */
-function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
+function diffVariants(oldModel: UnionSource, newModel: UnionSource): VariantChange[] {
   const changes: VariantChange[] = [];
   const oldVariants = dispatchedVariants(oldModel);
   const newVariants = dispatchedVariants(newModel);
@@ -164,7 +168,7 @@ function diffVariants(oldModel: Model, newModel: Model): VariantChange[] {
  * `discriminator.mapping` alone names them — one model ref per distinct
  * mapping target, in mapping order. A model with neither has none.
  */
-function dispatchedVariants(model: Model): TypeRef[] {
+function dispatchedVariants(model: UnionSource): TypeRef[] {
   if (model.variants) return model.variants;
   const names = new Set(Object.values(model.discriminator?.mapping ?? {}));
   return [...names].map((name) => ({ kind: 'model', name }));
@@ -274,6 +278,46 @@ function quoteKeys(keys: readonly string[]): string {
   return keys.map((k) => `'${k}'`).join(', ');
 }
 
+/**
+ * The labels of the variants an inline union gained (`Bird`, `integer`), when
+ * that is all that changed between `oldType` and `newType`; `undefined` when
+ * they are not two such unions (#428). Both are unions, or the same
+ * `nullable`, array or map wrapper around two, and the new union is the old
+ * one with variants inserted: the old variants in their order — an inline
+ * union is otherwise compared as one type, variant by variant in order
+ * (`typeRefsEqual`), so a reorder or a repeat is not this — and every other
+ * variant one no old variant is. What else moved is judged as for a named
+ * union (`diffVariants`): a mapping key the new variants bring is part of
+ * their addition, while a composition keyword changed, or the discriminator
+ * added, removed, moved or remapped for an old variant, is not a widening.
+ * Nor is a member added to an `allOf`, which narrows it. Such a change is
+ * additive as a named union's `variant-added` is, from either side of the
+ * wire: a caller may send the new variant but need not, and a reader may
+ * receive it as it may a new enum value.
+ */
+export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[] | undefined {
+  if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
+    return addedUnionVariants(oldType.inner, newType.inner);
+  }
+  if (oldType.kind === 'array' && newType.kind === 'array') {
+    return addedUnionVariants(oldType.items, newType.items);
+  }
+  if (oldType.kind === 'map' && newType.kind === 'map') {
+    return addedUnionVariants(oldType.valueType, newType.valueType);
+  }
+  if (oldType.kind !== 'union' || newType.kind !== 'union') return undefined;
+  if (oldType.compositionKind === 'allOf' || newType.compositionKind === 'allOf') return undefined;
+  let kept = 0;
+  for (const variant of newType.variants) {
+    if (kept < oldType.variants.length && typeRefsEqual(oldType.variants[kept], variant)) kept++;
+    else if (oldType.variants.some((old) => typeRefsEqual(old, variant))) return undefined;
+  }
+  if (kept < oldType.variants.length) return undefined;
+  const changes = diffVariants(oldType, newType);
+  if (changes.length === 0 || changes.some((change) => change.kind !== 'variant-added')) return undefined;
+  return changes.map((change) => change.variant);
+}
+
 /** A short, human-readable label for a union variant in a change report. */
 function variantLabel(ref: TypeRef): string {
   switch (ref.kind) {
@@ -322,10 +366,18 @@ function diffFields(oldModel: Model, newModel: Model, direction: ModelDirection 
     if (!oldField) continue;
 
     if (!typeRefsEqual(oldField.type, newField.type)) {
+      const added = addedUnionVariants(oldField.type, newField.type);
       if (primitivesDifferOnlyByFormat(oldField.type, newField.type)) {
         changes.push({
           ...classifyFieldChange('field-format-changed', name),
           details: formatChangeDetails(oldField.type, newField.type),
+        });
+      } else if (added) {
+        changes.push({
+          kind: 'field-type-changed',
+          fieldName: name,
+          classification: 'additive',
+          details: `variant${added.length > 1 ? 's' : ''} ${added.join(', ')} added`,
         });
       } else {
         changes.push({
