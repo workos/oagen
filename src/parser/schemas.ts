@@ -174,19 +174,19 @@ function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
  * True when an enum schema admits `null` by any OAS 3.0 / 3.1 spelling: the
  * `nullable: true` flag, a `type` list naming `'null'`, a `null` member in
  * `enum:`, or — for an enum declared as a `oneOf`/`anyOf` of `const`
- * schemas — a `type: 'null'` variant that an `enum:` list beside the union
- * does not forbid (`enumListAdmitsNull`).
+ * schemas — a `null` variant (`isNullSchema`) that an `enum:` list beside
+ * the union does not forbid (`enumListAdmitsNull`).
  */
 function isNullableEnumSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
   if (Array.isArray(schema.enum) && schema.enum.includes(null)) return true;
-  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema) && enumListAdmitsNull(schema);
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema) && enumListAdmitsNull(schema);
 }
 
 /**
  * Whether an `enum:` list written beside a `oneOf`/`anyOf` of consts lets a
- * `type: 'null'` variant admit `null`. The keywords apply together, so a
+ * `null` variant admit `null`. The keywords apply together, so a
  * list that leaves `null` out forbids it whatever the variant says; a schema
  * with no list admits it.
  */
@@ -258,8 +258,8 @@ function enumListMembers(schema: SchemaObject): EnumMember[] | null {
 
 /**
  * The members a `oneOf`/`anyOf` of string `const` schemas declares — a
- * single-member string `enum` is the same thing — once its `type: 'null'`
- * variants are set aside: each variant's `const`, with the variant's own
+ * single-member string `enum` is the same thing — once its `null` variants
+ * are set aside: each variant's `const`, with the variant's own
  * `description` and, when it says `deprecated: true`, `deprecated` (the
  * literal `true` only, as `deprecatedEntry` reads it everywhere). A member
  * whose own `description` has no content takes the schema's
@@ -268,15 +268,15 @@ function enumListMembers(schema: SchemaObject): EnumMember[] | null {
  * written. An `enum:` list written beside the union applies together with
  * it, as JSON Schema keywords do: a member whose value the list leaves out
  * is dropped (so the list may leave no member at all), and the list decides
- * whether a `type: 'null'` variant admits `null` (`enumListAdmitsNull`).
- * Null when the schema has no `oneOf`/`anyOf`, when every variant is
- * `type: 'null'`, or when any variant is anything but a string const — a
+ * whether a `null` variant admits `null` (`enumListAdmitsNull`).
+ * Null when the schema has no `oneOf`/`anyOf`, when every variant is a
+ * `null` variant, or when any variant is anything but a string const — a
  * `$ref`, an object, a number const — since such a union is not an enum.
  */
 function constUnionEnumMembers(schema: SchemaObject): EnumMember[] | null {
   const variants = (schema.oneOf ?? schema.anyOf)
     ?.map((variant, index) => ({ variant, index }))
-    .filter(({ variant }) => !isNullVariantSchema(variant));
+    .filter(({ variant }) => !isNullSchema(variant));
   if (!variants || variants.length === 0) return null;
   const allowed = schema.enum
     ? new Set(nonNullEnumValues(schema.enum).map((v) => (typeof v === 'number' ? v : String(v))))
@@ -508,10 +508,29 @@ function singleNonNullBranch(schema: SchemaObject): SchemaObject | undefined {
   return nonNull.length === 1 && !nonNull[0].$ref ? nonNull[0] : undefined;
 }
 
-/** True for the `{ type: 'null' }` / `{ type: ['null'] }` branch of a nullable wrapper. */
+/**
+ * True for the `null` variant of a `oneOf`/`anyOf` — the branch that makes a
+ * union nullable, never a variant to type or name — in each spelling of a
+ * schema that admits `null` alone: `{ type: 'null' }` / `{ type: ['null'] }`,
+ * `{ const: null }`, and an `enum:` list of nothing but `null`
+ * (`{ enum: [null] }`). A `const` or `enum:` counts only with no `type`
+ * beside it and as the keyword that types the schema
+ * (`classifyInlineSchema`), so `{ type: 'string', const: null }` and a
+ * `$ref` or composition written beside one stay variants, as
+ * `{ enum: [null, 'x'] }` does. The one test of every site that sets a
+ * union's null variant aside.
+ */
 export function isNullSchema(schema: SchemaObject): boolean {
+  const { type } = schema;
+  if (type === 'null' || (Array.isArray(type) && type.length === 1 && type[0] === 'null')) return true;
+  if (type !== undefined) return false;
+  if (schema.const === null) return classifyInlineSchema(schema) === 'const';
+  const values = schema.enum;
   return (
-    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((value) => value === null) &&
+    classifyInlineSchema(schema) === 'enum'
   );
 }
 
@@ -580,10 +599,10 @@ export function unwrapNullableSchema(
 
 /**
  * The one variant a nullable `oneOf`/`anyOf` wrapper collapses to: what is
- * left once every `null` variant (`isNullSchema` — `{ type: 'null' }` or
- * `{ type: ['null'] }`, however many of either) is discarded, when at least
- * one was and exactly one variant remains. The single definition of a
- * nullable union wrapper on the model side, shared by `unwrapNullableSchema`
+ * left once every `null` variant (`isNullSchema` — `{ type: 'null' }`,
+ * `{ const: null }` or `{ enum: [null] }`, however many) is discarded, when
+ * at least one was and exactly one variant remains. The single definition of
+ * a nullable union wrapper on the model side, shared by `unwrapNullableSchema`
  * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
  * under `allOf` (which `schemaToTypeRef` gives precedence), no `null`
  * variant, or more than one non-null variant. Exported for the response
@@ -1785,7 +1804,7 @@ export function nameInlineVariantEntries(
   reserved: ReadonlySet<string> = NO_RESERVED,
   baseTaken = false,
 ): Map<SchemaObject, InlineVariantName> {
-  const nonNullVariants = (union.oneOf ?? union.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
+  const nonNullVariants = (union.oneOf ?? union.anyOf ?? []).filter((v) => !isNullSchema(v));
   const inlineObjectVariants = nonNullVariants.filter((v) => isInlineObjectSchema(v));
   const discriminator = deriveConstNamingDiscriminator(inlineObjectVariants);
   const titles = titleMappedVariantNames(union);
@@ -1833,7 +1852,7 @@ export function nameInlineVariantEntries(
 export function titleMappedVariantNames(union: SchemaObject): ReadonlyMap<SchemaObject, string> {
   const names = new Map<SchemaObject, string>();
   if (union.oneOf === undefined || union.discriminator) return names;
-  const nonNullVariants = union.oneOf.filter((v) => !isNullVariantSchema(v));
+  const nonNullVariants = union.oneOf.filter((v) => !isNullSchema(v));
   if (titleMappedDiscriminatorProperty(nonNullVariants) === null) return names;
   for (const variant of nonNullVariants) {
     if (!isInlineObjectSchema(variant)) continue;
@@ -1879,11 +1898,11 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
 
-/** True when a named union admits `null`: a `type: 'null'` variant, a `type` list with `'null'`, or OAS 3.0 `nullable: true`. */
+/** True when a named union admits `null`: a `null` variant (`isNullSchema`), a `type` list with `'null'`, or OAS 3.0 `nullable: true`. */
 function isNullableUnionSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
-  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullVariantSchema);
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema);
 }
 
 /**
@@ -2030,7 +2049,7 @@ export function nonObjectVariantContexts(
   const keptTitles = new Map<string, string>();
   let position = 0;
   for (const variant of variants) {
-    if (isNullVariantSchema(variant)) continue;
+    if (isNullSchema(variant)) continue;
     position++;
     if (objectVariantNames.has(variant)) continue;
     const member = unwrapNullableSchema(variant);
@@ -2168,13 +2187,6 @@ function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
 function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
   return variants.some((variant) =>
     TYPING_KEYWORDS.some((key) => (variant as Record<string, unknown>)[key] !== undefined),
-  );
-}
-
-/** The `{ type: 'null' }` member that marks a `oneOf`/`anyOf` as nullable; never a variant to name. */
-function isNullVariantSchema(schema: SchemaObject): boolean {
-  return (
-    schema.type === 'null' || (Array.isArray(schema.type) && schema.type.length === 1 && schema.type[0] === 'null')
   );
 }
 
@@ -2336,7 +2348,7 @@ export function warnOnUncarriedProperties(
   if (reportedUncarriedProperties.has(variants)) return;
   const uncarried: number[] = [];
   variants.forEach((variant, index) => {
-    if (isNullVariantSchema(variant) || isInlineObjectSchema(variant)) return;
+    if (isNullSchema(variant) || isInlineObjectSchema(variant)) return;
     const kind = classifyInlineSchema(unwrapNullableSchema(variant));
     if (kind === 'ref' || kind === 'allOf' || kind === 'union' || kind === 'map' || kind === 'object') {
       uncarried.push(index + 1);
@@ -2882,7 +2894,7 @@ function isNamedUnionSchema(schema: SchemaObject): boolean {
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`), not a union.
   if (isConstUnionEnumSchema(schema)) return false;
-  const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullVariantSchema(v));
+  const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullSchema(v));
   return !(nonNull.length === 1 && isPlainObjectSchema(nonNull[0]));
 }
 
@@ -2998,7 +3010,7 @@ function namedUnionMembers(
 ): NamedUnionMember[] {
   const members: NamedUnionMember[] = [];
   for (const raw of schema.oneOf ?? schema.anyOf ?? []) {
-    if (isNullVariantSchema(raw)) continue;
+    if (isNullSchema(raw)) continue;
     let resolved = raw;
     if (raw.$ref) {
       const refName = raw.$ref.split('/').pop() ?? '';
@@ -4503,9 +4515,11 @@ export function schemaToTypeRef(
     const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
     const rawVariants: SchemaObject[] = schema.oneOf ?? schema.anyOf ?? [];
 
-    // Check for nullable pattern: oneOf: [realType, { type: 'null' }]
-    const nullVariant = rawVariants.find(isNullVariantSchema);
-    const nonNullVariants = rawVariants.filter((v) => v !== nullVariant);
+    // Check for nullable pattern: oneOf: [realType, { type: 'null' }]. Every
+    // `null` variant is set aside, however many and however spelled
+    // (`isNullSchema`), as `nullableUnionBranch` sets them aside.
+    const nonNullVariants = rawVariants.filter((v) => !isNullSchema(v));
+    const hasNull = nonNullVariants.length < rawVariants.length;
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
     // schemas into a single enum. This turns patterns like
@@ -4538,10 +4552,10 @@ export function schemaToTypeRef(
       );
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
-      return nullVariant && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
+      return hasNull && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
-    if (nullVariant && nonNullVariants.length === 1) {
+    if (hasNull && nonNullVariants.length === 1) {
       // Nullable single type — unwrap as nullable. `asNullable` keeps a
       // `$ref` to an already-nullable enum component from double-wrapping.
       // The wrapper's `description` and link ride onto the branch
@@ -4660,8 +4674,7 @@ export function schemaToTypeRef(
       inlineVariantNames,
       reservedNames,
     );
-    for (const v of rawVariants) {
-      if (v === nullVariant) continue;
+    for (const v of nonNullVariants) {
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
@@ -4675,8 +4688,6 @@ export function schemaToTypeRef(
         );
       }
     }
-    const hasNull = !!nullVariant;
-
     const union: TypeRef = {
       kind: 'union',
       variants,

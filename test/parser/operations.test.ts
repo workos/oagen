@@ -1718,6 +1718,51 @@ describe('body-owned query parameters: composition, groups, and body refs', () =
     expect(op.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id']);
   });
 
+  it('sets a null alternative aside however it is spelled, the body typed nullable (#394)', () => {
+    const extract = (nullVariant: SchemaObject) =>
+      extractOperations({
+        '/sso/token': {
+          post: {
+            operationId: 'SsoController_token',
+            parameters: [q('client_id'), q('code'), q('subject_token')],
+            requestBody: jsonBody({
+              oneOf: [obj('client_id', 'code'), obj('client_id', 'subject_token'), nullVariant],
+            }),
+            responses: ok,
+          },
+        },
+        '/sso/logout': {
+          post: {
+            operationId: 'SsoController_logout',
+            parameters: [q('session_id')],
+            requestBody: jsonBody({ oneOf: [obj('session_id'), nullVariant] }),
+            responses: ok,
+          },
+        },
+      });
+    const expected = extract({ type: 'null' });
+    const [token, logout] = expected.services[0].operations;
+    expect(token.requestBody).toEqual({
+      kind: 'nullable',
+      inner: {
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'SSOTokenRequest' },
+          { kind: 'model', name: 'SSOTokenRequestWithSubjectToken' },
+        ],
+      },
+    });
+    expect(token.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['client_id']);
+    expect(logout.requestBody).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'union', variants: [{ kind: 'model', name: 'SSOLogoutRequest' }] },
+    });
+    expect(logout.bodyOwnedQueryParams?.map((p) => p.name)).toEqual(['session_id']);
+    for (const spelling of [{ const: null }, { enum: [null] }]) {
+      expect(extract(spelling), JSON.stringify(spelling)).toEqual(expected);
+    }
+  });
+
   it('unions allOf members and intersects anyOf alternatives', () => {
     const paths = {
       '/sso/token': {

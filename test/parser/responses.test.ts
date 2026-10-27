@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('classifyAndExtractResponse', () => {
   describe('$ref schemas', () => {
@@ -164,6 +165,35 @@ describe('classifyAndExtractResponse', () => {
       expect(result.inlineModels).toHaveLength(1);
       expect(result.inlineModels[0].name).toBe('ApiKey');
       expect(result.isPaginated).toBe(false);
+    });
+
+    it('unwraps the nullable wrapper whose null is `{ const: null }` or `{ enum: [null] }` (#394)', () => {
+      const wrapper = (nullVariant: SchemaObject): SchemaObject => ({
+        type: 'object',
+        properties: {
+          api_key: {
+            deprecated: true,
+            oneOf: [
+              {
+                type: 'object',
+                properties: { object: { type: 'string', const: 'api_key' }, id: { type: 'string' } },
+                required: ['object', 'id'],
+              },
+              nullVariant,
+            ],
+          },
+        },
+        required: ['api_key'],
+      });
+      const expected = classifyAndExtractResponse(wrapper({ type: 'null' }), 'ValidateApiKeyResponse');
+      expect(expected.response).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'ApiKey' } });
+      expect(expected.inlineModels.map((m) => [m.name, m.deprecated])).toEqual([['ApiKey', true]]);
+      for (const spelling of [{ const: null }, { enum: [null] }]) {
+        expect(
+          classifyAndExtractResponse(wrapper(spelling), 'ValidateApiKeyResponse'),
+          JSON.stringify(spelling),
+        ).toEqual(expected);
+      }
     });
 
     it('does not match wrapper with multiple required properties', () => {

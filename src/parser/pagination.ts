@@ -8,7 +8,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { classifyInlineSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import { classifyInlineSchema, isNullSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
 import { combineDeclarations, readInlineAllOf } from './inline-models.js';
 
@@ -532,10 +532,6 @@ export function resolveBareSchema(
       ? bare.allOf[0]
       : undefined;
   return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
-}
-
-function isNullSchema(schema: SchemaObject): boolean {
-  return schema.type === 'null' || (Array.isArray(schema.type) && schema.type.every((t) => t === 'null'));
 }
 
 /**
