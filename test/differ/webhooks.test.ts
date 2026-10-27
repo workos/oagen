@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { buildDirectionIndex } from '../../src/differ/direction.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import type { ApiSpec, Model, Parameter, Webhook } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -260,6 +264,60 @@ describe('diffSpecs — webhooks', () => {
       spec([webhook({ headerParams: [header('X-Defaulted', { default: 'b' })] })]),
     );
     expect(behaviorChanges).toEqual([]);
+  });
+});
+
+describe('parseSpec to diffSpecs — a required payload appearing or disappearing (issue #404 repro)', () => {
+  /** The issue's `old.json` without `requestBody`, or `new.json` with it: `petAdopted` responding `200`. */
+  const document = (requestBody?: unknown) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    webhooks: {
+      petAdopted: { post: { ...(requestBody ? { requestBody } : {}), responses: { '200': { description: 'ok' } } } },
+    },
+    components: {
+      schemas: { Pet: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } },
+    },
+  });
+  const requiredPet = {
+    required: true,
+    content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+  };
+
+  async function parseDocuments(oldDoc: unknown, newDoc: unknown): Promise<[ApiSpec, ApiSpec]> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-404-'));
+    try {
+      writeFileSync(join(dir, 'old.json'), JSON.stringify(oldDoc));
+      writeFileSync(join(dir, 'new.json'), JSON.stringify(newDoc));
+      return [await parseSpec(join(dir, 'old.json')), await parseSpec(join(dir, 'new.json'))];
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('says `payload added` / `payload removed` alone, still breaking, as an operation reports no required flip beside a body', async () => {
+    const [before, after] = await parseDocuments(document(), document(requiredPet));
+    expect(after.webhooks?.[0]).toMatchObject({ requestBodyRequired: true, requestBodyEncoding: 'json' });
+    for (const [details, oldSpec, newSpec] of [
+      ['payload added', before, after],
+      ['payload removed', after, before],
+    ] as const) {
+      expect(diffSpecs(oldSpec, newSpec).changes.filter((c) => c.kind === 'webhook-modified')).toEqual([
+        {
+          kind: 'webhook-modified',
+          name: 'petAdopted',
+          httpMethod: 'post',
+          paramChanges: [],
+          requestBodyChanged: true,
+          responsesChanged: false,
+          deprecatedChanged: false,
+          securityChanged: false,
+          tagsChanged: false,
+          details,
+          classification: 'breaking',
+        },
+      ]);
+    }
   });
 });
 

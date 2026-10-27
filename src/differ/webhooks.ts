@@ -137,6 +137,9 @@ export function diffWebhooks(
  *   `details` string so the change can report both sides.
  * - required → optional: breaking — a handler that assumed a body may get none.
  * - optional → required: additive — the body is now always there.
+ *   The flag is compared only while both sides carry a payload, as on an
+ *   operation: the parser sets it beside the payload, so one appearing or
+ *   disappearing takes its flag with it too.
  * - media types changed, both sides declaring a payload: one the sender can
  *   newly use, or whose body changed type, is breaking — the handler must
  *   decode it; one it can no longer use, or one that only changed a
@@ -177,7 +180,7 @@ function diffWebhookBody(
 
   const wasRequired = oldWebhook.requestBodyRequired === true;
   const isRequired = newWebhook.requestBodyRequired === true;
-  if (wasRequired !== isRequired) {
+  if (oldBody && newBody && wasRequired !== isRequired) {
     changes.push(isRequired ? 'body optional → required' : 'body required → optional');
     if (!isRequired) breaking = true;
   }
