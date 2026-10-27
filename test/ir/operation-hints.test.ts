@@ -77,6 +77,44 @@ describe('pathSegments (issue #269)', () => {
   });
 });
 
+describe('readPath: a colon that is not a custom method (issue #378)', () => {
+  const service = svc('Files', []);
+
+  it('keeps a colon inside any braces of a segment, not only braces that start it', () => {
+    expect(readPath('/v1/files/file-{file_path:path}')).toEqual([
+      { text: 'v1', customMethod: false },
+      { text: 'files', customMethod: false },
+      { text: 'file-{file_path:path}', customMethod: false },
+    ]);
+    expect(readPath('/v1/files/file-{file_path:path}:download')).toEqual([
+      { text: 'v1', customMethod: false },
+      { text: 'files', customMethod: false },
+      { text: 'file-{file_path:path}', customMethod: false },
+      { text: 'download', customMethod: true },
+    ]);
+    expect(pathSegments('/files/{a}.{b:c}')).toEqual(['files', '{a}.{b:c}']);
+    expect(pathSegments('/files/{a:b}:{c:d}')).toEqual(['files', '{a:b}', '{c:d}']);
+  });
+
+  it('keeps a segment with several colons whole: AIP-136 appends a single custom method', () => {
+    expect(readPath('/things/urn:pet:1')).toEqual([
+      { text: 'things', customMethod: false },
+      { text: 'urn:pet:1', customMethod: false },
+    ]);
+    expect(pathSegments('/things/{id}:a:b')).toEqual(['things', '{id}:a:b']);
+    expect(readPath('/things/urn:pet').map((s) => s.customMethod)).toEqual([false, false, true]);
+  });
+
+  it('names the issue repro as the segments read before #322, the custom method still split off', () => {
+    // A literal segment is snake-cased as written, so the segment kept whole
+    // names the GET as `file-{file_path}` names it, never the cut `list_path}`.
+    expect(deriveMethodName(op('get', '/v1/files/file-{file_path}'), service)).toBe('list_file_{file_path}');
+    expect(deriveMethodName(op('get', '/v1/files/file-{file_path:path}'), service)).toBe('list_file_{file_path:path}');
+    expect(deriveMethodName(op('post', '/v1/files/file-{file_path:path}:download'), service)).toBe('create_download');
+    expect(deriveMethodName(op('get', '/things/urn:pet:1'), service)).toBe('list_urn:pet:1');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // deriveMethodName — algorithm unit tests
 // ---------------------------------------------------------------------------

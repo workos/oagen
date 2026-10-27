@@ -30,19 +30,23 @@ export interface PathSegment {
  * from a slash-written literal: it never names a service, and it counts
  * against a path's plainness when inline model names collide (see the
  * parser's serviceSegmentIndex and pathDeviation). A colon inside a
- * parameter's braces is part of its name and does not split it. Empty
- * segments — a leading, trailing or doubled slash, or an empty side of a
- * colon — are dropped. The operation's `path` itself is never rewritten: it
+ * parameter's braces, wherever they sit in the segment, is part of its name
+ * and does not split it: `file-{file_path:path}` is one segment. AIP-136
+ * appends a single verb, so a custom method starts only at a segment's one
+ * colon outside braces: a segment with several, such as the literal
+ * `urn:pet:1`, is kept whole.
+ * Empty segments — a leading, trailing or doubled slash, or an empty side of
+ * a colon — are dropped. The operation's `path` itself is never rewritten: it
  * is the URL the SDK requests.
  */
 export function readPath(path: string): PathSegment[] {
   const segments: PathSegment[] = [];
   for (const segment of path.split('/')) {
-    // A parameter's braces are kept whole; only what follows them can carry
-    // the colon of a custom method.
-    const braces = segment.startsWith('{') ? segment.indexOf('}') + 1 : 0;
-    const parts = segment.slice(braces).split(':');
-    parts[0] = segment.slice(0, braces) + parts[0];
+    // Blank out the colons inside braces, keeping every index in place.
+    const outside = segment.replace(/\{[^}]*\}/g, (param) => param.replaceAll(':', ' '));
+    const colon = outside.indexOf(':');
+    const single = colon !== -1 && colon === outside.lastIndexOf(':');
+    const parts = single ? [segment.slice(0, colon), segment.slice(colon + 1)] : [segment];
     parts.forEach((part, i) => {
       if (part) segments.push({ text: part, customMethod: i > 0 });
     });
