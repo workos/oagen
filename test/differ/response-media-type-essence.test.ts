@@ -812,3 +812,65 @@ describe('pairing a lone 2xx: the entry spelled as it is wins over one that only
     ]);
   });
 });
+
+describe('parser to differ — a secondary body switched to another component of its shape (issue #390)', () => {
+  /** `listNotes`: JSON and YAML bodies `$ref`ing the given components, beside `Note` and an identical `NoteCopy`. */
+  const notes = (json: string, yaml: string) => {
+    const note = { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } };
+    return {
+      openapi: '3.1.0',
+      info: { title: 'Notes', version: '1' },
+      paths: {
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            responses: {
+              '200': {
+                description: 'OK',
+                content: {
+                  'application/json': { schema: { $ref: `#/components/schemas/${json}` } },
+                  'application/yaml': { schema: { $ref: `#/components/schemas/${yaml}` } },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: { schemas: { Note: note, NoteCopy: note } },
+    };
+  };
+  const diffDocuments = async (before: Record<string, unknown>, after: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-390-'));
+    try {
+      const oldPath = join(dir, 'old.json');
+      const newPath = join(dir, 'new.json');
+      writeFileSync(oldPath, JSON.stringify(before));
+      writeFileSync(newPath, JSON.stringify(after));
+      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('reports the YAML body as retyped, breaking: both documents declare both models, so neither was renamed', async () => {
+    const { changes, summary } = await diffDocuments(notes('Note', 'Note'), notes('Note', 'NoteCopy'));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      operationName: 'listNotes',
+      responseChanged: false,
+      responseContentTypeChanges: [
+        {
+          statusCode: 200,
+          added: [],
+          removed: [],
+          retyped: ['application/yaml'],
+          reparameterized: [],
+          classification: 'breaking',
+        },
+      ],
+      classification: 'breaking',
+    });
+    expect(summary.breaking).toBe(1);
+  });
+});

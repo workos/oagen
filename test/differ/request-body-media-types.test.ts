@@ -461,4 +461,20 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
       classification: 'breaking',
     });
   });
+
+  it('reports a payload moved to another model of its shape that both documents declare as retyped, breaking (issue #390)', () => {
+    const both = (noteModel: string): ApiSpec => ({
+      ...spec(noteModel, note(noteModel)),
+      models: [adoptionEvent, note('OldNote'), note('NewNote')],
+    });
+    const { changes } = diffSpecs(both('OldNote'), both('NewNote'));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'webhook-modified',
+      requestBodyChanged: true,
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
+      details: 'payload media type text/plain retyped',
+      classification: 'breaking',
+    });
+  });
 });
