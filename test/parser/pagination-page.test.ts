@@ -389,6 +389,72 @@ describe('detectEndOfIteration', () => {
       description: 'The pets',
     });
   });
+  it('reads every object the path passes through, nearest the array first, before the top level (#433)', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    /** `{ result: { page: { items, ...page }, ...result }, ...top }`, listed at `result.page.items`. */
+    const detect = (
+      page: Record<string, SchemaObject>,
+      result: Record<string, SchemaObject>,
+      top: Record<string, SchemaObject> = {},
+    ) =>
+      detectEndOfIteration(
+        { result: object({ page: object({ items: data, ...page }), ...result }), ...top },
+        'result.page.items',
+      );
+    // The issue: the stop field beside the array's grandparent is read, as
+    // one beside its parent and one at the top level are.
+    expect(detect({}, { total_pages: integer })).toEqual({ kind: 'totalPages', path: 'result.total_pages' });
+    expect(detect({ total_pages: integer }, {})).toEqual({ kind: 'totalPages', path: 'result.page.total_pages' });
+    expect(detect({}, {}, { total_pages: integer })).toEqual({ kind: 'totalPages', path: 'total_pages' });
+    // Nearest the array first within one kind; the kind order still decides
+    // across levels.
+    expect(detect({ has_more: boolean }, { has_more: boolean }, { has_more: boolean })).toEqual({
+      kind: 'hasMore',
+      path: 'result.page.has_more',
+    });
+    expect(detect({}, { has_more: boolean }, { has_more: boolean })).toEqual({
+      kind: 'hasMore',
+      path: 'result.has_more',
+    });
+    expect(detect({ total: integer }, { has_more: boolean })).toEqual({ kind: 'hasMore', path: 'result.has_more' });
+    expect(detect({}, { total: integer }, { has_more: boolean })).toEqual({ kind: 'hasMore', path: 'has_more' });
+    // Every object between the top level and the array, at any depth.
+    expect(
+      detectEndOfIteration(
+        { a: object({ b: object({ c: object({ items: data }) }), totalPages: integer }) },
+        'a.b.c.items',
+      ),
+    ).toEqual({ kind: 'totalPages', path: 'a.totalPages' });
+    // Each object is reached as the path is resolved: through a $ref under a
+    // nullable wrapper, and through an allOf.
+    const components: Record<string, SchemaObject> = {
+      Result: object({ page: object({ items: data }), total_pages: integer }),
+    };
+    const wrapped: SchemaObject = { oneOf: [{ $ref: '#/components/schemas/Result' }, { type: 'null' }] };
+    expect(detectEndOfIteration({ result: wrapped }, 'result.page.items', components)).toEqual({
+      kind: 'totalPages',
+      path: 'result.total_pages',
+    });
+    const composed: SchemaObject = {
+      allOf: [object({ page: object({ items: data }) }), object({ has_more: boolean })],
+    };
+    expect(detectEndOfIteration({ result: composed }, 'result.page.items')).toEqual({
+      kind: 'hasMore',
+      path: 'result.has_more',
+    });
+    // Nothing the path passes through is a stop field, whatever it is called:
+    // not even an object whose type list also admits a count.
+    const countOrObject = (properties: Record<string, SchemaObject>): SchemaObject => ({
+      type: ['object', 'integer'],
+      properties,
+    });
+    expect(
+      detectEndOfIteration({ result: object({ total: countOrObject({ items: data }) }) }, 'result.total.items'),
+    ).toBeUndefined();
+    expect(
+      detectEndOfIteration({ total: countOrObject({ page: object({ items: data }) }) }, 'total.page.items'),
+    ).toBeUndefined();
+  });
 });
 
 describe('resolveSchemaPath', () => {
