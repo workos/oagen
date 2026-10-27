@@ -146,6 +146,12 @@ describe('diffModels — a variant added to an inline union (issue #428)', () =>
         union([cat, dog, bird]),
       ],
       [
+        // The request-body parser writes no keyword on a `oneOf` it builds.
+        'a keyword written on one side only beside the addition',
+        union([cat, dog], { compositionKind: 'anyOf' }),
+        union([cat, dog, bird], { compositionKind: undefined }),
+      ],
+      [
         'an allOf gaining a member, which narrows it',
         union([cat, dog], { compositionKind: 'allOf', discriminator: undefined }),
         union([cat, dog, bird], { compositionKind: 'allOf', discriminator: undefined }),
@@ -267,14 +273,14 @@ describe("diffSpecs — the issue's documents, end to end (issue #428)", () => {
     );
   /** The union is the `200` body of `GET /pets/{id}`. */
   const bodyDocument = (names: string[]) => document({ '/pets/{id}': getById('getPet', petUnion(names)) }, {});
-  /** The union is the required request body of `POST /pets`. */
-  const requestDocument = (names: string[]) =>
+  /** `schema` is the required request body of `POST /pets`. */
+  const requestDocument = (schema: object) =>
     document(
       {
         '/pets': {
           post: {
             operationId: 'createPet',
-            requestBody: { required: true, content: { 'application/json': { schema: petUnion(names) } } },
+            requestBody: { required: true, content: { 'application/json': { schema } } },
             responses: { '204': { description: 'created' } },
           },
         },
@@ -331,8 +337,8 @@ describe("diffSpecs — the issue's documents, end to end (issue #428)", () => {
   });
 
   it('reports a variant added to a request body union as additive, and its removal as breaking', async () => {
-    const oldSpec = await parse('request-old', requestDocument(['Cat', 'Dog']));
-    const newSpec = await parse('request-new', requestDocument(['Cat', 'Dog', 'Bird']));
+    const oldSpec = await parse('request-old', requestDocument(petUnion(['Cat', 'Dog'])));
+    const newSpec = await parse('request-new', requestDocument(petUnion(['Cat', 'Dog', 'Bird'])));
     expect(summarize(diffSpecs(oldSpec, newSpec))).toEqual({
       changes: ['createPet requestBodyChanged: additive'],
       breaking: 0,
@@ -341,6 +347,26 @@ describe("diffSpecs — the issue's documents, end to end (issue #428)", () => {
       changes: ['createPet requestBodyChanged: breaking'],
       breaking: 1,
     });
+  });
+
+  it('keeps a request body whose keyword moved between anyOf and oneOf beside the addition breaking', async () => {
+    // The request-body parser builds a `oneOf` with no `compositionKind`, an `anyOf` with one (Greptile).
+    const anyOf = (names: string[]) => {
+      const { oneOf, ...rest } = petUnion(names);
+      return { ...rest, anyOf: oneOf };
+    };
+    const pairs: Array<[string, object, object]> = [
+      ['anyOf-to-oneOf', anyOf(['Cat', 'Dog']), petUnion(['Cat', 'Dog', 'Bird'])],
+      ['oneOf-to-anyOf', petUnion(['Cat', 'Dog']), anyOf(['Cat', 'Dog', 'Bird'])],
+    ];
+    for (const [pair, before, after] of pairs) {
+      const oldSpec = await parse(`${pair}-old`, requestDocument(before));
+      const newSpec = await parse(`${pair}-new`, requestDocument(after));
+      expect([pair, summarize(diffSpecs(oldSpec, newSpec))]).toEqual([
+        pair,
+        { changes: ['createPet requestBodyChanged: breaking'], breaking: 1 },
+      ]);
+    }
   });
 
   it('reports an undiscriminated `Cat | string` gaining `integer` as additive', async () => {

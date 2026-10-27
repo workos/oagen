@@ -286,14 +286,14 @@ function quoteKeys(keys: readonly string[]): string {
  * one with variants inserted: the old variants in their order — an inline
  * union is otherwise compared as one type, variant by variant in order
  * (`typeRefsEqual`), so a reorder or a repeat is not this — and every other
- * variant one no old variant is. What else moved is judged as for a named
- * union (`diffVariants`): a mapping key the new variants bring is part of
- * their addition, while a composition keyword changed, or the discriminator
- * added, removed, moved or remapped for an old variant, is not a widening.
- * Nor is a member added to an `allOf`, which narrows it. Such a change is
- * additive as a named union's `variant-added` is, from either side of the
- * wire: a caller may send the new variant but need not, and a reader may
- * receive it as it may a new enum value.
+ * variant one no old variant is. The composition keyword is the same, and
+ * what else moved is judged as for a named union (`diffVariants`): a mapping
+ * key the new variants bring is part of their addition, while the
+ * discriminator added, removed, moved or remapped for an old variant is not
+ * a widening. Nor is a member added to an `allOf`, which narrows it. Such a
+ * change is additive as a named union's `variant-added` is, from either side
+ * of the wire: a caller may send the new variant but need not, and a reader
+ * may receive it as it may a new enum value.
  */
 export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[] | undefined {
   if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
@@ -306,7 +306,10 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
     return addedUnionVariants(oldType.valueType, newType.valueType);
   }
   if (oldType.kind !== 'union' || newType.kind !== 'union') return undefined;
-  if (oldType.compositionKind === 'allOf' || newType.compositionKind === 'allOf') return undefined;
+  // The same keyword, written or not on both sides: `diffVariants` compares
+  // two written ones only, and the request-body parser writes none on a
+  // `oneOf`, so `anyOf` beside it would pass for no change.
+  if (oldType.compositionKind !== newType.compositionKind || oldType.compositionKind === 'allOf') return undefined;
   let kept = 0;
   for (const variant of newType.variants) {
     if (kept < oldType.variants.length && typeRefsEqual(oldType.variants[kept], variant)) kept++;
