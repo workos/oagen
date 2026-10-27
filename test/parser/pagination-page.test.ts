@@ -1119,4 +1119,25 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
       'endOfIteration path "meta.total" is not an integer or number field, as kind "totalCount" requires',
     );
   });
+
+  it('walks a component several variants reach once per segment, however long the path (Greptile)', () => {
+    // `Node` is a `oneOf` of two objects that each declare `child: Node`, so
+    // a walk per variant would double at every `child`.
+    const variant = (extra: Record<string, SchemaObject>): SchemaObject => ({
+      type: 'object',
+      properties: { child: { $ref: '#/components/schemas/Node' }, has_more: { type: 'boolean' }, ...extra },
+    });
+    const schemas: Record<string, SchemaObject> = {
+      Node: { oneOf: [variant({}), variant({ size: { type: 'integer' } })] },
+    };
+    const properties: Record<string, SchemaObject> = {
+      data: { type: 'array', items: { type: 'string' } },
+      node: { $ref: '#/components/schemas/Node' },
+    };
+    const path = ['node', ...Array<string>(40).fill('child'), 'has_more'].join('.');
+    expect(endOfIterationProblem({ kind: 'hasMore', path }, properties, schemas)).toBeUndefined();
+    expect(endOfIterationProblem({ kind: 'totalCount', path }, properties, schemas)).toBe(
+      `endOfIteration path "${path}" is not an integer or number field, as kind "totalCount" requires`,
+    );
+  });
 });

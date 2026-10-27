@@ -376,7 +376,7 @@ export function endOfIterationProblem(
   properties: Record<string, SchemaObject | undefined> | undefined,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  const fields = properties && fieldsAtPath({ properties }, end.path.split('.'), componentSchemas);
+  const fields = properties && fieldsAtPath({ properties }, end.path, componentSchemas);
   if (!fields) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
   if (fields.every((field) => endFieldFits(end.kind, resolveBareSchema(field, componentSchemas)))) return undefined;
   const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
@@ -384,7 +384,7 @@ export function endOfIterationProblem(
 }
 
 /**
- * Every field `segments` lands on below `schema`. Each segment is looked up
+ * Every field `path` lands on below `schema`. Each segment is looked up
  * among the properties of the object the path has reached, as
  * `resolveSchemaPath` looks it up — through `$ref`s, `allOf` members and
  * nullable wrappers — and, when that object does not declare it but is a
@@ -394,28 +394,46 @@ export function endOfIterationProblem(
  * a `oneOf` of two objects that each declare `has_more`). `undefined` when
  * the object, or any of its variants, lacks the segment. A variant that is
  * itself such a union declares no properties of its own
- * (`objectProperties`), so it lacks every segment.
+ * (`objectProperties`), so it lacks every segment. The walk goes one
+ * segment at a time over every schema reached so far, each counted once —
+ * by its `$ref`, else by the schema itself — so a component several
+ * variants reach is walked on once, however many variants reach it and
+ * however long the path.
  */
 function fieldsAtPath(
   schema: SchemaObject,
-  segments: readonly string[],
+  path: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject[] | undefined {
-  if (segments.length === 0) return [schema];
-  const [segment, ...rest] = segments;
-  const own = objectProperties(schema, componentSchemas)[segment];
-  if (own) return fieldsAtPath(own, rest, componentSchemas);
-  const bare = resolveBareSchema(schema, componentSchemas);
-  const variants = (bare.oneOf ?? bare.anyOf ?? []).filter((variant) => !isNullSchema(variant));
-  if (variants.length === 0) return undefined;
-  const fields: SchemaObject[] = [];
-  for (const variant of variants) {
-    const field = objectProperties(variant, componentSchemas)[segment];
-    const reached = field && fieldsAtPath(field, rest, componentSchemas);
-    if (!reached) return undefined;
-    fields.push(...reached);
+  let reached = [schema];
+  for (const segment of path.split('.')) {
+    const next = new Map<string | SchemaObject, SchemaObject>();
+    for (const node of reached) {
+      const fields = fieldsNamed(node, segment, componentSchemas);
+      if (!fields) return undefined;
+      for (const field of fields) next.set(field.$ref ?? field, field);
+    }
+    reached = [...next.values()];
   }
-  return fields;
+  return reached;
+}
+
+/**
+ * The fields `segment` names in `node` (`fieldsAtPath`): its own property of
+ * that name, else that property in each non-null variant of the
+ * `oneOf`/`anyOf` `node` is. `undefined` when `node`, or any variant, lacks it.
+ */
+function fieldsNamed(
+  node: SchemaObject,
+  segment: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject[] | undefined {
+  const own = objectProperties(node, componentSchemas)[segment];
+  if (own) return [own];
+  const bare = resolveBareSchema(node, componentSchemas);
+  const variants = (bare.oneOf ?? bare.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+  const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
+  return fields.length > 0 && fields.every((field) => field !== undefined) ? fields : undefined;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
