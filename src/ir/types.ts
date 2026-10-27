@@ -649,8 +649,10 @@ export type PaginationStrategy = 'cursor' | 'offset' | 'page' | 'link-header';
  * - `totalPages` — an integer count of pages; stop once the pages fetched so
  *   far reach it. For the `page` strategy that is
  *   `page - pageStart + 1 >= totalPages` — `page >= totalPages` when pages
- *   start at 1, `page + 1 >= totalPages` when they start at 0 — and for
- *   `offset` it is `floor(offset / limit) + 1 >= totalPages`.
+ *   start at 1, `page + 1 >= totalPages` when they start at 0 — for
+ *   `offset` it is `floor(offset / limit) + 1 >= totalPages`, and for
+ *   `cursor`, whose opaque cursor carries no page number, it is the number
+ *   of requests made so far `>= totalPages`.
  * - `totalCount` — an integer count of items; stop once the items received
  *   so far reach it.
  *
