@@ -39,9 +39,9 @@ import type { ServerChange, ServerVariableChange } from './types.js';
  * collected on one `server-modified` carrying the new document's spelling of
  * the template; a change to a variable the template never references is
  * additive whatever its kind, since no resolved URL can move, and so is a
- * changed default that leaves the resolved URL the same in its RFC 3986 form
- * (see `diffServerVariables`). Descriptions are not compared, as nowhere else
- * in the differ.
+ * changed default that moves no resolved URL in its RFC 3986 form (see
+ * `diffServerVariables`). Descriptions are not compared, as nowhere else in
+ * the differ.
  *
  * OpenAPI's default server is one thing however a document spells it (#291):
  * no `servers`, `servers: []`, and `servers: [{ url: '/' }]` (description and
@@ -236,10 +236,13 @@ function sameResolvedUrl(a: ServerEntry, b: ServerEntry): boolean {
  * `default`, or from a value the caller picks, so removing the variable,
  * changing its default or narrowing its values moves a resolved URL some
  * caller was built on: breaking. A changed default moves nothing, though,
- * when the old entry with only the new default swapped in resolves to the
- * same URL through `normalizeServerUrl`, as when only the host's case
- * changed (#406): that change is additive, with `details` saying why, and
- * is still reported, since defaults are compared as written. A declared
+ * when the template with only that variable filled in reads the same
+ * through `normalizeServerUrl` from either default, as when only the host's
+ * case changed (#406): that change is additive, with `details` saying why,
+ * and is still reported, since defaults are compared as written. The
+ * template's other placeholders are kept rather than filled from their
+ * defaults, since a caller may pick any value for them and
+ * `normalizeServerUrl` folds only what no such value can change. A declared
  * variable the template never references (`serverUrlPlaceholders` does not
  * list it; the parser keeps it as written) cannot reach any resolved URL, so
  * the same differences take nothing away from any caller and are additive,
@@ -285,12 +288,18 @@ function diffServerVariables(oldServer: ServerEntry, newServer: ServerEntry): Se
       };
       // The default is what a caller gets without choosing, so when the
       // template references the variable this moves the server's resolved
-      // URL whether or not it is servers[0], unless swapping in the new
-      // default alone leaves that URL the same in its RFC 3986 form, as one
-      // that only changes the host's case does (#406).
+      // URL whether or not it is servers[0], unless the template with only
+      // this variable filled in is one URL in its RFC 3986 form from either
+      // default, as when only the host's case changes (#406). The other
+      // placeholders stay, since a caller may pick any value for them: beside
+      // `{scheme}`, `{port}` going from `443` to `''` moves an `http` caller
+      // from port 443 to 80.
       const sameUrl =
         referenced.has(name) &&
-        sameResolvedUrl(oldServer, { url: oldServer.url, variables: { ...oldServer.variables, [name]: newVar } });
+        sameResolvedUrl(
+          { url: oldServer.url, variables: { [name]: oldVar } },
+          { url: oldServer.url, variables: { [name]: newVar } },
+        );
       changes.push(
         sameUrl
           ? {

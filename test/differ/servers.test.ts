@@ -773,6 +773,52 @@ describe('diffServers', () => {
         together.map((c) => (c.kind === 'server-modified' ? c.variableChanges.map((vc) => vc.classification) : c.kind)),
       ).toEqual([['breaking', 'breaking']]);
     });
+
+    it('still reports a default as breaking when it moves the URL under a value picked for another variable, such as `{port}` beside `{scheme}`', () => {
+      // Under the default scheme, `https`, `:443` and `:` are both the default
+      // port, but a caller who picks `http` moves from port 443 to port 80.
+      const template = '{scheme}://pets.example.com:{port}';
+      const httpsFirst = { default: 'https', enum: ['https', 'http'] };
+      const before = spec([server(template, { scheme: httpsFirst, port: { default: '443' } })]);
+      const after = spec([server(template, { scheme: httpsFirst, port: { default: '' } })]);
+      expect(diffServers(before, after)).toEqual([
+        {
+          kind: 'server-modified',
+          url: template,
+          variableChanges: [
+            {
+              kind: 'variable-default-changed',
+              variableName: 'port',
+              classification: 'breaking',
+              oldDefault: '443',
+              newDefault: '',
+              details: "default changed from '443' to ''",
+            },
+          ],
+          classification: 'breaking',
+        },
+      ]);
+      // `oagen diff` exits 2.
+      expect(diffSpecs(before, after).summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+
+      // `http` first and `80` dropped: a caller who picks `https` moves from port 80 to port 443.
+      const httpFirst = { default: 'http', enum: ['http', 'https'] };
+      expect(
+        diffServers(
+          spec([server(template, { scheme: httpFirst, port: { default: '80' } })]),
+          spec([server(template, { scheme: httpFirst, port: { default: '' } })]),
+        ).map((c) => [c.kind, c.classification]),
+      ).toEqual([['server-modified', 'breaking']]);
+
+      // With the scheme written out, no value a caller picks moves it.
+      const fixedScheme = 'https://pets.example.com:{port}';
+      expect(
+        diffServers(
+          spec([server(fixedScheme, { port: { default: '443' } })]),
+          spec([server(fixedScheme, { port: { default: '' } })]),
+        ).map((c) => [c.kind, c.classification]),
+      ).toEqual([['server-modified', 'additive']]);
+    });
   });
 });
 

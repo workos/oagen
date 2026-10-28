@@ -454,15 +454,16 @@ export interface OperationModified {
    * or its resolved URL moved: the first entry's resolved URL changed or
    * disappeared (`base-url-changed`), an entry removed (`server-removed`),
    * or, on a `server-modified`, a variable the template references removed,
-   * its default changed so that the resolved URL moves, an enum put on it or
-   * a value taken off it. Additive otherwise: an entry added, a first entry
+   * its default changed so that a resolved URL moves, an enum put on it or a
+   * value taken off it. Additive otherwise: an entry added, a first entry
    * appearing where there was none, a variable added, an enum lifted or a
-   * value added to it, a default changed to one that resolves to the same URL
-   * in its RFC 3986 form (a host that only changed case, #406), and any
-   * change to a variable the template never references. The operation
-   * is breaking for its servers exactly when one entry of `serverChanges`
-   * is. A webhook carries no `servers` in the IR (`Webhook` has no such
-   * field), so a `webhook-modified` change has no such flag.
+   * value added to it, a default changed that moves no resolved URL in its
+   * RFC 3986 form, whatever values a caller picks for the other variables
+   * (a host that only changed case, #406), and any change to a variable the
+   * template never references. The operation is breaking for its servers
+   * exactly when one entry of `serverChanges` is. A webhook carries no
+   * `servers` in the IR (`Webhook` has no such field), so a
+   * `webhook-modified` change has no such flag.
    */
   serversChanged: boolean;
   /**
@@ -1022,9 +1023,13 @@ export interface ServerModified {
  * additive case — those four kinds only — `details` says so; the three kinds
  * that are additive for any variable keep their shape. A referenced
  * variable's default changed is additive too when it moves nothing: when the
- * old entry with only the new default swapped in resolves to the same URL in
- * its RFC 3986 form (`normalizeServerUrl`), as when only the host's case
- * changed (#406). `details` then says so.
+ * template with only that variable filled in is one URL in its RFC 3986 form
+ * (`normalizeServerUrl`) from either default, as when only the host's case
+ * changed (#406); `details` then says so. The other placeholders are kept
+ * rather than filled from their defaults, so that holds whatever values a
+ * caller picks for them: in `{scheme}://pets.example.com:{port}`, `port`
+ * going from `443` to `''` stays breaking, since a caller who picks `http`
+ * moves from port 443 to 80.
  */
 export interface ServerVariableChange {
   kind:
@@ -1049,7 +1054,7 @@ export interface ServerVariableChange {
    * template never references, every change that would otherwise be breaking
    * also carries (appended after `; ` when there is other text) `{name} is
    * not in the URL template, so no resolved URL moves`. A default changed on a
-   * referenced variable without moving the resolved URL carries `either
+   * referenced variable without moving any resolved URL carries `either
    * default resolves to the same URL in its RFC 3986 form` after its text the
    * same way.
    */

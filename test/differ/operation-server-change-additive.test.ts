@@ -295,6 +295,36 @@ describe("diffOperations – a server change's classification (issue #299)", () 
       });
     });
 
+    it('a referenced default that moves the URL only under a value picked for another variable, as on the document (#406)', () => {
+      // `{port}` from `443` to `''` moves a caller who picks `http` to port 80.
+      const scheme = { default: 'https', enum: ['https', 'http'] };
+      const url = '{scheme}://notes.example.com:{port}';
+      const oldServers = [{ url, variables: { scheme, port: { default: '443' } } }];
+      const newServers = [{ url, variables: { scheme, port: { default: '' } } }];
+      const change = modified(withServers(oldServers), withServers(newServers));
+      expect(change).toMatchObject({
+        serversChanged: true,
+        serverChanges: [
+          {
+            kind: 'server-modified',
+            url,
+            variableChanges: [
+              {
+                kind: 'variable-default-changed',
+                variableName: 'port',
+                oldDefault: '443',
+                newDefault: '',
+                classification: 'breaking',
+              },
+            ],
+            classification: 'breaking',
+          },
+        ],
+        classification: 'breaking',
+      });
+      expect(change.serverChanges).toEqual(diffServers(spec(oldServers), spec(newServers)));
+    });
+
     it('an enum value removed, and an enum put on a referenced variable', () => {
       expect(
         modified(
