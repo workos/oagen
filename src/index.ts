@@ -70,6 +70,7 @@ export {
 // Operation resolution
 export type {
   OperationHint,
+  OperationNaming,
   PaginationHint,
   SplitHint,
   ResolvedOperation,

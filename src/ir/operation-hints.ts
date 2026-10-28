@@ -373,18 +373,30 @@ export function resolveMountTarget(name: string, mounts: Record<string, string>)
 }
 
 /**
+ * Where a method name comes from when no `name` hint sets it: `path` derives
+ * it from the HTTP method and path (`deriveMethodName`); `operationId` takes
+ * the operation's own name when the document declares an `operationId`
+ * (`Operation.name`, as the parser spelled it, in snake_case) and derives it
+ * from the path only for a path-named operation.
+ */
+export type OperationNaming = 'path' | 'operationId';
+
+/**
  * Resolve all operations in the spec, applying hints and mount rules.
  *
  * @param spec - The parsed API spec
  * @param hints - Per-operation overrides keyed by "METHOD /path"
  * @param mountRules - Service name → target service mappings; keys may be
  *   exact names or trailing-`*` prefix patterns (see {@link resolveMountTarget})
+ * @param operationNaming - Where an unhinted method name comes from; `path`
+ *   unless the consumer asks for `operationId` (see {@link OperationNaming})
  * @returns Resolved operations ready for emitter consumption
  */
 export function resolveOperations(
   spec: ApiSpec,
   hints?: Record<string, OperationHint>,
   mountRules?: Record<string, string>,
+  operationNaming: OperationNaming = 'path',
 ): ResolvedOperation[] {
   const resolved: ResolvedOperation[] = [];
   const hintMap = hints ?? {};
@@ -395,8 +407,13 @@ export function resolveOperations(
       const key = `${op.httpMethod.toUpperCase()} ${op.path}`;
       const hint = hintMap[key];
 
-      // Resolve method name: hint > algorithm
-      const methodName = hint?.name ?? deriveMethodName(op, service);
+      // Resolve method name: hint > algorithm, or — when the consumer asked
+      // for `operationId` naming — hint > operationId > algorithm. An operation
+      // the document named then keeps that name (as the parser spelled it, so
+      // an operationIdTransform is honoured), snake_cased; only a path-named
+      // operation gets a name derived from its method and path.
+      const fromOperationId = operationNaming === 'operationId' && op.operationId !== undefined;
+      const methodName = hint?.name ?? (fromOperationId ? toSnake(op.name) : deriveMethodName(op, service));
 
       // Resolve mount target: per-op hint > service mount rule > original service
       const mountOn = hint?.mountOn ?? resolveMountTarget(service.name, mounts);

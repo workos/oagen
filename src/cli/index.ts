@@ -47,6 +47,7 @@ let configTransformSpec:
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
+let configOperationNaming: import('../ir/operation-hints.js').OperationNaming | undefined;
 let configModelHints: Record<string, string> | undefined;
 let configFieldHints: Record<string, Record<string, string>> | undefined;
 let configEmitterOptions: Record<string, Record<string, unknown>> | undefined;
@@ -62,6 +63,7 @@ try {
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
+    configOperationNaming = config.operationNaming;
     configModelHints = config.modelHints;
     configFieldHints = config.fieldHints;
     configEmitterOptions = config.emitterOptions;
@@ -123,6 +125,7 @@ program
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
+      operationNaming: configOperationNaming,
       modelHints: configModelHints,
       fieldHints: configFieldHints,
       emitterOptions: configEmitterOptions?.[opts.lang],
@@ -254,6 +257,7 @@ program
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
+      operationNaming: configOperationNaming,
     }).catch(handleError);
   });
 

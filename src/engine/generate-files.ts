@@ -7,7 +7,7 @@ import {
   collectResponseBodyTypes,
   collectWebhookTypeRefs,
 } from '../ir/types.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { Emitter, EmitterContext, GeneratedFile, OperationsMap } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
@@ -23,6 +23,7 @@ export function buildEmitterContext(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    operationNaming?: OperationNaming;
     modelHints?: Record<string, string>;
     emitterOptions?: Record<string, unknown>;
     target?: string;
@@ -31,7 +32,12 @@ export function buildEmitterContext(
     presentServiceKeys?: Set<string>;
   },
 ): EmitterContext {
-  const resolvedOperations = resolveOperations(spec, options.operationHints, options.mountRules);
+  const resolvedOperations = resolveOperations(
+    spec,
+    options.operationHints,
+    options.mountRules,
+    options.operationNaming,
+  );
 
   // In a scoped run, derive the model/enum allow-lists = names reachable from the
   // SELECTED source services only (those whose post-mount target is selected).
@@ -311,6 +317,7 @@ export function generateFiles(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    operationNaming?: OperationNaming;
     modelHints?: Record<string, string>;
     emitterOptions?: Record<string, unknown>;
     target?: string;

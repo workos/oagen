@@ -263,6 +263,13 @@ export type SecurityRequirementSet = SecurityRequirement[];
 export interface Operation {
   name: string;
   /**
+   * The operation's `operationId`, verbatim, when the document declares one.
+   * `name` is what the parser made of it (`operationIdTransform` applied);
+   * this says that `name` came from one at all, which is what
+   * `resolveOperations` reads to prefer it over the path-derived method name.
+   */
+  operationId?: string;
+  /**
    * The `summary` alone: the OpenAPI operation's own, or — when the operation
    * declares none with non-whitespace content — the `summary` of the Path
    * Item it sits on (the `paths` entry, or the `components/pathItems` item a

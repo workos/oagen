@@ -442,6 +442,30 @@ describe('extractOperations', () => {
     expect(services[0].operations[0].name).toBe('FooController_bar');
   });
 
+  it('carries the operationId verbatim beside the name the transform made of it', () => {
+    const paths = {
+      '/foo': {
+        get: {
+          operationId: 'FooController_bar[0]',
+          responses: { '200': { description: 'ok' } },
+        },
+        post: {
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths, (id) => id.replace(/Controller_/, '.').replace(/\[\d+\]$/, ''));
+    const [named, pathNamed] = services[0].operations;
+    // The transform (and the parser's own `[n]` stripping) shape `name`; the
+    // id itself is kept as the document wrote it, overload marker included.
+    expect(named.name).toBe('Foo.bar');
+    expect(named.operationId).toBe('FooController_bar[0]');
+    // A path-named operation has no key at all, not an undefined one.
+    expect(pathNamed.name).toBe('create');
+    expect('operationId' in pathNamed).toBe(false);
+  });
+
   it('reads x-oagen-async extension', () => {
     const paths = {
       '/sync': {

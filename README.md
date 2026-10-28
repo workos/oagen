@@ -168,7 +168,7 @@ See [`src/ir/sdk-behavior.ts`](src/ir/sdk-behavior.ts) for all interfaces and de
 
 ## Operation Resolution
 
-`resolveOperations(spec, hints?, mountRules?)` derives method names and mount targets for every operation in the spec. The algorithm produces a snake_case name from the HTTP method and path, then applies optional overrides from a hint map.
+`resolveOperations(spec, hints?, mountRules?, operationNaming?)` derives method names and mount targets for every operation in the spec. The algorithm produces a snake_case name from the HTTP method and path, then applies optional overrides from a hint map. With `operationNaming: 'operationId'`, an operation the document names keeps its `operationId`-derived name (`Operation.name`, so `operationIdTransform` applies) in snake_case instead, and only a path-named operation goes through the algorithm; a hint still overrides either.
 
 Emitters consume `ctx.resolvedOperations` instead of computing names independently, ensuring all SDKs use the same method names (converted to each language's convention).
 

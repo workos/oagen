@@ -267,6 +267,61 @@ describe('resolveOperations', () => {
     expect(resolved[0].methodName).toBe('get_authorization_url');
   });
 
+  describe('operationNaming: operationId prefers the operationId-derived name', () => {
+    /** An operation the document named: `name` is what the parser made of the id. */
+    function named(httpMethod: HttpMethod, path: string, operationId: string, name: string): Operation {
+      return { ...op(httpMethod, path, name), operationId };
+    }
+
+    it('snake_cases the operationId-derived name instead of deriving one from the path', () => {
+      const s = spec([
+        svc('SSO', [
+          named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl'),
+          named('post', '/sso/token', 'exchangeCode', 'exchangeCode'),
+          named('get', '/sso/profile', 'getProfileAndToken', 'getProfileAndToken'),
+        ]),
+      ]);
+
+      const resolved = resolveOperations(s, undefined, undefined, 'operationId');
+      expect(resolved.map((r) => r.methodName)).toEqual([
+        'get_authorization_url',
+        'exchange_code',
+        'get_profile_and_token',
+      ]);
+      // The algorithm alone would have said otherwise for every one of them.
+      expect(deriveMethodName(s.services[0].operations[0], s.services[0])).toBe('authorize_sso');
+    });
+
+    it('is opt-in: the default keeps every name path-derived, operationId or not', () => {
+      const s = spec([svc('SSO', [named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl')])]);
+
+      expect(resolveOperations(s)[0].methodName).toBe('authorize_sso');
+      expect(resolveOperations(s, undefined, undefined, 'path')[0].methodName).toBe('authorize_sso');
+    });
+
+    it('reads the parser-spelled name, not the raw id, so an operationIdTransform is honoured', () => {
+      // `AgentBlueprintsController_create` is spelled `create` by the WorkOS transform.
+      const s = spec([
+        svc('AgentBlueprints', [named('post', '/agent_blueprints', 'AgentBlueprintsController_create', 'create')]),
+      ]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId')[0].methodName).toBe('create');
+    });
+
+    it('still yields to an explicit name hint', () => {
+      const s = spec([svc('SSO', [named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl')])]);
+      const hints: Record<string, OperationHint> = { 'GET /sso/authorize': { name: 'authorize' } };
+
+      expect(resolveOperations(s, hints, undefined, 'operationId')[0].methodName).toBe('authorize');
+    });
+
+    it('leaves a path-named operation to the algorithm, whatever name the parser gave it', () => {
+      const s = spec([svc('SSO', [op('get', '/sso/authorize', 'listAuthorize2')])]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId')[0].methodName).toBe('authorize_sso');
+    });
+  });
+
   it('applies mountOn hint override', () => {
     const s = spec([svc('Organizations', [op('get', '/organizations/{id}/audit_logs_retention')])]);
     const hints: Record<string, OperationHint> = {
