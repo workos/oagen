@@ -239,6 +239,149 @@ describe('path-named qualifiers (issue #288)', () => {
     });
   });
 
+  it('joins the nested collection only when a later pass tells the two apart (issue #402)', () => {
+    // The issue repro. `/notes/notes` has nothing `/notes` lacks for a later
+    // pass to read — no parameter, no root word, no segment between the
+    // service and the resource, no plural — so joined at `listNotes` the two
+    // would be numbered, and the nested collection that had the name would
+    // be `listNotes2`. The name counts as taken instead, and the service's
+    // own path is numbered on its plain name beside the operationId.
+    const repro: Paths = {
+      '/notes': { get: json },
+      '/notes/notes': { get: json },
+      '/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+    };
+    expect(services(repro)).toEqual([
+      {
+        name: 'Notes',
+        operations: ['list2: GET /notes', 'listNotes: GET /notes/notes', 'list: GET /notes/{noteId}/revisions'],
+      },
+    ]);
+    expect(names(reversed(repro))).toEqual(names(repro));
+    // The name `/notes/notes` has without the operationId, which adding it leaves alone.
+    expect(names({ '/notes': { get: json }, '/notes/notes': { get: json } })).toEqual({
+      'GET /notes': 'Notes.list',
+      'GET /notes/notes': 'Notes.listNotes',
+    });
+    // The same under an API root, for another method, and for a segment
+    // between the service and the resource that repeats the noun the name
+    // already ends with.
+    expect(
+      names({
+        '/api/notes': { get: json },
+        '/api/notes/notes': { get: json },
+        '/api/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /api/notes': 'Notes.list2',
+      'GET /api/notes/notes': 'Notes.listNotes',
+      'GET /api/notes/{noteId}/revisions': 'Notes.list',
+    });
+    expect(
+      names({
+        '/notes': { put: json },
+        '/notes/notes': { put: json },
+        '/notes/{noteId}/revisions': { put: withId('update', 'noteId') },
+      }),
+    ).toEqual({
+      'PUT /notes': 'Notes.update2',
+      'PUT /notes/notes': 'Notes.updateNotes',
+      'PUT /notes/{noteId}/revisions': 'Notes.update',
+    });
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/notes/notes': { get: json },
+        '/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.list2',
+      'GET /notes/notes/notes': 'Notes.listNotes',
+      'GET /notes/{noteId}/revisions': 'Notes.list',
+    });
+    // One holder no later pass can tell from `/notes` is enough to keep the
+    // name taken, while the parameter still tells the other holder apart.
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/notes': { get: json },
+        '/notes/{noteId}/notes': { get: op('noteId') },
+        '/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.list2',
+      'GET /notes/notes': 'Notes.listNotes',
+      'GET /notes/{noteId}/notes': 'Notes.listNotesByNoteId',
+      'GET /notes/{noteId}/revisions': 'Notes.list',
+    });
+    // Whatever a later pass reads still joins, as before: a segment between
+    // the service and the resource, a root word only one of them skipped, or
+    // the plural only the nested item can take back.
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/archive/notes': { get: json },
+        '/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.listNotes',
+      'GET /notes/archive/notes': 'Notes.listNotesArchive',
+      'GET /notes/{noteId}/revisions': 'Notes.list',
+    });
+    expect(
+      names({
+        '/api/notes': { get: json },
+        '/api/v1/notes/notes': { get: json },
+        '/api/notes/{noteId}/revisions': { get: withId('list', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /api/notes': 'Notes.listNotes',
+      'GET /api/v1/notes/notes': 'Notes.listNotesV1',
+      'GET /api/notes/{noteId}/revisions': 'Notes.list',
+    });
+    expect(
+      names({
+        '/notes/{noteId}': { get: op('noteId') },
+        '/notes/notes/{noteId}': { get: op('noteId') },
+        '/notes/{noteId}/revisions/{revisionId}': { get: withId('get', 'noteId', 'revisionId') },
+      }),
+    ).toEqual({
+      'GET /notes/{noteId}': 'Notes.getNote',
+      'GET /notes/notes/{noteId}': 'Notes.getNotes',
+      'GET /notes/{noteId}/revisions/{revisionId}': 'Notes.get',
+    });
+    // But not when the name that pass would give is taken: beside
+    // `operationId: listNotesByNoteId` the parameter has nothing left to give
+    // `/notes/{noteId}/notes`, which keeps `listNotes`, and beside
+    // `operationId: getNotes` the nested item keeps `getNote`.
+    expect(
+      names({
+        '/notes': { get: json },
+        '/notes/{noteId}/notes': { get: op('noteId') },
+        '/api/v1/{orgId}/notes': { get: withId('list', 'orgId') },
+        '/notes/{noteId}/pinned': { post: withId('listNotesByNoteId', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes': 'Notes.list2',
+      'GET /notes/{noteId}/notes': 'Notes.listNotes',
+      'GET /api/v1/{orgId}/notes': 'Notes.list',
+      'POST /notes/{noteId}/pinned': 'Notes.listNotesByNoteId',
+    });
+    expect(
+      names({
+        '/notes/{noteId}': { get: op('noteId') },
+        '/notes/notes/{noteId}': { get: op('noteId') },
+        '/notes/{noteId}/revisions/{revisionId}': { get: withId('get', 'noteId', 'revisionId') },
+        '/notes/pinned/{noteId}': { get: withId('getNotes', 'noteId') },
+      }),
+    ).toEqual({
+      'GET /notes/{noteId}': 'Notes.get2',
+      'GET /notes/notes/{noteId}': 'Notes.getNote',
+      'GET /notes/{noteId}/revisions/{revisionId}': 'Notes.get',
+      'GET /notes/pinned/{noteId}': 'Notes.getNotes',
+    });
+  });
+
   it('skips a By<Param> name an operationId holds, and numbers the plain name only when nothing is left', () => {
     expect(
       names({

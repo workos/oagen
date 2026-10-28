@@ -1538,12 +1538,15 @@ function inferAction(
  * a name another operation had with the number then landing on it
  * (`/org/members/archived` beside `/org/archived_members` is never
  * `listArchivedMembers2`, and `/api/notes` beside `operationId: listNotes` is
- * never `listNotes2`) — unless every operation that has it is path-named and
- * names the same noun, which the member then joins (nameIsFree): `/notes`
- * restoring `Notes` beside `/notes/{noteId}/notes` is `listNotes` with the
- * nested collection `listNotesByNoteId`; and members whose proposals say the
- * same thing take one spelling and stay one group for the next pass, numbered
- * on it when nothing after tells them apart. A qualifier never puts the
+ * never `listNotes2`) — unless every operation that has it is path-named,
+ * names the same noun and is one a later pass tells from the member, which
+ * the member then joins (nameIsFree): `/notes` restoring `Notes` beside
+ * `/notes/{noteId}/notes` is `listNotes` with the nested collection
+ * `listNotesByNoteId`, while `/notes/notes`, whose path has nothing `/notes`
+ * lacks, keeps `listNotes` and `/notes` is numbered on its plain name,
+ * `list2`; and members whose proposals say the same thing take one spelling
+ * and stay one group for the next pass, numbered on it when nothing after
+ * tells them apart. A qualifier never puts the
  * same word twice in a row into a name, whether the name already ends with it
  * (`listNotes` never becomes `listNotesNotes`) or the qualifier repeats it
  * itself (`/api/analytics/analytics/teams` → `listTeamsAnalytics`), compared
@@ -1552,9 +1555,10 @@ function inferAction(
  *   1. the resource noun (inferResourceFromPath); for the service's own
  *      path, whose plain name left that noun off, the service noun
  *      (inferServiceNoun) when a path-named operation outside the group
- *      already carries it under the name it would make, so that `/notes`
- *      beside `operationId: list` joins `/notes/{noteId}/notes` at
- *      `listNotes` and the parameter then tells them apart;
+ *      already carries it under the name it would make and a later pass
+ *      can tell the two apart, so that `/notes` beside `operationId: list`
+ *      joins `/notes/{noteId}/notes` at `listNotes` and the parameter then
+ *      tells them apart;
  *   2. the path segments between the service and the resource
  *      (inferDeeperContext), each singular when a path parameter follows it
  *      (pathSegmentNoun): `GET /users/{id}/legacy/factors` next to
@@ -1653,7 +1657,7 @@ function disambiguateOperationNames(
   };
   /** One pass on one group, through the rule every pass shares (qualifyGroup). */
   const qualify = (group: Operation[], proposal: (op: Operation) => string) =>
-    qualifyGroup(group, operations, pathNamed, nounOf, proposal, rename);
+    qualifyGroup(group, operations, pathNamed, nounOf, apart, proposal, rename);
 
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
@@ -1676,12 +1680,14 @@ function disambiguateOperationNames(
       // `/notes/{noteId}/notes` as `listNotes` — so the two take one spelling
       // (nameIsFree) and the parameters tell them apart, `listNotes` and
       // `listNotesByNoteId`, rather than the nested collection keeping the
-      // name the service's own path restores beside an operationId.
+      // name the service's own path restores beside an operationId. Only
+      // when a later pass can (apart): `/notes/notes` has nothing `/notes`
+      // lacks, and joined the two would only be numbered.
       const noun = inferServiceNoun(op.path, root);
       if (noun === null) return null;
       const name = appendQualifier(op.name, noun);
       const held = operations.some((other) => !group.includes(other) && pathNamed.has(other) && other.name === name);
-      return held && nameIsFree(group, operations, pathNamed, nounOf, op, name) ? noun : null;
+      return held && nameIsFree(group, operations, pathNamed, nounOf, apart, op, name) ? noun : null;
     },
     (group) => {
       // Singular, like the resource of an item operation, unless that
@@ -1786,13 +1792,6 @@ function disambiguateOperationNames(
     },
   ];
 
-  for (const qualifier of qualifiers) {
-    for (const group of collidingGroups(operations)) {
-      const words = qualifier(group);
-      qualify(group, (op) => appendQualifier(op.name, words(op)));
-    }
-  }
-
   // The plural a member could take back: none for an operationId-named
   // operation, and for a path-named one only while its name is still the one
   // it was built with — no qualifier above has extended it. Like every pass,
@@ -1807,6 +1806,38 @@ function disambiguateOperationNames(
     if (op.name !== fallbackOperationName(op.httpMethod, op.path, root, actions)) return null;
     return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
+
+  // Whether a later pass would tell `op`, once it has `name`, from `other`,
+  // a path-named operation of its noun that has it — what joining `other`
+  // there counts on (nameIsFree). One of the qualifiers after the first,
+  // which proposes such a join, run on the two alone, must give one of them
+  // a name no other operation has (`listNotesByNoteId` for
+  // `/notes/{noteId}/notes` beside `/notes`), or the plural must, which
+  // `other` can still take back and `op`, its name extended, cannot.
+  // Otherwise the two could only be numbered, the number landing on the name
+  // one of them had: `/notes/notes` has nothing `/notes` lacks, and
+  // `/notes/archive/notes` nothing but a `listNotesArchive` an operationId
+  // may hold.
+  const apart = (op: Operation, other: Operation, name: string): boolean => {
+    const free = (next: string) => next !== name && !operations.some((x) => x !== op && x !== other && x.name === next);
+    const plural = pluralOf(other);
+    return (
+      (plural !== null && free(plural)) ||
+      qualifiers.slice(1).some((qualifier) => {
+        const words = qualifier([op, other]);
+        const [own, theirs] = [appendQualifier(name, words(op)), appendQualifier(name, words(other))];
+        return own !== theirs && (free(own) || free(theirs));
+      })
+    );
+  };
+
+  for (const qualifier of qualifiers) {
+    for (const group of collidingGroups(operations)) {
+      const words = qualifier(group);
+      qualify(group, (op) => appendQualifier(op.name, words(op)));
+    }
+  }
+
   for (const group of collidingGroups(operations)) {
     // Like every qualifier, only when it tells the group apart: beside an
     // operationId, which has no plural, or beside a path that spells the
@@ -2146,6 +2177,7 @@ function qualifyGroup(
   operations: readonly Operation[],
   pathNamed: ReadonlySet<Operation>,
   nounOf: (op: Operation) => string | null,
+  apart: (op: Operation, other: Operation, name: string) => boolean,
   proposal: (op: Operation) => string,
   rename: (op: Operation, name: string) => void,
 ): void {
@@ -2157,7 +2189,7 @@ function qualifyGroup(
   }
   if (clusters.size <= 1) return;
   for (const [name, members] of clusters) {
-    if (!members.every((op) => nameIsFree(group, operations, pathNamed, nounOf, op, name))) continue;
+    if (!members.every((op) => nameIsFree(group, operations, pathNamed, nounOf, apart, op, name))) continue;
     for (const op of members) {
       if (pathNamed.has(op)) rename(op, name);
     }
@@ -2166,22 +2198,26 @@ function qualifyGroup(
 
 /**
  * Whether `name` is free for `op`, a member of `group`: no operation outside
- * the group has it, or every operation that has it is path-named and names
- * the noun `op` names (`nounOf`, compared as sameNoun compares) — the nested
- * collection of the service's own word, `/notes/{noteId}/notes` as
- * `listNotes` beside `/notes`. Such a name the member takes and joins the
- * group of, and the passes after tell the two apart by what does differ
- * between their paths: `listNotes` and `listNotesByNoteId`, `getNote` and
- * `getNoteByChildId`. A name an operationId-named operation has is never
- * free, nor is one a path-named operation of another noun has:
- * `listArchivedMembers` on `/org/archived_members` beside the `Archived` of
- * `/org/members/archived`, which nothing after could tell apart.
+ * the group has it, or every operation that has it is path-named, names the
+ * noun `op` names (`nounOf`, compared as sameNoun compares) and is one a
+ * later pass tells from `op` (`apart`) — the nested collection of the
+ * service's own word, `/notes/{noteId}/notes` as `listNotes` beside `/notes`.
+ * Such a name the member takes and joins the group of, and the passes after
+ * tell the two apart by what does differ between their paths: `listNotes`
+ * and `listNotesByNoteId`, `getNote` and `getNoteByChildId`. A name an
+ * operationId-named operation has is never free, nor is one a path-named
+ * operation of another noun has: `listArchivedMembers` on
+ * `/org/archived_members` beside the `Archived` of `/org/members/archived`,
+ * which nothing after could tell apart; nor `listNotes` on `/notes/notes`
+ * beside `/notes`, whose path has nothing `/notes` lacks: joined, the two
+ * would only be numbered, the number landing on the name one of them had.
  */
 function nameIsFree(
   group: readonly Operation[],
   operations: readonly Operation[],
   pathNamed: ReadonlySet<Operation>,
   nounOf: (op: Operation) => string | null,
+  apart: (op: Operation, other: Operation, name: string) => boolean,
   op: Operation,
   name: string,
 ): boolean {
@@ -2189,7 +2225,12 @@ function nameIsFree(
   return operations.every((other) => {
     if (group.includes(other) || other.name !== name) return true;
     const otherNoun = pathNamed.has(other) ? nounOf(other) : null;
-    return noun !== null && otherNoun !== null && sameNoun(otherNoun.toLowerCase(), noun.toLowerCase());
+    return (
+      noun !== null &&
+      otherNoun !== null &&
+      sameNoun(otherNoun.toLowerCase(), noun.toLowerCase()) &&
+      apart(op, other, name)
+    );
   });
 }
 
