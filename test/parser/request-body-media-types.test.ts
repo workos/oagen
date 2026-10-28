@@ -263,11 +263,12 @@ describe('request body media types are matched by essence (issue #278)', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const spec = await parseSpec(specPath);
       const [op] = spec.services.flatMap((s) => s.operations);
+      // The required flag stays with the declared body, read or not (#388).
       expect(bodyFields(op)).toEqual({
         requestBody: undefined,
         requestBodyEncoding: undefined,
-        requestBodyRequired: undefined,
-        hasFlag: false,
+        requestBodyRequired: true,
+        hasFlag: true,
       });
       expect(op.queryParams.map((p) => p.name)).toEqual(['name']);
       expect(spec.webhooks?.[0].requestBody).toBeUndefined();
@@ -476,11 +477,12 @@ describe('request body media types are matched by essence (issue #278)', () => {
     it('sets no requestBody for a body under an unread media type and says so once, naming the operation and the key', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const { op, inlineModels } = createPet({ 'application/xml': { schema: NAME_SCHEMA } });
+      // The required flag stays with the declared body, read or not (#388).
       expect(bodyFields(op)).toEqual({
         requestBody: undefined,
         requestBodyEncoding: undefined,
-        requestBodyRequired: undefined,
-        hasFlag: false,
+        requestBodyRequired: true,
+        hasFlag: true,
       });
       // The body is still carried, typed under its media type, in `requestBodyContents`.
       expect(inlineModels.map((m) => m.name)).toEqual(['CreatePetApplicationXmlRequest']);

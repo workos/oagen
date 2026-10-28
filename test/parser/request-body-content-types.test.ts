@@ -351,10 +351,10 @@ describe('request bodies keep every media type (issue #278)', () => {
       const op = opsOf(spec).createPet;
       expect(op.requestBody).toBeUndefined();
       expect(op.requestBodyEncoding).toBeUndefined();
-      // Set exactly when `requestBody` is, so neither key exists here.
-      for (const key of ['requestBodyContentType', 'requestBodyRequired']) {
-        expect(Object.keys(op), key).not.toContain(key);
-      }
+      // Set exactly when `requestBody` is, so the key does not exist here.
+      expect(Object.keys(op)).not.toContain('requestBodyContentType');
+      // Set whenever the body declares a media type, read or not (#388).
+      expect(op.requestBodyRequired).toBe(true);
       expect(op.requestBodyContentTypes).toEqual(['application/xml']);
       expect(op.requestBodyContents).toEqual([
         { contentType: 'application/xml', type: { kind: 'model', name: 'CreatePetApplicationXmlRequest' } },

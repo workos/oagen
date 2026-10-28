@@ -359,11 +359,15 @@ export interface Operation {
    */
   requestBodyContentType?: string;
   /**
-   * Whether a caller must send `requestBody`: the Request Body Object's
+   * Whether a caller must send the request body: the Request Body Object's
    * `required`, read after a `components/requestBodies` `$ref` is resolved.
    * OpenAPI defaults the flag to `false`, so a body the document does not
    * mark required comes through as `false`. Present exactly when
-   * `requestBody` is; an operation without a body has no entry.
+   * `requestBodyContentTypes` is — whenever the body declares a media type,
+   * whether it is read as `requestBody` or carried in `requestBodyContents`
+   * alone — so it is set beside every `requestBody` but does not imply one;
+   * an operation without a body, or whose body declares no media type, has
+   * no entry.
    */
   requestBodyRequired?: boolean;
   /**

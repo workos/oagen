@@ -2673,8 +2673,9 @@ function buildOperation(
   // Read off the resolved body so a `components/requestBodies` ref's flag
   // counts. Only `true` makes the body required: OpenAPI defaults the flag
   // to `false`, and a non-boolean value is not a declaration of requiredness.
-  // Set exactly when a body is, so the two fields can be read together.
-  const requestBodyRequired = requestBody !== undefined ? requestBodyObject?.required === true : undefined;
+  // Set exactly when the body declares a media type, read or not, so a body
+  // carried in `requestBodyContents` alone keeps it, as a webhook's does.
+  const requestBodyRequired = requestBodyContentTypes !== undefined ? requestBodyObject?.required === true : undefined;
 
   // The page parameter's first value is read from its schema as written —
   // `schema`, else the picked `content` entry's (`parameterTyping`) — so a
