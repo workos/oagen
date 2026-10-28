@@ -77,7 +77,7 @@ function fieldNames(models: Model[], name: string): string[] | undefined {
 
 const DROPPED = (label: string, keys: string) =>
   `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
-  `(${keys}) is one the parser reads — application/json or a +json media type, ` +
+  `(${keys}) is one the parser reads — application/json or a concrete +json media type, ` +
   `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
   `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`;
 
@@ -695,5 +695,140 @@ describe('request body media types are matched by essence (issue #278)', () => {
       expect(schemalessRequestBodyType('form-data')).toBeUndefined();
       expect(schemalessRequestBodyType('form-urlencoded')).toBeUndefined();
     });
+  });
+});
+
+/**
+ * Issue #387: `requestBodyContentType` is what an emitter sends as the
+ * request's `Content-Type`, so it is never a media range. A body declared
+ * only under a `+json` range (`application/*+json`) is read as one under
+ * `application/*` is: no `requestBody`, a warning, and the body carried in
+ * `requestBodyContents` alone. A response under such a range is still read
+ * as JSON.
+ */
+describe('a +json media range is not read as the request body (issue #387)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('through parseSpec (issue repro)', () => {
+    let dir: string;
+    let specPath: string;
+
+    beforeAll(() => {
+      dir = mkdtempSync(join(tmpdir(), 'oagen-387-'));
+      specPath = join(dir, 'range.json');
+      writeFileSync(
+        specPath,
+        JSON.stringify({
+          openapi: '3.1.0',
+          info: { title: 'range', version: '1' },
+          paths: {
+            '/notes': {
+              post: {
+                operationId: 'createNote',
+                requestBody: { content: { 'application/*': { schema: NAME_SCHEMA } } },
+                responses: ok,
+              },
+            },
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                requestBody: { content: { 'application/*+json': { schema: NAME_SCHEMA } } },
+                responses: ok,
+              },
+            },
+          },
+          webhooks: {
+            petAdopted: {
+              post: { requestBody: { content: { 'application/*+json': { schema: NAME_SCHEMA } } }, responses: {} },
+            },
+          },
+        }),
+      );
+    });
+
+    afterAll(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('reads a body under application/*+json as one under application/*, on an operation and a webhook', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const spec = await parseSpec(specPath);
+      const sites = [...spec.services.flatMap(({ operations }) => operations), ...(spec.webhooks ?? [])];
+      expect(
+        sites.map((site) => ({
+          name: site.name,
+          requestBody: site.requestBody,
+          requestBodyContentType: site.requestBodyContentType,
+          requestBodyContentTypes: site.requestBodyContentTypes,
+          requestBodyContents: site.requestBodyContents?.map(({ type }) => type),
+          requestBodyEncoding: site.requestBodyEncoding,
+        })),
+      ).toEqual([
+        {
+          name: 'createNote',
+          requestBody: undefined,
+          requestBodyContentType: undefined,
+          requestBodyContentTypes: ['application/*'],
+          requestBodyContents: [{ kind: 'model', name: 'CreateNoteApplicationAnyRequest' }],
+          requestBodyEncoding: undefined,
+        },
+        {
+          name: 'createPet',
+          requestBody: undefined,
+          requestBodyContentType: undefined,
+          requestBodyContentTypes: ['application/*+json'],
+          requestBodyContents: [{ kind: 'model', name: 'CreatePetApplicationAnyJsonRequest' }],
+          requestBodyEncoding: undefined,
+        },
+        {
+          name: 'petAdopted',
+          requestBody: undefined,
+          requestBodyContentType: undefined,
+          requestBodyContentTypes: ['application/*+json'],
+          requestBodyContents: [{ kind: 'model', name: 'PetAdoptedApplicationAnyJsonPayload' }],
+          requestBodyEncoding: undefined,
+        },
+      ]);
+      expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+        DROPPED('createNote', 'application/*'),
+        DROPPED('createPet', 'application/*+json'),
+        DROPPED('webhooks.petAdopted.post', 'application/*+json'),
+      ]);
+    });
+  });
+
+  it('reads no +json range, however it is spelled', () => {
+    for (const mediaType of ['application/*+json', '*/*+json', ' APPLICATION/*+JSON ; charset=utf-8']) {
+      expect(
+        selectRequestBodyContent({ content: { [mediaType]: { schema: NAME_SCHEMA } } }),
+        mediaType,
+      ).toBeUndefined();
+    }
+  });
+
+  it('picks a concrete +json media type declared after a range', () => {
+    const { op, inlineModels } = createPet({
+      'application/*+json': { schema: TITLE_SCHEMA },
+      'application/vnd.api+json; charset=utf-8': { schema: NAME_SCHEMA },
+    });
+    expect(op.requestBody).toEqual({ kind: 'model', name: 'CreatePetRequest' });
+    expect(op.requestBodyContentType).toBe('application/vnd.api+json');
+    expect(op.requestBodyEncoding).toBe('json');
+    expect(fieldNames(inlineModels, 'CreatePetRequest')).toEqual(['name']);
+  });
+
+  it('still reads a response declared under application/*+json as JSON', () => {
+    const paths = {
+      '/pets': {
+        get: {
+          operationId: 'getPet',
+          responses: { '200': { description: 'ok', content: { 'application/*+json': { schema: NAME_SCHEMA } } } },
+        },
+      },
+    };
+    const [op] = extractOperations(paths as never).services.flatMap((s) => s.operations);
+    expect(op.response).toEqual({ kind: 'model', name: 'GetPetResponse' });
   });
 });

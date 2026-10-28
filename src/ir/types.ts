@@ -322,8 +322,9 @@ export interface Operation {
    * types are matched by essence — parameters and case aside, so
    * `application/json; charset=utf-8` and `APPLICATION/JSON` are
    * `application/json` — and tried in a fixed order: `application/json`, then
-   * a `+json` media type (`application/vnd.api+json`), then
-   * `multipart/form-data`, then `application/x-www-form-urlencoded`, each
+   * a `+json` media type (`application/vnd.api+json`; never a range such as
+   * `application/*+json`), then `multipart/form-data`, then
+   * `application/x-www-form-urlencoded`, each
    * only when it declares a schema; then `application/octet-stream`, then
    * `text/plain`, with or without one (a schema-less binary body is a binary
    * string, a schema-less text body a string). An inline object body is
