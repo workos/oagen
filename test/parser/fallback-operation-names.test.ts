@@ -683,6 +683,45 @@ describe('plural path names (issue #268)', () => {
     ]);
   });
 
+  it('keeps a plural segment and its singular as two words of a qualifier (issue #377)', () => {
+    const x = (op: object) => ({ ...op, tags: ['X'] });
+    // The issue repro. Singular, the deeper contexts are `NoteNote`, one word
+    // twice in a row, and `Note`: both `listTagsNote`, which tells nothing
+    // apart. As written they are `NotesNote` and `Notes`: two segments,
+    // not a repeat, so the plural tells the paths apart.
+    expect(
+      names({
+        '/x/notes/{id}/note/tags': { get: x(item('id')) },
+        '/x/notes/{id}/tags': { get: x(item('id')) },
+      }),
+    ).toEqual([
+      'listTagsNotesNote            GET    /x/notes/{id}/note/tags',
+      'listTagsNotes                GET    /x/notes/{id}/tags',
+    ]);
+    // The same when the name ends with the plural: `Notes` overlaps it and
+    // `Note`, the next segment, is kept.
+    expect(
+      names({
+        '/x/notes/note/notes': { get: x(ok) },
+        '/x/notes/notes': { get: x(ok) },
+      }),
+    ).toEqual([
+      'listNotesNote                GET    /x/notes/note/notes',
+      'listNotes                    GET    /x/notes/notes',
+    ]);
+    // Still never the same word twice in a row: `NoteNotes` overlaps
+    // `listNotes` with `Note`, and its `Notes` would repeat the name's last word.
+    expect(
+      names({
+        '/x/notes/{id}/notes/notes': { get: x(item('id')) },
+        '/x/y/notes': { get: x(ok) },
+      }),
+    ).toEqual([
+      'listNotes                    GET    /x/notes/{id}/notes/notes',
+      'listNotesY                   GET    /x/y/notes',
+    ]);
+  });
+
   it('keeps a deeper segment as written when the plural is what tells two paths apart (review)', () => {
     // One segment deeper than the issue's repro: the singular `Pet` would
     // give both paths `getToyPet`, so the plural path keeps its spelling.
