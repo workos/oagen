@@ -94,7 +94,7 @@ describe('one untagged operation under a tagged service path leaves the tagged o
         name: 'Pets',
         operations: [
           'listPets: GET /v1/pets',
-          'batchGetPets: POST /v1/pets:batchGet',
+          'createBatchGet: POST /v1/pets:batchGet',
           'getPetExport: GET /v1/pets/{id}/export',
         ],
       },
@@ -104,7 +104,7 @@ describe('one untagged operation under a tagged service path leaves the tagged o
         name: 'Pets',
         operations: [
           'getPetExport: GET /v1/pets/{id}/export',
-          'batchGetPets: POST /v1/pets:batchGet',
+          'createBatchGet: POST /v1/pets:batchGet',
           'listPets: GET /v1/pets',
         ],
       },

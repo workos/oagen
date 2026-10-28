@@ -1193,9 +1193,10 @@ function inferOperationName(
  * `GET /companies/verification/{id}/verification-status` is
  * `getVerificationStatus`.
  *
- * `actions` false skips the first shape, for an operation that gave an
- * action name up to another method on its path (demoteSamePathNames):
- * `POST /pets/bulk-delete` is then `createBulkDelete`.
+ * `actions` false skips the first shape, for an action that gave its name
+ * up to an operationId on its path (demoteSamePathNames) or to the CRUD
+ * operation that could have it (yieldActionNames):
+ * `POST /store/pets/{id}/create` is then `createPetCreate`.
  */
 function fallbackOperationName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string {
   const action = actions ? inferAction(method, path, apiRootLength) : null;
@@ -1304,9 +1305,8 @@ function methodVerbs(method: HttpMethod): string[] {
  * and `batch-get` for a GET, `update-password` for a PUT or PATCH, and not
  * `bulk-delete` for a POST. `list` and `check` count only as the first word
  * (LEADING_ONLY_VERBS), so `wish-list`, `allow-list` and `health-check` carry
- * no verb. Such a segment is the action for that method (inferAction) and
- * keeps the action name when another method on the path would take it too
- * (demoteSamePathNames).
+ * no verb. Such a segment is the action for that method (inferAction), and
+ * for no method of another verb, declared beside it or not.
  */
 function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
   const segments = pathSegments(path);
@@ -1474,28 +1474,38 @@ function inferSingleton(
  *     `GET /pets/update` is `listUpdate` and `GET /pets/last-update` is
  *     `listLastUpdate`;
  *   - a POST on a literal with no parameter before it whose last word is any
- *     CRUD verb (CRUD_VERBS): `POST /pets/bulk-delete`, `POST /users/bulk-update`,
- *     `POST /v1/pets:batchGet`. Such a literal is otherwise read as a
- *     collection (`/pets/search` is `createSearch`), which would make it
- *     `createBulkDelete`. The last word only, so `/pets/delete-candidates`
- *     stays a collection, and a POST only, since a verb that is not the
- *     method's own is not what the method does.
+ *     CRUD verb (CRUD_VERBS): `POST /pets/health-check`. Such a literal is
+ *     otherwise read as a collection (`/pets/search` is `createSearch`). The
+ *     last word only, so `/pets/delete-candidates` stays a collection, and a
+ *     POST only, since a verb that is not the method's own is not what the
+ *     method does.
+ *
+ * A segment is one verb's action, whichever methods the document declares
+ * on it: the verb it carries (segmentCarriesVerb), the first method's in
+ * HTTP_METHODS order when it carries several, else POST's. A method of
+ * another verb is never read as an action on it, so declaring the method
+ * whose action it is takes no name from an operation already there:
+ * `POST /pets/bulk-delete`, `POST /users/bulk-update` and
+ * `POST /v1/pets:batchGet` carry DELETE's, PUT's and GET's verbs and are
+ * `createBulkDelete`, `createBulkUpdate` and `createBatchGet`, and
+ * `POST /users/{id}/update-password` is the singleton
+ * `createUserUpdatePassword`, beside that method or not.
  *
  * The verb is the segment itself. The resource is the singular parent
  * (inferItemParent) when the segment follows a parameter — `adopt` + `Pet` —
  * and otherwise the collection the segment sits under, as
  * inferResourceFromPath reads the path without the segment, so
- * `/pets/bulk-delete` in `Pets` is the bare `bulkDelete` and
- * `/store/pets/bulk-delete` is `bulkDeletePets`. The caller leaves the
+ * `DELETE /pets/bulk-delete` in `Pets` is the bare `bulkDelete` and
+ * `DELETE /store/pets/bulk-delete` is `bulkDeletePets`. The caller leaves the
  * resource off when the verb already ends with it (`restart-id-verification`
  * under `verification` is `restartIdVerification`, see appendQualifier).
  *
  * A custom method written after a colon is read as the segment it is written
  * on followed by the verb (see pathSegments): `/pets/{petId}:adopt` is
  * `{petId}` then `adopt`, so it is the action `adoptPet` exactly as
- * `/pets/{petId}/adopt` is; `/pets:bulkDelete` is read as `/pets/bulkDelete`
- * and is `bulkDelete`; `/pets:search` is read as `/pets/search` and stays a
- * `create`.
+ * `/pets/{petId}/adopt` is; `DELETE /pets:bulkDelete` is read as
+ * `/pets/bulkDelete` and is `bulkDelete`; `/pets:search` is read as
+ * `/pets/search` and stays a `create`.
  */
 function inferAction(
   method: HttpMethod,
@@ -1512,6 +1522,8 @@ function inferAction(
   const ownVerb = segmentCarriesVerb(method, path);
   const verbPhrase = method === 'post' && !afterParam && words.length > 0 && CRUD_VERBS.has(words[words.length - 1]);
   if (!postAction && !ownVerb && !verbPhrase) return null;
+  const owner = HTTP_METHODS.find((m) => segmentCarriesVerb(m, path)) ?? 'post';
+  if (inferVerb(owner, path) !== inferVerb(method, path)) return null;
 
   const resource = afterParam
     ? inferItemParent(segments, apiRootLength)
@@ -1532,9 +1544,11 @@ function inferAction(
  * resolved first (demoteSamePathNames), before the qualifiers below, since
  * every consumer that keys a service's operations by name — the differ among
  * them — would otherwise see one of the two. An action that shares a name
- * with a path-named operation of another shape yields next
- * (yieldActionNames), so `update` stays with `PUT /pets/{id}` and
- * `POST /pets/update` is `updatePets`. A name any pass gives an operation is
+ * with a path-named operation of another shape, or whose name one would have
+ * on the path without the action's verb, yields next (yieldActionNames),
+ * whether or not that operation is declared, so `update` stays with
+ * `PUT /pets/{id}` and `PUT /pets/update` is `updatePets` in a document
+ * with the item or without it. A name any pass gives an operation is
  * checked against every name the service holds, and once every pass has run
  * the one-path rule is checked once more (numberSamePathNames), since a
  * rename can land on a name an operation on the same path already has.
@@ -1695,8 +1709,9 @@ function disambiguateOperationNames(
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
   const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
-  // Then an action beside a CRUD or singleton operation of its name: the
-  // plain name stays with the latter, which the qualifiers would rename.
+  // Then an action beside a CRUD or singleton operation of its name, or one
+  // whose name such an operation would have, declared or not: the plain name
+  // stays with the latter, which the qualifiers would rename.
   for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   // Each qualifier, given the group, is the word or words a path-named
@@ -1969,26 +1984,25 @@ function disambiguateOperationNames(
  * both are path-named and their methods take the same verb (inferVerb): PUT
  * and PATCH are both `update`, so `/pets/{id}` has one `updatePet` for the
  * two, as it always has. Any other sharing hides one of the two from every
- * consumer that keys a service's operations by name, such as the differ, and
- * an action name is where it arises: `bulk-delete` is the action of a DELETE
- * (its own verb) and of a POST (a CRUD verb last), so both would be
- * `bulkDelete`.
+ * consumer that keys a service's operations by name, such as the differ.
+ * Two path-named operations of different verbs never share an action name,
+ * since a segment is one verb's action whichever methods the document
+ * declares on it (inferAction): `POST /pets/bulk-delete` is
+ * `createBulkDelete`, beside `DELETE /pets/bulk-delete`'s `bulkDelete` or
+ * not. What is left is an operationId on the path.
  *
- * The name stays with one verb, and every path-named operation of another
- * verb takes the name it has without the action rule (fallbackOperationName
- * with `actions` false): `POST /pets/bulk-delete` beside a DELETE is
- * `createBulkDelete`, and `POST /users/{id}/update-password` beside a PUT is
- * the singleton `createUserUpdatePassword`. The verb that keeps the name: an
- * operationId-named operation's, since that name is the author's and a
- * path-named sibling steps aside whatever its verb; else the verb the segment
- * carries (segmentCarriesVerb), `delete` for `bulk-delete`, the first
- * method's in HTTP_METHODS order when it carries two; else `create`, POST
- * being the only other method an action is read on (inferAction); else, for
- * a shared name that is no action (PUT and PATCH `updatePet`), the verb of
- * the first method in HTTP_METHODS order. When the name an operation falls back to is
- * still held on the path by an operationId or by another verb — path-named
- * PATCH `updatePet` beside `operationId: updatePet` on the PUT has no action
- * to drop — a numeric suffix free in the service is added, silently, as the
+ * An operationId-named operation keeps its name, since that name is the
+ * author's, and every path-named operation that shares it steps aside
+ * whatever its verb, taking the name it has without the action rule
+ * (fallbackOperationName with `actions` false): `POST /pets/{id}/adopt`
+ * beside `operationId: adoptPet` on the GET is the singleton
+ * `createPetAdopt`. Should two path-named operations of different verbs share
+ * a name on one path — the fallback names give none — the first in
+ * HTTP_METHODS order keeps it and the other steps aside the same way. When
+ * the name an operation falls back to is still held on the path by an
+ * operationId or by another verb — path-named PATCH `updatePet` beside
+ * `operationId: updatePet` on the PUT has no action to drop — a numeric
+ * suffix free in the service is added, silently, as the
  * numeric pass adds one and spelled as it spells it (numberedName:
  * `updatePet2`, and `updateTop10No2` for a PATCH on `/store/top10/{id}`
  * beside `operationId: updateTop10`). Two operationId-named operations on
@@ -2011,8 +2025,6 @@ function demoteSamePathNames(
   const demoted = new Set<Operation>();
   const taken = new Set(operations.map((op) => op.name));
   const verbOf = (op: Operation) => inferVerb(op.httpMethod, op.path);
-  // The verb that keeps a shared action name among path-named operations.
-  const claim = (op: Operation) => (segmentCarriesVerb(op.httpMethod, op.path) ? 0 : op.httpMethod === 'post' ? 1 : 2);
 
   for (const onPath of operationsByPath(operations).values()) {
     const byName = new Map<string, Operation[]>();
@@ -2030,8 +2042,8 @@ function demoteSamePathNames(
         rename(op, next);
         taken.add(next);
       }
-      const keeper =
-        explicit.length > 0 ? null : [...sharing].sort((a, b) => claim(a) - claim(b) || methodOrder(a, b))[0];
+      // `sharing` is in HTTP_METHODS order (operationsByPath).
+      const keeper = explicit.length > 0 ? null : sharing[0];
       const keptVerb = keeper === null ? null : verbOf(keeper);
       for (const op of sharing) {
         if (!pathNamed.has(op) || verbOf(op) === keptVerb) continue;
@@ -2053,29 +2065,35 @@ function demoteSamePathNames(
 }
 
 /**
- * Keep the plain CRUD name with the CRUD operation when an action takes it.
- * `POST /pets/update` is the action `update` — its collection `pets` is the
- * service segment, which a name leaves off — and so is `PUT /pets/{id}`. Left
- * to the qualifiers, the pair would be told apart by `By<Param>`, which
- * renames the PUT to `updateById`, and code calling `update` would then
- * reach `POST /pets/update`. So before the qualifiers run, a path-named
- * action that shares its name with a path-named operation of another shape —
- * a CRUD operation or a singleton, for which inferAction is null, a demoted
- * action among them — is renamed alone. It takes back the collection it
- * dropped, the service noun of the path the action segment sits on
- * (inferServiceNoun of qualifierPath): `updatePets`, `createPets` for
- * `POST /pets/create` beside `POST /pets`, `listAllPets` for
- * `GET /pets/list-all` beside `GET /pets/all`. When that adds nothing —
- * the name already ends with it (`POST /store/pets/{id}/create` is
- * `createPet`, as `POST /store/pets/{id}` is) or there is none
- * (`POST /store/pets/update` is `updatePets`, as `PUT /store/pets` is) — it
- * takes the name it has without the action rule (`createPetCreate`,
- * `createUpdate`) and is read from then on
- * as that shape, like a demoted action (demoteSamePathNames). An action
- * beside an operationId of its name is left to the numeric pass
- * (`adoptPet2`), and two actions of one name to the qualifiers
- * (`adoptPetRescue`). Groups come in name order and the renames depend only
- * on each operation's own path, so the result is deterministic. Returns the
+ * Keep the plain CRUD name with the CRUD operation an action could take it
+ * from. `PUT /pets/update` is the action `update` — its collection `pets` is
+ * the service segment, which a name leaves off — and so is `PUT /pets/{id}`.
+ * Left to the qualifiers, the pair would be told apart by `By<Param>`, which
+ * renames the PUT on the item to `updateById`, and code calling `update`
+ * would then reach `PUT /pets/update`. Renaming the action only once the
+ * other is declared would not do either: a document that adds `PUT /pets/{id}`
+ * would hand it the action's name, and `oagen diff` would read the addition
+ * as the action changing path. So before the qualifiers run, a path-named
+ * action is renamed alone, whether or not the other operation is declared,
+ * when its name is the one its method gives the path without the verb its
+ * segment starts with (verblessName): `update` for `PUT /pets/update`, as
+ * `PUT /pets` is. So is any other path-named action that shares its name
+ * with a path-named operation of another shape — a CRUD operation or a
+ * singleton, for which inferAction is null, a demoted action among them. It
+ * takes back the collection it dropped, the service noun of the path the
+ * action segment sits on (inferServiceNoun of qualifierPath): `updatePets`,
+ * `createPets` for `POST /pets/create` (`POST /pets` is `create`),
+ * `listAllPets` for `GET /pets/list-all` (`GET /pets/all` is `listAll`).
+ * When that adds nothing — the name already ends with it, or there is none,
+ * as for `POST /store/pets/{id}/create` (`createPet`, as
+ * `POST /store/pets/{id}` is) and `POST /store/pets/create` (`createPets`, as
+ * `POST /store/pets` is) — it takes the name it has without the action rule
+ * (`createPetCreate`, `createCreate`) and is read from then on as that
+ * shape, like a demoted action (demoteSamePathNames). An action beside an
+ * operationId of its name is left to the numeric pass (`adoptPet2`), and two
+ * actions of one name to the qualifiers (`adoptPetRescue`). Actions come in
+ * name order, then path order, and the renames depend only on each
+ * operation's own path, so the result is deterministic. Returns the
  * operations that fell back to their non-action name.
  */
 function yieldActionNames(
@@ -2088,24 +2106,64 @@ function yieldActionNames(
   const fellBack: Operation[] = [];
   const isAction = (op: Operation) =>
     pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
+  const meeting = new Set(
+    collidingGroups(operations)
+      .filter((group) => group.some((op) => pathNamed.has(op) && !isAction(op)))
+      .flatMap((group) => group.filter(isAction)),
+  );
+  const yielding = operations.filter(
+    (op) => meeting.has(op) || (isAction(op) && verblessName(op.httpMethod, op.path, apiRootLengthOf(op)) === op.name),
+  );
+  yielding.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || comparePaths(a, b) || methodOrder(a, b));
   // Every name the service holds, kept current as actions are renamed, so a
   // rename never lands on a name another operation already has — least of
   // all one on the action's own path, which no later pass looks at again.
   const taken = new Set(operations.map((op) => op.name));
-  for (const group of collidingGroups(operations)) {
-    if (!group.some((op) => pathNamed.has(op) && !isAction(op))) continue;
-    for (const op of group.filter(isAction)) {
-      const root = apiRootLengthOf(op);
-      const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
-      const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
-      const next =
-        [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ?? suffixedName(plain, taken);
-      rename(op, next);
-      taken.add(next);
-      if (next !== qualified) fellBack.push(op);
-    }
+  // The name each path and verb yielded to, which PUT and PATCH on one path share.
+  const yieldedOnPath = new Map<string, string>();
+  for (const op of yielding) {
+    const root = apiRootLengthOf(op);
+    const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
+    const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
+    const onPath = `${inferVerb(op.httpMethod, op.path)} ${op.path}`;
+    // An action that meets no operation of its name keeps it when it has no
+    // other free: a number would only move it off a name nothing else has.
+    const next =
+      yieldedOnPath.get(onPath) ??
+      [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ??
+      (meeting.has(op) ? suffixedName(plain, taken) : op.name);
+    yieldedOnPath.set(onPath, next);
+    if (next === op.name) continue;
+    rename(op, next);
+    taken.add(next);
+    if (next !== qualified) fellBack.push(op);
   }
   return fellBack;
+}
+
+/**
+ * The name an action's method gives its path with the method's verb that
+ * the action segment starts with taken off — the whole segment when it is
+ * that verb alone: `create` (`POST /pets`) for `POST /pets/create`, `listAll`
+ * (`GET /pets/all`) for `GET /pets/list-all`, `createPet`
+ * (`POST /store/pets/{id}`) for `POST /store/pets/{id}/create`. `null` when
+ * the segment does not start with one of the method's verbs (methodVerbs):
+ * `bulk-delete`, `adopt`, `force-update`, and when nothing but the API root
+ * is left (`POST /create`). GET's item verb reads one item, so `get` is what
+ * GET gives an item of what is left: `get` (`GET /pets/{id}`) for
+ * `GET /pets/get`. An action whose name this is shares it with an operation
+ * the document may declare, and yields it whether or not it does
+ * (yieldActionNames).
+ */
+function verblessName(method: HttpMethod, path: string, apiRootLength: number): string | null {
+  const segments = pathSegments(path);
+  const [verb, ...rest] = splitWords(segments[segments.length - 1] ?? '');
+  const word = verb?.toLowerCase();
+  if (word === undefined || !methodVerbs(method).includes(word)) return null;
+  const twin = rest.length > 0 ? [...segments.slice(0, -1), rest.join('-')] : segments.slice(0, -1);
+  if (twin.length <= apiRootLength) return null;
+  if (word !== METHOD_VERBS[method].collection && !twin[twin.length - 1].startsWith('{')) twin.push('{id}');
+  return fallbackOperationName(method, '/' + twin.join('/'), apiRootLength);
 }
 
 /**
@@ -2386,8 +2444,8 @@ function sameNoun(a: string, b: string): boolean {
  * `Pet` coming back as `getPetStatusPet`. The parent's own spelling is left
  * to the plural pass (writtenParentName), so `/shop/pets/{id}/status` beside
  * `/shop/pet/{id}/status` is `getPetsStatus`. Every other operation is read
- * whole, as is an action that gave its name up on its path
- * (demoteSamePathNames; `actions` false), whose name is the next shape's.
+ * whole, as is an action that gave its name up (demoteSamePathNames,
+ * yieldActionNames; `actions` false), whose name is the next shape's.
  */
 function qualifierPath(op: Operation, apiRootLength: number, actions = true): string {
   const segments = pathSegments(op.path);
