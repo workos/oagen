@@ -541,6 +541,39 @@ describe('response keys OpenAPI does not define', () => {
       expect(warn.mock.calls.map((c) => String(c[0]))).toEqual(expected);
     });
 
+    it('reserves no const prefix from an ignored key: GET /notes keeps its plain stem (issue #386)', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const pinning = (kind: string) => ({ type: 'object', properties: { kind: { const: kind } } });
+      /** An operationId-less `GET /notes` whose `key` body pins `kind`, beside a component `PinnedNotesGetThing`. */
+      const notesSpec = (key: string) => ({
+        openapi: '3.1.0',
+        info,
+        paths: {
+          '/notes': {
+            get: {
+              responses: {
+                '200': { description: 'ok', content: json({ type: 'object', properties: { id: { type: 'string' } } }) },
+                [key]: { description: key, content: json({ oneOf: [pinning('pinned'), pinning('draft')] }) },
+              },
+            },
+          },
+        },
+        components: { schemas: { PinnedNotesGetThing: petSchema } },
+      });
+
+      // Before #328 `parseInt` read `200 ` as `200`, so its `oneOf` reserved
+      // `Pinned` and the component pushed the path onto `Notes151Dd5GetResponse`.
+      const ir = await parseTempSpec(notesSpec('200 '));
+      expect(only(ir).response).toEqual(model('NotesGetResponse'));
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['NotesGetResponse', 'PinnedNotesGetThing']);
+      expect(warn.mock.calls.map((c) => String(c[0]))).toEqual([
+        '[oagen] Warning: Ignoring response key "200 " on GET /notes: not a status code (three digits, 100–599), a 1XX–5XX range, or "default"',
+      ]);
+
+      // Under a key read as a 2xx status the same body does reserve `Pinned`.
+      expect(only(await parseTempSpec(notesSpec('201'))).response).toEqual(model('Notes151Dd5GetResponse'));
+    });
+
     it('still reads an explicit 1xx code as a status code: not carried, and not warned about', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const { op } = extractPets({ '101': { description: 'switching protocols' }, '200': ok });
