@@ -53,13 +53,17 @@ import type { ServerChange, ServerVariableChange } from './types.js';
  * from any spelling of the default to a named host gains it as additive with
  * no `server-removed` for `/`, and the reverse has no `server-added` for
  * `/`. A `/` listed beside another server is one a caller can pick, so it is
- * added and removed like any other. The default address is compared through
- * `baseUrlBeyondDefault`, which reads `''` and `/` as one, so a document
- * whose first server merely resolves to `/` has not moved, while a `baseUrl`
- * naming a host with no `servers` beside it — an IR built by hand, which the
- * parser never produces — is compared as written. `oldBaseUrl` and
- * `newBaseUrl` still carry `ApiSpec.baseUrl` as the parser set it, `/`
- * included.
+ * added and removed like any other, and listed first it is the address a
+ * caller gets without naming a host: a host taking the front from it, by a
+ * reorder or because it was removed, is a breaking `base-url-changed`, which
+ * is additive only from a document whose list means the default (#405). The
+ * default address is compared through `baseUrlBeyondDefault`, which reads
+ * `''` and `/` as one, so a document whose first server merely resolves to
+ * `/` has not moved (a host taking the front from it is breaking all the
+ * same), while a `baseUrl` naming a host with no `servers` beside it — an IR
+ * built by hand, which the parser never produces — is compared as written.
+ * `oldBaseUrl` and `newBaseUrl` still carry `ApiSpec.baseUrl` as the parser
+ * set it, `/` included.
  *
  * `diffOperations` compares an operation's two effective server lists
  * through this same function, each read as a document whose `baseUrl` is
@@ -77,6 +81,8 @@ export function diffServers(
   // OpenAPI's single `/`, so that is what it is matched as.
   const oldServers = serversOrDefault(oldSpec.servers);
   const newServers = serversOrDefault(newSpec.servers);
+  const oldImplied = isDefaultServerList(oldSpec.servers);
+  const newImplied = isDefaultServerList(newSpec.servers);
   // `''` and `/` are one address — the default — on either side, so only a
   // move to or from somewhere else is a change. Any other `baseUrl` is
   // compared as written, even with no `servers` beside it.
@@ -88,10 +94,12 @@ export function diffServers(
       kind: 'base-url-changed',
       oldBaseUrl: oldSpec.baseUrl,
       newBaseUrl: newSpec.baseUrl,
-      // A default host appearing where there was none leaves every existing
-      // caller — who had to name a host — working; one moving or disappearing
-      // does not.
-      classification: oldBaseUrl === '' ? 'additive' : 'breaking',
+      // A default host appearing where the old list meant only the default
+      // leaves every existing caller — who had to name a host — working. One
+      // moving or disappearing does not, and neither does a host taking the
+      // front from a `/` the old list named beside another server: that `/`
+      // was the address a caller got without naming one (#405).
+      classification: oldBaseUrl === '' && oldImplied ? 'additive' : 'breaking',
     });
   }
 
@@ -109,9 +117,6 @@ export function diffServers(
   // anything beyond the default has no implied entry, so every surplus there
   // is reported, a `/` beside a named host included. Each surplus entry is
   // reported with its own spelling.
-  const oldImplied = isDefaultServerList(oldSpec.servers);
-  const newImplied = isDefaultServerList(newSpec.servers);
-
   if (!newImplied) {
     for (const url of newByUrl.keys()) {
       for (const server of pairings.get(url)!.surplusNew) {

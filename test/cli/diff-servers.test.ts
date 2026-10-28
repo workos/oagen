@@ -9,6 +9,8 @@ const FIXTURES = resolve(__dirname, '../fixtures');
 const BEFORE = resolve(FIXTURES, 'servers-before.json');
 const AFTER = resolve(FIXTURES, 'servers-after.json');
 const MOVED = resolve(FIXTURES, 'servers-moved.json');
+const ROOT_THEN_HOST = resolve(FIXTURES, 'servers-root-then-host.json');
+const HOST_THEN_ROOT = resolve(FIXTURES, 'servers-host-then-root.json');
 
 import { diffCommand } from '../../src/cli/diff.js';
 
@@ -73,6 +75,19 @@ describe('diffCommand — servers', () => {
     const err: any = await diffCommand({ old: BEFORE, new: BEFORE }).catch((e) => e);
     expect(err.exitCode).toBe(0);
     expect(printedReport().changes).toEqual([]);
+  });
+
+  it('exits 2 when a host is moved in front of a listed `/` (#405)', async () => {
+    const err: any = await diffCommand({ old: ROOT_THEN_HOST, new: HOST_THEN_ROOT }).catch((e) => e);
+    expect(err.exitCode).toBe(2);
+    expect(printedReport().changes).toEqual([
+      {
+        kind: 'base-url-changed',
+        oldBaseUrl: '/',
+        newBaseUrl: 'https://notes.example.com',
+        classification: 'breaking',
+      },
+    ]);
   });
 });
 

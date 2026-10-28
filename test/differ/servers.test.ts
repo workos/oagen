@@ -878,10 +878,65 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
           kind: 'base-url-changed',
           oldBaseUrl: '/',
           newBaseUrl: 'https://staging.api.example.com',
-          classification: 'additive',
+          classification: 'breaking',
         },
         { kind: 'server-removed', url: '/', classification: 'breaking' },
       ]);
+    });
+
+    it('reports a host moved in front of a listed `/` as breaking: callers on the default move with it (#405)', () => {
+      expect(diffServers(spec([root, staging]), spec([staging, root]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it("reports the issue's documents as one breaking base-url-changed (#405)", async () => {
+      const [rootFirst, hostFirst] = await Promise.all([
+        parseSpec(resolve(fixtures, 'servers-root-then-host.json')),
+        parseSpec(resolve(fixtures, 'servers-host-then-root.json')),
+      ]);
+      const diff = diffSpecs(rootFirst, hostFirst);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://notes.example.com',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 1, additive: 0, behaviorChanges: 0 });
+    });
+
+    it('reads a first server that merely resolves to `/` beside a host the same way (#405)', () => {
+      const rootTemplate = server('{root}', { root: { default: '/' } });
+      expect(diffServers(spec([rootTemplate, staging]), spec([staging, rootTemplate]))).toEqual([
+        {
+          kind: 'base-url-changed',
+          oldBaseUrl: '/',
+          newBaseUrl: 'https://staging.api.example.com',
+          classification: 'breaking',
+        },
+      ]);
+    });
+
+    it('still reads a first host as additive from every spelling of the default alone (#405)', () => {
+      const rootWithPort = server('/', { port: { default: '443' } });
+      for (const old of [spec(), spec([]), spec([root]), spec([root, root]), spec([rootWithPort])]) {
+        expect(diffServers(old, spec([staging]))).toEqual([
+          {
+            kind: 'base-url-changed',
+            oldBaseUrl: old.baseUrl,
+            newBaseUrl: 'https://staging.api.example.com',
+            classification: 'additive',
+          },
+          { kind: 'server-added', url: 'https://staging.api.example.com', classification: 'additive' },
+        ]);
+      }
     });
 
     it('pairs a listed `/` with the implied one, so `/` beside a host against the default reports only the host', () => {
@@ -922,7 +977,7 @@ describe("diffServers — OpenAPI's default server (issue #291)", () => {
         kind: 'base-url-changed',
         oldBaseUrl: '/',
         newBaseUrl: 'https://staging.api.example.com',
-        classification: 'additive',
+        classification: 'breaking',
       },
       { kind: 'server-removed', url: '/', classification: 'breaking' },
     ]);
