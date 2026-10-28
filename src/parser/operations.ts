@@ -2092,9 +2092,11 @@ function demoteSamePathNames(
  * shape, like a demoted action (demoteSamePathNames). A name another
  * operation holds is skipped, and with both held it is numbered on the
  * latter (`createCreate2` when operationIds hold `createPets` and
- * `createCreate`). An action beside an operationId of its name is left to
- * the numeric pass (`adoptPet2`), and two actions of one name to the
- * qualifiers (`adoptPetRescue`). Actions come in name order, then path
+ * `createCreate`), as it is when both are its own name (`update2` for
+ * `PUT /{id}/update`, which has no collection to take back and whose
+ * `PUT /{id}` is `update`). An action beside an operationId of its name is
+ * left to the numeric pass (`adoptPet2`), and two actions of one name to
+ * the qualifiers (`adoptPetRescue`). Actions come in name order, then path
  * order, and the renames depend only on each operation's own path, so the
  * result is deterministic. Returns the operations that fell back to their
  * non-action name.
@@ -2150,9 +2152,12 @@ function yieldActionNames(
  * (`GET /pets/all`) for `GET /pets/list-all`, `createPet`
  * (`POST /store/pets/{id}`) for `POST /store/pets/{id}/create`. `null` when
  * the segment does not start with one of the method's verbs (methodVerbs):
- * `bulk-delete`, `adopt`, `force-update`, and for an action that sits under
- * no collection, with no literal before its segment past the API root
- * (`POST /create`, `PUT /{id}/update`). GET's item verb reads one item, so
+ * `bulk-delete`, `adopt`, `force-update`, and when the segment is the one
+ * its service is named from (serviceSegmentIndex), so the path without it
+ * sits in another service: `POST /create`, and `PUT /v1/{id}/update`
+ * under a `/v1` root, whose `PUT /v1/{id}` is in `V1`. A bare parameter
+ * before the segment is no other service: `PUT /{id}/update` and
+ * `PUT /{id}` are both in `Default`. GET's item verb reads one item, so
  * `get` is what GET gives an item of what is left: `get` (`GET /pets/{id}`)
  * for `GET /pets/get`. An action whose name this is shares it with an
  * operation the document may declare, and yields it whether or not it
@@ -2163,7 +2168,7 @@ function verblessName(method: HttpMethod, path: string, apiRootLength: number): 
   const [verb, ...rest] = splitWords(segments[segments.length - 1] ?? '');
   const word = verb?.toLowerCase();
   if (word === undefined || !methodVerbs(method).includes(word)) return null;
-  if (!segments.slice(apiRootLength, -1).some((segment) => !segment.startsWith('{'))) return null;
+  if (serviceSegmentIndex(path, apiRootLength) === segments.length - 1) return null;
   const twin = rest.length > 0 ? [...segments.slice(0, -1), rest.join('-')] : segments.slice(0, -1);
   if (word !== METHOD_VERBS[method].collection && !twin[twin.length - 1].startsWith('{')) twin.push('{id}');
   return fallbackOperationName(method, '/' + twin.join('/'), apiRootLength);

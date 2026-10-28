@@ -962,6 +962,23 @@ describe('an operation added beside an action takes no name an operation already
       changes: ['operation-added create: additive'],
     });
     expect(names(held)).toContain('Pets.createCreate2             POST   /pets/create');
+    // On a bare parameter both names it could take back are its own, and
+    // `PUT /{id}` lands in its service: it is numbered alone too.
+    await expectAdditive(
+      { '/{id}/update': { put: itemOp } },
+      { '/{id}': { put: itemOp } },
+      { before: 'update2', more: 'update' },
+    );
+    // Untagged, a literal that names its service shares no service with the
+    // path without it (`V1` for `/v1/{id}`), so it keeps its name.
+    expect(names({ '/{id}/update': { put: item('id') } })).toEqual([
+      'Default.update2                PUT    /{id}/update',
+    ]);
+    expect(names({ '/v1/{id}/update': { put: item('id') }, '/v1/{id}': { put: item('id') } })).toEqual([
+      'V1.update                      PUT    /v1/{id}',
+      'Update.update                  PUT    /v1/{id}/update',
+    ]);
+    expect(names({ '/create': { post: ok } })).toEqual(['Create.create                  POST   /create']);
   });
 
   it('gives PUT and PATCH on one path the one name their action yields to', () => {
