@@ -81,6 +81,36 @@ describe('one untagged operation under a tagged service path leaves the tagged o
     ]);
   });
 
+  it('keeps a tagged /v1/pets and its tagged custom method beside an untagged /v1 export in Pets', () => {
+    // Issue #401: the `/v1` form of the move, with a tagged custom method.
+    // Before #337 the tagged pair went to `V1` and only the export stayed in `Pets`.
+    const paths: Paths = {
+      '/v1/pets': tagged('pets'),
+      '/v1/pets:batchGet': { post: { tags: ['pets'], ...ok } },
+      '/v1/pets/{id}/export': { get: { parameters: [pathParam('id')], ...ok } },
+    };
+    expect(services(paths)).toEqual([
+      {
+        name: 'Pets',
+        operations: [
+          'listPets: GET /v1/pets',
+          'batchGetPets: POST /v1/pets:batchGet',
+          'getPetExport: GET /v1/pets/{id}/export',
+        ],
+      },
+    ]);
+    expect(services(reversed(paths))).toEqual([
+      {
+        name: 'Pets',
+        operations: [
+          'getPetExport: GET /v1/pets/{id}/export',
+          'batchGetPets: POST /v1/pets:batchGet',
+          'listPets: GET /v1/pets',
+        ],
+      },
+    ]);
+  });
+
   it('places the tagged operations exactly where they go without the untagged one', () => {
     const taggedOnly: Paths = {
       '/api/v1/notes': repro['/api/v1/notes'],
