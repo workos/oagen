@@ -2089,12 +2089,15 @@ function demoteSamePathNames(
  * `POST /store/pets/{id}` is) and `POST /store/pets/create` (`createPets`, as
  * `POST /store/pets` is) — it takes the name it has without the action rule
  * (`createPetCreate`, `createCreate`) and is read from then on as that
- * shape, like a demoted action (demoteSamePathNames). An action beside an
- * operationId of its name is left to the numeric pass (`adoptPet2`), and two
- * actions of one name to the qualifiers (`adoptPetRescue`). Actions come in
- * name order, then path order, and the renames depend only on each
- * operation's own path, so the result is deterministic. Returns the
- * operations that fell back to their non-action name.
+ * shape, like a demoted action (demoteSamePathNames). A name another
+ * operation holds is skipped, and with both held it is numbered on the
+ * latter (`createCreate2` when operationIds hold `createPets` and
+ * `createCreate`). An action beside an operationId of its name is left to
+ * the numeric pass (`adoptPet2`), and two actions of one name to the
+ * qualifiers (`adoptPetRescue`). Actions come in name order, then path
+ * order, and the renames depend only on each operation's own path, so the
+ * result is deterministic. Returns the operations that fell back to their
+ * non-action name.
  */
 function yieldActionNames(
   operations: Operation[],
@@ -2126,14 +2129,13 @@ function yieldActionNames(
     const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
     const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
     const onPath = `${inferVerb(op.httpMethod, op.path)} ${op.path}`;
-    // An action that meets no operation of its name keeps it when it has no
-    // other free: a number would only move it off a name nothing else has.
+    // Numbered when both are held, the CRUD operation declared or not, so
+    // declaring it later never moves the action to a number.
     const next =
       yieldedOnPath.get(onPath) ??
       [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ??
-      (meeting.has(op) ? suffixedName(plain, taken) : op.name);
+      suffixedName(plain, taken);
     yieldedOnPath.set(onPath, next);
-    if (next === op.name) continue;
     rename(op, next);
     taken.add(next);
     if (next !== qualified) fellBack.push(op);
@@ -2148,20 +2150,21 @@ function yieldActionNames(
  * (`GET /pets/all`) for `GET /pets/list-all`, `createPet`
  * (`POST /store/pets/{id}`) for `POST /store/pets/{id}/create`. `null` when
  * the segment does not start with one of the method's verbs (methodVerbs):
- * `bulk-delete`, `adopt`, `force-update`, and when nothing but the API root
- * is left (`POST /create`). GET's item verb reads one item, so `get` is what
- * GET gives an item of what is left: `get` (`GET /pets/{id}`) for
- * `GET /pets/get`. An action whose name this is shares it with an operation
- * the document may declare, and yields it whether or not it does
- * (yieldActionNames).
+ * `bulk-delete`, `adopt`, `force-update`, and for an action that sits under
+ * no collection, with no literal before its segment past the API root
+ * (`POST /create`, `PUT /{id}/update`). GET's item verb reads one item, so
+ * `get` is what GET gives an item of what is left: `get` (`GET /pets/{id}`)
+ * for `GET /pets/get`. An action whose name this is shares it with an
+ * operation the document may declare, and yields it whether or not it
+ * does (yieldActionNames).
  */
 function verblessName(method: HttpMethod, path: string, apiRootLength: number): string | null {
   const segments = pathSegments(path);
   const [verb, ...rest] = splitWords(segments[segments.length - 1] ?? '');
   const word = verb?.toLowerCase();
   if (word === undefined || !methodVerbs(method).includes(word)) return null;
+  if (!segments.slice(apiRootLength, -1).some((segment) => !segment.startsWith('{'))) return null;
   const twin = rest.length > 0 ? [...segments.slice(0, -1), rest.join('-')] : segments.slice(0, -1);
-  if (twin.length <= apiRootLength) return null;
   if (word !== METHOD_VERBS[method].collection && !twin[twin.length - 1].startsWith('{')) twin.push('{id}');
   return fallbackOperationName(method, '/' + twin.join('/'), apiRootLength);
 }

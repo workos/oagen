@@ -949,6 +949,19 @@ describe('an operation added beside an action takes no name an operation already
       { '/pets/{id}': { get: itemOp } },
       { before: 'getPets', more: 'get' },
     );
+    // Both names it would take back are operationIds': the action is
+    // numbered on its name without the action rule, the CRUD operation
+    // declared or not.
+    const held: Paths = {
+      '/pets/create': { post: op },
+      '/pets/a': { get: { ...op, operationId: 'createPets' } },
+      '/pets/b': { get: { ...op, operationId: 'createCreate' } },
+    };
+    expect(await diff(held, withAdded(held, { '/pets': { post: op } }))).toEqual({
+      breaking: 0,
+      changes: ['operation-added create: additive'],
+    });
+    expect(names(held)).toContain('Pets.createCreate2             POST   /pets/create');
   });
 
   it('gives PUT and PATCH on one path the one name their action yields to', () => {
