@@ -414,6 +414,150 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
     }
   });
 
+  it('keeps the parent as written when its plural is what tells two singletons apart (issue #381)', async () => {
+    // The issue repro: every operation tagged `Shop`, returning 200 with a
+    // JSON string. A singleton's qualifiers read its path without the parent
+    // (`/shop/status` for both), so the plural is all that tells
+    // `/shop/pets/{id}/status` from `/shop/pet/{id}/status`, as it tells the
+    // two items apart.
+    const jsonString = {
+      '200': { description: 'ok', content: { 'application/json': { schema: { type: 'string' } } } },
+    };
+    const op = (...ids: string[]) => ({
+      tags: ['Shop'],
+      responses: jsonString,
+      parameters: ids.map((name) => ({ name, in: 'path' as const, required: true, schema: { type: 'string' } })),
+    });
+    const repro = {
+      '/shop/pets/{id}/status': { get: op('id') },
+      '/shop/pet/{id}/status': { get: op('id') },
+      '/shop/pets/{id}/toys/{toyId}': { get: op('id', 'toyId') },
+      '/shop/pet/{id}/toys/{toyId}': { get: op('id', 'toyId') },
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const spec = await parseSpec(
+        await writeSpec('repro.json', { openapi: '3.1.0', info: { title: 'repro', version: '1' }, paths: repro }),
+      );
+      expect(
+        spec.services.flatMap(({ operations }) =>
+          operations.map((o) => `${o.name}: ${o.httpMethod.toUpperCase()} ${o.path}`),
+        ),
+      ).toEqual([
+        'getPetsStatus: GET /shop/pets/{id}/status',
+        'getPetStatus: GET /shop/pet/{id}/status',
+        'getToyPets: GET /shop/pets/{id}/toys/{toyId}',
+        'getToyPet: GET /shop/pet/{id}/toys/{toyId}',
+      ]);
+      // The same names whatever the document order.
+      const reversed = Object.fromEntries(Object.entries(repro).reverse());
+      expect(names(reversed)).toEqual(names(repro));
+      // A path-derived name is refined silently.
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+
+    // The parent is the literal nearest the parameter, wherever it sits, and
+    // a segment that repeats the parent's noun is not added again
+    // (appendQualifier): `/org/statuses/{id}/status` is `getStatuses`.
+    expect(
+      names({
+        '/shop/owners/{ownerId}/pets/{id}/status': { get: item('id') },
+        '/shop/owners/{ownerId}/pet/{id}/status': { get: item('id') },
+        '/org/statuses/{id}/status': { get: item('id') },
+        '/org/status/{id}/status': { get: item('id') },
+      }),
+    ).toEqual([
+      'Org.getStatus                  GET    /org/status/{id}/status',
+      'Org.getStatuses                GET    /org/statuses/{id}/status',
+      'Shop.getPetStatus              GET    /shop/owners/{ownerId}/pet/{id}/status',
+      'Shop.getPetsStatus             GET    /shop/owners/{ownerId}/pets/{id}/status',
+    ]);
+    // PUT and PATCH on one path share the parent as written.
+    expect(
+      names({
+        '/shop/pets/{id}/status': { put: item('id'), patch: item('id') },
+        '/shop/pet/{id}/status': { put: item('id') },
+      }),
+    ).toEqual([
+      'Shop.updatePetStatus           PUT    /shop/pet/{id}/status',
+      'Shop.updatePetsStatus          PATCH  /shop/pets/{id}/status',
+      'Shop.updatePetsStatus          PUT    /shop/pets/{id}/status',
+    ]);
+    // Singletons that write the parent alike take it together and are
+    // numbered on it, as items that share a plural are; two that would only
+    // take one spelling are numbered on the plain name, since it would say
+    // nothing about which is which.
+    expect(
+      names({
+        '/shop/Pets/{id}/status': { get: item('id') },
+        '/shop/pets/{id}/status': { get: item('id') },
+        '/shop/pet/{id}/status': { get: item('id') },
+      }),
+    ).toEqual([
+      'Shop.getPetsStatus             GET    /shop/Pets/{id}/status',
+      'Shop.getPetStatus              GET    /shop/pet/{id}/status',
+      'Shop.getPetsStatus2            GET    /shop/pets/{id}/status',
+    ]);
+    expect(
+      names({
+        '/shop/Pets/{id}/status': { get: item('id') },
+        '/shop/pets/{id}/status': { get: item('id') },
+      }),
+    ).toEqual([
+      'Shop.getPetStatus              GET    /shop/Pets/{id}/status',
+      'Shop.getPetStatus2             GET    /shop/pets/{id}/status',
+    ]);
+  });
+
+  it('gives a singleton its parent as written only beside another singleton, and only when that name is free (issue #381)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      // An operationId joining the pair keeps the plain name; the plural path
+      // still takes its plural and the singular path is numbered, as for
+      // `getPets` and `getPet2` beside `operationId: getPet`.
+      expect(
+        names({
+          '/shop/featured/{id}': { get: { ...item('id'), operationId: 'getPetStatus' } },
+          '/shop/pets/{id}/status': { get: item('id') },
+          '/shop/pet/{id}/status': { get: item('id') },
+        }),
+      ).toEqual([
+        'Shop.getPetStatus              GET    /shop/featured/{id}',
+        'Shop.getPetStatus2             GET    /shop/pet/{id}/status',
+        'Shop.getPetsStatus             GET    /shop/pets/{id}/status',
+      ]);
+      // The parent as written is taken: the number goes on the plain name.
+      expect(
+        names({
+          '/shop/all/{id}': { get: { ...item('id'), operationId: 'getPetsStatus' } },
+          '/shop/pets/{id}/status': { get: item('id') },
+          '/shop/pet/{id}/status': { get: item('id') },
+        }),
+      ).toEqual([
+        'Shop.getPetsStatus             GET    /shop/all/{id}',
+        'Shop.getPetStatus              GET    /shop/pet/{id}/status',
+        'Shop.getPetStatus2             GET    /shop/pets/{id}/status',
+      ]);
+      // Beside an operation of another shape the plural is not what tells the
+      // paths apart, so the singleton has none to keep and is numbered, as it
+      // is beside an operationId alone.
+      expect(
+        names({
+          '/shop/pet-status/{id}': { get: item('id') },
+          '/shop/pets/{id}/status': { get: item('id') },
+        }),
+      ).toEqual([
+        'Shop.getPetStatus              GET    /shop/pet-status/{id}',
+        'Shop.getPetStatus2             GET    /shop/pets/{id}/status',
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('reads a custom method after a colon as the segment it is written on followed by the verb', () => {
     expect(
       names({
