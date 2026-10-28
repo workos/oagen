@@ -166,7 +166,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
   - `injectIdempotencyKey` — `true` when the spec declares an `Idempotency-Key` header parameter on the operation, which is then left out of `headerParams`: generate and send the header yourself
   - `deprecated?` — present, and `true`, only when the Operation Object says `deprecated: true`
   - `async?` — the Operation Object's `x-oagen-async` extension, carried as the document writes it (no test or coercion, so a non-boolean value such as `'yes'` arrives as that string); test `=== true`
-  - `tags?` — the operation's `tags` in document order, present only when at least one usable entry remains; for grouping or doc comments (the parser already named the service from the first tag)
+  - `tags?` — the operation's `tags` in document order, present only when at least one usable entry remains; for grouping or doc comments (the parser already named the service from the first tag that has a name)
   - `security?` — per-operation `SecurityRequirementSet[]`; `undefined` inherits `ApiSpec.security`
   - `servers?` — set only when the operation (or its Path Item) declares servers that differ from the document's; send its requests to `op.servers ?? spec.servers`
   - `parameterGroups?` — mutually-exclusive parameter groups (`name`, `optional`, `variants`, `wrapperName?`) for sum-type rendering; the grouped parameters stay in their location arrays
