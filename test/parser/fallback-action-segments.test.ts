@@ -540,6 +540,20 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
         'Shop.getPetStatus              GET    /shop/pet/{id}/status',
         'Shop.getPetStatus2             GET    /shop/pets/{id}/status',
       ]);
+      // Taken by a path-named operation too, even one `Archive` would tell
+      // apart: no qualifier runs after this pass, so joining it would only
+      // number the name it had (`getPetsStatus2`).
+      expect(
+        names({
+          '/shop/archive/pets-status/{id}/status': { get: item('id') },
+          '/shop/pets/{id}/status': { get: item('id') },
+          '/shop/pet/{id}/status': { get: item('id') },
+        }),
+      ).toEqual([
+        'Shop.getPetsStatus             GET    /shop/archive/pets-status/{id}/status',
+        'Shop.getPetStatus              GET    /shop/pet/{id}/status',
+        'Shop.getPetStatus2             GET    /shop/pets/{id}/status',
+      ]);
       // Beside an operation of another shape the plural is not what tells the
       // paths apart, so the singleton has none to keep and is numbered, as it
       // is beside an operationId alone.

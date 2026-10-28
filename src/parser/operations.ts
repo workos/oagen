@@ -1902,9 +1902,13 @@ function disambiguateOperationNames(
     // Like every qualifier, only when it tells the group apart: beside an
     // operationId, which has no plural, or beside a path that spells the
     // resource singular (`/store/pet/{id}`). Members that would all take the
-    // same plural are left to the numeric suffix. A plural is blocked only by
-    // a name outside the group (`operationId: getPets`); members that share
-    // one some other member does not (`/store/Pets/{id}` and
+    // same plural are left to the numeric suffix. A plural is blocked by any
+    // name outside the group, an operationId's (`operationId: getPets`) or a
+    // path-named operation's (`PUT /shop/archive/pets` beside
+    // `PUT /shop/pets/{id}`): no qualifier is left to tell a member from an
+    // operation whose name it joined (nameIsFree, `apart`), so the join would
+    // only put a number on the name that operation had. Members that share a
+    // plural some other member does not (`/store/Pets/{id}` and
     // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
     // numbered below, `getPets` and `getPets2` — the names such a document
     // produced before item resources were singularised. Two groups never
@@ -1914,7 +1918,8 @@ function disambiguateOperationNames(
     // (parentAsWritten): `/shop/Pets/{id}/status` and `/shop/pets/{id}/status`
     // beside `/shop/pet/{id}/status` are `getPetsStatus` and `getPetsStatus2`.
     const respelled = parentAsWritten(group);
-    qualify(group, (op) => pluralOf(op) ?? respelled(op) ?? op.name);
+    const proposal = (op: Operation) => pluralOf(op) ?? respelled(op) ?? op.name;
+    qualifyGroup(group, operations, pathNamed, nounOf, () => false, proposal, rename);
   }
 
   const taken = new Set(operations.map((op) => op.name));
