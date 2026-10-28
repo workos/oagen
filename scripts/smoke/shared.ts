@@ -698,9 +698,14 @@ export function getExpectedStatusCodes(op: Operation): number[] {
   return getExpectedStatuses(op).codes;
 }
 
-/** `expected` as one token per entry, `/`-joined: `200/404/4XX/default`. */
+/**
+ * `expected` as one token per entry, `/`-joined: `200/404/4XX/default`; an
+ * operation that declares no responses covers nothing and reads
+ * `none (no responses declared)`.
+ */
 export function formatExpectedStatuses(expected: ExpectedStatuses): string {
-  return [...expected.codes.map(String), ...expected.ranges, ...(expected.hasDefault ? ['default'] : [])].join('/');
+  const tokens = [...expected.codes.map(String), ...expected.ranges, ...(expected.hasDefault ? ['default'] : [])];
+  return tokens.length > 0 ? tokens.join('/') : 'none (no responses declared)';
 }
 
 /**

@@ -179,13 +179,13 @@ For TypeScript SDKs, `sdk-test.ts` runs a `tsc --noEmit` pre-flight check before
 
 Both `smoke-results-raw.json` and `smoke-results-sdk-{lang}.json` contain a `SmokeResults` object with an array of `CapturedExchange` records. Each exchange records the request sent, the response received, and outcome metadata:
 
-- **`outcome`**: `"success"` (2xx), `"api-error"` (4xx/5xx or network failure), or `"skipped"` (missing path params or no SDK mapping)
-- **`unexpectedStatus`**: `true` when the operation's declared responses do not cover the response status code: no explicit code, no `1XX`–`5XX` range response containing it, and no `default` response. Only present when `true`.
+- **`outcome`**: `"success"` (any status below 400: a 2xx, or a 3xx the operation itself returned, since redirects are not followed), `"api-error"` (4xx/5xx or network failure), or `"skipped"` (missing path params or no SDK mapping)
+- **`unexpectedStatus`**: `true` when the operation's declared responses do not cover the response status code: no explicit code, no `1XX`–`5XX` range response containing it, and no `default` response. An operation that declares no responses (no `responses` key, or an empty map) covers nothing, so any status it returns is unexpected. An explicit 1xx code (`101`) is not checked: the IR does not carry one, so only a `1XX` range or a `default` response covers a 1xx status. Only present when `true`.
 - **`expectedStatusCodes`**: The explicit status codes declared in the spec: every declared 2xx/3xx code (`Operation.responseStatusCode` plus every `successResponses` entry) and every error code; nothing is implied from the HTTP method, so an operation declaring no 2xx/3xx response lists no success code. A range or `default` response is not listed here. Only present when `unexpectedStatus` is `true`.
 - **`expectedStatuses`**: Everything the declared responses cover — `codes` (the same list as `expectedStatusCodes`), `ranges` (the `1XX`–`5XX` range keys, in declaration order) and `hasDefault` (whether a `default` response exists). Only present when `unexpectedStatus` is `true`.
 - **`provenance`**: (SDK results only) Records how the SDK method was resolved — includes `resolutionTier` (`exact`, `crud-prefix`, `fuzzy`, or `manifest`), `resolutionConfidence`, and the `sdkMethodName` used.
 
-The console summary also reports the count of unexpected status codes, cleanup failures, and lists each unexpected status with everything the spec covers (explicit codes, then ranges, then `default`):
+The console summary also reports the count of unexpected status codes, cleanup failures, and lists each unexpected status with everything the spec covers (explicit codes, then ranges, then `default`; `none (no responses declared)` when the operation declares none):
 
 ```
 Results: 30 success, 80 api-error, 48 skipped, 5 unexpected status, 2 cleanup failures
