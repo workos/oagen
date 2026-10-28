@@ -699,7 +699,10 @@ export interface ResponseContentTypesChange {
    * renames the model the parser mints for it) is no retype and surfaces as
    * `model-removed` + `model-added` instead — other than the one the entry's
    * own `type` is read from, which `responseChanged` and `errorsChanged`
-   * already report.
+   * already report. Two model or enum refs whose names both specs declare
+   * are compared by name, nested ones included, however alike: neither was
+   * renamed, so a body moved from `Note` to an identical `NoteCopy` is
+   * retyped.
    */
   retyped: string[];
   /**
@@ -743,7 +746,10 @@ export interface RequestBodyContentTypesChange {
    * parameter edit on a key declared beside another spelling of its essence
    * renames the model the parser mints for it) is no retype and surfaces as
    * `model-removed` + `model-added` instead — other than the one
-   * `requestBody` is read from, which `requestBodyChanged` reports.
+   * `requestBody` is read from, which `requestBodyChanged` reports. Two
+   * model or enum refs whose names both specs declare are compared by name,
+   * nested ones included, however alike: neither was renamed, so a body
+   * moved from `Note` to an identical `NoteCopy` is retyped.
    */
   retyped: string[];
   /**
