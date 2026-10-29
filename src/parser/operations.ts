@@ -53,8 +53,10 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  unwrapCollapsedWrappers,
   unwrapNullableField,
   warnOnUncarriedProperties,
+  withWrapperDocs,
 } from './schemas.js';
 import {
   collectResponseHeaders,
@@ -3838,16 +3840,23 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
  * the pick reads (`selected`, from `selectRequestBodyContent`), as it stands
  * there: a `$ref` is not followed, so a component's text stays on its model,
  * while a `description` written beside the `$ref` is read, as a field reads
- * one. `undefined` when neither has content; a body none of whose media
- * types is read has no `selected` and carries its own text alone. The text
- * is kept verbatim. Every reader of a body — the operation extractor and the
- * webhook builder — takes the body's doc text from here.
+ * one. A wrapper the type builder collapses — a nullable `oneOf`/`anyOf`, a
+ * single-member `allOf` — is read by the rule the enum and the model built
+ * from its branch follow (`unwrapCollapsedWrappers`): its own text when it
+ * has content, else its branch's. `undefined` when neither has content; a
+ * body none of whose media types is read has no `selected` and carries its
+ * own text alone. The text is kept verbatim. Every reader of a body — the
+ * operation extractor and the webhook builder — takes the body's doc text
+ * from here.
  */
 export function requestBodyDescriptionOf(
   body: RequestBodyObject | undefined,
   selected: SelectedRequestBodyContent | undefined,
 ): string | undefined {
-  return presentText(body?.description) ?? presentText(selected?.schema?.description);
+  const schema = selected?.schema;
+  return (
+    presentText(body?.description) ?? (schema ? presentText(unwrapCollapsedWrappers(schema).description) : undefined)
+  );
 }
 
 /**
@@ -4242,12 +4251,15 @@ function typePickedRequestBody(
       } else {
         const variantName = objectVariantNames.get(variant);
         const entry = variantContexts.get(variant);
+        // A `oneOf` of one variant types it with the body's documentation, as
+        // `schemaToTypeRef` types the same union anywhere else (`withWrapperDocs`).
+        const typed = schema.oneOf.length === 1 ? withWrapperDocs(variant, schema) : variant;
         variants.push(
           variantName !== undefined
             ? { kind: 'model', name: variantName }
             : entry
-              ? schemaToTypeRef(variant, entry.context, undefined, undefined, entry.reserved)
-              : schemaToTypeRef(variant, contextName),
+              ? schemaToTypeRef(typed, entry.context, undefined, undefined, entry.reserved)
+              : schemaToTypeRef(typed, contextName),
         );
       }
     }

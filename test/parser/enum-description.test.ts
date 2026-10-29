@@ -740,6 +740,191 @@ describe('Enum.description on inline enums', () => {
     expect(byName(spec.enums, 'CreatePetRequestKind')).not.toHaveProperty('extensions');
     expectEnumsSound(spec);
   });
+
+  it('reproduces #445: a single-member oneOf or anyOf gives its text to the enum, as its allOf twin under a nullable wrapper does', async () => {
+    const E = { type: 'string', enum: ['small', 'large'] };
+    /** The issue's document: `Owner`, returned by `getOwner`, with the one `size` property given. */
+    const owner = (size: unknown) =>
+      document(
+        {
+          '/owners/{id}': {
+            get: {
+              operationId: 'getOwner',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: { 'application/json': { schema: { $ref: '#/components/schemas/Owner' } } },
+                },
+              },
+            },
+          },
+        },
+        { components: { schemas: { Owner: { type: 'object', properties: { size } } } } },
+      );
+    const sizes: Record<string, unknown> = {
+      'any-of.json': { description: "The owner's size.", anyOf: [E] },
+      'nullable-all-of.json': {
+        description: "The owner's size.",
+        anyOf: [{ allOf: [{ ...E, description: 'A size.' }] }, { type: 'null' }],
+      },
+      'nullable-one-of.json': {
+        description: "The owner's size.",
+        anyOf: [{ oneOf: [{ ...E, description: 'A size.' }] }, { type: 'null' }],
+      },
+      'one-of.json': { description: "The owner's size.", oneOf: [E] },
+    };
+
+    const types: Record<string, TypeRef> = {};
+    for (const [file, size] of Object.entries(sizes)) {
+      const spec = await parseDocument(owner(size));
+      const field = byName(byName(spec.models, 'Owner').fields, 'size');
+      expect(texts(spec.enums), file).toEqual([{ name: 'OwnerSize', description: "The owner's size." }]);
+      expect(field.description, file).toBe("The owner's size.");
+      types[file] = field.type;
+      expectEnumsSound(spec);
+    }
+    // Only the text moved: a single-member oneOf or anyOf is still a union of one variant.
+    const size: TypeRef = { kind: 'enum', name: 'OwnerSize', values: ['small', 'large'] };
+    expect(types).toEqual({
+      'any-of.json': { kind: 'union', variants: [size], compositionKind: 'anyOf' },
+      'nullable-all-of.json': { kind: 'nullable', inner: size },
+      'nullable-one-of.json': {
+        kind: 'nullable',
+        inner: { kind: 'union', variants: [size], compositionKind: 'oneOf' },
+      },
+      'one-of.json': { kind: 'union', variants: [size], compositionKind: 'oneOf' },
+    });
+  });
+
+  it("a single-member oneOf or anyOf at every site gives its text, link and keys to its variant's enum, and the variant's only when it has none (#445)", async () => {
+    const lone = (
+      keyword: 'oneOf' | 'anyOf',
+      values: string[],
+      wrapperText: string | undefined,
+      variantText?: string,
+    ) => ({
+      ...(wrapperText !== undefined ? { description: wrapperText } : {}),
+      [keyword]: [{ type: 'string', enum: values, ...(variantText !== undefined ? { description: variantText } : {}) }],
+    });
+    const json = (schema: unknown) => ({ 'application/json': { schema } });
+    const spec = await parseDocument(
+      document(
+        {
+          '/modes': {
+            post: {
+              operationId: 'createMode',
+              parameters: [
+                { name: 'kind', in: 'query', schema: lone('oneOf', ['x', 'y'], 'Wrapper kind.', 'Variant kind.') },
+                { name: 'X-Mode', in: 'header', schema: lone('anyOf', ['p', 'q'], undefined, 'Variant mode.') },
+              ],
+              requestBody: {
+                content: {
+                  // A primary body's `oneOf` is built by the request-body path itself.
+                  ...json(lone('oneOf', ['on', 'off'], 'Wrapper request.', 'Variant request.')),
+                  'text/csv': { schema: lone('oneOf', ['yes', 'no'], 'Wrapper csv.') },
+                },
+              },
+              responses: {
+                '200': {
+                  description: 'ok',
+                  headers: { 'X-Policy': { schema: lone('anyOf', ['retry', 'stop'], 'Wrapper policy.') } },
+                  content: json(lone('oneOf', ['a', 'b'], 'Wrapper response.', 'Variant response.')),
+                },
+              },
+            },
+          },
+          '/notes': {
+            post: {
+              operationId: 'createNote',
+              requestBody: { content: json(lone('anyOf', ['n1', 'n2'], 'Wrapper note.', 'Variant note.')) },
+              responses,
+            },
+          },
+        },
+        {
+          webhooks: {
+            petAdopted: {
+              post: {
+                requestBody: { content: json(lone('oneOf', ['adopted', 'returned'], 'Wrapper payload.')) },
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+          components: {
+            schemas: {
+              Pet: {
+                type: 'object',
+                properties: {
+                  tags: { type: 'array', items: lone('anyOf', ['t1', 't2'], 'Wrapper tag.', 'Variant tag.') },
+                  // Nested: the outermost text with content wins, then the next.
+                  deep: {
+                    description: 'Outer.',
+                    oneOf: [
+                      { description: 'Middle.', anyOf: [{ type: 'string', enum: ['u', 'v'], description: 'Inner.' }] },
+                    ],
+                  },
+                  deepMiddle: {
+                    oneOf: [{ description: 'Middle only.', oneOf: [{ type: 'string', enum: ['u2', 'v2'] }] }],
+                  },
+                  // A union of several variants is no wrapper: its text stays on the field.
+                  several: {
+                    description: 'Several.',
+                    oneOf: [
+                      { type: 'string', enum: ['s1', 's2'], description: 'One of several.' },
+                      { type: 'integer' },
+                    ],
+                  },
+                  // The link and the keys ride along with the text, by the one wrapper rule.
+                  linked: {
+                    description: 'Linked.',
+                    externalDocs: { url: 'https://example.com/linked' },
+                    'x-since': '2',
+                    oneOf: [{ type: 'string', enum: ['l1', 'l2'], 'x-since': '1', 'x-owner': 'pets' }],
+                  },
+                },
+              },
+            },
+          },
+        },
+      ),
+    );
+
+    expect(texts(spec.enums)).toEqual([
+      { name: 'PetTags', description: 'Wrapper tag.' },
+      { name: 'PetDeep', description: 'Outer.' },
+      { name: 'PetDeepMiddle', description: 'Middle only.' },
+      { name: 'PetSeveral', description: 'One of several.' },
+      { name: 'PetLinked', description: 'Linked.' },
+      { name: 'ModesKind', description: 'Wrapper kind.' },
+      { name: 'ModesXMode', description: 'Variant mode.' },
+      { name: 'ModesXPolicy', description: 'Wrapper policy.' },
+      { name: 'CreateModeRequest', description: 'Wrapper request.' },
+      { name: 'CreateModeResponse', description: 'Wrapper response.' },
+      { name: 'CreateModeTextCsvRequest', description: 'Wrapper csv.' },
+      { name: 'CreateNoteRequest', description: 'Wrapper note.' },
+      { name: 'PetAdoptedPayload', description: 'Wrapper payload.' },
+    ]);
+    const linked = byName(spec.enums, 'PetLinked');
+    expect(linked.externalDocs).toEqual({ url: 'https://example.com/linked' });
+    expect(linked.extensions).toEqual({ 'x-since': '2', 'x-owner': 'pets' });
+    // The fields keep their own schema's text, link and keys: the union's.
+    const fields = byName(spec.models, 'Pet').fields;
+    expect(byName(fields, 'several').description).toBe('Several.');
+    expect(byName(fields, 'linked').extensions).toEqual({ 'x-since': '2' });
+    // The bodies are still unions of one variant.
+    const [createMode] = allOperations(spec);
+    expect(createMode.requestBody).toMatchObject({
+      kind: 'union',
+      variants: [{ kind: 'enum', name: 'CreateModeRequest', values: ['on', 'off'] }],
+    });
+    expect(createMode.response).toEqual({
+      kind: 'union',
+      variants: [{ kind: 'enum', name: 'CreateModeResponse', values: ['a', 'b'] }],
+      compositionKind: 'oneOf',
+    });
+    expectEnumsSound(spec);
+  });
 });
 
 describe('inlineEnumRef – the recorded text', () => {

@@ -54,8 +54,9 @@ function textWithContent(raw: unknown): string | undefined {
  * (`rawExternalDocs`, when usable). The schema is the one that declares the
  * members — the `enum:` list or the `oneOf`/`anyOf` of consts — as the
  * caller hands it over: `schemaToTypeRef` passes a collapsed nullable or
- * single-member `allOf` wrapper's text and link onto its branch first
- * (`withWrapperDocs`), so both are read by one rule.
+ * single-member `allOf` wrapper's text and link onto its branch first, and a
+ * single-member `oneOf`/`anyOf`'s onto its variant (`withWrapperDocs`), so
+ * all are read by one rule.
  */
 export function inlineEnumRef(
   name: string,
