@@ -955,7 +955,9 @@ function extractDirectResource(
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
       // would collide with the component model, so keep the context name.
-      const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(rebuilt, contextName);
+      // A const only variants declare holds on a branch: it names nothing.
+      const branchOnly = new Set(merged.properties.filter((p) => p.conditional).map((p) => p.name));
+      const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(rebuilt, contextName, branchOnly);
       inlineModels.push(...extractInlineModel(modelName, rebuilt, componentSchemas));
       return {
         response: { kind: 'model', name: modelName },
@@ -1062,7 +1064,17 @@ function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
   return declaresNull(schema) ? { kind: 'nullable', inner: ref } : ref;
 }
 
-function deriveModelName(schema: SchemaObject, fallback: string): string {
+/**
+ * The name a response object takes from a string `const` it declares
+ * (`object: 'note'` names it `Note`), else `fallback`. A property in
+ * `branchOnly` holds on one branch of the body, not on every instance (only
+ * an inline `allOf`'s `oneOf`/`anyOf` variants declare it:
+ * `MergedProperty.conditional`), so its const names nothing
+ * (workos/oagen#396: one variant's `kind: cat` named the body `Cat`, and a
+ * `kind: dog` added to another variant renamed it); it still counts toward
+ * the list envelope, which is the whole body's shape.
+ */
+function deriveModelName(schema: SchemaObject, fallback: string, branchOnly?: ReadonlySet<string>): string {
   if (!schema.properties) return toPascalCase(fallback);
   // A list envelope's const (`object: 'list'`) names the envelope's kind, which
   // every envelope of the API shares, not what it lists (workos/oagen#418).
@@ -1071,15 +1083,15 @@ function deriveModelName(schema: SchemaObject, fallback: string): string {
   // Prefer well-known discriminant properties for backward compatibility
   const preferred = ['object', 'type'];
   for (const name of preferred) {
-    const field = schema.properties[name];
+    const field = branchOnly?.has(name) ? undefined : schema.properties[name];
     if (field && field.const && typeof field.const === 'string') {
       return toPascalCase(field.const);
     }
   }
 
   // Fall back to any property with a const string value
-  for (const [, field] of Object.entries(schema.properties)) {
-    if (field && field.const && typeof field.const === 'string') {
+  for (const [name, field] of Object.entries(schema.properties)) {
+    if (!branchOnly?.has(name) && field && field.const && typeof field.const === 'string') {
       return toPascalCase(field.const);
     }
   }

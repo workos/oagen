@@ -1794,6 +1794,8 @@ export interface MergedProperty {
   name: string;
   schema: SchemaObject;
   origin: { name: string; schema: SchemaObject } | null;
+  /** `true` when only `oneOf`/`anyOf` variants declare it: it holds on a branch, not on every instance. */
+  conditional?: true;
 }
 
 /** An inline `allOf` read as one object shape; see `mergeAllOfMembers`. */
@@ -2216,8 +2218,10 @@ export function declareProperty(
  * them, which the type builder reads as it reads any inline union — string
  * consts pinned differently per variant (`kind: cat` | `kind: dog`) collapse
  * to an inline enum, other literals and types to a union — so the field is
- * never typed from one variant's value alone. Properties keep the order they
- * were first declared in.
+ * never typed from one variant's value alone. Such a property is marked
+ * `conditional`: it holds on a branch, so its `const` does not name a
+ * response body (`extractDirectResource`, workos/oagen#396). Properties keep
+ * the order they were first declared in.
  *
  * A schema reached twice is read once in each capacity it is reached in —
  * as an inline member (the merged model's own, unions included), through a
@@ -2312,7 +2316,7 @@ export function mergeAllOfMembers(
   const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>
     unconditional
       ? { name, schema: unconditional.schema, origin: unconditional.origin }
-      : { name, schema: unionOfDeclarations(conditional), origin: null },
+      : { name, schema: unionOfDeclarations(conditional), origin: null, conditional: true },
   );
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.

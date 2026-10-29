@@ -1168,7 +1168,12 @@ describe('round 2: keywords the declarations of a combined property agree on', (
       undefined,
     );
     expect(merged.properties).toEqual([
-      { name: 'kind', origin: null, schema: { readOnly: true, description: 'Kind', oneOf: [cat, dog] } },
+      {
+        name: 'kind',
+        origin: null,
+        schema: { readOnly: true, description: 'Kind', oneOf: [cat, dog] },
+        conditional: true,
+      },
     ]);
   });
 });
@@ -1300,13 +1305,128 @@ describe('declarations that differ only in a keyword the field reads by agreemen
         { type: 'string', format: 'uuid', readOnly: true, description: 'A' },
         { type: 'string', format: 'uuid', readOnly: true, description: 'B', default: 'x' },
       ),
-    ).toEqual([{ name: 'kind', origin: null, schema: { type: 'string', format: 'uuid', readOnly: true } }]);
+    ).toEqual([
+      { name: 'kind', origin: null, schema: { type: 'string', format: 'uuid', readOnly: true }, conditional: true },
+    ]);
     // A `format` types the declaration, as a `const` or an `enum` does: still two shapes.
     const uuid: SchemaObject = { type: 'string', format: 'uuid', readOnly: true };
     const plain: SchemaObject = { type: 'string', readOnly: true, description: 'Plain' };
     expect(mergedKind(uuid, plain)).toEqual([
-      { name: 'kind', origin: null, schema: { readOnly: true, oneOf: [uuid, plain] } },
+      { name: 'kind', origin: null, schema: { readOnly: true, oneOf: [uuid, plain] }, conditional: true },
     ]);
+  });
+});
+
+describe('a const only a variant declares names no inline allOf response body (#396)', () => {
+  /** The issue's `POST /pets` 200 body: the `allOf` of `members`, beside `schemas` as components. */
+  const createPet = (members: SchemaObject[], schemas?: Record<string, SchemaObject>) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/pets': {
+        post: { operationId: 'createPet', responses: { '200': jsonResponse({ allOf: members }) } },
+      },
+    },
+    ...(schemas && { components: { schemas } }),
+  });
+  const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+  const text = (value?: string): SchemaObject => ({ type: 'string', ...(value !== undefined && { const: value }) });
+  /** The issue's always-applying member: a required `name`. */
+  const base: SchemaObject = { ...object({ name: text() }), required: ['name'] };
+  const responseOf = (ir: ApiSpec) => opsOf(ir)['createPet']!.response;
+
+  it("names the issue's documents after the operation, so a const another variant adds renames nothing", async () => {
+    // object.json: was `CreatePetPet`, renamed off the component `Pet` with a warning.
+    const pet = await parseWithoutWarnings(
+      createPet([base, { oneOf: [object({ object: text('pet') }), object({ x: text() })] }], {
+        Pet: object({ other: text() }),
+      }),
+    );
+    expect(responseOf(pet)).toEqual(model('CreatePetResponse'));
+    expect(pet.models.map((m) => m.name)).toEqual(['Pet', 'CreatePetResponse']);
+    expect(fieldsOf(modelsByName(pet)['CreatePetResponse'])).toEqual([
+      'name: string',
+      'object?: literal',
+      'x?: string',
+    ]);
+    expectSound(pet, ['Pet']);
+    // kind-old.json was `Cat`; kind-new.json, `dog` added to the other variant, `CreatePetResponse`.
+    const cat = object({ kind: text('cat'), meow: text() });
+    const kindOld = await parseWithoutWarnings(createPet([base, { oneOf: [cat, object({ bark: text() })] }]));
+    const kindNew = await parseWithoutWarnings(
+      createPet([base, { oneOf: [cat, object({ kind: text('dog'), bark: text() })] }]),
+    );
+    for (const ir of [kindOld, kindNew]) {
+      expect(responseOf(ir)).toEqual(model('CreatePetResponse'));
+      expect(ir.models.map((m) => m.name)).toEqual(['CreatePetResponse']);
+      expect(modelsByName(ir)['CreatePetResponse']?.fields.map((f) => f.name)).toEqual([
+        'name',
+        'kind',
+        'meow',
+        'bark',
+      ]);
+      expectSound(ir, []);
+    }
+    // `oagen diff --old kind-old.json --new kind-new.json`: the operation is
+    // unchanged and its model is modified, not removed (`Cat`) beside one
+    // added; the model's `kind` widens from the literal `cat` to an enum of both.
+    expect(diffSpecs(kindOld, kindNew).changes).toMatchObject([
+      { kind: 'model-modified', name: 'CreatePetResponse', fieldChanges: [{ fieldName: 'kind' }] },
+      { kind: 'enum-added', name: 'CreatePetResponseKind' },
+    ]);
+  });
+
+  it('still names the body after a const every instance carries, and reads the list envelope off every property', async () => {
+    const cat = object({ kind: text('cat') });
+    const bark = object({ bark: text() });
+    // An always-applying member's const, before or after the variants, and a
+    // nullable member's one variant's, which applies as the member does.
+    for (const members of [
+      [{ ...base, properties: { ...base.properties, object: text('pet') } }, { oneOf: [cat, bark] }],
+      [{ oneOf: [cat, bark] }, object({ object: text('pet') }), base],
+      [base, { oneOf: [object({ object: text('pet') }), { type: 'null' }] }, { oneOf: [cat, bark] }],
+    ]) {
+      const ir = await parseWithoutWarnings(createPet(members));
+      expect(responseOf(ir)).toEqual(model('Pet'));
+      const names = modelsByName(ir)['Pet']?.fields.map((f) => f.name);
+      expect(names?.sort()).toEqual(['bark', 'kind', 'name', 'object']);
+      expectSound(ir, []);
+    }
+    // A const every variant declares alike still holds on a branch only: a
+    // variant added without it would rename the body.
+    const both = await parseWithoutWarnings(
+      createPet([
+        base,
+        { oneOf: [object({ object: text('pet'), a: text() }), object({ object: text('pet'), b: text() })] },
+      ]),
+    );
+    expect(responseOf(both)).toEqual(model('CreatePetResponse'));
+    expect(fieldsOf(modelsByName(both)['CreatePetResponse'])).toEqual([
+      'name: string',
+      'object?: literal',
+      'a?: string',
+      'b?: string',
+    ]);
+    // A member's `object: list` beside a data array and a stop field only
+    // variants declare is a list envelope's kind, never the body's name (#418).
+    const page = object({ data: { type: 'array', items: text() }, has_more: { type: 'boolean' } });
+    const list = await parseWithoutWarnings(createPet([object({ object: text('list') }), { oneOf: [page, bark] }]));
+    expect(responseOf(list)).toEqual(model('CreatePetResponse'));
+  });
+
+  it('marks a property only variants declare as conditional, and one a member declares as not', () => {
+    const union: SchemaObject = { oneOf: [object({ name: text('x'), kind: text('cat') }), object({ bark: text() })] };
+    for (const members of [
+      [base, union],
+      [union, base],
+    ]) {
+      const merged = mergeAllOfMembers({ allOf: members }, undefined);
+      expect(merged.properties.map((p) => `${p.name}${p.conditional ? ' (conditional)' : ''}`).sort()).toEqual([
+        'bark (conditional)',
+        'kind (conditional)',
+        'name',
+      ]);
+    }
   });
 });
 
