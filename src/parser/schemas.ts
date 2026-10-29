@@ -52,6 +52,11 @@ export function componentSchemaOf(
   return map && Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
+/** The document's `components/schemas` while they are read (`activeComponentSchemas`), for a reader that merges an `allOf` as the extractors do. */
+export function documentComponentSchemas(): Record<string, SchemaObject> | undefined {
+  return activeComponentSchemas;
+}
+
 /**
  * Module-level set of resolved schema names whose components/schemas entry is
  * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of

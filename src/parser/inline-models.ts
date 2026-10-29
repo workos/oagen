@@ -7,6 +7,7 @@ import {
   classifyInlineSchema,
   componentPropertyLedger,
   componentSchemaOf,
+  documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
   constraintsEntry,
@@ -137,9 +138,11 @@ export function mintedInlineNameEntries(
       return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved, deep);
     }
     if (reading !== 'merged') return [];
-    // The merged model's own properties are its inline members'
-    // (`materializeMergedAllOf`); a `$ref` member's stay its component's.
-    const own = deep ? mergeAllOfMembers(s, undefined).properties : [];
+    // The merged model's own properties, as `materializeMergedAllOf` re-enters
+    // them: a `$ref` member's stay its component's, unless an inline member
+    // declares the property too and the two conjoin.
+    const merged = deep ? mergeAllOfMembers(s, documentComponentSchemas()).properties : [];
+    const own = merged.filter((p) => p.origin === null);
     return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;

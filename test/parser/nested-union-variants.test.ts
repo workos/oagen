@@ -641,6 +641,63 @@ describe('a name minted anywhere under an object variant, or anywhere under the 
     expect(warnings).toEqual([]);
     expectSound(spec, everySiteComponents);
   });
+
+  it("an allOf's property a `$ref` member's component declares too is the merged model's own, and so is what it nests (Greptile round 1)", async () => {
+    // `Base.loc` and the inline member's `loc` conjoin into the merged
+    // model's own `{ extra, lng }`, so its `extra` mints
+    // `HolderShapeVariant2LocExtra`, which `variant_2_loc_extra` takes.
+    const { spec, warnings } = await parse(
+      'allof-overlap',
+      specDoc(
+        {},
+        {
+          Base: obj({ loc: obj({ extra: obj({ x: str }) }) }),
+          Holder: obj({
+            shape: {
+              oneOf: [
+                obj({ m: str, variant_2_loc_extra: obj({ z: str }) }),
+                { allOf: [{ $ref: '#/components/schemas/Base' }, obj({ loc: obj({ lng: str }) })] },
+              ],
+            },
+          }),
+        },
+      ),
+    );
+    expect(render(fieldType(spec, 'Holder', 'shape')!)).toBe('(HolderShape | HolderShapeVariant2Value)');
+    expect(fieldsOf(spec, 'HolderShapeVariant2LocExtra')).toEqual(['z']);
+    expect(fieldsOf(spec, 'HolderShapeVariant2ValueLoc')).toEqual(['extra', 'lng']);
+    expect(fieldsOf(spec, 'HolderShapeVariant2ValueLocExtra')).toEqual(['x']);
+    expect(fieldsOf(spec, 'BaseLocExtra')).toEqual(['x']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Base', 'Holder']);
+  });
+
+  it("an allOf's property only its `$ref` member's component declares stays the component's, so it moves nothing (Greptile round 1)", async () => {
+    // `loc` is inherited and typed `BaseLoc`, so nothing under the merged
+    // model is named `HolderShapeVariant2Loc` and the variant keeps its context.
+    const { spec, warnings } = await parse(
+      'allof-inherited',
+      specDoc(
+        {},
+        {
+          Base: obj({ loc: obj({ x: str }) }),
+          Holder: obj({
+            shape: {
+              oneOf: [
+                obj({ m: str, variant_2_loc: obj({ z: str }) }),
+                { allOf: [{ $ref: '#/components/schemas/Base' }, obj({ id: str })] },
+              ],
+            },
+          }),
+        },
+      ),
+    );
+    expect(render(fieldType(spec, 'Holder', 'shape')!)).toBe('(HolderShape | HolderShapeVariant2)');
+    expect(render(fieldType(spec, 'HolderShapeVariant2', 'loc')!)).toBe('BaseLoc');
+    expect(fieldsOf(spec, 'HolderShapeVariant2Loc')).toEqual(['z']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Base', 'Holder']);
+  });
 });
 
 describe('a request body `oneOf`', () => {
