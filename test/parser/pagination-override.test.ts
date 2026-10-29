@@ -128,6 +128,31 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     expect(op.pagination?.endOfIteration).toEqual({ kind: 'totalPages', path: 'meta.total_pages' });
   });
 
+  it('reads the stop field of a companion one member declares as a $ref and another inline, in either order (#432)', async () => {
+    // Both declarations apply, so the companion is a `Meta` that also has
+    // `total_pages`, in the model and in the read alike.
+    const components = { schemas: { Meta: { type: 'object', properties: { page: { type: 'integer' } } } } };
+    const withRef = envelope({ meta: { $ref: '#/components/schemas/Meta' } });
+    const withTotal = {
+      type: 'object',
+      properties: { meta: { type: 'object', properties: { total_pages: { type: 'integer' } } } },
+    };
+    for (const members of [
+      [withRef, withTotal],
+      [withTotal, withRef],
+    ]) {
+      const ir = await parseJson(petsSpec({ responses: jsonResponse({ allOf: members }) }, components));
+      const op = onlyOperation(ir);
+      expect(op.pagination?.endOfIteration).toEqual({ kind: 'totalPages', path: 'meta.total_pages' });
+      const [meta] = op.pagination?.envelopeFields ?? [];
+      const [companion] = meta ? modelNamesIn(meta.type) : [];
+      expect(companion).not.toBe('Meta');
+      const fields = ir.models.find((m) => m.name === companion)?.fields.map((f) => f.name);
+      expect(fields?.sort()).toEqual(['page', 'total_pages']);
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('survives a companion whose component refers to itself, as a stop field or beside one (Greptile)', async () => {
     const schemas = { Flag: { oneOf: [{ $ref: '#/components/schemas/Flag' }, { type: 'null' }] } };
     const flag = { $ref: '#/components/schemas/Flag' };
@@ -2002,6 +2027,60 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
           'items',
           'total_pages',
         ]);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('conjoins a $ref to an object component and an inline object two members declare, in the model and in the read alike (#432)', async () => {
+      // The issue's shapes: `PetPage { items: Pet[] }`, and two `allOf`
+      // members declaring `result`, one an inline object with the stop field,
+      // one a `$ref` to `PetPage`. JSON Schema applies both, so `result` is a
+      // `PetPage` that also has `total_pages`, whichever member comes first.
+      const PetPage = { type: 'object', properties: { items: petArray } };
+      const withTotal = {
+        type: 'object',
+        properties: { result: { type: 'object', properties: { total_pages: { type: 'integer' } } } },
+      };
+      const withPage = { type: 'object', properties: { result: { $ref: '#/components/schemas/PetPage' } } };
+      const expected = {
+        ...page,
+        dataPath: 'result.items',
+        endOfIteration: { kind: 'totalPages', path: 'result.total_pages' },
+        itemType: 'Pet',
+      };
+      const modelOf = (ir: ApiSpec, name: string) => ir.models.find((m) => m.name === name);
+      const resultOf = (ir: ApiSpec, wrapper: string) => modelOf(ir, wrapper)?.fields.find((f) => f.name === 'result');
+      for (const [label, members] of [
+        ['inline first', [withTotal, withPage]],
+        ['ref first', [withPage, withTotal]],
+      ] as const) {
+        const PetPageResponse = { allOf: members };
+        const inlineIr = await parseJson(listOp(PetPageResponse, { dataPath: 'result.items' }, { PetPage }));
+        const inline = onlyOperation(inlineIr);
+        expect(projection(inline), `${label}: inline wrapper`).toEqual(expected);
+        expect(resultOf(inlineIr, 'ListPetsResponse')?.type, `${label}: inline wrapper`).toEqual({
+          kind: 'model',
+          name: 'ListPetsResponseResult',
+        });
+        const inlineResult = modelOf(inlineIr, 'ListPetsResponseResult')?.fields.map((f) => f.name);
+        expect(inlineResult?.sort(), `${label}: inline wrapper`).toEqual(['items', 'total_pages']);
+        expectModelsConsistent(inlineIr, inline, ['Pet', 'PetList', 'PetPage']);
+        const referencedIr = await parseJson(
+          listOp(
+            { $ref: '#/components/schemas/PetPageResponse' },
+            { dataPath: 'result.items' },
+            { PetPage, PetPageResponse },
+          ),
+        );
+        const referenced = onlyOperation(referencedIr);
+        expect(projection(referenced), `${label}: $ref wrapper`).toEqual(expected);
+        expect(resultOf(referencedIr, 'PetPageResponse')?.type, `${label}: $ref wrapper`).toEqual({
+          kind: 'model',
+          name: 'PetPageResponseResult',
+        });
+        const referencedResult = modelOf(referencedIr, 'PetPageResponseResult')?.fields.map((f) => f.name);
+        expect(referencedResult?.sort(), `${label}: $ref wrapper`).toEqual(['items', 'total_pages']);
+        expectModelsConsistent(referencedIr, referenced, ['Pet', 'PetList', 'PetPage', 'PetPageResponse']);
       }
       expect(warn).not.toHaveBeenCalled();
     });

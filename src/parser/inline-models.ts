@@ -1894,7 +1894,7 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     Pet }], required: [name]` was `Pet` with `name` optional). A
  *     `required` adds to the component only when the component declares
  *     properties the merge would read — its own, or its `allOf` chain's
- *     (`refContributesProperties`): JSON Schema applies `required` to an
+ *     (`contributesProperties`): JSON Schema applies `required` to an
  *     object instance only, so beside a `$ref` to an array, a primitive, an
  *     enum or a union component it constrains nothing, and the reference
  *     stands (the same review: `{ allOf: [{ $ref: Pets }], required: [name] }`
@@ -1917,7 +1917,7 @@ export function readInlineAllOf(
     if (members.some(isInlineAllOfMember) || refs.length > 1) return 'merged';
     const addsRequired =
       [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0) &&
-      refContributesProperties(refs[0]!.$ref!, componentSchemas);
+      contributesProperties(refs[0]!, componentSchemas);
     return addsRequired ? 'merged' : 'reference';
   }
   if (members.length === 1) {
@@ -1929,24 +1929,24 @@ export function readInlineAllOf(
 }
 
 /**
- * Whether the component `ref` names contributes properties to an `allOf`
- * merge — declares `properties` of its own, or through its `allOf` chain
- * (a member's `$ref` followed the same way), the reading `mergeAllOfMembers`
- * makes of a `$ref` member; a union the component carries is not read
- * there, so it does not count. False for an array, a primitive, an enum, a
+ * Whether `schema` contributes properties to an `allOf` merge — declares
+ * `properties` of its own, or through its `$ref` or its `allOf` chain (a
+ * member's `$ref` followed the same way), the reading `mergeAllOfMembers`
+ * makes of a member; a union a component carries is not read there, so it
+ * does not count. False for a `$ref` to an array, a primitive, an enum, a
  * union-only component, and for a ref no component answers. A chain that
  * returns to a schema it has read declares nothing more.
  */
-function refContributesProperties(ref: string, componentSchemas?: Record<string, SchemaObject>): boolean {
+function contributesProperties(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
   const seen = new Set<SchemaObject>();
-  const declares = (schema: SchemaObject | undefined): boolean => {
-    if (!schema || seen.has(schema)) return false;
-    seen.add(schema);
-    if (schema.$ref) return declares(componentSchemaOf(schema.$ref, componentSchemas));
-    if (Object.keys(schema.properties ?? {}).length > 0) return true;
-    return (schema.allOf ?? []).some(declares);
+  const declares = (s: SchemaObject | undefined): boolean => {
+    if (!s || seen.has(s)) return false;
+    seen.add(s);
+    if (s.$ref) return declares(componentSchemaOf(s.$ref, componentSchemas));
+    if (Object.keys(s.properties ?? {}).length > 0) return true;
+    return (s.allOf ?? []).some(declares);
   };
-  return declares(componentSchemaOf(ref, componentSchemas));
+  return declares(schema);
 }
 
 /**
@@ -2039,9 +2039,20 @@ export function declaresType(schema: SchemaObject): boolean {
  * whenever they had any keyword, so a member documenting the items made
  * `data` an `unknown[]`); the later's other keywords over the earlier's;
  * and `type: ['array', 'null']` when either admits `null`
- * (`declaresNull`), else `type: 'array'`. Any other pair keeps the first
- * as written. Returns `held` itself when `next` adds nothing to it, so a
- * lone declaration keeps its identity.
+ * (`declaresNull`), else `type: 'array'`; an inline object and a `$ref` to
+ * an object component, or an `allOf` that reaches one (`composesObject`,
+ * the component the document's: `componentSchemaOf`), become the `allOf`
+ * of both in document order, which every reader reads as any inline
+ * `allOf` (`mergeAllOfMembers`, `collectObjectProperties`), carrying the
+ * keywords a field reads from either (`declarationKeywords`, the later's
+ * over the earlier's) — so `result: { $ref: PetPage }` beside `result: {
+ * properties: { total_pages } }` is a `PetPage` that also has
+ * `total_pages`, whichever is read first (workos/oagen#432: the first was
+ * kept, so `result` had `items` or `total_pages`, never both, and a
+ * `dataPath` through the other was rejected), while a `$ref` to an array,
+ * an enum, a primitive or a union component is no object to conjoin. Any
+ * other pair keeps the first as written. Returns `held` itself when `next`
+ * adds nothing to it, so a lone declaration keeps its identity.
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
@@ -2078,7 +2089,37 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
     };
   }
+  if (
+    (isInlineObjectSchema(first) && composesObject(second)) ||
+    (isInlineObjectSchema(second) && composesObject(first))
+  ) {
+    return { ...declarationKeywords(first), ...declarationKeywords(second), allOf: [first, second] };
+  }
   return first;
+}
+
+/**
+ * Whether a typing declaration that is no inline object — a `$ref`, or an
+ * `allOf` — is an object whose properties an `allOf` merge reads
+ * (`contributesProperties`): a `$ref` to a component that declares
+ * properties, its own or its `allOf` chain's, or an `allOf` that reaches
+ * one. A `$ref` to an array, a primitive, an enum or a union component, or
+ * one no component answers, is not, so no inline object beside it turns it
+ * into an object merge (`combineDeclarations`).
+ */
+function composesObject(schema: SchemaObject): boolean {
+  return (schema.$ref !== undefined || schema.allOf !== undefined) && contributesProperties(schema);
+}
+
+/**
+ * What a declaration says of its property beside the type: the keywords a
+ * field reads from its own schema (`LIFTED_DECLARATION_KEYWORDS`) and its
+ * extensions, which an `allOf` conjoining it with another declaration
+ * carries for the field it types (`combineDeclarations`).
+ */
+function declarationKeywords(schema: SchemaObject): SchemaObject {
+  const keywords = Object.entries(schema).filter(([key]) => LIFTED_DECLARATION_KEYWORDS.includes(key));
+  return { ...Object.fromEntries(keywords), ...extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS) };
 }
 
 /**
