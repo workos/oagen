@@ -951,6 +951,73 @@ components:
 
     expect(model(ir, 'Pet').discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
   });
+
+  /** `Pet` over `Cat`, `Dog` and `third`, discriminated on `kind` by the keyword or implicitly; `Bird` and `Fish` pin `kind` too. */
+  const wrappedPets = (third: string, keyword: boolean) =>
+    parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Cat'
+        - $ref: '#/components/schemas/Dog'
+        - ${third}
+${keyword ? '      discriminator:\n        propertyName: kind\n' : ''}    Bird:
+      type: object
+      properties:
+        kind: { const: bird }
+      required: [kind]
+    Fish:
+      type: object
+      properties:
+        kind: { const: fish }
+      required: [kind]
+${animals}`);
+
+  it.each([
+    [
+      'a nullable wrapper',
+      "{ anyOf: [{ $ref: '#/components/schemas/Bird' }, { type: 'null' }] }",
+      { kind: 'nullable', inner: modelRef('Bird') },
+    ],
+    [
+      'a multi-type wrapper',
+      "{ oneOf: [{ $ref: '#/components/schemas/Bird' }, { type: string }] }",
+      { kind: 'union', variants: [modelRef('Bird'), { kind: 'primitive', type: 'string' }], compositionKind: 'oneOf' },
+    ],
+    [
+      'an allOf read as its reference',
+      "{ allOf: [{ $ref: '#/components/schemas/Bird' }], description: A bird }",
+      modelRef('Bird'),
+    ],
+  ] as const)(
+    'reads the const of a variant under %s from the one model it wraps, keyword or not (#427)',
+    async (_, third, variant) => {
+      for (const keyword of [true, false]) {
+        const pet = model(await wrappedPets(third, keyword), 'Pet');
+        expect(pet.variants, `keyword: ${keyword}`).toEqual([modelRef('Cat'), modelRef('Dog'), variant]);
+        expect(pet.discriminator, `keyword: ${keyword}`).toEqual({
+          property: 'kind',
+          mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' },
+        });
+      }
+    },
+  );
+
+  it.each([
+    ['two references', "{ oneOf: [{ $ref: '#/components/schemas/Bird' }, { $ref: '#/components/schemas/Fish' }] }"],
+    [
+      'a reference beside an inline object',
+      "{ oneOf: [{ $ref: '#/components/schemas/Bird' }, { type: object, properties: { kind: { const: fish } } }] }",
+    ],
+    [
+      'a reference merged into a model of its own',
+      "{ allOf: [{ $ref: '#/components/schemas/Bird' }, { type: object, properties: { wings: { type: integer } } }] }",
+    ],
+  ])('names no variant whose wrapper holds %s, so nothing is mapped (#427)', async (_, third) => {
+    expect(model(await wrappedPets(third, true), 'Pet').discriminator).toEqual({ property: 'kind', mapping: {} });
+    expect(model(await wrappedPets(third, false), 'Pet').discriminator).toBeUndefined();
+  });
 });
 
 describe('named unions: renames and folds', () => {
