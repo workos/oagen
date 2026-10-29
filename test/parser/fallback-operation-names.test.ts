@@ -987,11 +987,11 @@ describe('custom-method paths (issue #269)', () => {
     const paths = { '/v1/pets:batchGet': { post: json }, '/v1/pets': { get: json } };
     const { services } = extractOperations(paths as Parameters<typeof extractOperations>[0]);
     expect(services.map((s) => s.name)).toEqual(['Pets']);
-    // `batchGet` ends in a CRUD verb, so it is the action (#271), as
-    // `/v1/pets/batchGet` is; the service segment it sits on is dropped.
+    // `batchGet` carries GET's verb, so it is GET's action (#379) and a POST
+    // on it is read as the collection `/v1/pets/batchGet` is.
     expect(names(paths)).toEqual([
       'list                         GET    /v1/pets',
-      'batchGet                     POST   /v1/pets:batchGet',
+      'createBatchGet               POST   /v1/pets:batchGet',
     ]);
   });
 

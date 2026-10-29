@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { extractOperations } from '../../src/parser/operations.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collectModelRefs } from '../../src/ir/types.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 
 /**
  * Fallback names on an action or singleton segment (issue #271). A literal
@@ -242,17 +243,32 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
         '/store/pets/search': { post: ok },
       }),
     ).toEqual([
-      'Pets.bulkDelete                POST   /pets/bulk-delete',
+      // `bulk-delete` and `bulk-update` carry DELETE's and PUT's verbs, whose
+      // actions they are whether or not those methods are declared (#379).
+      'Pets.createBulkDelete          POST   /pets/bulk-delete',
       'Pets.updateBulkDelete          PUT    /pets/bulk-delete',
       'Pets.listLastUpdate            GET    /pets/last-update',
       'Pets.listUpdate                GET    /pets/update',
       'Store.listCheckIns             GET    /store/events/check-ins',
-      'Store.bulkUpdatePets           POST   /store/pets/bulk-update',
+      'Store.createBulkUpdate         POST   /store/pets/bulk-update',
       'Store.listDeleteCandidates     GET    /store/pets/delete-candidates',
       'Store.createDeleteCandidates   POST   /store/pets/delete-candidates',
       'Store.createSearch             POST   /store/pets/search',
-      'Store.bulkDeletePhotos         POST   /store/pets/{id}/photos/bulk-delete',
+      'Store.createBulkDelete         POST   /store/pets/{id}/photos/bulk-delete',
       'Store.listDisplayOptions       GET    /store/settings/display-options',
+    ]);
+    // A CRUD verb last that no other method carries: `list` and `check` count
+    // for GET and HEAD only as the first word, and `create` is POST's own.
+    expect(
+      names({
+        '/pets/health-check': { post: ok },
+        '/pets/allow-list': { post: ok },
+        '/pets/bulk-create': { post: ok },
+      }),
+    ).toEqual([
+      'Pets.allowList                 POST   /pets/allow-list',
+      'Pets.bulkCreate                POST   /pets/bulk-create',
+      'Pets.healthCheck               POST   /pets/health-check',
     ]);
   });
 
@@ -269,9 +285,11 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
       }),
     ).toEqual([
       'Pets.listAllowList             GET    /pets/allow-list',
-      'Pets.checkHealth               HEAD   /pets/check-health',
+      // `HEAD /pets/health` and `GET /pets/all` would be `checkHealth` and
+      // `listAll`, so the actions take back their collection (#379).
+      'Pets.checkHealthPets           HEAD   /pets/check-health',
       'Pets.forceUpdate               PUT    /pets/force-update',
-      'Pets.listAll                   GET    /pets/list-all',
+      'Pets.listAllPets               GET    /pets/list-all',
       'Pets.checkPetHealthCheck       HEAD   /pets/{id}/health-check',
       'Pets.getPetWishList            GET    /pets/{id}/wish-list',
       'Pets.batchGet                  GET    /pets:batchGet',
@@ -305,9 +323,24 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
       'Pets.create                    POST   /pets',
       'Pets.listAll                   GET    /pets/all',
       'Pets.createPets                POST   /pets/create',
-      'Pets.deletePets                POST   /pets/delete',
+      // `delete` and `update` carry DELETE's and PUT's verbs: a POST on them
+      // is no action (#379).
+      'Pets.createDelete              POST   /pets/delete',
       'Pets.listAllPets               GET    /pets/list-all',
-      'Pets.updatePets                POST   /pets/update',
+      'Pets.createUpdate              POST   /pets/update',
+      'Pets.delete                    DELETE /pets/{id}',
+      'Pets.update                    PUT    /pets/{id}',
+    ]);
+    // The methods whose verbs they are read them as the actions.
+    expect(
+      names({
+        '/pets/delete': { delete: ok },
+        '/pets/update': { put: ok },
+        '/pets/{id}': { put: item('id'), delete: item('id') },
+      }),
+    ).toEqual([
+      'Pets.deletePets                DELETE /pets/delete',
+      'Pets.updatePets                PUT    /pets/update',
       'Pets.delete                    DELETE /pets/{id}',
       'Pets.update                    PUT    /pets/{id}',
     ]);
@@ -351,10 +384,20 @@ describe('fallback names on an action or singleton segment (issue #271)', () => 
         '/shop/rescue/pets/bulk-delete': { post: ok },
       }),
     ).toEqual([
-      'Shop.bulkDeletePets            POST   /shop/pets/bulk-delete',
+      // `bulk-delete` is DELETE's action, so these POSTs are collections (#379).
+      'Shop.createBulkDeletePets      POST   /shop/pets/bulk-delete',
       'Shop.getPetStatus              GET    /shop/pets/{id}/status',
-      'Shop.bulkDeletePetsRescue      POST   /shop/rescue/pets/bulk-delete',
+      'Shop.createBulkDeleteRescuePets POST   /shop/rescue/pets/bulk-delete',
       'Shop.getPetStatusRescue        GET    /shop/rescue/pets/{id}/status',
+    ]);
+    expect(
+      names({
+        '/shop/pets/bulk-delete': { delete: ok },
+        '/shop/rescue/pets/bulk-delete': { delete: ok },
+      }),
+    ).toEqual([
+      'Shop.bulkDeletePets            DELETE /shop/pets/bulk-delete',
+      'Shop.bulkDeletePetsRescue      DELETE /shop/rescue/pets/bulk-delete',
     ]);
     // Under an API root the parameters tell the paths apart; one every path
     // carries, `petId`, adds nothing.
@@ -625,9 +668,16 @@ describe('one name on one path: two methods never share it unless they are PUT a
   });
 
   it('keeps the action with POST when no method carries the verb, and shares it between PUT and PATCH', () => {
+    expect(names({ '/pets/health-check': { get: ok, post: ok, put: ok } })).toEqual([
+      'Pets.listHealthCheck           GET    /pets/health-check',
+      'Pets.healthCheck               POST   /pets/health-check',
+      'Pets.updateHealthCheck         PUT    /pets/health-check',
+    ]);
+    // `bulk-delete` carries DELETE's verb: the action is the DELETE's, declared
+    // or not, and a POST on it is no action (#379).
     expect(names({ '/pets/bulk-delete': { get: ok, post: ok, put: ok } })).toEqual([
       'Pets.listBulkDelete            GET    /pets/bulk-delete',
-      'Pets.bulkDelete                POST   /pets/bulk-delete',
+      'Pets.createBulkDelete          POST   /pets/bulk-delete',
       'Pets.updateBulkDelete          PUT    /pets/bulk-delete',
     ]);
     expect(names({ '/pets/bulk-update': { post: ok, put: ok, patch: ok } })).toEqual([
@@ -801,5 +851,153 @@ describe('one name on one path: two methods never share it unless they are PUT a
     } as Parameters<typeof extractOperations>[0]);
     expectUniqueNames(services);
     expect(services.flatMap((s) => s.operations).length).toBe(54);
+  });
+});
+
+describe('an operation added beside an action takes no name an operation already has (issue #379)', () => {
+  // Every operation tagged `Pets`, returning 204, with no operationId.
+  const op = { tags: ['Pets'], responses: { '204': { description: 'ok' } } };
+  const itemOp = { ...op, ...idParam('id') };
+
+  /** `paths` with the operations of `more` declared too: a path both carry has the methods of both. */
+  const withAdded = (paths: Paths, more: Paths): Paths => {
+    const merged: Paths = { ...paths };
+    for (const [p, methods] of Object.entries(more)) merged[p] = { ...merged[p], ...methods };
+    return merged;
+  };
+
+  /** What `oagen diff` reports between two documents of `before` and `after`, one line per change. */
+  async function diff(before: Paths, after: Paths) {
+    const doc = (paths: Paths) => ({ openapi: '3.1.0', info: { title: 'repro', version: '1' }, paths });
+    const { changes, summary } = diffSpecs(
+      await parseSpec(await writeSpec('old.json', doc(before))),
+      await parseSpec(await writeSpec('new.json', doc(after))),
+    );
+    return {
+      breaking: summary.breaking,
+      changes: changes.map((c) => `${c.kind} ${'operationName' in c ? c.operationName : ''}: ${c.classification}`),
+    };
+  }
+
+  /**
+   * Each case declares `before`, then adds `more`, in both orders: whichever
+   * operation the document had, the other one comes in as one additive
+   * `operation-added`, under the name it has in the merged document, and the
+   * one already there keeps its own.
+   */
+  async function expectAdditive(before: Paths, more: Paths, named: { before: string; more: string }) {
+    const after = withAdded(before, more);
+    expect(await diff(before, after)).toEqual({ breaking: 0, changes: [`operation-added ${named.more}: additive`] });
+    expect(await diff(more, after)).toEqual({ breaking: 0, changes: [`operation-added ${named.before}: additive`] });
+  }
+
+  it('reports each pair of the issue as one additive operation-added', async () => {
+    // `POST /pets/bulk-delete` carries DELETE's verb, so the action is the
+    // DELETE's whether or not it is declared.
+    await expectAdditive(
+      { '/pets/bulk-delete': { post: op } },
+      { '/pets/bulk-delete': { delete: op } },
+      { before: 'createBulkDelete', more: 'bulkDelete' },
+    );
+    // `POST /pets` is `create`, so the action on `/pets/create` never is.
+    await expectAdditive(
+      { '/pets/create': { post: op } },
+      { '/pets': { post: op } },
+      { before: 'createPets', more: 'create' },
+    );
+    // `update` is PUT's verb: a POST on it is no action.
+    await expectAdditive(
+      { '/pets/update': { post: op } },
+      { '/pets/{id}': { put: itemOp } },
+      { before: 'createUpdate', more: 'update' },
+    );
+  });
+
+  it('names an action alike whether or not the operation that could share its name is declared', async () => {
+    // A POST after a parameter on a segment that carries PUT's verb.
+    await expectAdditive(
+      { '/pets/{id}/update-password': { post: itemOp } },
+      { '/pets/{id}/update-password': { put: itemOp } },
+      { before: 'createPetUpdatePassword', more: 'updatePasswordPet' },
+    );
+    // An action whose name the operation of its method on the path without
+    // the verb has: `GET /pets/all` is `listAll`, `PUT /pets` is `update`,
+    // `POST /store/pets/{id}` is `createPet`.
+    await expectAdditive(
+      { '/pets/list-all': { get: op } },
+      { '/pets/all': { get: op } },
+      { before: 'listAllPets', more: 'listAll' },
+    );
+    await expectAdditive(
+      { '/pets/update': { put: op } },
+      { '/pets/{id}': { put: itemOp } },
+      { before: 'updatePets', more: 'update' },
+    );
+    await expectAdditive(
+      { '/store/pets/{id}/create': { post: itemOp } },
+      { '/store/pets/{id}': { post: itemOp } },
+      { before: 'createPetCreate', more: 'createPet' },
+    );
+    await expectAdditive(
+      { '/store/pets/update': { post: op } },
+      { '/store/pets': { put: op } },
+      { before: 'createUpdate', more: 'updatePets' },
+    );
+    // `get` reads one item: `GET /pets/{id}` is `get`.
+    await expectAdditive(
+      { '/pets/get': { get: op } },
+      { '/pets/{id}': { get: itemOp } },
+      { before: 'getPets', more: 'get' },
+    );
+    // Both names it would take back are operationIds': the action is
+    // numbered on its name without the action rule, the CRUD operation
+    // declared or not.
+    const held: Paths = {
+      '/pets/create': { post: op },
+      '/pets/a': { get: { ...op, operationId: 'createPets' } },
+      '/pets/b': { get: { ...op, operationId: 'createCreate' } },
+    };
+    expect(await diff(held, withAdded(held, { '/pets': { post: op } }))).toEqual({
+      breaking: 0,
+      changes: ['operation-added create: additive'],
+    });
+    expect(names(held)).toContain('Pets.createCreate2             POST   /pets/create');
+    // On a bare parameter both names it could take back are its own, and
+    // `PUT /{id}` lands in its service: it is numbered alone too.
+    await expectAdditive(
+      { '/{id}/update': { put: itemOp } },
+      { '/{id}': { put: itemOp } },
+      { before: 'update2', more: 'update' },
+    );
+    // Untagged, a literal that names its service shares no service with the
+    // path without it (`V1` for `/v1/{id}`), so it keeps its name.
+    expect(names({ '/{id}/update': { put: item('id') } })).toEqual([
+      'Default.update2                PUT    /{id}/update',
+    ]);
+    expect(names({ '/v1/{id}/update': { put: item('id') }, '/v1/{id}': { put: item('id') } })).toEqual([
+      'V1.update                      PUT    /v1/{id}',
+      'Update.update                  PUT    /v1/{id}/update',
+    ]);
+    expect(names({ '/create': { post: ok } })).toEqual(['Create.create                  POST   /create']);
+  });
+
+  it('gives PUT and PATCH on one path the one name their action yields to', () => {
+    expect(names({ '/pets/update': { put: ok, patch: ok } })).toEqual([
+      'Pets.updatePets                PATCH  /pets/update',
+      'Pets.updatePets                PUT    /pets/update',
+    ]);
+    expect(
+      names({
+        '/pets/update': { put: ok, patch: ok },
+        '/pets/{id}': { put: item('id') },
+        '/store/pets/{id}/update': { put: item('id'), patch: item('id') },
+      }),
+    ).toEqual([
+      'Pets.updatePets                PATCH  /pets/update',
+      'Pets.updatePets                PUT    /pets/update',
+      'Pets.update                    PUT    /pets/{id}',
+      'Store.updatePetUpdate          PATCH  /store/pets/{id}/update',
+      'Store.updatePetUpdate          PUT    /store/pets/{id}/update',
+    ]);
   });
 });
