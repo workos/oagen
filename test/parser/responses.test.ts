@@ -260,12 +260,36 @@ describe('classifyAndExtractResponse', () => {
         expect(mixed.inlineModels[0].fields.map((f) => f.name)).toEqual(['shape']);
       }
 
-      // A `oneOf` of one object, with or without `null` beside it, is still the resource it wraps.
+      // Nor does a const written beside the union, under `oneOf` or `anyOf`,
+      // make it one tagged object: each variant carries it, as on a field.
+      const tagged: SchemaObject = { type: 'object', properties: { object: { const: 'shape' } } };
+      for (const beside of [
+        { ...tagged, oneOf: [circle, square] },
+        { ...tagged, anyOf: [circle, square] },
+      ]) {
+        const kept = classify({ shape: beside });
+        expect(kept.response, JSON.stringify(beside)).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+        expect(kept.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+          ['GetShapeResponse', ['shape']],
+          ['GetShapeResponseShape', ['object', 'kind', 'radius']],
+          ['SquareGetShapeResponseShape', ['object', 'kind', 'side']],
+        ]);
+      }
+
+      // A `oneOf` of one object, with or without `null` beside it, is still
+      // the resource it wraps, and so is a tagged object a `oneOf` of bare
+      // constraint sets only limits.
       expect(classify({ shape: { oneOf: [circle] } }).response).toEqual({ kind: 'model', name: 'Circle' });
       expect(classify({ shape: { oneOf: [circle, { type: 'null' }] } }).response).toEqual({
         kind: 'nullable',
         inner: { kind: 'model', name: 'Circle' },
       });
+      const pet: SchemaObject = {
+        type: 'object',
+        properties: { object: { const: 'pet' }, a: { type: 'string' }, b: { type: 'string' } },
+        oneOf: [{ required: ['a'] }, { required: ['b'] }],
+      };
+      expect(classify({ pet }).response).toEqual({ kind: 'model', name: 'Pet' });
     });
 
     it('does not match wrapper with multiple required properties', () => {

@@ -728,17 +728,23 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
+  // A `oneOf`/`anyOf` that types the property (`classifyInlineSchema`) with
+  // more than one variant once every `null` one is set aside (`isNullSchema`)
+  // is a union, the body's own field, however many variants carry a const
+  // and whatever properties are written beside it: unwrapping it would type
+  // the response as one variant, or as those properties alone, and drop the
+  // rest (#415). A union of bare constraint sets does not type the property;
+  // it only limits the object.
+  const variants = (propSchema.oneOf ?? propSchema.anyOf)?.filter((v) => !isNullSchema(v)) ?? [];
+  if (variants.length > 1 && classifyInlineSchema(propSchema) === 'union') return false;
+
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
 
   // A `oneOf` of one such object, with or without `null` variants (a
-  // nullable resource): what is left once every `null` variant is set aside
-  // (`isNullSchema`). A union of several non-null variants stays the body's
-  // own field, however many carry a const; unwrapping it would type the
-  // response as its first variant and drop the rest (#415).
+  // nullable resource).
   if (propSchema.oneOf) {
-    const [variant, ...others] = propSchema.oneOf.filter((v) => !isNullSchema(v));
-    return others.length === 0 && variant?.type === 'object' && hasDiscriminantConstField(variant) !== null;
+    return variants.length === 1 && variants[0].type === 'object' && hasDiscriminantConstField(variants[0]) !== null;
   }
 
   return false;
