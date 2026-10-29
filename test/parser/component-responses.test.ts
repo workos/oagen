@@ -1353,10 +1353,13 @@ describe("an operation's own inline body named like a component response's body 
     expect(diffSpecs(cardFirst, cardLast).changes).toEqual([]);
   });
 
-  it("steps past an operation's own body at a secondary success code too, in either path order", async () => {
+  it("leaves `CardResponse` to the component beside an operation's own body at a secondary success code, in either path order", async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // `card`'s primary 200 is the component schema `Pet`, which mints nothing;
-    // its 201 is an inline `{ j }`, which mints `CardResponse` as a primary would.
+    // its 201 is an inline `{ j }`, which a later status code names for
+    // itself, `CardResponse201` (#435; it took `CardResponse` as a primary
+    // would, and the component stepped to `CardResponse2`), so it takes
+    // nothing from the component.
     const secondary = {
       '/card': {
         get: {
@@ -1373,10 +1376,47 @@ describe("an operation's own inline body named like a component response's body 
       const ops = byName(spec);
       expect(ops.get('card')!.successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`)).toEqual([
         '200: Pet',
-        '201: CardResponse',
+        '201: CardResponse201',
       ]);
-      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
-      expect(modelsOf(spec)).toEqual(['CardResponse { j }', 'CardResponse2 { text }', 'Pet { name }']);
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse');
+      expect(modelsOf(spec)).toEqual(['CardResponse { text }', 'CardResponse201 { j }', 'Pet { name }']);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it("steps past the names an operation's own body takes at a secondary success code, in either path order", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `card`'s 201 moves to `CardResponse201` (#435) and its `response` object
+    // with it, to `CardResponse201Response`: the name the body of a component
+    // `CardResponse201` derives, which steps past it.
+    const secondary = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: {
+            '200': json({ $ref: '#/components/schemas/Pet' }),
+            '201': json(object({ response: object({ k: string }) })),
+          },
+        },
+      },
+    };
+    const getNote201 = {
+      '/notes': {
+        get: { operationId: 'getNote', responses: { '200': { $ref: '#/components/responses/CardResponse201' } } },
+      },
+    };
+    const cardFirst = await parse({ ...secondary, ...getNote201 }, { CardResponse201: textCard });
+    const notesFirst = await parse({ ...getNote201, ...secondary }, { CardResponse201: textCard });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      expect(responsesOf(spec)).toEqual(['card: Pet', 'getNote: CardResponse201Response2']);
+      expect(modelsOf(spec)).toEqual([
+        'CardResponse201 { response }',
+        'CardResponse201Response { k }',
+        'CardResponse201Response2 { text }',
+        'Pet { name }',
+      ]);
     }
     expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
   });
@@ -1624,18 +1664,53 @@ describe("a component response's other media types and headers (issue #302)", ()
     const spec = await parse(twoOperations('302', '302', { '200': ok }));
     expect(warn).not.toHaveBeenCalled();
 
-    expect(modelNames(spec)).toEqual(['CardApplicationJsonResponse', 'CardApplicationYamlResponse', 'CardXMeta']);
+    // The JSON body is the component's body, `CardResponse`, as at a 200 or a
+    // 404 (#435; it was `CardApplicationJsonResponse`), while the entry's own
+    // `type` stays `unknown`, as every 3xx entry's does.
+    expect(modelNames(spec)).toEqual(['CardApplicationYamlResponse', 'CardResponse', 'CardXMeta']);
     for (const op of ['getNote', 'getPet']) {
       const redirect = byName(spec)
         .get(op)!
         .successResponses!.find((r) => r.statusCode === 302)!;
+      expect(redirect.type, op).toEqual({ kind: 'primitive', type: 'unknown' });
       expect(contentsOf(redirect), op).toEqual([
-        'application/json: CardApplicationJsonResponse',
+        'application/json: CardResponse',
         'application/yaml: CardApplicationYamlResponse',
       ]);
       expect(headersOf(redirect), op).toEqual(['X-Meta: CardXMeta']);
     }
     expectSound(spec);
+  });
+
+  it('the issue #435 repro: a 302 shares `CardResponse` with the 200 of another operation, in either path order', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const jsonCard = {
+      description: 'A card',
+      content: { 'application/json': { schema: { type: 'object', properties: { text: { type: 'string' } } } } },
+    };
+    const getNote = { '/notes': { get: { operationId: 'getNote', responses: { '200': cardRef } } } };
+    const getPet = { '/pets': { get: { operationId: 'getPet', responses: { '302': cardRef } } } };
+    const before = await parse(getNote, { responses: { Card: jsonCard } });
+    const after = await parse({ ...getNote, ...getPet }, { responses: { Card: jsonCard } });
+    const petsFirst = await parse({ ...getPet, ...getNote }, { responses: { Card: jsonCard } });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [after, petsFirst]) {
+      expect(modelNames(spec)).toEqual(['CardResponse']);
+      expect(contentsOf({ contents: byName(spec).get('getNote')!.responseContents })).toEqual([
+        'application/json: CardResponse',
+      ]);
+      const getPetOp = byName(spec).get('getPet')!;
+      expect(getPetOp.responseStatusCode).toBe(302);
+      expect(getPetOp.response).toEqual({ kind: 'primitive', type: 'unknown' });
+      expect(contentsOf({ contents: getPetOp.responseContents })).toEqual(['application/json: CardResponse']);
+      expectSound(spec);
+    }
+    // The service is all that is new: no second model of the component's body.
+    expect(diffSpecs(before, after).changes).toEqual([
+      expect.objectContaining({ kind: 'service-added', classification: 'additive' }),
+    ]);
+    expect(diffSpecs(after, petsFirst).changes).toEqual([]);
   });
 
   it('from an operation without an operationId: the component names them, not the path', async () => {

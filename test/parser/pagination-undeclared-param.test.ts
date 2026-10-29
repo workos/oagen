@@ -521,16 +521,19 @@ describe('a list envelope on an operation without a paging parameter (issue #309
       expectSound(ir);
     });
 
-    it('identical kept envelopes on a 200 and a 201 share one model', async () => {
+    it('identical kept envelopes on a 200 and a 201 are a model each, the 201 named for its status code (#435)', async () => {
       const ir = await parseJson(withResponses({ '200': envelopeAt('ok'), '201': envelopeAt('created') }));
       const op = onlyOperation(ir);
       expect(op.pagination).toBeUndefined();
+      // The 201 never shares the primary's model, so an edit to either body
+      // changes that body's model alone (#435; the two shared one before).
       expect(op.successResponses?.map((r) => r.type)).toEqual([
         { kind: 'model', name: 'ListPetsResponse' },
-        { kind: 'model', name: 'ListPetsResponse' },
+        { kind: 'model', name: 'ListPetsResponse201' },
       ]);
-      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse']);
+      expect(ir.models.map((m) => m.name)).toEqual(['ListPetsResponse', 'ListPetsResponse201']);
       expect(fieldsOf(ir, 'ListPetsResponse')).toEqual(['data', 'total_pages']);
+      expect(fieldsOf(ir, 'ListPetsResponse201')).toEqual(['data', 'total_pages']);
       expect(warnings()).toEqual([warningFor('no cursor, offset or page query parameter is declared')]);
       expectSound(ir);
     });

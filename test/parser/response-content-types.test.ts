@@ -7,6 +7,7 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import {
   collectAlternateResponseContents,
   collectResponseBodyTypes,
@@ -1962,7 +1963,11 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
   });
   /** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
   const afterParam = { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] };
-  /** A response with `{ id }` under application/json and the given schema under the vendor media type. */
+  /**
+   * A response with `{ id }` under application/json and the given schema under the vendor media type.
+   * The JSON body of every status code after the primary is `CreatePetResponse201`: a later status code
+   * names its body for itself, and an identical later body shares that one's (#435).
+   */
   const withVendor = (vendor: unknown, description = 'ok') => ({
     description,
     content: { 'application/json': { schema: obj({ id: str }) }, 'application/vnd.pet+json': { schema: vendor } },
@@ -1977,10 +1982,15 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       }),
     );
 
-    expect(modelsOf(spec)).toEqual([`${PLAIN} { other }`, 'CreatePetResponse { id }', `${PLAIN}200 { name }`]);
+    expect(modelsOf(spec)).toEqual([
+      `${PLAIN} { other }`,
+      'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
+      `${PLAIN}200 { name }`,
+    ]);
     expect(successOf(findOp(spec, 'createPet'))).toEqual([
       `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}200`,
-      `201: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}200`,
+      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}200`,
     ]);
     expectSound(spec, [PLAIN]);
     expect(warn).not.toHaveBeenCalled();
@@ -1991,10 +2001,10 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       document(createPet({ '200': withVendor(obj({ name: str })), '201': withVendor(obj({ name: str }), 'created') })),
     );
 
-    expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${PLAIN} { name }`]);
+    expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { id }', `${PLAIN} { name }`]);
     expect(successOf(findOp(spec, 'createPet'))).toEqual([
       `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}`,
-      `201: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}`,
+      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}`,
     ]);
     expectSound(spec, []);
   });
@@ -2010,6 +2020,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expect(modelsOf(spec)).toEqual([
       `${PLAIN} { other }`,
       'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
       `${PLAIN}200 { owner }`,
       `${PLAIN}200Owner { id }`,
     ]);
@@ -2036,6 +2047,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expect(modelsOf(spec)).toEqual([
       `${PLAIN} { other }`,
       'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
       `${PLAIN}200 { name }`,
       `${PLAIN}202 { name, eta }`,
     ]);
@@ -2062,6 +2074,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expect(modelsOf(spec)).toEqual([
       `${PLAIN} { other }`,
       'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
       `${PLAIN}200 { owner }`,
       `${PLAIN}200Owner { id }`,
       `${PLAIN}201 { owner }`,
@@ -2095,6 +2108,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       `${PLAIN} { shape }`,
       `${PLAIN}Circle { kind, radius }`,
       'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
       'Square { kind, side }',
     ]);
     expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN, PLAIN]);
@@ -2136,6 +2150,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         `${PLAIN}201 { shape, original }`,
         `${PLAIN}Circle { kind, diameter }`,
         'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
         'Square { kind, side }',
       ]);
       const later = spec.models.find((m) => m.name === `${PLAIN}201`)!;
@@ -2175,6 +2190,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         `${PLAIN} { shape, kind_ref }`,
         `${PLAIN}Circle { kind, diameter }`,
         'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
         'Square { kind, side }',
       ]);
       expect(spec.models.find((m) => m.name === PLAIN)?.fields.map((f) => f.type)).toMatchObject([
@@ -2206,6 +2222,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
 
       expect(spec.models.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`)).toEqual([
         'CreatePetResponse',
+        'CreatePetResponse201',
         PLAIN,
         `${PLAIN}201 (deprecated)`,
       ]);
@@ -2269,6 +2286,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     // derive one name.
     const YAML = 'CreatePetApplicationYamlResponse';
     const YAML_CHARSET = 'CreatePetApplicationYamlCharsetUtf8Response';
+    /** `{ id }` under application/json, which a 201 names `CreatePetResponse201` (#435), beside the given keys. */
     const withYaml = (keys: Record<string, unknown>, description = 'ok') => ({
       description,
       content: { 'application/json': { schema: obj({ id: str }) }, ...keys },
@@ -2298,7 +2316,12 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      expect(modelsOf(spec)).toEqual([`${YAML} { other }`, 'CreatePetResponse { id }', `${YAML}200 { name }`]);
+      expect(modelsOf(spec)).toEqual([
+        `${YAML} { other }`,
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
+        `${YAML}200 { name }`,
+      ]);
       expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
         `200: application/yaml; charset=utf-8 → ${YAML}200`,
         `201: application/yaml → ${YAML}200`,
@@ -2342,7 +2365,12 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         document(createPet({ '200': withYaml(keys()), '201': withYaml(keys(), 'created') })),
       );
 
-      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', `${YAML} { name }`, `${YAML_CHARSET} { name }`]);
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
+        `${YAML} { name }`,
+        `${YAML_CHARSET} { name }`,
+      ]);
       expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
         `200: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
         `201: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
@@ -2623,7 +2651,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       });
     });
 
-    it('shares a nested model the stepped copy and the primary hold alike, stepping the root only (#309)', async () => {
+    it('moves a nested model the primary holds alike with the stepped body, so it never follows the primary (#309, #435)', async () => {
       const warn = silence();
       const spec = await parseDocument(
         document(
@@ -2634,12 +2662,15 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         ),
       );
 
-      // The 201's root differs (`extra`) and steps; its `owner` is the shape
-      // the 200 already holds under `CreatePetResponseOwner`, so it is shared.
+      // The 201's `owner` is the shape the 200 holds under
+      // `CreatePetResponseOwner`, but it moves with its root, as the root
+      // does whatever the 200 declares: shared, it would move off that name
+      // the day the 200's `owner` changed (#435; #309 shared it).
       expect(modelsOf(spec)).toEqual([
         'CreatePetResponse { owner }',
         'CreatePetResponseOwner { id }',
         'CreatePetResponse201 { owner, extra }',
+        'CreatePetResponse201Owner { id }',
       ]);
       expect(findOp(spec, 'createPet').successResponses!.map((r) => name(r.type))).toEqual([
         'CreatePetResponse',
@@ -2712,6 +2743,194 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       expect(op.successResponses![1].type).toEqual({ kind: 'array', items: { kind: 'model', name: 'CreatePetItem' } });
       expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetItem { id }']);
       expect(warn).not.toHaveBeenCalled();
+      expectSound(spec, []);
+    });
+  });
+
+  describe("a later status code's body named for itself, whatever the 200 declares (issue #435)", () => {
+    const json = (schema: unknown, description = 'ok') => ({
+      description,
+      content: { 'application/json': { schema } },
+    });
+    const enumOf = (...values: string[]) => ({ type: 'string', enum: values });
+    const successNames = (spec: ApiSpec) =>
+      findOp(spec, 'createPet').successResponses!.map((r) => `${r.statusCode}: ${name(r.type)}`);
+    /** Each model's fields with the name of the model or enum each is typed by. */
+    const typesOf = (spec: ApiSpec) =>
+      spec.models.map(
+        ({ fields, name: model }) =>
+          `${model} { ${fields.map((f) => `${f.name}: ${f.type.kind === 'model' || f.type.kind === 'enum' ? f.type.name : f.type.kind}`).join(', ')} }`,
+      );
+    const enumsOf = (spec: ApiSpec) =>
+      spec.enums.map(({ name: enumName, values }) => `${enumName} [${values.map((v) => v.value).join(', ')}]`);
+
+    it('the issue repro (case 1): a field added to a 201 that matched the 200 is an additive change to its own model', async () => {
+      const warn = silence();
+      const before = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str })), '201': json(obj({ id: str }), 'created') })),
+      );
+      const after = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str })), '201': json(obj({ id: str, tag: str }), 'created') })),
+      );
+
+      // The 201 starts out with a model of its own, although it matches the
+      // 200's, so the field lands on that model instead of moving the 201
+      // off `CreatePetResponse`.
+      expect(successNames(before)).toEqual(['200: CreatePetResponse', '201: CreatePetResponse201']);
+      expect(modelsOf(before)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { id }']);
+      expect(successNames(after)).toEqual(['200: CreatePetResponse', '201: CreatePetResponse201']);
+      expect(modelsOf(after)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { id, tag }']);
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        expect.objectContaining({ kind: 'model-modified', name: 'CreatePetResponse201', classification: 'additive' }),
+      ]);
+      expect(diff.summary.breaking).toBe(0);
+      expect(warnings(warn)).toEqual([]);
+      expectSound(before, []);
+      expectSound(after, []);
+    });
+
+    it('a field added to the 200 instead leaves the 201 where it was', async () => {
+      const before = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str })), '201': json(obj({ id: str }), 'created') })),
+      );
+      const after = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str, tag: str })), '201': json(obj({ id: str }), 'created') })),
+      );
+
+      expect(successNames(after)).toEqual(['200: CreatePetResponse', '201: CreatePetResponse201']);
+      expect(diffSpecs(before, after).changes).toEqual([
+        expect.objectContaining({ kind: 'model-modified', name: 'CreatePetResponse', classification: 'additive' }),
+      ]);
+    });
+
+    it('the issue repro (case 2): a 201 and a 202 that declare one body share `CreatePetResponse201`', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(obj({ tag: str }), 'created'),
+            '202': json(obj({ tag: str }), 'accepted'),
+          }),
+        ),
+      );
+
+      expect(successNames(spec)).toEqual([
+        '200: CreatePetResponse',
+        '201: CreatePetResponse201',
+        '202: CreatePetResponse201',
+      ]);
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { tag }']);
+      expect(warnings(warn)).toEqual([]);
+      expectSound(spec, []);
+    });
+
+    it('shares a whole body, nested models and enums included, and only a whole body', async () => {
+      const warn = silence();
+      const body = obj({ owner: obj({ id: str, role: enumOf('a', 'b') }), tag: str });
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(body, 'created'),
+            '202': json(body, 'accepted'),
+            // The same `owner` beside another field: a body of its own, `owner` and all.
+            '203': json(obj({ owner: obj({ id: str, role: enumOf('a', 'b') }), eta: str }), 'non-authoritative'),
+          }),
+        ),
+      );
+
+      expect(successNames(spec)).toEqual([
+        '200: CreatePetResponse',
+        '201: CreatePetResponse201',
+        '202: CreatePetResponse201',
+        '203: CreatePetResponse203',
+      ]);
+      expect(typesOf(spec)).toEqual([
+        'CreatePetResponse { id: primitive }',
+        'CreatePetResponse201 { owner: CreatePetResponse201Owner, tag: primitive }',
+        'CreatePetResponse201Owner { id: primitive, role: CreatePetResponse201OwnerRole }',
+        'CreatePetResponse203 { owner: CreatePetResponse203Owner, eta: primitive }',
+        'CreatePetResponse203Owner { id: primitive, role: CreatePetResponse203OwnerRole }',
+      ]);
+      expect(enumsOf(spec)).toEqual(['CreatePetResponse201OwnerRole [a, b]', 'CreatePetResponse203OwnerRole [a, b]']);
+      expect(warnings(warn)).toEqual([]);
+      expectSound(spec, []);
+    });
+
+    it('the issue repro (case 3): an inline enum moves with the body, `CreatePetResponse201Status` whatever the 200 declares', async () => {
+      const warn = silence();
+      const created = json(obj({ status: enumOf('c', 'd'), tag: str }), 'created');
+      const before = await parseDocument(document(createPet({ '200': json(obj({ id: str })), '201': created })));
+      const after = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str, status: enumOf('a', 'b') })), '201': created })),
+      );
+      // The 200 declaring the 201's very enum does not pull the 201's back either.
+      const same = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str, status: enumOf('c', 'd') })), '201': created })),
+      );
+
+      expect(typesOf(before)).toEqual([
+        'CreatePetResponse { id: primitive }',
+        'CreatePetResponse201 { status: CreatePetResponse201Status, tag: primitive }',
+      ]);
+      expect(enumsOf(before)).toEqual(['CreatePetResponse201Status [c, d]']);
+      expect(typesOf(after)).toEqual([
+        'CreatePetResponse { id: primitive, status: CreatePetResponseStatus }',
+        'CreatePetResponse201 { status: CreatePetResponse201Status, tag: primitive }',
+      ]);
+      expect(enumsOf(after)).toEqual(['CreatePetResponseStatus [a, b]', 'CreatePetResponse201Status [c, d]']);
+      expect(typesOf(same)[1]).toBe('CreatePetResponse201 { status: CreatePetResponse201Status, tag: primitive }');
+      expect(enumsOf(same)).toEqual(['CreatePetResponseStatus [c, d]', 'CreatePetResponse201Status [c, d]']);
+
+      // The 201 did not change, so nothing of it is reported.
+      const diff = diffSpecs(before, after);
+      expect(diff.summary.breaking).toBe(0);
+      expect(diff.changes.map((change) => ('name' in change ? change.name : change.kind))).toEqual([
+        'CreatePetResponse',
+        'CreatePetResponseStatus',
+      ]);
+      expect(warnings(warn)).toEqual([]);
+      for (const spec of [before, after, same]) expectSound(spec, []);
+    });
+
+    it('moves an enum nested in a moved model with it: `CreatePetResponse201OwnerRole`', async () => {
+      const created = json(obj({ owner: obj({ role: enumOf('c', 'd') }), tag: str }), 'created');
+      const before = await parseDocument(document(createPet({ '200': json(obj({ id: str })), '201': created })));
+      const after = await parseDocument(
+        document(createPet({ '200': json(obj({ id: str, owner: obj({ role: enumOf('a', 'b') }) })), '201': created })),
+      );
+
+      expect(typesOf(after)).toEqual([
+        'CreatePetResponse { id: primitive, owner: CreatePetResponseOwner }',
+        'CreatePetResponseOwner { role: CreatePetResponseOwnerRole }',
+        'CreatePetResponse201 { owner: CreatePetResponse201Owner, tag: primitive }',
+        'CreatePetResponse201Owner { role: CreatePetResponse201OwnerRole }',
+      ]);
+      expect(enumsOf(after)).toEqual(['CreatePetResponseOwnerRole [a, b]', 'CreatePetResponse201OwnerRole [c, d]']);
+      expect(diffSpecs(before, after).summary.breaking).toBe(0);
+      expectSound(after, []);
+    });
+
+    it('leaves a `$ref` to a component enum named like the context as written', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(obj({ status: { $ref: '#/components/schemas/CreatePetResponseStatus' }, tag: str }), 'created'),
+          }),
+          { CreatePetResponseStatus: enumOf('x', 'y') },
+        ),
+      );
+
+      expect(typesOf(spec)).toEqual([
+        'CreatePetResponse { id: primitive }',
+        'CreatePetResponse201 { status: CreatePetResponseStatus, tag: primitive }',
+      ]);
+      expect(enumsOf(spec)).toEqual(['CreatePetResponseStatus [x, y]']);
+      expect(warnings(warn)).toEqual([]);
       expectSound(spec, []);
     });
   });

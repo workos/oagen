@@ -284,7 +284,7 @@ describe('the same rule at every other site the merge passes name', () => {
     expectSound(spec, ['CreatePetRequest', 'CreatePetResponse']);
   });
 
-  it('a second success body sharing the primary model follows it to the new name', async () => {
+  it('a second success body of the primary shape keeps a model of its own while the primary takes the new name', async () => {
     const { spec, warnings } = await parse(
       'second-success',
       specDoc(getPet({ '200': response(obj({ a: str })), '202': response(obj({ a: str })) }), {
@@ -292,12 +292,15 @@ describe('the same rule at every other site the merge passes name', () => {
       }),
     );
     expect(bothKinds(spec)).toEqual([]);
-    expect(modelsOf(spec)).toEqual(['GetPetResponse2 {a}']);
+    // The 202 is named for its status code whatever the 200 declares, so it
+    // never shares the primary's model (#435; it followed it to
+    // `GetPetResponse2` before), and its name is clear of the enum.
+    expect(modelsOf(spec)).toEqual(['GetPetResponse2 {a}', 'GetPetResponse202 {a}']);
     const { getPet: pet } = opsOf(spec);
     expect(show(pet.response)).toBe('model GetPetResponse2');
     expect(pet.successResponses?.map(({ statusCode, type }) => `${statusCode}: ${show(type)}`)).toEqual([
       '200: model GetPetResponse2',
-      '202: model GetPetResponse2',
+      '202: model GetPetResponse202',
     ]);
     expect(warnings).toEqual([renamed('GetPetResponse', 'GetPetResponse2')]);
     expectSound(spec, ['GetPetResponse']);

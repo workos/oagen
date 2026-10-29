@@ -11,6 +11,7 @@ import type {
   ResponseContent,
   RequestBodyContent,
   Enum,
+  EnumRef,
   DefaultResponse,
   RangeResponse,
   Model,
@@ -109,6 +110,7 @@ import {
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
@@ -515,7 +517,7 @@ export function extractOperations(
     [...(componentModels ?? []), ...(componentFieldModels ?? [])],
     componentSchemas,
     Object.keys(componentResponses ?? {}).length > 0
-      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas)
+      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas, componentResponses)
       : [],
   );
   const componentResponseModelNames = new Map(
@@ -5917,22 +5919,28 @@ function resolveComponentResponseModelNames(
 
 /**
  * Every model name an operation named from an `operationId` mints for its own
- * inline success bodies — `<Op>Response` at any 2xx and everything under it,
- * under every reading (`bodyModelNames`) — the `operationId` being the one
- * its models are named by (`modelOperationIds`). A component response's body
- * steps past these names (`resolveComponentResponseModelNames`), so `card`'s
- * inline 200 keeps `CardResponse` and the body of a component `Card` is
- * `CardResponse2`, whatever the order of the paths (workos/oagen#424). A 2xx
- * written as a `$ref` mints under its component's name or not at all, and an
- * operation that names its models from its path steps past the components
- * itself (`resolvePathModelBaseNames`), so neither reserves anything. Read
- * silently (`rehearse`): the operation reports its body's problems once, when
- * it is built.
+ * inline success bodies — the primary's `<Op>Response` and everything under
+ * it, and each later status code's under the stem it moves to
+ * (`<Op>Response201`, `stepSecondaryBody`), under every reading
+ * (`bodyModelNames`) — the `operationId` being the one its models are named
+ * by (`modelOperationIds`). A component response's body steps past these
+ * names (`resolveComponentResponseModelNames`), so `card`'s inline 200 keeps
+ * `CardResponse` and the body of a component `Card` is `CardResponse2`,
+ * whatever the order of the paths (workos/oagen#424), while `card`'s inline
+ * 201 beside another primary takes `CardResponse201` and nothing from the
+ * component. The primary is chosen by the rule `extractResponses` chooses it
+ * by (`primaryResponseEntry`), a `$ref` among the entries resolved to read
+ * it. A 2xx written as a `$ref` mints under its component's name or not at
+ * all, and an operation that names its models from its path steps past the
+ * components itself (`resolvePathModelBaseNames`), so neither reserves
+ * anything. Read silently (`rehearse`): the operation reports its body's
+ * problems once, when it is built.
  */
 function operationBodyModelNames(
   paths: Record<string, PathItem>,
   modelOperationIds: ReadonlyMap<string, string | null>,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  componentResponses: Record<string, Record<string, unknown>> | undefined,
 ): string[] {
   return rehearse(() => {
     const names: string[] = [];
@@ -5943,12 +5951,19 @@ function operationBodyModelNames(
         const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op?.operationId;
         if (!op || !operationId) continue;
         const contextName = operationIdModelName(operationId, 'Response');
-        for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
+        const entries = Object.entries(op.responses ?? {}).flatMap(([statusCode, response]) => {
           const responseKey = classifyResponseKey(statusCode);
-          if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
-          if ('$ref' in response) continue;
-          const { schema } = primaryBodySchema(response);
-          if (schema) names.push(...bodyModelNames(schema, contextName, componentSchemas));
+          if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 400) return [];
+          const code = responseKey.code;
+          const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
+          return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
+        });
+        const primaryCode = primaryResponseEntry(entries, componentSchemas)?.code;
+        for (const { code, inline, pick } of entries) {
+          if (!inline || !pick.schema) continue;
+          const minted = bodyModelNames(pick.schema, contextName, componentSchemas);
+          const moves = code !== primaryCode && minted.some((name) => name.includes(contextName));
+          names.push(...(moves ? minted.map((name) => name.replace(contextName, `${contextName}${code}`)) : minted));
         }
       }
     }
@@ -6663,8 +6678,8 @@ function extractResponses(
   const bodySchemas = new Map<number, SchemaObject>();
   // The context each 2xx body's models were named under — `<Op>Response`,
   // or the component's shared name — the stem a later status code's body
-  // steps from when a kept model holds one of its names (`stepSecondaryBody`).
-  const bodyContexts = new Map<number, string>();
+  // steps from (`stepSecondaryBody`), and whether it is a component's.
+  const bodyContexts = new Map<number, { context: string; component: boolean }>();
 
   // Every 2xx, 3xx and error entry is resolved once, here, and the loop
   // below reads it from this map. The bundler leaves `$ref:
@@ -6809,7 +6824,7 @@ function extractResponses(
         extractedType = result.response;
         bodyResults.set(code, result);
         bodySchemas.set(code, bodySchema);
-        bodyContexts.set(code, contextName);
+        bodyContexts.set(code, { context: contextName, component: componentModelName !== undefined });
       }
       const contents = extractResponseContents(
         resp.content,
@@ -6828,14 +6843,21 @@ function extractResponses(
     } else if (code >= 300 && code < 400) {
       // 3xx redirects — include so emitter can detect redirect endpoints. The
       // type is not read from any media type, so every content entry is typed
-      // on its own.
+      // on its own. A component's JSON body is still the component's body
+      // (`CardResponse`), deferred as at a `404` or `default` site, so every
+      // operation that returns the component shares one model of it whatever
+      // the key it mounts it at; the entry's own type stays `unknown`.
+      const json = componentModelName === undefined ? undefined : jsonResponseSchema(resp);
+      const targets: Array<{ type?: TypeRef }> = [];
       const contents = extractResponseContents(
         resp.content,
-        undefined,
-        undefined,
+        json?.contentType,
+        json && typeFallbackBody(json.schema, componentModelName!, String(code), fallback, targets, componentModelName),
         contentModelNaming(site, 'Response', code),
         ctx,
       );
+      const own = json && contents?.contents.find((content) => content.contentType === json.contentType);
+      if (own) targets.push(own);
       allSuccessResponses.push({
         statusCode: code,
         type: undescribedBodyType(),
@@ -6923,13 +6945,15 @@ function extractResponses(
   // them, so keeping only one body's would leave the others dangling. Every
   // status derives the same `<Op>Response` context name, so the primary's
   // definition — the one `response` points at — goes first; the other bodies
-  // follow in status order, and a model of theirs the kept one shares
-  // (`modelFingerprint`) resolves to the kept definition silently. A later
-  // body that reaches a model the kept ones hold under another shape is
-  // re-derived under its own stem first — `<Op>Response<code>`, then a
-  // number (`stepSecondaryBody`) — so its `successResponses` entry keeps the
-  // shape its status code declared; only a clash on a model the stem does
-  // not name is still resolved to the kept definition, with a warning. The
+  // follow in status order, each named for itself before it is merged
+  // (`stepSecondaryBody`): the operation's own body moves to its own stem —
+  // the one an earlier status code's identical body took, else
+  // `<Op>Response<code>`, then a number — whatever the kept bodies hold, so
+  // its `successResponses` entry keeps the shape its status code declared
+  // under a name no other status code's body decides. A model of a later
+  // body the kept one shares (`modelFingerprint`) resolves to the kept
+  // definition silently; only a clash on a model the stem does not name is
+  // still resolved to the kept definition, with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
@@ -6941,9 +6965,13 @@ function extractResponses(
     return a - b;
   });
   const keptByName = new Map<string, { model: Model; status: number }>();
+  // The stem each of the operation's own later bodies settled on, by the
+  // body as it was read, so a later body that reads alike settles on it too.
+  const settledStems = new Map<string, string>();
   for (const [status, result] of bodiesByPrimacy) {
     if (status !== primaryStatus) {
-      stepSecondaryBody(result, bodyContexts.get(status) ?? operationBodyName, status, keptByName, ctx.registry);
+      const { context, component } = bodyContexts.get(status)!;
+      stepSecondaryBody(result, context, status, keptByName, ctx.registry, component ? undefined : settledStems);
     }
     const reached =
       status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
@@ -7059,33 +7087,41 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
 }
 
 /**
- * Re-derive a later status code's body under its own stem when a model it
- * reaches is already kept — by the primary, or by an earlier status code —
- * under another shape, so its `successResponses` entry keeps the shape the
- * status code declared instead of resolving to the kept model's: a 201
- * `{ owner: { id } }` beside a 200 `{ id }`, or a list envelope kept at a
- * 201 beside a 200 `{ id }` (`{ data, total_pages }`, no paging parameter).
- * The stem steps as a secondary media-type body's does (`deferredNamingStem`):
- * the status code first (`CreatePetResponse201`), then a number
- * (`CreatePetResponse2`, `…3`, …). Every model the body reaches that its
- * context names moves with it (`CreatePetResponse201Owner`) — except one a
- * kept model already holds under the same shape, which stays shared (the
- * 201's `{ owner: { id } }` beside the 200's keeps `CreatePetResponseOwner`),
- * unless it references a model that moves — the entry's type and the
- * models' fields rewritten in place, so the `contents` entry that shares
- * the type follows; a model named outside the context (a settled item,
- * `CreatePetItem`; a titled variant) keeps its name. A candidate is taken
- * when a name it would give is kept, or owned in the spec-wide registry by
- * a component or another operation, under a shape the owner does not share
- * (`ownerShares`); an identical shape shares the name, as it always did.
- * Only references the body itself minted are repointed — by identity, never
- * by name alone: an explicit `$ref` to a same-named component
- * (`isComponentModelRef`) and a reference an `allOf` merge copied from
- * another component's field (`isInheritedModelRef`) stay as written, the
- * filter the merge passes hand the same rewriters. Returns whether anything
- * moved: nothing does when no reached model clashes, or when the clash is
- * on a model the context does not name, which the caller then reports as
- * before.
+ * Name a later status code's body for itself before its models are merged
+ * with the kept ones (workos/oagen#435). The operation's own body
+ * (`settled` given) was read under the primary's context, `<Op>Response`,
+ * and always moves off it, whatever the primary or an earlier status code
+ * holds: to the stem an earlier status code settled on for a body that read
+ * the same, so a 202 identical to the 201 shares `CreatePetResponse201`;
+ * else to its status code (`CreatePetResponse201`), then a number
+ * (`CreatePetResponse2`, `…3`, …), the chain a secondary media-type body
+ * steps through (`deferredNamingStem`), a candidate being taken when no name
+ * it would give is kept, or owned in the spec-wide registry by a component
+ * or another operation, under a shape the owner does not share
+ * (`ownerShares`). So no edit to the primary renames it: a 201 identical to
+ * the 200 is `CreatePetResponse201` beside `CreatePetResponse`, and a field
+ * added to either is an additive change to that one's model, never a move
+ * between the two. Two bodies keep the names they were read under unless
+ * one of them clashes: a component response's (`settled` absent), which is
+ * the component's wherever it is mounted, and an array body or a list
+ * envelope unwrapped to its items, whose items were settled against the
+ * registry as they were read (`typeInlineItems`). Every model the body
+ * reaches that its context names moves with it (`CreatePetResponse201Owner`),
+ * and so does every inline enum those models and the entry's type carry
+ * (`CreatePetResponse201Status`, `CreatePetResponse201OwnerRole`), so each is
+ * named under the model it sits in; a model the context does not name (a
+ * settled item, `CreatePetItem`; a titled variant) keeps its name, and so
+ * does a `$ref` to a component enum, which carries no values. The entry's
+ * type and the models' fields are rewritten in place, so the `contents`
+ * entry that shares the type follows. Only references the body itself
+ * minted are repointed — by identity, never by name alone: an explicit
+ * `$ref` to a same-named component (`isComponentModelRef`) and a reference
+ * an `allOf` merge copied from another component's field
+ * (`isInheritedModelRef`) stay as written, the filter the merge passes hand
+ * the same rewriters. Returns whether anything moved: nothing does for a
+ * body with no model its context names, nor for one of the two kept bodies
+ * above when none of its names clashes; a clash on a model the context does
+ * not name is then reported by the caller as before.
  */
 function stepSecondaryBody(
   result: ResponseExtractionResult,
@@ -7093,11 +7129,9 @@ function stepSecondaryBody(
   status: number,
   kept: ReadonlyMap<string, { model: Model; status: number }>,
   registry: InlineModelRegistry | undefined,
+  /** The stem each of the operation's own earlier bodies settled on, by the body as read; absent for a component's body. */
+  settled?: Map<string, string>,
 ): boolean {
-  const sharedByKept = (model: Model, name: string): boolean => {
-    const keptModel = kept.get(name)?.model;
-    return keptModel !== undefined && modelFingerprint(keptModel) === modelFingerprint(model);
-  };
   const clashes = (model: Model, name: string): boolean => {
     const fingerprint = modelFingerprint(model);
     const keptModel = kept.get(name)?.model;
@@ -7108,15 +7142,41 @@ function stepSecondaryBody(
   // Reached through the body's own models, not the kept ones: the body
   // keeps its root once it steps, so everything under that root is its.
   const own = reachedModels(result.response, result.inlineModels, new Map());
-  // A model the context names carries it: as a prefix (the root, a nested
-  // object `…Owner`, a nested variant `…Shape`), as a suffix (a const-named
-  // variant, `Square…` — `deriveModelName`) or in between (a const-named
-  // nested variant, `Square…Shape`); it moves by that one occurrence. A
-  // settled item (`<Op>Item`) and a titled variant do not carry it.
+  // A name the context names carries it: as a prefix (the root, a nested
+  // object `…Owner`, a nested variant `…Shape`, a field's enum `…Status`),
+  // as a suffix (a const-named variant, `Square…` — `deriveModelName`) or in
+  // between (a const-named nested variant, `Square…Shape`); it moves by that
+  // one occurrence. A settled item (`<Op>Item`) and a titled variant do not
+  // carry it.
   const namedByContext = (name: string): boolean => name.includes(context);
   const movedTo = (name: string, stem: string): string => name.replace(context, stem);
   const named = [...own].filter((model) => namedByContext(model.name));
-  if (!named.some((model) => clashes(model, model.name))) return false;
+  const root = result.response.kind === 'nullable' ? result.response.inner : result.response;
+  const always = settled !== undefined && root.kind !== 'array';
+  if (named.length === 0 || (!always && !named.some((model) => clashes(model, model.name)))) return false;
+
+  // The body as read, before anything moved: what a later status code's
+  // body must read alike to settle on this one's stem.
+  const shape = always
+    ? JSON.stringify([
+        shapeWithEnumFlags(result.response),
+        [...own].map((model) => `${model.name} ${modelFingerprint(model)}`).sort(),
+      ])
+    : undefined;
+  const earlier = shape === undefined ? undefined : settled?.get(shape);
+  const under = (stem: string): Map<Model, string> => new Map(named.map((model) => [model, movedTo(model.name, stem)]));
+  // The earlier body's stem is taken as it stands: moved under it, this body
+  // gives the very models that body keeps there.
+  let stem = earlier ?? `${context}${status}`;
+  let names = under(stem);
+  if (earlier === undefined) {
+    // Unbounded on purpose: the kept names and the registry are finite and
+    // every step is a new number, so a free stem is always reached.
+    for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) {
+      names = under((stem = `${context}${n}`));
+    }
+    if (shape !== undefined) settled?.set(shape, stem);
+  }
 
   // Only a reference the body itself minted moves with it, by the
   // reference's identity rather than its name: an explicit `$ref` to a
@@ -7125,33 +7185,15 @@ function stepSecondaryBody(
   // stay as written, so `original: { $ref: CreatePetResponseOwner }` beside
   // an inline `owner` of that name keeps naming the component.
   const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
-  const mintedNames = (ref: TypeRef): string[] => {
-    const found: string[] = [];
-    walkTypeRef(ref, { model: (modelRef) => void (admit(modelRef) && found.push(modelRef.name)) });
-    return found;
-  };
-  // What moves: every model the context names, except one a kept model
-  // already holds under the same shape, which stays shared — unless it
-  // references, by a minted reference, a model that moves, since its shape
-  // then differs after all.
-  const moving = new Set(named.filter((model) => !sharedByKept(model, model.name)));
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const model of named) {
-      if (moving.has(model)) continue;
-      const movingNames = new Set([...moving].map((m) => m.name));
-      if (collectModelTypeRefs(model).some((ref) => mintedNames(ref).some((name) => movingNames.has(name)))) {
-        moving.add(model);
-        grew = true;
-      }
-    }
+  // An inline enum carries its values on the reference, which a `$ref` to a
+  // component enum does not. Every one is found before any is renamed, so a
+  // reference two fields share moves once.
+  const enums = new Set<EnumRef>();
+  for (const ref of [result.response, ...named.flatMap(collectModelTypeRefs)]) {
+    walkTypeRef(ref, {
+      enum: (enumRef) => void (enumRef.values && namedByContext(enumRef.name) && enums.add(enumRef)),
+    });
   }
-  const under = (stem: string): Map<Model, string> =>
-    new Map([...moving].map((model) => [model, movedTo(model.name, stem)]));
-  let names = under(`${context}${status}`);
-  // Unbounded on purpose: the kept names and the registry are finite and
-  // every step is a new number, so a free stem is always reached.
-  for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) names = under(`${context}${n}`);
 
   // Every reference moves through the one rewriter every rename site uses
   // (`renameTypeRefModels`, `renameModelRefs`), under the identity filter
@@ -7162,6 +7204,7 @@ function stepSecondaryBody(
   renameTypeRefModels(result.response, byOldName, admit);
   for (const model of own) renameModelRefs(model, byOldName, admit);
   for (const [model, name] of names) model.name = name;
+  for (const enumRef of enums) enumRef.name = movedTo(enumRef.name, stem);
   return true;
 }
 
