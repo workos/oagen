@@ -462,6 +462,30 @@ describe('a name an enum owns is not a parameter model’s', () => {
     expectSound(spec);
   });
 
+  it("an enum nested in a later operation's parameter model: the earlier model is qualified by its operation (#425)", async () => {
+    // The review's fourth document with the two parameters swapped: the
+    // `filterStatus` object now comes first, and still steps past the
+    // `PetsFilterStatus` enum the later `filter` object nests.
+    const { spec, warnings } = await parse(
+      'nested-enum-after',
+      specDoc(
+        pets(
+          [param('filterStatus', 'query', obj({ code: str }))],
+          [param('filter', 'query', obj({ status: en(['draft', 'published']) }))],
+        ),
+      ),
+    );
+    expect(warnings).toEqual([]);
+    const ops = opsOf(spec);
+    expect(paramTypes(ops.listPets)).toEqual({ 'query:filterStatus': 'PetsListPetsFilterStatus' });
+    expect(paramTypes(ops.searchPets)).toEqual({ 'query:filter': 'PetsFilter' });
+    expect(fieldsOf(spec, 'PetsListPetsFilterStatus')).toEqual({ code: 'string' });
+    expect(fieldsOf(spec, 'PetsFilter')).toEqual({ status: 'PetsFilterStatus' });
+    expect(enumValues(spec, 'PetsFilterStatus')).toEqual(['draft', 'published']);
+    expect(modelNames(spec)).toEqual(['PetsFilter', 'PetsListPetsFilterStatus']);
+    expectSound(spec);
+  });
+
   it("the same operation's parameter enum in another location: the model is qualified by its location", async () => {
     const { spec, warnings } = await parse(
       'same-operation-enum',

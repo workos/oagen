@@ -21,7 +21,7 @@ import type { SchemaObject } from '../../src/parser/schemas.js';
  * one name. The error body, the `default` body and the header model step in
  * the deferred pass's shape registry, which reserves every enum name in play
  * (`reserveEnumNames`) — the name of a body that is itself an enum before
- * any deferred model is named (`deferredEnumName`). The sites the merge
+ * any deferred model is named (`deferredEnumNames`). The sites the merge
  * passes name — a request body or primary response named from its
  * operation, a model nested under one, a list-envelope companion, a
  * component field's object — are settled there (`settleSharedNames`): a
@@ -648,4 +648,64 @@ describe('review: one rule — the model steps wherever an enum of its name exis
       }
     }
   });
+});
+
+describe('workos/oagen#425: an enum nested in another deferred site’s model holds its name in either document order', () => {
+  // `listNotes` (tag `searchPetsError404`) mints an `x` object — a
+  // `deepObject` query parameter, or a response header — under
+  // `SearchPetsError404X`, the name `searchPets`'s 404 body lifts its nested
+  // `x` enum under. Declared first, the object used to keep the name until
+  // the merge renamed it with the operation in front
+  // (`ListNotesSearchPetsError404X`); declared second, it stepped along its
+  // own ladder.
+  const xObject = obj({ n: str });
+  const listNotes = (site: 'query' | 'header') => ({
+    '/notes': {
+      get: {
+        operationId: 'listNotes',
+        tags: ['searchPetsError404'],
+        ...(site === 'query' && { parameters: [{ name: 'x', in: 'query', style: 'deepObject', schema: xObject }] }),
+        responses: {
+          '200': response(obj({ id: str }), site === 'header' ? { headers: { x: { schema: xObject } } } : {}),
+        },
+      },
+    },
+  });
+  const searchPets = {
+    '/pets/search': {
+      get: {
+        operationId: 'searchPets',
+        tags: ['pets'],
+        responses: { '200': response(obj({ id: str })), '404': response(obj({ x: en(['a', 'b']) })) },
+      },
+    },
+  };
+
+  for (const site of ['query', 'header'] as const) {
+    it(`steps the ${site} object by operation (\`SearchPetsError404ListNotesX\`), declared before or after the enum`, async () => {
+      for (const [order, paths] of [
+        ['object-first', { ...listNotes(site), ...searchPets }],
+        ['enum-first', { ...searchPets, ...listNotes(site) }],
+      ] as const) {
+        const { spec, warnings } = await parse(`${site}-${order}`, specDoc(paths));
+        expect(warnings).toEqual([]);
+        expect(bothKinds(spec)).toEqual([]);
+        expect(enumsOf(spec)).toEqual(['SearchPetsError404X [a,b]']);
+        expect(modelsOf(spec).sort()).toEqual([
+          'ListNotesResponse {id}',
+          'SearchPetsError404 {x}',
+          'SearchPetsError404ListNotesX {n}',
+          'SearchPetsResponse {id}',
+        ]);
+        const { listNotes: notes, searchPets: pets } = opsOf(spec);
+        expect(site === 'query' ? queryType(notes, 'x') : headersOf(notes).x).toBe(
+          'model SearchPetsError404ListNotesX',
+        );
+        expect(errorsOf(pets)).toEqual(['404: model SearchPetsError404']);
+        const body = spec.models.find((m) => m.name === 'SearchPetsError404');
+        expect(show(body?.fields[0].type)).toBe('enum SearchPetsError404X');
+        expectSound(spec);
+      }
+    });
+  }
 });

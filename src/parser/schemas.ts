@@ -2618,9 +2618,8 @@ function buildSyntheticEnumRef(
  * `ConnectionType` → `ConnectionType`), then passed through the active
  * `schemaNameTransform` as a component's name is, so a project's rename map
  * (`RadarAction` → `RadarListAction` in `oagen.config.ts`) reaches inline
- * enums too. One rule for every inline enum: an `enum:` list, a `oneOf` of
- * consts (`buildSyntheticEnumRef`), and the name a deferred body that is an
- * enum is reserved under before it is typed (`inlineEnumSchemaName`).
+ * enums too. One rule for every inline enum: an `enum:` list and a `oneOf`
+ * of consts (`buildSyntheticEnumRef`) alike.
  */
 export function inlineEnumName(contextName: string | undefined, parentModelName: string | undefined): string {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
@@ -2630,10 +2629,8 @@ export function inlineEnumName(contextName: string | undefined, parentModelName:
 }
 
 /**
- * How `schemaToTypeRef` types a schema as an inline enum, when it does. The
- * one decision both the typer's enum branches and `inlineEnumSchemaName`
- * read, so the name a pass reserves before a schema is typed and the name
- * the schema is typed under can never disagree. Decided on the schema as
+ * How `schemaToTypeRef` types a schema as an inline enum, when it does: the
+ * one decision the typer's enum branches read. Decided on the schema as
  * the typer sees it at those branches — its nullable wrappers removed, so
  * callers unwrap first (`unwrapNullableSchema`): a `oneOf`/`anyOf` whose
  * non-null variants are string `const` schemas (`constUnionEnumMembers`)
@@ -2642,7 +2639,7 @@ export function inlineEnumName(contextName: string | undefined, parentModelName:
  * of any count of non-null members but one is an `enum-list` enum, one
  * alone being a literal; every other shape — a `$ref`, an `allOf`, a union
  * of other variants, an object, an array — is not an enum here (an array's
- * items are the array's question, `inlineEnumSchemaName`).
+ * items are typed on their own).
  */
 export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | undefined {
   const kind = classifyInlineSchema(schema);
@@ -2659,27 +2656,6 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
 
 /** The two spellings of an inline enum `schemaToTypeRef` lifts (`inlineEnumSpelling`), with the const union's members. */
 export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
-
-/**
- * The enum name `schemaToTypeRef` types `schema` under — a schema it types
- * as an inline enum in either spelling (`inlineEnumSpelling`), under any
- * nullable wrapper, or an array of one, which is lifted under the array's
- * own name — or undefined when it types the schema as something else. Lets
- * a pass reserve the enum's name before the schema is typed
- * (`extractOperations`), whatever the document order of the sites.
- */
-export function inlineEnumSchemaName(
-  schema: SchemaObject,
-  contextName: string | undefined,
-  parentModelName: string | undefined,
-): string | undefined {
-  const inner = unwrapNullableSchema(schema);
-  if (classifyInlineSchema(inner) === 'array') {
-    const items = inner.items;
-    return items && !Array.isArray(items) ? inlineEnumSchemaName(items, contextName, parentModelName) : undefined;
-  }
-  return inlineEnumSpelling(inner) ? inlineEnumName(contextName, parentModelName) : undefined;
-}
 
 /**
  * Detect an implicit discriminator on a `oneOf` whose every variant pins the
@@ -3616,7 +3592,7 @@ function withoutArrayComponents<T>(fn: () => T): T {
  * reported is set aside and restored, so every warning the schema deserves
  * is printed once, by the extraction that keeps the models.
  */
-function rehearse<T>(fn: () => T): T {
+export function rehearse<T>(fn: () => T): T {
   const warn = console.warn;
   const reported = reportedUncarriedProperties;
   console.warn = () => {};

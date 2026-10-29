@@ -48,11 +48,11 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
-  inlineEnumSchemaName,
   isComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  rehearse,
   unwrapCollapsedWrappers,
   unwrapNullableField,
   warnOnUncarriedProperties,
@@ -694,17 +694,17 @@ export function extractOperations(
   for (const [op, qualifier] of qualifierOf) {
     reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
   }
-  // An enum a deferred site itself types — a body that is an inline enum, or
-  // an array of one — is named only when the site is resolved, after the
-  // models of every site before it in the document; reserved now
-  // (`deferredEnumName`), a deferred object body of the same name steps
-  // past it whichever of the two the document declares first
-  // (`GetPetError404Body`), as it steps past every other enum in play, so a
-  // model never keeps an enum's name.
-  for (const item of deferred) {
-    const enumName = deferredEnumName(item);
-    if (enumName !== undefined) reserveEnumNames(registry, [enumName], item.operationQualifier);
-  }
+  // An enum a deferred site types — a body that is itself an inline enum or
+  // an array of one, or an enum nested in a model the site mints (the `x`
+  // field of a 404 body) — is named only when the site is resolved, after
+  // the models of every site before it in the document; reserved now
+  // (`deferredEnumNames`), a deferred model of the same name steps past it
+  // whichever of the two the document declares first — an object 404 body
+  // to `GetPetError404Body`, a parameter or header object of another
+  // operation to its operation-qualified name (`SearchPetsError404ListNotesX`)
+  // — as it steps past every other enum in play, so a model never keeps an
+  // enum's name.
+  for (const item of deferred) reserveEnumNames(registry, deferredEnumNames(item), item.operationQualifier);
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
   inlineModels.push(...deferredTypes.models);
   // The root every component-shared site wrote, by identity (every target of
@@ -4662,26 +4662,25 @@ interface ResponseTypingContext {
  * the renames made under them, so a later one shares an identical shape
  * under whichever name the earlier took (`materializeInlineSchema`).
  *
- * Two precedences decide a name a model and an enum both derive. An enum
- * typed as an operation is built — one a parameter, a request body, a
- * success body, a pagination field carries — is in the registry before this
- * pass and keeps its name wherever the document declares it: a `status`
- * query enum on a later operation sends an earlier operation's `status`
- * parameter object to `PetsListPetsStatus`, and the same operation's to
- * `PetsQueryStatus`. Among the sites named here — response headers, error
- * bodies, secondary and fallback bodies, parameter models — document order
- * decides: each site registers the enums it types (a body that is itself an
- * enum, an enum nested in a model it minted) as it is resolved, so the
- * earlier site keeps the name and a later one that derives it steps (an
- * `X-Mode` header parameter object after an earlier operation's `X-Mode`
- * response-header enum is `PetsGetPetXMode`) — except that the enum a body
- * itself is (an error, fallback or secondary body that is an inline enum,
- * or an array of one) is reserved before any of these sites is named
- * (`deferredEnumName`), so `getPet`'s object 404 is `GetPetError404Body`
- * whether `get-pet`'s enum 404 comes before or after it. So the IR never
- * declares a model and an enum under one name, and the model is always
- * the one that steps. Returns the models materialized, having set each
- * target's `type`.
+ * An enum keeps a name a model also derives, wherever the document declares
+ * the two. One typed as an operation is built — one a parameter, a request
+ * body, a success body, a pagination field carries — is in the registry
+ * before this pass: a `status` query enum on a later operation sends an
+ * earlier operation's `status` parameter object to `PetsListPetsStatus`,
+ * and the same operation's to `PetsQueryStatus`. One a site named here
+ * types — a response header, an error, secondary or fallback body, a
+ * parameter model, whether the site is itself the enum or nests it in a
+ * model it mints — is reserved before any of these sites is named, under
+ * the name the site lifts it under at its first candidate
+ * (`deferredEnumNames`): `getPet`'s object 404 is `GetPetError404Body`
+ * whether `get-pet`'s enum 404 comes before or after it, and an `x`
+ * parameter object of `listNotes` (service `SearchPetsError404`) is
+ * `SearchPetsError404ListNotesX` whether the `x` enum nested in
+ * `searchPets`'s 404 body comes before or after it. Each site then
+ * registers the enums it types as it is resolved, under the stem it settled
+ * on. So the IR never declares a model and an enum under one name, and the
+ * model is always the one that steps. Returns the models materialized,
+ * having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
@@ -4885,15 +4884,39 @@ function isSentSite(item: DeferredInlineType): boolean {
 }
 
 /**
- * The enum name a deferred body typed as an inline enum — an error, fallback
- * or secondary body whose schema is an `enum:` list, or an array of one — is
- * lifted under when its site is resolved: its first candidate
- * (`deferredNamingStem`) as `schemaToTypeRef` names an enum under it, the
- * site's parent qualifying it as a header's does (`inlineEnumSchemaName`);
- * undefined for every other shape, which mints models or nothing.
+ * Every enum name a deferred site types when it is resolved under its first
+ * candidate (`deferredNamingStem`): the schema itself when it is an inline
+ * enum (an error, fallback or secondary body that is an `enum:` list, or an
+ * array of one) and every inline enum nested in a model it mints (a field's,
+ * a variant's, array items'), the site's parent qualifying them as a
+ * header's does. Read off a silent rehearsal of the site's first trial
+ * (`rehearse`) — the extractor for the models and `schemaToTypeRef` for the
+ * type, as `materializeInlineSchema` runs them — so the names are the ones
+ * the site lifts, with no second copy of the naming rules to keep in step. A
+ * name one of the site's own models takes too (an `a.b` enum beside an `aB`
+ * object, both `GetPetError404AB`) is left to the merge passes, which move
+ * the model (`GetPetError404AB2`): reserved, it would only send the site
+ * past its own first candidate, where the two meet again. A site that steps
+ * past its first candidate lifts its nested enums under the stem it moves to
+ * (`GetPetError404BodyX`), so the name reserved for one of them is then held
+ * by no enum: a model that derives it has still stepped to its qualified
+ * name, the same in either document order.
  */
-function deferredEnumName(item: DeferredInlineType): string | undefined {
-  return inlineEnumSchemaName(item.schema, deferredNamingStem(item)(0, []), item.parentName);
+function deferredEnumNames(item: DeferredInlineType): string[] {
+  const stem = deferredNamingStem(item)(0, []);
+  return rehearse(() => {
+    const models: Model[] = [];
+    extractInlineModelsFromProperties(
+      { properties: { [stem]: item.schema } },
+      models,
+      item.parentName,
+      item.componentSchemas,
+    );
+    const own = new Set(models.map((model) => model.name));
+    return [schemaToTypeRef(item.schema, stem, item.parentName), ...models.flatMap(collectModelTypeRefs)]
+      .flatMap(collectEnumRefs)
+      .filter((name) => !own.has(name));
+  });
 }
 
 /** The candidate property names of a deferred schema, by kind (see `materializeDeferredType`). */
