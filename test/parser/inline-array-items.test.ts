@@ -796,7 +796,8 @@ describe('review round 1', () => {
       ['nullable first', nullable({}), plain(pet), petList],
       // Nullable last: the later `items: {}` narrows nothing, so the earlier `pet` stays.
       ['nullable last', plain(pet), nullable({}), petList],
-      // A later declaration that narrows wins whichever side is nullable.
+      // A later declaration that narrows conjoins with the earlier whichever side
+      // is nullable: two inline object items merge their properties (#431).
       [
         'nullable last, narrowed',
         plain(pet),
@@ -813,7 +814,7 @@ describe('review round 1', () => {
       expect(result.response, label).toEqual(response);
       expect(result.itemType, label).toEqual({ kind: 'model', name: 'ListPetsItem' });
       const fields = result.inlineModels.find((m) => m.name === 'ListPetsItem')?.fields.map((f) => f.name);
-      expect(fields, label).toEqual(label === 'nullable last, narrowed' ? ['text'] : ['name']);
+      expect(fields, label).toEqual(label === 'nullable last, narrowed' ? ['name', 'text'] : ['name']);
     }
     // Neither side nullable: a plain array, the later items winning.
     const plainResult = classifyAndExtractResponse(envelope(plain({}), plain(pet)), 'ListPetsResponse');

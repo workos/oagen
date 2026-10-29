@@ -1586,6 +1586,57 @@ describe('two typing declarations of one name conjoin as JSON Schema applies bot
     expect(first.properties[0]!.schema).toEqual({ type: 'string' });
   });
 
+  it('combines the items of two arrays as two declarations of a property, in either order (#431)', async () => {
+    const arrayOf = (itemSchema: SchemaObject): SchemaObject => ({ type: 'array', items: itemSchema });
+    // The issue's `PetPage`: the second member only describes the items of
+    // `data`, declares `tags` again as `integer[]`, and gives the items of
+    // `owners` and the object `owner` a property each.
+    const first = obj({
+      data: arrayOf({ $ref: '#/components/schemas/Pet' }),
+      tags: arrayOf({ type: 'string' }),
+      owners: arrayOf(obj({ name: { type: 'string' } })),
+      owner: obj({ name: { type: 'string' } }),
+    });
+    const second = obj({
+      data: { ...arrayOf({ description: 'A pet' }), description: 'The pets on this page' },
+      tags: arrayOf({ type: 'integer' }),
+      owners: arrayOf(obj({ email: { type: 'string' } })),
+      owner: obj({ email: { type: 'string' } }),
+    });
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Pet: obj({ name: { type: 'string' } }),
+          PetPage: { allOf: [first, second] },
+          PagePet: { allOf: [second, first] },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    const typeOf = (model: string, field: string) => models[model]?.fields.find((f) => f.name === field)?.type;
+    const arrayOfType = (items: unknown) => ({ kind: 'array', items });
+    for (const [name, ownerFields] of [
+      ['PetPage', ['name?: string', 'email?: string']],
+      ['PagePet', ['email?: string', 'name?: string']],
+    ] as const) {
+      // A typeless `items` only annotates the typed one.
+      expect(typeOf(name, 'data'), name).toEqual(arrayOfType(model('Pet')));
+      // Two typed primitives keep the first.
+      expect(typeOf(name, 'tags'), name).toEqual(
+        arrayOfType({ kind: 'primitive', type: name === 'PetPage' ? 'string' : 'integer' }),
+      );
+      // Two inline objects conjoin, as the same two objects as a property do,
+      // so the items are the very shape of `owner` and share its model.
+      expect(typeOf(name, 'owner'), name).toEqual(model(`${name}Owner`));
+      expect(fieldsOf(models[`${name}Owner`]), name).toEqual(ownerFields);
+      expect(typeOf(name, 'owners'), name).toEqual(arrayOfType(model(`${name}Owner`)));
+    }
+    expectSound(ir, ['Pet', 'PetPage', 'PagePet']);
+  });
+
   it("builds a conjoined object as the merged model's own and the component's own, so the field names a model that has both parts", async () => {
     const A = obj({ result: items });
     const B = obj({ result: total });
