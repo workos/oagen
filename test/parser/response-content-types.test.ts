@@ -2913,6 +2913,59 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       expectSound(after, []);
     });
 
+    it('shares a body declared with its fields in another order, or other docs, as one shape (Greptile)', async () => {
+      const warn = silence();
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(obj({ a: str, b: { type: 'integer' } }), 'created'),
+            '202': json(obj({ b: { type: 'integer', description: 'The b.' }, a: str }), 'accepted'),
+          }),
+        ),
+      );
+
+      expect(successNames(spec)).toEqual([
+        '200: CreatePetResponse',
+        '201: CreatePetResponse201',
+        '202: CreatePetResponse201',
+      ]);
+      expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { a, b }']);
+      expect(warnings(warn)).toEqual([]);
+      expectSound(spec, []);
+    });
+
+    it('keeps apart two bodies whose variants differ only in their titles, since a title names a model', async () => {
+      const warn = silence();
+      const withShape = (title: string) =>
+        obj({ shape: { oneOf: [titled(title, 'round', { r: str }), titled('Square', 'square', { side: str })] } });
+      const spec = await parseDocument(
+        document(
+          createPet({
+            '200': json(obj({ id: str })),
+            '201': json(withShape('Circle'), 'created'),
+            '202': json(withShape('Disk'), 'accepted'),
+          }),
+        ),
+      );
+
+      expect(successNames(spec)).toEqual([
+        '200: CreatePetResponse',
+        '201: CreatePetResponse201',
+        '202: CreatePetResponse202',
+      ]);
+      expect(typesOf(spec)).toEqual(
+        expect.arrayContaining([
+          'CreatePetResponse201 { shape: union }',
+          'CreatePetResponse202 { shape: union }',
+          'Circle { kind: literal, r: primitive }',
+          'Disk { kind: literal, r: primitive }',
+        ]),
+      );
+      expect(warnings(warn)).toEqual([]);
+      expectSound(spec, []);
+    });
+
     it('leaves a `$ref` to a component enum named like the context as written', async () => {
       const warn = silence();
       const spec = await parseDocument(

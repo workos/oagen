@@ -110,6 +110,7 @@ import {
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
 import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
   modelFingerprint,
@@ -5958,7 +5959,7 @@ function operationBodyModelNames(
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
         const primaryCode = primaryResponseEntry(entries, componentSchemas)?.code;
-        // A later body moves to the stem an earlier one declared alike took,
+        // A later body moves to the stem an earlier one of its shape took,
         // else to its status code, in status order, as `stepSecondaryBody`
         // moves it.
         const stems = new Map<string, string>();
@@ -5969,7 +5970,7 @@ function operationBodyModelNames(
             names.push(...minted);
             continue;
           }
-          const key = JSON.stringify(pick.schema);
+          const key = bodyShapeKey(pick.schema, contextName, componentSchemas);
           const stem = stems.get(key) ?? `${contextName}${code}`;
           stems.set(key, stem);
           names.push(...minted.map((name) => name.replace(contextName, stem)));
@@ -6019,6 +6020,33 @@ function bodyModelNames(
     for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
   }
   return [...names];
+}
+
+/**
+ * A response body's shape under `contextName`, under every reading
+ * (`BODY_READINGS`): its type and every model it mints, each by name and
+ * `modelFingerprint` — so the order of its fields and its documentation do
+ * not count, while a titled variant's name, which names a model, does. Two
+ * later bodies of one operation with one key are one body, named alike
+ * (`stepSecondaryBody`), and the reservation of a later body's names
+ * (`operationBodyModelNames`) asks the same question of the same schema.
+ * Read silently (`rehearse`): the body reports its problems once, when it is
+ * read.
+ */
+function bodyShapeKey(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): string {
+  return rehearse(() =>
+    JSON.stringify(
+      BODY_READINGS.map((reading) => {
+        const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+        const models = body.inlineModels.map((model) => `${model.name} ${modelFingerprint(model)}`).sort();
+        return [shapeWithEnumFlags(body.response), models];
+      }),
+    ),
+  );
 }
 
 /**
@@ -6956,7 +6984,7 @@ function extractResponses(
   // definition — the one `response` points at — goes first; the other bodies
   // follow in status order, each named for itself before it is merged
   // (`stepSecondaryBody`): the operation's own body moves to its own stem —
-  // the one an earlier status code's body declared alike took, else
+  // the one an earlier status code's body of its shape took, else
   // `<Op>Response<code>`, then a number — whatever the kept bodies hold, so
   // its `successResponses` entry keeps the shape its status code declared
   // under a name no other status code's body decides. A model of a later
@@ -6975,12 +7003,14 @@ function extractResponses(
   });
   const keptByName = new Map<string, { model: Model; status: number }>();
   // The stem each of the operation's own later bodies settled on, by its
-  // schema as declared, so a later body declared alike settles on it too.
+  // shape (`bodyShapeKey`), so a later body of that shape settles on it too.
   const settledStems = new Map<string, string>();
   for (const [status, result] of bodiesByPrimacy) {
     if (status !== primaryStatus) {
       const { context, component } = bodyContexts.get(status)!;
-      const settled = component ? undefined : { stems: settledStems, key: JSON.stringify(bodySchemas.get(status)) };
+      const settled = component
+        ? undefined
+        : { stems: settledStems, key: bodyShapeKey(bodySchemas.get(status)!, context, componentSchemas) };
       stepSecondaryBody(result, context, status, keptByName, ctx.registry, settled);
     }
     const reached =
@@ -7101,8 +7131,8 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * the kept ones (workos/oagen#435). The operation's own body (`settled` given)
  * was read under the primary's context, `<Op>Response`, and always moves off
  * it, whatever the primary or an earlier status code holds: to the stem an
- * earlier status code settled on for a body declared alike (the same schema),
- * so a 202 identical to the 201 shares `CreatePetResponse201`; else to its
+ * earlier status code settled on for a body of its shape (`bodyShapeKey`), so
+ * a 202 identical to the 201 shares `CreatePetResponse201`; else to its
  * status code (`CreatePetResponse201`), then a number (`CreatePetResponse2`,
  * `…3`, …), the chain a secondary media-type body steps through
  * (`deferredNamingStem`), a candidate being taken when no name it would give is
@@ -7140,7 +7170,8 @@ function stepSecondaryBody(
   registry: InlineModelRegistry | undefined,
   /**
    * The stem each of the operation's own earlier later bodies settled on, by
-   * its schema as declared (`key`, this body's); absent for a component's body.
+   * its shape (`bodyShapeKey`; `key` is this body's); absent for a component's
+   * body.
    */
   settled?: { stems: Map<string, string>; key: string },
 ): boolean {
@@ -7167,10 +7198,8 @@ function stepSecondaryBody(
   const always = settled !== undefined && root.kind !== 'array';
   if (named.length === 0 || (!always && !named.some((model) => clashes(model, model.name)))) return false;
 
-  // A body declared as an earlier one was is read as that one was, so it
-  // takes that one's stem as it stands: moved under it, it gives the very
-  // models that body keeps there. The schema decides, not the models read
-  // from it, so `operationBodyModelNames` reserves the same stem.
+  // A body of an earlier one's shape takes that one's stem as it stands:
+  // moved under it, it gives the very models that body keeps there.
   const earlier = always ? settled?.stems.get(settled.key) : undefined;
   const under = (stem: string): Map<Model, string> => new Map(named.map((model) => [model, movedTo(model.name, stem)]));
   let stem = earlier ?? `${context}${status}`;
