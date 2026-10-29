@@ -731,9 +731,14 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
 
-  // oneOf with object + null (nullable resource)
+  // A `oneOf` of one such object, with or without `null` variants (a
+  // nullable resource): what is left once every `null` variant is set aside
+  // (`isNullSchema`). A union of several non-null variants stays the body's
+  // own field, however many carry a const; unwrapping it would type the
+  // response as its first variant and drop the rest (#415).
   if (propSchema.oneOf) {
-    return propSchema.oneOf.some((v) => v.type === 'object' && hasDiscriminantConstField(v) !== null);
+    const [variant, ...others] = propSchema.oneOf.filter((v) => !isNullSchema(v));
+    return others.length === 0 && variant?.type === 'object' && hasDiscriminantConstField(variant) !== null;
   }
 
   return false;
@@ -759,8 +764,8 @@ function extractWrappedResource(
       const modelName = deriveModelName(objectVariant, resourceName);
       // `oneOf: [object, null]` is a nullable wrapper: the model built from
       // its one branch takes the wrapper's `deprecated` and limits, as every
-      // other nullable unwrap gives it (`collapsedNullableBranch`); a
-      // multi-variant union's variant is built as written.
+      // other nullable unwrap gives it (`collapsedNullableBranch`); otherwise
+      // the variant is built as written.
       const source = collapsedNullableBranch(propSchema) ?? objectVariant;
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
