@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import {
   collectModelTypeRefs,
@@ -21,22 +22,22 @@ import type { SchemaObject } from '../../src/parser/schemas.js';
  * mints a model is now deferred like a response header
  * (`deferParameterModels`) and materialized under a name nothing else owns.
  *
- * "Nothing else" includes every enum name, under two precedences. An enum a
- * parameter, a request body, a success body or a pagination field carries —
- * typed as the operation is built, in the registry before any deferred site
- * is named (`reserveEnumNames`) — keeps its name wherever the document
- * declares it: a `status` query enum on a later operation sends an earlier
- * operation's `status` object to `PetsListPetsStatus`, and the same
- * operation's to `PetsQueryStatus` (the registry records whose reference
- * carries the enum). Among the deferred sites — response headers, error
- * bodies, secondary and fallback bodies, parameter models — document order
- * decides: each site registers the enums it types as it is resolved, so the
- * earlier site keeps the name and a later one that derives it steps
- * (`PetsSearchPetsXMode`, `GetPetError404Body`), while an enum lifted after a
- * model of its name steps to a distinct name in the collectors
- * (`collectDistinctEnums`: `PetsOwnerKind2`, `GetPetError404Body` when the
- * object body comes first). So the IR never declares a model and an enum
- * under one name.
+ * "Nothing else" includes every enum name, wherever the document declares
+ * it. An enum a parameter, a request body, a success body or a pagination
+ * field carries is typed as the operation is built, in the registry before
+ * any deferred site is named (`reserveEnumNames`): a `status` query enum on
+ * a later operation sends an earlier operation's `status` object to
+ * `PetsListPetsStatus`, and the same operation's to `PetsQueryStatus` (the
+ * registry records whose reference carries the enum). One a deferred site
+ * types — a response header, an error, secondary or fallback body, a
+ * parameter model, whether the site is itself the enum or nests it in a
+ * model it mints — is reserved before any deferred site is named
+ * (`deferredEnumNames`), so a model that derives it steps whichever of the
+ * two the document declares first (`PetsSearchPetsXMode`,
+ * `GetPetError404Body`, `PetsListPetsFilter`). An enum named like a
+ * component model, which no pass renames, steps instead, to a distinct name
+ * in the collectors (`collectDistinctEnums`: `PetsOwnerKind2`). So the IR
+ * never declares a model and an enum under one name.
  */
 
 const dirs: string[] = [];
@@ -308,7 +309,8 @@ describe('a name an enum owns is not a parameter model’s', () => {
   // #333 on the base (every enum typed before the deferred pass is reserved,
   // the collectors step a lifted enum around a model's name) and this
   // branch's additions pick different winners: a same-operation clash reads
-  // by location, and among deferred sites the earlier one keeps the name.
+  // by location, and among deferred sites the enum, declared first in each,
+  // keeps the name.
   describe('the review’s four documents, as the merged tree names them', () => {
     const Pet = { $ref: '#/components/schemas/Pet' };
     const okPet = { '200': { description: 'ok', ...json(Pet) } };
@@ -584,6 +586,107 @@ describe('a name an enum owns is not a parameter model’s', () => {
     expect(modelNames(spec)).toEqual(['PetsMode', 'PetsOwner', 'PetsOwnerKind']);
     expect(enumNames(spec)).toEqual(['PetsMode2', 'PetsOwnerKind2']);
     expectSound(spec, ['PetsMode', 'PetsOwnerKind']);
+  });
+
+  // workos/oagen#411: three outcomes of the rule above that no test pinned, on
+  // the issue's documents. Every operation is a `GET` tagged `pets` with a
+  // lone `200`; `filter` is the `deepObject` query object `{ tag }`, and each
+  // enum is `['on', 'off']`.
+  describe('the outcomes #348 documents, on the documents of #411', () => {
+    const onOff = en(['on', 'off']);
+    /** `one.json`: `listPets` with the `filter` object. */
+    const one = { '/pets': { get: { operationId: 'listPets', tags: ['pets'], parameters: [filter], responses: ok } } };
+    /** `getStats`, whose `200` declares a `filter` enum response header. */
+    const getStats = {
+      '/pets/stats': {
+        get: {
+          operationId: 'getStats',
+          tags: ['pets'],
+          responses: { '200': { description: 'ok', headers: { filter: { schema: onOff } } } },
+        },
+      },
+    };
+    /** `listPetTags`, with a `filter` enum query parameter. */
+    const listPetTags = {
+      '/pets/tags': {
+        get: {
+          operationId: 'listPetTags',
+          tags: ['pets'],
+          parameters: [param('filter', 'query', onOff)],
+          responses: ok,
+        },
+      },
+    };
+
+    it('a `filter` response-header enum of another operation, declared after or before: the enum keeps `PetsFilter`, the object steps', async () => {
+      for (const [label, paths] of [
+        ['later-header-enum', { ...one, ...getStats }],
+        ['earlier-header-enum', { ...getStats, ...one }],
+      ] as const) {
+        const { spec, warnings } = await parse(label, specDoc(paths));
+        expect(warnings).toEqual([]);
+        const ops = opsOf(spec);
+        expect(paramTypes(ops.listPets)).toEqual({ 'query:filter': 'PetsListPetsFilter' });
+        expect(show(ops.getStats.responseHeaders![0].type)).toBe('PetsFilter');
+        expect(fieldsOf(spec, 'PetsListPetsFilter')).toEqual({ tag: 'string' });
+        expect(enumValues(spec, 'PetsFilter')).toEqual(['on', 'off']);
+        expect(modelNames(spec)).toEqual(['PetsListPetsFilter']);
+        expect(enumNames(spec)).toEqual(['PetsFilter']);
+        expectSound(spec);
+      }
+    });
+
+    it('adding an operation whose `filter` enum takes the name renames the object: a breaking `model-removed`, so `oagen diff` exits 2', async () => {
+      const { spec: before } = await parse('one', specDoc(one));
+      expect(paramTypes(opsOf(before).listPets)).toEqual({ 'query:filter': 'PetsFilter' });
+      for (const [label, paths, added] of [
+        ['later-query-enum', { ...one, ...listPetTags }, 'listPetTags'],
+        ['later-header-enum', { ...one, ...getStats }, 'getStats'],
+      ] as const) {
+        const { spec: after } = await parse(label, specDoc(paths));
+        const { changes, summary } = diffSpecs(before, after);
+        expect(
+          changes
+            .filter(({ kind }) => kind !== 'operation-modified')
+            .map(
+              (c) =>
+                `${c.kind} ${'name' in c ? c.name : 'operationName' in c ? c.operationName : ''} (${c.classification})`,
+            ),
+        ).toEqual([
+          'model-added PetsListPetsFilter (additive)',
+          'model-removed PetsFilter (breaking)',
+          'enum-added PetsFilter (additive)',
+          `operation-added ${added} (additive)`,
+        ]);
+        // `oagen diff` exits 2 when any change is breaking.
+        expect(summary.breaking).toBeGreaterThan(0);
+      }
+    });
+
+    it('an `X-Status` header-parameter enum and an `X-Status` object response header on one operation: the model steps by status code', async () => {
+      const { spec, warnings } = await parse(
+        'same-operation',
+        specDoc({
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              tags: ['pets'],
+              parameters: [param('X-Status', 'header', onOff)],
+              responses: { '200': { description: 'ok', headers: { 'X-Status': { schema: obj({ code: str }) } } } },
+            },
+          },
+        }),
+      );
+      expect(warnings).toEqual([]);
+      const { listPets } = opsOf(spec);
+      expect(paramTypes(listPets)).toEqual({ 'header:X-Status': 'PetsXStatus' });
+      expect(show(listPets.responseHeaders![0].type)).toBe('PetsXStatus200');
+      expect(enumValues(spec, 'PetsXStatus')).toEqual(['on', 'off']);
+      expect(fieldsOf(spec, 'PetsXStatus200')).toEqual({ code: 'string' });
+      expect(modelNames(spec)).toEqual(['PetsXStatus200']);
+      expect(enumNames(spec)).toEqual(['PetsXStatus']);
+      expectSound(spec);
+    });
   });
 });
 
