@@ -49,6 +49,7 @@ export async function verifyCommand(opts: {
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
+  collapseErrorBodies?: boolean;
   namespace?: string;
   compatConfig?: CompatConfig;
   compatReport?: string;
@@ -70,6 +71,7 @@ export async function verifyCommand(opts: {
     operationIdTransform,
     schemaNameTransform,
     transformSpec,
+    collapseErrorBodies,
     compatConfig,
     compatReport,
     compatExplain,
@@ -96,7 +98,12 @@ export async function verifyCommand(opts: {
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
     let parsedSpec;
     if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform, transformSpec });
+      parsedSpec = await parseSpec(spec, {
+        operationIdTransform,
+        schemaNameTransform,
+        transformSpec,
+        collapseErrorBodies,
+      });
     } else if (effectiveScope === 'spec-only') {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
@@ -203,8 +210,18 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
-    const oldParsedSpec = await parseSpec(oldSpec, { operationIdTransform, schemaNameTransform, transformSpec });
-    const newParsedSpec = await parseSpec(spec, { operationIdTransform, schemaNameTransform, transformSpec });
+    const oldParsedSpec = await parseSpec(oldSpec, {
+      operationIdTransform,
+      schemaNameTransform,
+      transformSpec,
+      collapseErrorBodies,
+    });
+    const newParsedSpec = await parseSpec(spec, {
+      operationIdTransform,
+      schemaNameTransform,
+      transformSpec,
+      collapseErrorBodies,
+    });
     const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {

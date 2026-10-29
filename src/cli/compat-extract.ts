@@ -129,6 +129,7 @@ export async function compatExtractCommand(opts: {
   spec?: string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
+  collapseErrorBodies?: boolean;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
   console.log(`Extracting ${opts.lang} compat snapshot from ${opts.sdkPath}...`);
@@ -156,6 +157,7 @@ export async function compatExtractCommand(opts: {
     const parsedSpec = await parseSpec(opts.spec, {
       schemaNameTransform: opts.schemaNameTransform,
       transformSpec: opts.transformSpec,
+      collapseErrorBodies: opts.collapseErrorBodies,
     });
     enrichWithSpecContext(snapshot, parsedSpec);
   }

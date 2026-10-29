@@ -9,6 +9,10 @@ import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, ResponseContent, ResponseHeader, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/component-responses.yml');
@@ -616,7 +620,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             components,
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse2' });
         const own = spec.models.find((m) => m.name === 'OwnerCardResponse2');
@@ -665,7 +669,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse3' });
         const fieldsOf = (name: string) =>
@@ -712,7 +716,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse100' });
         const fieldsOf = (name: string) =>
@@ -755,7 +759,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
           [200, { kind: 'model', name: 'OwnerCardResponse2' }],
@@ -789,7 +793,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             components: { schemas: { Pet: PET_SCHEMA }, responses: { PetFound: petFound } },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         return spec.services.flatMap((s) => s.operations)[0];
       }
 
@@ -804,7 +808,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
 
     it('resolves every component response of the fixture with no warnings and no dangling model refs', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       validateModelRefs(spec);
       expect(warn.mock.calls).toEqual([]);
 
@@ -905,7 +909,7 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
     const specPath = join(dir, 'spec.json');
     const document = { openapi: '3.1.0', info: { title: 'shared', version: '1' }, paths, components };
     writeFileSync(specPath, JSON.stringify(document));
-    return parseSpec(specPath);
+    return parseSpec(specPath, { collapseErrorBodies: false });
   }
 
   const opsByName = (spec: ApiSpec): Map<string, Operation> =>
@@ -1293,7 +1297,7 @@ describe("a component response's other media types and headers (issue #302)", ()
         },
       }),
     );
-    return parseSpec(specPath);
+    return parseSpec(specPath, { collapseErrorBodies: false });
   }
 
   const typeName = (type: TypeRef | undefined): string | undefined =>
@@ -1836,7 +1840,7 @@ describe('a component list envelope is reserved under both readings (#309 review
           components: { responses: { NotePage: notePage }, schemas },
         }),
       );
-      const spec = await parseSpec(specPath);
+      const spec = await parseSpec(specPath, { collapseErrorBodies: false });
       validateModelRefs(spec);
       return { spec, warnings: warn.mock.calls.map((call) => String(call[0])) };
     } finally {

@@ -13,12 +13,14 @@ export async function diffCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
+  collapseErrorBodies?: boolean;
 }): Promise<void> {
   const parseOptions = {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
     operationHints: opts.operationHints,
+    collapseErrorBodies: opts.collapseErrorBodies,
   };
   let [oldSpec, newSpec] = await Promise.all([parseSpec(opts.old, parseOptions), parseSpec(opts.new, parseOptions)]);
   if (opts.docUrl) {

@@ -8,6 +8,10 @@ import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inlin
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { assignModelsToServices, collectFallbackResponseTypes, collectResponseHeaders } from '../../src/ir/types.js';
 import type { ApiSpec, Enum, Model, Operation, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 const info = { title: 'Pets', version: '1' };
 const str: TypeRef = { kind: 'primitive', type: 'string' };
@@ -46,7 +50,7 @@ async function parseTempSpec(spec: Record<string, unknown>): Promise<ApiSpec> {
   const specFile = path.join(tmpDir, 'spec.json');
   try {
     await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(specFile);
+    return await parseSpec(specFile, { collapseErrorBodies: false });
   } finally {
     await fs.rm(tmpDir, { recursive: true });
   }

@@ -430,3 +430,76 @@ describe('consumer-project config pattern', () => {
     expect(runners['ruby']).toBeUndefined();
   });
 });
+
+describe('collapseErrorBodies from config reaches every command that parses a spec', () => {
+  // The pass folds inline error bodies by default (collapse-error-bodies.ts);
+  // `collapseErrorBodies: false` in oagen.config must reach `parse` and `diff`
+  // as it reaches `generate`, or a diff reads model names the generated SDK
+  // does not have (workos/oagen#497 review).
+  const dir = resolve(os.tmpdir(), `oagen-collapse-config-${process.pid}`);
+  const config = resolve(dir, 'oagen.config.mjs');
+  const oldSpec = resolve(dir, 'old.json');
+  const newSpec = resolve(dir, 'new.json');
+  const message = {
+    type: 'object',
+    properties: { message: { type: 'string' } },
+    required: ['message'],
+  };
+  const op = (id: string, responses: Record<string, unknown>) => ({
+    get: {
+      operationId: id,
+      responses: {
+        '200': { description: 'ok', content: { 'application/json': { schema: { type: 'object' } } } },
+        ...responses,
+      },
+    },
+  });
+  const notFound = { description: 'nf', content: { 'application/json': { schema: message } } };
+  const doc = (petsResponses: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'collapse', version: '1' },
+    paths: {
+      '/pets': op('getPets', petsResponses),
+      '/notes': op('getNotes', { '404': notFound }),
+    },
+  });
+
+  beforeEach(() => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(config, 'export default { collapseErrorBodies: false };\n');
+    writeFileSync(oldSpec, JSON.stringify(doc({ '404': notFound })));
+    writeFileSync(newSpec, JSON.stringify(doc({ '404': notFound, '409': { ...notFound, description: 'dup' } })));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const modelNamesOf = (stdout: string): string[] =>
+    (JSON.parse(stdout).models as Array<{ name: string }>).map((m) => m.name).sort();
+
+  it('parse: folds by default and keeps per-operation models under the opt-out', async () => {
+    const folded = await run(['parse', '--spec', oldSpec]);
+    expect(folded.code).toBe(0);
+    expect(modelNamesOf(folded.stdout)).toEqual(['ErrorBody']);
+
+    const kept = await run(['--config', config, 'parse', '--spec', oldSpec]);
+    expect(kept.code).toBe(0);
+    expect(modelNamesOf(kept.stdout)).toEqual(['GetNotesError404', 'GetPetsError404']);
+  });
+
+  it('diff: reports the model a new error body adds only under the opt-out, as generation would', async () => {
+    // `diff` exits 1 when it reports non-breaking changes (the new 409 entry itself).
+    const folded = await run(['diff', '--old', oldSpec, '--new', newSpec]);
+    expect(folded.code).toBe(1);
+    const foldedKinds = (JSON.parse(folded.stdout).changes as Array<{ kind: string }>).map((c) => c.kind);
+    expect(foldedKinds).not.toContain('model-added');
+
+    const kept = await run(['--config', config, 'diff', '--old', oldSpec, '--new', newSpec]);
+    expect(kept.code).toBe(1);
+    const added = (JSON.parse(kept.stdout).changes as Array<{ kind: string; name?: string }>)
+      .filter((c) => c.kind === 'model-added')
+      .map((c) => c.name);
+    expect(added).toEqual(['GetPetsError409']);
+  });
+});
