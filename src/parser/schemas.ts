@@ -664,6 +664,26 @@ function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
 }
 
 /**
+ * `schema` with every wrapper the type builder collapses stripped — a
+ * nullable wrapper of any spelling (`unwrapNullableSchema`) and a
+ * single-member `allOf` read as its member (`unwrappedAllOfMember`),
+ * however they nest — each level's documentation carried onto what it
+ * unwraps to, outermost first (`withWrapperDocs`). So its `description` is
+ * the text the enum and the model built from the branch take: the
+ * outermost wrapper's with content, else the next, else the branch's own.
+ * A `$ref` is never followed, and a `$ref` member of an `allOf` is a
+ * reference rather than a branch, so the wrapper's own text stands. Read for
+ * a request body's doc text (`requestBodyDescriptionOf`).
+ */
+export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
+  const bare = unwrapNullableSchema(schema, withWrapperDocs);
+  if (!bare.allOf || classifyInlineSchema(bare) !== 'allOf' || readInlineAllOf(bare.allOf, bare) !== 'unwrapped') {
+    return bare;
+  }
+  return unwrapCollapsedWrappers(unwrappedAllOfMember(bare, bare.allOf[0]));
+}
+
+/**
  * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
  * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
  * `nullable: true` beside a `type`, a `oneOf`/`anyOf` that collapses to one
@@ -780,10 +800,13 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
  * none (workos/oagen#369 round 3: the model path restored the outermost
  * wrapper's keys after unwrapping every level at once, so an inner
  * wrapper's were lost). Read by the type builder's two wrapper sites
- * (`schemaToTypeRef`), by the model extractors (`unwrapNullableField`
- * through `unwrapNullableSchema`, `unwrappedAllOfMember`) and by the
- * response path (`extractDirectResource`), so a model, an enum and a field
- * built from one wrapper document themselves alike.
+ * (`schemaToTypeRef`) and where it types the lone variant of a
+ * single-member `oneOf`/`anyOf`, which stays a union (workos/oagen#445;
+ * the request body's own `oneOf` likewise), by the model extractors
+ * (`unwrapNullableField` through `unwrapNullableSchema`,
+ * `unwrappedAllOfMember`) and by the response path
+ * (`extractDirectResource`), so a model, an enum and a field built from one
+ * wrapper document themselves alike.
  */
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const carried: SchemaObject = {};
@@ -4856,11 +4879,17 @@ export function schemaToTypeRef(
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
         variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
       } else {
+        // A union of one variant stays a union, but it is the schema the
+        // document wrote for its variant: the variant is typed with the
+        // union's documentation by the one wrapper rule (`withWrapperDocs`),
+        // so an inline enum it lifts to documents itself as under a nullable
+        // wrapper. The lookups read the variant as written.
+        const typed = nonNullVariants.length === 1 ? withWrapperDocs(v, schema) : v;
         const entry = variantContexts.get(v);
         variants.push(
           entry
-            ? schemaToTypeRef(v, entry.context, parentModelName, undefined, entry.reserved)
-            : schemaToTypeRef(v, contextName, parentModelName),
+            ? schemaToTypeRef(typed, entry.context, parentModelName, undefined, entry.reserved)
+            : schemaToTypeRef(typed, contextName, parentModelName),
         );
       }
     }
