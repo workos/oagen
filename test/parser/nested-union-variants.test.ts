@@ -488,6 +488,161 @@ describe('what counts as claimed, and how the context steps', () => {
   });
 });
 
+describe('a name minted anywhere under an object variant, or anywhere under the variant, counts (#372)', () => {
+  // A nested `a` variant holding an inline `loc`, which mints `<its name>Loc`.
+  const aWithLoc = obj({ type: { const: 'a' }, loc: obj({ lng: str }) });
+  /** The issue's `GET /pets/{id}`: the 200 body's `shape` is `{ m, …property }` beside `oneOf: [aWithLoc, b]`. */
+  const getPet = (property: Record<string, SchemaObject>) =>
+    specDoc({
+      '/pets/{id}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+          responses: {
+            '200': {
+              description: 'OK',
+              ...json(obj({ shape: { oneOf: [obj({ m: str, ...property }), { oneOf: [aWithLoc, b] }] } })),
+            },
+          },
+        },
+      },
+    });
+  const shape = (spec: ApiSpec) => render(fieldType(spec, 'GetPetResponse', 'shape')!);
+  const stepped = '(GetPetResponseShape | (GetPetResponseShapeVariant2Value | BGetPetResponseShapeVariant2Value))';
+
+  it("the issue's repro: a nested variant's `loc` would take the name `variant_2_loc` mints, so the nested union steps on as it does beside `variant_2`", async () => {
+    const repro = await parse('repro', getPet({ variant_2_loc: obj({ z: str }) }));
+    const control = await parse('control', getPet({ variant_2: obj({ z: str }) }));
+    expect(shape(repro.spec)).toBe(stepped);
+    expect(shape(control.spec)).toBe(stepped);
+    expect(fieldsOf(repro.spec, 'GetPetResponseShape')).toEqual(['m', 'variant_2_loc']);
+    expect(fieldsOf(repro.spec, 'GetPetResponseShapeVariant2Loc')).toEqual(['z']);
+    for (const { spec, warnings } of [repro, control]) {
+      expect(fieldsOf(spec, 'GetPetResponseShapeVariant2Value')).toEqual(['type', 'loc']);
+      expect(render(fieldType(spec, 'GetPetResponseShapeVariant2Value', 'loc')!)).toBe(
+        'GetPetResponseShapeVariant2ValueLoc',
+      );
+      expect(fieldsOf(spec, 'GetPetResponseShapeVariant2ValueLoc')).toEqual(['lng']);
+      expect(fieldsOf(spec, 'BGetPetResponseShapeVariant2Value')).toEqual(['type', 'b']);
+      expect(warnings).toEqual([]);
+      expectSound(spec, []);
+    }
+  });
+
+  it("the issue's second case: an object variant's grandchild (`variant` → `2`) takes the nested variant's own name", async () => {
+    const { spec, warnings } = await parse('grandchild', getPet({ variant: obj({ '2': obj({ z: str }) }) }));
+    expect(shape(spec)).toBe(stepped);
+    expect(fieldsOf(spec, 'GetPetResponseShapeVariant')).toEqual(['2']);
+    expect(fieldsOf(spec, 'GetPetResponseShapeVariant2')).toEqual(['z']);
+    expect(fieldsOf(spec, 'GetPetResponseShapeVariant2Value')).toEqual(['type', 'loc']);
+    expect(fieldsOf(spec, 'GetPetResponseShapeVariant2ValueLoc')).toEqual(['lng']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, []);
+  });
+
+  it('a nested name nothing claims moves nothing: the nested union keeps `<field>_variant_<n>`', async () => {
+    const { spec, warnings } = await parse('unclaimed', getPet({}));
+    expect(shape(spec)).toBe('(GetPetResponseShape | (GetPetResponseShapeVariant2 | BGetPetResponseShapeVariant2))');
+    expect(fieldsOf(spec, 'GetPetResponseShapeVariant2Loc')).toEqual(['lng']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, []);
+  });
+
+  const claimingChild = obj({ m: str, variant_2_loc: obj({ z: str }) });
+  const cases: Array<{
+    label: string;
+    schema: SchemaObject;
+    type: (base: string) => string;
+    models: (base: string) => Record<string, string[]>;
+  }> = [
+    {
+      label: "a nested union whose variant's child an object variant's child claims",
+      schema: { oneOf: [claimingChild, { oneOf: [aWithLoc, b] }] },
+      type: (base) => `(${base} | (${base}Variant2Value | B${base}Variant2Value))`,
+      models: (base) => ({
+        [base]: ['m', 'variant_2_loc'],
+        [`${base}Variant2Loc`]: ['z'],
+        [`${base}Variant2Value`]: ['type', 'loc'],
+        [`${base}Variant2ValueLoc`]: ['lng'],
+        [`B${base}Variant2Value`]: ['type', 'b'],
+      }),
+    },
+    {
+      label: "a nested union whose variant an object variant's grandchild claims",
+      schema: { oneOf: [obj({ m: str, variant: obj({ '2': obj({ z: str }) }) }), { oneOf: [aWithLoc, b] }] },
+      type: (base) => `(${base} | (${base}Variant2Value | B${base}Variant2Value))`,
+      models: (base) => ({
+        [`${base}Variant2`]: ['z'],
+        [`${base}Variant2Value`]: ['type', 'loc'],
+        [`${base}Variant2ValueLoc`]: ['lng'],
+      }),
+    },
+    {
+      label: "an allOf whose own property's model an object variant's child claims",
+      schema: {
+        oneOf: [claimingChild, { allOf: [{ $ref: '#/components/schemas/Base' }, obj({ loc: obj({ lng: str }) })] }],
+      },
+      type: (base) => `(${base} | ${base}Variant2Value)`,
+      models: (base) => ({
+        [`${base}Variant2Loc`]: ['z'],
+        [`${base}Variant2Value`]: ['id', 'loc'],
+        [`${base}Variant2ValueLoc`]: ['lng'],
+      }),
+    },
+    {
+      label: "a nullable object whose child an object variant's child claims",
+      schema: { oneOf: [claimingChild, { oneOf: [obj({ loc: obj({ lng: str }) }), { type: 'null' }] }] },
+      type: (base) => `(${base} | ${base}Variant2Value?)`,
+      models: (base) => ({
+        [`${base}Variant2Loc`]: ['z'],
+        [`${base}Variant2Value`]: ['loc'],
+        [`${base}Variant2ValueLoc`]: ['lng'],
+      }),
+    },
+    {
+      label: "an array whose items' child an object variant's child claims",
+      schema: {
+        oneOf: [obj({ m: str, item_loc: obj({ z: str }) }), { type: 'array', items: obj({ loc: obj({ lng: str }) }) }],
+      },
+      type: (base) => `(${base} | ${base}ArrayItem[])`,
+      models: (base) => ({
+        [`${base}ItemLoc`]: ['z'],
+        [`${base}ArrayItem`]: ['loc'],
+        [`${base}ArrayItemLoc`]: ['lng'],
+      }),
+    },
+    {
+      label: "a later nested union whose variant an earlier nested union's child claims",
+      schema: {
+        oneOf: [
+          str,
+          { oneOf: [obj({ type: { const: 'a' }, variant_3: obj({ z: str }) }), b] },
+          { oneOf: [obj({ c: str }), obj({ d: str })] },
+        ],
+      },
+      type: (base) => `(string | (${base} | B${base}) | (${base}Variant3Value | ${base}Variant3ValueWithD))`,
+      models: (base) => ({
+        [base]: ['type', 'variant_3'],
+        [`${base}Variant3`]: ['z'],
+        [`${base}Variant3Value`]: ['c'],
+        [`${base}Variant3ValueWithD`]: ['d'],
+      }),
+    },
+  ];
+
+  it.each(cases)('$label, at every site', async ({ label, schema, type, models }) => {
+    const { spec, warnings } = await parse(label.replace(/\W+/g, '-'), everySite(schema));
+    expect(siteTypes(spec)).toEqual(
+      Object.fromEntries(Object.entries(siteBases).map(([site, base]) => [site, type(base)])),
+    );
+    for (const base of Object.values(siteBases)) {
+      for (const [name, fields] of Object.entries(models(base))) expect(fieldsOf(spec, name)).toEqual(fields);
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+});
+
 describe('a request body `oneOf`', () => {
   const post = (schema: SchemaObject) =>
     specDoc(
@@ -943,6 +1098,47 @@ describe('nonObjectVariantContexts', () => {
     expect(entries.get(otherShape)!.reserved.has('A')).toBe(true);
     expect(entries.get(sameShape)!.reserved.has('A')).toBe(false);
     expect(entries.get(sameShape)!.reserved.has('B')).toBe(true);
+  });
+
+  it('reads every name under an object variant and under a variant, at any depth (#372)', () => {
+    const withChild = obj({ m: str, variant_2_loc: obj({ z: str }) });
+    const withGrandchild = obj({ m: str, variant: obj({ '2': obj({ z: str }) }) });
+    const nestedWithLoc: SchemaObject = { oneOf: [obj({ type: { const: 'a' }, loc: obj({ lng: str }) }), b] };
+    const child = nonObjectVariantContexts(
+      'shape',
+      [withChild, nestedWithLoc],
+      undefined,
+      'Thing',
+      new Map([[withChild, 'ThingShape']]),
+    );
+    // `ThingShapeVariant2Loc` is both `variant_2_loc`'s model and the `a` variant's `loc` under `shape_variant_2`.
+    expect(contextsOf(child)).toEqual([[nestedWithLoc, 'shape_variant_2_value']]);
+    expect([...child.get(nestedWithLoc)!.reserved].sort()).toEqual(['ThingShape', 'ThingShapeVariant2Loc']);
+    const grandchild = nonObjectVariantContexts(
+      'shape',
+      [withGrandchild, nested],
+      undefined,
+      'Thing',
+      new Map([[withGrandchild, 'ThingShape']]),
+    );
+    expect(contextsOf(grandchild)).toEqual([[nested, 'shape_variant_2_value']]);
+    expect([...grandchild.get(nested)!.reserved].sort()).toEqual([
+      'ThingShape',
+      'ThingShapeVariant',
+      'ThingShapeVariant2',
+    ]);
+  });
+
+  it("never steps for what a kept title's own properties mint: those names are context-free like the title (#372)", () => {
+    const titledWithLoc = obj({ kind: { const: 'a' }, loc: obj({ lng: str }) }, { title: 'A' });
+    const first: SchemaObject = { oneOf: [titledWithLoc, titledB] };
+    const again: SchemaObject = { oneOf: [titledWithLoc, titledB] };
+    const entries = nonObjectVariantContexts('shape', [str, first, again], undefined, 'Thing', new Map());
+    expect(contextsOf(entries)).toEqual([
+      [first, 'shape'],
+      [again, 'shape'],
+    ]);
+    expect(entries.get(again)!.reserved.has('ALoc')).toBe(true);
   });
 
   it('decides nothing without a context name', () => {

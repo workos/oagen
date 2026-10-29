@@ -102,12 +102,17 @@ export interface MintedInlineName {
  * same schema (`reservedNames`); the sibling-reservation readers leave it
  * unset and read the names in isolation, while `nonObjectVariantContexts`
  * passes a variant's own set so the names it records are the ones taken.
+ * `deep` follows each inline model's name with everything its own
+ * properties mint under it (`mintedChildNameEntries`), so the names are the
+ * whole tree the extractor builds: `nonObjectVariantContexts` reads them so,
+ * and the sibling readers read the top level only.
  */
 export function mintedInlineNameEntries(
   contextName: string,
   schema: SchemaObject,
   parentModelName: string | undefined,
   reserved?: ReadonlySet<string>,
+  deep = false,
 ): MintedInlineName[] {
   const s = unwrapNullableSchema(schema);
   // Dispatch on the one classification `schemaToTypeRef` uses, so the names
@@ -115,9 +120,10 @@ export function mintedInlineNameEntries(
   const kind = classifyInlineSchema(s);
   if (kind === 'ref') return [];
   const base = toPascalCase(contextName);
-  const modelName = (): MintedInlineName[] => [
-    { name: qualifyInlineModelName(base, parentModelName), contextFree: false },
-  ];
+  const withChildren = (entry: MintedInlineName, properties: SchemaObject['properties']): MintedInlineName[] =>
+    deep ? [entry, ...mintedChildNameEntries(properties, entry.name, entry.contextFree)] : [entry];
+  const modelName = (properties?: SchemaObject['properties']): MintedInlineName[] =>
+    withChildren({ name: qualifyInlineModelName(base, parentModelName), contextFree: false }, properties);
   const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     return [
@@ -127,8 +133,14 @@ export function mintedInlineNameEntries(
   if (kind === 'allOf' && s.allOf) {
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
     const reading = readInlineAllOf(s.allOf, s);
-    if (reading === 'unwrapped') return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved);
-    return reading === 'merged' ? modelName() : [];
+    if (reading === 'unwrapped') {
+      return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved, deep);
+    }
+    if (reading !== 'merged') return [];
+    // The merged model's own properties are its inline members'
+    // (`materializeMergedAllOf`); a `$ref` member's stay its component's.
+    const own = deep ? mergeAllOfMembers(s, undefined).properties : [];
+    return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
@@ -141,24 +153,55 @@ export function mintedInlineNameEntries(
     // context itself or `<context>_variant_<n>` for a nested union, a nullable
     // object, an `allOf` or an inline enum — stepping around the names the
     // entry reserves — so a sibling that would take one of those names steps
-    // around it.
+    // around it. Read `deep`, they are the names the decision already read
+    // under that context (`VariantContext.minted`).
     const objectVariantNames = new Map([...variantEntries].map(([variant, entry]) => [variant, entry.name]));
     const others = [
       ...nonObjectVariantContexts(contextName, nonNull, undefined, parentModelName, objectVariantNames, reserved),
     ].flatMap(([variant, entry]) =>
-      mintedInlineNameEntries(entry.context, unwrapNullableSchema(variant), parentModelName, entry.reserved),
+      deep
+        ? entry.minted
+        : mintedInlineNameEntries(entry.context, unwrapNullableSchema(variant), parentModelName, entry.reserved),
     );
-    return [...[...variantEntries].map(([variant, entry]) => ({ ...entry, schema: variant })), ...others];
+    return [
+      ...[...variantEntries].flatMap(([variant, entry]) =>
+        withChildren({ ...entry, schema: variant }, variant.properties),
+      ),
+      ...others,
+    ];
   }
   if (kind === 'const') return [];
   if (kind === 'enum') return (s.enum ?? []).filter((v) => v !== null).length >= 2 ? enumName() : [];
-  if (kind === 'array' && s.items) return mintedInlineNameEntries(contextName, s.items, parentModelName, reserved);
-  if (kind === 'object') return modelName();
+  if (kind === 'array' && s.items) {
+    return mintedInlineNameEntries(contextName, s.items, parentModelName, reserved, deep);
+  }
+  if (kind === 'object') return modelName(s.properties);
   if (kind === 'map') {
     const value = mapValueSchema(s);
-    return value ? mintedInlineNameEntries(contextName, value, parentModelName, reserved) : [];
+    return value ? mintedInlineNameEntries(contextName, value, parentModelName, reserved, deep) : [];
   }
   return [];
+}
+
+/**
+ * Everything the properties of the inline model `modelName` mint under it, at
+ * any depth (`mintedInlineNameEntries`, `deep`), each property read in
+ * isolation: the models its extraction builds below it. The properties of a
+ * kept title's model (`contextFree`) are named from the title, so what they
+ * mint is context-free too.
+ */
+export function mintedChildNameEntries(
+  properties: SchemaObject['properties'],
+  modelName: string,
+  contextFree = false,
+): MintedInlineName[] {
+  return Object.entries(properties ?? {}).flatMap(([property, schema]) =>
+    schema
+      ? mintedInlineNameEntries(property, schema, modelName, undefined, true).map((child) =>
+          contextFree ? { ...child, contextFree } : child,
+        )
+      : [],
+  );
 }
 
 /**
