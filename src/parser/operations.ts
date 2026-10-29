@@ -1585,7 +1585,12 @@ function inferAction(
  *      the same one. This is what tells a path-named operation from an
  *      operationId it collides with, which is never renamed and which the
  *      parameters above cannot touch: `GET /api/notes` beside
- *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`;
+ *      `operationId: list` on `GET /api/{teamId}/notes` is `listNotes`.
+ *      Singular for an item, as its resource would be:
+ *      `GET /api/notes/{noteId}` beside `operationId: get` is `getNote`.
+ *      Then an item still colliding because an operation outside the group
+ *      has that singular name takes the noun as written, as a deeper
+ *      segment does: `getNotes` beside `operationId: getNote` as well;
  *   6. for a path-named item operation whose singular name none of those
  *      could tell apart — `GET /store/pets/{id}` is `getPet`, and so is
  *      `operationId: getPet` on `/store/featured/{id}`, or path-named
@@ -1764,6 +1769,20 @@ function disambiguateOperationNames(
       // `/api/v1/notes`), restoring it would only move the collision, and
       // qualifyGroup skips the pass.
       return inferServiceNoun(op.path, apiRootLengthOf(op));
+    },
+    (group) => {
+      // An item the pass above left colliding, because its singular noun
+      // gives it the name of an operation outside the group, takes the noun
+      // as written, as a deeper segment does: `/api/notes/{noteId}` beside
+      // `operationId: get` and `operationId: getNote` is `getNotes`. Not in
+      // the pass above, where the item's `Notes` could match a collection's
+      // beside it and tell neither apart.
+      const outside = namesOutside(group);
+      return (op) => {
+        const root = apiRootLengthOf(op);
+        const taken = outside.has(appendQualifier(op.name, inferServiceNoun(op.path, root)));
+        return taken ? inferServiceNoun(op.path, root, false) : null;
+      };
     },
   ];
 
@@ -2308,14 +2327,16 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
  * `Note` for the item `/api/notes/{id}`. Null when the last literal segment
  * past the API root is a different word (`/api/notes/{id}/tags`, whose `Tags`
  * the plain name already carries) or when nothing literal follows the root
- * (`/api/v1/{id}`).
+ * (`/api/v1/{id}`). `singularItem` false keeps an item's noun as the path
+ * spells it (`Notes` for `/api/notes/{id}`), for the service-noun qualifier
+ * when the singular gives a name already taken (disambiguateOperationNames).
  */
-function inferServiceNoun(path: string, apiRootLength: number): string | null {
+function inferServiceNoun(path: string, apiRootLength: number, singularItem = true): string | null {
   const segments = pathSegments(path);
   let last = segments.length - 1;
   while (last >= apiRootLength && isParameterSegment(segments[last])) last--;
   if (last < apiRootLength || last !== serviceSegmentIndex(path, apiRootLength)) return null;
-  return toPascalCase(pathSegmentNoun(segments, last));
+  return toPascalCase(singularItem ? pathSegmentNoun(segments, last) : segments[last]);
 }
 
 /**
