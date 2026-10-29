@@ -322,8 +322,9 @@ export interface Operation {
    * types are matched by essence — parameters and case aside, so
    * `application/json; charset=utf-8` and `APPLICATION/JSON` are
    * `application/json` — and tried in a fixed order: `application/json`, then
-   * a `+json` media type (`application/vnd.api+json`), then
-   * `multipart/form-data`, then `application/x-www-form-urlencoded`, each
+   * a `+json` media type (`application/vnd.api+json`; never a range such as
+   * `application/*+json`), then `multipart/form-data`, then
+   * `application/x-www-form-urlencoded`, each
    * only when it declares a schema; then `application/octet-stream`, then
    * `text/plain`, with or without one (a schema-less binary body is a binary
    * string, a schema-less text body a string). An inline object body is
@@ -336,8 +337,8 @@ export interface Operation {
   requestBody?: TypeRef;
   /**
    * The wire encoding of the media type `requestBody` was read from: `json`
-   * for `application/json` and any `+json` media type, `form-data` for
-   * `multipart/form-data`, `form-urlencoded` for
+   * for `application/json` and any concrete `+json` media type, `form-data`
+   * for `multipart/form-data`, `form-urlencoded` for
    * `application/x-www-form-urlencoded`, `binary` for
    * `application/octet-stream`, `text` for `text/plain`. Set exactly when
    * `requestBody` is.

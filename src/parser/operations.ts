@@ -3401,7 +3401,9 @@ const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set<HttpMethod>(['pos
  * `application/json; charset=utf-8`, `APPLICATION/JSON` and
  * `multipart/form-data; boundary=x` read as their bare types — and a `+json`
  * media type (`application/vnd.api+json`, `application/merge-patch+json`) is
- * JSON. A JSON or form body is read only when it declares a schema, so an
+ * JSON. A media range (`application/*`, `application/*+json`) is never read:
+ * the picked essence is the request's `Content-Type`, which a range cannot
+ * be. A JSON or form body is read only when it declares a schema, so an
  * `application/json` entry without one yields to a later media type that has
  * one; a binary or text body may legitimately declare none.
  */
@@ -3412,10 +3414,11 @@ const REQUEST_BODY_MEDIA_TYPES: ReadonlyArray<{
 }> = [
   // The one JSON rule requests and responses share (`isJsonMediaType`), in
   // the order `jsonResponseSchema` applies it: `application/json` itself
-  // first, then any `+json` type.
+  // first, then any `+json` type — on a request a concrete one only, while a
+  // response is still read under `application/*+json`.
   { matches: isPlainJsonMediaType, encoding: 'json', schemaRequired: true },
   {
-    matches: (essence) => isJsonMediaType(essence) && !isPlainJsonMediaType(essence),
+    matches: (essence) => isJsonMediaType(essence) && !isPlainJsonMediaType(essence) && !essence.includes('*'),
     encoding: 'json',
     schemaRequired: true,
   },
@@ -3462,7 +3465,7 @@ export interface SelectedRequestBodyContent {
 /**
  * Pick the content entry a request body is read from, by media type essence
  * in the fixed order of `REQUEST_BODY_MEDIA_TYPES`: `application/json`, then
- * a `+json` media type, then `multipart/form-data`, then
+ * a concrete `+json` media type, then `multipart/form-data`, then
  * `application/x-www-form-urlencoded` — each only with a schema — then
  * `application/octet-stream`, then `text/plain`. Within one tier the first
  * matching key in document order wins. `undefined` when the body declares no
@@ -3503,7 +3506,7 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
   if (declared.length === 0 || selectRequestBodyContent(body)) return;
   console.warn(
     `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
-      `(${declared.join(', ')}) is one the parser reads — application/json or a +json media type, ` +
+      `(${declared.join(', ')}) is one the parser reads — application/json or a concrete +json media type, ` +
       `multipart/form-data or application/x-www-form-urlencoded with a schema, application/octet-stream or ` +
       `text/plain with or without one, parameters and case aside. It is carried in requestBodyContents only.`,
   );
