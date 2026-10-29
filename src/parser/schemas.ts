@@ -4053,7 +4053,10 @@ function detectAllOfVariantDiscriminator(
   if (!candidateProperty) return null;
 
   const mapping: Record<string, string> = {};
-  const seenModelNames = new Set<string>();
+  // The component's own name is the dispatcher's: a variant named so — one
+  // whose const gives no name, `''` or `'-'` — is as ambiguous as two
+  // variants of one name (workos/oagen#430).
+  const seenModelNames = new Set<string>([fallbackName]);
   for (const v of variants) {
     const value = getEffectiveConstPropertyValue(v, candidateProperty);
     if (value === null) return null;
@@ -4383,11 +4386,13 @@ function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: stri
   // it with the parent name so the variant resolves to e.g. `ConnectApplicationOAuth`
   // / `ConnectApplicationM2M`. Multi-word consts like `action.authentication.denied`
   // are already specific enough on their own, matching the established
-  // EventSchema variant naming.
+  // EventSchema variant naming. Either way a const never names the variant as
+  // the parent itself, whose name is the dispatcher's: `CatEvent`'s `cat` is
+  // `CatEventCat` as `PetEvent`'s is `PetEventCat`, and `Cat`'s is `CatCat`
+  // (workos/oagen#430).
   const wordCount = splitWords(constValue).length;
+  if (pascal === fallbackName) return `${fallbackName}${pascal}`;
   if (wordCount >= 2) return pascal;
-  if (pascal === fallbackName) return pascal;
-  if (fallbackName.startsWith(pascal)) return fallbackName;
   if (pascal.endsWith(fallbackName)) return pascal;
   return `${fallbackName}${pascal}`;
 }
