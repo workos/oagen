@@ -27,7 +27,9 @@
  * error-only model by its own key, and a string the document pins —
  * `const: idp_metadata_fetch_failed`, an inline `enum`, a plain `string` —
  * all as one string, so the bodies that differ only in their error code,
- * their prose or their `x-` extensions fold onto one model.
+ * their prose or their `x-` extensions fold onto one model. A string inside
+ * an array, union or map keeps its value in the key, and so does a field's
+ * `domainName` (a `fieldHints` entry), so neither is lost in a fold.
  *
  * Each group becomes one model. A group whose members all pin one string
  * field to one value is named from that value (`RateLimitExceededErrorBody`,
@@ -91,6 +93,13 @@ export interface CollapseErrorBodiesOptions {
    * the component's, named after it, and is left alone.
    */
   componentSites?: ReadonlySet<TypeRef>;
+  /**
+   * Names no shared model or enum may take beside the component schemas and
+   * the models kept: the document's enums and every enum lifted so far, so a
+   * shared `ErrorBody` never stands beside an `ErrorBody` enum a component's
+   * `body` field minted.
+   */
+  reservedNames?: Iterable<string>;
 }
 
 /**
@@ -181,6 +190,7 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   const reserved = new Set<string>([
     ...input.models.filter((model) => !errorOnly.has(model.name)).map((model) => model.name),
     ...options.componentNames,
+    ...(options.reservedNames ?? []),
   ]);
   const canonical = new Map<string, string>(); // group key → shared name
   const mint = (base: string): string => {
@@ -230,13 +240,32 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
     if (!canonical.has(key)) canonical.set(key, mint(groupBaseName(members[0], pinnedByKey.get(key)!)));
   }
 
+  // The shared enums, one per field name some group pins to two or more
+  // values, named from the same pool as the models so neither takes the
+  // other's name.
+  const enumNamesByField = new Map<string, string>();
+  for (const pinned of pinnedByKey.values()) {
+    for (const [field, { values }] of pinned) {
+      if (values.size >= 2 && !enumNamesByField.has(field)) {
+        enumNamesByField.set(field, mint(`${ERROR_BODY_BASE}${toPascalCase(field)}`));
+      }
+    }
+  }
+
   // Build the shared models.
   const renames = new Map<string, string>();
   for (const name of errorOnly) renames.set(name, canonical.get(keys.of(name))!);
   const sharedModels: Model[] = [];
   for (const [key, members] of orderedGroups) {
     sharedModels.push(
-      buildSharedModel(canonical.get(key)!, members, pinnedByKey.get(key)!, enumValuesByField, renames),
+      buildSharedModel(
+        canonical.get(key)!,
+        members,
+        pinnedByKey.get(key)!,
+        enumValuesByField,
+        enumNamesByField,
+        renames,
+      ),
     );
   }
 
@@ -324,7 +353,7 @@ class ModelKeys {
     this.visiting.add(name);
     const model = this.byName.get(name)!;
     const fields = model.fields
-      .map((field) => `${field.name}${field.required ? '!' : '?'}${fieldFlags(field)}=${this.type(field.type)}`)
+      .map((field) => `${field.name}${field.required ? '!' : '?'}${fieldFlags(field)}=${this.type(field.type, true)}`)
       .sort()
       .join('|');
     const own = stableJson({
@@ -332,13 +361,8 @@ class ModelKeys {
       constraints: model.constraints,
       typeParams: model.typeParams,
       compositionKind: model.compositionKind,
-      variants: model.variants?.map((variant) => this.type(variant)).sort(),
-      discriminator: model.discriminator && {
-        property: model.discriminator.property,
-        targets: Object.values(model.discriminator.mapping)
-          .map((target) => (this.errorOnly.has(target) ? `M{${this.of(target)}}` : `R:${target}`))
-          .sort(),
-      },
+      variants: model.variants?.map((variant) => this.type(variant, false)).sort(),
+      discriminator: model.discriminator && this.discriminator(model.discriminator),
     });
     const key = `${fields}#${own}`;
     this.visiting.delete(name);
@@ -346,35 +370,52 @@ class ModelKeys {
     return key;
   }
 
-  /** A type's structure: every way the document pins or frees a string reads as `S`. */
-  type(type: TypeRef): string {
+  /**
+   * A type's structure. A field's own type (`direct`, through a nullable
+   * wrapper) reads every way the document pins or frees a string as one `S`,
+   * since `sharedFieldType` reads those values across the group; a string
+   * inside an array, union or map keeps its value in the key (`L"a"`,
+   * `E["a","b"]`), since nothing combines values there, so two bodies that
+   * list different codes in an array stay two models.
+   */
+  type(type: TypeRef, direct: boolean): string {
     switch (type.kind) {
       case 'literal':
-        return typeof type.value === 'string' ? 'S' : `L${JSON.stringify(type.value)}`;
+        return direct && typeof type.value === 'string' ? 'S' : `L${JSON.stringify(type.value)}`;
       case 'enum':
-        return isStringValuedInlineEnum(type) ? 'S' : `E:${type.name}`;
+        if (isStringValuedInlineEnum(type)) return direct ? 'S' : `E${JSON.stringify([...type.values!].sort())}`;
+        return type.values ? `E${JSON.stringify(type.values)}` : `E:${type.name}`;
       case 'primitive':
-        return type.type === 'string' && !type.format ? 'S' : `P:${type.type}:${type.format ?? ''}`;
+        return direct && type.type === 'string' && !type.format ? 'S' : `P:${type.type}:${type.format ?? ''}`;
       case 'model':
         return this.errorOnly.has(type.name) ? `M{${this.of(type.name)}}` : `R:${type.name}`;
       case 'array':
-        return `A[${this.type(type.items)}]`;
+        return `A[${this.type(type.items, false)}]`;
       case 'nullable':
-        return `N(${this.type(type.inner)})`;
+        return `N(${this.type(type.inner, direct)})`;
       case 'union': {
-        const variants = type.variants.map((variant) => this.type(variant)).sort();
-        const discriminator = type.discriminator ? `@${type.discriminator.property}` : '';
+        const variants = type.variants.map((variant) => this.type(variant, false)).sort();
+        const discriminator = type.discriminator ? this.discriminator(type.discriminator) : '';
         return `U${type.compositionKind ?? ''}${discriminator}(${variants.join(',')})`;
       }
       case 'map':
-        return `Map(${type.keyType ? this.type(type.keyType) : ''};${this.type(type.valueType)})`;
+        return `Map(${type.keyType ? this.type(type.keyType, false) : ''};${this.type(type.valueType, false)})`;
     }
+  }
+
+  /** A discriminator's property and every mapping entry, the target read as the variants are. */
+  private discriminator(discriminator: { property: string; mapping: Record<string, string> }): string {
+    const entries = Object.entries(discriminator.mapping)
+      .map(([value, target]) => `${value}=${this.errorOnly.has(target) ? `M{${this.of(target)}}` : `R:${target}`}`)
+      .sort();
+    return `@${discriminator.property}{${entries.join(',')}}`;
   }
 }
 
-/** A field's flags and limits: everything but its name, type, documentation and extensions. */
+/** A field's flags, limits and domain name: everything but its name, type, documentation and extensions. */
 function fieldFlags(field: Field): string {
   return stableJson({
+    domainName: field.domainName,
     readOnly: field.readOnly,
     writeOnly: field.writeOnly,
     deprecated: field.deprecated,
@@ -443,6 +484,7 @@ function buildSharedModel(
   members: readonly Model[],
   pinned: ReadonlyMap<string, PinnedValues>,
   enumValuesByField: ReadonlyMap<string, ReadonlySet<string>>,
+  enumNamesByField: ReadonlyMap<string, string>,
   renames: ReadonlyMap<string, string>,
 ): Model {
   const representative = members[0];
@@ -450,8 +492,16 @@ function buildSharedModel(
     const siblings = members.map((member) => member.fields.find((f) => f.name === field.name)!);
     const agree = <K extends keyof Field>(key: K): Field[K] | undefined =>
       siblings.every((sibling) => stableJson(sibling[key]) === stableJson(field[key])) ? field[key] : undefined;
-    const { type, changed } = sharedFieldType(field, pinned.get(field.name), enumValuesByField, renames);
+    const { type, changed } = sharedFieldType(
+      field,
+      pinned.get(field.name),
+      enumValuesByField,
+      enumNamesByField,
+      renames,
+    );
     const shared: Field = { name: field.name, type, required: field.required };
+    // Every member agrees on the domain name: it is part of the key.
+    if (field.domainName !== undefined) shared.domainName = field.domainName;
     const description = agree('description');
     if (description !== undefined) shared.description = description;
     if (field.readOnly !== undefined) shared.readOnly = field.readOnly;
@@ -510,6 +560,7 @@ function sharedFieldType(
   field: Field,
   pinned: PinnedValues | undefined,
   enumValuesByField: ReadonlyMap<string, ReadonlySet<string>>,
+  enumNamesByField: ReadonlyMap<string, string>,
   renames: ReadonlyMap<string, string>,
 ): { type: TypeRef; changed: boolean } {
   if (pinned) {
@@ -518,7 +569,7 @@ function sharedFieldType(
     if (pinned.values.size >= 2) {
       const enumRef: EnumRef = {
         kind: 'enum',
-        name: `${ERROR_BODY_BASE}${toPascalCase(field.name)}`,
+        name: enumNamesByField.get(field.name) ?? `${ERROR_BODY_BASE}${toPascalCase(field.name)}`,
         values: [...(enumValuesByField.get(field.name) ?? pinned.values)].sort(),
       };
       type = enumRef;

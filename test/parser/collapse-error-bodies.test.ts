@@ -446,3 +446,92 @@ describe('every error site', () => {
     expectSound(ir);
   });
 });
+
+describe('what the review asked to pin (workos/oagen#497)', () => {
+  it('reserves the names of enums already lifted, so a shared model never stands beside an enum of its name', async () => {
+    // A component `Error` with a `body` enum lifts `ErrorBody` as an enum
+    // before the pass runs; the shared `{ message }` body steps past it.
+    const ir = await parseWithoutWarnings(
+      doc(
+        {
+          ...getOp('pets', {
+            '200': { description: 'ok', content: json({ $ref: '#/components/schemas/Error' }) },
+            '404': { description: 'nf', content: json(messageBody()) },
+          }),
+          ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+        },
+        { Error: obj({ body: { type: 'string', enum: ['json', 'text'] } }) },
+      ),
+    );
+    expect(ir.enums.map((e) => e.name)).toEqual(['ErrorBody']);
+    expect(modelNames(ir)).toEqual(['Error', 'ErrorBody2', 'Note']);
+    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody2' });
+    expectSound(ir, ['Note', 'Error']);
+  });
+
+  it('keeps string values inside arrays in the key, so bodies listing different codes stay two models', async () => {
+    const codes = (code: string): Doc =>
+      obj({ codes: { type: 'array', items: { type: 'string', const: code } }, message: str });
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '400': { description: 'bad', content: json(codes('a')) } }),
+        ...getOp('notes', { '400': { description: 'bad', content: json(codes('b')) } }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithCodes', 'ErrorBodyWithCodes2', 'Note']);
+    // Groups are named in the order of their first member: `getNotes` sorts before `getPets`.
+    expect(fieldSummary(ir, 'ErrorBodyWithCodes')).toEqual(['codes: "b"[]', 'message: string']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodes2')).toEqual(['codes: "a"[]', 'message: string']);
+    expectSound(ir);
+  });
+
+  it('keeps a discriminator mapping in the key, so bodies that map values to different models stay apart', async () => {
+    const mapped = (mapping: Record<string, string>): Doc =>
+      obj({
+        message: str,
+        detail: {
+          oneOf: [{ $ref: '#/components/schemas/Note' }, { $ref: '#/components/schemas/Tag' }],
+          discriminator: { propertyName: 'kind', mapping },
+        },
+      });
+    const ir = await parseWithoutWarnings(
+      doc(
+        {
+          ...getOp('pets', {
+            '400': {
+              description: 'bad',
+              content: json(mapped({ note: '#/components/schemas/Note', tag: '#/components/schemas/Tag' })),
+            },
+          }),
+          ...getOp('notes', {
+            '400': {
+              description: 'bad',
+              content: json(mapped({ note: '#/components/schemas/Tag', tag: '#/components/schemas/Note' })),
+            },
+          }),
+        },
+        { Tag: obj({ label: str }) },
+      ),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithDetail', 'ErrorBodyWithDetail2', 'Note', 'Tag']);
+    expectSound(ir, ['Note', 'Tag']);
+  });
+
+  it('carries a field hint applied to a folded body, and applies one keyed by the shared name', async () => {
+    const spec = doc({
+      ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
+      ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+    });
+    const carried = await parse(spec, {
+      fieldHints: { GetPetsError404: { message: 'detail' }, GetNotesError404: { message: 'detail' } },
+    });
+    expect(carried.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBe('detail');
+
+    const keyedByShared = await parse(spec, { fieldHints: { ErrorBody: { message: 'detail' } } });
+    expect(keyedByShared.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBe('detail');
+
+    // A hint on one body only keeps that body apart: the domain name is part of the key.
+    const split = await parse(spec, { fieldHints: { GetPetsError404: { message: 'detail' } } });
+    expect(modelNames(split)).toEqual(['ErrorBody', 'ErrorBody2', 'Note']);
+  });
+});

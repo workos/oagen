@@ -314,7 +314,13 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const collapsedModels =
     options?.collapseErrorBodies === false
       ? finalModels
-      : collapseErrorBodies({ services, webhooks, models: finalModels }, { componentNames, componentSites });
+      : collapseErrorBodies(
+          { services, webhooks, models: finalModels },
+          { componentNames, componentSites, reservedNames: enums.map((e) => e.name) },
+        );
+  // A hint keyed by a shared model's name (`ErrorBodyWithCode`) applies here;
+  // one keyed by a folded model's name was applied above and rode along.
+  applyFieldHints(collapsedModels, options?.fieldHints);
   // Each collector steps a renamed enum around every model name as well as
   // every enum's, so the merge passes above (which mint against every enum
   // name an `EnumRef` carries) and the collectors never meet on one name.
