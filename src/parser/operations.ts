@@ -485,7 +485,21 @@ export function extractOperations(
   // request bodies, responses, headers and examples alike.
   const refSiblingDescriptions = siblingDocsMode(openapiVersion);
 
-  // Operations without an operationId name their inline models from the
+  // An API root the untagged paths sit under (`/api`, `/v1`) tells the
+  // services apart no better than nothing, so untagged operations skip it
+  // when their service and fallback name are taken from the path (see
+  // documentApiRoot). Tagged operations are named exactly as before.
+  const apiRoot = documentApiRoot(resolvedPaths);
+  // Every operation's service and name are settled before any operation is
+  // built (see planOperations), so the models of an operation whose
+  // operationId the document reuses can follow the name it ends up with, and
+  // no two such operations name their models alike (see
+  // resolveReusedOperationIds).
+  const plan = planOperations(resolvedPaths, apiRoot, operationIdTransform);
+  const { modelOperationIds, sharedWith } = resolveReusedOperationIds(resolvedPaths, plan);
+
+  // Operations without an operationId — or left none by the reuse of their
+  // own (see resolveReusedOperationIds) — name their inline models from the
   // path, and two distinct paths — or a path and an operationId, component
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
@@ -504,27 +518,21 @@ export function extractOperations(
     componentModels,
     componentRequestBodies,
     componentResponseNaming,
+    modelOperationIds,
+    sharedWith,
   );
-  // An API root the untagged paths sit under (`/api`, `/v1`) tells the
-  // services apart no better than nothing, so untagged operations skip it
-  // when their service and fallback name are taken from the path (see
-  // documentApiRoot). Tagged operations are named exactly as before.
-  const apiRoot = documentApiRoot(resolvedPaths);
 
-  const serviceMap = new Map<string, Operation[]>();
+  /** Every operation built, by its plan key (`${method} ${path}`). */
+  const operationsByKey = new Map<string, Operation>();
   const inlineModels: Model[] = [];
   const inlineModelBundles: InlineModelBundle[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
   /** The PascalCase operation name each companion was lifted under, to qualify it should a merge pass rename it. */
   const companionQualifiers = new Map<EnvelopeCompanion, string>();
   // Service name each tagged operation was grouped under, keyed by operation
-  // identity. The path-prefix split below moves operations between services,
-  // so this is how a split-off service is traced back to the tag it came from.
+  // identity. The path-prefix split moves operations between services, so
+  // this is how a split-off service is traced back to the tag it came from.
   const tagServiceByOperation = new Map<Operation, string>();
-  // Operations named from the method and path rather than an operationId.
-  // Only these may be renamed when names collide within a service (see
-  // disambiguateOperationNames); a name taken from an operationId is kept as is.
-  const pathNamed = new Set<Operation>();
   // Header, secondary-body, fallback-body, error-body and parameter schemas
   // are typed only after this loop, once every primary model is known
   // (`resolveDeferredInlineTypes`): their names must not collide with a
@@ -583,7 +591,10 @@ export function extractOperations(
       const tag = serviceTag(op.tags);
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
-      const pathModelBaseName = pathModelBaseNames.get(`${method} ${path}`) ?? derivePathModelBaseName(path, method);
+      const key = `${method} ${path}`;
+      // A path that shares another's Operation Object names its models as that path does.
+      const pathModelBaseName =
+        pathModelBaseNames.get(sharedWith.get(key) ?? key) ?? derivePathModelBaseName(path, method);
       const servers = operationServers(
         extractServerList(op.servers, `operation ${operationLabel(op, path, method)}`),
         pathLevelServers,
@@ -603,7 +614,7 @@ export function extractOperations(
         pathLevelParams,
         pathItem,
         pathModelBaseName,
-        operationIdTransform,
+        plan.operations.get(key)!.initialName,
         serviceName,
         componentSchemas,
         componentParameters,
@@ -612,7 +623,6 @@ export function extractOperations(
         componentHeaders,
         componentResponses,
         deferred,
-        apiRootLength,
         servers,
         refSiblingDescriptions,
         componentResponseModelNames,
@@ -620,6 +630,7 @@ export function extractOperations(
         operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
         componentModels,
         registry,
+        modelOperationIds.get(key),
       );
       inlineModels.push(...opModels);
       // The operation's models join the registry under its qualifier, so a
@@ -630,15 +641,14 @@ export function extractOperations(
       inlineModelBundles.push(...opBundles);
       if (opCompanions) {
         envelopeCompanions.push(...opCompanions);
-        for (const companion of opCompanions) companionQualifiers.set(companion, toPascalCase(operation.name));
+        // Qualified as the operation's own models are (`buildOperation`'s `namingName`).
+        const qualifier = toPascalCase(modelOperationIds.get(key) ?? operation.name);
+        for (const companion of opCompanions) companionQualifiers.set(companion, qualifier);
       }
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
       if (tag) tagServiceByOperation.set(operation, serviceName);
-      if (!op.operationId) pathNamed.add(operation);
-      const ops = serviceMap.get(serviceName) ?? [];
-      ops.push(operation);
-      serviceMap.set(serviceName, ops);
+      operationsByKey.set(key, operation);
     }
   }
 
@@ -713,26 +723,15 @@ export function extractOperations(
   inlineModelBundles.push(...deferredTypes.bundles);
   attachSharedRefs(inlineModelBundles, new Set(registeredModels.map((model) => model.name)));
 
-  // The API root each operation's path sits under, for every step below: none
-  // for a tagged operation, whose service is its tag.
-  const rootLengthOf = (op: Operation) => (tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot));
-
-  // Split a tagged service whose tag groups operations from several first
-  // path segments — `/organizations` and `/organization_domains` both tagged
-  // `organizations` — into one service per segment. Decided over the tagged
-  // operations alone, so an untagged operation the service picked up by path
-  // never moves its tagged siblings (see splitTaggedServices).
-  splitTaggedServices(serviceMap, tagServiceByOperation);
-
-  // Disambiguate operation names within each service.
-  // Multiple operations can get the same name (e.g., several "list" endpoints
-  // in UserManagement for users, invitations, auth factors, etc.).
-  for (const [serviceName, operations] of serviceMap) {
-    disambiguateOperationNames(operations, pathNamed, serviceName, rootLengthOf);
-  }
-
   const declaredTags = indexDocumentTags(documentTags);
-  const services: Service[] = Array.from(serviceMap.entries()).map(([name, operations]) => {
+  // Each service the plan settled, its operations under the names they
+  // settled on (see planOperations).
+  const services: Service[] = Array.from(plan.services.entries()).map(([name, keys]) => {
+    const operations = keys.map((key) => {
+      const operation = operationsByKey.get(key)!;
+      operation.name = plan.operations.get(key)!.name;
+      return operation;
+    });
     const { description, externalDocs } = resolveServiceDocs(name, operations, tagServiceByOperation, declaredTags);
     // Omit each key entirely when no tag gives it so the IR shape is
     // unchanged for documents without tag descriptions or links.
@@ -745,6 +744,91 @@ export function extractOperations(
   });
 
   return { services, inlineModels, inlineModelBundles, componentSites };
+}
+
+/** What `planOperations` settles for one operation. */
+interface PlannedOperation {
+  /** The name it starts with: its `operationId`'s, else the one its method and path give it (`inferOperationName`). */
+  initialName: string;
+  /** The name it ends with, unique within its service (`disambiguateOperationNames`). */
+  name: string;
+  /** The API root its path sits under for naming: none for a tagged operation, whose service is its tag. */
+  rootLength: number;
+}
+
+/** Every operation's plan, and every service's operations, by key (`${method} ${path}`), services in IR order. */
+interface OperationPlan {
+  operations: Map<string, PlannedOperation>;
+  services: Map<string, string[]>;
+}
+
+/**
+ * Settle the service and the name of every operation before any operation is
+ * built, so an operation's models can follow the name it ends up with
+ * (resolveReusedOperationIds). Each operation starts in the service its tag
+ * or its path gives it (inferServiceName), under the name its `operationId`
+ * or its method and path give it (inferOperationName, the one place
+ * `operationIdTransform` is called). Then a tagged service whose tag groups
+ * operations from several first path segments — `/organizations` and
+ * `/organization_domains` both tagged `organizations` — is split into one
+ * service per segment, decided over the tagged operations alone, so an
+ * untagged operation the service picked up by path never moves its tagged
+ * siblings (splitTaggedServices); and the names within each service are made
+ * unique, since several operations can take one name — several `list`
+ * endpoints in `UserManagement`, for users, invitations and auth factors
+ * (disambiguateOperationNames, whose warnings are given here).
+ *
+ * Both passes read nothing of an operation but its name, path and method,
+ * so they run on stand-ins that carry those, and each operation built
+ * afterwards takes the service and the name the passes gave its stand-in.
+ */
+function planOperations(
+  paths: Record<string, PathItem>,
+  apiRoot: readonly string[],
+  operationIdTransform: ((id: string) => string) | undefined,
+): OperationPlan {
+  const serviceMap = new Map<string, Operation[]>();
+  const started = new Map<Operation, { key: string; initialName: string }>();
+  // Service name each tagged operation was grouped under, keyed by operation
+  // identity, so a split-off service is traced back to the tag it came from.
+  const tagServiceByOperation = new Map<Operation, string>();
+  // Operations named from the method and path rather than an operationId.
+  // Only these may be renamed when names collide within a service (see
+  // disambiguateOperationNames); a name taken from an operationId is kept as is.
+  const pathNamed = new Set<Operation>();
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op) continue;
+      // The same reading the operation loop of extractOperations makes.
+      const tag = serviceTag(op.tags);
+      const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
+      const serviceName = inferServiceName(path, tag, apiRootLength);
+      const name = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
+      const stub = { name, path, httpMethod: method } as Operation;
+      started.set(stub, { key: `${method} ${path}`, initialName: name });
+      if (tag) tagServiceByOperation.set(stub, serviceName);
+      if (!op.operationId) pathNamed.add(stub);
+      const ops = serviceMap.get(serviceName) ?? [];
+      ops.push(stub);
+      serviceMap.set(serviceName, ops);
+    }
+  }
+
+  splitTaggedServices(serviceMap, tagServiceByOperation);
+  const rootLengthOf = (op: Operation) => (tagServiceByOperation.has(op) ? 0 : apiRootLengthOf(op.path, apiRoot));
+  for (const [serviceName, operations] of serviceMap) {
+    disambiguateOperationNames(operations, pathNamed, serviceName, rootLengthOf);
+  }
+
+  const operations = new Map<string, PlannedOperation>();
+  for (const [stub, { key, initialName }] of started) {
+    operations.set(key, { initialName, name: stub.name, rootLength: rootLengthOf(stub) });
+  }
+  const services = new Map(
+    [...serviceMap].map(([serviceName, stubs]) => [serviceName, stubs.map((stub) => started.get(stub)!.key)] as const),
+  );
+  return { operations, services };
 }
 
 /**
@@ -2733,7 +2817,8 @@ function buildOperation(
   pathLevelParams: RawParameterObject[],
   pathItemDocs: PathItemDocs,
   pathModelBaseName: string,
-  operationIdTransform?: (id: string) => string,
+  /** The name the operation starts with (`planOperations`); the naming passes settle the one it ends with. */
+  operationName: string,
   serviceName?: string,
   componentSchemas?: Record<string, SchemaObject>,
   componentParameters?: Record<string, Record<string, unknown>>,
@@ -2742,13 +2827,19 @@ function buildOperation(
   componentHeaders?: Record<string, Record<string, unknown>>,
   componentResponses?: Record<string, Record<string, unknown>>,
   deferred: DeferredInlineType[] = [],
-  apiRootLength = 0,
   servers?: ServerEntry[],
   refSiblingDescriptions: SiblingDocs = 'override',
   componentResponseModelNames?: ReadonlyMap<string, string>,
   paginationHint?: unknown,
   componentModels?: Model[],
   registry?: ModelShapeRegistry,
+  /**
+   * The `operationId` the operation's models are named from when the
+   * document reuses its own (`resolveReusedOperationIds`): the name the
+   * reuse renamed it to, or `null` to name them from the path; absent, its
+   * own.
+   */
+  modelOperationId?: string | null,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -2759,7 +2850,12 @@ function buildOperation(
 } {
   const opLabel = operationLabel(op, path, method);
   warnOnIgnoredCallbacks(op.callbacks, opLabel);
-  const operationName = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
+  // The Operation Object as every model name reads it (the request and
+  // response bodies, the error and fallback bodies, the qualifiers): with
+  // the `operationId` the reuse of its own leaves it, if any. The name its
+  // models are qualified by goes with it.
+  const namingOp = modelOperationId === undefined ? op : { ...op, operationId: modelOperationId ?? undefined };
+  const namingName = modelOperationId ?? operationName;
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(
@@ -2821,7 +2917,7 @@ function buildOperation(
   const opContext = serviceName;
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(op, operationName, pathModelBaseName, opContext);
+  const operationQualifier = headerOperationQualifier(namingOp, namingName, pathModelBaseName, opContext);
   // What the typing of a parameter, a response header or a secondary,
   // fallback or error body reads from the operation and the spec; a schema
   // deferred through it is typed once every operation has been read
@@ -2883,7 +2979,7 @@ function buildOperation(
     description: requestBodyDescription,
     contentTypes: requestBodyContentTypes,
     contents: requestBodyContents,
-  } = extractRequestBody(requestBodyObject, op, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
+  } = extractRequestBody(requestBodyObject, namingOp, pathModelBaseName, reqBodyModels, componentSchemas, opLabel, {
     deferred,
     operationQualifier,
     componentSchemas,
@@ -2968,7 +3064,7 @@ function buildOperation(
     overrideProblem,
     envelopeCompanions,
     unpagedEnvelope,
-  } = extractResponses(op.responses, op, pathModelBaseName, path, method, componentSchemas, typing, {
+  } = extractResponses(op.responses, namingOp, pathModelBaseName, opLabel, componentSchemas, typing, {
     disabled: iteratorSource === undefined,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
     endOfIteration: paginationDisabled ? undefined : paginationOverride?.hint.endOfIteration,
@@ -3139,7 +3235,7 @@ function buildOperation(
   // bundle owns the success bodies, the list envelope and the response
   // headers; the request bundle owns the body. Qualified as a header model or
   // list-envelope companion is (`GetLegacyWidgetWidget`).
-  const qualifier = toPascalCase(operationName);
+  const qualifier = toPascalCase(namingName);
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
   // items may have shared another site's model (`typeInlineItems`), and the
@@ -5035,13 +5131,110 @@ export function derivePathBasedName(
 }
 
 /**
- * Decide the path-derived model prefix of every operation that has no
- * `operationId`, keyed by `${method} ${path}`.
+ * What the models of each operation whose `operationId` the document reuses
+ * are named from, keyed by `${method} ${path}`. `modelOperationIds` holds
+ * the name to read as its `operationId`, or `null` for one that names them
+ * from its path, as an operation without an `operationId` does
+ * (resolvePathModelBaseNames); an operation not there names them from its
+ * own. `sharedWith` holds, for a path that `$ref`s the Operation Object of
+ * another, the path whose models it shares. Reused means declared on more
+ * than one Operation Object, which OpenAPI forbids: every such operation
+ * would otherwise name its models alike (`CreateNoteRequest`), and the
+ * merge would keep one body for all of them.
+ *
+ * Each Operation Object claims the stem (operationIdModelBase) of the name
+ * the first of its paths ends up with (planOperations): its `operationId`'s
+ * while the operation keeps the name it took from it, and its new name's
+ * when the reuse renamed it within its service — `createNote2` names its
+ * models `CreateNote2Request` beside `createNote`'s `CreateNoteRequest`.
+ * Paths and claims are taken in the order the numeric pass of
+ * disambiguateOperationNames keeps a name in — the shorter API root, then
+ * the path by code unit, then the method in HTTP_METHODS order — so the
+ * outcome never depends on document order. The stems the document wrote
+ * are served first, each granted while no earlier claim and no `operationId`
+ * declared on one Operation Object holds it; then the new names, which the
+ * parser made, each granted, as a path-derived prefix is, only while no
+ * stem held starts with it: a renamed `getNote2` that returns a `request`
+ * object would name it `GetNote2ResponseRequest`, the request body of
+ * `operationId: getNote2Response`. An operation whose claim is not granted
+ * names its models from its path: one that kept the name in another service
+ * as well (`createNote` in `Notes` and in `ArchivedNotes`: `/archived-notes`
+ * sorts first, so `/notes` sends a `NotesPostRequest`), or one renamed to a
+ * name another `operationId` holds. Every other path of the Operation
+ * Object reads its one body and shares its models. An `operationId`
+ * declared on one Operation Object is not reused, even when two paths
+ * `$ref` the Path Item it is on.
+ */
+function resolveReusedOperationIds(
+  paths: Record<string, PathItem>,
+  plan: OperationPlan,
+): { modelOperationIds: Map<string, string | null>; sharedWith: Map<string, string> } {
+  const declaring = new Map<string, Array<{ key: string; path: string; method: HttpMethod; op: OperationObject }>>();
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op?.operationId) continue;
+      const entries = declaring.get(op.operationId) ?? [];
+      entries.push({ key: `${method} ${path}`, path, method, op });
+      declaring.set(op.operationId, entries);
+    }
+  }
+  const reused = (entries: Array<{ op: OperationObject }>) => new Set(entries.map(({ op }) => op)).size > 1;
+  // Every stem an `operationId` declared on one Operation Object holds.
+  const held = new Set(
+    [...declaring].filter(([, entries]) => !reused(entries)).map(([operationId]) => operationIdModelBase(operationId)),
+  );
+  const claims = [...declaring.values()]
+    .filter(reused)
+    .flat()
+    .map((entry) => ({ ...entry, ...plan.operations.get(entry.key)! }))
+    .sort(
+      (a, b) =>
+        a.rootLength - b.rootLength ||
+        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) ||
+        HTTP_METHODS.indexOf(a.method) - HTTP_METHODS.indexOf(b.method),
+    );
+
+  // One claim per Operation Object, made by the first of its paths.
+  const claimants = new Map<OperationObject, (typeof claims)[number]>();
+  const sharedWith = new Map<string, string>();
+  for (const claim of claims) {
+    const first = claimants.get(claim.op);
+    if (first) sharedWith.set(claim.key, first.key);
+    else claimants.set(claim.op, claim);
+  }
+
+  const modelOperationIds = new Map<string, string | null>();
+  for (const { key, op, initialName, name } of claimants.values()) {
+    if (name !== initialName) continue;
+    const stem = operationIdModelBase(op.operationId!);
+    if (held.has(stem)) modelOperationIds.set(key, null);
+    held.add(stem);
+  }
+  for (const { key, initialName, name } of claimants.values()) {
+    if (name === initialName) continue;
+    const stem = operationIdModelBase(name);
+    modelOperationIds.set(key, [...held].some((taken) => taken.startsWith(stem)) ? null : name);
+    held.add(stem);
+  }
+  for (const [key, first] of sharedWith) {
+    if (modelOperationIds.has(first)) modelOperationIds.set(key, modelOperationIds.get(first)!);
+  }
+  return { modelOperationIds, sharedWith };
+}
+
+/**
+ * Decide the path-derived model prefix of every operation that names its
+ * models from its path — one without an `operationId`, or one whose
+ * `operationId` the document reuses and leaves it none
+ * (resolveReusedOperationIds) — keyed by `${method} ${path}`.
+ * A path that shares another's Operation Object (`sharedWith`) takes no part:
+ * it names its models as that path does.
  *
  * A prefix collides when two distinct raw paths with the same method flatten
  * to it (see derivePathModelBaseName), or when a reserved name starts with
  * it. The reserved names are every resolved component model name and, for
- * every operation with an `operationId`, its model stem
+ * every operation that names its models from an `operationId`, their stem
  * (operationIdModelBase). A prefix is the stem of several emitted names —
  * `…Request`, `…Response`, a list's `…Item`, nested inline models such as
  * `…ResponseOwner`, envelope companions such as `…ListMetadata` — so the
@@ -5085,6 +5278,8 @@ function resolvePathModelBaseNames(
   componentModels?: Model[],
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentResponseNaming: ReadonlyMap<string, ComponentResponseNaming> = new Map(),
+  modelOperationIds: ReadonlyMap<string, string | null> = new Map(),
+  sharedWith: ReadonlyMap<string, string> = new Map(),
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -5116,12 +5311,15 @@ function resolvePathModelBaseNames(
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
       if (!op) continue;
-      if (op.operationId) {
-        reservedNames.add(operationIdModelBase(op.operationId));
+      const key = `${method} ${path}`;
+      if (sharedWith.has(key)) continue;
+      const modelOperationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
+      if (modelOperationId) {
+        reservedNames.add(operationIdModelBase(modelOperationId));
         continue;
       }
       const plain = derivePathModelBaseName(path, method);
-      candidates.push({ key: `${method} ${path}`, path, method, plain });
+      candidates.push({ key, path, method, plain });
       const rawPaths = rawPathsByPlainName.get(plain) ?? new Set<string>();
       rawPaths.add(path);
       rawPathsByPlainName.set(plain, rawPaths);
@@ -6232,10 +6430,11 @@ function undescribedBodyType(): TypeRef {
 
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
+  /** The Operation Object as the operation's model names read it (`buildOperation`'s `namingOp`). */
   op: OperationObject | undefined,
   pathModelBaseName: string,
-  path?: string,
-  method?: HttpMethod,
+  /** The operation as diagnostics name it (`operationLabel`). */
+  opLabel: string,
   componentSchemas?: Record<string, SchemaObject>,
   ctx: ResponseTypingContext = { operationQualifier: '', deferred: [] },
   pagination: PaginationExtractionOptions = {},
@@ -6292,7 +6491,6 @@ function extractResponses(
   let unpagedEnvelope: boolean | undefined;
 
   const allSuccessResponses: SuccessResponse[] = [];
-  const opLabel = operationLabel(op, path ?? '/', method ?? 'get');
   // Every 2xx body's classification, by status code. The models of all of
   // them are kept — `successResponses` references each — while the paging
   // fields are read from the status chosen as primary once every status code

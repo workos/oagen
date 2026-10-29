@@ -165,6 +165,41 @@ describe('a numeric suffix on a name that ends in a digit (#289)', () => {
     }
   });
 
+  it("names the renamed operation's models after the number it takes: getV2No2 returns a GetV2No2Response (#416)", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const returning = (field: string) => ({
+        ...param('id', { operationId: 'getV2' }),
+        responses: {
+          '200': {
+            description: 'ok',
+            content: {
+              'application/json': { schema: { type: 'object', properties: { [field]: { type: 'string' } } } },
+            },
+          },
+        },
+      });
+      const { services, inlineModels } = extractOperations({
+        '/store/pets/{id}': { get: returning('pet') },
+        '/store/featured/{id}': { get: returning('featured') },
+      });
+      // Each response keeps its own fields, under the name of the operation
+      // that returns it.
+      expect(
+        services.flatMap((s) =>
+          s.operations.map((op) => {
+            const name = op.response.kind === 'model' ? op.response.name : '';
+            const fields = inlineModels.find((m) => m.name === name)?.fields.map((f) => f.name);
+            return `${op.name}: ${name} {${fields?.join(', ')}}`;
+          }),
+        ),
+      ).toEqual(['getV2No2: GetV2No2Response {pet}', 'getV2: GetV2Response {featured}']);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('spells the number the same way on one path: a path-named PATCH beside operationId updateTop10 is updateTop10No2', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
