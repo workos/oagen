@@ -22,6 +22,7 @@ import {
   foldSiblingProperties,
   isArrayComponentRef,
   isArraySchema,
+  isNullSchema,
   collapsedNullableBranch,
   typesAsUnknown,
   warnOnUncarriedProperties,
@@ -764,7 +765,7 @@ function extractWrappedResource(
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
       const hasNullVariant = propSchema.oneOf.some(
-        (v) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
+        (v) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
       );
 
       const modelRef: TypeRef = { kind: 'model', name: modelName };

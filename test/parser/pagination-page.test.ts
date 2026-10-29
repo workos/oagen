@@ -152,6 +152,15 @@ describe('resolveSchemaKeyword', () => {
     expect(resolveSchemaKeyword({ anyOf: [{ type: 'null' }, { default: 4 }] }, 'default')).toBe(4);
   });
 
+  it('reads through a nullable wrapper whose null is `{ const: null }` or `{ enum: [null] }` (#394)', () => {
+    for (const nullVariant of [{ const: null }, { enum: [null] }]) {
+      expect(
+        resolveSchemaKeyword({ anyOf: [nullVariant, { default: 4 }] }, 'default'),
+        JSON.stringify(nullVariant),
+      ).toBe(4);
+    }
+  });
+
   it('returns undefined when no level declares the keyword, and survives a self-referencing $ref', () => {
     expect(resolveSchemaKeyword({ type: 'integer' }, 'default')).toBeUndefined();
     expect(resolveSchemaKeyword({ oneOf: [{ default: 1 }, { default: 2 }] }, 'default')).toBeUndefined();
@@ -1181,5 +1190,20 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     expect(problem(beside({ oneOf: [after, object({ has_more: { type: 'string' } })] }))).toBe(
       'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
     );
+  });
+
+  it('sets a null variant on the path aside however it is spelled (#394)', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const boolean: SchemaObject = { type: 'boolean' };
+    for (const nullVariant of [{ const: null }, { enum: [null] }]) {
+      const meta = {
+        anyOf: [object({ has_more: boolean }), object({ has_more: boolean, page: boolean }), nullVariant],
+      };
+      const body = object({ data: { type: 'array', items: { type: 'string' } }, meta });
+      expect(
+        bodyEndOfIterationProblem({ kind: 'hasMore', path: 'meta.has_more' }, body),
+        JSON.stringify(nullVariant),
+      ).toBeUndefined();
+    }
   });
 });

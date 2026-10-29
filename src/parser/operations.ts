@@ -51,6 +51,7 @@ import {
   inlineEnumSchemaName,
   isComponentModelRef,
   isInlineObjectSchema,
+  isNullSchema,
   nonObjectVariantContexts,
   unwrapNullableField,
   warnOnUncarriedProperties,
@@ -3590,7 +3591,7 @@ function collectBodyPropertyNames(
     for (const name of collectBodyPropertyNames(sub, componentSchemas, seen)) names.add(name);
   }
   for (const alternatives of [schema.oneOf, schema.anyOf]) {
-    const branches = (alternatives ?? []).filter((alt) => alt.type !== 'null');
+    const branches = (alternatives ?? []).filter((alt) => !isNullSchema(alt));
     if (branches.length === 0) continue;
     let common: Set<string> | undefined;
     for (const branch of branches) {
@@ -3916,7 +3917,7 @@ function typePickedRequestBody(
       if (variant.$ref) {
         const ref = schemaToTypeRef(variant, contextName);
         variants.push(ref);
-      } else if (variant.type === 'null') {
+      } else if (isNullSchema(variant)) {
         // skip null variant in union, handle separately
       } else {
         const variantName = objectVariantNames.get(variant);
@@ -3932,7 +3933,7 @@ function typePickedRequestBody(
     }
 
     const hasNull = schema.oneOf.some(
-      (v: SchemaObject) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
+      (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
     );
     const union: TypeRef = {
       kind: 'union',
