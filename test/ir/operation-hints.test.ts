@@ -113,6 +113,12 @@ describe('readPath: a colon that is not a custom method (issue #378)', () => {
     expect(literals.filter((segment) => isParameterSegment(segment))).toEqual([]);
   });
 
+  it('names a segment kept whole for its several colons from its text, even one that ends with a parameter', () => {
+    const pets = svc('Pets', [op('get', '/pets/{id}'), op('get', '/pets/{id}:a:b{ext}')]);
+    expect(pets.operations.map((o) => deriveMethodName(o, pets))).toEqual(['get_pet', 'list_{id}:a:b{ext}']);
+    expect(findResolvedMethodCollisions(resolveOperations(spec([pets])))).toEqual([]);
+  });
+
   it('names the issue repro as the segments read before #322, the custom method still split off', () => {
     // A literal segment is snake-cased as written, so the segment kept whole
     // names the GET as `file-{file_path}` names it, never the cut `list_path}`.

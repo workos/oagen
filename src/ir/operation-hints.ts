@@ -281,7 +281,9 @@ function singularize(word: string): string {
  * 1. Strip path-param segments (`{id}`, `{slug}`, etc.); a custom method
  *    written after a colon (`{id}:verify`, `factors:enroll`) is read as its
  *    segment followed by the verb (see pathSegments), so it is named like
- *    `{id}/verify` and `factors/enroll`
+ *    `{id}/verify` and `factors/enroll`, and a segment kept whole for its
+ *    several colons is a literal (see isParameterSegment), even one braces
+ *    open and close (`{id}:a:b{ext}`)
  * 2. If the terminal segment is an action verb, use it as the verb
  * 3. Otherwise, use the CRUD verb for the HTTP method
  * 4. For GET on a collection (no trailing {id}), use "list"; with {id}, use "get"
@@ -295,7 +297,7 @@ export function deriveMethodName(op: Operation, _service: Service): string {
   const staticSegments: string[] = [];
   let trailingParam = false;
   for (const seg of segments) {
-    if (seg.startsWith('{') && seg.endsWith('}')) {
+    if (isParameterSegment(seg) && seg.endsWith('}')) {
       trailingParam = true;
     } else {
       staticSegments.push(seg);
