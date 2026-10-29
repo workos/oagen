@@ -94,6 +94,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       operationHints: configOperationHints,
     });
   });
@@ -172,6 +173,7 @@ program
       ...opts,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
 
@@ -230,6 +232,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       compatConfig: configCompat,
       compatReport: opts.compatReport,
       compatFailOn: opts.compatFailOn,

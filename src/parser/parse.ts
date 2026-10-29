@@ -71,6 +71,13 @@ export interface ParseOptions {
    */
   operationHints?: Record<string, OperationHint>;
   /**
+   * Fold the models materialized for inline error bodies onto shared models
+   * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
+   * see `collapseErrorBodies`). On by default; `false` keeps one model per
+   * operation and status code (`<Op>Error<code>`).
+   */
+  collapseErrorBodies?: boolean;
+  /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
    * extraction runs. Use this when the upstream spec can't be changed but you
    * need to patch around a spec quirk that would otherwise emit a breaking SDK
@@ -84,13 +91,6 @@ export interface ParseOptions {
    * If you need to inspect the resulting IR instead, post-process the
    * `ApiSpec` returned by `parseSpec`.
    */
-  /**
-   * Fold the models materialized for inline error bodies onto shared models
-   * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
-   * see `collapseErrorBodies`). On by default; `false` keeps one model per
-   * operation and status code (`<Op>Error<code>`).
-   */
-  collapseErrorBodies?: boolean;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
 }
 
@@ -314,10 +314,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const collapsedModels =
     options?.collapseErrorBodies === false
       ? finalModels
-      : collapseErrorBodies(
-          { services, webhooks, models: finalModels },
-          { componentNames, componentSites, reservedNames: enums.map((e) => e.name) },
-        );
+      : collapseErrorBodies({ services, webhooks, models: finalModels }, { componentNames, componentSites, enums });
   // A hint keyed by a shared model's name (`ErrorBodyWithCode`) applies here;
   // one keyed by a folded model's name was applied above and rode along.
   applyFieldHints(collapsedModels, options?.fieldHints);

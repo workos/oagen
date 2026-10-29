@@ -64,7 +64,7 @@
  * `collapseErrorBodies: false` on `ParseOptions` keeps the per-operation
  * models for a consumer that names them.
  */
-import type { EnumRef, Field, Model, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
+import type { Enum, EnumRef, Field, Model, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
 import {
   collectModelRefs,
   collectModelTypeRefs,
@@ -73,6 +73,7 @@ import {
   renameTypeRefModels,
 } from '../ir/types.js';
 import { singularize, toPascalCase } from '../utils/naming.js';
+import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
 
 /** The stem every shared error body is named from: `ErrorBody`, `ErrorBodyWithCode`, and the enums `ErrorBodyCode`, `ErrorBodyError`. */
@@ -94,12 +95,13 @@ export interface CollapseErrorBodiesOptions {
    */
   componentSites?: ReadonlySet<TypeRef>;
   /**
-   * Names no shared model or enum may take beside the component schemas and
-   * the models kept: the document's enums and every enum lifted so far, so a
-   * shared `ErrorBody` never stands beside an `ErrorBody` enum a component's
-   * `body` field minted.
+   * The document's enums and every enum lifted before the pass. No shared
+   * model takes one of their names (a shared `ErrorBody` steps past an
+   * `ErrorBody` enum a component's `body` field minted), and a shared enum
+   * takes the name of one of them only when the members agree, sharing it as
+   * the collectors share any inline enum.
    */
-  reservedNames?: Iterable<string>;
+  enums?: readonly Enum[];
 }
 
 /**
@@ -168,7 +170,15 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
     if (group) group.push(byName.get(name)!);
     else groups.set(key, [byName.get(name)!]);
   }
-  const orderedGroups = [...groups.entries()].sort(([, a], [, b]) => a[0].name.localeCompare(b[0].name));
+  // Groups are ordered by shape, never by the operations that produced them:
+  // fewer fields first, then the key, so the smaller of two shapes asking
+  // for one name keeps the bare name (`ErrorBody` is `{ message: string }`
+  // beside `{ message: string | string[] }`) and renaming an operation moves
+  // no model name.
+  const orderedGroups = [...groups.entries()].sort(([keyA, a], [keyB, b]) => {
+    const fields = a[0].fields.length - b[0].fields.length;
+    return fields !== 0 ? fields : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+  });
   const pinnedByKey = new Map<string, Map<string, PinnedValues>>();
   for (const [key, members] of orderedGroups) pinnedByKey.set(key, pinnedValues(members));
 
@@ -187,10 +197,11 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   // their pinned value or their fields; then the ones only another error
   // body reaches, from their parent and field.
   const topLevel = new Set(errorRoots.filter((name) => errorOnly.has(name)));
+  const existingEnums = options.enums ?? [];
   const reserved = new Set<string>([
     ...input.models.filter((model) => !errorOnly.has(model.name)).map((model) => model.name),
     ...options.componentNames,
-    ...(options.reservedNames ?? []),
+    ...existingEnums.map((e) => e.name),
   ]);
   const canonical = new Map<string, string>(); // group key → shared name
   const mint = (base: string): string => {
@@ -246,9 +257,13 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   const enumNamesByField = new Map<string, string>();
   for (const pinned of pinnedByKey.values()) {
     for (const [field, { values }] of pinned) {
-      if (values.size >= 2 && !enumNamesByField.has(field)) {
-        enumNamesByField.set(field, mint(`${ERROR_BODY_BASE}${toPascalCase(field)}`));
-      }
+      if (values.size < 2 || enumNamesByField.has(field)) continue;
+      const base = `${ERROR_BODY_BASE}${toPascalCase(field)}`;
+      const members = [...(enumValuesByField.get(field) ?? values)].sort().map((value) => ({ name: value, value }));
+      // An enum of that name with the same members is shared, as the
+      // collectors share any inline enum; other members, or a model, step.
+      const shared = existingEnums.find((e) => e.name === base && sameEnumShape(e.values, members));
+      enumNamesByField.set(field, shared ? shared.name : mint(base));
     }
   }
 
@@ -453,7 +468,8 @@ function groupBaseName(representative: Model, pinned: ReadonlyMap<string, Pinned
   const single = [...pinned.values()].filter(({ values, open }) => values.size === 1 && !open);
   if (single.length === 1) {
     const word = toPascalCase([...single[0].values][0]);
-    if (word.length > 0) return `${word}${ERROR_BODY_BASE}`;
+    // A value that is empty or starts with a digit (`4001`) names nothing.
+    if (word.length > 0 && !/^\d/.test(word)) return `${word}${ERROR_BODY_BASE}`;
   }
   return sharedBaseName(representative);
 }

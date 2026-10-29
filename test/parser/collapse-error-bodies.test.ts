@@ -479,9 +479,9 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
       }),
     );
     expect(modelNames(ir)).toEqual(['ErrorBodyWithCodes', 'ErrorBodyWithCodes2', 'Note']);
-    // Groups are named in the order of their first member: `getNotes` sorts before `getPets`.
-    expect(fieldSummary(ir, 'ErrorBodyWithCodes')).toEqual(['codes: "b"[]', 'message: string']);
-    expect(fieldSummary(ir, 'ErrorBodyWithCodes2')).toEqual(['codes: "a"[]', 'message: string']);
+    // Groups are ordered by shape (the key), not by operation: `"a"` sorts before `"b"`.
+    expect(fieldSummary(ir, 'ErrorBodyWithCodes')).toEqual(['codes: "a"[]', 'message: string']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodes2')).toEqual(['codes: "b"[]', 'message: string']);
     expectSound(ir);
   });
 
@@ -533,5 +533,93 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
     // A hint on one body only keeps that body apart: the domain name is part of the key.
     const split = await parse(spec, { fieldHints: { GetPetsError404: { message: 'detail' } } });
     expect(modelNames(split)).toEqual(['ErrorBody', 'ErrorBody2', 'Note']);
+  });
+});
+
+describe('what the human review asked to pin (workos/oagen#497, review 5704133720)', () => {
+  it('orders shapes by their structure, so `{ message: string }` keeps `ErrorBody` whichever operation declares it, and renaming an operation moves no name', async () => {
+    const union = obj({ message: { oneOf: [str, { type: 'array', items: str }] } });
+    const build = (plainOp: string, unionOp: string): Doc =>
+      doc({
+        ...getOp(plainOp, { '400': { description: 'bad', content: json(messageBody()) } }),
+        ...getOp(unionOp, { '400': { description: 'bad', content: json(union) } }),
+      });
+    // The union body's operation sorts before the plain one...
+    const a = await parseWithoutWarnings(build('pets', 'notes'));
+    expect(fieldSummary(a, 'ErrorBody')).toEqual(['message: string']);
+    expect(fieldSummary(a, 'ErrorBody2')).toEqual(['message: string | string[]']);
+    // ...and after it: the same names.
+    const b = await parseWithoutWarnings(build('notes', 'pets'));
+    expect(fieldSummary(b, 'ErrorBody')).toEqual(['message: string']);
+    expect(fieldSummary(b, 'ErrorBody2')).toEqual(['message: string | string[]']);
+    // Fewer fields first for a value-named pair, in either order.
+    const notFound = (extra: Record<string, unknown>): Doc =>
+      obj({ code: { type: 'string', const: 'not_found' }, message: str, ...extra });
+    for (const [small, large] of [
+      ['pets', 'notes'],
+      ['notes', 'pets'],
+    ]) {
+      const ir = await parseWithoutWarnings(
+        doc({
+          ...getOp(small, { '404': { description: 'nf', content: json(notFound({})) } }),
+          ...getOp(large, { '404': { description: 'nf', content: json(notFound({ id: str })) } }),
+        }),
+      );
+      expect(fieldSummary(ir, 'NotFoundErrorBody')).toEqual(['code: "not_found"', 'message: string']);
+      expect(fieldSummary(ir, 'NotFoundErrorBody2')).toEqual(['code: "not_found"', 'message: string', 'id: string']);
+    }
+  });
+
+  it('shares a component enum of the same name and members instead of stepping past it', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        {
+          ...getOp('pets', {
+            '200': {
+              description: 'ok',
+              content: json(obj({ code: { $ref: '#/components/schemas/ErrorBodyCode' } })),
+            },
+            '409': { description: 'dup', content: json(codedBody('pet_taken')) },
+          }),
+          ...getOp('notes', { '409': { description: 'dup', content: json(codedBody('note_locked')) } }),
+        },
+        { ErrorBodyCode: { type: 'string', enum: ['note_locked', 'pet_taken'] } },
+      ),
+    );
+    expect(ir.enums.map((e) => e.name)).toEqual(['ErrorBodyCode']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCode')).toEqual(['code: ErrorBodyCode', 'message: string']);
+    // Other members step, as the collectors step any inline enum.
+    const other = await parseWithoutWarnings(
+      doc(
+        {
+          ...getOp('pets', {
+            '200': {
+              description: 'ok',
+              content: json(obj({ code: { $ref: '#/components/schemas/ErrorBodyCode' } })),
+            },
+            '409': { description: 'dup', content: json(codedBody('pet_taken')) },
+          }),
+          ...getOp('notes', { '409': { description: 'dup', content: json(codedBody('note_locked')) } }),
+        },
+        { ErrorBodyCode: { type: 'string', enum: ['something_else'] } },
+      ),
+    );
+    expect(other.enums.map((e) => e.name).sort()).toEqual(['ErrorBodyCode', 'ErrorBodyCode2']);
+    expect(fieldSummary(other, 'ErrorBodyWithCode')).toEqual(['code: ErrorBodyCode2', 'message: string']);
+  });
+
+  it('falls back to the field-based name when the pinned value would start with a digit', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '409': { description: 'dup', content: json(codedBody('4001')) },
+        }),
+        ...getOp('notes', {
+          '409': { description: 'dup', content: json(codedBody('4001')) },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithCode', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCode')).toEqual(['code: "4001"', 'message: string']);
   });
 });
