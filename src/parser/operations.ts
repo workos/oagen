@@ -514,7 +514,9 @@ export function extractOperations(
     componentResponses,
     [...(componentModels ?? []), ...(componentFieldModels ?? [])],
     componentSchemas,
-    componentResponses ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas) : [],
+    Object.keys(componentResponses ?? {}).length > 0
+      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas)
+      : [],
   );
   const componentResponseModelNames = new Map(
     [...componentResponseNaming].map(([componentName, naming]) => [componentName, naming.name]),
