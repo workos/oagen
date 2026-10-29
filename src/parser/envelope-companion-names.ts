@@ -216,8 +216,9 @@ export function resolveEnvelopeCompanionNames(
  * like a live component field's model, say) repoints every operation that
  * shares it, and nothing else. `survivingModels` is what the resolver
  * returned; a companion is a survivor when its own model is among them.
- * `qualifiers` gives each companion the PascalCase name of the operation that
- * lifted it, to prefix a renamed model as a header model is prefixed.
+ * `qualifiers` gives each companion the stem the models of the operation
+ * that lifted it are named from (`ListUsers`, or `UsersGet` for `GET /users`
+ * without an `operationId`), to prefix a renamed model with.
  */
 export function companionBundles(
   companions: EnvelopeCompanion[],

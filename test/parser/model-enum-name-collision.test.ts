@@ -320,10 +320,13 @@ describe('the same rule at every other site the merge passes name', () => {
       ),
     );
     expect(bothKinds(spec)).toEqual([]);
-    expect(modelsOf(spec)).toEqual(['GetPetsByPetIdGetResponse {a}']);
+    // Qualified by the path-derived prefix its name already starts with, so
+    // it steps by number as `CreatePetResponse2` does, never by the derived
+    // operation name `get` (`GetPetsByPetIdGetResponse`, before #380).
+    expect(modelsOf(spec)).toEqual(['PetsByPetIdGetResponse2 {a}']);
     expect(enumsOf(spec)).toEqual(['PetsByPetIdGetResponse [a,b]']);
-    expect(show(opsOf(spec).get.response)).toBe('model GetPetsByPetIdGetResponse');
-    expect(warnings).toEqual([renamed('PetsByPetIdGetResponse', 'GetPetsByPetIdGetResponse')]);
+    expect(show(opsOf(spec).get.response)).toBe('model PetsByPetIdGetResponse2');
+    expect(warnings).toEqual([renamed('PetsByPetIdGetResponse', 'PetsByPetIdGetResponse2')]);
     expectSound(spec, ['PetsByPetIdGetResponse']);
   });
 
