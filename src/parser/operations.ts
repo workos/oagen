@@ -507,11 +507,16 @@ export function extractOperations(
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
   // The model name each component response's inline body takes, decided once
-  // for every operation that returns it (see resolveComponentResponseModelNames).
+  // for every operation that returns it (see resolveComponentResponseModelNames),
+  // past every name an operation's own inline success body mints (read only
+  // when there is a component to step, see operationBodyModelNames).
   const componentResponseNaming = resolveComponentResponseModelNames(
     componentResponses,
     [...(componentModels ?? []), ...(componentFieldModels ?? [])],
     componentSchemas,
+    Object.keys(componentResponses ?? {}).length > 0
+      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas)
+      : [],
   );
   const componentResponseModelNames = new Map(
     [...componentResponseNaming].map(([componentName, naming]) => [componentName, naming.name]),
@@ -1233,7 +1238,7 @@ function normalizeOperationIdForNaming(operationId: string): string {
  * The inline request body, response or error body model name of an operation
  * that has an `operationId`. The single source of that name: extractRequestBody,
  * deriveResponseName, deriveFallbackResponseName and deriveErrorModelName use
- * it to name, resolvePathModelBaseNames to reserve.
+ * it to name, resolvePathModelBaseNames and operationBodyModelNames to reserve.
  */
 function operationIdModelName(operationId: string, suffix: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
@@ -5845,9 +5850,11 @@ interface ComponentResponseNaming {
  * first numbered form (`OwnerCardResponse2`, `…3`) under which neither it nor
  * any model the body mints — a nested object (`OwnerCardResponse2Detail`),
  * array items, union variants, envelope companions — is a name a component
- * schema (or a model a component field mints) or an earlier component
- * response already owns: `OwnerCard` beside a schema `OwnerCardResponse`, or
- * beside a schema `OwnerCardResponse2Detail`, or beside a component response
+ * schema (or a model a component field mints), an operation's own inline
+ * success body (`operationBodyModelNames`) or an earlier component response
+ * already owns: `OwnerCard` beside a schema `OwnerCardResponse`, or beside a
+ * schema `OwnerCardResponse2Detail`, or beside an operation `ownerCard` whose
+ * inline 200 is `OwnerCardResponse`, or beside a component response
  * `OwnerCardResponse`. A shared name of another shape would otherwise be
  * folded by the later merge, which compares field names, onto a model with
  * other field types, silently; and naming such a body per operation instead
@@ -5874,8 +5881,9 @@ function resolveComponentResponseModelNames(
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   takenModels: readonly Model[],
   componentSchemas?: Record<string, SchemaObject>,
+  operationBodyNames: readonly string[] = [],
 ): ReadonlyMap<string, ComponentResponseNaming> {
-  const taken = new Set(takenModels.map((model) => model.name));
+  const taken = new Set([...takenModels.map((model) => model.name), ...operationBodyNames]);
   const componentNames = Object.keys(componentResponses ?? {});
   const exact = componentNames.filter((name) => componentResponseModelName(name) === name);
   const ordered = [...exact, ...componentNames.filter((name) => !exact.includes(name))];
@@ -5905,6 +5913,47 @@ function resolveComponentResponseModelNames(
     names.set(componentName, { name, minted });
   }
   return names;
+}
+
+/**
+ * Every model name an operation named from an `operationId` mints for its own
+ * inline success bodies — `<Op>Response` at any 2xx and everything under it,
+ * under every reading (`bodyModelNames`) — the `operationId` being the one
+ * its models are named by (`modelOperationIds`). A component response's body
+ * steps past these names (`resolveComponentResponseModelNames`), so `card`'s
+ * inline 200 keeps `CardResponse` and the body of a component `Card` is
+ * `CardResponse2`, whatever the order of the paths (workos/oagen#424). A 2xx
+ * written as a `$ref` mints under its component's name or not at all, and an
+ * operation that names its models from its path steps past the components
+ * itself (`resolvePathModelBaseNames`), so neither reserves anything. Read
+ * silently (`rehearse`): the operation reports its body's problems once, when
+ * it is built.
+ */
+function operationBodyModelNames(
+  paths: Record<string, PathItem>,
+  modelOperationIds: ReadonlyMap<string, string | null>,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): string[] {
+  return rehearse(() => {
+    const names: string[] = [];
+    for (const [path, pathItem] of Object.entries(paths)) {
+      for (const method of HTTP_METHODS) {
+        const op = pathItem[method];
+        const key = `${method} ${path}`;
+        const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op?.operationId;
+        if (!op || !operationId) continue;
+        const contextName = operationIdModelName(operationId, 'Response');
+        for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
+          const responseKey = classifyResponseKey(statusCode);
+          if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
+          if ('$ref' in response) continue;
+          const { schema } = primaryBodySchema(response);
+          if (schema) names.push(...bodyModelNames(schema, contextName, componentSchemas));
+        }
+      }
+    }
+    return names;
+  });
 }
 
 /** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */

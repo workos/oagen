@@ -1087,8 +1087,8 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
 
   it("steps a 404 and a default of the component the same way when an operation's own model holds its name", async () => {
     // `problem`'s inline 200 body is `ProblemResponse`, a name the pre-pass
-    // does not reserve against, so both component sites step past it — by
-    // number alike, whichever kind of site each is, so they still share.
+    // reserves (#424), so the component's body steps past it — by number at
+    // both sites alike, whichever kind of site each is, so they still share.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const spec = await parseDocument(
       {
@@ -1245,6 +1245,196 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
       expect(warn).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("an operation's own inline body named like a component response's body (issue #424)", () => {
+  // `card`'s inline 200 body is `CardResponse`, named from its operationId,
+  // and so is the body of the component `Card` that `getNote` returns. The
+  // component's body used to step past component schemas and other
+  // components only, so both minted `CardResponse` and the merge kept one
+  // shape for both operations, with a warning.
+  let dir: string | undefined;
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  const object = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+  const json = (schema: unknown) => ({ description: 'ok', content: { 'application/json': { schema } } });
+  const string = { type: 'string' };
+  const cardRef = { $ref: '#/components/responses/Card' };
+  const textCard = { description: 'A card', content: { 'application/json': { schema: object({ text: string }) } } };
+  /** `GET /card` (`card`), whose inline 200 `{ j }` derives `CardResponse` from the operationId. */
+  const card = { '/card': { get: { operationId: 'card', responses: { '200': json(object({ j: string })) } } } };
+  const getNote = { '/notes': { get: { operationId: 'getNote', responses: { '200': cardRef } } } };
+
+  async function parse(paths: Record<string, unknown>, responses: Record<string, unknown> = { Card: textCard }) {
+    dir ??= mkdtempSync(join(tmpdir(), 'oagen-424-'));
+    const specPath = join(dir, 'spec.json');
+    const schemas = { Pet: PET_SCHEMA };
+    writeFileSync(
+      specPath,
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: '424', version: '1' },
+        paths,
+        components: { schemas, responses },
+      }),
+    );
+    return parseSpec(specPath);
+  }
+
+  const typeName = (type: TypeRef | undefined): string =>
+    type?.kind === 'model' ? type.name : type?.kind === 'primitive' ? type.type : JSON.stringify(type);
+  /** Every operation's response, as the issue's repro prints them, sorted. */
+  const responsesOf = (spec: ApiSpec): string[] =>
+    spec.services
+      .flatMap((s) => s.operations)
+      .map(({ name, response }) => `${name}: ${typeName(response)}`)
+      .sort();
+  /** Every model with its fields, as the issue's repro prints them, sorted. */
+  const modelsOf = (spec: ApiSpec): string[] =>
+    spec.models.map(({ fields, name }) => `${name} { ${fields.map((f) => f.name).join(', ')} }`).sort();
+  const byName = (spec: ApiSpec): Map<string, Operation> =>
+    new Map(spec.services.flatMap((s) => s.operations).map((op) => [op.name, op]));
+
+  it("the issue's repro: the component's body steps to `CardResponse2`, in either path order", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cardFirst = await parse({ ...card, ...getNote });
+    const notesFirst = await parse({ ...getNote, ...card });
+    expect(warn).not.toHaveBeenCalled();
+
+    // Before: one `CardResponse` for both, `{ j }` with `/card` first and `{ text }` with `/notes` first.
+    for (const spec of [cardFirst, notesFirst]) {
+      expect(responsesOf(spec)).toEqual(['card: CardResponse', 'getNote: CardResponse2']);
+      expect(modelsOf(spec)).toEqual(['CardResponse { j }', 'CardResponse2 { text }', 'Pet { name }']);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it('every site of the component takes the stepped name, its nested models with it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const detailed = {
+      description: 'A card',
+      content: { 'application/json': { schema: object({ text: string, detail: object({ code: string }) }) } },
+    };
+    const ownDetail = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: { '200': json(object({ j: string, detail: object({ other: string }) })) },
+        },
+      },
+    };
+    const getPet = {
+      '/pets': { get: { operationId: 'getPet', responses: { '200': { description: 'ok' }, '404': cardRef } } },
+    };
+    const listPets = { '/pets/all': { get: { operationId: 'listPets', responses: { default: cardRef } } } };
+    const cardFirst = await parse({ ...ownDetail, ...getNote, ...getPet, ...listPets }, { Card: detailed });
+    const cardLast = await parse({ ...getNote, ...getPet, ...listPets, ...ownDetail }, { Card: detailed });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, cardLast]) {
+      const ops = byName(spec);
+      expect(typeName(ops.get('card')!.response)).toBe('CardResponse');
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(typeName(ops.get('getPet')!.errors[0].type)).toBe('CardResponse2');
+      expect(typeName(ops.get('listPets')!.defaultResponse?.type)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual([
+        'CardResponse { j, detail }',
+        'CardResponse2 { text, detail }',
+        'CardResponse2Detail { code }',
+        'CardResponseDetail { other }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, cardLast).changes).toEqual([]);
+  });
+
+  it("steps past an operation's own body at a secondary success code too, in either path order", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `card`'s primary 200 is the component schema `Pet`, which mints nothing;
+    // its 201 is an inline `{ j }`, which mints `CardResponse` as a primary would.
+    const secondary = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: { '200': json({ $ref: '#/components/schemas/Pet' }), '201': json(object({ j: string })) },
+        },
+      },
+    };
+    const cardFirst = await parse({ ...secondary, ...getNote });
+    const notesFirst = await parse({ ...getNote, ...secondary });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(ops.get('card')!.successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`)).toEqual([
+        '200: Pet',
+        '201: CardResponse',
+      ]);
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual(['CardResponse { j }', 'CardResponse2 { text }', 'Pet { name }']);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it('steps past an identical shape too, as past a component schema of that name', async () => {
+    // The name is reserved whatever the shape, so the component's name never
+    // follows the shape of another operation's body.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const same = { '/card': { get: { operationId: 'card', responses: { '200': json(object({ text: string })) } } } };
+    const spec = await parse({ ...same, ...getNote });
+    expect(responsesOf(spec)).toEqual(['card: CardResponse', 'getNote: CardResponse2']);
+    expect(modelsOf(spec)).toEqual(['CardResponse { text }', 'CardResponse2 { text }', 'Pet { name }']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps `CardResponse` for the component when the operation named like it mints no model of its own', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `card` returns the component itself, the component schema `Pet`, or a
+    // string: whatever its operationId derives, it mints nothing under it.
+    const returning = (response: unknown) => ({
+      '/card': { get: { operationId: 'card', responses: { '200': response } } },
+    });
+    for (const [response, own] of [
+      [cardRef, 'CardResponse'],
+      [json({ $ref: '#/components/schemas/Pet' }), 'Pet'],
+      [json(string), 'string'],
+    ] as const) {
+      const spec = await parse({ ...returning(response), ...getNote });
+      expect(responsesOf(spec)).toEqual([`card: ${own}`, 'getNote: CardResponse']);
+      expect(modelsOf(spec)).toEqual(['CardResponse { text }', 'Pet { name }']);
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('steps past the name a reused operationId leaves the operation to name its models by', async () => {
+    // Two Operation Objects declare `card`: `/card` keeps the name, and
+    // `/card/{id}`, renamed `card2`, names its inline body `Card2Response`,
+    // the name the body of a component `Card2` derives.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const card2Ref = { $ref: '#/components/responses/Card2' };
+    const spec = await parse(
+      {
+        ...card,
+        '/card/{id}': { get: { operationId: 'card', responses: { '200': json(object({ k: string })) } } },
+        '/notes': { get: { operationId: 'getNote', responses: { '200': card2Ref } } },
+      },
+      { Card2: textCard },
+    );
+
+    expect(responsesOf(spec)).toEqual(['card2: Card2Response', 'card: CardResponse', 'getNote: Card2Response2']);
+    expect(modelsOf(spec)).toEqual([
+      'Card2Response { k }',
+      'Card2Response2 { text }',
+      'CardResponse { j }',
+      'Pet { name }',
+    ]);
+    expect(warn.mock.calls).toEqual([[expect.stringContaining('the latter is renamed "card2"')]]);
+  });
 });
 
 describe("a component response's other media types and headers (issue #302)", () => {
