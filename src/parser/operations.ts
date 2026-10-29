@@ -3465,7 +3465,7 @@ export interface SelectedRequestBodyContent {
 /**
  * Pick the content entry a request body is read from, by media type essence
  * in the fixed order of `REQUEST_BODY_MEDIA_TYPES`: `application/json`, then
- * a `+json` media type, then `multipart/form-data`, then
+ * a concrete `+json` media type, then `multipart/form-data`, then
  * `application/x-www-form-urlencoded` — each only with a schema — then
  * `application/octet-stream`, then `text/plain`. Within one tier the first
  * matching key in document order wins. `undefined` when the body declares no

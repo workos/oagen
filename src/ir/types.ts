@@ -337,8 +337,8 @@ export interface Operation {
   requestBody?: TypeRef;
   /**
    * The wire encoding of the media type `requestBody` was read from: `json`
-   * for `application/json` and any `+json` media type, `form-data` for
-   * `multipart/form-data`, `form-urlencoded` for
+   * for `application/json` and any concrete `+json` media type, `form-data`
+   * for `multipart/form-data`, `form-urlencoded` for
    * `application/x-www-form-urlencoded`, `binary` for
    * `application/octet-stream`, `text` for `text/plain`. Set exactly when
    * `requestBody` is.

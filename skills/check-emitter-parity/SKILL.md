@@ -65,7 +65,7 @@ A missing kind means an entire category of types won't generate correctly.
 #### Operation
 
 - `pagination` — Auto-paging iterator generation (cursor, offset, page, link-header strategies; optional `endOfIteration` stop field)
-- `requestBodyEncoding` — Body serialization: json (`application/json` and any `+json` media type), form-data, form-urlencoded, binary, text
+- `requestBodyEncoding` — Body serialization: json (`application/json` and any concrete `+json` media type), form-data, form-urlencoded, binary, text
 - `requestBodyRequired` — Whether the body argument is mandatory or optional
 - `requestBodyContentType` — The media type to send as `Content-Type` (the picked entry's essence, `application/merge-patch+json`)
 - `injectIdempotencyKey` — Whether to inject an idempotency key header (the `Idempotency-Key` parameter is left out of `headerParams`)
