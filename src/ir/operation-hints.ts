@@ -30,19 +30,23 @@ export interface PathSegment {
  * from a slash-written literal: it never names a service, and it counts
  * against a path's plainness when inline model names collide (see the
  * parser's serviceSegmentIndex and pathDeviation). A colon inside a
- * parameter's braces is part of its name and does not split it. Empty
- * segments — a leading, trailing or doubled slash, or an empty side of a
- * colon — are dropped. The operation's `path` itself is never rewritten: it
+ * parameter's braces, wherever they sit in the segment, is part of its name
+ * and does not split it: `file-{file_path:path}` is one segment. AIP-136
+ * appends a single verb, so a custom method starts only at a segment's one
+ * colon outside braces: a segment with several, such as the literal
+ * `urn:pet:1`, is kept whole, and is a literal even when a parameter opens
+ * it (see isParameterSegment).
+ * Empty segments — a leading, trailing or doubled slash, or an empty side of
+ * a colon — are dropped. The operation's `path` itself is never rewritten: it
  * is the URL the SDK requests.
  */
 export function readPath(path: string): PathSegment[] {
   const segments: PathSegment[] = [];
   for (const segment of path.split('/')) {
-    // A parameter's braces are kept whole; only what follows them can carry
-    // the colon of a custom method.
-    const braces = segment.startsWith('{') ? segment.indexOf('}') + 1 : 0;
-    const parts = segment.slice(braces).split(':');
-    parts[0] = segment.slice(0, braces) + parts[0];
+    const outside = blankBracedColons(segment);
+    const colon = outside.indexOf(':');
+    const single = colon !== -1 && colon === outside.lastIndexOf(':');
+    const parts = single ? [segment.slice(0, colon), segment.slice(colon + 1)] : [segment];
     parts.forEach((part, i) => {
       if (part) segments.push({ text: part, customMethod: i > 0 });
     });
@@ -53,6 +57,23 @@ export function readPath(path: string): PathSegment[] {
 /** The text of each segment readPath reads: `/pets/{petId}:adopt` → `pets`, `{petId}`, `adopt`. */
 export function pathSegments(path: string): string[] {
   return readPath(path).map((segment) => segment.text);
+}
+
+/**
+ * Whether a segment readPath reads is a path parameter: it starts with a
+ * parameter's braces (`{petId}`, `{pet:id}`, `{tag}.json`) and has no colon
+ * outside braces. A segment readPath keeps whole for its several colons is
+ * one literal even when a parameter opens it, as `urn:pet:1` is, so the
+ * parser reads `{petId}:adopt:now` as a literal and its words reach the
+ * names read from it, instead of a parameter whose tail drops out.
+ */
+export function isParameterSegment(segment: string): boolean {
+  return segment.startsWith('{') && !blankBracedColons(segment).includes(':');
+}
+
+/** A segment with the colons inside its braces blanked out, every index kept in place. */
+function blankBracedColons(segment: string): string {
+  return segment.replace(/\{[^}]*\}/g, (param) => param.replaceAll(':', ' '));
 }
 
 // ---------------------------------------------------------------------------
@@ -260,7 +281,9 @@ function singularize(word: string): string {
  * 1. Strip path-param segments (`{id}`, `{slug}`, etc.); a custom method
  *    written after a colon (`{id}:verify`, `factors:enroll`) is read as its
  *    segment followed by the verb (see pathSegments), so it is named like
- *    `{id}/verify` and `factors/enroll`
+ *    `{id}/verify` and `factors/enroll`, and a segment kept whole for its
+ *    several colons is a literal (see isParameterSegment), even one braces
+ *    open and close (`{id}:a:b{ext}`)
  * 2. If the terminal segment is an action verb, use it as the verb
  * 3. Otherwise, use the CRUD verb for the HTTP method
  * 4. For GET on a collection (no trailing {id}), use "list"; with {id}, use "get"
@@ -274,7 +297,7 @@ export function deriveMethodName(op: Operation, _service: Service): string {
   const staticSegments: string[] = [];
   let trailingParam = false;
   for (const seg of segments) {
-    if (seg.startsWith('{') && seg.endsWith('}')) {
+    if (isParameterSegment(seg) && seg.endsWith('}')) {
       trailingParam = true;
     } else {
       staticSegments.push(seg);

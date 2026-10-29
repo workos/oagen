@@ -950,4 +950,50 @@ describe('custom-method paths (issue #269)', () => {
       { name: 'Notes', operations: ['list: GET /api/v1/notes'] },
     ]);
   });
+
+  it('splits a segment only at the colon of a custom method (issue #378)', () => {
+    // A colon inside braces is the parameter's wherever they sit, so the GET
+    // reads `file-{file_path:path}` whole, as `/v1/files/file-{file_path}` is
+    // read (`listFileFilePath`), and the POST still reads `download` as its
+    // custom method; a literal with several colons is one literal, as AIP-136
+    // appends a single verb.
+    expect(
+      services({
+        '/v1/files/file-{file_path:path}': { get: jsonItem('file_path:path') },
+        '/v1/files/file-{file_path:path}:download': { post: jsonItem('file_path:path') },
+        '/things/urn:pet:1': { get: { ...json, tags: ['things'] } },
+      }),
+    ).toEqual([
+      {
+        name: 'Files',
+        operations: [
+          'listFileFilePathPath: GET /v1/files/file-{file_path:path}',
+          'createDownload: POST /v1/files/file-{file_path:path}:download',
+        ],
+      },
+      { name: 'Things', operations: ['listUrnPet1: GET /things/urn:pet:1'] },
+    ]);
+  });
+
+  it('reads a segment that a parameter opens and several colons follow as one literal, so its neighbours keep their names (issue #378)', () => {
+    // `{petId}:adopt:now` carries no custom method, and read as the
+    // parameter `{petId}` it would drop `:adopt:now` and collide with
+    // `GET /v1/pets/{petId}` as `get`, renaming both.
+    expect(
+      services({
+        '/v1/pets/{petId}': { get: jsonItem('petId') },
+        '/v1/pets/{petId}:adopt:now': { get: jsonItem('petId') },
+      }),
+    ).toEqual([
+      {
+        name: 'Pets',
+        operations: ['get: GET /v1/pets/{petId}', 'listPetIdAdoptNow: GET /v1/pets/{petId}:adopt:now'],
+      },
+    ]);
+    // A literal names a service, so it leaves `V1` to `/v1/{name}`.
+    expect(services({ '/v1/{name}': { get: jsonItem('name') }, '/v1/{name}:a:b': { get: jsonItem('name') } })).toEqual([
+      { name: 'V1', operations: ['get: GET /v1/{name}'] },
+      { name: 'NameAB', operations: ['list: GET /v1/{name}:a:b'] },
+    ]);
+  });
 });
