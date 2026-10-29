@@ -674,7 +674,7 @@ export function extractOperations(
   );
 
   // Headers, secondary bodies, fallback bodies, error bodies and parameters
-  // are named last, in document order, against every name in the registry —
+  // are named last, in the order below, against every name in the registry —
   // the component models and enums, the components' field models, every
   // request body, primary response, item and companion model — and against
   // every enum name decided so far: the component enums, and every enum
@@ -694,25 +694,39 @@ export function extractOperations(
   for (const [op, qualifier] of qualifierOf) {
     reserveEnumNames(registry, collectOperationTypeRefs(op).flatMap(collectEnumRefs), qualifier);
   }
+  // The sites a `components/responses` entry declares (`componentSite`) are
+  // named first, component by component in the order the components' bodies
+  // were settled (`resolveComponentResponseModelNames`), then every
+  // operation's own, each in document order: so of two components whose
+  // sites derive one name the one settled first keeps it (`Card`'s `X-Meta`
+  // is `CardXMeta`, `CardX`'s `Meta` `CardXMeta2`), and an operation's own
+  // site that derives a component's name steps past it (`CardGetCardXMeta`),
+  // whatever the order of the paths (workos/oagen#423). A component is
+  // ranked by the name its body is shared under, which its sites carry
+  // (`componentSite`) and no other component's body takes.
+  const componentRanks = new Map([...componentResponseNaming.values()].map(({ name }, rank) => [name, rank]));
+  const rankOf = ({ componentSite }: DeferredInlineType): number =>
+    componentSite === undefined ? componentRanks.size : (componentRanks.get(componentSite) ?? componentRanks.size);
+  const namingOrder = [...deferred].sort((a, b) => rankOf(a) - rankOf(b));
   // An enum a deferred site types — a body that is itself an inline enum or
   // an array of one, or an enum nested in a model the site mints (the `x`
   // field of a 404 body) — is named only when the site is resolved, after
-  // the models of every site before it in the document; reserved now
+  // the models of every site named before it; reserved now
   // (`deferredEnumNames`), a deferred model of the same name steps past it
   // whichever of the two the document declares first — an object 404 body
   // to `GetPetError404Body`, a parameter or header object of another
   // operation to its operation-qualified name (`SearchPetsError404ListNotesX`)
   // — as it steps past every other enum in play, so a model never keeps an
   // enum's name.
-  for (const item of deferred) reserveEnumNames(registry, deferredEnumNames(item), item.operationQualifier);
-  const deferredTypes = resolveDeferredInlineTypes(deferred, registry);
+  for (const item of namingOrder) reserveEnumNames(registry, deferredEnumNames(item), registryOwner(item));
+  const deferredTypes = resolveDeferredInlineTypes(deferred, registry, namingOrder);
   inlineModels.push(...deferredTypes.models);
   // The root every component-shared site wrote, by identity (every target of
   // a site carries the one TypeRef its resolution produced), for the enum
   // collector (`OperationExtractionResult.componentSites`).
   const componentSites = new Set<TypeRef>();
   for (const item of deferred) {
-    if (!item.componentSite) continue;
+    if (item.componentSite === undefined) continue;
     for (const target of item.targets) if (target.type) componentSites.add(target.type);
   }
   // Each deferred schema is a site of its own (the references it wrote, the
@@ -4559,15 +4573,21 @@ interface DeferredInlineType {
    * Set for a site a `components/responses` entry declares — its fallback or
    * error body (`<Component>Response`), an inline body under another media
    * type (`<Component><MediaType>Response`), an object-shaped header
-   * (`<Component><Header>`) — named after the component wherever the
-   * component is returned: a 404 of one operation, the `default` or a range
-   * of another. Every such site is a sibling of every other that derives the
+   * (`<Component><Header>`) — to the model name the component's body is
+   * shared under (`CardResponse`, `CardResponse2`; `sharedResponseModelName`),
+   * which no other component's body takes (its stem may: `CardResponse2` is
+   * also the stem of a component `CardResponse2`'s `CardResponse2Response`).
+   * Such a site is named after the component wherever the component is
+   * returned: a 404 of one operation, the `default` or a range of another.
+   * Every such site is a sibling of every other that derives the
    * same name, whatever its kind, and on a clash steps by number alike
    * (`ProblemResponse2`, `CardXMeta2`, `CardApplicationYamlResponse2`), never
-   * by the operation or status code that mounted the component, so all
-   * settle on one name that depends on the component alone.
+   * by the operation or status code that mounted the component; and every
+   * such site is named before any operation's own, component by component
+   * (`extractOperations`), so all settle on one name that depends on the
+   * component alone.
    */
-  componentSite?: boolean;
+  componentSite?: string;
   /**
    * What tells this site from another of the same name within one operation:
    * a status code, the key of a `4XX`/`5XX` range (`4XX`), the label of a
@@ -4645,15 +4665,19 @@ interface ResponseTypingContext {
  * companions — shared on an identical shape only, so no deferred schema
  * can take one of their names for a shape the owner does not share,
  * whichever operation minted it; each resolved schema's own models join it
- * in turn, in document order (path order, then an operation's secondary
- * request bodies in content order, then the response keys as written; a
- * response's headers before its error body and its secondary bodies, a
- * fallback's body before its headers), so the first owner of a name keeps
- * it. Every enum name decided before this pass, component or minted, is
- * held too, as a name no model may take (`reserveEnumNames`): a deferred
- * schema that derives one steps to its next candidate, so a component enum
- * `ReplaceWidgetTextCsvRequest` sends the `text/csv` body's model to
- * `ReplaceWidgetTextCsvRequest2`. The sites that derive from one bare name
+ * in turn, in `namingOrder` — the sites a `components/responses` entry
+ * declares (`componentSite`) first, component by component, then every
+ * operation's own (see `extractOperations`), each in document order (path
+ * order, then an operation's secondary request bodies in content order,
+ * then the response keys as written; a response's headers before its error
+ * body and its secondary bodies, a fallback's body before its headers) — so
+ * the first owner of a name keeps it, and a component's site is never an
+ * operation's own (`registryOwner`). Every enum name decided before this
+ * pass, component or minted, is held too, as a name no model may take
+ * (`reserveEnumNames`): a deferred schema that derives one steps to its
+ * next candidate, so a component enum `ReplaceWidgetTextCsvRequest` sends
+ * the `text/csv` body's model to `ReplaceWidgetTextCsvRequest2`. The sites
+ * that derive from one bare name
  * — one kind, parent and name: the same header on several status codes or
  * operations, one media type's body on several status codes, a component
  * response's header or secondary body from every operation that returns it;
@@ -4679,47 +4703,52 @@ interface ResponseTypingContext {
  * `searchPets`'s 404 body comes before or after it. Each site then
  * registers the enums it types as it is resolved, under the stem it settled
  * on. So the IR never declares a model and an enum under one name, and the
- * model is always the one that steps. Returns the models materialized,
- * having set each target's `type`.
+ * model is always the one that steps. Returns the models materialized and
+ * one bundle per site, in the order of `deferred` (document order) whatever
+ * the order the sites were named in, having set each target's `type`.
  */
 function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
   registry: ModelShapeRegistry,
+  namingOrder: readonly DeferredInlineType[],
 ): { models: Model[]; bundles: InlineModelBundle[] } {
-  const models: Model[] = [];
-  const bundles: InlineModelBundle[] = [];
+  const bundleOf = new Map<DeferredInlineType, InlineModelBundle>();
   const siblingsByBareName = new Map<string, SiblingSites>();
-  for (const item of deferred) {
+  for (const item of namingOrder) {
     // A component response's site is one site wherever the component is
     // returned, so its record is keyed by the name the component gives it
     // alone (its body's, or a header's under the component's stem), not by
     // whether the site is an error or a fallback entry.
-    const bareName = item.componentSite
-      ? `component\u0000${item.parentName ?? ''}\u0000${item.name}`
-      : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
+    const bareName =
+      item.componentSite !== undefined
+        ? `component\u0000${item.parentName ?? ''}\u0000${item.name}`
+        : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     let siblings = siblingsByBareName.get(bareName);
     if (!siblings) siblingsByBareName.set(bareName, (siblings = createSiblingSites()));
-    const minted = models.length;
+    const models: Model[] = [];
     const type = materializeDeferredType(item, registry, models, siblings);
     // An enum this site typed — a body that is itself an enum, one nested in
     // a model it minted — owns its name from here on, as the site's models do.
     reserveEnumNames(
       registry,
-      [type, ...models.slice(minted).flatMap(collectModelTypeRefs)].flatMap(collectEnumRefs),
-      item.operationQualifier,
+      [type, ...models.flatMap(collectModelTypeRefs)].flatMap(collectEnumRefs),
+      registryOwner(item),
     );
     for (const target of item.targets) target.type = type;
     // The one TypeRef every target shares is the site's root; the models
     // minted for it are the site's own (a shape that shared another site's
     // model minted nothing here, see `attachSharedRefs`).
-    bundles.push({
+    bundleOf.set(item, {
       qualifier: item.operationQualifier,
       roots: [type],
-      models: models.slice(minted),
+      models,
       ...(isSentSite(item) ? { sent: true } : {}),
     });
   }
-  return { models, bundles };
+  // In document order, whatever order the sites were named in, so the IR
+  // lists their models where it would without a component site among them.
+  const bundles = deferred.map((item) => bundleOf.get(item)!);
+  return { models: bundles.flatMap((bundle) => bundle.models), bundles };
 }
 
 /**
@@ -4872,7 +4901,7 @@ function materializeDeferredType(
     parentName: item.parentName,
     componentSchemas: item.componentSchemas,
     registry,
-    operation: item.operationQualifier,
+    operation: registryOwner(item),
     sent: isSentSite(item),
     models,
   });
@@ -4881,6 +4910,19 @@ function materializeDeferredType(
 /** Whether a deferred schema is one the SDK sends — a secondary request body or a parameter — rather than receives. */
 function isSentSite(item: DeferredInlineType): boolean {
   return item.kind === 'request' || item.kind === 'param';
+}
+
+/**
+ * The operation the registry records as the owner of a deferred site's models
+ * and enums (`InlineModelOwner.operation`): the site's own, or none for a site
+ * a `components/responses` entry declares (`componentSite`) — the
+ * component's, whichever operation returning it is read first. So an
+ * operation's own site that derives a component site's name steps as beside
+ * a component (`deferredNamingStem`), by operation (`CardGetCardXMeta`), in
+ * either path order and whether or not the operation returns the component.
+ */
+function registryOwner(item: DeferredInlineType): string | undefined {
+  return item.componentSite === undefined ? item.operationQualifier : undefined;
 }
 
 /**
@@ -4931,7 +4973,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
   // (`resolveComponentResponseModelNames`), never by the operation or status
   // code below, which belong to operation-owned sites; so every site that
   // returns the component reaches the same name (workos/oagen#302).
-  if (item.componentSite) return byNumber;
+  if (item.componentSite !== undefined) return byNumber;
   switch (item.kind) {
     case 'header': {
       // Decide the preference between candidates 2 and 3 from the bare
@@ -5121,7 +5163,7 @@ function extractResponseHeaders(
         parentName: site.headerParent,
         componentSchemas: ctx.componentSchemas,
         targets: [entry],
-        ...(site.shared && { componentSite: true }),
+        ...(site.component !== undefined && { componentSite: site.component }),
       });
     }
     result.push(entry);
@@ -5948,8 +5990,13 @@ interface ContentModelNaming {
   role: 'Response' | 'Error';
   /** A status code, the key of a `4XX`/`5XX` range (`4XX`), or the label of a `default` or `1XX`–`3XX` response (`Default`, `Success`). */
   statusCode: number | string;
-  /** Set for a component response's body: a component site (`componentSite`), stepping by number on a clash. */
-  shared: boolean;
+  /**
+   * The model name a component response's body is shared under
+   * (`ResponseModelSite.component`), set for a component response: its
+   * bodies are component sites (`componentSite`), stepping by number on a
+   * clash.
+   */
+  component: string | undefined;
 }
 
 /**
@@ -5973,13 +6020,15 @@ interface ResponseModelSite {
    */
   stem: string;
   /**
-   * Set for a component response: its models are named from the component
-   * alone, so the same names come out of every operation that returns it, at
-   * whatever status code or fallback key, and the shape registry shares one
-   * model among them; on a clash they step by number (`componentSite`), so
-   * the stepped name depends on the component alone too.
+   * The model name a component response's body is shared under
+   * (`componentModelName`), set for a component response: its models are
+   * named from the component alone, so the same names come out of every
+   * operation that returns it, at whatever status code or fallback key, and
+   * the shape registry shares one model among them; on a clash they step by
+   * number (`componentSite`), so the stepped name depends on the component
+   * alone too.
    */
-  shared: boolean;
+  component: string | undefined;
   /** What qualifies a header's models: `stem` for a component response, the service for an inline one; none without a service. */
   headerParent: string | undefined;
 }
@@ -6019,10 +6068,10 @@ function responseModelSite(
   ctx: ResponseTypingContext,
 ): ResponseModelSite {
   const stem = (componentModelName ?? bodyName).replace(/Response$/, '');
-  if (componentModelName !== undefined) return { stem, shared: true, headerParent: stem };
+  if (componentModelName !== undefined) return { stem, component: componentModelName, headerParent: stem };
   return {
     stem,
-    shared: false,
+    component: undefined,
     headerParent: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
   };
 }
@@ -6040,7 +6089,12 @@ function contentModelNaming(
   role: 'Response' | 'Error',
   statusCode: number | string,
 ): ContentModelNaming {
-  return { base: site.stem, role: site.shared ? 'Response' : role, statusCode, shared: site.shared };
+  return {
+    base: site.stem,
+    role: site.component === undefined ? role : 'Response',
+    statusCode,
+    component: site.component,
+  };
 }
 
 /**
@@ -6122,7 +6176,7 @@ function typeSecondaryContent(
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
-    ...(naming.shared && { componentSite: true }),
+    ...(naming.component !== undefined && { componentSite: naming.component }),
   });
   return target.type;
 }
@@ -6284,7 +6338,6 @@ function fillFallbackResponse(
       ? deriveFallbackResponseName(sink.op, sink.pathModelBaseName, label)
       : deriveErrorModelName(sink.op, sink.pathModelBaseName, errorRange);
   const contextName = componentModelName ?? operationName;
-  const componentSite = componentModelName !== undefined;
   const site = responseModelSite(componentModelName, operationName, sink.ctx);
   const json = jsonResponseSchema(resp);
   // Shared by reference with the deferred body, so the content entry of the
@@ -6293,8 +6346,8 @@ function fillFallbackResponse(
   if (json) {
     entry.type =
       errorRange === undefined
-        ? typeFallbackBody(json.schema, contextName, label, sink, targets, componentSite)
-        : typeErrorBody(json.schema, contextName, errorRange, sink.ctx, targets, componentSite);
+        ? typeFallbackBody(json.schema, contextName, label, sink, targets, componentModelName)
+        : typeErrorBody(json.schema, contextName, errorRange, sink.ctx, targets, componentModelName);
   }
   const contents = extractResponseContents(
     resp.content,
@@ -6346,7 +6399,7 @@ function typeFallbackBody(
   label: string,
   sink: FallbackResponseSink,
   targets: Array<{ type?: TypeRef }>,
-  componentSite: boolean,
+  componentSite: string | undefined,
 ): TypeRef {
   if (schema.$ref) return schemaToTypeRef(schema, contextName);
   sink.ctx.deferred.push({
@@ -6357,7 +6410,7 @@ function typeFallbackBody(
     operationQualifier: sink.ctx.operationQualifier,
     componentSchemas: sink.ctx.componentSchemas,
     targets,
-    ...(componentSite && { componentSite }),
+    ...(componentSite !== undefined && { componentSite }),
   });
   return { kind: 'primitive', type: 'unknown' };
 }
@@ -6403,7 +6456,7 @@ function typeErrorBody(
   code: number | StatusRange,
   ctx: ResponseTypingContext,
   targets: Array<{ type?: TypeRef }>,
-  componentSite: boolean,
+  componentSite: string | undefined,
 ): TypeRef {
   if (schema.$ref) return schemaToTypeRef(schema, contextName);
   ctx.deferred.push({
@@ -6414,7 +6467,7 @@ function typeErrorBody(
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets,
-    ...(componentSite && { componentSite }),
+    ...(componentSite !== undefined && { componentSite }),
   });
   return { kind: 'primitive', type: 'unknown' };
 }
@@ -6751,14 +6804,7 @@ function extractResponses(
       const entry: ErrorResponse = { statusCode: code, type: undefined };
       const targets: Array<{ type?: TypeRef }> = [entry];
       const type = json
-        ? typeErrorBody(
-            json.schema,
-            componentModelName ?? bodyName,
-            code,
-            ctx,
-            targets,
-            componentModelName !== undefined,
-          )
+        ? typeErrorBody(json.schema, componentModelName ?? bodyName, code, ctx, targets, componentModelName)
         : undefined;
       entry.type = type;
       const contents = extractResponseContents(
