@@ -421,6 +421,25 @@ describe('a body enum whose name is taken', () => {
     expectSound(ir);
   });
 
+  it('a second array-of-enum success body is qualified the same way, from the `<Op>Item` its items take (#447)', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getPetKind({
+          '200': { description: 'kinds', ...json({ type: 'array', items: kind }) },
+          '202': { description: 'later', ...json({ type: 'array', items: en(['pending', 'unknown']) }) },
+        }),
+      ),
+    );
+    expect(operation(ir, 'getPetKind').successResponses?.map(({ type }) => ref(type))).toEqual([
+      'array<enum GetPetKindItem>',
+      'array<enum GetPetKindItem202>',
+    ]);
+    expect(enumNames(ir)).toEqual(['GetPetKindItem', 'GetPetKindItem202']);
+    expect(enumValues(ir, 'GetPetKindItem')).toEqual(['cat', 'dog']);
+    expect(enumValues(ir, 'GetPetKindItem202')).toEqual(['pending', 'unknown']);
+    expectSound(ir);
+  });
+
   it('a lone response body steps around a component enum of the same name and other members', async () => {
     const ir = await parseWithoutWarnings(
       doc(getPetKind({ '200': { description: 'kind', ...json(kind) } }), { GetPetKindResponse: en(['old', 'new']) }),

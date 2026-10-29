@@ -433,8 +433,8 @@ export interface Operation {
    * `responseDescription`, and an emitter should take the success body
    * from `rangeResponses` (`2XX`), then `defaultResponse` — the same order
    * it resolves any status: the explicit entry, then the matching range,
-   * then the default. A body that is itself an inline enum, or an array of
-   * one, is promoted to `spec.enums` as `<Op>Response` (see
+   * then the default. A body that is itself an inline enum is promoted to
+   * `spec.enums` as `<Op>Response`, and an array of one as `<Op>Item` (see
    * `SuccessResponse.type` for one of several success bodies).
    */
   response: TypeRef;
@@ -1217,11 +1217,11 @@ export interface Enum {
    * `description` and `externalDocs` are: a nullable `oneOf`/`anyOf` or
    * single-member `allOf` wrapper the parser collapses carries its keys
    * onto the branch, the wrapper's value winning for a key both declare.
-   * The field, parameter or header the inline schema types carries the
-   * same keys, since they are its schema's own. When several inline
-   * schemas lift to one name, the first lifted gives the keys, as it gives
-   * the values. Present only when at least one key remains. Not shape: two
-   * inline enums that differ only here are one enum.
+   * The field the inline schema types carries the same keys, since they are
+   * its schema's own. When several inline schemas lift to one name, the
+   * first lifted gives the keys, as it gives the values. Present only when
+   * at least one key remains. Not shape: two inline enums that differ only
+   * here are one enum.
    */
   extensions?: Extensions;
 }
@@ -1925,10 +1925,11 @@ export interface ErrorResponse {
 /**
  * One entry of `Operation.successResponses`: a declared 2xx or 3xx response.
  * A 3xx entry's `type` is always `unknown`. A 2xx body that is itself an
- * inline enum, or an array of one, is promoted to `spec.enums` as
- * `<Op>Response`; every entry derives that same name, so a second body with
- * other members is qualified with its status code (`CheckPetKindResponse202`),
- * while identical members share one enum.
+ * inline enum is promoted to `spec.enums` as `<Op>Response`, and an array of
+ * one as `<Op>Item`, the name an array body's items take; every entry of one
+ * shape derives the same name, so a second body with other members is
+ * qualified with its status code (`CheckPetKindResponse202`,
+ * `CheckPetKindItem202`), while identical members share one enum.
  */
 export interface SuccessResponse {
   statusCode: number;
