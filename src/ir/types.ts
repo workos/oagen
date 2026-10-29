@@ -546,8 +546,9 @@ export interface Operation {
    * onto its first occurrence. Present only when at least one remains. The
    * parser names the service from the first entry that still has a name once
    * PascalCased (`tags[0]`, unless it has no ASCII letter or digit, like
-   * `-`), so the two never disagree; the list is kept so an emitter can group
-   * or document the method by every tag.
+   * `-`), or from the path when none has one, as for an untagged operation;
+   * the list is kept so an emitter can group or document the method by every
+   * tag.
    */
   tags?: string[];
   /**

@@ -402,7 +402,7 @@ interface Operation {
   injectIdempotencyKey: boolean; // true when the operation declares an Idempotency-Key header parameter, which is then left out of headerParams
   deprecated?: boolean; // Present, and true, only when the Operation Object says deprecated: true
   async?: boolean; // The x-oagen-async extension, carried as the document writes it (see Async marker below)
-  tags?: string[]; // The operation's tags in document order, entries that are not strings with non-whitespace content dropped, repeats folded; only when at least one remains; the service is named from the first entry that has a name once PascalCased
+  tags?: string[]; // The operation's tags in document order, entries that are not strings with non-whitespace content dropped, repeats folded; only when at least one remains; the service is named from the first entry that has a name once PascalCased, or from the path when none has one
   security?: SecurityRequirementSet[]; // Per-operation requirements; undefined inherits ApiSpec.security
   parameterGroups?: ParameterGroup[]; // Mutually-exclusive parameter groups from x-mutually-exclusive-parameter-groups; see ParameterGroup in src/ir/types.ts
 }
