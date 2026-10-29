@@ -1091,6 +1091,92 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       }
     });
 
+    describe('a stop field every variant of a oneOf companion declares (#437)', () => {
+      // The issue's operation: `GET /pets?after` returning `{ data: string[], meta }`,
+      // `meta` a `oneOf` of two objects that each declare a boolean `has_more`.
+      const object = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+      const boolean = { type: 'boolean' };
+      const cursorSpec = (meta: unknown, extension?: unknown, components?: Record<string, unknown>) =>
+        petsSpec(
+          {
+            parameters: [query('after', { type: 'string' })],
+            responses: jsonResponse(object({ data: { type: 'array', items: { type: 'string' } }, meta })),
+            ...(extension !== undefined && { 'x-pagination': extension }),
+          },
+          components,
+        );
+      const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+      const issueMeta = {
+        oneOf: [
+          object({ has_more: boolean, next_after: { type: 'string' } }),
+          object({ has_more: boolean, next_page: { type: 'integer' } }),
+        ],
+      };
+
+      it('keeps the override: whichever variant is sent, the field is a boolean (the issue)', async () => {
+        // Detection reads nothing inside the union, so the override is the only way to name it.
+        expect(onlyOperation(await parseJson(cursorSpec(issueMeta))).pagination?.endOfIteration).toBeUndefined();
+        const ir = await parseJson(cursorSpec(issueMeta, { endOfIteration }));
+        expect(onlyOperation(ir).pagination).toMatchObject({ strategy: 'cursor', param: 'after', endOfIteration });
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, []);
+      });
+
+      it('keeps it through $ref variants of an anyOf beside a null variant', async () => {
+        const components = {
+          schemas: {
+            AfterMeta: object({ has_more: boolean, next_after: { type: 'string' } }),
+            PageMeta: object({ has_more: { $ref: '#/components/schemas/Flag' }, next_page: { type: 'integer' } }),
+            Flag: { type: ['boolean', 'null'] },
+          },
+        };
+        const meta = {
+          anyOf: [
+            { $ref: '#/components/schemas/AfterMeta' },
+            { $ref: '#/components/schemas/PageMeta' },
+            { type: 'null' },
+          ],
+        };
+        const ir = await parseJson(cursorSpec(meta, { endOfIteration }, components));
+        expect(onlyOperation(ir).pagination?.endOfIteration).toEqual(endOfIteration);
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, Object.keys(components.schemas));
+      });
+
+      it('keeps it when the oneOf is one of several allOf members, as the IR model declares the field (MichaelDeBoey)', async () => {
+        // Every instance carries every member, so whichever variant is sent, `has_more` is a boolean.
+        const meta = { allOf: [issueMeta, object({ trace_id: { type: 'string' } })] };
+        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toBeUndefined();
+        const ir = await parseJson(cursorSpec(meta, { endOfIteration }));
+        expect(onlyOperation(ir).pagination).toMatchObject({ strategy: 'cursor', param: 'after', endOfIteration });
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, []);
+        const hasMore = ir.models.find((m) => m.name === 'Meta')?.fields.find((f) => f.name === 'has_more');
+        expect(hasMore?.type).toEqual({ kind: 'primitive', type: 'boolean' });
+      });
+
+      it('rejects a field only some variants declare, or one a variant types otherwise', async () => {
+        const cases: Array<[unknown, string]> = [
+          [
+            { oneOf: [object({ has_more: boolean }), object({ next_page: { type: 'integer' } })] },
+            'endOfIteration path "meta.has_more" does not resolve to a field in the response',
+          ],
+          [
+            { oneOf: [object({ has_more: boolean }), object({ has_more: { type: 'string' } })] },
+            'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
+          ],
+        ];
+        for (const [meta, problem] of cases) {
+          const bare = onlyOperation(await parseJson(cursorSpec(meta)));
+          expect(warn).not.toHaveBeenCalled();
+          const overridden = onlyOperation(await parseJson(cursorSpec(meta, { endOfIteration })));
+          rejected(problem);
+          expect(overridden.pagination).toEqual(bare.pagination);
+          warn.mockClear();
+        }
+      });
+    });
+
     it('checks the stop field against the primary response, not another 2xx body', async () => {
       const hasMore = { ...totalEnvelope, properties: { ...totalEnvelope.properties, more: { type: 'boolean' } } };
       const ok = (schema: unknown) => ({ description: 'ok', content: { 'application/json': { schema } } });

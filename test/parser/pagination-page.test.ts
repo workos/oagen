@@ -1059,4 +1059,127 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     );
     expect(bodyEndOfIterationProblem({ kind: 'totalCount', path: 'total' }, schema)).toBeUndefined();
   });
+
+  it('walks every variant of a oneOf/anyOf on the path, each of which must declare a field of the fitting type (#437)', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const boolean: SchemaObject = { type: 'boolean' };
+    const integer: SchemaObject = { type: 'integer' };
+    const schemas: Record<string, SchemaObject> = {
+      PageMeta: object({ has_more: boolean, page: object({ last: boolean }), total: { type: 'number' } }),
+    };
+    const pageMeta: SchemaObject = { $ref: '#/components/schemas/PageMeta' };
+    const problem = (meta: SchemaObject, kind: 'hasMore' | 'totalCount', path: string) =>
+      bodyEndOfIterationProblem(
+        { kind, path },
+        object({ data: { type: 'array', items: { type: 'string' } }, meta }),
+        schemas,
+      );
+    const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
+
+    // Every variant declares it: a `$ref` or inline, beside a `null` variant,
+    // under `anyOf`, a union again one segment down, an integer beside a
+    // number for a count, and `properties` written beside the `oneOf`, which
+    // every inline variant carries.
+    expect(problem({ oneOf: [pageMeta, object({ has_more: boolean })] }, 'hasMore', 'meta.has_more')).toBeUndefined();
+    expect(
+      problem(
+        { anyOf: [object({ has_more: { type: ['boolean', 'null'] } }), pageMeta, { type: 'null' }] },
+        'hasMore',
+        'meta.has_more',
+      ),
+    ).toBeUndefined();
+    const pages = (...variants: SchemaObject[]) => ({ oneOf: [pageMeta, object({ page: { oneOf: variants } })] });
+    expect(
+      problem(pages(object({ last: boolean }), object({ last: boolean, size: integer })), 'hasMore', 'meta.page.last'),
+    ).toBeUndefined();
+    expect(problem({ oneOf: [pageMeta, object({ total: integer })] }, 'totalCount', 'meta.total')).toBeUndefined();
+    expect(
+      problem(
+        { properties: { has_more: boolean }, oneOf: [object({ a: integer }), object({ b: integer })] },
+        'hasMore',
+        'meta.has_more',
+      ),
+    ).toBeUndefined();
+
+    // A field only some variants declare resolves to no field; one a variant
+    // types otherwise is not of the kind's type; a union of nulls declares none.
+    expect(problem({ oneOf: [pageMeta, object({ next: integer })] }, 'hasMore', 'meta.has_more')).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem(pages(object({ last: boolean }), object({ size: integer })), 'hasMore', 'meta.page.last')).toBe(
+      missing('meta.page.last'),
+    );
+    expect(problem({ oneOf: [{ type: 'null' }, { type: 'null' }] }, 'hasMore', 'meta.has_more')).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem({ oneOf: [pageMeta, object({ has_more: { type: 'string' } })] }, 'hasMore', 'meta.has_more')).toBe(
+      'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
+    );
+    expect(problem({ oneOf: [pageMeta, object({ total: { type: 'string' } })] }, 'totalCount', 'meta.total')).toBe(
+      'endOfIteration path "meta.total" is not an integer or number field, as kind "totalCount" requires',
+    );
+  });
+
+  it('walks a component several variants reach once per segment, however long the path (Greptile)', () => {
+    // `Node` is a `oneOf` of two objects that each declare `child: Node`, so
+    // a walk per variant would double at every `child`.
+    const variant = (extra: Record<string, SchemaObject>): SchemaObject => ({
+      type: 'object',
+      properties: { child: { $ref: '#/components/schemas/Node' }, has_more: { type: 'boolean' }, ...extra },
+    });
+    const schemas: Record<string, SchemaObject> = {
+      Node: { oneOf: [variant({}), variant({ size: { type: 'integer' } })] },
+    };
+    const properties: Record<string, SchemaObject> = {
+      data: { type: 'array', items: { type: 'string' } },
+      node: { $ref: '#/components/schemas/Node' },
+    };
+    const path = ['node', ...Array<string>(40).fill('child'), 'has_more'].join('.');
+    expect(endOfIterationProblem({ kind: 'hasMore', path }, properties, schemas)).toBeUndefined();
+    expect(endOfIterationProblem({ kind: 'totalCount', path }, properties, schemas)).toBe(
+      `endOfIteration path "${path}" is not an integer or number field, as kind "totalCount" requires`,
+    );
+  });
+
+  it('walks a oneOf/anyOf that is one of several allOf members, which every instance carries beside the others (MichaelDeBoey)', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const boolean: SchemaObject = { type: 'boolean' };
+    const after = object({ has_more: boolean, next_after: { type: 'string' }, page: object({ last: boolean }) });
+    const numbered = object({ has_more: boolean, next_page: { type: 'integer' }, page: object({ last: boolean }) });
+    const trace = object({ trace_id: { type: 'string' } });
+    const beside = (union: SchemaObject): SchemaObject => ({ allOf: [union, trace] });
+    const schemas: Record<string, SchemaObject> = {
+      MetaUnion: { anyOf: [after, numbered] },
+      Meta: beside({ oneOf: [after, numbered] }),
+    };
+    const problem = (meta: SchemaObject, path = 'meta.has_more') =>
+      bodyEndOfIterationProblem(
+        { kind: 'hasMore', path },
+        object({ data: { type: 'array', items: { type: 'string' } }, meta }),
+        schemas,
+      );
+    const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
+
+    // The review's `meta`; the union as a `$ref` to an `anyOf`, beside a
+    // `null` variant, one `allOf` deeper, or the whole `meta` a component; a
+    // path one segment further; and a second union that declares the field
+    // in every variant where the first does not.
+    expect(problem(beside({ oneOf: [after, numbered] }))).toBeUndefined();
+    expect(problem(beside({ $ref: '#/components/schemas/MetaUnion' }))).toBeUndefined();
+    expect(problem(beside({ oneOf: [after, numbered, { type: 'null' }] }))).toBeUndefined();
+    expect(problem({ allOf: [beside({ oneOf: [after, numbered] }), object({ x: boolean })] })).toBeUndefined();
+    expect(problem({ $ref: '#/components/schemas/Meta' })).toBeUndefined();
+    expect(problem(beside({ oneOf: [after, numbered] }), 'meta.page.last')).toBeUndefined();
+    expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [after, numbered] }] })).toBeUndefined();
+
+    // A field only some variants of each union declare resolves to no field;
+    // one a variant types otherwise is not a boolean.
+    expect(problem(beside({ oneOf: [after, trace] }))).toBe(missing('meta.has_more'));
+    expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [numbered, trace] }] })).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem(beside({ oneOf: [after, object({ has_more: { type: 'string' } })] }))).toBe(
+      'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
+    );
+  });
 });
