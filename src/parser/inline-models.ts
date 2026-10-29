@@ -2211,7 +2211,8 @@ export function declareProperty(
  * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
  * distinct declarations (`unionOfDeclarations`): one declaration, or several
- * of one shape, is that declaration; several shapes become a `oneOf` of
+ * of one shape, is that declaration (the first, carrying only the flags,
+ * documentation and limits they agree on); several shapes become a `oneOf` of
  * them, which the type builder reads as it reads any inline union — string
  * consts pinned differently per variant (`kind: cat` | `kind: dog`) collapse
  * to an inline enum, other literals and types to a union — so the field is
@@ -2332,7 +2333,8 @@ export function mergeAllOfMembers(
  * The keywords a field reads from its own schema — the flags and
  * documentation `buildFieldFromSchema` reads and the validation keywords
  * `extractConstraints` reads — which `unionOfDeclarations` lifts onto a
- * combined declaration when every declaration agrees on them.
+ * combined declaration when every declaration agrees on them, and which
+ * therefore make no shape of their own there.
  */
 const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'readOnly',
@@ -2363,8 +2365,9 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
 
 /**
  * The one schema that types a property several variants declare: the first
- * declaration when every declaration has the same shape (`schemaShapeKey`,
- * documentation ignored), else a `oneOf` of the distinct shapes, each the
+ * declaration when every declaration has the same shape (`schemaShapeKey`
+ * of the declaration less `LIFTED_DECLARATION_KEYWORDS`, so documentation,
+ * flags and limits ignored), else a `oneOf` of the distinct shapes, each the
  * first declaration of its shape, in order. See `mergeAllOfMembers`.
  *
  * A field reads its flags, documentation and limits from its own schema
@@ -2374,11 +2377,13 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
  * two `kind` declarations both `readOnly: true` with different consts make a
  * read-only enum field; a keyword the declarations disagree on, or one only
  * some declare, is not the field's. Every declaration as written has a say,
- * a repeat of an earlier shape included. The extensions are read by the same
- * agreement (`agreedExtensions`), and — unlike the keywords, which the first
- * declaration gives when all share one shape — under both outcomes: the one
- * declaration a single shape is typed from carries the agreed keys in place
- * of its own. The declarations themselves are kept as
+ * a repeat of an earlier shape included. The keywords and the extensions
+ * (`agreedExtensions`) are read by this agreement under both outcomes: the
+ * one declaration a single shape is typed from carries the agreed keywords
+ * and keys in place of its own, so two `type: 'string'` declarations, one
+ * `readOnly` or documented otherwise, are a plain `string` field
+ * (workos/oagen#397: they were `(string | string)`, or the first's
+ * description). The declarations themselves are kept as
  * written inside the `oneOf`, so an enum member or a variant model still
  * carries its own description and limits. A `null` any declaration admits
  * (`nullable: true`, or a `type` list naming `null`) is a value the property
@@ -2389,24 +2394,31 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
  */
 function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
-  // The extensions are decided first, across every declaration as written,
-  // apart from the shape dedupe below: a declaration dropped as a repeat of
-  // an earlier shape still has its say, so `x-since` written as `1`, `2` and
-  // `1` by three declarations is nobody's (workos/oagen#369 review, which
-  // read the keys off the distinct shapes alone and kept the `1`).
+  // The extensions and the keywords are decided first, across every
+  // declaration as written, apart from the shape dedupe below: a declaration
+  // dropped as a repeat of an earlier shape still has its say, so `x-since`
+  // written as `1`, `2` and `1` by three declarations is nobody's
+  // (workos/oagen#369 review, which read the keys off the distinct shapes
+  // alone and kept the `1`).
   const extensions = agreedExtensions(declarations);
+  const agreed = agreedDeclarationKeys(declarations, LIFTED_DECLARATION_KEYWORDS);
+  // The keywords the field reads by that agreement make no shape.
+  const lifted = new Set(LIFTED_DECLARATION_KEYWORDS);
   const distinct = new Map<string, SchemaObject>();
   for (const declaration of declarations) {
-    const key = schemaShapeKey(declaration);
+    const key = schemaShapeKey(omitKeys(declaration, lifted));
     if (!distinct.has(key)) distinct.set(key, declaration);
   }
   const shapes = [...distinct.values()];
-  // One shape: the first declaration, as written, carrying the agreed
+  // One shape: the first declaration, carrying the agreed keywords and
   // extensions in place of its own.
-  if (shapes.length === 1) return withAgreedExtensions(shapes[0]!, extensions);
-  // The keywords are read across every declaration the same way: a dropped
-  // repeat of a shape that disagrees on a keyword leaves it off too.
-  const agreed: Record<string, unknown> = { ...agreedDeclarationKeys(declarations, LIFTED_DECLARATION_KEYWORDS) };
+  if (shapes.length === 1) {
+    const first = shapes[0]!;
+    const disputed = new Set(
+      LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
+    );
+    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
+  }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
   return { ...agreed, ...extensions, oneOf: variants };
