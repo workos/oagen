@@ -4311,6 +4311,271 @@ describe('a title two unions give different shapes at different depths of one ro
     expectConsistent(ir, ['CreateDrawingRequest', 'CreateDrawingDefaultResponse']);
   });
 
+  /** The issue's `allof.json` schema (#374): `Base` merged with an inline member whose `marker.shape` gives `Circle` and `Square` other shapes. */
+  const mergedWithBase = (): SchemaObject => ({
+    allOf: [{ $ref: '#/components/schemas/Base' }, obj({ marker: obj({ shape: byDiameter() }) })],
+  });
+  /** `body` beside the issue's `Base`, whose `shape` is the `{ radius }` and `{ side }` union. */
+  const withBase = (body: Record<string, unknown>) =>
+    doc({ ...body, components: { schemas: { Base: obj({ id: { type: 'string' }, shape: byRadius() }) } } });
+  const str = { kind: 'primitive', type: 'string' };
+
+  it("contests a title an inline response's `$ref` and inline `allOf` members give different shapes (#374)", async () => {
+    // The issue's `allof.json`: the response merges `Base` with an inline
+    // member into one model whose inline models come from both, so `Circle`
+    // and `Square` are contested under the response root. Neither root saw
+    // the clash before: both members kept the bare titles, and `marker.shape`
+    // resolved to `Base`'s `{ radius }` and `{ side }`, with a warning.
+    const ir = await parseWithoutWarnings(
+      withBase(op('getDrawing', { responses: { '200': { description: 'ok', ...json(mergedWithBase()) } } })),
+    );
+    const types = fieldTypesByModel(ir.models);
+    // The mark is on `Base`'s own variants, so they are qualified wherever
+    // they appear, `Base` included.
+    expect(types['Base']).toEqual({ id: str, shape: unionOf('CircleBaseShape', 'SquareBaseShape') });
+    expect(types['GetDrawingResponse']).toEqual({
+      id: str,
+      shape: unionOf('CircleGetDrawingResponseShape', 'SquareGetDrawingResponseShape'),
+      marker: model('GetDrawingResponseMarker'),
+    });
+    expect(types['GetDrawingResponseMarker']).toEqual({
+      shape: unionOf('CircleGetDrawingResponseMarkerShape', 'SquareGetDrawingResponseMarkerShape'),
+    });
+    for (const owner of ['Base', 'GetDrawingResponse']) {
+      expect(types[`Circle${owner}Shape`]).toEqual({ ...kind('circle'), radius: num });
+      expect(types[`Square${owner}Shape`]).toEqual({ ...kind('square'), side: num });
+    }
+    expect(types['CircleGetDrawingResponseMarkerShape']).toEqual({ ...kind('circle'), diameter: num });
+    expect(types['SquareGetDrawingResponseMarkerShape']).toEqual({ ...kind('square'), len: num });
+    expect(modelNames(ir)).toEqual([
+      'Base',
+      'CircleBaseShape',
+      'CircleGetDrawingResponseMarkerShape',
+      'CircleGetDrawingResponseShape',
+      'GetDrawingResponse',
+      'GetDrawingResponseMarker',
+      'SquareBaseShape',
+      'SquareGetDrawingResponseMarkerShape',
+      'SquareGetDrawingResponseShape',
+    ]);
+    expectConsistent(ir, ['Base']);
+  });
+
+  /** The fields of each model the union `field` of the model `owner` names, in order. */
+  const variantFields = (ir: ApiSpec, owner: string, field: string): string[][] => {
+    const fieldsOf = (name: string) => ir.models.find((m) => m.name === name)?.fields ?? [];
+    const type = fieldsOf(owner).find((f) => f.name === field)?.type;
+    if (type?.kind !== 'union') return [];
+    return type.variants.map((variant) => fieldsOf(variant.kind === 'model' ? variant.name : '').map((f) => f.name));
+  };
+
+  it.each<{ label: string; body: Record<string, unknown>; merged: string }>([
+    {
+      label: 'a 2xx response',
+      body: op('getDrawing', { responses: { '200': { description: 'ok', ...json(mergedWithBase()) } } }),
+      merged: 'GetDrawingResponse',
+    },
+    {
+      label: 'a default response',
+      body: op('getDrawing', {
+        responses: { '204': { description: 'ok' }, default: { description: 'err', ...json(mergedWithBase()) } },
+      }),
+      merged: 'GetDrawingDefaultResponse',
+    },
+    {
+      label: 'an error response',
+      body: op('getDrawing', {
+        responses: { '204': { description: 'ok' }, '404': { description: 'gone', ...json(mergedWithBase()) } },
+      }),
+      merged: 'GetDrawingError404',
+    },
+    {
+      label: 'a field of a default response',
+      body: op('getDrawing', {
+        responses: {
+          '204': { description: 'ok' },
+          default: { description: 'err', ...json(obj({ drawing: mergedWithBase() })) },
+        },
+      }),
+      merged: 'GetDrawingDefaultResponseDrawing',
+    },
+    {
+      label: 'a response header',
+      body: op('getDrawing', {
+        responses: { '204': { description: 'ok', headers: { 'X-Meta': { schema: mergedWithBase() } } } },
+      }),
+      merged: 'DrawingsXMeta',
+    },
+    {
+      label: 'a query parameter',
+      body: op('getDrawing', {
+        parameters: [{ name: 'filter', in: 'query', content: { 'application/json': { schema: mergedWithBase() } } }],
+        responses: { '204': { description: 'ok' } },
+      }),
+      merged: 'DrawingsFilter',
+    },
+    {
+      label: 'a request body',
+      body: {
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: json(mergedWithBase()),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      },
+      merged: 'CreateDrawingRequest',
+    },
+    {
+      label: 'a webhook payload',
+      body: {
+        paths: {},
+        webhooks: {
+          drawingCreated: {
+            post: {
+              operationId: 'drawingCreated',
+              requestBody: json(mergedWithBase()),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      },
+      merged: 'DrawingCreatedPayload',
+    },
+  ])("keeps both members' shapes of a title they contest under $label (#374)", async ({ body, merged }) => {
+    // Wherever the issue's `allOf` is merged, `Base.shape` and the inline
+    // `marker.shape` are one model's, so the title is contested there and
+    // each union keeps its own shapes. Before, a response, a header or a
+    // parameter pointed one of them at the other's models (a 2xx response
+    // with a warning, the rest silently), and a request body or webhook
+    // payload renamed the inline member's after the fact.
+    const ir = await parseWithoutWarnings(withBase(body));
+    const marker = fieldTypesByModel(ir.models)[merged]?.['marker'];
+    expect(marker).toMatchObject({ kind: 'model' });
+    expect(variantFields(ir, 'Base', 'shape')).toEqual([
+      ['kind', 'radius'],
+      ['kind', 'side'],
+    ]);
+    expect(variantFields(ir, merged, 'shape')).toEqual([
+      ['kind', 'radius'],
+      ['kind', 'side'],
+    ]);
+    expect(variantFields(ir, (marker as { name: string }).name, 'shape')).toEqual([
+      ['kind', 'diameter'],
+      ['kind', 'len'],
+    ]);
+    expectConsistent(ir, ['Base']);
+  });
+
+  it.each<{ label: string; body: (schema: SchemaObject) => Record<string, unknown>; root: string }>([
+    {
+      label: 'a 2xx response',
+      body: (schema) => op('getDrawing', { responses: { '200': { description: 'ok', ...json(schema) } } }),
+      root: 'GetDrawingResponse',
+    },
+    {
+      label: 'a default response',
+      body: (schema) =>
+        op('getDrawing', {
+          responses: { '204': { description: 'ok' }, default: { description: 'err', ...json(schema) } },
+        }),
+      root: 'GetDrawingDefaultResponse',
+    },
+    {
+      label: 'a request body',
+      body: (schema) => ({
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: json(schema),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+      root: 'CreateDrawingRequest',
+    },
+  ])(
+    'contests a title under a property both members declare, under $label (#374, Greptile)',
+    async ({ body, root }) => {
+      // `Base.meta` and the inline member's `meta` conjoin into one property of
+      // the merged model, its own: `meta.shape` comes from `Base` and
+      // `meta.marker.shape` from the inline member, and both are minted under
+      // the root, so their titles are compared there.
+      const ir = await parseWithoutWarnings(
+        doc({
+          ...body({
+            allOf: [
+              { $ref: '#/components/schemas/Base' },
+              obj({ meta: obj({ marker: obj({ shape: byDiameter() }) }) }),
+            ],
+          }),
+          components: { schemas: { Base: obj({ id: { type: 'string' }, meta: obj({ shape: byRadius() }) }) } },
+        }),
+      );
+      /** The model the field `field` of the model `owner` references. */
+      const modelOf = (owner: string, field: string): string => {
+        const type = fieldTypesByModel(ir.models)[owner]?.[field];
+        expect(type).toMatchObject({ kind: 'model' });
+        return (type as { name: string }).name;
+      };
+      const meta = modelOf(root, 'meta');
+      const marker = modelOf(meta, 'marker');
+      for (const owner of ['BaseMeta', meta]) {
+        expect(variantFields(ir, owner, 'shape')).toEqual([
+          ['kind', 'radius'],
+          ['kind', 'side'],
+        ]);
+      }
+      expect(variantFields(ir, marker, 'shape')).toEqual([
+        ['kind', 'diameter'],
+        ['kind', 'len'],
+      ]);
+      expectConsistent(ir, ['Base']);
+    },
+  );
+
+  it.each<{ label: string; member: SchemaObject }>([
+    { label: "a `shape` the merge drops for `Base`'s", member: obj({ shape: byDiameter() }) },
+    { label: 'a union whose variants the merge flattens into the model', member: byDiameter() },
+  ])('keeps the bare titles for $label, which is no model (#374 review)', async ({ member }) => {
+    // The merged model holds `Base.shape` alone: the inline member's union is
+    // dropped (the first declaration types the property) or flattened into
+    // the model's optional fields, so it is minted nowhere and contests
+    // nothing, in a response as in a request body.
+    const schema: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, member] };
+    for (const [body, root] of [
+      [op('getDrawing', { responses: { '200': { description: 'ok', ...json(schema) } } }), 'GetDrawingResponse'],
+      [
+        {
+          paths: {
+            '/drawings': {
+              post: {
+                operationId: 'createDrawing',
+                requestBody: json(schema),
+                responses: { '204': { description: 'ok' } },
+              },
+            },
+          },
+        },
+        'CreateDrawingRequest',
+      ],
+    ] as const) {
+      const ir = await parseWithoutWarnings(withBase(body));
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Base']).toEqual({ id: str, shape: unionOf('Circle', 'Square') });
+      expect(types[root]).toMatchObject({ id: str, shape: unionOf('Circle', 'Square') });
+      expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['Square']).toEqual({ ...kind('square'), side: num });
+      expect(modelNames(ir)).toEqual(['Base', 'Circle', root, 'Square'].sort());
+      expectConsistent(ir, ['Base']);
+    }
+  });
+
   describe('markContestedTitles', () => {
     const variantsOf = (union: SchemaObject): SchemaObject[] => union.oneOf!;
 
@@ -4429,6 +4694,127 @@ describe('a title two unions give different shapes at different depths of one ro
       });
       expect(variantsOf(component).map(isContestedTitle)).toEqual([false, false]);
       expect(variantsOf(untitled).map(isContestedTitle)).toEqual([false, false]);
+    });
+
+    const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+    /** A response of `body`, `top` the `{ radius }` union a component holds and `inner` the body's `{ diameter }` one (#374). */
+    type MergeCase = {
+      label: string;
+      body: (inner: SchemaObject) => SchemaObject;
+      schemas: (top: SchemaObject) => Record<string, SchemaObject>;
+    };
+    const markResponse = ({ body, schemas }: MergeCase) => {
+      const top = byRadius();
+      const inner = byDiameter();
+      markContestedTitles({
+        paths: { '/d': { get: { responses: { '200': json(body(inner)) } } } },
+        components: { schemas: schemas(top) },
+      });
+      return [variantsOf(top).map(isContestedTitle), variantsOf(inner).map(isContestedTitle)];
+    };
+    const marker = (inner: SchemaObject) => obj({ marker: obj({ shape: inner }) });
+    const base = (top: SchemaObject) => ({ Base: obj({ id: { type: 'string' }, shape: top }) });
+
+    it.each<MergeCase>([
+      { label: 'a `$ref` member', body: (inner) => ({ allOf: [ref('Base'), marker(inner)] }), schemas: base },
+      {
+        label: "a `$ref` in the component's own `allOf` chain",
+        body: (inner) => ({ allOf: [ref('Base'), marker(inner)] }),
+        schemas: (top) => ({
+          Base: { allOf: [ref('Root'), obj({ id: { type: 'string' } })] },
+          Root: obj({ shape: top }),
+        }),
+      },
+      {
+        label: "a `$ref` under an inline member's own `allOf`",
+        body: (inner) => ({ allOf: [{ allOf: [ref('Base')] }, marker(inner)] }),
+        schemas: base,
+      },
+      {
+        label: 'a nullable `$ref` member',
+        body: (inner) => ({ allOf: [{ oneOf: [ref('Base'), { type: 'null' }] }, marker(inner)] }),
+        schemas: base,
+      },
+      {
+        label: '`properties` written beside a lone `$ref` member',
+        body: (inner) => ({ allOf: [ref('Base')], properties: { marker: obj({ shape: inner }) } }),
+        schemas: base,
+      },
+      {
+        label: 'a property both members declare, conjoined (Greptile)',
+        body: (inner) => ({ allOf: [ref('Base'), obj({ meta: marker(inner) })] }),
+        schemas: (top) => ({ Base: obj({ meta: obj({ shape: top }) }) }),
+      },
+    ])('reads what a merged `allOf` inherits with the root, through $label (#374)', (merge) => {
+      // The issue's `allof.json`: the response merges `Base` with an inline
+      // member into one model, which carries `Base.shape` beside the inline
+      // `marker.shape`, so the two are compared under the response root.
+      expect(markResponse(merge)).toEqual([
+        [true, true],
+        [true, true],
+      ]);
+    });
+
+    it.each<MergeCase>([
+      {
+        label: 'an `allOf` read as a plain reference',
+        body: (inner) => obj({ base: { allOf: [ref('Base')] }, marker: obj({ shape: inner }) }),
+        schemas: base,
+      },
+      {
+        label: "a `$ref` under an inline member's variant",
+        body: (inner) => ({ allOf: [marker(inner), { oneOf: [ref('Base'), obj({ other: n })] }] }),
+        schemas: base,
+      },
+      {
+        label: "a union component's variants",
+        body: (inner) => ({ allOf: [ref('Base'), marker(inner)] }),
+        schemas: (top) => ({ Base: top }),
+      },
+      {
+        label: 'a declaration the merge drops for the first one (review)',
+        body: (inner) => ({ allOf: [ref('Base'), obj({ shape: inner })] }),
+        schemas: base,
+      },
+      {
+        label: "a union whose variants the merge flattens into the model's fields (review)",
+        body: (inner) => ({ allOf: [ref('Base'), inner] }),
+        schemas: base,
+      },
+    ])('reads nothing the merge does not inherit: $label (#374)', (merge) => {
+      // Each of these is left to its component's model, which the components
+      // root reads (`mergeAllOfMembers`), so no title is contested here.
+      expect(markResponse(merge)).toEqual([
+        [false, false],
+        [false, false],
+      ]);
+    });
+
+    it('reads an inherited property once per root, so a chain of merges ends and stays linear (#374)', () => {
+      // Each link merges the next one under three properties, so reading an
+      // inherited property again wherever it is reached would take 3^29
+      // walks; the last link's union is still compared with the response's.
+      // A component that merges itself, and two that merge each other, end.
+      const deepest = byRadius();
+      const inner = byDiameter();
+      const schemas: Record<string, SchemaObject> = { Link30: obj({ shape: deepest }) };
+      for (let i = 29; i >= 1; i--) {
+        const fields = ['l1', 'l2', 'l3'].map((f) => [f, { allOf: [ref(`Link${i + 1}`), obj({ [f]: n })] }]);
+        schemas[`Link${i}`] = obj(Object.fromEntries(fields));
+      }
+      schemas['Node'] = obj({ child: { allOf: [ref('Node'), obj({ extra: n })] } });
+      schemas['A'] = obj({ toB: { allOf: [ref('B'), obj({ x: n })] } });
+      schemas['B'] = obj({ toA: { allOf: [ref('A'), obj({ y: n })] } });
+      markContestedTitles({
+        paths: {
+          '/d': {
+            get: { responses: { '200': json({ allOf: [ref('Link1'), ref('Node'), ref('A'), marker(inner)] }) } },
+          },
+        },
+        components: { schemas },
+      });
+      expect(variantsOf(deepest).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
     });
 
     it("replaces the previous document's marks", () => {
