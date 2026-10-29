@@ -1421,6 +1421,50 @@ describe("an operation's own inline body named like a component response's body 
     expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
   });
 
+  it('reserves the name a later body shares, not one it never takes, in either path order (Greptile)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // `card`'s 202 is declared as its 201 is, so both are `CardResponse201`
+    // and nothing mints `CardResponse202Response`: the body of a component
+    // `CardResponse202` keeps that name.
+    const later = object({ response: object({ k: string }) });
+    const secondary = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: {
+            '200': json({ $ref: '#/components/schemas/Pet' }),
+            '201': json(later),
+            '202': json(later),
+          },
+        },
+      },
+    };
+    const getNote202 = {
+      '/notes': {
+        get: { operationId: 'getNote', responses: { '200': { $ref: '#/components/responses/CardResponse202' } } },
+      },
+    };
+    const cardFirst = await parse({ ...secondary, ...getNote202 }, { CardResponse202: textCard });
+    const notesFirst = await parse({ ...getNote202, ...secondary }, { CardResponse202: textCard });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      expect(responsesOf(spec)).toEqual(['card: Pet', 'getNote: CardResponse202Response']);
+      expect(
+        byName(spec)
+          .get('card')!
+          .successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`),
+      ).toEqual(['200: Pet', '201: CardResponse201', '202: CardResponse201']);
+      expect(modelsOf(spec)).toEqual([
+        'CardResponse201 { response }',
+        'CardResponse201Response { k }',
+        'CardResponse202Response { text }',
+        'Pet { name }',
+      ]);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
   it('steps past an identical shape too, as past a component schema of that name', async () => {
     // The name is reserved whatever the shape, so the component's name never
     // follows the shape of another operation's body.
