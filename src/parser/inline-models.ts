@@ -2030,14 +2030,18 @@ export function declaresType(schema: SchemaObject): boolean {
  * earlier's; two arrays, each under a nullable wrapper of any spelling or
  * none (`arraySchemaOf`), merge as the bare arrays they wrap, so the `items`
  * land in the one array that is then read, whichever declaration wore the
- * wrapper: the later `items` when they say something and the earlier when
- * the later declaration only constrains the array (`minItems: 1`) or allows
- * any item (`items: {}`), so `data: User[]` is not downgraded in either
- * order; the later's other keywords over the earlier's; and `type:
- * ['array', 'null']` when either admits `null` (`declaresNull`), else
- * `type: 'array'`. Any other pair keeps the first as written. Returns
- * `held` itself when `next` adds nothing to it, so a lone declaration keeps
- * its identity.
+ * wrapper: the two `items` combined by this same rule when both declare
+ * them, else the one declared — so `data: User[]` is not downgraded in
+ * either order by `items` that declare no type (`{ description }`, `{}`)
+ * or by a declaration that only constrains the array (`minItems: 1`), two
+ * inline object `items` conjoin, and `string[]` then `integer[]` stays
+ * `string[]` (workos/oagen#431: the later `items` replaced the earlier
+ * whenever they had any keyword, so a member documenting the items made
+ * `data` an `unknown[]`); the later's other keywords over the earlier's;
+ * and `type: ['array', 'null']` when either admits `null`
+ * (`declaresNull`), else `type: 'array'`. Any other pair keeps the first
+ * as written. Returns `held` itself when `next` adds nothing to it, so a
+ * lone declaration keeps its identity.
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
@@ -2061,8 +2065,10 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
   const firstArray = arraySchemaOf(first);
   const secondArray = firstArray && arraySchemaOf(second);
   if (firstArray && secondArray) {
-    const says = (items: SchemaObject | undefined): boolean => items !== undefined && Object.keys(items).length > 0;
-    const items = says(secondArray.items) ? secondArray.items : firstArray.items;
+    const items =
+      firstArray.items && secondArray.items
+        ? combineDeclarations(firstArray.items, secondArray.items)
+        : (secondArray.items ?? firstArray.items);
     const { nullable: _firstFlag, ...firstBare } = firstArray;
     const { nullable: _secondFlag, ...secondBare } = secondArray;
     return {

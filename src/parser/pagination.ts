@@ -586,8 +586,8 @@ function objectProperties(
  * merge settles it for a model's field (`combineDeclarations`): two inline
  * objects merge their properties — `pagination.next` from one member and
  * `pagination.total` from another both belong to the response, as they do
- * to the wrapper's model — two arrays keep the `items` that say something,
- * and otherwise the first declaration that declares a type types it, a
+ * to the wrapper's model — two arrays combine their `items` by the same
+ * rule, and otherwise the first declaration that declares a type types it, a
  * typeless one only annotating it. (Envelope detection reads the
  * members' own `properties`; a `oneOf`/`anyOf` member with more than one
  * non-null variant declares none, so it contributes no property here; it is
