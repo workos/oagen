@@ -766,12 +766,15 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * the roots' models decide it (the first owner keeps the name, and a later
  * shape is renamed or dropped with a warning).
  *
- * Within a root, the walk follows the schema keywords only — `properties`
- * and the other name-to-schema maps, `items`, `additionalProperties`,
- * `allOf`/`oneOf`/`anyOf` and the rest of `schemaShapeKey`'s structural
- * keywords — so a property named `schema` or `title` is a property, and a
- * `$ref` is a reference to a component read under the components root, not
- * descended into. The roots are found by following the OpenAPI object model
+ * Within a root, the walk follows the keywords the parser types a schema
+ * through only — `properties`, `patternProperties`, `additionalProperties`,
+ * `items` and `allOf`/`oneOf`/`anyOf` — so a property named `schema` or
+ * `title` is a property, a `$ref` is a reference to a component read under
+ * the components root, not descended into, and a union under `not`,
+ * `if`/`then`/`else`, `$defs`/`definitions`, `dependentSchemas`, `contains`,
+ * `prefixItems`, `propertyNames` or another keyword the parser never reads
+ * never becomes a model, so it contests no title (`schemaShapeKey` still
+ * compares them). The roots are found by following the OpenAPI object model
  * (`schemaRootsOf`), the way the operation, response and webhook readers
  * do, so a name is never mistaken for a specification extension: a header
  * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
@@ -981,18 +984,21 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
       entry.variants.push(foldedVariantOrigin(variant) ?? variant);
       byTitle.set(title, entry);
     }
-    // The group continues through what `mintedInlineNameEntries` reads for a
-    // union: its variants, an array's items, a map's values (whether under
-    // `additionalProperties` or `patternProperties`), and the one member of a
-    // lone `allOf`. `properties` and every other keyword begin a new group.
+    // Only the keywords the parser types a schema through are walked: a union
+    // under `not`, `if`, `$defs` or any other never becomes a model, so it
+    // contests nothing. The group continues through what
+    // `mintedInlineNameEntries` reads for a union: its variants, an array's
+    // items, a map's values (whether under `additionalProperties` or
+    // `patternProperties`), and the one member of a lone `allOf`.
+    // `properties` and a longer `allOf` begin a new group.
     ancestors.add(schema);
     for (const [keyword, value] of Object.entries(schema)) {
-      if (NAMED_SCHEMA_MAPS.has(keyword) && isRecord(value)) {
+      if ((keyword === 'properties' || keyword === 'patternProperties') && isRecord(value)) {
         const inherited = keyword === 'patternProperties' ? claims : undefined;
         for (const sub of Object.values(value)) if (isSchemaRecord(sub)) walk(sub, inherited);
-      } else if (SCHEMA_KEYWORDS.has(keyword) && isSchemaRecord(value)) {
-        walk(value, keyword === 'items' || keyword === 'additionalProperties' ? claims : undefined);
-      } else if (SCHEMA_LIST_KEYWORDS.has(keyword) && Array.isArray(value)) {
+      } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaRecord(value)) {
+        walk(value, claims);
+      } else if ((keyword === 'allOf' || keyword === 'oneOf' || keyword === 'anyOf') && Array.isArray(value)) {
         const inherited =
           keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && value.length === 1)
             ? claims
