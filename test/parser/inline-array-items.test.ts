@@ -843,6 +843,136 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
       expect(kindOf(keyword, documented, str), keyword).toBe(documented);
     }
   });
+
+  /** `Holder.list` typed by `list`, `Holder` returned by `getHolder`, beside `schemas`. */
+  const holderDoc = (list: SchemaObject, schemas: Record<string, SchemaObject> = {}) =>
+    specDoc(
+      {
+        '/holders/{id}': {
+          get: {
+            operationId: 'getHolder',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+            responses: ok({ $ref: '#/components/schemas/Holder' }),
+          },
+        },
+      },
+      { Holder: obj({ list }), ...schemas },
+    );
+
+  it("builds a component field's array items once, the properties beside their `oneOf` or `allOf` carried (#393)", async () => {
+    // The issue, verbatim (`items.json`, `items-allof.json`), and the same items as map values, which match.
+    const cases: Array<[string, SchemaObject, Record<string, SchemaObject>, string[]]> = [
+      [
+        'items',
+        { type: 'array', items: tagged },
+        {},
+        [
+          'Holder { list: (HolderList | HolderListWithText)[] }',
+          'HolderList { id: string, name: string }',
+          'HolderListWithText { id: string, text: string }',
+        ],
+      ],
+      [
+        'items-allof',
+        { type: 'array', items: extended },
+        { Pet: pet },
+        ['Holder { list: HolderList[] }', 'Pet { name: string }', 'HolderList { id: string, name: string }'],
+      ],
+      [
+        'values',
+        { type: 'object', additionalProperties: tagged },
+        {},
+        [
+          'Holder { list: map<(HolderList | HolderListWithText)> }',
+          'HolderList { id: string, name: string }',
+          'HolderListWithText { id: string, text: string }',
+        ],
+      ],
+    ];
+    for (const [label, list, schemas, models] of cases) {
+      const { spec, warnings } = await parse(label, holderDoc(list, schemas));
+      expect(spec.models.map(describeModel), label).toEqual(models);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, ['Holder', ...Object.keys(schemas)]);
+    }
+  });
+
+  it('does so for every spelling of the array and of the composition beside the items (#393)', async () => {
+    const kinded = obj(
+      { kind: str },
+      {
+        discriminator: { propertyName: 'kind' },
+        oneOf: [obj({ kind: { const: 'cat' }, meow: str }), obj({ kind: { const: 'dog' }, bark: str })],
+      },
+    );
+    const titled = obj(
+      { id: str },
+      {
+        oneOf: [
+          obj({ kind: { const: 'circle' }, radius: str }, { title: 'Circle' }),
+          obj({ kind: { const: 'square' }, side: str }, { title: 'Square' }),
+        ],
+      },
+    );
+    const cases: Array<[string, SchemaObject, string[]]> = [
+      [
+        'an array with no `type`',
+        { items: tagged },
+        [
+          'Holder { list: (HolderList | HolderListWithText)[] }',
+          'HolderList { id: string, name: string }',
+          'HolderListWithText { id: string, text: string }',
+        ],
+      ],
+      [
+        'a nullable array',
+        { type: ['array', 'null'], items: tagged },
+        [
+          'Holder { list: (HolderList | HolderListWithText)[] | null }',
+          'HolderList { id: string, name: string }',
+          'HolderListWithText { id: string, text: string }',
+        ],
+      ],
+      [
+        'an anyOf',
+        { type: 'array', items: obj({ id: str }, { anyOf: [pet, note] }) },
+        [
+          'Holder { list: (HolderList | HolderListWithText)[] }',
+          'HolderList { id: string, name: string }',
+          'HolderListWithText { id: string, text: string }',
+        ],
+      ],
+      [
+        'an allOf of inline members',
+        { type: 'array', items: obj({ id: str }, { allOf: [pet, note] }) },
+        ['Holder { list: HolderList[] }', 'HolderList { id: string, name: string, text: string }'],
+      ],
+      [
+        'variants pinning a discriminator',
+        { type: 'array', items: kinded },
+        [
+          'Holder { list: (HolderList | DogHolderList)[] }',
+          'HolderList { kind: "cat", meow: string }',
+          'DogHolderList { kind: "dog", bark: string }',
+        ],
+      ],
+      [
+        'titled variants',
+        { type: 'array', items: titled },
+        [
+          'Holder { list: (Circle | Square)[] }',
+          'Circle { id: string, kind: "circle", radius: string }',
+          'Square { id: string, kind: "square", side: string }',
+        ],
+      ],
+    ];
+    for (const [label, list, models] of cases) {
+      const { spec, warnings } = await parse('spelling', holderDoc(list));
+      expect(spec.models.map(describeModel), label).toEqual(models);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, ['Holder']);
+    }
+  });
 });
 
 describe('review round 1', () => {
