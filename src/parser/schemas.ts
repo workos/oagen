@@ -52,6 +52,11 @@ export function componentSchemaOf(
   return map && Object.hasOwn(map, key) ? map[key] : undefined;
 }
 
+/** The document's `components/schemas` while they are read (`activeComponentSchemas`), for a reader that merges an `allOf` as the extractors do. */
+export function documentComponentSchemas(): Record<string, SchemaObject> | undefined {
+  return activeComponentSchemas;
+}
+
 /**
  * Module-level set of resolved schema names whose components/schemas entry is
  * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
@@ -1990,10 +1995,15 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
  * deferred body's registry already gives another shape — the same set the
  * object variants step around through `reservedNamesFor`), an inline object
  * variant of the union takes it (`ReqShape` — the reason a nested union's
- * variants step), an object variant's own property mints it (`item` under
- * `ReqShape` is `ReqShapeItem`), or an earlier variant of this map minted it.
- * When the context chosen by kind still mints a claimed name, it steps on
- * exactly as a plain array's items do beside such a sibling
+ * variants step), an object variant's own property mints it at any depth
+ * (`item` under `ReqShape` is `ReqShapeItem`; a `variant` object holding a
+ * `2` object under it mints `ReqShapeVariant2`, as a `variant_2` object
+ * would), or an earlier variant of this map minted it, at any depth too.
+ * When the context chosen by kind still mints a claimed name — a model of
+ * the variant's own, or one at any depth under it (the `loc` of a nested
+ * variant `ReqShapeVariant2` is `ReqShapeVariant2Loc`, which a
+ * `variant_2_loc` object of `ReqShape` takes) — it steps on exactly as a
+ * plain array's items do beside such a sibling
  * (`firstFreeElementContext`: `shapes_array_item`, `shapes_array_item2`, …
  * for an array; `shapes_variant_2_value`, `shapes_variant_2_member_value`, …
  * for the rest), so no two variants of one union share a model, and neither
@@ -2008,7 +2018,7 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
  * Each entry also carries the names the variant must step around when it is
  * typed and extracted under its context (`reserved`): everything claimed at
  * that point — the sibling-minted and caller-reserved names, the object
- * variants and their children, every name an earlier variant minted — plus
+ * variants and all they nest, every name an earlier variant minted — plus
  * the context-free title an earlier variant kept for a different shape. Both
  * sides hand that set down as `reservedNames`, the set the enclosing field's
  * own variants step around through `reservedNamesFor`, so a nested
@@ -2026,10 +2036,15 @@ export function isArraySchema(schema: SchemaObject | undefined): boolean {
  * sees are the names actually taken.
  *
  * `objectVariantNames` is the name each inline object variant's model takes
- * (`nameInlineVariants`), as the caller decided it; those names, and the
- * names the models' own properties mint, are claimed before any context is
- * chosen. One level is enough: every name a child's children mint starts
- * with the child's.
+ * (`nameInlineVariants`), as the caller decided it; those names, and every
+ * name the models' own properties mint at any depth
+ * (`mintedChildNameEntries`), are claimed before any variant that mints a
+ * name is decided. A variant is checked by every name it mints under a
+ * context, at any depth too (`mintedInlineNameEntries`, `deep`): a name on
+ * one side can equal one any number of levels down on the other, since
+ * `variant` and `2` join into the name `variant_2` gives. What a kept
+ * title's model nests is named from the title, so it is context-free like
+ * the title and never makes a variant step.
  */
 export function nonObjectVariantContexts(
   contextName: string | undefined,
@@ -2046,13 +2061,12 @@ export function nonObjectVariantContexts(
     if (siblingName === contextName) continue;
     for (const minted of mintedInlineNames(siblingName, siblingSchema, parentModelName)) claimed.add(minted);
   }
-  for (const [variant, variantName] of objectVariantNames) {
-    claimed.add(variantName);
-    for (const [property, propertySchema] of Object.entries(unwrapNullableSchema(variant).properties ?? {})) {
-      if (!propertySchema) continue;
-      for (const minted of mintedInlineNames(property, propertySchema, variantName)) claimed.add(minted);
-    }
-  }
+  for (const variantName of objectVariantNames.values()) claimed.add(variantName);
+  // What the object variants' own properties mint, at any depth, is read
+  // once the first variant that mints a name is decided: a deep read walks
+  // the whole tree, which a union whose other variants mint nothing (an
+  // object beside `enum: ['']`) never needs.
+  let childrenClaimed = false;
   // The context-free title each earlier variant kept, with the shape it
   // gave it: reserved for a later variant unless that variant gives the same
   // title the identical shape, which then shares the model.
@@ -2065,14 +2079,31 @@ export function nonObjectVariantContexts(
     const member = unwrapNullableSchema(variant);
     const kind = classifyInlineSchema(member);
     if (kind === 'ref') continue;
+    const ownEntries = mintedInlineNameEntries(contextName, member, parentModelName);
+    if (ownEntries.length > 0 && !childrenClaimed) {
+      childrenClaimed = true;
+      for (const [objectVariant, variantName] of objectVariantNames) {
+        for (const child of mintedChildNameEntries(unwrapNullableSchema(objectVariant).properties, variantName)) {
+          claimed.add(child.name);
+        }
+      }
+    }
     const ownTitles = new Map<string, string>();
-    for (const entry of mintedInlineNameEntries(contextName, member, parentModelName)) {
+    for (const entry of ownEntries) {
       if (entry.contextFree && entry.schema) ownTitles.set(entry.name, schemaShapeKey(entry.schema));
     }
     const reserved = new Set(claimed);
     for (const [title, shape] of keptTitles) if (ownTitles.get(title) !== shape) reserved.add(title);
-    const minted = (candidate: string): MintedInlineName[] =>
-      mintedInlineNameEntries(candidate, member, parentModelName, reserved);
+    // Read once per candidate: the check, the step and the claims below share it.
+    const mintedUnder = new Map<string, MintedInlineName[]>();
+    const minted = (candidate: string): MintedInlineName[] => {
+      let names = mintedUnder.get(candidate);
+      if (!names) {
+        names = mintedInlineNameEntries(candidate, member, parentModelName, reserved, true);
+        mintedUnder.set(candidate, names);
+      }
+      return names;
+    };
     const dependentNames = (candidate: string): string[] =>
       minted(candidate)
         .filter((entry) => !entry.contextFree)
@@ -2104,7 +2135,7 @@ export function nonObjectVariantContexts(
           ? stepped
           : firstFreeElementContext(stepped, 'value', reserved, dependentNames, under).context;
     }
-    contexts.set(variant, { context, reserved });
+    contexts.set(variant, { context, reserved, minted: minted(context) });
     for (const entry of minted(context)) {
       if (entry.contextFree && entry.schema) keptTitles.set(entry.name, schemaShapeKey(entry.schema));
       else claimed.add(entry.name);
@@ -2117,6 +2148,8 @@ export function nonObjectVariantContexts(
 export interface VariantContext {
   context: string;
   reserved: ReadonlySet<string>;
+  /** Every name the variant mints under `context`, at any depth (`mintedInlineNameEntries`, `deep`). */
+  minted: readonly MintedInlineName[];
 }
 
 /** Which of its keywords types an inline schema; see `classifyInlineSchema`. */
@@ -5049,6 +5082,7 @@ import {
   agreedExtensions,
   withAgreedExtensions,
   type MintedInlineName,
+  mintedChildNameEntries,
   mintedInlineNameEntries,
   mintedInlineNames,
   modelFingerprint,
