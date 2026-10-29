@@ -643,6 +643,103 @@ describe('Enum.description on inline enums', () => {
     ]);
     expectEnumsSound(spec);
   });
+
+  it("a flattened discriminated body's discriminator gives each value its variant's text, and the enum and field only the text every variant writes (#446)", async () => {
+    /** A body `oneOf` of objects, each pinning `kind` to a const with the text beside it (none for `undefined`). */
+    const pets = (operationId: string, kinds: [string, string | undefined][]) => ({
+      post: {
+        operationId,
+        requestBody: {
+          content: {
+            'application/json': {
+              schema: {
+                oneOf: kinds.map(([kind, text]) => ({
+                  type: 'object',
+                  properties: {
+                    kind: { type: 'string', const: kind, ...(text !== undefined ? { description: text } : {}) },
+                    [`${kind}_name`]: { type: 'string' },
+                  },
+                  required: ['kind'],
+                })),
+                discriminator: { propertyName: 'kind' },
+              },
+            },
+          },
+        },
+        responses,
+      },
+    });
+    const spec = await parseDocument(
+      document({
+        // The issue's repro: each variant documents its own const.
+        '/pets': pets('createPet', [
+          ['cat', 'A cat.'],
+          ['dog', 'A dog.'],
+        ]),
+        // One text every variant writes documents the property, and so the enum.
+        '/agreed': pets('createAgreed', [
+          ['cat', 'The kind of pet.'],
+          ['dog', 'The kind of pet.'],
+        ]),
+        // A text only some variants write is not the property's.
+        '/partial': pets('createPartial', [
+          ['cat', 'A cat.'],
+          ['dog', undefined],
+        ]),
+        // A value two variants pin takes the first's text, as an inline
+        // `allOf` keeps the first declaration of a repeated shape.
+        '/repeated': pets('createRepeated', [
+          ['cat', 'A cat.'],
+          ['cat', 'Another cat.'],
+          ['dog', 'A dog.'],
+        ]),
+      }),
+    );
+
+    const values = (name: string) => byName(spec.enums, name).values.map((v) => [v.value, v.description]);
+    const kindField = (model: string) => byName(byName(spec.models, model).fields, 'kind');
+
+    expect(byName(spec.enums, 'CreatePetRequestKind')).not.toHaveProperty('description');
+    expect(values('CreatePetRequestKind')).toEqual([
+      ['cat', 'A cat.'],
+      ['dog', 'A dog.'],
+    ]);
+    expect(kindField('CreatePetRequest').description).toBeUndefined();
+
+    expect(byName(spec.enums, 'CreateAgreedRequestKind').description).toBe('The kind of pet.');
+    expect(values('CreateAgreedRequestKind')).toEqual([
+      ['cat', 'The kind of pet.'],
+      ['dog', 'The kind of pet.'],
+    ]);
+    expect(kindField('CreateAgreedRequest').description).toBe('The kind of pet.');
+
+    expect(byName(spec.enums, 'CreatePartialRequestKind')).not.toHaveProperty('description');
+    expect(values('CreatePartialRequestKind')).toEqual([
+      ['cat', 'A cat.'],
+      ['dog', undefined],
+    ]);
+    expect(byName(spec.enums, 'CreatePartialRequestKind').values[1]).not.toHaveProperty('description');
+    expect(kindField('CreatePartialRequest').description).toBeUndefined();
+
+    expect(byName(spec.enums, 'CreateRepeatedRequestKind')).not.toHaveProperty('description');
+    expect(values('CreateRepeatedRequestKind')).toEqual([
+      ['cat', 'A cat.'],
+      ['dog', 'A dog.'],
+    ]);
+    expect(kindField('CreateRepeatedRequest').description).toBeUndefined();
+
+    // The bodies are still flattened, the discriminator an enum of the consts;
+    // the per-value texts are carried as a consumed key, not as an extension.
+    for (const op of allOperations(spec)) expect(op.requestBody?.kind).toBe('model');
+    expect(kindField('CreatePetRequest').type).toEqual({
+      kind: 'enum',
+      name: 'CreatePetRequestKind',
+      values: ['cat', 'dog'],
+    });
+    expect(kindField('CreatePetRequest')).not.toHaveProperty('extensions');
+    expect(byName(spec.enums, 'CreatePetRequestKind')).not.toHaveProperty('extensions');
+    expectEnumsSound(spec);
+  });
 });
 
 describe('inlineEnumRef – the recorded text', () => {

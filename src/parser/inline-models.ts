@@ -2561,9 +2561,14 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
  * its key order — each as the first declaration writes it. A key any
  * declaration leaves unset, or declares with another value, is left out.
  * The one agreement rule for a property several variants declare, read for
- * the lifted keywords and for the extensions alike (`unionOfDeclarations`).
+ * the lifted keywords and for the extensions alike (`unionOfDeclarations`),
+ * and for the text of a flattened body's discriminator
+ * (`flattenDiscriminatedUnionBody`).
  */
-function agreedDeclarationKeys(declarations: readonly SchemaObject[], keys: Iterable<string>): Record<string, unknown> {
+export function agreedDeclarationKeys(
+  declarations: readonly SchemaObject[],
+  keys: Iterable<string>,
+): Record<string, unknown> {
   const agreed: Record<string, unknown> = {};
   for (const key of keys) {
     const values = declarations.map((declaration) => declaration[key]);

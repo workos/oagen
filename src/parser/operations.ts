@@ -68,6 +68,7 @@ import {
   type ModelRef,
 } from '../ir/types.js';
 import {
+  agreedDeclarationKeys,
   agreedExtensions,
   collectProperties,
   extractInlineModelsFromProperties,
@@ -4308,7 +4309,10 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
 
   const variants = schema.oneOf as SchemaObject[];
   const discValues: string[] = [];
-  let discPropSchema: SchemaObject | undefined;
+  // Each pinned value's text, aligned with `discValues`: the `description` of
+  // the declaration that pins it — the first's, for a value two variants pin,
+  // as an inline `allOf` keeps the first declaration of a repeated shape.
+  const discValueTexts: unknown[] = [];
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
@@ -4324,8 +4328,10 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
           ? dp.enum[0]
           : undefined;
     if (constVal === undefined) return null;
-    if (!discValues.includes(constVal)) discValues.push(constVal);
-    if (!discPropSchema) discPropSchema = dp;
+    if (!discValues.includes(constVal)) {
+      discValues.push(constVal);
+      discValueTexts.push(dp?.description);
+    }
   }
 
   const variantCount = variants.length;
@@ -4355,13 +4361,18 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     const declared = declarations.get(name)!;
     properties[name] =
       name === discProp
-        ? // The discriminator collapses to an enum of the pinned values,
-          // documented by the first variant's and carrying the agreed keys.
+        ? // The discriminator collapses to an enum of the pinned values, each
+          // documented by the declaration that pins it, as a `oneOf` of string
+          // consts documents its members (`x-enum-descriptions`, read onto
+          // each `EnumValue`); the enum and the field carry the text and keys
+          // every declaration agrees on (workos/oagen#446: the first
+          // variant's text, which documents one value, was the enum's).
           {
             type: 'string',
             enum: discValues,
-            ...(discPropSchema?.description ? { description: discPropSchema.description } : {}),
+            ...agreedDeclarationKeys(declared, ['description']),
             ...agreedExtensions(declared),
+            'x-enum-descriptions': discValueTexts,
           }
         : withAgreedExtensions(declared[0]!, agreedExtensions(declared));
   }
