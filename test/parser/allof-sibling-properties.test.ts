@@ -1122,9 +1122,9 @@ describe('workos/oagen#307: properties written beside allOf', () => {
             Pet: pet,
             AnyOne: { allOf: [{ anyOf: [only] }] },
             OneOne: { allOf: [{ oneOf: [only] }] },
-            // Consts of more than one letter: `deriveDiscriminatedVariantName` hands
-            // a variant the parent's own name when the parent starts with the const
-            // (`AnyTwo` starts with `A`), a naming rule this PR leaves as it is.
+            // Consts of more than one letter: `deriveDiscriminatedVariantName` handed
+            // a variant the parent's own name when the parent started with the const
+            // (`AnyTwo` starts with `A`), until workos/oagen#430.
             AnyTwo: {
               allOf: [
                 ref('Pet'),
@@ -1149,5 +1149,348 @@ describe('workos/oagen#307: properties written beside allOf', () => {
       expect(warnings).toEqual([]);
       expectSound(spec, ['Pet', 'AnyOne', 'OneOne', 'AnyTwo']);
     });
+  });
+});
+
+/**
+ * workos/oagen#430: a discriminated `allOf` variant was named for its const
+ * prefixed with the component's name, except when the name already started
+ * with the const: `CatEvent`'s `cat` variant was named `CatEvent` and took
+ * the dispatcher's place, while the same document with the component named
+ * `PetEvent` dispatched to `PetEventCat` and `PetEventDog`.
+ */
+describe("workos/oagen#430: a discriminated variant never takes its component's name", () => {
+  const event = obj({ id: str }, { required: ['id'] });
+  const variant = (kind: string, own: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { type: 'string', const: kind }, ...own }, { required: ['kind'] });
+  const cat = variant('cat', { meow: str });
+  const dog = variant('dog', { bark: str });
+
+  for (const keyword of ['oneOf', 'anyOf'] as const) {
+    it(`the issue's document: \`CatEvent\` dispatches as \`PetEvent\` does (${keyword})`, async () => {
+      for (const name of ['CatEvent', 'PetEvent']) {
+        const { spec, warnings } = await parse(
+          `${name}-${keyword}`,
+          specDoc(
+            { '/cat-events': getOp('getCatEvent', ref(name)) },
+            { Event: event, [name]: { allOf: [ref('Event'), { [keyword]: [cat, dog] }] } },
+          ),
+        );
+        expect(show(opsOf(spec).getCatEvent!.response), name).toBe(name);
+        expect(fieldsOf(spec, name), name).toEqual(['id: string']);
+        expect(modelOf(spec, name).discriminator, name).toEqual({
+          property: 'kind',
+          mapping: { cat: `${name}Cat`, dog: `${name}Dog` },
+        });
+        expect(fieldsOf(spec, `${name}Cat`), name).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+        expect(fieldsOf(spec, `${name}Dog`), name).toEqual(['id: string', 'kind: "dog"', 'bark?: string']);
+        expect(modelNames(spec).sort(), name).toEqual(['Event', name, `${name}Cat`, `${name}Dog`].sort());
+        expect(warnings, name).toEqual([]);
+        expectSound(spec, ['Event', name]);
+      }
+    });
+  }
+
+  it("a const that is the component's whole name, one word or several, is prefixed with it too", async () => {
+    const { spec, warnings } = await parse(
+      'const-is-component-name',
+      specDoc(
+        {},
+        {
+          Event: event,
+          Cat: { allOf: [ref('Event'), { oneOf: [cat, dog] }] },
+          CatEvent: {
+            allOf: [
+              ref('Event'),
+              { oneOf: [variant('cat_event', { meow: str }), variant('dog_event', { bark: str })] },
+            ],
+          },
+        },
+      ),
+    );
+    expect(fieldsOf(spec, 'Cat')).toEqual(['id: string']);
+    expect(modelOf(spec, 'Cat').discriminator).toEqual({ property: 'kind', mapping: { cat: 'CatCat', dog: 'CatDog' } });
+    expect(fieldsOf(spec, 'CatCat')).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+    expect(fieldsOf(spec, 'CatDog')).toEqual(['id: string', 'kind: "dog"', 'bark?: string']);
+    // A const of several words stands alone, as before, unless it is the component's name.
+    expect(fieldsOf(spec, 'CatEvent')).toEqual(['id: string']);
+    expect(modelOf(spec, 'CatEvent').discriminator).toEqual({
+      property: 'kind',
+      mapping: { cat_event: 'CatEventCatEvent', dog_event: 'DogEvent' },
+    });
+    expect(fieldsOf(spec, 'CatEventCatEvent')).toEqual(['id: string', 'kind: "cat_event"', 'meow?: string']);
+    expect(fieldsOf(spec, 'DogEvent')).toEqual(['id: string', 'kind: "dog_event"', 'bark?: string']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Event', 'Cat', 'CatEvent']);
+  });
+
+  it("a const that gives no name would name its variant as the component: the union is flattened, as two variants of one name's is", async () => {
+    for (const nameless of ['', '-']) {
+      const { spec, warnings } = await parse(
+        `nameless-const-${nameless.length}`,
+        specDoc(
+          {},
+          { Event: event, CatEvent: { allOf: [ref('Event'), { oneOf: [variant(nameless, { meow: str }), dog] }] } },
+        ),
+      );
+      expect(modelOf(spec, 'CatEvent').discriminator, nameless).toBeUndefined();
+      expect(fieldsOf(spec, 'CatEvent'), nameless).toEqual([
+        'id: string',
+        `kind?: ${JSON.stringify(nameless)}`,
+        'meow?: string',
+        'bark?: string',
+      ]);
+      expect(modelNames(spec).sort(), nameless).toEqual(['CatEvent', 'Event']);
+      expect(warnings, nameless).toEqual([]);
+      expectSound(spec, ['Event', 'CatEvent']);
+    }
+  });
+
+  // Review: a variant name this rule mints may already be another model's,
+  // and the variant was folded onto whichever model had more fields.
+  const catEvent = { allOf: [ref('Event'), { oneOf: [cat, dog] }] };
+  const catEventOps = {
+    '/cat-events': getOp('getCatEvent', ref('CatEvent')),
+    '/cat-event-cats': getOp('getCatEventCat', ref('CatEventCat')),
+  };
+
+  it('a name a component holds with another shape: the variant steps by number, the mapping with it, in any order', async () => {
+    // The review's document: a `CatEventCat` of its own, with more fields than the `cat` variant.
+    const schemas: Record<string, SchemaObject> = {
+      Event: event,
+      CatEvent: catEvent,
+      CatEventCat: obj({ a: str, b: str, c: str, d: str }),
+    };
+    for (const order of permutations(Object.keys(schemas))) {
+      const { spec, warnings } = await parse(
+        `component-holds-${order.join('-')}`,
+        specDoc(catEventOps, Object.fromEntries(order.map((key) => [key, schemas[key]]))),
+      );
+      expect(modelOf(spec, 'CatEvent').discriminator, order.join()).toEqual({
+        property: 'kind',
+        mapping: { cat: 'CatEventCat2', dog: 'CatEventDog' },
+      });
+      expect(fieldsOf(spec, 'CatEventCat2'), order.join()).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+      expect(fieldsOf(spec, 'CatEventCat'), order.join()).toEqual([
+        'a?: string',
+        'b?: string',
+        'c?: string',
+        'd?: string',
+      ]);
+      expect(show(opsOf(spec).getCatEventCat!.response), order.join()).toBe('CatEventCat');
+      expect(modelNames(spec).sort(), order.join()).toEqual(
+        ['CatEvent', 'CatEventCat', 'CatEventCat2', 'CatEventDog', 'Event'].sort(),
+      );
+      expect(warnings, order.join()).toEqual([]);
+      expectSound(spec, ['Event', 'CatEvent', 'CatEventCat']);
+    }
+  });
+
+  it('a component of the identical shape is shared, and keeps its own documentation', async () => {
+    const same = obj(
+      { id: str, kind: { type: 'string', const: 'cat' }, meow: str },
+      { required: ['id', 'kind'], description: 'A cat event.' },
+    );
+    for (const order of [
+      ['Event', 'CatEvent', 'CatEventCat'],
+      ['Event', 'CatEventCat', 'CatEvent'],
+    ]) {
+      const schemas: Record<string, SchemaObject> = { Event: event, CatEvent: catEvent, CatEventCat: same };
+      const { spec, warnings } = await parse(
+        `component-shares-${order.join('-')}`,
+        specDoc(catEventOps, Object.fromEntries(order.map((key) => [key, schemas[key]]))),
+      );
+      expect(modelOf(spec, 'CatEvent').discriminator?.mapping, order.join()).toEqual({
+        cat: 'CatEventCat',
+        dog: 'CatEventDog',
+      });
+      expect(fieldsOf(spec, 'CatEventCat'), order.join()).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+      expect(modelOf(spec, 'CatEventCat').description, order.join()).toBe('A cat event.');
+      expect(modelNames(spec).sort(), order.join()).toEqual(['CatEvent', 'CatEventCat', 'CatEventDog', 'Event']);
+      expect(warnings, order.join()).toEqual([]);
+      expectSound(spec, ['Event', 'CatEvent', 'CatEventCat']);
+    }
+  });
+
+  it("a name an enum, a named union's variant or another component's field object holds steps too", async () => {
+    const holders: Record<string, Record<string, SchemaObject>> = {
+      enum: { CatEventCat: { type: 'string', enum: ['a', 'b'] } },
+      'named union': { EventCat: { oneOf: [variant('cat', { z1: str, z2: str, z3: str }), variant('dog', {})] } },
+      'field object': { Cat: obj({ event_cat: obj({ x: str }) }) },
+    };
+    for (const [label, holder] of Object.entries(holders)) {
+      const { spec, warnings } = await parse(
+        `holder-${label.replace(' ', '-')}`,
+        specDoc(
+          { '/cat-events': getOp('getCatEvent', ref('CatEvent')) },
+          { Event: event, CatEvent: catEvent, ...holder },
+        ),
+      );
+      expect(modelOf(spec, 'CatEvent').discriminator?.mapping, label).toEqual({
+        cat: 'CatEventCat2',
+        dog: 'CatEventDog',
+      });
+      expect(fieldsOf(spec, 'CatEventCat2'), label).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, ['Event', 'CatEvent', ...Object.keys(holder)]);
+    }
+  });
+
+  it("an identical component's nested object is shared with it, and the variant builds nothing of its own", async () => {
+    const owner = obj({ name: str });
+    const { spec, warnings } = await parse(
+      'identical-with-nested',
+      specDoc(catEventOps, {
+        Event: event,
+        CatEvent: { allOf: [ref('Event'), { oneOf: [variant('cat', { owner }), dog] }] },
+        CatEventCat: obj({ id: str, kind: { type: 'string', const: 'cat' }, owner }, { required: ['id', 'kind'] }),
+      }),
+    );
+    expect(modelOf(spec, 'CatEvent').discriminator?.mapping).toEqual({ cat: 'CatEventCat', dog: 'CatEventDog' });
+    expect(fieldsOf(spec, 'CatEventCat')).toEqual(['id: string', 'kind: "cat"', 'owner?: CatEventCatOwner']);
+    expect(fieldsOf(spec, 'CatEventCatOwner')).toEqual(['name?: string']);
+    expect(modelNames(spec).sort()).toEqual(['CatEvent', 'CatEventCat', 'CatEventCatOwner', 'CatEventDog', 'Event']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Event', 'CatEvent', 'CatEventCat']);
+  });
+
+  it("a variant identical to another component's field object keeps its own model, which a later enum of the name does not move", async () => {
+    // The field object could be renamed through its own site; the mapping must not name it.
+    const { spec } = await parse(
+      'identical-field-object',
+      specDoc(
+        {
+          '/cat-events': getOp('getCatEvent', ref('CatEvent')),
+          '/cat': {
+            get: {
+              operationId: 'getCat',
+              tags: ['Cat'],
+              parameters: [{ name: 'event_cat', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } }],
+              responses: ok(ref('Cat')),
+            },
+          },
+        },
+        {
+          Event: event,
+          CatEvent: catEvent,
+          Cat: obj({
+            event_cat: obj(
+              { id: str, kind: { type: 'string', const: 'cat' }, meow: str },
+              { required: ['id', 'kind'] },
+            ),
+          }),
+        },
+        { tags: [{ name: 'Cat' }] },
+      ),
+    );
+    expect(modelOf(spec, 'CatEvent').discriminator?.mapping).toEqual({ cat: 'CatEventCat', dog: 'CatEventDog' });
+    expect(fieldsOf(spec, 'CatEventCat')).toEqual(['id: string', 'kind: "cat"', 'meow?: string']);
+    expect(fieldsOf(spec, 'Cat')).toEqual(['event_cat?: CatEventCat']);
+    expect(unresolvedReferences(spec)).toEqual([]);
+    expect(orphanedModels(spec, ['Event', 'CatEvent', 'Cat'])).toEqual([]);
+  });
+
+  it('a name held under the variant steps the whole variant, the models nested under it moving with it', async () => {
+    const owned = { allOf: [ref('Event'), { oneOf: [variant('cat', { owner: obj({ name: str }) }), dog] }] };
+    const { spec, warnings } = await parse(
+      'nested-name-held',
+      specDoc({}, { Event: event, CatEvent: owned, CatEventCatOwner: obj({ age: int }) }),
+    );
+    expect(modelOf(spec, 'CatEvent').discriminator?.mapping).toEqual({ cat: 'CatEventCat2', dog: 'CatEventDog' });
+    expect(fieldsOf(spec, 'CatEventCat2')).toEqual(['id: string', 'kind: "cat"', 'owner?: CatEventCat2Owner']);
+    expect(fieldsOf(spec, 'CatEventCat2Owner')).toEqual(['name?: string']);
+    expect(fieldsOf(spec, 'CatEventCatOwner')).toEqual(['age?: integer']);
+    expect(modelNames(spec)).not.toContain('CatEventCat');
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Event', 'CatEvent', 'CatEventCatOwner']);
+  });
+
+  it("a variant an earlier dispatcher's variant holds with another shape steps; an identical one is shared", async () => {
+    const userEvent = (own: Record<string, SchemaObject>): SchemaObject => ({
+      allOf: [
+        ref('Event'),
+        {
+          oneOf: [
+            obj({ type: { type: 'string', const: 'user.created' }, ...own }, { required: ['type'] }),
+            obj({ type: { type: 'string', const: 'user.deleted' } }, { required: ['type'] }),
+          ],
+        },
+      ],
+    });
+    const mappingOf = (spec: ApiSpec, name: string) => modelOf(spec, name).discriminator?.mapping;
+
+    for (const [first, second] of [
+      ['EventA', 'EventB'],
+      ['EventB', 'EventA'],
+    ]) {
+      const schemas: Record<string, SchemaObject> = { EventA: userEvent({ a: str }), EventB: userEvent({ b: str }) };
+      const { spec, warnings } = await parse(
+        `two-dispatchers-${first}`,
+        specDoc({}, { Event: event, [first]: schemas[first], [second]: schemas[second] }),
+      );
+      // The first in the document keeps the name; the other steps.
+      expect(mappingOf(spec, first), first).toEqual({ 'user.created': 'UserCreated', 'user.deleted': 'UserDeleted' });
+      expect(mappingOf(spec, second), first).toEqual({ 'user.created': 'UserCreated2', 'user.deleted': 'UserDeleted' });
+      const own = (name: string) => (name === 'EventA' ? 'a?: string' : 'b?: string');
+      expect(fieldsOf(spec, 'UserCreated'), first).toEqual(['id: string', 'type: "user.created"', own(first)]);
+      expect(fieldsOf(spec, 'UserCreated2'), first).toEqual(['id: string', 'type: "user.created"', own(second)]);
+      expect(warnings, first).toEqual([]);
+      expectSound(spec, ['Event', 'EventA', 'EventB']);
+    }
+
+    const { spec } = await parse(
+      'two-dispatchers-identical',
+      specDoc({}, { Event: event, EventA: userEvent({ a: str }), EventB: userEvent({ a: str }) }),
+    );
+    expect(mappingOf(spec, 'EventA')).toEqual({ 'user.created': 'UserCreated', 'user.deleted': 'UserDeleted' });
+    expect(mappingOf(spec, 'EventB')).toEqual({ 'user.created': 'UserCreated', 'user.deleted': 'UserDeleted' });
+    expect(modelNames(spec).sort()).toEqual(['Event', 'EventA', 'EventB', 'UserCreated', 'UserDeleted']);
+  });
+
+  it("a variant whose nameless const sits in an `allOf` wrapper keeps the wrapper's fields when the union is flattened", async () => {
+    for (const nameless of ['', '-']) {
+      // The review's document: `kind` and `meow` inside the variant's `allOf`, beside a plain `dog`.
+      const wrapped = { allOf: [variant(nameless, { meow: str })] };
+      // And a wrapper whose second member is a union of its own.
+      const nested = { allOf: [variant(nameless, { meow: str }), { oneOf: [obj({ purr: str }), obj({ hiss: str })] }] };
+      for (const [label, cat, fields] of [
+        ['wrapped', wrapped, ['meow?: string']],
+        ['nested', nested, ['meow?: string', 'purr?: string', 'hiss?: string']],
+      ] as const) {
+        const { spec, warnings } = await parse(
+          `wrapped-nameless-const-${label}-${nameless.length}`,
+          specDoc(
+            { '/cat-events': getOp('getCatEvent', ref('CatEvent')) },
+            { Event: event, CatEvent: { allOf: [ref('Event'), { oneOf: [cat, dog] }] } },
+          ),
+        );
+        expect(modelOf(spec, 'CatEvent').discriminator, label).toBeUndefined();
+        expect(fieldsOf(spec, 'CatEvent'), label).toEqual([
+          'id: string',
+          `kind?: ${JSON.stringify(nameless)}`,
+          ...fields,
+          'bark?: string',
+        ]);
+        expect(modelNames(spec).sort(), label).toEqual(['CatEvent', 'Event']);
+        expect(warnings, label).toEqual([]);
+        expectSound(spec, ['Event', 'CatEvent']);
+      }
+    }
+  });
+
+  it('two wrapped variants named alike keep their fields when the union is flattened', async () => {
+    const wrap = (kind: string, own: Record<string, SchemaObject>): SchemaObject => ({ allOf: [variant(kind, own)] });
+    const { spec, warnings } = await parse(
+      'wrapped-alike',
+      specDoc(
+        {},
+        { Event: event, Ab: { allOf: [ref('Event'), { oneOf: [wrap('a-b', { x: str }), wrap('a_b', { y: str })] }] } },
+      ),
+    );
+    expect(modelOf(spec, 'Ab').discriminator).toBeUndefined();
+    expect(fieldsOf(spec, 'Ab')).toEqual(['id: string', 'kind?: "a-b"', 'x?: string', 'y?: string']);
+    expect(modelNames(spec).sort()).toEqual(['Ab', 'Event']);
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Event', 'Ab']);
   });
 });
