@@ -772,11 +772,13 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * shape is renamed or dropped with a warning). A component an inline `allOf`
  * merges into one model (`readInlineAllOf`: `'merged'`) is read with that
  * root too, as far as the merge reads it: the model carries the component's
- * properties beside its inline members' (`mergeAllOfMembers`), so every
- * property it inherits through a `$ref` member is walked under the root,
- * each once (workos/oagen#374: as a response, `allOf: [{ $ref: Base },
- * { … }]` kept a title `Base.shape` and the inline `marker.shape` give
- * different shapes, and one union resolved to the other's models).
+ * properties beside its inline members' (`mergeAllOfMembers`), so its
+ * properties — every one it inherits through a `$ref` member, and one an
+ * inline member declares too, conjoined with the component's — are walked
+ * under the root, each once (workos/oagen#374: as a response, `allOf:
+ * [{ $ref: Base }, { … }]` kept a title `Base.shape` and the inline
+ * `marker.shape` give different shapes, and one union resolved to the
+ * other's models).
  *
  * Within a root, the walk follows the keywords the parser types a schema
  * through only — `properties`, `patternProperties`, `additionalProperties`,
@@ -968,8 +970,8 @@ function schemaRootsOf(
  * under a property that starts a group of its own, where the same title is
  * a claim — and a schema that refers back to itself is stopped by the
  * ancestors on the path to it, which ends the walk. `componentSchemas`
- * resolves the `$ref` members of a merged `allOf`, whose inherited
- * properties are read here too (`inheritedAllOfProperties`).
+ * resolves the `$ref` members of a merged `allOf`, whose model's properties
+ * are read here too (`mergedAllOfProperties`).
  */
 function markContestedTitlesUnderRoot(
   roots: readonly SchemaObject[],
@@ -978,10 +980,10 @@ function markContestedTitlesUnderRoot(
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
   const visitedByGroup = new WeakMap<Set<string>, WeakSet<SchemaObject>>();
   const ancestors = new Set<SchemaObject>();
-  // The properties a merged `allOf` inherited, each read once: a property
+  // The properties of a merged `allOf`'s model, each read once: a property
   // starts a group of its own, so a second read finds the same claims, and a
   // chain of components each merging the next would be read once per path.
-  const inheritedRead = new WeakSet<SchemaObject>();
+  const mergedRead = new WeakSet<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
   // already claimed for the union this schema is reached from without
   // entering an object. Only the first variant of a group to carry a title
@@ -1041,12 +1043,13 @@ function markContestedTitlesUnderRoot(
       }
     }
     // A `$ref` member of an `allOf` merged into one model is no reference:
-    // the model carries what the merge inherits through it beside its inline
-    // members' properties, so those properties are read with this root, each
-    // a group of its own like any property.
-    for (const property of inheritedAllOfProperties(folded, componentSchemas)) {
-      if (inheritedRead.has(property)) continue;
-      inheritedRead.add(property);
+    // the model carries what the merge reads through it beside its inline
+    // members' properties, conjoined with theirs where both declare one, so
+    // the model's properties are read with this root, each a group of its
+    // own like any property.
+    for (const property of mergedAllOfProperties(folded, componentSchemas)) {
+      if (mergedRead.has(property)) continue;
+      mergedRead.add(property);
       walk(property);
     }
     ancestors.delete(schema);
@@ -1058,20 +1061,21 @@ function markContestedTitlesUnderRoot(
 }
 
 /**
- * The properties an inline `allOf` read as one merged model
- * (`readInlineAllOf`: `'merged'`) inherits from the components its `$ref`
- * members name — every property `mergeAllOfMembers` reads through a
- * reference, a component's `allOf` chain included — and none for any other
- * schema. A `$ref` the merge does not follow (one under a variant), and a
- * union a component carries, which the merge leaves to that component, add
- * nothing.
+ * Every always-applying property of the one model an inline `allOf` read as
+ * merged (`readInlineAllOf`: `'merged'`) builds (`mergeAllOfMembers`): those
+ * it inherits through a `$ref` member, a component's own `allOf` chain
+ * included; those two members declare, conjoined into one the model owns (a
+ * `meta` both `Base` and an inline member declare carries `Base`'s
+ * `meta.shape` beside the inline `meta.marker`); and an inline member's own,
+ * which the walk also reads where it is written. None for any other schema,
+ * nor a property only variants declare, which only an inline member's
+ * variants can and the walk reads there. A `$ref` the merge does not follow
+ * (one under a variant), and a union a component carries, which the merge
+ * leaves to that component, add nothing.
  */
-function inheritedAllOfProperties(
-  schema: SchemaObject,
-  componentSchemas: Record<string, SchemaObject>,
-): SchemaObject[] {
+function mergedAllOfProperties(schema: SchemaObject, componentSchemas: Record<string, SchemaObject>): SchemaObject[] {
   if (!schema.allOf || readInlineAllOf(schema.allOf, schema, componentSchemas) !== 'merged') return [];
-  return mergeAllOfMembers(schema, componentSchemas).properties.flatMap((p) => (p.origin ? [p.schema] : []));
+  return mergeAllOfMembers(schema, componentSchemas).properties.flatMap((p) => (p.conditional ? [] : [p.schema]));
 }
 
 /**

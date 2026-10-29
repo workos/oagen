@@ -4470,6 +4470,75 @@ describe('a title two unions give different shapes at different depths of one ro
     expectConsistent(ir, ['Base']);
   });
 
+  it.each<{ label: string; body: (schema: SchemaObject) => Record<string, unknown>; root: string }>([
+    {
+      label: 'a 2xx response',
+      body: (schema) => op('getDrawing', { responses: { '200': { description: 'ok', ...json(schema) } } }),
+      root: 'GetDrawingResponse',
+    },
+    {
+      label: 'a default response',
+      body: (schema) =>
+        op('getDrawing', {
+          responses: { '204': { description: 'ok' }, default: { description: 'err', ...json(schema) } },
+        }),
+      root: 'GetDrawingDefaultResponse',
+    },
+    {
+      label: 'a request body',
+      body: (schema) => ({
+        paths: {
+          '/drawings': {
+            post: {
+              operationId: 'createDrawing',
+              requestBody: json(schema),
+              responses: { '204': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+      root: 'CreateDrawingRequest',
+    },
+  ])(
+    'contests a title under a property both members declare, under $label (#374, Greptile)',
+    async ({ body, root }) => {
+      // `Base.meta` and the inline member's `meta` conjoin into one property of
+      // the merged model, its own: `meta.shape` comes from `Base` and
+      // `meta.marker.shape` from the inline member, and both are minted under
+      // the root, so their titles are compared there.
+      const ir = await parseWithoutWarnings(
+        doc({
+          ...body({
+            allOf: [
+              { $ref: '#/components/schemas/Base' },
+              obj({ meta: obj({ marker: obj({ shape: byDiameter() }) }) }),
+            ],
+          }),
+          components: { schemas: { Base: obj({ id: { type: 'string' }, meta: obj({ shape: byRadius() }) }) } },
+        }),
+      );
+      /** The model the field `field` of the model `owner` references. */
+      const modelOf = (owner: string, field: string): string => {
+        const type = fieldTypesByModel(ir.models)[owner]?.[field];
+        expect(type).toMatchObject({ kind: 'model' });
+        return (type as { name: string }).name;
+      };
+      const meta = modelOf(root, 'meta');
+      const marker = modelOf(meta, 'marker');
+      for (const owner of ['BaseMeta', meta]) {
+        expect(variantFields(ir, owner, 'shape')).toEqual([
+          ['kind', 'radius'],
+          ['kind', 'side'],
+        ]);
+      }
+      expect(variantFields(ir, marker, 'shape')).toEqual([
+        ['kind', 'diameter'],
+        ['kind', 'len'],
+      ]);
+      expectConsistent(ir, ['Base']);
+    },
+  );
+
   describe('markContestedTitles', () => {
     const variantsOf = (union: SchemaObject): SchemaObject[] => union.oneOf!;
 
@@ -4634,7 +4703,12 @@ describe('a title two unions give different shapes at different depths of one ro
         body: (inner) => ({ allOf: [ref('Base')], properties: { marker: obj({ shape: inner }) } }),
         schemas: base,
       },
-    ])('reads the properties a merged `allOf` inherits through $label with the root (#374)', (merge) => {
+      {
+        label: 'a property both members declare, conjoined (Greptile)',
+        body: (inner) => ({ allOf: [ref('Base'), obj({ meta: marker(inner) })] }),
+        schemas: (top) => ({ Base: obj({ meta: obj({ shape: top }) }) }),
+      },
+    ])('reads what a merged `allOf` inherits with the root, through $label (#374)', (merge) => {
       // The issue's `allof.json`: the response merges `Base` with an inline
       // member into one model, which carries `Base.shape` beside the inline
       // `marker.shape`, so the two are compared under the response root.
