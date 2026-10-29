@@ -20,6 +20,16 @@ function emptySurface(overrides?: Partial<ApiSurface>): ApiSurface {
   };
 }
 
+/** A required string field on an SDK interface. */
+const sdkField = (name: string) => ({ name, type: 'string', optional: false });
+
+/** A required string field on an IR model. */
+const irField = (name: string): ApiSpec['models'][number]['fields'][number] => ({
+  name,
+  type: { kind: 'primitive', type: 'string' },
+  required: true,
+});
+
 describe('buildOverlayLookup', () => {
   it('builds method lookup from manifest entries', () => {
     const surface = emptySurface({
@@ -514,6 +524,109 @@ describe('buildOverlayLookup', () => {
 
     const lookup = buildOverlayLookup(surface, manifest, spec);
     expect(lookup.modelNameByIR.get('ControllerOrgResponse')).toBe('Organization');
+  });
+
+  it('reserves exact-name interfaces before a look-alike can claim them via Jaccard', () => {
+    // A synthetic nested copy of an existing response shape (identical fields)
+    // sorts before the model that owns the SDK name. Jaccard must not run for
+    // the copy until every exact match has been reserved, or the owner loses
+    // its mapping and the copy gets redirected onto the owner's file.
+    const surface = emptySurface({
+      interfaces: {
+        DataIntegrationAccessTokenResponseAccessToken: {
+          name: 'DataIntegrationAccessTokenResponseAccessToken',
+          fields: Object.fromEntries(
+            ['object', 'accessToken', 'expiresAt', 'scopes', 'missingScopes'].map((name) => [name, sdkField(name)]),
+          ),
+          extends: [],
+        },
+      },
+    });
+
+    const fields = ['object', 'access_token', 'expires_at', 'scopes', 'missing_scopes'].map(irField);
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        { name: 'DataIntegrationAccessTokenResponseWithAccessTokenAccessToken', fields },
+        { name: 'DataIntegrationAccessTokenResponseAccessToken', fields },
+      ],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('DataIntegrationAccessTokenResponseAccessToken')).toBe(
+      'DataIntegrationAccessTokenResponseAccessToken',
+    );
+    expect(lookup.modelNameByIR.has('DataIntegrationAccessTokenResponseWithAccessTokenAccessToken')).toBe(false);
+  });
+
+  it('reserves a derived name for its owner before a look-alike can claim it via Jaccard', () => {
+    // SDK `NoteResponse` derives from IR `Note`, but `ArchivedNote` has the same
+    // fields and sorts first. The derived-name pass must run for every model
+    // before Jaccard, or `ArchivedNote` takes `NoteResponse` by field overlap.
+    const surface = emptySurface({
+      interfaces: {
+        NoteResponse: {
+          name: 'NoteResponse',
+          fields: Object.fromEntries(['id', 'title', 'body'].map((name) => [name, sdkField(name)])),
+          extends: [],
+        },
+      },
+    });
+
+    const fields = ['id', 'title', 'body'].map(irField);
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        { name: 'ArchivedNote', fields },
+        { name: 'Note', fields },
+      ],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('Note')).toBe('NoteResponse');
+    expect(lookup.modelNameByIR.has('ArchivedNote')).toBe(false);
+  });
+
+  it('reserves an exact name before an earlier model can take it as a derived name', () => {
+    // IR `Pet` derives `PetResponse`, which IR `PetResponse` owns exactly but
+    // sorts later. Every exact match is reserved before any derived-name pass.
+    const surface = emptySurface({
+      interfaces: {
+        PetResponse: {
+          name: 'PetResponse',
+          fields: Object.fromEntries(['id', 'name', 'species'].map((name) => [name, sdkField(name)])),
+          extends: [],
+        },
+      },
+    });
+
+    const fields = ['id', 'name', 'species'].map(irField);
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        { name: 'Pet', fields },
+        { name: 'PetResponse', fields },
+      ],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('PetResponse')).toBe('PetResponse');
+    expect(lookup.modelNameByIR.has('Pet')).toBe(false);
   });
 
   it('field matching picks first interface when Jaccard scores tie', () => {

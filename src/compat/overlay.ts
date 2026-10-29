@@ -381,7 +381,10 @@ function sdkInterfaceFieldSignature(iface: ApiInterface): Set<string> {
  * 2. Field-structure matching (fallback):
  *    For IR models not matched by operations, compare their field names
  *    against all SDK interfaces using Jaccard similarity. A match requires
- *    ≥60% field overlap with ≥3 fields in common.
+ *    ≥60% field overlap with ≥3 fields in common. Exact and derived name
+ *    matches are reserved for every model first; only then does Jaccard
+ *    scoring run over what is still unmatched, so a structural look-alike can
+ *    never claim a name its real owner would have matched exactly.
  */
 function buildModelNameMap(
   surface: ApiSurface,
@@ -440,24 +443,28 @@ function buildModelNameMap(
 
   const sdkSignatureNames = new Set(sdkSignatures.map((s) => s.name));
 
-  for (const model of spec.models) {
-    if (mapped.has(model.name)) continue;
-    if (model.fields.length < 2) continue;
-
-    // Strategy 2a: Prefer exact name match — if the IR model name matches an SDK
-    // interface name exactly, use it without Jaccard scoring. This prevents
-    // false positives when a superset interface (e.g., DirectoryUserWithGroups)
-    // scores higher than the exact match (DirectoryUser).
+  // Strategy 2a: exact name matches, reserved for EVERY candidate before any
+  // fuzzier strategy runs. A structurally identical IR model that merely sorts
+  // earlier (e.g. a synthetic nested copy of an existing response shape) must
+  // not claim an SDK name another IR model owns outright: the owner would lose
+  // its mapping, and emitters that honor `fileBySymbol` would redirect the
+  // look-alike onto the owner's file. Exact matches also skip Jaccard scoring,
+  // which prevents false positives when a superset interface (e.g.,
+  // DirectoryUserWithGroups) scores higher than the exact match (DirectoryUser).
+  const candidates = spec.models.filter((model) => !mapped.has(model.name) && model.fields.length >= 2);
+  for (const model of candidates) {
     if (sdkSignatureNames.has(model.name) && !usedSdkNames.has(model.name)) {
       lookup.modelNameByIR.set(model.name, model.name);
       mapped.add(model.name);
       usedSdkNames.add(model.name);
-      continue;
     }
+  }
 
-    // Strategy 2a+: Try derived model names before falling back to Jaccard
-    const derivedNames = hints.derivedModelNames(model.name);
-    for (const derived of derivedNames) {
+  // Strategy 2a+: derived model names, again for every remaining candidate
+  // before Jaccard gets to claim anything.
+  for (const model of candidates) {
+    if (mapped.has(model.name)) continue;
+    for (const derived of hints.derivedModelNames(model.name)) {
       if (sdkSignatureNames.has(derived) && !usedSdkNames.has(derived)) {
         lookup.modelNameByIR.set(model.name, derived);
         mapped.add(model.name);
@@ -465,12 +472,16 @@ function buildModelNameMap(
         break;
       }
     }
+  }
+
+  // In strict mode, skip Jaccard entirely
+  if (options?.strictModelMatch) return;
+
+  // Strategy 2b: Fall back to Jaccard field-similarity matching for whatever
+  // no name-based pass could place.
+  for (const model of candidates) {
     if (mapped.has(model.name)) continue;
 
-    // In strict mode, skip Jaccard entirely
-    if (options?.strictModelMatch) continue;
-
-    // Strategy 2b: Fall back to Jaccard field-similarity matching
     const irFields = irModelFieldSignature(model);
     let bestMatch: string | null = null;
     let bestScore = 0;
