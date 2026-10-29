@@ -1,0 +1,10 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "repro", "version": "1" },
+  "servers": [{ "url": "https://{region}.pets.example.com", "variables": { "region": { "default": "EU" } } }],
+  "paths": {
+    "/pets": {
+      "get": { "operationId": "listPets", "responses": { "204": { "description": "ok" } } }
+    }
+  }
+}

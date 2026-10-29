@@ -11,6 +11,8 @@ const AFTER = resolve(FIXTURES, 'servers-after.json');
 const MOVED = resolve(FIXTURES, 'servers-moved.json');
 const ROOT_THEN_HOST = resolve(FIXTURES, 'servers-root-then-host.json');
 const HOST_THEN_ROOT = resolve(FIXTURES, 'servers-host-then-root.json');
+const REGION_UPPER = resolve(FIXTURES, 'servers-region-case-before.json');
+const REGION_LOWER = resolve(FIXTURES, 'servers-region-case-after.json');
 
 import { diffCommand } from '../../src/cli/diff.js';
 
@@ -88,6 +90,12 @@ describe('diffCommand — servers', () => {
         classification: 'breaking',
       },
     ]);
+  });
+
+  it("exits 1 when a variable default only changes the host's case (#406)", async () => {
+    const err: any = await diffCommand({ old: REGION_UPPER, new: REGION_LOWER }).catch((e) => e);
+    expect(err.exitCode).toBe(1);
+    expect(printedReport().changes.map((c) => [c.kind, c.classification])).toEqual([['server-modified', 'additive']]);
   });
 });
 
