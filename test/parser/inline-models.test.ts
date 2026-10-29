@@ -4055,6 +4055,52 @@ describe('a title two unions give different shapes at different depths of one ro
     expectConsistent(ir, ['Drawing']);
   });
 
+  /** Every keyword holding a schema that the parser never types, each wrapping `schema` the way it takes one (#375). */
+  const untypedKeywords: { keyword: string; under: (schema: SchemaObject) => SchemaObject }[] = [
+    ...[
+      'not',
+      'if',
+      'then',
+      'else',
+      'contains',
+      'propertyNames',
+      'additionalItems',
+      'unevaluatedProperties',
+      'unevaluatedItems',
+    ].map((keyword) => ({ keyword, under: (schema: SchemaObject) => ({ [keyword]: schema }) })),
+    { keyword: 'prefixItems', under: (schema) => ({ prefixItems: [schema] }) },
+    ...['$defs', 'definitions', 'dependentSchemas'].map((keyword) => ({
+      keyword,
+      under: (schema: SchemaObject) => ({ [keyword]: { other: schema } }),
+    })),
+  ];
+
+  it.each(untypedKeywords)(
+    'a union under $keyword, which the parser never types, contests no title (#375)',
+    async ({ under }) => {
+      // The issue's response: `shape` beside a union of other shapes that
+      // only the keyword holds. That union never becomes a model, so `shape`
+      // keeps `Circle` and `Square` as it does without it, in a response root
+      // and in the components root alike.
+      const drawing = obj({ id: { type: 'string' }, shape: byRadius() }, under(obj({ other: byDiameter() })));
+      for (const [spec, root] of [
+        [
+          doc(op('getDrawing', { responses: { '200': { description: 'ok', ...json(drawing) } } })),
+          'GetDrawingResponse',
+        ],
+        [doc({ paths: {}, components: { schemas: { Drawing: drawing } } }), 'Drawing'],
+      ] as const) {
+        const ir = await parseWithoutWarnings(spec);
+        const types = fieldTypesByModel(ir.models);
+        expect(types[root]).toEqual({ id: { kind: 'primitive', type: 'string' }, shape: unionOf('Circle', 'Square') });
+        expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+        expect(types['Square']).toEqual({ ...kind('square'), side: num });
+        expect(modelNames(ir)).toEqual(['Circle', root, 'Square']);
+        expectConsistent(ir, [root]);
+      }
+    },
+  );
+
   it('reads every component schema as one root, since their inline models are collected together', async () => {
     const ir = await parseWithoutWarnings(
       doc({
@@ -4196,6 +4242,33 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(inExample).map(isContestedTitle)).toEqual([false, false]);
       expect(variantsOf(inExtension).map(isContestedTitle)).toEqual([false, false]);
     });
+
+    /** Every keyword the parser types a schema through, each wrapping `schema` the way it takes one. */
+    const typedKeywords: typeof untypedKeywords = [
+      { keyword: 'properties', under: (schema) => obj({ marker: schema }) },
+      { keyword: 'patternProperties', under: (schema) => ({ patternProperties: { '^m': schema } }) },
+      { keyword: 'additionalProperties', under: (schema) => ({ additionalProperties: schema }) },
+      { keyword: 'items', under: (schema) => ({ type: 'array', items: schema }) },
+      { keyword: 'allOf', under: (schema) => ({ allOf: [schema] }) },
+      { keyword: 'oneOf', under: (schema) => ({ oneOf: [schema, n] }) },
+      { keyword: 'anyOf', under: (schema) => ({ anyOf: [schema, n] }) },
+    ];
+
+    it.each([
+      ...typedKeywords.map((entry) => ({ ...entry, contested: true })),
+      ...untypedKeywords.map((entry) => ({ ...entry, contested: false })),
+    ])(
+      'reads a union under $keyword only if the parser types a schema there: contested $contested (#375)',
+      ({ under, contested }) => {
+        // A union of other shapes beside `shape`, under the keyword: one the
+        // parser never types never becomes a model, so it contests nothing.
+        const top = byRadius();
+        const inner = byDiameter();
+        markContestedTitles({ components: { schemas: { Drawing: obj({ shape: top, holder: under(inner) }) } } });
+        expect(variantsOf(top).map(isContestedTitle)).toEqual([contested, contested]);
+        expect(variantsOf(inner).map(isContestedTitle)).toEqual([contested, contested]);
+      },
+    );
 
     it('does not descend into a `$ref`, and ignores a union that is not title-mapped', () => {
       const component = byRadius();
