@@ -1841,6 +1841,37 @@ describe("a component response's other media types and headers (issue #302)", ()
       expectSound(cardXListedFirst);
     });
 
+    it('two components whose stems coincide are still told apart by their bodies, in either path order (Greptile)', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // A schema `CardResponse` steps `Card`'s body to `CardResponse2`, whose
+      // stem is also that of `CardResponse2`'s own body, `CardResponse2Response`:
+      // both `Meta` headers derive `CardResponse2Meta`, and the components
+      // are ranked by their distinct body names, not by the stem they share.
+      const components = {
+        schemas: { CardResponse: object('id') },
+        responses: {
+          Card: { description: 'A card', headers: { Meta: { schema: object('trace') } } },
+          CardResponse2: { description: 'Another card', headers: { Meta: { schema: object('other') } } },
+        },
+      };
+      const getPet = {
+        '/pets': {
+          get: { operationId: 'getPet', responses: { '200': { $ref: '#/components/responses/CardResponse2' } } },
+        },
+      };
+      const notesFirst = await parse({ ...getNote, ...getPet }, components);
+      const petsFirst = await parse({ ...getPet, ...getNote }, components);
+      expect(warn).not.toHaveBeenCalled();
+
+      for (const spec of [notesFirst, petsFirst]) {
+        expect(sites(spec)).toEqual(['getNote Meta: CardResponse2Meta', 'getPet Meta: CardResponse2Meta2']);
+        expect(fieldsOf(spec, 'CardResponse2Meta')).toEqual([['trace', 'string']]);
+        expect(fieldsOf(spec, 'CardResponse2Meta2')).toEqual([['other', 'string']]);
+        expectSound(spec, ['CardResponse']);
+      }
+      expect(diffSpecs(notesFirst, petsFirst).changes).toEqual([]);
+    });
+
     it("an operation's own header that derives `CardXMeta` steps by operation, in either path order", async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const components = { responses: { Card: metaCard } };

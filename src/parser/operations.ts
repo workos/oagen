@@ -702,10 +702,9 @@ export function extractOperations(
   // is `CardXMeta`, `CardX`'s `Meta` `CardXMeta2`), and an operation's own
   // site that derives a component's name steps past it (`CardGetCardXMeta`),
   // whatever the order of the paths (workos/oagen#423). A component is
-  // ranked by the stem its sites carry (`responseModelSite`).
-  const componentRanks = new Map(
-    [...componentResponseNaming.values()].map(({ name }, rank) => [name.replace(/Response$/, ''), rank]),
-  );
+  // ranked by the name its body is shared under, which its sites carry
+  // (`componentSite`) and no other component's body takes.
+  const componentRanks = new Map([...componentResponseNaming.values()].map(({ name }, rank) => [name, rank]));
   const rankOf = ({ componentSite }: DeferredInlineType): number =>
     componentSite === undefined ? componentRanks.size : (componentRanks.get(componentSite) ?? componentRanks.size);
   const namingOrder = [...deferred].sort((a, b) => rankOf(a) - rankOf(b));
@@ -4571,13 +4570,16 @@ interface DeferredInlineType {
    */
   name: string;
   /**
-   * The component's stem (`Card`, `CardResponse2`; `responseModelSite`), set
-   * for a site a `components/responses` entry declares — its fallback or
+   * Set for a site a `components/responses` entry declares — its fallback or
    * error body (`<Component>Response`), an inline body under another media
    * type (`<Component><MediaType>Response`), an object-shaped header
-   * (`<Component><Header>`) — named after the component wherever the
-   * component is returned: a 404 of one operation, the `default` or a range
-   * of another. Every such site is a sibling of every other that derives the
+   * (`<Component><Header>`) — to the model name the component's body is
+   * shared under (`CardResponse`, `CardResponse2`; `sharedResponseModelName`),
+   * which no other component's body takes (its stem may: `CardResponse2` is
+   * also the stem of a component `CardResponse2`'s `CardResponse2Response`).
+   * Such a site is named after the component wherever the component is
+   * returned: a 404 of one operation, the `default` or a range of another.
+   * Every such site is a sibling of every other that derives the
    * same name, whatever its kind, and on a clash steps by number alike
    * (`ProblemResponse2`, `CardXMeta2`, `CardApplicationYamlResponse2`), never
    * by the operation or status code that mounted the component; and every
@@ -5161,7 +5163,7 @@ function extractResponseHeaders(
         parentName: site.headerParent,
         componentSchemas: ctx.componentSchemas,
         targets: [entry],
-        ...(site.shared && { componentSite: site.stem }),
+        ...(site.component !== undefined && { componentSite: site.component }),
       });
     }
     result.push(entry);
@@ -5988,8 +5990,13 @@ interface ContentModelNaming {
   role: 'Response' | 'Error';
   /** A status code, the key of a `4XX`/`5XX` range (`4XX`), or the label of a `default` or `1XX`–`3XX` response (`Default`, `Success`). */
   statusCode: number | string;
-  /** Set for a component response's body: a component site (`componentSite`), stepping by number on a clash. */
-  shared: boolean;
+  /**
+   * The model name a component response's body is shared under
+   * (`ResponseModelSite.component`), set for a component response: its
+   * bodies are component sites (`componentSite`), stepping by number on a
+   * clash.
+   */
+  component: string | undefined;
 }
 
 /**
@@ -6013,13 +6020,15 @@ interface ResponseModelSite {
    */
   stem: string;
   /**
-   * Set for a component response: its models are named from the component
-   * alone, so the same names come out of every operation that returns it, at
-   * whatever status code or fallback key, and the shape registry shares one
-   * model among them; on a clash they step by number (`componentSite`), so
-   * the stepped name depends on the component alone too.
+   * The model name a component response's body is shared under
+   * (`componentModelName`), set for a component response: its models are
+   * named from the component alone, so the same names come out of every
+   * operation that returns it, at whatever status code or fallback key, and
+   * the shape registry shares one model among them; on a clash they step by
+   * number (`componentSite`), so the stepped name depends on the component
+   * alone too.
    */
-  shared: boolean;
+  component: string | undefined;
   /** What qualifies a header's models: `stem` for a component response, the service for an inline one; none without a service. */
   headerParent: string | undefined;
 }
@@ -6059,10 +6068,10 @@ function responseModelSite(
   ctx: ResponseTypingContext,
 ): ResponseModelSite {
   const stem = (componentModelName ?? bodyName).replace(/Response$/, '');
-  if (componentModelName !== undefined) return { stem, shared: true, headerParent: stem };
+  if (componentModelName !== undefined) return { stem, component: componentModelName, headerParent: stem };
   return {
     stem,
-    shared: false,
+    component: undefined,
     headerParent: ctx.serviceName ? toPascalCase(ctx.serviceName) : undefined,
   };
 }
@@ -6080,7 +6089,12 @@ function contentModelNaming(
   role: 'Response' | 'Error',
   statusCode: number | string,
 ): ContentModelNaming {
-  return { base: site.stem, role: site.shared ? 'Response' : role, statusCode, shared: site.shared };
+  return {
+    base: site.stem,
+    role: site.component === undefined ? role : 'Response',
+    statusCode,
+    component: site.component,
+  };
 }
 
 /**
@@ -6162,7 +6176,7 @@ function typeSecondaryContent(
     operationQualifier: ctx.operationQualifier,
     componentSchemas: ctx.componentSchemas,
     targets: [target],
-    ...(naming.shared && { componentSite: naming.base }),
+    ...(naming.component !== undefined && { componentSite: naming.component }),
   });
   return target.type;
 }
@@ -6325,7 +6339,6 @@ function fillFallbackResponse(
       : deriveErrorModelName(sink.op, sink.pathModelBaseName, errorRange);
   const contextName = componentModelName ?? operationName;
   const site = responseModelSite(componentModelName, operationName, sink.ctx);
-  const componentSite = site.shared ? site.stem : undefined;
   const json = jsonResponseSchema(resp);
   // Shared by reference with the deferred body, so the content entry of the
   // media type `type` was read from can join it once it exists.
@@ -6333,8 +6346,8 @@ function fillFallbackResponse(
   if (json) {
     entry.type =
       errorRange === undefined
-        ? typeFallbackBody(json.schema, contextName, label, sink, targets, componentSite)
-        : typeErrorBody(json.schema, contextName, errorRange, sink.ctx, targets, componentSite);
+        ? typeFallbackBody(json.schema, contextName, label, sink, targets, componentModelName)
+        : typeErrorBody(json.schema, contextName, errorRange, sink.ctx, targets, componentModelName);
   }
   const contents = extractResponseContents(
     resp.content,
@@ -6791,14 +6804,7 @@ function extractResponses(
       const entry: ErrorResponse = { statusCode: code, type: undefined };
       const targets: Array<{ type?: TypeRef }> = [entry];
       const type = json
-        ? typeErrorBody(
-            json.schema,
-            componentModelName ?? bodyName,
-            code,
-            ctx,
-            targets,
-            site.shared ? site.stem : undefined,
-          )
+        ? typeErrorBody(json.schema, componentModelName ?? bodyName, code, ctx, targets, componentModelName)
         : undefined;
       entry.type = type;
       const contents = extractResponseContents(
