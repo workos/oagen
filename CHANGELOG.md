@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.33.0](https://github.com/workos/oagen/compare/v0.32.1...v0.33.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **differ:** make a host moved in front of a listed `/` breaking ([#451](https://github.com/workos/oagen/issues/451))
+
+### Bug Fixes
+
+* **compat:** reserve exact-name model matches before Jaccard inference ([#486](https://github.com/workos/oagen/issues/486)) ([76c0311](https://github.com/workos/oagen/commit/76c0311cd7f77297f8c51e8bfd19177ffc1c0244))
+* **differ:** make a host moved in front of a listed `/` breaking ([#451](https://github.com/workos/oagen/issues/451)) ([2e14498](https://github.com/workos/oagen/commit/2e14498c8688f7366823b93439b6260087716e40))
+* **smoke:** say so when an operation declares no responses ([#448](https://github.com/workos/oagen/issues/448)) ([2bf3758](https://github.com/workos/oagen/commit/2bf3758dede382039b061226320e027e30290a44))
+
 ## [0.32.1](https://github.com/workos/oagen/compare/v0.32.0...v0.32.1) (2026-10-26)
 
 
