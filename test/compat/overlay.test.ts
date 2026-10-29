@@ -516,6 +516,50 @@ describe('buildOverlayLookup', () => {
     expect(lookup.modelNameByIR.get('ControllerOrgResponse')).toBe('Organization');
   });
 
+  it('reserves exact-name interfaces before a look-alike can claim them via Jaccard', () => {
+    // A synthetic nested copy of an existing response shape (identical fields)
+    // sorts before the model that owns the SDK name. Jaccard must not run for
+    // the copy until every exact match has been reserved, or the owner loses
+    // its mapping and the copy gets redirected onto the owner's file.
+    const sdkField = (name: string) => ({ name, type: 'string', optional: false });
+    const surface = emptySurface({
+      interfaces: {
+        DataIntegrationAccessTokenResponseAccessToken: {
+          name: 'DataIntegrationAccessTokenResponseAccessToken',
+          fields: Object.fromEntries(
+            ['object', 'accessToken', 'expiresAt', 'scopes', 'missingScopes'].map((name) => [name, sdkField(name)]),
+          ),
+          extends: [],
+        },
+      },
+    });
+
+    const irField = (name: string): ApiSpec['models'][number]['fields'][number] => ({
+      name,
+      type: { kind: 'primitive', type: 'string' },
+      required: true,
+    });
+    const fields = ['object', 'access_token', 'expires_at', 'scopes', 'missing_scopes'].map(irField);
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: '',
+      services: [],
+      enums: [],
+      models: [
+        { name: 'DataIntegrationAccessTokenResponseWithAccessTokenAccessToken', fields },
+        { name: 'DataIntegrationAccessTokenResponseAccessToken', fields },
+      ],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const lookup = buildOverlayLookup(surface, undefined, spec);
+    expect(lookup.modelNameByIR.get('DataIntegrationAccessTokenResponseAccessToken')).toBe(
+      'DataIntegrationAccessTokenResponseAccessToken',
+    );
+    expect(lookup.modelNameByIR.has('DataIntegrationAccessTokenResponseWithAccessTokenAccessToken')).toBe(false);
+  });
+
   it('field matching picks first interface when Jaccard scores tie', () => {
     const surface = emptySurface({
       interfaces: {
