@@ -86,6 +86,7 @@ export type DeprecatedNode =
     }
   | { node: 'model'; modelName: string }
   | { node: 'field'; modelName: string; fieldName: string }
+  | { node: 'envelope-field'; serviceName: string; operationName: string; fieldName: string }
   | { node: 'enum'; enumName: string }
   | { node: 'enum-value'; enumName: string; valueName: string }
   | { node: 'webhook'; name: string; httpMethod: string }
@@ -542,14 +543,21 @@ export interface OperationModified {
   oldExtensions?: Extensions;
   newExtensions?: Extensions;
   /**
-   * The fields of the list envelope (`Operation.pagination.envelopeFields`)
-   * whose `extensions` differ, one `field-extensions-changed` entry each
-   * with the two sides beside it, matched by field name while both specs
-   * paginate. Present only when there is at least one. A scalar companion
-   * (`has_more`) sits on no model `diffModels` reads, so this is where its
-   * change is reported; a companion object's model is compared in the
-   * models diff like any model. No other property of an envelope field is
-   * compared by the differ.
+   * What changed about the list envelope's fields
+   * (`Operation.pagination.envelopeFields`, which an emitter types the
+   * envelope from), matched by field name while both specs paginate and
+   * compared as a model's fields are (`diffFields`), an absent list reading
+   * as no field. Each entry is classified as on a response-only model, since
+   * the envelope is only ever read: a field added is additive, required or
+   * not; one removed or retyped is breaking, but for an inline union that
+   * only gained variants; format, requiredness, access flags, `deprecated`
+   * and extensions are judged as on any model's field. The operation is
+   * breaking when an entry is. Present only when there is at least one. A
+   * scalar companion (`has_more`) sits on no model `diffModels` reads, so
+   * this is where its change is reported; a companion object's own fields
+   * are compared in the models diff like any model's, and its envelope field
+   * is an entry here only when the field itself changes, the model it names
+   * included.
    */
   envelopeFieldChanges?: FieldChange[];
   /**
