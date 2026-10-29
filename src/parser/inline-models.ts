@@ -769,17 +769,25 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * `webhooks` or `components` alike — is a root of its own. The same title
  * given two shapes by two roots is not contested here: the passes that merge
  * the roots' models decide it (the first owner keeps the name, and a later
- * shape is renamed or dropped with a warning).
+ * shape is renamed or dropped with a warning). A component an inline `allOf`
+ * merges into one model (`readInlineAllOf`: `'merged'`) is read with that
+ * root too, as far as the merge reads it: the model carries the component's
+ * properties beside its inline members' (`mergeAllOfMembers`), so every
+ * property it inherits through a `$ref` member is walked under the root,
+ * each once (workos/oagen#374: as a response, `allOf: [{ $ref: Base },
+ * { … }]` kept a title `Base.shape` and the inline `marker.shape` give
+ * different shapes, and one union resolved to the other's models).
  *
  * Within a root, the walk follows the keywords the parser types a schema
  * through only — `properties`, `patternProperties`, `additionalProperties`,
  * `items` and `allOf`/`oneOf`/`anyOf` — so a property named `schema` or
  * `title` is a property, a `$ref` is a reference to a component read under
- * the components root, not descended into, and a union under `not`,
- * `if`/`then`/`else`, `$defs`/`definitions`, `dependentSchemas`, `contains`,
- * `prefixItems`, `propertyNames` or another keyword the parser never reads
- * never becomes a model, so it contests no title (`schemaShapeKey` still
- * compares them). The roots are found by following the OpenAPI object model
+ * the components root, not descended into (a merged `allOf`'s `$ref` member
+ * aside, see above), and a union under `not`, `if`/`then`/`else`,
+ * `$defs`/`definitions`, `dependentSchemas`, `contains`, `prefixItems`,
+ * `propertyNames` or another keyword the parser never reads never becomes a
+ * model, so it contests no title (`schemaShapeKey` still compares them).
+ * The roots are found by following the OpenAPI object model
  * (`schemaRootsOf`), the way the operation, response and webhook readers
  * do, so a name is never mistaken for a specification extension: a header
  * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
@@ -799,6 +807,8 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * external schema inlined twice as one object — is read under each root and
  * compared with each root's other variants, and a mark from either root
  * stands: the shared variant's title is then qualified wherever it appears.
+ * So does a component's union a root reads through a merged `allOf`: a mark
+ * there qualifies the component's own variants too (`CircleBaseShape`).
  * Within a root the same holds per claim group: a union object reached
  * under two groups — nested in `shape`, where an earlier union of the group
  * already claimed its title, and again as `wrapper.marker`, where it keeps
@@ -813,8 +823,13 @@ export function markContestedTitles(document: unknown): void {
   if (!isRecord(document)) return;
   const components = isRecord(document['components']) ? document['components'] : undefined;
   const schemas = components?.['schemas'];
-  if (isRecord(schemas)) markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord));
-  for (const root of schemaRootsOf(document, components)) markContestedTitlesUnderRoot([root]);
+  // What a merged `allOf`'s `$ref` members resolve against: this document's
+  // components only, none when it declares none.
+  const componentSchemas = isRecord(schemas) ? (schemas as Record<string, SchemaObject>) : {};
+  if (isRecord(schemas)) {
+    markContestedTitlesUnderRoot(Object.values(schemas).filter(isSchemaRecord), componentSchemas);
+  }
+  for (const root of schemaRootsOf(document, components)) markContestedTitlesUnderRoot([root], componentSchemas);
 }
 
 /** A plain object: the only value that can be a schema or a container of them. */
@@ -952,12 +967,21 @@ function schemaRootsOf(
  * title no claim there, an earlier variant having claimed it) is read again
  * under a property that starts a group of its own, where the same title is
  * a claim — and a schema that refers back to itself is stopped by the
- * ancestors on the path to it, which ends the walk.
+ * ancestors on the path to it, which ends the walk. `componentSchemas`
+ * resolves the `$ref` members of a merged `allOf`, whose inherited
+ * properties are read here too (`inheritedAllOfProperties`).
  */
-function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
+function markContestedTitlesUnderRoot(
+  roots: readonly SchemaObject[],
+  componentSchemas: Record<string, SchemaObject>,
+): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
   const visitedByGroup = new WeakMap<Set<string>, WeakSet<SchemaObject>>();
   const ancestors = new Set<SchemaObject>();
+  // The properties a merged `allOf` inherited, each read once: a property
+  // starts a group of its own, so a second read finds the same claims, and a
+  // chain of components each merging the next would be read once per path.
+  const inheritedRead = new WeakSet<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
   // already claimed for the union this schema is reached from without
   // entering an object. Only the first variant of a group to carry a title
@@ -984,7 +1008,8 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
     // `properties` written beside the union folded into them
     // (`foldSiblingProperties`). The marks go on the document's variants,
     // which every later fold's copies are read through (`isContestedTitle`).
-    for (const [variant, title] of titleMappedVariantNames(foldSiblingProperties(schema))) {
+    const folded = foldSiblingProperties(schema);
+    for (const [variant, title] of titleMappedVariantNames(folded)) {
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
       if (!claims.has(title)) {
         claims.add(title);
@@ -1015,12 +1040,38 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
         for (const sub of value) if (isSchemaRecord(sub)) walk(sub, inherited);
       }
     }
+    // A `$ref` member of an `allOf` merged into one model is no reference:
+    // the model carries what the merge inherits through it beside its inline
+    // members' properties, so those properties are read with this root, each
+    // a group of its own like any property.
+    for (const property of inheritedAllOfProperties(folded, componentSchemas)) {
+      if (inheritedRead.has(property)) continue;
+      inheritedRead.add(property);
+      walk(property);
+    }
     ancestors.delete(schema);
   };
   for (const root of roots) walk(root);
   for (const { shapes, variants } of byTitle.values()) {
     if (shapes.size > 1) for (const variant of variants) contestedTitledVariants.add(variant);
   }
+}
+
+/**
+ * The properties an inline `allOf` read as one merged model
+ * (`readInlineAllOf`: `'merged'`) inherits from the components its `$ref`
+ * members name — every property `mergeAllOfMembers` reads through a
+ * reference, a component's `allOf` chain included — and none for any other
+ * schema. A `$ref` the merge does not follow (one under a variant), and a
+ * union a component carries, which the merge leaves to that component, add
+ * nothing.
+ */
+function inheritedAllOfProperties(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject>,
+): SchemaObject[] {
+  if (!schema.allOf || readInlineAllOf(schema.allOf, schema, componentSchemas) !== 'merged') return [];
+  return mergeAllOfMembers(schema, componentSchemas).properties.flatMap((p) => (p.origin ? [p.schema] : []));
 }
 
 /**
