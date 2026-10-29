@@ -874,13 +874,28 @@ export interface Parameter {
    * `content` and the map is read (see `type`) — a schema-less `text/plain`
    * entry included; absent for a `schema` parameter, and for a `content`
    * map none of whose media types is read, whose string value is sent as
-   * written. An emitter that serializes parameters by `style` and `explode`
-   * must instead serialize such a value in this media type: JSON-encode an
-   * `application/json` or `+json` value, send a `text/plain` value as text.
-   * `oagen diff` compares it by essence and reports a change as a breaking
-   * `param-content-type-changed`.
+   * written (`contentTypes` keeps that map's media types). An emitter that
+   * serializes parameters by `style` and `explode` must instead serialize
+   * such a value in this media type: JSON-encode an `application/json` or
+   * `+json` value, send a `text/plain` value as text. `oagen diff` compares
+   * it by essence — an unread map by the first of its `contentTypes` — and
+   * reports a change as a `param-content-type-changed`, breaking unless both
+   * sides are read from a JSON media type.
    */
   contentType?: string;
+  /**
+   * The media types the parameter's `content` map declares: its keys, in
+   * document order and exactly as written. Present when the parameter is
+   * declared with `content` and the map declares at least one media type,
+   * whether or not one of them is read (`contentType` is the one that is),
+   * as `Operation.requestBodyContentTypes` is for a request body; absent for
+   * a `schema` parameter, a `schema` beside the map included. OpenAPI allows
+   * the map one entry. For a map none of whose media types is read, this is
+   * where the media type the document declares the value in is kept: the
+   * value is typed as a string and sent as written, so an emitter has
+   * nothing to encode.
+   */
+  contentTypes?: string[];
   /**
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
