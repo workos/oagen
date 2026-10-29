@@ -728,12 +728,23 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
+  // A `oneOf`/`anyOf` that types the property (`classifyInlineSchema`) with
+  // more than one variant once every `null` one is set aside (`isNullSchema`)
+  // is a union, the body's own field, however many variants carry a const
+  // and whatever properties are written beside it: unwrapping it would type
+  // the response as one variant, or as those properties alone, and drop the
+  // rest (#415). A union of bare constraint sets does not type the property;
+  // it only limits the object.
+  const variants = (propSchema.oneOf ?? propSchema.anyOf)?.filter((v) => !isNullSchema(v)) ?? [];
+  if (variants.length > 1 && classifyInlineSchema(propSchema) === 'union') return false;
+
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
 
-  // oneOf with object + null (nullable resource)
+  // A `oneOf` of one such object, with or without `null` variants (a
+  // nullable resource).
   if (propSchema.oneOf) {
-    return propSchema.oneOf.some((v) => v.type === 'object' && hasDiscriminantConstField(v) !== null);
+    return variants.length === 1 && variants[0].type === 'object' && hasDiscriminantConstField(variants[0]) !== null;
   }
 
   return false;
@@ -759,8 +770,8 @@ function extractWrappedResource(
       const modelName = deriveModelName(objectVariant, resourceName);
       // `oneOf: [object, null]` is a nullable wrapper: the model built from
       // its one branch takes the wrapper's `deprecated` and limits, as every
-      // other nullable unwrap gives it (`collapsedNullableBranch`); a
-      // multi-variant union's variant is built as written.
+      // other nullable unwrap gives it (`collapsedNullableBranch`); otherwise
+      // the variant is built as written.
       const source = collapsedNullableBranch(propSchema) ?? objectVariant;
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
