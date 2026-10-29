@@ -31,6 +31,7 @@ export async function generateCommand(opts: {
   mountRules?: Record<string, string>;
   modelHints?: Record<string, string>;
   fieldHints?: Record<string, Record<string, string>>;
+  collapseErrorBodies?: boolean;
   emitterOptions?: Record<string, unknown>;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
@@ -39,6 +40,7 @@ export async function generateCommand(opts: {
     transformSpec: opts.transformSpec,
     fieldHints: opts.fieldHints,
     operationHints: opts.operationHints,
+    collapseErrorBodies: opts.collapseErrorBodies,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);

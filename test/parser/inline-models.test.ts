@@ -26,6 +26,10 @@ import {
   type Operation,
   type TypeRef,
 } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 /** A cursor parameter, so a list envelope is unwrapped for the iterator it drives (#309). */
 const afterParam = [{ name: 'after', in: 'query', schema: { type: 'string' } }];
@@ -58,7 +62,7 @@ async function parseTempSpec(spec: Record<string, unknown>): Promise<Awaited<Ret
   const specFile = path.join(tmpDir, 'spec.json');
   try {
     await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(specFile);
+    return await parseSpec(specFile, { collapseErrorBodies: false });
   } finally {
     await fs.rm(tmpDir, { recursive: true });
   }
@@ -4612,6 +4616,7 @@ describe('a title two unions give different shapes at different depths of one ro
     try {
       await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
       const ir = await parseSpec(specFile, {
+        collapseErrorBodies: false,
         transformSpec: (document) => {
           // The response's `shape` becomes the very object the body's is.
           type Node = Record<string, unknown>;

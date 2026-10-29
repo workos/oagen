@@ -17,6 +17,10 @@ import {
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Enum, Model, Operation, ResponseContent, Service, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/response-content-types.yml');
@@ -27,7 +31,7 @@ async function parseDocument(document: Record<string, unknown>): Promise<ApiSpec
   try {
     const file = join(dir, 'spec.json');
     writeFileSync(file, JSON.stringify(document));
-    return await parseSpec(file);
+    return await parseSpec(file, { collapseErrorBodies: false });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -121,7 +125,7 @@ describe('response content types', () => {
 
   describe('through parseSpec (issue #211 repro)', () => {
     it('keeps every media type of the card beside the unchanged fixed-order pick', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const card = findOp(spec, 'renderPetCard');
 
       // The fixed-order pick is untouched: the PDF still wins and reads as binary.
@@ -150,7 +154,7 @@ describe('response content types', () => {
     });
 
     it('shares the primary entry with `response`, and the operation lists with the primary success entry', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const report = findOp(spec, 'getReport');
       expect(report.responseContents?.[0].contentType).toBe('application/json');
       expect(report.responseContents?.[0].type).toBe(report.response);
@@ -167,7 +171,7 @@ describe('response content types', () => {
     });
 
     it('keeps media types verbatim — parameters, vendor suffixes and wildcards — in document order', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       expect(findOp(spec, 'getReport').responseContentTypes).toEqual([
         'application/json',
         'application/vnd.api+json',
@@ -177,7 +181,7 @@ describe('response content types', () => {
     });
 
     it('types a secondary media type the way the fixed-order pick would had it been declared alone', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const exports = findOp(spec, 'downloadExport');
       // Outside the fixed order the schema decides, and no schema is unknown.
       expect(typeOf(exports, '*/*')).toEqual({ kind: 'primitive', type: 'string', format: 'binary' });
@@ -196,7 +200,7 @@ describe('response content types', () => {
 
     it('materializes an inline body under a secondary media type as a model named after it, nested objects included', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
 
       expect(findOp(spec, 'getReport').responseContents?.[1]).toEqual({
         contentType: 'application/vnd.api+json',
@@ -222,7 +226,7 @@ describe('response content types', () => {
     });
 
     it('resolves every model and enum reachable only through a content entry', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const modelNames = new Set(spec.models.map((m) => m.name));
       const enumNames = new Set(spec.enums.map((e) => e.name));
       const walked: string[] = [];
@@ -262,7 +266,7 @@ describe('response content types', () => {
     });
 
     it('shares one model for an identical inline shape on another status code and re-derives a different one by code', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const job = findOp(spec, 'startJob');
       const ndjson = (code: number) => job.successResponses!.find((r) => r.statusCode === code)!.contents![1].type;
       expect(ndjson(200)).toEqual({ kind: 'model', name: 'StartJobApplicationXNdjsonResponse' });
@@ -274,7 +278,7 @@ describe('response content types', () => {
     });
 
     it('steps around a component schema that already owns the derived name with a different shape', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       expect(findOp(spec, 'getCard').responseContents?.[1].type).toEqual({
         kind: 'model',
         name: 'GetCardApplicationVndCardJsonResponse200',
@@ -284,7 +288,7 @@ describe('response content types', () => {
     });
 
     it('promotes an inline enum under a secondary media type to spec.enums', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       expect(findOp(spec, 'getStatus').responseContents?.[1].type).toMatchObject({
         kind: 'enum',
         name: 'GetStatusApplicationVndStatusJsonResponse',
@@ -294,7 +298,7 @@ describe('response content types', () => {
     });
 
     it('leaves a response that declares no media type without the fields', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const health = findOp(spec, 'getHealth');
       expect(Object.keys(health)).not.toContain('responseContentTypes');
       expect(Object.keys(health)).not.toContain('responseContents');
@@ -308,7 +312,7 @@ describe('response content types', () => {
     });
 
     it("types a redirect's body without reading it into the redirect's unknown type", async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const legacy = findOp(spec, 'getLegacy');
       expect(legacy.response).toEqual({ kind: 'primitive', type: 'unknown' });
       expect(legacy.responseContentTypes).toEqual(['text/html']);
@@ -320,7 +324,7 @@ describe('response content types', () => {
     });
 
     it('keeps error media types, sharing the application/json entry with `type`', async () => {
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const [notFound, problem] = findOp(spec, 'renderPetCard').errors;
 
       expect(notFound.statusCode).toBe(404);
@@ -345,7 +349,7 @@ describe('response content types', () => {
 
     it('materializes an inline application/json error body under `<Op>Error<code>`, shared with its content entry, with no warning', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const report = findOp(spec, 'getReport');
       const [invalid] = report.errors;
 

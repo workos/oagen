@@ -49,6 +49,7 @@ let configOperationHints: Record<string, import('../ir/operation-hints.js').Oper
 let configMountRules: Record<string, string> | undefined;
 let configModelHints: Record<string, string> | undefined;
 let configFieldHints: Record<string, Record<string, string>> | undefined;
+let configCollapseErrorBodies: boolean | undefined;
 let configEmitterOptions: Record<string, Record<string, unknown>> | undefined;
 let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
@@ -64,6 +65,7 @@ try {
     configMountRules = config.mountRules;
     configModelHints = config.modelHints;
     configFieldHints = config.fieldHints;
+    configCollapseErrorBodies = config.collapseErrorBodies;
     configEmitterOptions = config.emitterOptions;
     configCompat = config.compat;
   }
@@ -125,6 +127,7 @@ program
       mountRules: configMountRules,
       modelHints: configModelHints,
       fieldHints: configFieldHints,
+      collapseErrorBodies: configCollapseErrorBodies,
       emitterOptions: configEmitterOptions?.[opts.lang],
     }).catch(handleError);
   });

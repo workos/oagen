@@ -92,6 +92,12 @@ export interface OagenConfig {
    */
   fieldHints?: Record<string, Record<string, string>>;
   /**
+   * Fold inline error bodies onto shared, shape-named models (`ErrorBody`,
+   * `ErrorBodyWithCode`). On by default; `false` keeps `<Op>Error<code>` per
+   * operation and status code. See `ParseOptions.collapseErrorBodies`.
+   */
+  collapseErrorBodies?: boolean;
+  /**
    * Language-specific emitter options. The CLI passes only the active
    * language's option bag to that emitter.
    */
