@@ -1663,6 +1663,89 @@ describe('two typing declarations of one name conjoin as JSON Schema applies bot
     expect(fieldsOf(models['PageResult'])).toEqual(['items: array', 'total_pages?: integer']);
     expectSound(ir, ['A', 'B', 'Holder', 'Page']);
   });
+
+  it('conjoins a $ref to an object component and an inline object as the allOf of both, in either order (#432)', async () => {
+    const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+    const page = ref('PetPage');
+    const more = obj({ has_more: { type: 'boolean' } });
+    // A component that is no object: the inline object beside it does not
+    // make it one, so the first declaration types the property, as before.
+    const pets = ref('Pets');
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {},
+      components: {
+        schemas: {
+          Pet: obj({ name: { type: 'string' } }),
+          PetPage: obj({ items: { type: 'array', items: ref('Pet') }, owner: obj({ name: { type: 'string' } }) }),
+          Pets: { type: 'array', items: ref('Pet') },
+          RefFirst: { allOf: [obj({ result: page }), obj({ result: total })] },
+          InlineFirst: { allOf: [obj({ result: total }), obj({ result: page })] },
+          // A third declaration conjoins with the conjunction, wherever the `$ref` sits.
+          RefThenTwo: { allOf: [obj({ result: page }), obj({ result: total }), obj({ result: more })] },
+          RefBetween: { allOf: [obj({ result: total }), obj({ result: page }), obj({ result: more })] },
+          // The flags and documentation a declaration gives the field stay the field's.
+          Documented: {
+            allOf: [obj({ result: { ...total, description: 'The page', readOnly: true } }), obj({ result: page })],
+          },
+          ArrayFirst: { allOf: [obj({ result: pets }), obj({ result: total })] },
+          ArrayLast: { allOf: [obj({ result: total }), obj({ result: pets })] },
+          // A declaration inherited through a `$ref` member conjoins the same way.
+          RefHolder: obj({ result: page }),
+          Extended: { allOf: [ref('RefHolder'), obj({ result: total })] },
+          // An inline `allOf` merge reads the same declaration.
+          Holder: obj({ value: { allOf: [obj({ result: total }), obj({ result: page })] } }),
+          // So do the items of two arrays (#431).
+          Listed: {
+            allOf: [
+              obj({ data: { type: 'array', items: ref('Pet') } }),
+              obj({ data: { type: 'array', items: obj({ extra: { type: 'string' } }) } }),
+            ],
+          },
+        },
+      },
+    });
+    const models = modelsByName(ir);
+    const pageFields = ['items?: array', 'owner?: PetPageOwner'];
+    for (const [name, resultFields] of [
+      ['RefFirst', [...pageFields, 'total_pages?: integer']],
+      ['InlineFirst', ['total_pages?: integer', ...pageFields]],
+      ['RefThenTwo', [...pageFields, 'total_pages?: integer', 'has_more?: boolean']],
+      ['RefBetween', ['total_pages?: integer', ...pageFields, 'has_more?: boolean']],
+      ['Documented', ['total_pages?: integer', ...pageFields]],
+      ['Extended', [...pageFields, 'total_pages?: integer']],
+      ['HolderValue', ['total_pages?: integer', ...pageFields]],
+    ] as const) {
+      // `result` is a `PetPage` that also has `total_pages`: the fields it
+      // inherits are typed as `PetPage` types them (`PetPageOwner`).
+      expect(fieldsOf(models[name]), name).toEqual([`result?: ${name}Result`]);
+      expect(fieldsOf(models[`${name}Result`]), name).toEqual(resultFields);
+    }
+    const documented = models['Documented']!.fields[0]!;
+    expect([documented.description, documented.readOnly]).toEqual(['The page', true]);
+    expect(models['ArrayFirst']!.fields[0]!.type).toEqual({ kind: 'array', items: model('Pet') });
+    expect(fieldsOf(models['ArrayLast'])).toEqual(['result?: ArrayLastResult']);
+    expect(fieldsOf(models['ArrayLastResult'])).toEqual(['total_pages?: integer']);
+    expect(models['Listed']!.fields[0]!.type).toEqual({ kind: 'array', items: model('ListedData') });
+    expect(fieldsOf(models['ListedData'])).toEqual(['name?: string', 'extra?: string']);
+    expectSound(ir, [
+      'Pet',
+      'PetPage',
+      'Pets',
+      'RefFirst',
+      'InlineFirst',
+      'RefThenTwo',
+      'RefBetween',
+      'Documented',
+      'ArrayFirst',
+      'ArrayLast',
+      'RefHolder',
+      'Extended',
+      'Holder',
+      'Listed',
+    ]);
+  });
 });
 
 describe('the origin of an inherited field is the component whose model carries it (Greptile, #308 round 4)', () => {
