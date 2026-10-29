@@ -4101,6 +4101,140 @@ describe('a title two unions give different shapes at different depths of one ro
     },
   );
 
+  /** A title-mapped union's TypeRef, its variants in `mapping` order (#373). */
+  const mappedUnion = (mapping: Record<string, string>) => ({
+    kind: 'union',
+    compositionKind: 'oneOf',
+    variants: Object.values(mapping).map(model),
+    discriminator: { property: 'kind', mapping },
+  });
+  /** #373's union: two variants titled `Circle`, told apart by `kind` (`c1`, `c2`). */
+  const circleTwice = (first: string, later: string): SchemaObject => ({
+    oneOf: [
+      obj({ kind: { const: 'c1' }, [first]: n }, { title: 'Circle' }),
+      obj({ kind: { const: 'c2' }, [later]: n }, { title: 'Circle' }),
+    ],
+  });
+  const triangle = (fields: Record<string, SchemaObject>): SchemaObject =>
+    obj({ kind: { const: 'triangle' }, ...fields }, { title: 'Triangle' });
+
+  it.each<{ label: string; spec: (drawing: SchemaObject) => Record<string, unknown>; root: string }>([
+    {
+      label: 'a component schema',
+      spec: (drawing) => doc({ paths: {}, components: { schemas: { Drawing: drawing } } }),
+      root: 'Drawing',
+    },
+    {
+      label: 'a request body',
+      spec: (drawing) =>
+        doc({
+          paths: {
+            '/drawings': {
+              post: {
+                operationId: 'createDrawing',
+                requestBody: json(drawing),
+                responses: { '204': { description: 'ok' } },
+              },
+            },
+          },
+        }),
+      root: 'CreateDrawingRequest',
+    },
+  ])('qualifies a later variant that repeats a contested title too, under $label (#373)', async ({ spec, root }) => {
+    // The issue's `repeat.json`: `shape` and `marker.shape` each title two
+    // variants `Circle`. Their first ones, `{ radius }` and `{ x }`, contest
+    // the title, and the later ones carry it too, so all four take their
+    // context-qualified names — the later ones used to keep the bare
+    // `Circle`, one model for `{ diameter }` and `{ z }`.
+    const ir = await parseWithoutWarnings(
+      spec(
+        obj({
+          id: { type: 'string' },
+          shape: circleTwice('radius', 'diameter'),
+          marker: obj({ shape: circleTwice('x', 'z') }),
+        }),
+      ),
+    );
+    const types = fieldTypesByModel(ir.models);
+    expect(types[root]).toEqual({
+      id: { kind: 'primitive', type: 'string' },
+      shape: mappedUnion({ c1: `Circle${root}Shape`, c2: `${root}ShapeWithDiameter` }),
+      marker: model(`${root}Marker`),
+    });
+    expect(types[`${root}Marker`]).toEqual({
+      shape: mappedUnion({ c1: `Circle${root}MarkerShape`, c2: `${root}MarkerShapeWithZ` }),
+    });
+    expect(types[`Circle${root}Shape`]).toEqual({ ...kind('c1'), radius: num });
+    expect(types[`${root}ShapeWithDiameter`]).toEqual({ ...kind('c2'), diameter: num });
+    expect(types[`Circle${root}MarkerShape`]).toEqual({ ...kind('c1'), x: num });
+    expect(types[`${root}MarkerShapeWithZ`]).toEqual({ ...kind('c2'), z: num });
+    expect(modelNames(ir)).toEqual(
+      [
+        root,
+        `${root}Marker`,
+        `Circle${root}Shape`,
+        `${root}ShapeWithDiameter`,
+        `Circle${root}MarkerShape`,
+        `${root}MarkerShapeWithZ`,
+      ].sort(),
+    );
+    expectConsistent(ir, [root]);
+  });
+
+  it("qualifies a later variant among an array variant's items too, at both depths (#373)", async () => {
+    // The issue's array case: at each depth `shape` is a `Circle | Square`
+    // union beside an array of `Circle | Triangle`. The first `Circle`s,
+    // `{ radius }` and `{ x }`, contest the title, so the items' `Circle`s are
+    // qualified with them instead of both keeping the bare `Circle`, one model
+    // for `{ diameter }` and `{ z }`. `Square` and `Triangle` are the same at
+    // both depths, so they are kept and shared.
+    const shapes = (first: string, later: string): SchemaObject => ({
+      oneOf: [
+        { oneOf: [circle({ [first]: n }), square({ side: n })] },
+        { type: 'array', items: { oneOf: [circle({ [later]: n }), triangle({ base: n })] } },
+      ],
+    });
+    const ir = await parseWithoutWarnings(
+      doc({
+        paths: {},
+        components: {
+          schemas: { Drawing: obj({ shape: shapes('radius', 'diameter'), marker: obj({ shape: shapes('x', 'z') }) }) },
+        },
+      }),
+    );
+    const shapeUnion = (head: string, items: string) => ({
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [
+        mappedUnion({ circle: head, square: 'Square' }),
+        { kind: 'array', items: mappedUnion({ circle: items, triangle: 'Triangle' }) },
+      ],
+    });
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Drawing']).toEqual({
+      shape: shapeUnion('CircleDrawingShape', 'CircleDrawingShapeItem'),
+      marker: model('DrawingMarker'),
+    });
+    expect(types['DrawingMarker']).toEqual({
+      shape: shapeUnion('CircleDrawingMarkerShape', 'CircleDrawingMarkerShapeItem'),
+    });
+    expect(types['CircleDrawingShape']).toEqual({ ...kind('circle'), radius: num });
+    expect(types['CircleDrawingShapeItem']).toEqual({ ...kind('circle'), diameter: num });
+    expect(types['CircleDrawingMarkerShape']).toEqual({ ...kind('circle'), x: num });
+    expect(types['CircleDrawingMarkerShapeItem']).toEqual({ ...kind('circle'), z: num });
+    expect(modelNames(ir)).toEqual([
+      'CircleDrawingMarkerShape',
+      'CircleDrawingMarkerShapeItem',
+      'CircleDrawingShape',
+      'CircleDrawingShapeItem',
+      'Drawing',
+      'DrawingMarker',
+      'Square',
+      'Triangle',
+    ]);
+    expectConsistent(ir, ['Drawing']);
+  });
+
   it('reads every component schema as one root, since their inline models are collected together', async () => {
     const ir = await parseWithoutWarnings(
       doc({
@@ -4397,12 +4531,13 @@ describe('a title two unions give different shapes at different depths of one ro
       markContestedTitles({ components: { schemas: { Drawing: obj({ shape: twice }) } } });
       expect(variantsOf(twice).map(isContestedTitle)).toEqual([false, false]);
       // A second union whose `Circle` has the later variant's shape contests
-      // the first variant's, not the later one's.
+      // the first variant's. The later one carries the contested title, so it
+      // is marked with the first and does not keep `Circle` either (#373).
       const other = byDiameter();
       markContestedTitles({
         components: { schemas: { Drawing: obj({ shape: twice, marker: obj({ shape: other }) }) } },
       });
-      expect(variantsOf(twice).map(isContestedTitle)).toEqual([true, false]);
+      expect(variantsOf(twice).map(isContestedTitle)).toEqual([true, true]);
       expect(variantsOf(other).map(isContestedTitle)).toEqual([true, false]);
     });
 
@@ -4441,8 +4576,10 @@ describe('a title two unions give different shapes at different depths of one ro
       });
       expect(variantsOf(first).map(isContestedTitle)).toEqual([true, true]);
       expect(variantsOf(underProperty).map(isContestedTitle)).toEqual([true, true]);
+      // The group's later variants claim nothing, but they carry the contested
+      // titles, so they are marked with the first one (#373).
       for (const union of [later, inItems, inValues, inAllOf]) {
-        expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
+        expect(variantsOf(union).map(isContestedTitle)).toEqual([true, true]);
       }
       // Without the property's union, nothing contests the group's claim.
       const alone = byRadius();
@@ -4453,6 +4590,55 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(alone).map(isContestedTitle)).toEqual([false, false]);
       expect(variantsOf(alongside).map(isContestedTitle)).toEqual([false, false]);
     });
+
+    it('marks a later variant that repeats a contested title in its union too (#373)', () => {
+      // The issue's `repeat.json`: each union's first `Circle`, `{ radius }`
+      // and `{ x }`, claims the title and contests it. The later ones claim
+      // nothing but carry the title, so they are marked with the first ones;
+      // unmarked, both would keep the bare `Circle` once the first ones are
+      // qualified.
+      const top = circleTwice('radius', 'diameter');
+      const inner = circleTwice('x', 'z');
+      markContestedTitles({ components: { schemas: { Drawing: nested(top, inner) } } });
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+    });
+
+    it.each<{ label: string; holding: (union: SchemaObject) => SchemaObject }>([
+      { label: 'a nested union', holding: (union) => union },
+      { label: "an array variant's items", holding: (union) => ({ type: 'array', items: union }) },
+      { label: "a map variant's values", holding: (union) => ({ type: 'object', additionalProperties: union }) },
+      {
+        label: "a map variant's pattern values",
+        holding: (union) => ({ type: 'object', patternProperties: { '^s': union } }),
+      },
+      { label: 'a lone `allOf` member', holding: (union) => ({ allOf: [union] }) },
+    ])(
+      'marks a later `Circle` in $label of a contested group too, and reads no claim from it (#373)',
+      ({ holding }) => {
+        // A `Circle | Square` union beside the holder of a later
+        // `Circle | Triangle`, all in one claim group.
+        const group = (first: string, later: string) => {
+          const head: SchemaObject = { oneOf: [circle({ [first]: n }), square({ side: n })] };
+          const tail: SchemaObject = { oneOf: [circle({ [later]: n }), triangle({ base: n })] };
+          return { head, tail, union: { oneOf: [head, holding(tail)] } };
+        };
+        // Alone, the later `Circle` is no claim, so its other shape contests nothing.
+        const alone = group('radius', 'diameter');
+        markContestedTitles({ components: { schemas: { Drawing: obj({ shape: alone.union }) } } });
+        expect(variantsOf(alone.head).map(isContestedTitle)).toEqual([false, false]);
+        expect(variantsOf(alone.tail).map(isContestedTitle)).toEqual([false, false]);
+        // At two depths whose first `Circle`s differ, the title is contested,
+        // and each group's later `Circle` is marked with its first.
+        const top = group('radius', 'diameter');
+        const deeper = group('x', 'z');
+        markContestedTitles({ components: { schemas: { Drawing: nested(top.union, deeper.union) } } });
+        for (const { head, tail } of [top, deeper]) {
+          expect(variantsOf(head).map(isContestedTitle)).toEqual([true, false]);
+          expect(variantsOf(tail).map(isContestedTitle)).toEqual([true, false]);
+        }
+      },
+    );
 
     it('ends on a schema that refers back to itself, within a root and across the document', () => {
       // A root whose property is the root itself, with a conflict further

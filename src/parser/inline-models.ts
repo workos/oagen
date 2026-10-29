@@ -744,16 +744,21 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * take their context-qualified names instead (`nameInlineVariantEntries`).
  * Identical shapes under one title share one model, as between siblings
  * (`reservedInlineNames`), and a title used once is kept. Within one union
- * only the first variant to carry a title is read: a later one with the
- * same title never keeps it, whatever the document holds (`emitted` in
- * `nameInlineVariantEntries`), so it is no claim on the title. The same
- * holds across everything one union reaches without entering an object —
- * its nested unions, its array variants' items, its map variants' values,
- * a lone `allOf` member — the names `mintedInlineNameEntries` reads for the
- * union, which `nonObjectVariantContexts` decides in variant order: an
- * earlier variant's kept title is reserved for a later variant of another
- * shape and shared for the identical one. So one claim set spans that
- * group, and only its first variant per title is read here.
+ * only the first variant to carry a title is a claim on it: a later one
+ * with the same title never keeps it while the first does, whatever the
+ * document holds (`emitted` in `nameInlineVariantEntries`), so its shape
+ * is not compared. The same holds across everything one union reaches
+ * without entering an object — its nested unions, its array variants'
+ * items, its map variants' values, a lone `allOf` member — the names
+ * `mintedInlineNameEntries` reads for the union, which
+ * `nonObjectVariantContexts` decides in variant order: an earlier variant's
+ * kept title is reserved for a later variant of another shape and shared
+ * for the identical one. So one claim set spans that group, and only its
+ * first variant per title is compared. A later one still carries the title,
+ * so it is marked with the rest when the title is contested: the first then
+ * takes its context-qualified name, which leaves nothing to step the later
+ * one off the bare title, and two groups' later variants of two shapes
+ * would meet on it.
  *
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
@@ -939,29 +944,32 @@ function schemaRootsOf(
 
 /**
  * Mark every title-mapped variant under `roots` (read as one root) whose
- * title another variant under the same roots gives a different shape; see
+ * title two claims under the same roots give different shapes; see
  * `markContestedTitles` for the walk. The visited sets are this root's own:
  * a schema object another root also holds is read here as well, against
  * this root's variants. Within the root a schema is read once per claim
  * group it is reached from — a union object one group already read (its
- * title skipped as claimed) is read again under a property that starts a
- * group of its own, where the same title is a claim — and a schema that
- * refers back to itself is stopped by the ancestors on the path to it, which
- * ends the walk.
+ * title no claim there, an earlier variant having claimed it) is read again
+ * under a property that starts a group of its own, where the same title is
+ * a claim — and a schema that refers back to itself is stopped by the
+ * ancestors on the path to it, which ends the walk.
  */
 function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
   const byTitle = new Map<string, { shapes: Set<string>; variants: SchemaObject[] }>();
   const visitedByGroup = new WeakMap<Set<string>, WeakSet<SchemaObject>>();
   const ancestors = new Set<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
-  // already read for the union this schema is reached from without entering
-  // an object. Only the first variant of a group to carry a title can keep
-  // it — a later one with the same title is stepped off it by its own union
-  // (`emitted` in `nameInlineVariantEntries` within one union; the kept
-  // titles `nonObjectVariantContexts` reserves across a union's non-object
-  // variants) whatever else is in the document — so a later one competes
-  // for nothing and is not read here. A schema reached any other way starts
-  // a group of its own, under which a title the first group skipped is a
+  // already claimed for the union this schema is reached from without
+  // entering an object. Only the first variant of a group to carry a title
+  // can keep it — a later one with the same title is stepped off it by its
+  // own union while the first keeps it (`emitted` in
+  // `nameInlineVariantEntries` within one union; the kept titles
+  // `nonObjectVariantContexts` reserves across a union's non-object
+  // variants) whatever else is in the document — so a later one's shape
+  // competes for nothing. It is still recorded, to be marked when the title
+  // is contested: the first is then qualified, and nothing steps the later
+  // one off the bare title. A schema reached any other way starts a group of
+  // its own, under which a title that was no claim in the first group is a
   // claim of its own, so the schema is read again there (a union object a
   // `transformSpec` reused under another property: its title keeps the bare
   // name there, and contests the first group's).
@@ -977,10 +985,11 @@ function markContestedTitlesUnderRoot(roots: readonly SchemaObject[]): void {
     // (`foldSiblingProperties`). The marks go on the document's variants,
     // which every later fold's copies are read through (`isContestedTitle`).
     for (const [variant, title] of titleMappedVariantNames(foldSiblingProperties(schema))) {
-      if (claims.has(title)) continue;
-      claims.add(title);
       const entry = byTitle.get(title) ?? { shapes: new Set<string>(), variants: [] };
-      entry.shapes.add(schemaShapeKey(variant));
+      if (!claims.has(title)) {
+        claims.add(title);
+        entry.shapes.add(schemaShapeKey(variant));
+      }
       entry.variants.push(foldedVariantOrigin(variant) ?? variant);
       byTitle.set(title, entry);
     }
