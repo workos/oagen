@@ -146,6 +146,7 @@ program
       transformSpec: configTransformSpec,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
+      collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
 
@@ -257,6 +258,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
