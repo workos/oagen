@@ -21,7 +21,7 @@ import type {
   ServerEntry,
   StatusRange,
 } from '../ir/types.js';
-import { pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
+import { isParameterSegment, pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
 import { foldHeaderName, foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { createHash } from 'node:crypto';
@@ -854,7 +854,7 @@ function isApiMarkerSegment(segment: string): boolean {
 /** Leading literal segments of a path through its last API marker; `0` without one. */
 function pathRootLength(segments: readonly string[]): number {
   let length = 0;
-  for (let i = 0; i < segments.length && !segments[i].startsWith('{'); i++) {
+  for (let i = 0; i < segments.length && !isParameterSegment(segments[i]); i++) {
     if (isApiMarkerSegment(segments[i])) length = i + 1;
   }
   return length;
@@ -969,7 +969,7 @@ function apiRootLengthOf(path: string, apiRoot: readonly string[]): number {
 function serviceSegmentIndex(path: string, apiRootLength: number): number {
   if (apiRootLength === 0) return 0;
   const index = readPath(path).findIndex(
-    (segment, i) => i >= apiRootLength && !segment.text.startsWith('{') && !segment.customMethod,
+    (segment, i) => i >= apiRootLength && !isParameterSegment(segment.text) && !segment.customMethod,
   );
   return index === -1 ? 0 : index;
 }
@@ -995,7 +995,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
   }
   const first = pathSegments(path)[serviceSegmentIndex(path, apiRootLength)] ?? 'Default';
   // Skip path params
-  if (first.startsWith('{')) return 'Default';
+  if (isParameterSegment(first)) return 'Default';
   return toPascalCase(first);
 }
 
@@ -1008,7 +1008,7 @@ function inferServiceName(path: string, tag: string | undefined, apiRootLength: 
  */
 function splitSegmentService(op: Operation, serviceName: string): string {
   const first = pathSegments(op.path)[0];
-  return first === undefined || first.startsWith('{') ? serviceName : toPascalCase(first);
+  return first === undefined || isParameterSegment(first) ? serviceName : toPascalCase(first);
 }
 
 /**
@@ -1258,7 +1258,7 @@ const LEADING_ONLY_VERBS: ReadonlySet<string> = new Set(['list', 'check']);
 function inferVerb(method: HttpMethod, path: string): string {
   const segments = pathSegments(path);
   const last = segments[segments.length - 1];
-  const item = last !== undefined && (last.startsWith('{') || isSingletonSegment(segments));
+  const item = last !== undefined && (isParameterSegment(last) || isSingletonSegment(segments));
   return item ? METHOD_VERBS[method].item : METHOD_VERBS[method].collection;
 }
 
@@ -1281,7 +1281,7 @@ function methodVerbs(method: HttpMethod): string[] {
 function segmentCarriesVerb(method: HttpMethod, path: string): boolean {
   const segments = pathSegments(path);
   const last = segments[segments.length - 1];
-  if (last === undefined || last.startsWith('{')) return false;
+  if (last === undefined || isParameterSegment(last)) return false;
   const words = splitWords(last).map((w) => w.toLowerCase());
   return methodVerbs(method).some((verb) => (LEADING_ONLY_VERBS.has(verb) ? words[0] === verb : words.includes(verb)));
 }
@@ -1301,7 +1301,7 @@ function looksPlural(segment: string): boolean {
 function isSingletonSegment(segments: readonly string[]): boolean {
   if (segments.length < 2) return false;
   const last = segments[segments.length - 1];
-  return !last.startsWith('{') && segments[segments.length - 2].startsWith('{') && !looksPlural(last);
+  return !isParameterSegment(last) && isParameterSegment(segments[segments.length - 2]) && !looksPlural(last);
 }
 
 /**
@@ -1319,7 +1319,7 @@ function isSingletonSegment(segments: readonly string[]): boolean {
  */
 function pathSegmentNoun(segments: readonly string[], index: number): string {
   const segment = segments[index];
-  return segments[index + 1]?.startsWith('{') ? singularizePathSegment(segment) : segment;
+  return isParameterSegment(segments[index + 1] ?? '') ? singularizePathSegment(segment) : segment;
 }
 
 /**
@@ -1351,7 +1351,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
   // root word is never the resource: /api/v1/{id} is Api.delete, not deleteV1.
   let resourceIndex = -1;
   for (let i = segments.length - 1; i >= apiRootLength; i--) {
-    if (!segments[i].startsWith('{')) {
+    if (!isParameterSegment(segments[i])) {
       resourceIndex = i;
       break;
     }
@@ -1383,7 +1383,7 @@ function inferResourceFromPath(path: string, apiRootLength = 0, singularItem = t
  */
 function itemParentIndex(segments: readonly string[], apiRootLength: number): number {
   for (let i = segments.length - 3; i >= apiRootLength; i--) {
-    if (!segments[i].startsWith('{') && !isApiMarkerSegment(segments[i])) return i;
+    if (!isParameterSegment(segments[i]) && !isApiMarkerSegment(segments[i])) return i;
   }
   return -1;
 }
@@ -1468,8 +1468,8 @@ function inferAction(
   const segments = pathSegments(path);
   if (segments.length === 0) return null;
   const last = segments[segments.length - 1];
-  if (last.startsWith('{')) return null;
-  const afterParam = segments.length >= 2 && segments[segments.length - 2].startsWith('{');
+  if (isParameterSegment(last)) return null;
+  const afterParam = segments.length >= 2 && isParameterSegment(segments[segments.length - 2]);
   const words = splitWords(last).map((w) => w.toLowerCase());
   const postAction = method === 'post' && afterParam && !last.toLowerCase().endsWith('s');
   const ownVerb = segmentCarriesVerb(method, path);
@@ -2257,7 +2257,7 @@ function qualifierPath(op: Operation, apiRootLength: number, actions = true): st
  */
 function pathParamWords(path: string): string[] {
   return pathSegments(path)
-    .filter((segment) => segment.startsWith('{'))
+    .filter((segment) => isParameterSegment(segment))
     .map((segment) => toPascalCase(segment.replace(/[{}]/g, '')));
 }
 
@@ -2293,7 +2293,7 @@ function inferByParamsSuffix(path: string, shared: ReadonlySet<string>): string 
 function inferServiceNoun(path: string, apiRootLength: number): string | null {
   const segments = pathSegments(path);
   let last = segments.length - 1;
-  while (last >= apiRootLength && segments[last].startsWith('{')) last--;
+  while (last >= apiRootLength && isParameterSegment(segments[last])) last--;
   if (last < apiRootLength || last !== serviceSegmentIndex(path, apiRootLength)) return null;
   return toPascalCase(pathSegmentNoun(segments, last));
 }
@@ -2329,7 +2329,7 @@ function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true
   const segments = pathSegments(path);
   const nouns: string[] = [];
   for (let i = apiRootLength; i < segments.length; i++) {
-    if (!segments[i].startsWith('{')) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
+    if (!isParameterSegment(segments[i])) nouns.push(singularItem ? pathSegmentNoun(segments, i) : segments[i]);
   }
   // Skip first (service) and last (already used) — use the middle ones
   if (nouns.length >= 3) {
@@ -4792,7 +4792,7 @@ function extractResponseHeaders(
 export function derivePathModelBaseName(path: string, method: HttpMethod, disambiguator = ''): string {
   const segments = pathSegments(path);
   const parts = segments.map((segment) =>
-    segment.startsWith('{') ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
+    isParameterSegment(segment) ? 'By' + toPascalCase(segment.replace(/[{}]/g, '')) : toPascalCase(segment),
   );
   const resource = parts.length > 0 ? parts.join('') : 'Unknown';
   // `_` separators guarantee a word boundary on each side of the disambiguator
@@ -4972,14 +4972,16 @@ type PathDeviation = [trailingSlash: number, customMethods: number, irregularSeg
  * `/pets/{id}/batchAdopt` at [0, 0, 1]. A parameter segment is never
  * irregular, whatever follows its braces, so a path without a colon scores
  * as it did before custom methods were read: `/tags/{tag}.json` and
- * `/tags/{tag}/json` still tie.
+ * `/tags/{tag}/json` still tie. A segment kept whole for its several colons
+ * is a literal even when a parameter opens it (isParameterSegment), so
+ * `/pets/{id}:adopt:now` scores [0, 0, 1].
  */
 function pathDeviation(rawPath: string): PathDeviation {
   const trailingSlash = rawPath.length > 1 && rawPath.endsWith('/') ? 1 : 0;
   const segments = readPath(rawPath);
   const customMethods = segments.filter((segment) => segment.customMethod).length;
   const irregularSegments = segments.filter(
-    (segment) => !segment.text.startsWith('{') && /[^a-z0-9]/.test(segment.text),
+    (segment) => !isParameterSegment(segment.text) && /[^a-z0-9]/.test(segment.text),
   ).length;
   return [trailingSlash, customMethods, irregularSegments];
 }

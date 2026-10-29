@@ -974,4 +974,26 @@ describe('custom-method paths (issue #269)', () => {
       { name: 'Things', operations: ['listUrnPet1: GET /things/urn:pet:1'] },
     ]);
   });
+
+  it('reads a segment that a parameter opens and several colons follow as one literal, so its neighbours keep their names (issue #378)', () => {
+    // `{petId}:adopt:now` carries no custom method, and read as the
+    // parameter `{petId}` it would drop `:adopt:now` and collide with
+    // `GET /v1/pets/{petId}` as `get`, renaming both.
+    expect(
+      services({
+        '/v1/pets/{petId}': { get: jsonItem('petId') },
+        '/v1/pets/{petId}:adopt:now': { get: jsonItem('petId') },
+      }),
+    ).toEqual([
+      {
+        name: 'Pets',
+        operations: ['get: GET /v1/pets/{petId}', 'listPetIdAdoptNow: GET /v1/pets/{petId}:adopt:now'],
+      },
+    ]);
+    // A literal names a service, so it leaves `V1` to `/v1/{name}`.
+    expect(services({ '/v1/{name}': { get: jsonItem('name') }, '/v1/{name}:a:b': { get: jsonItem('name') } })).toEqual([
+      { name: 'V1', operations: ['get: GET /v1/{name}'] },
+      { name: 'NameAB', operations: ['list: GET /v1/{name}:a:b'] },
+    ]);
+  });
 });

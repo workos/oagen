@@ -34,7 +34,8 @@ export interface PathSegment {
  * and does not split it: `file-{file_path:path}` is one segment. AIP-136
  * appends a single verb, so a custom method starts only at a segment's one
  * colon outside braces: a segment with several, such as the literal
- * `urn:pet:1`, is kept whole.
+ * `urn:pet:1`, is kept whole, and is a literal even when a parameter opens
+ * it (see isParameterSegment).
  * Empty segments — a leading, trailing or doubled slash, or an empty side of
  * a colon — are dropped. The operation's `path` itself is never rewritten: it
  * is the URL the SDK requests.
@@ -42,8 +43,7 @@ export interface PathSegment {
 export function readPath(path: string): PathSegment[] {
   const segments: PathSegment[] = [];
   for (const segment of path.split('/')) {
-    // Blank out the colons inside braces, keeping every index in place.
-    const outside = segment.replace(/\{[^}]*\}/g, (param) => param.replaceAll(':', ' '));
+    const outside = blankBracedColons(segment);
     const colon = outside.indexOf(':');
     const single = colon !== -1 && colon === outside.lastIndexOf(':');
     const parts = single ? [segment.slice(0, colon), segment.slice(colon + 1)] : [segment];
@@ -57,6 +57,23 @@ export function readPath(path: string): PathSegment[] {
 /** The text of each segment readPath reads: `/pets/{petId}:adopt` → `pets`, `{petId}`, `adopt`. */
 export function pathSegments(path: string): string[] {
   return readPath(path).map((segment) => segment.text);
+}
+
+/**
+ * Whether a segment readPath reads is a path parameter: it starts with a
+ * parameter's braces (`{petId}`, `{pet:id}`, `{tag}.json`) and has no colon
+ * outside braces. A segment readPath keeps whole for its several colons is
+ * one literal even when a parameter opens it, as `urn:pet:1` is, so the
+ * parser reads `{petId}:adopt:now` as a literal and its words reach the
+ * names read from it, instead of a parameter whose tail drops out.
+ */
+export function isParameterSegment(segment: string): boolean {
+  return segment.startsWith('{') && !blankBracedColons(segment).includes(':');
+}
+
+/** A segment with the colons inside its braces blanked out, every index kept in place. */
+function blankBracedColons(segment: string): string {
+  return segment.replace(/\{[^}]*\}/g, (param) => param.replaceAll(':', ' '));
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deriveMethodName,
   findResolvedMethodCollisions,
+  isParameterSegment,
   pathSegments,
   readPath,
   resolveMountTarget,
@@ -103,6 +104,13 @@ describe('readPath: a colon that is not a custom method (issue #378)', () => {
     ]);
     expect(pathSegments('/things/{id}:a:b')).toEqual(['things', '{id}:a:b']);
     expect(readPath('/things/urn:pet').map((s) => s.customMethod)).toEqual([false, false, true]);
+  });
+
+  it('reads a segment kept whole for its several colons as a literal, even when a parameter opens it', () => {
+    const params = ['{petId}', '{pet:id}', '{tag}.json', '{a}.{b:c}', '{x'];
+    const literals = ['{petId}:adopt:now', '{a:b}:x:y', 'urn:pet:1', 'file-{file_path:path}', 'pets'];
+    expect(params.filter((segment) => !isParameterSegment(segment))).toEqual([]);
+    expect(literals.filter((segment) => isParameterSegment(segment))).toEqual([]);
   });
 
   it('names the issue repro as the segments read before #322, the custom method still split off', () => {
