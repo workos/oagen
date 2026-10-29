@@ -601,37 +601,65 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
  * The array schema `schema` is, once a nullable wrapper of any spelling is
  * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
  * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
- * written with or without `items` beside it — and `undefined` when it is
- * not an array: `unwrapNullableSchema`, the one definition the model side
- * unwraps by, then `isArraySchema`, the one test every site makes. So a
- * list envelope's data array, an array response body and an `allOf`-merged
- * array property are arrays here whatever wrapper they wear, as
- * `schemaToTypeRef` types them `nullable<array<…>>`. A `$ref` is a reference
- * and is not looked through: a `$ref` to an array component is typed as the
- * array the component declares by `schemaToTypeRef` itself, with the items
- * the component pass built (`isArrayComponentRef` says whether a property
- * is one), and the explicit `dataPath` walk (`resolveBareSchema`) is the one
- * place any other reference is followed.
+ * written with or without `items` beside it — and an `allOf` read as one
+ * member (`allOfReadAsMember`: `allOf: [{ type: 'array', items }]`), the two
+ * however they alternate, and `undefined` when it is not an array:
+ * `unwrapNullableSchema`, the one definition the model side unwraps by, then
+ * `isArraySchema`, the one test every site makes. So a list envelope's data
+ * array, an array response body and an `allOf`-merged array property are
+ * arrays here whatever wrapper they wear, as `schemaToTypeRef` types them
+ * `nullable<array<…>>`. A `$ref` is a reference and is not looked through:
+ * a `$ref` to an array component is typed as the array the component
+ * declares by `schemaToTypeRef` itself, with the items the component pass
+ * built (`isArrayComponentRef` says whether a property is one), and the
+ * explicit `dataPath` walk (`resolveBareSchema`) is the one place any other
+ * reference is followed.
  */
 export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
   const bare = unwrapNullableSchema(schema);
-  return isArraySchema(bare) ? bare : undefined;
+  if (isArraySchema(bare)) return bare;
+  const member = allOfReadAsMember(bare);
+  return member && arraySchemaOf(member);
+}
+
+/**
+ * The member `schemaToTypeRef` types an `allOf` as (`readInlineAllOf`): a
+ * lone member with nothing added to it (`'unwrapped'`), read as the schema
+ * itself with the wrapper's limits, flag and documentation
+ * (`unwrappedAllOfMember`), or the first `$ref` member of a plain reference
+ * (`'reference'`). `undefined` for any other schema: no `allOf` that types
+ * it (`classifyInlineSchema`), or one merged into a model. Read on a schema
+ * whose nullable wrappers are removed and sibling `properties` folded in
+ * (`unwrapNullableSchema`), as `schemaToTypeRef` reads it.
+ */
+function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
+  if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
+  const reading = readInlineAllOf(schema.allOf, schema);
+  if (reading === 'unwrapped') return unwrappedAllOfMember(schema, schema.allOf[0]);
+  return reading === 'reference' ? schema.allOf.find((member) => member.$ref !== undefined) : undefined;
 }
 
 /**
  * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
  * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
- * `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to
- * one non-null variant (`nullableUnionBranch`). The one test for the places
- * the response path builds an array TypeRef itself (`nullableIf`) or merges
- * two array declarations (`combineDeclarations`).
+ * `nullable: true` beside a `type`, a `oneOf`/`anyOf` that collapses to one
+ * non-null variant (`nullableUnionBranch`), or an `allOf` read as a member
+ * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`).
+ * The one test for the places the response path builds an array TypeRef
+ * itself (`nullableIf`) or merges two array declarations
+ * (`combineDeclarations`), which find the array through the same wrappers
+ * (`arraySchemaOf`).
  */
 export function declaresNull(schema: SchemaObject): boolean {
-  return (
+  if (
     (Array.isArray(schema.type) && schema.type.includes('null')) ||
     (schema.nullable === true && schema.type !== undefined) ||
     nullableUnionBranch(schema) !== undefined
-  );
+  ) {
+    return true;
+  }
+  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  return member !== undefined && declaresNull(member);
 }
 
 /**
@@ -3531,16 +3559,18 @@ function arrayComponentTypeRef(key: string): TypeRef | undefined {
 /**
  * Whether `schema` is a `$ref` to an array component — by the key the `$ref`
  * names, as `schemaToTypeRef` resolves it — under any nullable wrapper
- * `unwrapNullableSchema` strips, so a reader that asks whether a property is
- * an array from the document (`detectListEnvelope`, `buildFieldFromSchema`)
- * answers for a reference as `schemaToTypeRef` types it. False outside an
- * extraction, as a `$ref` to an enum component is a model reference there.
+ * `unwrapNullableSchema` strips and any `allOf` read as the reference
+ * (`allOfReadAsMember`: `allOf: [{ $ref: Pets }]`), so a reader that asks
+ * whether a property is an array from the document (`detectListEnvelope`,
+ * `buildFieldFromSchema`) answers for a reference as `schemaToTypeRef`
+ * types it. False outside an extraction, as a `$ref` to an enum component
+ * is a model reference there.
  */
 export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
   if (!schema) return false;
-  const { $ref } = unwrapNullableSchema(schema);
-  if (!$ref) return false;
-  const segments = $ref.split('/');
+  const bare = unwrapNullableSchema(schema);
+  if (!bare.$ref) return isArrayComponentRef(allOfReadAsMember(bare));
+  const segments = bare.$ref.split('/');
   return activeArrayComponentPlans.has(segments[segments.length - 1]);
 }
 
