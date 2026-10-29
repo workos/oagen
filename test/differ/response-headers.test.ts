@@ -232,12 +232,85 @@ describe('issue #296 repro: headers on a lone 200 dropped, retyped and deprecate
       ],
       classification: 'breaking',
     });
-    // An added header is located at the new entry, which carries the code.
+    // The other way round, the 200 is one the new spec adds, which is no
+    // header change: gaining it is `responseChanged`. Used to report
+    // `X-Trace` added at 200 (issue #409).
     expect(diffSpecs(only404, lone200).changes[0]).toMatchObject({
-      responseHeaderChanges: [
-        { kind: 'header-added', headerName: 'X-Trace', statusCode: 200, classification: 'additive' },
-      ],
+      responseChanged: true,
+      responseHeadersChanged: false,
+      responseHeaderChanges: [],
+      classification: 'breaking',
     });
+  });
+});
+
+describe('issue #409 repro: an operation that declared no 2xx gains some', () => {
+  /** `POST /pets` (`createPet`) declaring `responses`, as the issue writes it. */
+  const documentWith = (responses: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    paths: { '/pets': { post: { operationId: 'createPet', responses } } },
+  });
+  const notFound = { description: 'Not found' };
+  const created = {
+    description: 'Created',
+    headers: { 'X-Pet-Id': { schema: { type: 'string' } } },
+    content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+  };
+  const queued = { description: 'Queued', headers: { 'X-Queue-Id': { schema: { type: 'string' } } } };
+  const before = documentWith({ '404': notFound });
+  const after = documentWith({ '200': created, '204': queued, '404': notFound });
+  const afterLone = documentWith({ '200': created, '404': notFound });
+
+  /** The `operation-modified` change between two documents (an inline body model comes or goes beside it). */
+  async function operationChange(oldDoc: unknown, newDoc: unknown) {
+    const { changes } = diffSpecs(
+      await parseSpec(await writeSpec('old.json', oldDoc)),
+      await parseSpec(await writeSpec('new.json', newDoc)),
+    );
+    const change = changes.find((c) => c.kind === 'operation-modified');
+    if (change?.kind !== 'operation-modified') throw new Error('expected an operation-modified change');
+    return change;
+  }
+
+  it.each([
+    ['after.json', after],
+    ['after-lone.json', afterLone],
+  ])('reports no header or media type of a 2xx %s adds, only responseChanged', async (_, newDoc) => {
+    // Used to report `X-Queue-Id` added at 204 (after.json), or `X-Pet-Id`
+    // and `application/json` added at 200 (after-lone.json): the old
+    // primary, which carries no code, paired by its (no) media types with
+    // one of the new 2xx entries.
+    expect(await operationChange(before, newDoc)).toMatchObject({
+      responseChanged: true,
+      responseHeadersChanged: false,
+      responseHeaderChanges: [],
+      responseContentTypesChanged: false,
+      responseContentTypeChanges: [],
+      classification: 'breaking',
+    });
+  });
+
+  it('still reports what each 2xx declared when the operation loses them all, under its own code', async () => {
+    const change = await operationChange(after, before);
+    expect(change.responseHeaderChanges).toHaveLength(2);
+    expect(change.responseHeaderChanges).toEqual(
+      expect.arrayContaining([
+        { kind: 'header-removed', headerName: 'X-Pet-Id', statusCode: 200, classification: 'breaking' },
+        { kind: 'header-removed', headerName: 'X-Queue-Id', statusCode: 204, classification: 'breaking' },
+      ]),
+    );
+    expect(change.responseContentTypeChanges).toEqual([
+      {
+        statusCode: 200,
+        added: [],
+        removed: ['application/json'],
+        retyped: [],
+        reparameterized: [],
+        classification: 'breaking',
+      },
+    ]);
+    expect(change).toMatchObject({ responseChanged: true, classification: 'breaking' });
   });
 });
 
