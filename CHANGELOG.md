@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.34.0](https://github.com/workos/oagen/compare/v0.33.0...v0.34.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **parser:** fold inline error bodies onto shared, shape-named models ([#497](https://github.com/workos/oagen/issues/497))
+* **differ:** make a server variable default that resolves to the same URL additive ([#452](https://github.com/workos/oagen/issues/452))
+
+### Bug Fixes
+
+* **differ:** make a server variable default that resolves to the same URL additive ([#452](https://github.com/workos/oagen/issues/452)) ([697fb65](https://github.com/workos/oagen/commit/697fb65d5deab388d8ebaeb5b040890c3cdbbc0f))
+* **parser:** fold inline error bodies onto shared, shape-named models ([#497](https://github.com/workos/oagen/issues/497)) ([9fd1a5f](https://github.com/workos/oagen/commit/9fd1a5f67d8b2777c6b2a3dbfc3d967922870677))
+
 ## [0.33.0](https://github.com/workos/oagen/compare/v0.32.1...v0.33.0) (2026-10-29)
 
 
