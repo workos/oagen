@@ -158,7 +158,7 @@ A missing kind means an entire category of types won't generate correctly.
 - `example` — Example value annotation
 - `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
-- `extensions` — The field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array component, whose keys the field carries as it carries that component's `externalDocs`), as written; for a key the SDK knows
+- `extensions` — The field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array component, whose keys the field carries under its own, as it carries that component's `externalDocs`), as written; for a key the SDK knows
 
 #### Enum
 
