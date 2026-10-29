@@ -6343,7 +6343,7 @@ function typeFallbackBody(
  * plain or nullable object, an array or map of objects, `oneOf`/`anyOf`
  * variants (`GetPetError400`, `GetPetError400WithCode`,
  * `AuthGetPetError400`), an `allOf` merge with `$ref` branches, nested
- * objects (`GetPetError404Details`) — is materialized under the name
+ * objects (`GetPetError404Detail`) — is materialized under the name
  * `schemaToTypeRef` references it by, by construction, and checked against
  * the spec-wide registry: a name a component schema, a model nested in one
  * (`GetPet.error404` owns `GetPetError404`), a header or another operation's
