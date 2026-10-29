@@ -2877,13 +2877,19 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
 interface NamedUnionMember {
   /** The variant as written. */
   raw: SchemaObject;
-  /** The component schema a `$ref` variant points at (as `extractAllOfModel` resolves its members); `raw` otherwise. */
+  /**
+   * The component schema a `$ref` variant points at (as `extractAllOfModel`
+   * resolves its members), or the one a wrapper variant wraps
+   * (`wrappedVariantReference`); `raw` otherwise.
+   */
   resolved: SchemaObject;
   /**
    * The model name the variant is referenced by: an inline object variant's
-   * extracted model (`nameNamedUnionVariants`), a `$ref` variant's component.
-   * `null` for a variant that is neither (a primitive, an inline enum, an
-   * array), which a derived discriminator cannot map.
+   * extracted model (`nameNamedUnionVariants`), a `$ref` variant's component,
+   * a wrapper variant's one wrapped component (`nullable<Bird>`,
+   * `union<Bird|string>`). `null` for a variant that is none of those (a
+   * primitive, an inline enum, an array), which a derived discriminator
+   * cannot map.
    */
   name: string | null;
 }
@@ -3041,7 +3047,9 @@ function namedUnionEntry(
  * The non-null variants of a named union, each with the schema its const
  * values and properties are read from (a `$ref` resolved against the
  * components, so a discriminator pinned inside the referenced schema is
- * seen) and the model name it is referenced by.
+ * seen) and the model name it is referenced by. A variant that wraps one
+ * reference (`wrappedVariantReference`) is read as that reference, so its
+ * const reaches a derived mapping as a bare `$ref` variant's does (#427).
  */
 function namedUnionMembers(
   schema: SchemaObject,
@@ -3051,15 +3059,50 @@ function namedUnionMembers(
   const members: NamedUnionMember[] = [];
   for (const raw of schema.oneOf ?? schema.anyOf ?? []) {
     if (isNullSchema(raw)) continue;
+    const named = raw.$ref || inlineNames.has(raw) ? raw : (wrappedVariantReference(raw) ?? raw);
     let resolved = raw;
-    if (raw.$ref) {
-      const refName = raw.$ref.split('/').pop() ?? '';
+    if (named.$ref) {
+      const refName = named.$ref.split('/').pop() ?? '';
       const target = schemas && Object.hasOwn(schemas, refName) ? schemas[refName] : undefined;
       if (target) resolved = target;
     }
-    members.push({ raw, resolved, name: inlineNames.get(raw) ?? resolveVariantModelName(raw) });
+    members.push({ raw, resolved, name: inlineNames.get(raw) ?? resolveVariantModelName(named) });
   }
   return members;
+}
+
+/**
+ * The one `$ref` a named union's variant wraps, read through the wrappers the
+ * differ reads a variant's models through (`variantModelNames`): a nullable
+ * wrapper (`unwrapNullableSchema`: `anyOf: [{ $ref: Bird }, { type: 'null' }]`),
+ * an `allOf` read as its reference (`allOfReadAsMember`), and a nested
+ * `oneOf`/`anyOf`, whose primitive, enum, array or map members name no model
+ * (`oneOf: [{ $ref: Bird }, { type: 'string' }]`). `undefined` when it wraps
+ * no reference, two, or one beside a model the extractor names (an inline
+ * object, a merged `allOf`): a mapping key read off that one reference would
+ * leave the other model out.
+ */
+function wrappedVariantReference(variant: SchemaObject): SchemaObject | undefined {
+  const refs: SchemaObject[] = [];
+  const visit = (schema: SchemaObject): boolean => {
+    const bare = unwrapNullableSchema(schema);
+    switch (classifyInlineSchema(bare)) {
+      case 'ref':
+        refs.push(bare);
+        return true;
+      case 'allOf': {
+        const member = allOfReadAsMember(bare);
+        return member !== undefined && visit(member);
+      }
+      case 'union':
+        return (bare.oneOf ?? bare.anyOf ?? []).every((member) => isNullSchema(member) || visit(member));
+      case 'object':
+        return false;
+      default:
+        return true;
+    }
+  };
+  return visit(variant) && refs.length === 1 ? refs[0] : undefined;
 }
 
 /**
