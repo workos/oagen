@@ -3160,3 +3160,48 @@ describe('extractOperations – Operation.tags (issue #273)', () => {
     expect(services.map((s) => s.name).sort()).toEqual(['Labels', 'Notes']);
   });
 });
+
+describe('extractOperations – a first tag with no name (issue #412)', () => {
+  const responses = { '204': { description: 'No content' } };
+  const layout = (paths: Parameters<typeof extractOperations>[0]) =>
+    extractOperations(paths).services.map(({ name, operations }) => ({
+      name,
+      operations: operations.map((op) => `${op.name} ${JSON.stringify(op.tags)}`),
+    }));
+  const notes = (tags: string[]) => layout({ '/notes': { get: { operationId: 'listNotes', tags, responses } } });
+
+  it('names the service from the first tag that has a name after PascalCasing, as an empty first tag does', () => {
+    expect(notes(['', 'Notes'])).toEqual([{ name: 'Notes', operations: ['listNotes ["Notes"]'] }]);
+    expect(notes([' ', 'Notes'])).toEqual([{ name: 'Notes', operations: ['listNotes ["Notes"]'] }]);
+    expect(notes(['-', 'Notes'])).toEqual([{ name: 'Notes', operations: ['listNotes ["-","Notes"]'] }]);
+  });
+
+  it('drops a whitespace-only tag from Operation.tags, as it drops an empty one', () => {
+    expect(notes(['Notes', '\t', 'Labels', ' \n '])).toEqual([
+      { name: 'Notes', operations: ['listNotes ["Notes","Labels"]'] },
+    ]);
+    // Nothing left: path-named, as if untagged, with no `tags` key.
+    expect(notes([' ', '\t'])).toEqual([{ name: 'Notes', operations: ['listNotes undefined'] }]);
+    const { services } = extractOperations({ '/notes': { get: { operationId: 'listNotes', tags: [' '], responses } } });
+    expect(services[0].operations[0]).not.toHaveProperty('tags');
+  });
+
+  it('keeps a tag with no name in Operation.tags without naming the service from it', () => {
+    expect(notes(['-'])).toEqual([{ name: 'Notes', operations: ['listNotes ["-"]'] }]);
+    expect(notes(['-', '#', 'multi-factor-auth'])).toEqual([
+      { name: 'MultiFactorAuth', operations: ['listNotes ["-","#","multi-factor-auth"]'] },
+    ]);
+  });
+
+  it('treats an operation whose tags name nothing as untagged when finding the API root', () => {
+    expect(
+      layout({
+        '/api/v1/notes': { get: { operationId: 'listNotes', tags: ['-'], responses } },
+        '/api/v1/labels': { get: { operationId: 'listLabels', tags: [' '], responses } },
+      }),
+    ).toEqual([
+      { name: 'Notes', operations: ['listNotes ["-"]'] },
+      { name: 'Labels', operations: ['listLabels undefined'] },
+    ]);
+  });
+});

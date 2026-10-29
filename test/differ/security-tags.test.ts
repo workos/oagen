@@ -924,6 +924,34 @@ describe('a first-tag change that renames the service is a service move, not a t
     ]);
     expect(summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 0 });
   });
+
+  it('moves nothing for a first tag that is blank or has no name, since the service is the next tag (issue #412)', async () => {
+    const notes = async (tags: string[]) =>
+      parseSpec(
+        await writeSpec('notes.json', document({ '/notes': { get: { operationId: 'listNotes', tags, responses } } })),
+      );
+    const before = await notes(['Notes']);
+
+    // A whitespace-only tag is dropped from `tags` as an empty one is: no change at all.
+    expect(diffSpecs(before, await notes([' ', 'Notes'])).changes).toEqual([]);
+
+    // `-` stays in `tags` but names no service, so `listNotes` is still matched in `Notes`.
+    const dash = await notes(['-', 'Notes']);
+    expect(dash.services.map((s) => s.name)).toEqual(['Notes']);
+    const { changes, summary } = diffSpecs(before, dash);
+    expect(changes).toMatchObject([
+      {
+        kind: 'operation-modified',
+        serviceName: 'Notes',
+        operationName: 'listNotes',
+        tagsChanged: true,
+        oldTags: ['Notes'],
+        newTags: ['-', 'Notes'],
+        classification: 'additive',
+      },
+    ]);
+    expect(summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 0 });
+  });
 });
 
 describe('the new diff types are part of the package’s public surface', () => {

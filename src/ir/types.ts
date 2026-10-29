@@ -542,11 +542,13 @@ export interface Operation {
   async?: boolean;
   /**
    * The operation's `tags`, in document order, with every entry that is not
-   * a non-empty string dropped and a repeated entry folded onto its first
-   * occurrence. Present only when at least one remains. The parser names the
-   * service from `tags[0]` — the first usable entry — so the two never
-   * disagree; the list is kept so an emitter can group or document the
-   * method by every tag.
+   * a string with non-whitespace content dropped and a repeated entry folded
+   * onto its first occurrence. Present only when at least one remains. The
+   * parser names the service from the first entry that still has a name once
+   * PascalCased (`tags[0]`, unless it has no ASCII letter or digit, like
+   * `-`), or from the path when none has one, as for an untagged operation;
+   * the list is kept so an emitter can group or document the method by every
+   * tag.
    */
   tags?: string[];
   /**
