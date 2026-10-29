@@ -1201,9 +1201,10 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
   });
 
   // `listNotes`'s own inline `default` is `ListNotesDefaultResponse`; so is
-  // the body of a component `ListNotesDefault`. The earlier site in the
-  // document keeps the name and the later one steps by number; the two shapes
-  // are never folded onto each other.
+  // the body of a component `ListNotesDefault`. A component's site is named
+  // before every operation's own (#423), so the component keeps the name in
+  // either document order and the operation's own steps by number; the two
+  // shapes are never folded onto each other.
   const ownDefault = {
     get: {
       operationId: 'listNotes',
@@ -1223,21 +1224,23 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
     [
       'the operation with its own default first',
       { '/notes': ownDefault, '/pets': viaComponent },
-      'listNotes',
       'getPet',
+      'listNotes',
     ],
   ])(
     "keeps an operation's own default apart from a component body that derives the same name (%s)",
-    async (_order, paths, first, second) => {
+    async (_order, paths, named, numbered) => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const spec = await parseDocument(paths, { responses: { Found: found, ListNotesDefault: problem } });
 
       const ops = opsByName(spec);
-      expect(ops.get(first)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse'));
-      expect(ops.get(second)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse2'));
+      expect(ops.get(named)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse'));
+      expect(ops.get(numbered)!.defaultResponse?.type).toEqual(model('ListNotesDefaultResponse2'));
       const fieldsByOperation = { listNotes: ['a'], getPet: ['title'] };
-      expect(fieldsOf(spec, 'ListNotesDefaultResponse')).toEqual(fieldsByOperation[first as 'listNotes' | 'getPet']);
-      expect(fieldsOf(spec, 'ListNotesDefaultResponse2')).toEqual(fieldsByOperation[second as 'listNotes' | 'getPet']);
+      expect(fieldsOf(spec, 'ListNotesDefaultResponse')).toEqual(fieldsByOperation[named as 'listNotes' | 'getPet']);
+      expect(fieldsOf(spec, 'ListNotesDefaultResponse2')).toEqual(
+        fieldsByOperation[numbered as 'listNotes' | 'getPet'],
+      );
       expectSound(spec);
       expect(warn).not.toHaveBeenCalled();
     },
@@ -1781,6 +1784,205 @@ describe("a component response's other media types and headers (issue #302)", ()
     ]);
     expect(headersOf(getNote.errors[0])).toEqual(['X-Meta: NotesXMeta']);
     expectSound(spec);
+  });
+
+  describe("named before every operation's own site, whatever the path order (issue #423)", () => {
+    // A component's headers, secondary bodies and error or fallback body used
+    // to be named among every other deferred site in path order, the first
+    // owner keeping a name, so moving or adding an operation renamed the
+    // model of another, unchanged one.
+    const object = (field: string) => ({ type: 'object', properties: { [field]: { type: 'string' } } });
+    const metaCard = { description: 'A card', headers: { 'X-Meta': { schema: object('trace') } } };
+    const getNote = { '/notes': { get: { operationId: 'getNote', responses: { '200': cardRef } } } };
+    /** `GET /card` (`getCard`): an inline 200 whose own `X-Meta` derives `CardXMeta` from its service. */
+    const getCard = {
+      '/card': {
+        get: {
+          operationId: 'getCard',
+          responses: { '200': { description: 'ok', headers: { 'X-Meta': { schema: object('other') } } } },
+        },
+      },
+    };
+    /** Every header and every `application/yaml` body of every operation, as the issue's repro prints them, sorted. */
+    const sites = (spec: ApiSpec): string[] =>
+      spec.services
+        .flatMap((s) => s.operations)
+        .flatMap(({ name, responseContents = [], responseHeaders = [] }) => [
+          ...responseHeaders.map((h) => `${name} ${h.name}: ${typeName(h.type)}`),
+          ...responseContents
+            .filter((c) => c.contentType === 'application/yaml')
+            .map((c) => `${name} ${c.contentType}: ${typeName(c.type)}`),
+        ])
+        .sort();
+
+    it('two components whose headers derive `CardXMeta`: the one `components/responses` lists first keeps it, in either path order', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cardX = { description: 'Another card', headers: { Meta: { schema: object('other') } } };
+      const getPet = {
+        '/pets': { get: { operationId: 'getPet', responses: { '200': { $ref: '#/components/responses/CardX' } } } },
+      };
+      const components = { responses: { Card: metaCard, CardX: cardX } };
+      const notesFirst = await parse({ ...getNote, ...getPet }, components);
+      const petsFirst = await parse({ ...getPet, ...getNote }, components);
+      // The components' own order decides, as it does between their bodies.
+      const cardXListedFirst = await parse({ ...getNote, ...getPet }, { responses: { CardX: cardX, Card: metaCard } });
+      expect(warn).not.toHaveBeenCalled();
+
+      // Before: `getPet Meta: CardXMeta` and `getNote X-Meta: CardXMeta2` with `/pets` first.
+      for (const spec of [notesFirst, petsFirst]) {
+        expect(sites(spec)).toEqual(['getNote X-Meta: CardXMeta', 'getPet Meta: CardXMeta2']);
+        expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'string']]);
+        expect(fieldsOf(spec, 'CardXMeta2')).toEqual([['other', 'string']]);
+        expectSound(spec);
+      }
+      // Moving an operation is no change.
+      expect(diffSpecs(notesFirst, petsFirst).changes).toEqual([]);
+      expect(sites(cardXListedFirst)).toEqual(['getNote X-Meta: CardXMeta2', 'getPet Meta: CardXMeta']);
+      expectSound(cardXListedFirst);
+    });
+
+    it("an operation's own header that derives `CardXMeta` steps by operation, in either path order", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const components = { responses: { Card: metaCard } };
+      const cardFirst = await parse({ ...getCard, ...getNote }, components);
+      const notesFirst = await parse({ ...getNote, ...getCard }, components);
+      expect(warn).not.toHaveBeenCalled();
+
+      // Before: `getCard X-Meta: CardXMeta` and `getNote X-Meta: CardXMeta2` with `/card` first.
+      for (const spec of [cardFirst, notesFirst]) {
+        expect(sites(spec)).toEqual(['getCard X-Meta: CardGetCardXMeta', 'getNote X-Meta: CardXMeta']);
+        expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'string']]);
+        expect(fieldsOf(spec, 'CardGetCardXMeta')).toEqual([['other', 'string']]);
+        expectSound(spec);
+      }
+      expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+    });
+
+    it("an operation that returns the component steps its own header past the component's by operation, in either path order", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const components = { responses: { Card: metaCard } };
+      // `getCard` mounts `Card` at its 404, so with `/card` first it is the
+      // first operation to read the component's `X-Meta`; the component's
+      // site is still nobody's own, so `getCard`'s 200 header steps past it
+      // by operation, as beside a component, never by its status code.
+      const getCardToo = {
+        '/card': {
+          get: {
+            operationId: 'getCard',
+            responses: { ...getCard['/card'].get.responses, '404': cardRef },
+          },
+        },
+      };
+      const cardFirst = await parse({ ...getCardToo, ...getNote }, components);
+      const notesFirst = await parse({ ...getNote, ...getCardToo }, components);
+      expect(warn).not.toHaveBeenCalled();
+
+      // Before, with `/card` first: `CardXMeta` for the 200 and `CardXMeta2` for the 404.
+      for (const spec of [cardFirst, notesFirst]) {
+        const operation = byName(spec).get('getCard')!;
+        expect(headersOf({ headers: operation.responseHeaders })).toEqual(['X-Meta: CardGetCardXMeta']);
+        expect(headersOf(operation.errors[0])).toEqual(['X-Meta: CardXMeta']);
+        expect(headersOf({ headers: byName(spec).get('getNote')!.responseHeaders })).toEqual(['X-Meta: CardXMeta']);
+        expect(fieldsOf(spec, 'CardXMeta')).toEqual([['trace', 'string']]);
+        expect(fieldsOf(spec, 'CardGetCardXMeta')).toEqual([['other', 'string']]);
+        expectSound(spec);
+      }
+      expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+    });
+
+    it("an operation's own `application/yaml` body that derives the component's name steps by status code, in either path order", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const components = {
+        responses: {
+          Card: {
+            description: 'A card',
+            content: { 'application/json': { schema: object('text') }, 'application/yaml': { schema: object('y') } },
+          },
+        },
+      };
+      const card = {
+        '/card': {
+          get: {
+            operationId: 'card',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': { schema: { type: 'string' } },
+                  'application/yaml': { schema: object('other') },
+                },
+              },
+            },
+          },
+        },
+      };
+      const cardFirst = await parse({ ...card, ...getNote }, components);
+      const notesFirst = await parse({ ...getNote, ...card }, components);
+      expect(warn).not.toHaveBeenCalled();
+
+      // Before: `card`'s took `CardApplicationYamlResponse` and the component's
+      // stepped to `CardApplicationYamlResponse2` with `/card` first.
+      for (const spec of [cardFirst, notesFirst]) {
+        expect(sites(spec)).toEqual([
+          'card application/yaml: CardApplicationYamlResponse200',
+          'getNote application/yaml: CardApplicationYamlResponse',
+        ]);
+        expect(fieldsOf(spec, 'CardApplicationYamlResponse')).toEqual([['y', 'string']]);
+        expect(fieldsOf(spec, 'CardApplicationYamlResponse200')).toEqual([['other', 'string']]);
+        expectSound(spec);
+      }
+      expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+    });
+
+    it("removing one of the operations that return the component leaves the others' names unchanged", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const components = { responses: { Card: metaCard } };
+      const getPet = { '/pets': { get: { operationId: 'getPet', responses: { '200': cardRef } } } };
+      const all = await parse({ ...getNote, ...getCard, ...getPet }, components);
+      const withoutNote = await parse({ ...getCard, ...getPet }, components);
+      expect(warn).not.toHaveBeenCalled();
+
+      expect(sites(all)).toEqual([
+        'getCard X-Meta: CardGetCardXMeta',
+        'getNote X-Meta: CardXMeta',
+        'getPet X-Meta: CardXMeta',
+      ]);
+      // Before: `getCard`, first once `getNote` was gone, took `CardXMeta`,
+      // and `getPet`'s header stepped to `CardXMeta2`.
+      expect(sites(withoutNote)).toEqual(['getCard X-Meta: CardGetCardXMeta', 'getPet X-Meta: CardXMeta']);
+      expect(diffSpecs(all, withoutNote).changes.map((change) => change.kind)).toEqual(['service-removed']);
+    });
+
+    it("lists the models where the document reads their sites, though a component's are named first", async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const problem = {
+        description: 'A problem',
+        headers: { 'X-Trace': { schema: object('id') } },
+        content: { 'application/json': { schema: object('title') } },
+      };
+      const spec = await parse(
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              responses: { '200': { description: 'ok', headers: { 'X-Meta': { schema: object('page') } } } },
+            },
+          },
+          '/notes': {
+            get: {
+              operationId: 'getNote',
+              responses: { '200': ok, '404': { $ref: '#/components/responses/Problem' } },
+            },
+          },
+        },
+        { responses: { Problem: problem } },
+      );
+      expect(warn).not.toHaveBeenCalled();
+
+      // No name changes, so neither does the order the IR lists the models in.
+      expect(spec.models.map((m) => m.name)).toEqual(['PetsXMeta', 'ProblemXTrace', 'ProblemResponse']);
+      expectSound(spec);
+    });
   });
 });
 
