@@ -162,6 +162,30 @@ interface ArrayComponentMints {
  */
 let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
 
+/**
+ * The names one discriminated union's variant models take
+ * (`planDispatcherVariants`): each object variant's name, and the names in
+ * its tree a component's model of the identical shape holds — the
+ * component's model stands for the variant's, which is not built.
+ */
+interface DispatcherUnionPlan {
+  names: Map<SchemaObject, string>;
+  shared: Set<string>;
+}
+
+/**
+ * The plans of the document's discriminated allOf + oneOf/anyOf components
+ * (`planDispatcherVariants`), keyed by the union's variant list and the
+ * component's name: what the dispatcher's mapping
+ * (`detectAllOfVariantDiscriminator`) and the variant builder
+ * (`extractDiscriminatedAllOfVariantModels`) both read, so the mapping names
+ * the models built. Decided in `extractSchemas` before any model is built
+ * and dropped with the other per-document state; empty while the plans are
+ * decided and outside an extraction, when a variant takes the name its const
+ * derives (`deriveDiscriminatedVariantName`).
+ */
+let activeDispatcherVariantPlans: Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>> = new Map();
+
 /** The array components whose reference is being built right now, so a cycle through their items is cut (`arrayComponentTypeRef`). */
 const resolvingArrayComponents = new Set<string>();
 
@@ -1061,6 +1085,13 @@ export function extractSchemas(
   // operation or a webhook — is then typed from its plan, by the key it
   // names.
   activeArrayComponentPlans = new Map();
+  // The discriminated variants' names, decided before the array components
+  // are planned: an array component's items step around them
+  // (`componentMints`), as they step around every other entry's names. They
+  // are decided with no plan in place, every variant read under the name
+  // its const derives.
+  activeDispatcherVariantPlans = new Map();
+  activeDispatcherVariantPlans = planDispatcherVariants(schemas);
   const arrayComponents = Object.entries(schemas)
     .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -1205,6 +1236,7 @@ export function clearSchemaNameTransform(): void {
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
   activeArrayComponentPlans = new Map();
+  activeDispatcherVariantPlans = new Map();
   markContestedTitles(undefined);
 }
 
@@ -3538,12 +3570,15 @@ function rehearse<T>(fn: () => T): T {
  * enums are read with none registered (`withoutArrayComponents`), so an
  * enum another component's items hold is never claimed for this entry. An
  * array component's items are not read here: their names come from its plan
- * (`others`), under the context it settles on.
+ * (`others`), under the context it settles on. With `dispatcherVariants`
+ * false the discriminated variants are left out: the names they are
+ * planned around (`planDispatcherVariants`).
  */
 function componentMints(
   key: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject>,
+  dispatcherVariants = true,
 ): ReadonlyMap<string, readonly string[]> {
   const name = resolveSchemaName(key);
   return rehearse(() => {
@@ -3561,7 +3596,7 @@ function componentMints(
     }
     const extract = (): Model[] => [
       extractModel(name, schema, schemas),
-      ...extractDiscriminatedAllOfVariantModels(schema, name, schemas),
+      ...(dispatcherVariants ? extractDiscriminatedAllOfVariantModels(schema, name, schemas) : []),
       ...extractNamedUnionVariantModels(schema, name, schemas),
       ...extractInlineModelsFromSchemas({ [key]: schema }),
     ];
@@ -3819,9 +3854,11 @@ export function unionVariantsOf(schema: SchemaObject): SchemaObject[] | undefine
  * `oneOf`/`anyOf` whose variants pin one property to distinct consts is a
  * dispatcher (`detectAllOfVariantDiscriminator`): its variants' properties
  * are not read, and the discriminator is returned; otherwise every
- * variant's properties are read as branch-only, and a variant's `required`
- * is not read, since its properties are present only on that branch. With
- * `readVariants` false the union is not read at all — the dispatcher base
+ * variant's properties — those its `allOf` wrappers and the unions nested in
+ * them declare too (`flattenVariantForExtraction`) — are read as
+ * branch-only, and a variant's `required` is not read, since its properties
+ * are present only on that branch. With `readVariants` false the union is
+ * not read at all — the dispatcher base
  * reads the variant axis for its own properties only — while a nullable
  * wrapper, never a variant axis, is still applied. Shared by
  * `extractAllOfModel` and the dispatcher base of
@@ -3870,8 +3907,13 @@ function readComponentAllOfMember(
   // Flatten oneOf/anyOf variant fields into the parent model as optional
   // fields. This handles the common allOf + oneOf pattern where the spec
   // uses mutually exclusive variant groups (e.g. password vs password_hash).
+  // A variant is read as the variant builder would read it were the union
+  // dispatched (`flattenVariantForExtraction`): through its `allOf`
+  // wrappers, where the detection above finds a const too, and the unions
+  // nested in them (workos/oagen#430 review: a wrapped `{ kind: '-', meow }`
+  // lost `meow` once its nameless const sent the union here).
   for (const variant of variants) {
-    for (const [key, value] of Object.entries(variant.properties ?? {})) {
+    for (const [key, value] of Object.entries(flattenVariantForExtraction(variant).properties ?? {})) {
       if (value) declareProperty(ledger, key, value, null, true);
     }
   }
@@ -3947,7 +3989,8 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * pin one property to distinct consts makes the model a dispatcher
  * (`detectAllOfVariantDiscriminator`; its variants are built by
  * `extractDiscriminatedAllOfVariantModels`); otherwise the variants' inline
- * properties are flattened in as optional fields.
+ * properties, read through their `allOf` wrappers, are flattened in as
+ * optional fields.
  */
 function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   // One sibling set for every field of the composed model, nested `allOf`
@@ -4022,8 +4065,10 @@ function getEffectiveConstPropertyValue(schema: SchemaObject, property: string):
  * object that pins the same property to a distinct const value. Unlike
  * detectConstPropertyDiscriminator (which requires $ref or title for variant
  * model names), this version derives model names from the const value itself
- * using deriveDiscriminatedVariantName — matching how extractDiscriminatedAllOfVariantModels
- * names those models.
+ * using deriveDiscriminatedVariantName — two variants of one name, or one
+ * named as the component, make the union no axis — and maps each value to
+ * the name its model settled on (`planDispatcherVariants`), the one
+ * extractDiscriminatedAllOfVariantModels builds it under.
  *
  * Walks through allOf wrappers on each variant so a oneOf branch like
  *   { allOf: [{ properties: { type: { const: 'oauth' } } }, { oneOf: […] }] }
@@ -4057,6 +4102,7 @@ function detectAllOfVariantDiscriminator(
   // whose const gives no name, `''` or `'-'` — is as ambiguous as two
   // variants of one name (workos/oagen#430).
   const seenModelNames = new Set<string>([fallbackName]);
+  const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
   for (const v of variants) {
     const value = getEffectiveConstPropertyValue(v, candidateProperty);
     if (value === null) return null;
@@ -4064,7 +4110,7 @@ function detectAllOfVariantDiscriminator(
     // If two variants map to the same model name, the discriminator is ambiguous
     if (seenModelNames.has(modelName)) return null;
     seenModelNames.add(modelName);
-    mapping[value] = modelName;
+    mapping[value] = plan?.names.get(v) ?? modelName;
   }
 
   return { property: candidateProperty, mapping };
@@ -4130,6 +4176,14 @@ function memberUnion(
   }
 }
 
+/**
+ * The variant models of a discriminated allOf + oneOf/anyOf component: each
+ * object variant's rebuilt schema (`discriminatedVariantSchemas`) extracted
+ * with everything nested under it (`extractInlineModelDeep`) under the name
+ * the variant settled on (`planDispatcherVariants`), the one the
+ * dispatcher's mapping names. A model another entry builds for the
+ * identical shape is that entry's to build, so it is left out here.
+ */
 function extractDiscriminatedAllOfVariantModels(
   schema: SchemaObject,
   fallbackName: string,
@@ -4137,6 +4191,38 @@ function extractDiscriminatedAllOfVariantModels(
 ): Model[] {
   const models: Model[] = [];
   const seenNames = new Set<string>();
+  for (const { variants, rebuilt } of discriminatedVariantSchemas(schema, fallbackName, schemas)) {
+    const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
+    for (const { variant, merged } of rebuilt) {
+      const variantName = plan?.names.get(variant) ?? deriveDiscriminatedVariantName(variant, fallbackName);
+      for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
+        if (seenNames.has(model.name) || plan?.shared.has(model.name)) continue;
+        seenNames.add(model.name);
+        models.push(model);
+      }
+    }
+  }
+  return models;
+}
+
+/** A discriminated component's variant axis: its union's variants, and each object variant with the schema its model is built from. */
+interface DiscriminatedAxis {
+  variants: readonly SchemaObject[];
+  rebuilt: Array<{ variant: SchemaObject; merged: SchemaObject }>;
+}
+
+/**
+ * Every variant axis of a discriminated allOf + oneOf/anyOf component, each
+ * object variant rebuilt as the complete object its model is built from: the
+ * base every variant carries, then the variant's own declarations. Nothing
+ * for a component no union of which dispatches.
+ */
+function discriminatedVariantSchemas(
+  schema: SchemaObject,
+  fallbackName: string,
+  schemas?: Record<string, SchemaObject>,
+): DiscriminatedAxis[] {
+  const axesFound: DiscriminatedAxis[] = [];
 
   // Collect base-object properties + required from the allOf wrapper so each
   // variant can be emitted as a complete, self-contained type. Schemas like
@@ -4172,7 +4258,7 @@ function extractDiscriminatedAllOfVariantModels(
     }
   }
   const axes = new Set(axisVariants.keys());
-  if (axes.size === 0) return models;
+  if (axes.size === 0) return axesFound;
   const ledger = new Map<string, PropertyDeclarations>();
   const baseRequired = new Set<string>();
   const seen = new Set<SchemaObject>([schema]);
@@ -4205,6 +4291,7 @@ function extractDiscriminatedAllOfVariantModels(
   );
 
   for (const variants of axisVariants.values()) {
+    const rebuilt: DiscriminatedAxis['rebuilt'] = [];
     for (const variant of variants) {
       // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
       // OAuth branch is `allOf: [{ properties: {…} }, { oneOf: [first-party
@@ -4240,22 +4327,124 @@ function extractDiscriminatedAllOfVariantModels(
         ...externalDocsEntry(variant.externalDocs),
         ...extensionsOf(variant, SCHEMA_CONSUMED_EXTENSIONS),
       };
-
-      const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
-      for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
-        if (seenNames.has(model.name)) continue;
-        seenNames.add(model.name);
-        models.push(model);
-      }
+      rebuilt.push({ variant, merged });
     }
+    axesFound.push({ variants, rebuilt });
   }
 
-  return models;
+  return axesFound;
+}
+
+/**
+ * The name of every discriminated allOf + oneOf/anyOf component's variant
+ * models, decided once per document, the components in document order, so
+ * no variant folds onto a model of another shape (workos/oagen#430 review:
+ * `CatEvent`'s `cat` variant, `CatEventCat`, was dropped for a component
+ * `CatEventCat` with more fields, and the dispatcher mapped `cat` to that
+ * component). A variant takes the name its const derives
+ * (`deriveDiscriminatedVariantName`) unless a name its tree mints there —
+ * the variant's model or one nested under it (`extractInlineModelDeep`,
+ * rehearsed) — is held with another shape: by another entry
+ * (`componentMints`: its model, enum or array, its named-union variants, the
+ * objects and enums its fields mint), by a variant an earlier dispatcher or
+ * an earlier variant of the union settled on, or, whatever its shape, by the
+ * component itself or the union's other variants. It then steps by number
+ * (`CatEventCat2`, `CatEventCat3`, …), everything nested under it moving
+ * with it. A holder of the identical shape is shared. A component's model
+ * stands for the variant's, which is not built, so the component keeps its
+ * own documentation; any other holder's copy is built as before and folds
+ * onto the other (`keepLarger`, `settleFieldInlineModels`), so the mapping
+ * never names a model a later pass may rename through another site, such as
+ * a field's object. A name that does not start with the variant's (a nested
+ * variant's title) does not move with it and is left to the rules that name
+ * it.
+ */
+function planDispatcherVariants(
+  schemas: Record<string, SchemaObject>,
+): Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>> {
+  const plans = new Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>>();
+  const dispatchers = Object.entries(schemas).flatMap(([key, schema]) => {
+    if (isEnumComponentSchema(schema) || isArrayComponentEntry(schema, schemas)) return [];
+    const name = resolveSchemaName(key);
+    const axes = discriminatedVariantSchemas(schema, name, schemas);
+    return axes.length > 0 ? [{ key, name, axes }] : [];
+  });
+  if (dispatchers.length === 0) return plans;
+  const components = componentModelNames();
+  const minted = new Map(
+    Object.entries(schemas).map(([key, schema]) => [key, componentMints(key, schema, schemas, false)] as const),
+  );
+  // Every name a variant tree settled on, with its shape, for the dispatchers after it.
+  const settled = new Map<string, string[]>();
+  for (const { key, name, axes } of dispatchers) {
+    const held = new Map<string, string[]>();
+    const hold = (holder: string, shape: string): void => {
+      held.set(holder, [...(held.get(holder) ?? []), shape]);
+    };
+    for (const [other, names] of minted) {
+      if (other !== key) for (const [holder, shapes] of names) for (const shape of shapes) hold(holder, shape);
+    }
+    for (const [holder, shapes] of settled) for (const shape of shapes) hold(holder, shape);
+    for (const { variants, rebuilt } of axes) {
+      const taken = new Set([name, ...variants.map((variant) => deriveDiscriminatedVariantName(variant, name))]);
+      const plan: DispatcherUnionPlan = { names: new Map(), shared: new Set() };
+      for (const { variant, merged } of rebuilt) {
+        const own = deriveDiscriminatedVariantName(variant, name);
+        taken.delete(own);
+        const { variantName, tree } = firstFreeVariantName(own, merged, schemas, taken, held);
+        plan.names.set(variant, variantName);
+        taken.add(variantName);
+        for (const model of tree) {
+          if (!model.name.startsWith(variantName)) continue;
+          if (held.has(model.name)) {
+            if (components.has(model.name)) plan.shared.add(model.name);
+            continue;
+          }
+          const shape = modelShapeKey(model);
+          hold(model.name, shape);
+          settled.set(model.name, [shape]);
+        }
+      }
+      plans.set(variants, new Map([...(plans.get(variants) ?? []), [name, plan]]));
+    }
+  }
+  return plans;
+}
+
+/**
+ * The first of `base`, `base2`, `base3`, … under which a variant's tree
+ * — its rebuilt schema `merged`, extracted with everything nested under it
+ * — mints no name starting with the candidate that is `taken`, or `held`
+ * with a shape other than the one it mints; with that tree. It ends: each
+ * candidate's names start with the candidate, and a held or taken name
+ * starts with finitely many of them.
+ */
+function firstFreeVariantName(
+  base: string,
+  merged: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  taken: ReadonlySet<string>,
+  held: ReadonlyMap<string, readonly string[]>,
+): { variantName: string; tree: Model[] } {
+  for (let n = 1; ; n++) {
+    const variantName = n === 1 ? base : `${base}${n}`;
+    if (taken.has(variantName)) continue;
+    const tree = rehearse(() => extractInlineModelDeep(variantName, merged, schemas));
+    const free = tree.every(
+      (model) =>
+        !model.name.startsWith(variantName) ||
+        (!taken.has(model.name) && (held.get(model.name) ?? []).every((shape) => shape === modelShapeKey(model))),
+    );
+    if (free) return { variantName, tree };
+  }
 }
 
 /**
  * Flatten a oneOf variant schema into a single object-shaped schema for
- * variant-model extraction. Recursively merges `allOf` members and folds
+ * variant-model extraction, and for a union no discriminator dispatches,
+ * whose variants a component's model flattens in
+ * (`readComponentAllOfMember`), so a variant declares the same properties
+ * either way. Recursively merges `allOf` members and folds
  * any nested `oneOf` into an inline-oneOf field group whose properties are
  * the union across sub-branches (required only when present in every
  * sub-branch). Returns the schema unchanged when no flattening is needed.
