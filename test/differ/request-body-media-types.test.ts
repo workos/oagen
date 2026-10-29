@@ -381,6 +381,33 @@ describe('parseSpec to diffSpecs — the issue #278 body under application/json;
       classification: 'breaking',
     });
   });
+
+  it('reports a form body moved to an identical component both documents declare as retyped, breaking (issue #390 review)', async () => {
+    const note = { type: 'object', properties: { id: { type: 'string' }, title: { type: 'string' } } };
+    /** The JSON body on `Note` beside a form body on `form`, with `Note` and an identical `NoteCopy` declared. */
+    const notes = (form: string) => ({
+      ...document({
+        'application/json': { schema: { $ref: '#/components/schemas/Note' } },
+        'application/x-www-form-urlencoded': { schema: { $ref: `#/components/schemas/${form}` } },
+      }),
+      components: { schemas: { Note: note, NoteCopy: note } },
+    });
+    const { changes } = await diffDocuments(notes('Note'), notes('NoteCopy'));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'operation-modified',
+      requestBodyChanged: false,
+      requestBodyEncodingChanged: false,
+      requestBodyContentTypeChange: {
+        added: [],
+        removed: [],
+        retyped: ['application/x-www-form-urlencoded'],
+        reparameterized: [],
+        classification: 'breaking',
+      },
+      classification: 'breaking',
+    });
+  });
 });
 
 describe('diffSpecs — a webhook payload model that was only renamed is no media-type change', () => {
@@ -455,6 +482,22 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     const changed: Model = { ...note('NewNote'), fields: [{ name: 'text', type: string, required: false }] };
     const { changes } = diffSpecs(spec('OldNote', note('OldNote')), spec('NewNote', changed));
     expect(changes.find((c) => c.kind === 'webhook-modified')).toMatchObject({
+      requestBodyChanged: true,
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
+      details: 'payload media type text/plain retyped',
+      classification: 'breaking',
+    });
+  });
+
+  it('reports a payload moved to another model of its shape that both documents declare as retyped, breaking (issue #390)', () => {
+    const both = (noteModel: string): ApiSpec => ({
+      ...spec(noteModel, note(noteModel)),
+      models: [adoptionEvent, note('OldNote'), note('NewNote')],
+    });
+    const { changes } = diffSpecs(both('OldNote'), both('NewNote'));
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      kind: 'webhook-modified',
       requestBodyChanged: true,
       requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
       details: 'payload media type text/plain retyped',
