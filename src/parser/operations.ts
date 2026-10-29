@@ -6210,13 +6210,17 @@ function extractResponses(
             : pagination.dataPath;
         // When only the override can drive an iterator, a body it will not
         // page — every body once the override is rejected, or a secondary
-        // its `dataPath` reaches no array in — keeps a list envelope as a
-        // plain response model, as under `disabled`, rather than unwrapped
-        // for an iterator that never comes.
+        // its `dataPath` reaches no array in, or its `endOfIteration`
+        // resolves in to no field of the fitting type — keeps a list
+        // envelope as a plain response model, as under `disabled`, rather
+        // than unwrapped for an iterator that never comes.
         const paginationDisabled =
           pagination.disabled === true ||
           (pagination.overrideOnly === true &&
-            (!overrideDecision.usable || (pagination.dataPath !== undefined && dataPathOverride === undefined)));
+            (!overrideDecision.usable ||
+              (pagination.dataPath !== undefined && dataPathOverride === undefined) ||
+              (pagination.endOfIteration !== undefined &&
+                bodyEndOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) !== undefined)));
         // The primary body's array items are settled against the registry
         // (`typeInlineItems`); the dry run that reads a component response's
         // names (`bodyModelNames`) passes none and mints nothing into it.
