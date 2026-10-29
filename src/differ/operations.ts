@@ -116,9 +116,10 @@ export function diffOperations(
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response) || successGainedOrLost;
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
     // The required flag and the encoding are compared only while both sides
-    // carry a body: a body appearing or disappearing is already
-    // `requestBodyChanged`, and the parser sets both beside the body, so
-    // they go with it.
+    // carry a body (`requestBody`): a body appearing or disappearing is
+    // already `requestBodyChanged`, so it takes both with it. The parser also
+    // sets the flag on a body carried in `requestBodyContents` alone (one
+    // under `application/xml` alone, say); that flag is not compared either.
     const bothCarryBody = !!oldOp.requestBody && !!newOp.requestBody;
     // An absent flag reads as optional, as it does in OpenAPI.
     const requestBodyRequiredChanged =

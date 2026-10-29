@@ -179,7 +179,13 @@ export interface Webhook {
    * exactly when `requestBody` is.
    */
   requestBodyContentType?: string;
-  /** Present, and `true`, only when the document marks the request body `required`. */
+  /**
+   * Present, and `true`, only when the document marks the request body
+   * `required` and the body declares a media type (`requestBodyContentTypes`
+   * is set), the presence rule `Operation.requestBodyRequired` follows: a
+   * payload carried in `requestBodyContents` alone keeps it, and a body with
+   * no `content`, or an empty map, has no entry.
+   */
   requestBodyRequired?: boolean;
   /**
    * Doc text for the payload, read as `Operation.requestBodyDescription`
@@ -359,11 +365,15 @@ export interface Operation {
    */
   requestBodyContentType?: string;
   /**
-   * Whether a caller must send `requestBody`: the Request Body Object's
+   * Whether a caller must send the request body: the Request Body Object's
    * `required`, read after a `components/requestBodies` `$ref` is resolved.
    * OpenAPI defaults the flag to `false`, so a body the document does not
    * mark required comes through as `false`. Present exactly when
-   * `requestBody` is; an operation without a body has no entry.
+   * `requestBodyContentTypes` is — whenever the body declares a media type,
+   * whether it is read as `requestBody` or carried in `requestBodyContents`
+   * alone — so it is set beside every `requestBody` but does not imply one;
+   * an operation without a body, or whose body declares no media type, has
+   * no entry.
    */
   requestBodyRequired?: boolean;
   /**

@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { resolve, dirname } from 'node:path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import type { Operation } from '../../src/ir/types.js';
@@ -129,16 +131,18 @@ describe('request body required (issue #213)', () => {
       expect(Object.keys(post)).not.toContain('requestBodyRequired');
     });
 
-    it('is absent when a declared body yields no IR body', () => {
+    it('is absent only when a declared body declares no media type', () => {
       // No `content` at all: nothing to type, so nothing to require.
       const contentless = singleOperation(withBody({ required: true }));
       expect(contentless.requestBody).toBeUndefined();
       expect(Object.keys(contentless)).not.toContain('requestBodyRequired');
 
-      // JSON without a schema is dropped by the parser; the flag follows the body.
+      // JSON without a schema yields no `requestBody`, but the body is still
+      // carried in `requestBodyContents`, and the flag stays with it (#388).
       const schemaless = singleOperation(withBody({ required: true, content: { 'application/json': {} } }));
       expect(schemaless.requestBody).toBeUndefined();
-      expect(Object.keys(schemaless)).not.toContain('requestBodyRequired');
+      expect(schemaless.requestBodyContentTypes).toEqual(['application/json']);
+      expect(schemaless.requestBodyRequired).toBe(true);
     });
 
     it('does not leak into the body type', () => {
@@ -248,6 +252,129 @@ describe('request body required (issue #213)', () => {
       );
       expect(op.httpMethod).toBe('delete');
       expect(op.requestBodyRequired).toBe(true);
+    });
+  });
+
+  describe('a body carried in requestBodyContents alone (issue #388)', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('keeps the flag on the operation, as a webhook keeps it (issue repro)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const requestBody = {
+        required: true,
+        content: { 'application/xml': { schema: { type: 'object', properties: { name: { type: 'string' } } } } },
+      };
+      const dir = mkdtempSync(join(tmpdir(), 'oagen-388-'));
+      try {
+        const file = join(dir, 'required.json');
+        writeFileSync(
+          file,
+          JSON.stringify({
+            openapi: '3.1.0',
+            info: { title: 'required', version: '1' },
+            paths: { '/pets': { post: { operationId: 'createPet', requestBody, responses: ok } } },
+            webhooks: { petAdopted: { post: { requestBody, responses: {} } } },
+          }),
+        );
+        const { services, webhooks } = await parseSpec(file);
+        const sites = [...services.flatMap(({ operations }) => operations), ...(webhooks ?? [])];
+        const projected = sites.map((site) => ({
+          name: site.name,
+          requestBody: site.requestBody,
+          requestBodyContents: site.requestBodyContents?.map(({ type }) => type),
+          requestBodyContentTypes: site.requestBodyContentTypes,
+          requestBodyRequired: site.requestBodyRequired,
+        }));
+        expect(projected).toMatchInlineSnapshot(`
+          [
+            {
+              "name": "createPet",
+              "requestBody": undefined,
+              "requestBodyContentTypes": [
+                "application/xml",
+              ],
+              "requestBodyContents": [
+                {
+                  "kind": "model",
+                  "name": "CreatePetApplicationXmlRequest",
+                },
+              ],
+              "requestBodyRequired": true,
+            },
+            {
+              "name": "petAdopted",
+              "requestBody": undefined,
+              "requestBodyContentTypes": [
+                "application/xml",
+              ],
+              "requestBodyContents": [
+                {
+                  "kind": "model",
+                  "name": "PetAdoptedApplicationXmlPayload",
+                },
+              ],
+              "requestBodyRequired": true,
+            },
+          ]
+        `);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('is false, and present, when the document leaves such a body optional', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const op = singleOperation(withBody({ content: { 'text/csv': { schema: { type: 'string' } } } }));
+      expect(bodyFields(op)).toEqual({
+        requestBody: undefined,
+        requestBodyEncoding: undefined,
+        requestBodyRequired: false,
+        hasFlag: true,
+      });
+      expect(op.requestBodyContentTypes).toEqual(['text/csv']);
+    });
+
+    it('is read after $ref resolution', () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const xml = { required: true, content: { 'application/xml': { schema: noteSchema } } };
+      const op = singleOperation(withBody({ $ref: '#/components/requestBodies/Note' }), { Note: xml });
+      expect(op.requestBody).toBeUndefined();
+      expect(op.requestBodyRequired).toBe(true);
+    });
+
+    it('is absent when the body declares no media type', () => {
+      const empty = singleOperation(withBody({ required: true, content: {} }));
+      expect(empty.requestBodyContentTypes).toBeUndefined();
+      expect(Object.keys(empty)).not.toContain('requestBodyRequired');
+    });
+
+    it('is absent on the webhook too when the body declares no media type, as on the operation (#388 review)', async () => {
+      for (const requestBody of [{ required: true, content: {} }, { required: true }]) {
+        const dir = mkdtempSync(join(tmpdir(), 'oagen-388-'));
+        try {
+          const file = join(dir, 'required.json');
+          writeFileSync(
+            file,
+            JSON.stringify({
+              openapi: '3.1.0',
+              info: { title: 'required', version: '1' },
+              paths: { '/pets': { post: { operationId: 'createPet', requestBody, responses: ok } } },
+              webhooks: { petAdopted: { post: { requestBody, responses: {} } } },
+            }),
+          );
+          const { services, webhooks } = await parseSpec(file);
+          const sites = [...services.flatMap(({ operations }) => operations), ...(webhooks ?? [])];
+          expect(sites.map(({ name }) => name)).toEqual(['createPet', 'petAdopted']);
+          for (const site of sites) {
+            expect(site.requestBodyContentTypes, site.name).toBeUndefined();
+            expect(Object.keys(site), site.name).not.toContain('requestBodyRequired');
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
     });
   });
 });
