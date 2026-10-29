@@ -2210,14 +2210,16 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * with `type: 'object'`, no `type`, or a type list naming `object`, so a
  * nullable or multi-typed object variant included) gains them, the schema's
  * own first and its own declaration kept where the variant declares the same
- * property, so the union keeps every variant and each carries the shared
- * properties. Every other variant is typed as written: a `$ref` names a
- * component the parser never merges properties into (it may be an enum or a
- * union it could not augment); a primitive, an array or an enum is no object,
- * so `properties` constrains nothing in it; a nested composition or a
- * nullable union wrapper is left to its own variants. `schemaToTypeRef`
- * reports the variants that may be objects and did not take the properties
- * (`warnOnUncarriedProperties`).
+ * property unless the variant's is the narrower (`narrowsDeclaration`: a
+ * variant's `kind: { const: 'cat' }` beside an own `kind: { type: 'string' }`
+ * stays `'cat'`), so the union keeps every variant, each carries the shared
+ * properties and a discriminated one keeps its mapping. Every other variant
+ * is typed as written: a `$ref` names a component the parser never merges
+ * properties into (it may be an enum or a union it could not augment); a
+ * primitive, an array or an enum is no object, so `properties` constrains
+ * nothing in it; a nested composition or a nullable union wrapper is left to
+ * its own variants. `schemaToTypeRef` reports the variants that may be
+ * objects and did not take the properties (`warnOnUncarriedProperties`).
  *
  * Applies only when the schema's `type` admits an object (`object`, a type
  * list naming it, or none), it declares at least one property of its own
@@ -2291,19 +2293,53 @@ function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
 /**
  * `variant` carrying `own`'s properties and required names when it is an
  * inline object (`isInlineObjectSchema`), itself otherwise. The schema's own
- * properties come first and win where both declare a name; the required
- * names are the union of both lists.
+ * properties come first and win where both declare a name, unless the
+ * variant's declaration is the narrower (`narrowsDeclaration`): JSON Schema
+ * applies both, so a variant's `kind: { const: 'cat' }` beside an own
+ * `kind: { type: 'string', readOnly: true }` is a read-only `'cat'`, and a
+ * discriminated union keeps its mapping. The own declaration's flags,
+ * documentation, limits and extensions (`declarationKeywords`) stay the
+ * field's wherever the variant's sets none. The required names are the
+ * union of both lists.
  */
 function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
   if (!isInlineObjectSchema(variant)) return variant;
   const properties: Record<string, SchemaObject | undefined> = { ...own.properties };
   for (const [name, property] of Object.entries(variant.properties ?? {})) {
+    const held = properties[name];
     if (!Object.hasOwn(properties, name)) properties[name] = property;
+    else if (held && property && narrowsDeclaration(property, held)) {
+      properties[name] = { ...declarationKeywords(held), ...property };
+    }
   }
   const required = [...new Set([...(own.required ?? []), ...(variant.required ?? [])])];
   const folded: SchemaObject = { ...variant, properties, ...(required.length > 0 && { required }) };
   foldedVariantOrigins.set(folded, foldedVariantOrigin(variant) ?? variant);
   return folded;
+}
+
+/**
+ * Whether a variant's declaration of a property is narrower than the
+ * schema's own (`conjoinSiblingProperties`): it is typed by the values it
+ * pins (`const` or `enum`, `classifyInlineSchema`), and the own declaration
+ * pins none, or pins every one of them and more. Any other pair — the same
+ * values, values the own does not all admit, a variant that pins none — is
+ * not, and the own declaration stays.
+ */
+function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
+  const narrow = pinnedValues(variant);
+  if (narrow === undefined) return false;
+  const wide = pinnedValues(own);
+  return (
+    wide === undefined ||
+    (narrow.every((value) => wide.includes(value)) && wide.some((value) => !narrow.includes(value)))
+  );
+}
+
+/** The values a declaration's `const` or `enum` pins it to, when that is what types it; `undefined` otherwise. */
+function pinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
+  const kind = classifyInlineSchema(schema);
+  return kind === 'const' ? [schema.const] : kind === 'enum' ? schema.enum : undefined;
 }
 
 /** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
@@ -4891,6 +4927,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 import {
   buildInlineModel,
   collectProperties,
+  declarationKeywords,
   declareProperty,
   declaresInlineProperties,
   elementContextName,
