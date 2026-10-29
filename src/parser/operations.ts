@@ -496,7 +496,7 @@ export function extractOperations(
   // no two such operations name their models alike (see
   // resolveReusedOperationIds).
   const plan = planOperations(resolvedPaths, apiRoot, operationIdTransform);
-  const modelOperationIds = resolveReusedOperationIds(resolvedPaths, plan);
+  const { modelOperationIds, sharedWith } = resolveReusedOperationIds(resolvedPaths, plan);
 
   // Operations without an operationId — or left none by the reuse of their
   // own (see resolveReusedOperationIds) — name their inline models from the
@@ -519,6 +519,7 @@ export function extractOperations(
     componentRequestBodies,
     componentResponseNaming,
     modelOperationIds,
+    sharedWith,
   );
 
   /** Every operation built, by its plan key (`${method} ${path}`). */
@@ -591,7 +592,9 @@ export function extractOperations(
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
       const key = `${method} ${path}`;
-      const pathModelBaseName = pathModelBaseNames.get(key) ?? derivePathModelBaseName(path, method);
+      // A path that shares another's Operation Object names its models as that path does.
+      const pathModelBaseName =
+        pathModelBaseNames.get(sharedWith.get(key) ?? key) ?? derivePathModelBaseName(path, method);
       const servers = operationServers(
         extractServerList(op.servers, `operation ${operationLabel(op, path, method)}`),
         pathLevelServers,
@@ -5128,33 +5131,44 @@ export function derivePathBasedName(
 }
 
 /**
- * The `operationId` each operation whose own the document reuses names its
- * models from, keyed by `${method} ${path}`: `null` for one that names them
+ * What the models of each operation whose `operationId` the document reuses
+ * are named from, keyed by `${method} ${path}`. `modelOperationIds` holds
+ * the name to read as its `operationId`, or `null` for one that names them
  * from its path, as an operation without an `operationId` does
- * (resolvePathModelBaseNames). An operation not here names them from its
- * own. Reused means declared on more than one Operation Object, which
- * OpenAPI forbids: every such operation would otherwise name its models
- * alike (`CreateNoteRequest`), and the merge would keep one body for all of
- * them.
+ * (resolvePathModelBaseNames); an operation not there names them from its
+ * own. `sharedWith` holds, for a path that `$ref`s the Operation Object of
+ * another, the path whose models it shares. Reused means declared on more
+ * than one Operation Object, which OpenAPI forbids: every such operation
+ * would otherwise name its models alike (`CreateNoteRequest`), and the
+ * merge would keep one body for all of them.
  *
- * Each claims the stem (operationIdModelBase) of the name it ends up with
- * (planOperations): its `operationId`'s while it keeps the name it took from
- * it, and its new name's when the reuse renamed it within its service —
- * `createNote2` names its models `CreateNote2Request` beside `createNote`'s
- * `CreateNoteRequest`. Claims are served in the order the numeric pass of
+ * Each Operation Object claims the stem (operationIdModelBase) of the name
+ * the first of its paths ends up with (planOperations): its `operationId`'s
+ * while the operation keeps the name it took from it, and its new name's
+ * when the reuse renamed it within its service — `createNote2` names its
+ * models `CreateNote2Request` beside `createNote`'s `CreateNoteRequest`.
+ * Paths and claims are taken in the order the numeric pass of
  * disambiguateOperationNames keeps a name in — the shorter API root, then
  * the path by code unit, then the method in HTTP_METHODS order — so the
- * outcome never depends on document order, and a claim is granted while no
- * earlier one, and no `operationId` declared on one Operation Object, holds
- * its stem. An operation whose claim is not granted names its models from
- * its path: one that kept the name in another service as well (`createNote`
- * in `Notes` and in `ArchivedNotes`: `/archived-notes` sorts first, so
- * `/notes` sends a `NotesPostRequest`), or one renamed to a name another
- * `operationId` already names its models from. An `operationId` declared on
- * one Operation Object is not reused, even when two paths `$ref` the Path
- * Item it is on: both operations read one body, and share its models.
+ * outcome never depends on document order. The stems the document wrote
+ * are served first, each granted while no earlier claim and no `operationId`
+ * declared on one Operation Object holds it; then the new names, which the
+ * parser made, each granted, as a path-derived prefix is, only while no
+ * stem held starts with it: a renamed `getNote2` that returns a `request`
+ * object would name it `GetNote2ResponseRequest`, the request body of
+ * `operationId: getNote2Response`. An operation whose claim is not granted
+ * names its models from its path: one that kept the name in another service
+ * as well (`createNote` in `Notes` and in `ArchivedNotes`: `/archived-notes`
+ * sorts first, so `/notes` sends a `NotesPostRequest`), or one renamed to a
+ * name another `operationId` holds. Every other path of the Operation
+ * Object reads its one body and shares its models. An `operationId`
+ * declared on one Operation Object is not reused, even when two paths
+ * `$ref` the Path Item it is on.
  */
-function resolveReusedOperationIds(paths: Record<string, PathItem>, plan: OperationPlan): Map<string, string | null> {
+function resolveReusedOperationIds(
+  paths: Record<string, PathItem>,
+  plan: OperationPlan,
+): { modelOperationIds: Map<string, string | null>; sharedWith: Map<string, string> } {
   const declaring = new Map<string, Array<{ key: string; path: string; method: HttpMethod; op: OperationObject }>>();
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
@@ -5181,15 +5195,32 @@ function resolveReusedOperationIds(paths: Record<string, PathItem>, plan: Operat
         HTTP_METHODS.indexOf(a.method) - HTTP_METHODS.indexOf(b.method),
     );
 
+  // One claim per Operation Object, made by the first of its paths.
+  const claimants = new Map<OperationObject, (typeof claims)[number]>();
+  const sharedWith = new Map<string, string>();
+  for (const claim of claims) {
+    const first = claimants.get(claim.op);
+    if (first) sharedWith.set(claim.key, first.key);
+    else claimants.set(claim.op, claim);
+  }
+
   const modelOperationIds = new Map<string, string | null>();
-  for (const { key, op, initialName, name } of claims) {
-    const renamed = name !== initialName;
-    const stem = operationIdModelBase(renamed ? name : op.operationId!);
+  for (const { key, op, initialName, name } of claimants.values()) {
+    if (name !== initialName) continue;
+    const stem = operationIdModelBase(op.operationId!);
     if (held.has(stem)) modelOperationIds.set(key, null);
-    else if (renamed) modelOperationIds.set(key, name);
     held.add(stem);
   }
-  return modelOperationIds;
+  for (const { key, initialName, name } of claimants.values()) {
+    if (name === initialName) continue;
+    const stem = operationIdModelBase(name);
+    modelOperationIds.set(key, [...held].some((taken) => taken.startsWith(stem)) ? null : name);
+    held.add(stem);
+  }
+  for (const [key, first] of sharedWith) {
+    if (modelOperationIds.has(first)) modelOperationIds.set(key, modelOperationIds.get(first)!);
+  }
+  return { modelOperationIds, sharedWith };
 }
 
 /**
@@ -5197,6 +5228,8 @@ function resolveReusedOperationIds(paths: Record<string, PathItem>, plan: Operat
  * models from its path — one without an `operationId`, or one whose
  * `operationId` the document reuses and leaves it none
  * (resolveReusedOperationIds) — keyed by `${method} ${path}`.
+ * A path that shares another's Operation Object (`sharedWith`) takes no part:
+ * it names its models as that path does.
  *
  * A prefix collides when two distinct raw paths with the same method flatten
  * to it (see derivePathModelBaseName), or when a reserved name starts with
@@ -5246,6 +5279,7 @@ function resolvePathModelBaseNames(
   componentRequestBodies?: Record<string, Record<string, unknown>>,
   componentResponseNaming: ReadonlyMap<string, ComponentResponseNaming> = new Map(),
   modelOperationIds: ReadonlyMap<string, string | null> = new Map(),
+  sharedWith: ReadonlyMap<string, string> = new Map(),
 ): Map<string, string> {
   const candidates: Array<{ key: string; path: string; method: HttpMethod; plain: string }> = [];
   const rawPathsByPlainName = new Map<string, Set<string>>();
@@ -5278,6 +5312,7 @@ function resolvePathModelBaseNames(
       const op = pathItem[method];
       if (!op) continue;
       const key = `${method} ${path}`;
+      if (sharedWith.has(key)) continue;
       const modelOperationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
       if (modelOperationId) {
         reservedNames.add(operationIdModelBase(modelOperationId));

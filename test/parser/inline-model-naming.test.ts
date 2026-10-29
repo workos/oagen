@@ -464,6 +464,95 @@ describe('an operationId two operations declare (issue #416)', () => {
     expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([RENAMED_CREATE_NOTE]);
   });
 
+  it("names a renamed operation's models from its path when another operationId's models start with its new name", async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const getNote = (properties: Record<string, object>) => ({
+      get: { operationId: 'getNote', responses: { '200': jsonResponse({ type: 'object', properties }) } },
+    });
+
+    // Named after `getNote2`, the `request` object `/notes/drafts` returns
+    // would be `GetNote2ResponseRequest`: the body `getNote2Response` sends.
+    const out = await parseInline(
+      api({
+        '/notes': getNote({ id: { type: 'string' } }),
+        '/notes/drafts': getNote({ request: inlineObject({ title: { type: 'string' } }) }),
+        '/other': {
+          post: {
+            operationId: 'getNote2Response',
+            requestBody: jsonBody(inlineObject({ label: { type: 'string' } })),
+            responses: { '204': { description: 'ok' } },
+          },
+        },
+      }),
+      (ir) => ({
+        models: ir.models.map(({ fields, name }) => `${name} {${fields.map((f) => f.name).join(', ')}}`),
+        operations: ir.services.flatMap((s) =>
+          s.operations.map((op) => `${op.name}: ${summarize(op).requestBody ?? summarize(op).response}`),
+        ),
+      }),
+    );
+
+    expect(out).toMatchInlineSnapshot(`
+      {
+        "models": [
+          "GetNoteResponse {id}",
+          "NotesDraftsGetResponse {request}",
+          "NotesDraftsGetResponseRequest {title}",
+          "GetNote2ResponseRequest {label}",
+        ],
+        "operations": [
+          "getNote: GetNoteResponse",
+          "getNote2: NotesDraftsGetResponse",
+          "getNote2Response: GetNote2ResponseRequest",
+        ],
+      }
+    `);
+    expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+      '[oagen] Warning: Operations GET /notes and GET /notes/drafts in service Notes both take the name "getNote" from their operationId; the latter is renamed "getNote2" — give each a distinct operationId',
+    ]);
+  });
+
+  it('names every path of one Operation Object alike when another Operation Object reuses its operationId', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const listPets = (properties: Record<string, { type: string }>) => ({
+      get: { operationId: 'listPets', responses: { '200': jsonResponse(inlineObject(properties)) } },
+    });
+
+    // `/other` sorts first and keeps the operationId's models; `/pets` names
+    // its models from its path, and `/pets/all`, which reads the same
+    // Operation Object, shares them although it is renamed `listPets2`.
+    const out = await parseInline(
+      api(
+        {
+          '/pets': { $ref: '#/components/pathItems/Pets' },
+          '/pets/all': { $ref: '#/components/pathItems/Pets' },
+          '/other': listPets({ title: { type: 'string' } }),
+        },
+        { pathItems: { Pets: listPets({ name: { type: 'string' } }) } },
+      ),
+      (ir) => ({
+        models: ir.models.map(({ fields, name }) => `${name} {${fields.map((f) => f.name).join(', ')}}`),
+        operations: ir.services.flatMap((s) =>
+          s.operations.map((op) => `${s.name}.${op.name} (${op.path}): ${summarize(op).response}`),
+        ),
+      }),
+    );
+
+    expect(out).toMatchInlineSnapshot(`
+      {
+        "models": [
+          "PetsGetResponse {name}",
+          "ListPetsResponse {title}",
+        ],
+        "operations": [
+          "Pets.listPets (/pets): PetsGetResponse",
+          "Pets.listPets2 (/pets/all): PetsGetResponse",
+          "Other.listPets (/other): ListPetsResponse",
+        ],
+      }
+    `);
+  });
+
   it('still shares the models of one Operation Object that two paths $ref', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
 
