@@ -1143,6 +1143,18 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expectSound(ir, Object.keys(components.schemas));
       });
 
+      it('keeps it when the oneOf is one of several allOf members, as the IR model declares the field (MichaelDeBoey)', async () => {
+        // Every instance carries every member, so whichever variant is sent, `has_more` is a boolean.
+        const meta = { allOf: [issueMeta, object({ trace_id: { type: 'string' } })] };
+        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toBeUndefined();
+        const ir = await parseJson(cursorSpec(meta, { endOfIteration }));
+        expect(onlyOperation(ir).pagination).toMatchObject({ strategy: 'cursor', param: 'after', endOfIteration });
+        expect(warn).not.toHaveBeenCalled();
+        expectSound(ir, []);
+        const hasMore = ir.models.find((m) => m.name === 'Meta')?.fields.find((f) => f.name === 'has_more');
+        expect(hasMore?.type).toEqual({ kind: 'primitive', type: 'boolean' });
+      });
+
       it('rejects a field only some variants declare, or one a variant types otherwise', async () => {
         const cases: Array<[unknown, string]> = [
           [

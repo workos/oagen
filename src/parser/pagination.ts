@@ -360,9 +360,10 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * field it would not see is not there for an override either. `end.path` is
  * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
  * through `$ref`s, `allOf` members and nullable wrappers at every further
- * segment), and through each non-null variant of a `oneOf`/`anyOf` on the
- * way that does not declare the next segment itself (`fieldsAtPath`), so it
- * lands on one field per variant; each must fit `end.kind` by the test
+ * segment), and, where an object on the way does not declare the next
+ * segment itself, through each non-null variant of a `oneOf`/`anyOf` that
+ * object is or has among its `allOf` members (`fieldsAtPath`), so it lands
+ * on one field per variant; each must fit `end.kind` by the test
  * detection applies to a field it names (`endFieldFits`), under
  * `resolveBareSchema` as a detected one is. With no `properties` — an
  * operation whose primary response declares no body — the path resolves to
@@ -388,12 +389,15 @@ export function endOfIterationProblem(
  * among the properties of the object the path has reached, as
  * `resolveSchemaPath` looks it up — through `$ref`s, `allOf` members and
  * nullable wrappers — and, when that object does not declare it but is a
- * `oneOf`/`anyOf`, in each of its non-null variants instead: whichever
- * variant the wire carries, the field must be there, so the path goes on in
- * every one and lands on one field per variant (`meta.has_more` with `meta`
- * a `oneOf` of two objects that each declare `has_more`). `undefined` when
- * the object, or any of its variants, lacks the segment. A variant that is
- * itself such a union declares no properties of its own
+ * `oneOf`/`anyOf` or has one among its `allOf` members (`fieldsNamed`), in
+ * each non-null variant of that union instead: whichever variant the wire
+ * carries, the field must be there, so the path goes on in every one and
+ * lands on one field per variant (`meta.has_more` with `meta` a `oneOf` of
+ * two objects that each declare `has_more`, or `meta` an `allOf` of that
+ * `oneOf` and a `trace_id` member, every member applying whichever variant
+ * is sent). `undefined` when the object does not declare the segment and no
+ * union it has declares it in every variant. A variant's own unions are not
+ * walked: one that is itself such a union declares no properties of its own
  * (`objectProperties`), so it lacks every segment. The walk goes one
  * segment at a time over every schema reached so far, each counted once —
  * by its `$ref`, else by the schema itself — so a component several
@@ -420,20 +424,25 @@ function fieldsAtPath(
 
 /**
  * The fields `segment` names in `node` (`fieldsAtPath`): its own property of
- * that name, else that property in each non-null variant of the
- * `oneOf`/`anyOf` `node` is. `undefined` when `node`, or any variant, lacks it.
+ * that name, else that property in each non-null variant of the first
+ * `oneOf`/`anyOf` `node` is composed of — `node` itself or an `allOf`
+ * member, however deep, as `collectObjectProperties` walks them — whose
+ * every such variant declares it. `undefined` when there is none.
  */
 function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject[] | undefined {
-  const own = objectProperties(node, componentSchemas)[segment];
+  const { properties, unions } = collectObjectProperties(node, componentSchemas);
+  const own = properties[segment];
   if (own) return [own];
-  const bare = resolveBareSchema(node, componentSchemas);
-  const variants = (bare.oneOf ?? bare.anyOf ?? []).filter((variant) => !isNullSchema(variant));
-  const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
-  return fields.length > 0 && fields.every((field) => field !== undefined) ? fields : undefined;
+  for (const union of unions) {
+    const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+    const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
+    if (fields.length > 0 && fields.every((field) => field !== undefined)) return fields;
+  }
+  return undefined;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -556,16 +565,20 @@ function objectProperties(
  * and otherwise the first declaration that declares a type types it, a
  * typeless one only annotating it. (Envelope detection reads the
  * members' own `properties`; a `oneOf`/`anyOf` member with more than one
- * non-null variant declares none, so it contributes nothing here. A body
- * that is not an envelope is merged by `mergeAllOfMembers`, which reads such
- * a member's variants.)
+ * non-null variant declares none, so it contributes no property here; it is
+ * listed in `unions`, with every other `oneOf`/`anyOf` the walk meets — the
+ * body itself first, then the members in the order walked — for the
+ * override check, which reads a field every variant of one declares
+ * (`fieldsNamed`). A body that is not an envelope is merged by
+ * `mergeAllOfMembers`, which reads such a member's variants.)
  */
 export function collectObjectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-): { properties: Record<string, SchemaObject>; required: string[] } {
+): { properties: Record<string, SchemaObject>; required: string[]; unions: SchemaObject[] } {
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
+  const unions: SchemaObject[] = [];
   const seenRefs = new Set<string>();
   const seenNodes = new WeakSet<SchemaObject>();
 
@@ -576,6 +589,7 @@ export function collectObjectProperties(
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
+    if (bare.oneOf ?? bare.anyOf) unions.push(bare);
     for (const sub of bare.allOf ?? []) visit(sub);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
@@ -586,7 +600,7 @@ export function collectObjectProperties(
   };
   visit(schema);
 
-  return { properties, required };
+  return { properties, required, unions };
 }
 
 // ---------------------------------------------------------------------------
