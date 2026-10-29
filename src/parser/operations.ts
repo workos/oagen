@@ -1229,6 +1229,22 @@ function pluralFallbackName(method: HttpMethod, path: string, apiRootLength: num
 }
 
 /**
+ * The name fallbackOperationName gives a singleton (inferSingleton) with its
+ * parent as the path spells it rather than singular: `getPetsStatus` for
+ * `GET /shop/pets/{id}/status`, whose name is `getPetStatus`, and that name
+ * itself for a parent spelled singular, `GET /shop/pet/{id}/status`. `null`
+ * for every other shape, an action among them. disambiguateOperationNames
+ * falls back to it before a numeric suffix when the parent's plural is all
+ * that tells two singletons apart. `actions` is fallbackOperationName's.
+ */
+function writtenParentName(method: HttpMethod, path: string, apiRootLength: number, actions = true): string | null {
+  if (actions && inferAction(method, path, apiRootLength)) return null;
+  const singleton = inferSingleton(path, apiRootLength, false);
+  if (singleton === null) return null;
+  return appendQualifier(appendQualifier(inferVerb(method, path), singleton.parent), singleton.resource);
+}
+
+/**
  * The CRUD verb each HTTP method takes on one item and on a collection. Only
  * GET's differ: `get` for one item, `list` for a collection.
  */
@@ -1405,11 +1421,13 @@ function itemParentIndex(segments: readonly string[], apiRootLength: number): nu
 /**
  * The parent of a path's last segment (itemParentIndex) as a noun, singular
  * since the parameter addresses one of it: `Pet` for `/pets/{petId}/adopt`.
- * `null` when there is none.
+ * `null` when there is none. `singular` false keeps it as the path spells it
+ * (`Pets`), for writtenParentName.
  */
-function inferItemParent(segments: readonly string[], apiRootLength: number): string | null {
+function inferItemParent(segments: readonly string[], apiRootLength: number, singular = true): string | null {
   const index = itemParentIndex(segments, apiRootLength);
-  return index < 0 ? null : toPascalCase(singularizePathSegment(segments[index]));
+  if (index < 0) return null;
+  return toPascalCase(singular ? singularizePathSegment(segments[index]) : segments[index]);
 }
 
 /**
@@ -1421,13 +1439,18 @@ function inferItemParent(segments: readonly string[], apiRootLength: number): st
  * `createOrderStatus` for `POST /orders/{id}/status`. A POST on a singleton
  * that does not end in `s` is an action instead (inferAction), so
  * `/users/{id}/avatar` is `getUserAvatar` for a GET but `avatarUser` for a
- * POST; give the POST an `operationId`.
+ * POST; give the POST an `operationId`. `singularParent` false keeps the
+ * parent as the path spells it (`Pets`), for writtenParentName.
  */
-function inferSingleton(path: string, apiRootLength = 0): { parent: string | null; resource: string } | null {
+function inferSingleton(
+  path: string,
+  apiRootLength = 0,
+  singularParent = true,
+): { parent: string | null; resource: string } | null {
   const segments = pathSegments(path);
   if (!isSingletonSegment(segments)) return null;
   return {
-    parent: inferItemParent(segments, apiRootLength),
+    parent: inferItemParent(segments, apiRootLength, singularParent),
     resource: toPascalCase(segments[segments.length - 1]),
   };
 }
@@ -1613,7 +1636,17 @@ function inferAction(
  *      which is which. Members that share a plural some other member does
  *      not take it together and are numbered on it: beside `/store/pet/{id}`
  *      or an operationId's `getPet`, those two are `getPets` and `getPets2`,
- *      each a variant of its twin rather than of the operationId;
+ *      each a variant of its twin rather than of the operationId. A
+ *      singleton has one only beside another path-named singleton that
+ *      writes its parent otherwise: the name carries the parent singular and
+ *      the qualifiers read the path without it (qualifierPath), so the
+ *      parent's plural is all that tells the two apart, and the singleton
+ *      that writes it plural takes its name with the parent as written
+ *      (writtenParentName) — `GET /shop/pets/{id}/status` beside
+ *      `GET /shop/pet/{id}/status` is `getPetsStatus` and `getPetStatus`,
+ *      as `getToyPets` and `getToyPet` are. Beside an operationId or an
+ *      operation of another shape it has none and is numbered
+ *      (`getPetStatus2`);
  *   7. a numeric suffix (`listNotes2`, `listNotes3`, …), when no pass above
  *      has a free name that tells the group apart, so an emitter never
  *      sees two methods with one name in one class. A name that already
@@ -1807,6 +1840,33 @@ function disambiguateOperationNames(
     return pluralFallbackName(op.httpMethod, op.path, root, actions);
   };
 
+  // The plural of a singleton in `group`: its name with the parent as the
+  // path writes it (writtenParentName), `getPetsStatus` for
+  // `/shop/pets/{id}/status`, while its name is still the one it was built
+  // with. Only when another path-named singleton of the group writes the
+  // parent otherwise (`/shop/pet/{id}/status`): the qualifiers read a
+  // singleton's path without its parent (qualifierPath), so its plural is
+  // all that tells the two apart. Only path-named singletons take part (an
+  // operationId-named member does not, as in the deeper-context pass), so
+  // beside an operationId or an operation of another shape a singleton keeps
+  // its name and is numbered, as before.
+  const parentAsWritten = (group: Operation[]): ((op: Operation) => string | null) => {
+    const written = new Map<Operation, string>();
+    for (const op of group) {
+      if (!pathNamed.has(op)) continue;
+      const root = apiRootLengthOf(op);
+      const actions = !demoted.has(op);
+      const name = writtenParentName(op.httpMethod, op.path, root, actions);
+      if (name !== null && op.name === fallbackOperationName(op.httpMethod, op.path, root, actions)) {
+        written.set(op, name);
+      }
+    }
+    return (op) => {
+      const own = written.get(op);
+      return own !== undefined && own !== op.name && [...written.values()].some((name) => name !== own) ? own : null;
+    };
+  };
+
   // Whether a later pass would tell `op`, once it has `name`, from `other`,
   // a path-named operation of its noun that has it — what joining `other`
   // there counts on (nameIsFree). One of the qualifiers after the first,
@@ -1842,15 +1902,24 @@ function disambiguateOperationNames(
     // Like every qualifier, only when it tells the group apart: beside an
     // operationId, which has no plural, or beside a path that spells the
     // resource singular (`/store/pet/{id}`). Members that would all take the
-    // same plural are left to the numeric suffix. A plural is blocked only by
-    // a name outside the group (`operationId: getPets`); members that share
-    // one some other member does not (`/store/Pets/{id}` and
+    // same plural are left to the numeric suffix. A plural is blocked by any
+    // name outside the group, an operationId's (`operationId: getPets`) or a
+    // path-named operation's (`PUT /shop/archive/pets` beside
+    // `PUT /shop/pets/{id}`): no qualifier is left to tell a member from an
+    // operation whose name it joined (nameIsFree, `apart`), so the join would
+    // only put a number on the name that operation had. Members that share a
+    // plural some other member does not (`/store/Pets/{id}` and
     // `/store/pets/{id}` beside `/store/pet/{id}`) take it together and are
     // numbered below, `getPets` and `getPets2` — the names such a document
     // produced before item resources were singularised. Two groups never
     // share a plural: it is the group's singular name with the resource as
-    // written, so one plural means one singular name, and one group.
-    qualify(group, (op) => pluralOf(op) ?? op.name);
+    // written, so one plural means one singular name, and one group. A
+    // singleton's parent as written follows the same rule
+    // (parentAsWritten): `/shop/Pets/{id}/status` and `/shop/pets/{id}/status`
+    // beside `/shop/pet/{id}/status` are `getPetsStatus` and `getPetsStatus2`.
+    const respelled = parentAsWritten(group);
+    const proposal = (op: Operation) => pluralOf(op) ?? respelled(op) ?? op.name;
+    qualifyGroup(group, operations, pathNamed, nounOf, () => false, proposal, rename);
   }
 
   const taken = new Set(operations.map((op) => op.name));
@@ -2314,7 +2383,9 @@ function sameNoun(a: string, b: string): boolean {
  * before the segment: `getPetStatus` on `/shop/rescue/pets/{id}/status` is
  * read as `/shop/rescue/status`, whose resource `Status` the name ends with,
  * so the same `Rescue` tells it from `/shop/pets/{id}/status` rather than
- * `Pet` coming back as `getPetStatusPet`. Every other operation is read
+ * `Pet` coming back as `getPetStatusPet`. The parent's own spelling is left
+ * to the plural pass (writtenParentName), so `/shop/pets/{id}/status` beside
+ * `/shop/pet/{id}/status` is `getPetsStatus`. Every other operation is read
  * whole, as is an action that gave its name up on its path
  * (demoteSamePathNames; `actions` false), whose name is the next shape's.
  */

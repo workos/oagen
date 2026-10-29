@@ -629,6 +629,47 @@ describe('plural path names (issue #268)', () => {
     ]);
   });
 
+  it('falls back to a numeric suffix when a path-named operation outside the group has the plural (#381 review)', () => {
+    // `PUT /shop/archive/pets` is `updatePets`. `Archive` would tell it from
+    // `/shop/pets/{id}`, but no qualifier runs after the plural, so joining
+    // it would only number the name it had (`updatePets2`).
+    expect(
+      names({
+        '/shop/pets/{id}': { put: item('id') },
+        '/shop/pet/{id}': { put: item('id') },
+        '/shop/archive/pets': { put: ok },
+      }),
+    ).toEqual([
+      'updatePets                   PUT    /shop/archive/pets',
+      'updatePet                    PUT    /shop/pet/{id}',
+      'updatePet2                   PUT    /shop/pets/{id}',
+    ]);
+    expect(
+      names({
+        '/shop/featured/{id}': { put: { ...item('id'), operationId: 'updatePet' } },
+        '/shop/pets/{id}': { put: item('id') },
+        '/shop/archive/pets': { put: ok },
+      }),
+    ).toEqual([
+      'updatePets                   PUT    /shop/archive/pets',
+      'updatePet                    PUT    /shop/featured/{id}',
+      'updatePet2                   PUT    /shop/pets/{id}',
+    ]);
+    // Nor does the item take the name from an operation that sorts after it,
+    // which the numeric pass would then renumber `updatePets2`.
+    expect(
+      names({
+        '/shop/pets/{id}': { put: item('id') },
+        '/shop/pet/{id}': { put: item('id') },
+        '/shop/rescue/pets': { put: ok },
+      }),
+    ).toEqual([
+      'updatePet                    PUT    /shop/pet/{id}',
+      'updatePet2                   PUT    /shop/pets/{id}',
+      'updatePets                   PUT    /shop/rescue/pets',
+    ]);
+  });
+
   it('singularises a deeper segment only when a parameter follows it, and keeps the rest as written', () => {
     // `cats` in `/store/cats/toys/{toyId}` addresses no one cat, so it stays
     // plural, exactly as a collection resource does; `legacy` is not plural.
