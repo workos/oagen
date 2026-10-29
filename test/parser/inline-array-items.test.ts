@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
 import {
@@ -673,6 +674,143 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
     expect(fieldsOf(spec, 'CircleDrawingMarker')).toEqual(['color', 'kind', 'radius']);
     expect(warnings).toEqual([]);
     expectSound(spec, ['Drawing', 'Pet']);
+  });
+
+  it("keeps a variant's `const` beside the schema's own plain declaration, so the union keeps its mapping (#392)", async () => {
+    // The issue, verbatim: an own `kind: string` beside variants pinning `kind` to `cat` and `dog`.
+    const doc = (dog: string) =>
+      specDoc({
+        '/pets/{id}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+            responses: ok(
+              obj({
+                name: str,
+                pet: obj(
+                  { kind: str },
+                  {
+                    discriminator: { propertyName: 'kind' },
+                    oneOf: [obj({ kind: { const: 'cat' }, meow: str }), obj({ kind: { const: dog }, bark: str })],
+                  },
+                ),
+              }),
+            ),
+          },
+        },
+      });
+    const { spec, warnings } = await parse('kind', doc('dog'));
+    const pet = modelOf(spec, 'GetPetResponse').fields[1].type;
+    expect(pet.kind === 'union' && pet.discriminator).toEqual({
+      property: 'kind',
+      mapping: { cat: 'GetPetResponsePet', dog: 'DogGetPetResponsePet' },
+    });
+    expect(spec.models.map(describeModel)).toEqual([
+      'GetPetResponse { name: string, pet: (GetPetResponsePet | DogGetPetResponsePet) }',
+      'GetPetResponsePet { kind: "cat", meow: string }',
+      'DogGetPetResponsePet { kind: "dog", bark: string }',
+    ]);
+    expect(warnings).toEqual([]);
+    expectSound(spec);
+    // So `oagen diff` sees the value change: the `dog` variant is removed and a `wolf` one added.
+    const { spec: wolf } = await parse('kind-wolf', doc('wolf'));
+    const report = diffSpecs(spec, wolf);
+    expect(report.changes.map((c) => [c.kind, 'name' in c ? c.name : undefined, c.classification])).toEqual([
+      ['model-added', 'WolfGetPetResponsePet', 'additive'],
+      ['model-removed', 'DogGetPetResponsePet', 'breaking'],
+      ['model-modified', 'GetPetResponse', 'breaking'],
+    ]);
+    expect(report.summary.breaking).toBeGreaterThan(0);
+  });
+
+  it('keeps the narrower of two declarations of one property, a variant pinning its values, at every site (#392)', async () => {
+    const kinded = (own: SchemaObject, cat: SchemaObject): SchemaObject =>
+      obj(
+        { kind: own },
+        {
+          discriminator: { propertyName: 'kind' },
+          oneOf: [obj({ kind: cat, meow: str }), obj({ kind: { const: 'dog' }, bark: str })],
+        },
+      );
+    /** Each site's union but the request body's, with its base name, taken out of its array at a list site. */
+    const siteUnions = (spec: ApiSpec): Array<[string, TypeRef]> => {
+      const ops = opsOf(spec);
+      const refs: Array<[string, TypeRef]> = [
+        [bases.response, ops.createThing.response],
+        [bases.item, ops.listThings.response],
+        [bases.page, ops.listPages.response],
+        [bases.param, ops.createThing.queryParams[0].type],
+        [bases.header, ops.createThing.responseHeaders![0].type],
+        [bases.field, modelOf(spec, 'Holder').fields[0].type],
+      ];
+      return refs.map(([base, ref]) => [base, ref.kind === 'array' ? ref.items : ref]);
+    };
+    // An own plain `kind`, or an own enum of every value, beside variants pinning one value each.
+    const owns: Record<string, SchemaObject> = { plain: str, enum: { type: 'string', enum: ['cat', 'dog'] } };
+    for (const [label, own] of Object.entries(owns)) {
+      const { spec, warnings } = await parse(`narrower-${label}`, everySite(kinded(own, { const: 'cat' })));
+      for (const [base, union] of siteUnions(spec)) {
+        expect(show(union), `${label} ${base}`).toBe(`(${base} | Dog${base})`);
+        expect(union.kind === 'union' && union.discriminator, `${label} ${base}`).toEqual({
+          property: 'kind',
+          mapping: { cat: base, dog: `Dog${base}` },
+        });
+        expect(describeModel(modelOf(spec, base)), `${label} ${base}`).toBe(`${base} { kind: "cat", meow: string }`);
+        expect(describeModel(modelOf(spec, `Dog${base}`)), `${label} ${base}`).toBe(
+          `Dog${base} { kind: "dog", bark: string }`,
+        );
+      }
+      // The request body, discriminated by the pinned values, is flattened into one object whose
+      // `kind` is the enum of those values, as a discriminated body is (see Request Body Encoding).
+      expect(show(opsOf(spec).createThing.requestBody!), label).toBe('CreateThingRequest');
+      expect(describeModel(modelOf(spec, 'CreateThingRequest')), label).toBe(
+        'CreateThingRequest { kind: CreateThingRequestKind, meow: string, bark: string }',
+      );
+      expect(
+        spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+        label,
+      ).toEqual([['CreateThingRequestKind', ['cat', 'dog']]]);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, everySiteComponents);
+    }
+    // A variant's `enum` is kept the same way, as the variant's own enum rather than `string`.
+    const { spec, warnings } = await parse('narrower-variant-enum', everySite(kinded(str, { enum: ['cat', 'tiger'] })));
+    for (const base of Object.values(bases)) {
+      expect(describeModel(modelOf(spec, base)), base).toBe(`${base} { kind: ${base}Kind, meow: string }`);
+    }
+    expect(Object.fromEntries(spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]))).toEqual(
+      Object.fromEntries(Object.values(bases).map((base) => [`${base}Kind`, ['cat', 'tiger']])),
+    );
+    expect(warnings).toEqual([]);
+    expectSound(spec, everySiteComponents);
+  });
+
+  it("keeps the schema's own declaration of a property a variant also declares unless the variant's is narrower (#392)", () => {
+    const kinds: SchemaObject = { type: 'string', enum: ['cat', 'dog'] };
+    const cases: Array<[string, SchemaObject, SchemaObject, 'own' | 'variant']> = [
+      ['a const beside a plain type', str, { const: 'cat' }, 'variant'],
+      ['an enum beside a plain type', str, { enum: ['cat', 'tiger'] }, 'variant'],
+      ['a const beside an enum naming it', kinds, { const: 'cat' }, 'variant'],
+      ['an enum of some of the own values', { enum: ['cat', 'dog', 'tiger'] }, kinds, 'variant'],
+      [
+        'a typed const beside a component',
+        { $ref: '#/components/schemas/Kind' },
+        { type: 'string', const: 'cat' },
+        'variant',
+      ],
+      ['a plain type beside an enum', kinds, str, 'own'],
+      ['an enum beside a const', { const: 'cat' }, kinds, 'own'],
+      ['the same values', { type: 'string', enum: ['cat'] }, { const: 'cat' }, 'own'],
+      ['values the own enum does not all name', kinds, { enum: ['cat', 'tiger'] }, 'own'],
+      ['a const the own enum does not name', kinds, { const: 'wolf' }, 'own'],
+      ['limits only', { type: 'string', maxLength: 3 }, str, 'own'],
+    ];
+    for (const keyword of ['oneOf', 'anyOf'] as const) {
+      for (const [label, own, variant, kept] of cases) {
+        const folded = foldSiblingProperties(obj({ kind: own }, { [keyword]: [obj({ kind: variant }), note] }));
+        expect(folded[keyword]?.[0].properties?.kind, `${keyword}: ${label}`).toBe(kept === 'own' ? own : variant);
+      }
+    }
   });
 });
 
