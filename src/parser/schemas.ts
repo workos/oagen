@@ -2296,15 +2296,20 @@ function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
  * properties come first and win where both declare a name, unless the
  * variant's declaration is the narrower (`narrowsDeclaration`): JSON Schema
  * applies both, so a variant's `kind: { const: 'cat' }` beside an own
- * `kind: { type: 'string' }` is `'cat'`, and a discriminated union keeps its
- * mapping. The required names are the union of both lists.
+ * `kind: { type: 'string', readOnly: true }` is a read-only `'cat'`, and a
+ * discriminated union keeps its mapping. The own declaration's flags,
+ * documentation, limits and extensions (`declarationKeywords`) stay the
+ * field's wherever the variant's sets none. The required names are the
+ * union of both lists.
  */
 function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
   if (!isInlineObjectSchema(variant)) return variant;
   const properties: Record<string, SchemaObject | undefined> = { ...own.properties };
   for (const [name, property] of Object.entries(variant.properties ?? {})) {
-    if (!Object.hasOwn(properties, name) || narrowsDeclaration(property, properties[name])) {
-      properties[name] = property;
+    const held = properties[name];
+    if (!Object.hasOwn(properties, name)) properties[name] = property;
+    else if (held && property && narrowsDeclaration(property, held)) {
+      properties[name] = { ...declarationKeywords(held), ...property };
     }
   }
   const required = [...new Set([...(own.required ?? []), ...(variant.required ?? [])])];
@@ -2321,7 +2326,7 @@ function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): Sch
  * values, values the own does not all admit, a variant that pins none — is
  * not, and the own declaration stays.
  */
-function narrowsDeclaration(variant: SchemaObject | undefined, own: SchemaObject | undefined): boolean {
+function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
   const narrow = pinnedValues(variant);
   if (narrow === undefined) return false;
   const wide = pinnedValues(own);
@@ -2332,8 +2337,7 @@ function narrowsDeclaration(variant: SchemaObject | undefined, own: SchemaObject
 }
 
 /** The values a declaration's `const` or `enum` pins it to, when that is what types it; `undefined` otherwise. */
-function pinnedValues(schema: SchemaObject | undefined): readonly unknown[] | undefined {
-  if (schema === undefined) return undefined;
+function pinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
   const kind = classifyInlineSchema(schema);
   return kind === 'const' ? [schema.const] : kind === 'enum' ? schema.enum : undefined;
 }
@@ -4923,6 +4927,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 import {
   buildInlineModel,
   collectProperties,
+  declarationKeywords,
   declareProperty,
   declaresInlineProperties,
   elementContextName,

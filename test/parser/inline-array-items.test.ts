@@ -745,8 +745,13 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
       ];
       return refs.map(([base, ref]) => [base, ref.kind === 'array' ? ref.items : ref]);
     };
-    // An own plain `kind`, or an own enum of every value, beside variants pinning one value each.
-    const owns: Record<string, SchemaObject> = { plain: str, enum: { type: 'string', enum: ['cat', 'dog'] } };
+    // An own plain `kind`, an own enum of every value, or an own `kind` with flags and documentation,
+    // beside variants pinning one value each.
+    const owns: Record<string, SchemaObject> = {
+      plain: str,
+      enum: { type: 'string', enum: ['cat', 'dog'] },
+      documented: { type: 'string', readOnly: true, description: 'Pet kind' },
+    };
     for (const [label, own] of Object.entries(owns)) {
       const { spec, warnings } = await parse(`narrower-${label}`, everySite(kinded(own, { const: 'cat' })));
       for (const [base, union] of siteUnions(spec)) {
@@ -759,6 +764,13 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
         expect(describeModel(modelOf(spec, `Dog${base}`)), `${label} ${base}`).toBe(
           `Dog${base} { kind: "dog", bark: string }`,
         );
+        // The own declaration's flags and documentation stay the field's.
+        for (const name of [base, `Dog${base}`]) {
+          const { readOnly, description } = modelOf(spec, name).fields[0];
+          expect({ readOnly, description }, `${label} ${name}`).toEqual(
+            label === 'documented' ? { readOnly: true, description: 'Pet kind' } : {},
+          );
+        }
       }
       // The request body, discriminated by the pinned values, is flattened into one object whose
       // `kind` is the enum of those values, as a discriminated body is (see Request Body Encoding).
@@ -805,11 +817,30 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
       ['a const the own enum does not name', kinds, { const: 'wolf' }, 'own'],
       ['limits only', { type: 'string', maxLength: 3 }, str, 'own'],
     ];
+    const kindOf = (keyword: 'oneOf' | 'anyOf', own: SchemaObject, variant: SchemaObject) =>
+      foldSiblingProperties(obj({ kind: own }, { [keyword]: [obj({ kind: variant }), note] }))[keyword]?.[0].properties
+        ?.kind;
+    // The own declaration still applies where the variant's wins: its flags, documentation, limits
+    // and extensions stay the field's wherever the variant's sets none.
+    const documented: SchemaObject = {
+      type: 'string',
+      readOnly: true,
+      description: 'Pet kind',
+      maxLength: 8,
+      'x-since': '2',
+    };
+    const carried = { readOnly: true, description: 'Pet kind', maxLength: 8, 'x-since': '2' };
     for (const keyword of ['oneOf', 'anyOf'] as const) {
       for (const [label, own, variant, kept] of cases) {
-        const folded = foldSiblingProperties(obj({ kind: own }, { [keyword]: [obj({ kind: variant }), note] }));
-        expect(folded[keyword]?.[0].properties?.kind, `${keyword}: ${label}`).toBe(kept === 'own' ? own : variant);
+        expect(kindOf(keyword, own, variant), `${keyword}: ${label}`).toEqual(kept === 'own' ? own : variant);
       }
+      expect(kindOf(keyword, documented, { const: 'cat' }), keyword).toEqual({ ...carried, const: 'cat' });
+      expect(kindOf(keyword, documented, { const: 'cat', description: 'A cat' }), keyword).toEqual({
+        ...carried,
+        const: 'cat',
+        description: 'A cat',
+      });
+      expect(kindOf(keyword, documented, str), keyword).toBe(documented);
     }
   });
 });
