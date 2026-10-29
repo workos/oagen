@@ -4539,6 +4539,43 @@ describe('a title two unions give different shapes at different depths of one ro
     },
   );
 
+  it.each<{ label: string; member: SchemaObject }>([
+    { label: "a `shape` the merge drops for `Base`'s", member: obj({ shape: byDiameter() }) },
+    { label: 'a union whose variants the merge flattens into the model', member: byDiameter() },
+  ])('keeps the bare titles for $label, which is no model (#374 review)', async ({ member }) => {
+    // The merged model holds `Base.shape` alone: the inline member's union is
+    // dropped (the first declaration types the property) or flattened into
+    // the model's optional fields, so it is minted nowhere and contests
+    // nothing, in a response as in a request body.
+    const schema: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, member] };
+    for (const [body, root] of [
+      [op('getDrawing', { responses: { '200': { description: 'ok', ...json(schema) } } }), 'GetDrawingResponse'],
+      [
+        {
+          paths: {
+            '/drawings': {
+              post: {
+                operationId: 'createDrawing',
+                requestBody: json(schema),
+                responses: { '204': { description: 'ok' } },
+              },
+            },
+          },
+        },
+        'CreateDrawingRequest',
+      ],
+    ] as const) {
+      const ir = await parseWithoutWarnings(withBase(body));
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Base']).toEqual({ id: str, shape: unionOf('Circle', 'Square') });
+      expect(types[root]).toMatchObject({ id: str, shape: unionOf('Circle', 'Square') });
+      expect(types['Circle']).toEqual({ ...kind('circle'), radius: num });
+      expect(types['Square']).toEqual({ ...kind('square'), side: num });
+      expect(modelNames(ir)).toEqual(['Base', 'Circle', root, 'Square'].sort());
+      expectConsistent(ir, ['Base']);
+    }
+  });
+
   describe('markContestedTitles', () => {
     const variantsOf = (union: SchemaObject): SchemaObject[] => union.oneOf!;
 
@@ -4733,6 +4770,16 @@ describe('a title two unions give different shapes at different depths of one ro
         label: "a union component's variants",
         body: (inner) => ({ allOf: [ref('Base'), marker(inner)] }),
         schemas: (top) => ({ Base: top }),
+      },
+      {
+        label: 'a declaration the merge drops for the first one (review)',
+        body: (inner) => ({ allOf: [ref('Base'), obj({ shape: inner })] }),
+        schemas: base,
+      },
+      {
+        label: "a union whose variants the merge flattens into the model's fields (review)",
+        body: (inner) => ({ allOf: [ref('Base'), inner] }),
+        schemas: base,
       },
     ])('reads nothing the merge does not inherit: $label (#374)', (merge) => {
       // Each of these is left to its component's model, which the components
