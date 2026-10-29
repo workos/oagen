@@ -179,7 +179,13 @@ export interface Webhook {
    * exactly when `requestBody` is.
    */
   requestBodyContentType?: string;
-  /** Present, and `true`, only when the document marks the request body `required`. */
+  /**
+   * Present, and `true`, only when the document marks the request body
+   * `required` and the body declares a media type (`requestBodyContentTypes`
+   * is set), the presence rule `Operation.requestBodyRequired` follows: a
+   * payload carried in `requestBodyContents` alone keeps it, and a body with
+   * no `content`, or an empty map, has no entry.
+   */
   requestBodyRequired?: boolean;
   /**
    * Doc text for the payload, read as `Operation.requestBodyDescription`

@@ -349,5 +349,32 @@ describe('request body required (issue #213)', () => {
       expect(empty.requestBodyContentTypes).toBeUndefined();
       expect(Object.keys(empty)).not.toContain('requestBodyRequired');
     });
+
+    it('is absent on the webhook too when the body declares no media type, as on the operation (#388 review)', async () => {
+      for (const requestBody of [{ required: true, content: {} }, { required: true }]) {
+        const dir = mkdtempSync(join(tmpdir(), 'oagen-388-'));
+        try {
+          const file = join(dir, 'required.json');
+          writeFileSync(
+            file,
+            JSON.stringify({
+              openapi: '3.1.0',
+              info: { title: 'required', version: '1' },
+              paths: { '/pets': { post: { operationId: 'createPet', requestBody, responses: ok } } },
+              webhooks: { petAdopted: { post: { requestBody, responses: {} } } },
+            }),
+          );
+          const { services, webhooks } = await parseSpec(file);
+          const sites = [...services.flatMap(({ operations }) => operations), ...(webhooks ?? [])];
+          expect(sites.map(({ name }) => name)).toEqual(['createPet', 'petAdopted']);
+          for (const site of sites) {
+            expect(site.requestBodyContentTypes, site.name).toBeUndefined();
+            expect(Object.keys(site), site.name).not.toContain('requestBodyRequired');
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    });
   });
 });
