@@ -1269,10 +1269,14 @@ describe("an operation's own inline body named like a component response's body 
   const card = { '/card': { get: { operationId: 'card', responses: { '200': json(object({ j: string })) } } } };
   const getNote = { '/notes': { get: { operationId: 'getNote', responses: { '200': cardRef } } } };
 
-  async function parse(paths: Record<string, unknown>, responses: Record<string, unknown> = { Card: textCard }) {
+  async function parse(
+    paths: Record<string, unknown>,
+    responses: Record<string, unknown> = { Card: textCard },
+    otherSchemas: Record<string, unknown> = {},
+  ) {
     dir ??= mkdtempSync(join(tmpdir(), 'oagen-424-'));
     const specPath = join(dir, 'spec.json');
-    const schemas = { Pet: PET_SCHEMA };
+    const schemas = { Pet: PET_SCHEMA, ...otherSchemas };
     writeFileSync(
       specPath,
       JSON.stringify({
@@ -1419,6 +1423,38 @@ describe("an operation's own inline body named like a component response's body 
       ]);
     }
     expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it("steps a later body that must take a number past the component's body, in either path order (review)", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A component schema owns `CardResponse201`, so `card`'s 201 steps on to a
+    // number; the component's body took `CardResponse2` past `card`'s 200, so
+    // the 201 steps past it too, to `CardResponse3`, whichever path is read
+    // first. The 201 is the 200's shape (`{ i }`) or another (`{ j }`).
+    for (const later of [object({ i: string }), object({ j: string })]) {
+      const card201 = {
+        '/card': {
+          get: { operationId: 'card', responses: { '200': json(object({ i: string })), '201': json(later) } },
+        },
+      };
+      const owned = { CardResponse201: object({ z: string }) };
+      const cardFirst = await parse({ ...card201, ...getNote }, { Card: textCard }, owned);
+      const notesFirst = await parse({ ...getNote, ...card201 }, { Card: textCard }, owned);
+
+      for (const spec of [cardFirst, notesFirst]) {
+        expect(
+          byName(spec)
+            .get('card')!
+            .successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`),
+        ).toEqual(['200: CardResponse', '201: CardResponse3']);
+        expect(typeName(byName(spec).get('getNote')!.response)).toBe('CardResponse2');
+        expect(modelsOf(spec)).toEqual(
+          expect.arrayContaining(['CardResponse { i }', 'CardResponse2 { text }', 'CardResponse201 { z }']),
+        );
+      }
+      expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+    }
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('reserves the name a later body shares, not one it never takes, in either path order (Greptile)', async () => {
