@@ -53,12 +53,19 @@ import {
  * taken against every name in play, so it names that one model and nothing
  * else. Absent, `minted` is created on first use, so a caller that gives
  * none still gets it within a pass; the parser hands one set to every pass.
+ * The model a mint names is recorded too, under the name its copies left,
+ * with how many sites share it (`mintedFor`), so an identical copy that
+ * must leave that name later — an operation's nested object beside the
+ * component field's that the settle moved before any operation was read —
+ * joins the model rather than minting another (`renameClusters`); it is
+ * created on first use and handed to every pass the same way.
  */
 export interface InlineModelNaming {
   bundles: InlineModelBundle[];
   reserved: Set<string>;
   enums: ReadonlySet<string>;
   minted?: Set<string>;
+  mintedFor?: Map<string, Map<Model, number>>;
 }
 
 /**
@@ -358,7 +365,12 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  * sites share it; a copy of another shape takes a name of its own. Two
  * deprecated `address` objects beside a live `PetOwnerAddress` of another
  * shape are one `PetOwnerAddress2`, as they would be one `PetOwnerAddress`
- * without the component.
+ * without the component. Copies that leave the name in different passes
+ * share it the same way (`naming.mintedFor`): a component field's copy,
+ * settled before any operation is read, takes the model, and an
+ * operation's identical copy joins it here, as does a deprecated copy
+ * identical to a field model that yielded the name to a live copy
+ * (`yielding`).
  *
  * Names are decided bottom-up — a name after every name its contenders'
  * fields reference, as the list-envelope pass decides nested companions —
@@ -481,6 +493,7 @@ function settleSharedNames(
       const bundle = naming && bundleOf.get(owner);
       if (bundle) {
         const renamed = renameInlineCopy(owner, name, bundle, naming);
+        shareMinted(naming, name, owner, 1);
         console.warn(`[oagen] Renamed inline model "${name}" → "${renamed}": it is deprecated while "${name}" is live`);
         owners.delete(name);
         owner = undefined;
@@ -740,12 +753,18 @@ function foldOnto(
  * through it (`renameInlineCopy`) and every later one is repointed to that
  * name (`repointSite`) and folded onto it, so identical copies that must
  * leave a name share one model under the new one, as they would share the
- * bare name with no claimant (`keepLargestByName`). Each cluster's rename is
- * noted as `[oagen] Renamed inline model "<name>" → "<renamed>": <reason>`,
- * with the number of sites when more than one shares it. A copy without a
- * site cannot be renamed and is left under `name`, `noSite` said for each.
- * The copies must agree on `deprecated`: a cluster never joins a live copy
- * to a deprecated one (`differOnlyByDeprecation`).
+ * bare name with no claimant (`keepLargestByName`). A cluster identical to a
+ * model already minted for copies leaving `name` (`naming.mintedFor`) — by
+ * an earlier pass, as the settle moves a component field's copy before any
+ * operation is read, or by a field model yielding the name — that is still
+ * a site's model joins it the same way, every copy repointed and folded
+ * onto it, rather than minting another. Each cluster's rename is noted as
+ * `[oagen] Renamed inline model "<name>" → "<renamed>": <reason>`, with the
+ * number of sites when more than one shares the model, those an earlier
+ * rename moved onto it included. A copy without a site cannot be renamed
+ * and is left under `name`, `noSite` said for each. The copies must agree
+ * on `deprecated`: a cluster never joins a live copy to a deprecated one
+ * (`differOnlyByDeprecation`).
  */
 function renameClusters(
   name: string,
@@ -761,30 +780,46 @@ function renameClusters(
     const shape = modelFingerprint(copy);
     clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
   }
-  for (const cluster of clusters.values()) {
-    let renamed: string | undefined;
-    let leader: Model | undefined;
+  for (const [shape, cluster] of clusters) {
+    // Only a model still a site's: one no site holds, or one folded here, may be gone from the IR.
+    let leader = [...(naming?.mintedFor?.get(name)?.keys() ?? [])].find(
+      (model) => bundleOf.has(model) && !folded.has(model) && modelFingerprint(model) === shape,
+    );
     for (const copy of cluster) {
       const bundle = naming && bundleOf.get(copy);
       if (!naming || !bundle) {
         console.warn(noSite);
         continue;
       }
-      if (renamed === undefined || leader === undefined) {
-        renamed = renameInlineCopy(copy, name, bundle, naming);
+      if (leader === undefined) {
+        renameInlineCopy(copy, name, bundle, naming);
         leader = copy;
         continue;
       }
-      repointSite(bundle, name, renamed, copy);
+      repointSite(bundle, name, leader.name, copy);
       foldOnto(copy, leader, bundleOf, folded);
     }
-    if (renamed !== undefined) {
-      const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+    const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+    if (naming && leader && sites > 0) {
+      const shared = shareMinted(naming, name, leader, sites);
       console.warn(
-        `[oagen] Renamed inline model "${name}" → "${renamed}": ${reason}${sites > 1 ? ` (shared by ${sites} sites)` : ''}`,
+        `[oagen] Renamed inline model "${name}" → "${leader.name}": ${reason}${shared > 1 ? ` (shared by ${shared} sites)` : ''}`,
       );
     }
   }
+}
+
+/**
+ * Count `sites` more sites sharing `model`, minted for copies leaving `name`
+ * (`InlineModelNaming.mintedFor`), and return how many share it now.
+ */
+function shareMinted(naming: InlineModelNaming, name: string, model: Model, sites: number): number {
+  const mintedFor = (naming.mintedFor ??= new Map());
+  const sharing = mintedFor.get(name) ?? new Map<Model, number>();
+  mintedFor.set(name, sharing);
+  const shared = (sharing.get(model) ?? 0) + sites;
+  sharing.set(model, shared);
+  return shared;
 }
 
 /**
