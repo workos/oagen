@@ -2,6 +2,7 @@ import type { Enum, EnumRef, Model, ModelRef, Service, TypeRef, Webhook } from '
 import {
   walkTypeRef,
   collectResponseHeaders,
+  collectModelRefs,
   collectModelTypeRefs,
   collectRequestBodyTypes,
   collectResponseBodyTypes,
@@ -241,7 +242,9 @@ function bundlesByModel(naming: InlineModelNaming | undefined): Map<Model, Inlin
  * minting `FooBarThing`) still follows that model off an enum's name. The
  * rule the final field merge applies, applied as soon as the field models
  * are settled, so the model a later pass meets under a name is the one that
- * survives it.
+ * survives it. A copy with a site that references a model of its own the
+ * winner does not has left the name before this runs (`settleSharedNames`),
+ * so no fold here leaves a nested model referenced by nothing.
  */
 function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[] {
   const byName = new Map<string, Model>();
@@ -374,12 +377,18 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  * — its shape is its site's own now, and folding it by name would leave the
  * renamed child referenced by nothing, or hand every other site the child
  * the pass had just kept off the shared name. The contenders that follow no
- * rename are settled by the pass's own choice, as they always were; when
- * every contender follows one, the first cluster keeps the name as that
- * choice would keep the first definition. A contender under a name a
+ * rename are settled by the pass's own choice, as they always were, but for
+ * one that choice would fold onto a definition that does not reference a
+ * model it references itself (a reference its site minted, as above, to a
+ * model no owner holds): it leaves the name the same way, since folded by
+ * name it would leave that model referenced by nothing (`strands`). When
+ * every contender follows a rename, the first cluster keeps the name as
+ * that choice would keep the first definition. A contender under a name a
  * rename minted — the leader of a cluster, which the other sites of the
  * cluster were repointed to — keeps it. The deprecated copies of a live
- * name are compared with the live contenders that keep the name alone.
+ * name are compared with the live contenders that follow no rename, those
+ * the pass's choice would drop included, or, when every one follows a
+ * rename, with the first cluster.
  *
  * A contender without a site — none the parser produces; a direct caller's —
  * cannot be renamed and is left under the shared name, with a warning: the
@@ -419,6 +428,27 @@ function settleSharedNames(
       walkTypeRef(ref, {
         model: (r) => {
           if (inlineRefAdmit(false)(r) && minted.has(r.name)) found = true;
+        },
+      });
+    }
+    return found;
+  };
+  /**
+   * Whether `copy`, folded onto `kept`, would leave a model of its own
+   * referenced by nothing: whether one of its own references (as
+   * `followsRename` reads them) names a model `kept` does not reference —
+   * never its own name, which then resolves to `kept`, nor an owner's,
+   * which no pass drops.
+   */
+  const strands = (copy: Model, kept: Model): boolean => {
+    const keptNames = new Set(collectModelTypeRefs(kept).flatMap(collectModelRefs));
+    let found = false;
+    for (const ref of collectModelTypeRefs(copy)) {
+      walkTypeRef(ref, {
+        model: (r) => {
+          if (inlineRefAdmit(false)(r) && r.name !== copy.name && !owners.has(r.name) && !keptNames.has(r.name)) {
+            found = true;
+          }
         },
       });
     }
@@ -493,10 +523,11 @@ function settleSharedNames(
       // keep it and hand every other site the child the pass kept off the
       // name. A holder under a name a rename minted is the leader the other
       // sites of its cluster were repointed to, and keeps it. The twins that
-      // follow no rename are settled as always; when every holder follows
-      // one, the first cluster keeps the name as the pass's choice would
-      // keep the first definition. The copies of the other flag below are
-      // measured against the holders that keep the name alone.
+      // follow no rename are settled as always, but for one that would
+      // strand a model of its own (below); when every holder follows one,
+      // the first cluster keeps the name as the pass's choice would keep the
+      // first definition. The copies of the other flag below are measured
+      // against the holders that follow no rename, or that first cluster.
       const own = holders.filter((m) => !minted.has(m.name) && followsRename(m));
       const rest = holders.filter((m) => !own.includes(m));
       const leaving = byShape(own);
@@ -511,6 +542,27 @@ function settleSharedNames(
         `[oagen] Warning: Inline model "${name}" references a renamed model, is named like another definition and has no site to be renamed from — keeping the usual definition under the shared name`,
       );
       live = holders.filter((m) => rest.includes(m) || first.includes(m));
+      // A holder the pass's choice would fold onto another definition
+      // (`keepLargestByName`: the most fields, the first on a tie) leaves the
+      // name by its site too when it references a model of its own that
+      // definition does not: folded by name, it would leave that model
+      // referenced by nothing. Its nested models were decided before it, so
+      // it is read with their final names, and its own parent, decided
+      // after it, follows its rename. The copies of the other flag below are
+      // still measured against every holder in `live`, so whether one folds
+      // never depends on which definition document order keeps on a tie.
+      if (live.length > 1) {
+        const kept = preferredDefinition(live);
+        renameClusters(
+          name,
+          live.filter((m) => m !== kept && strands(m, kept)),
+          naming,
+          bundleOf,
+          folded,
+          `it references a model the definition kept under "${name}" does not`,
+          `[oagen] Warning: Inline model "${name}" references a model the definition kept under "${name}" does not and has no site to be renamed from — keeping the usual definition under the shared name`,
+        );
+      }
       if (live.length === 0 || holders.length === group.length) continue;
     }
 

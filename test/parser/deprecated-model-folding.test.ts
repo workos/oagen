@@ -1823,6 +1823,132 @@ describe('a renamed nested model goes with the parent that references it (issue 
       ]);
     }
   });
+
+  const note = (props: Record<string, unknown>) => obj({ object: { type: 'string', const: 'note' }, ...props });
+
+  it('qualifies a twin the shared name would drop when the definition it keeps does not reference the twin’s nested model, in either order (issue #442, `repro.json`)', async () => {
+    // `getA` and `getC` both mint `Note`; `getC`'s has more fields and keeps
+    // the name. Folded onto it, `getA`'s `Note` would leave its `NoteOwner`
+    // referenced by nothing, so it keeps its own shape under its site's name.
+    for (const { order, spec, warnings } of await parseBothOrders('dropped-twin', {}, [
+      ['/a', getOp('getA', note({ owner: obj({ city: str }) }))],
+      ['/c', getOp('getC', note({ holder: obj({ city: str }), extra: str }))],
+    ])) {
+      const ops = opsOf(spec);
+      expect(ops.getA?.response, order).toEqual({ kind: 'model', name: 'GetANote' });
+      expect(ops.getC?.response, order).toEqual({ kind: 'model', name: 'Note' });
+      expect(
+        describeModels(spec).sort((a, b) => a.name.localeCompare(b.name)),
+        order,
+      ).toEqual([
+        { deprecated: undefined, fields: ['object: literal', 'owner: NoteOwner'], name: 'GetANote', required: [] },
+        {
+          deprecated: undefined,
+          fields: ['object: literal', 'holder: NoteHolder', 'extra: string'],
+          name: 'Note',
+          required: [],
+        },
+        { deprecated: undefined, fields: ['city: string'], name: 'NoteHolder', required: [] },
+        { deprecated: undefined, fields: ['city: string'], name: 'NoteOwner', required: [] },
+      ]);
+      expectSound(spec, []);
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "Note" → "GetANote": it references a model the definition kept under "Note" does not',
+      ]);
+    }
+  });
+
+  it('keeps `getC`’s own `owner` rather than the `$ref` of the twin that keeps the name (issue #442, `ref.json`)', async () => {
+    // `getA`'s `owner` is a `$ref` to a component; `getB`'s deprecated owner
+    // takes `GetBNoteOwner2` and its `Note` follows it off the name. `getA`
+    // and `getC` tie on fields and `getA`'s, declared first, keeps `Note`:
+    // folded onto it, `getC` would be typed with the component's `q` and its
+    // own `NoteOwner` referenced by nothing.
+    const schemas = { GetBNoteOwner: obj({ q: str }) };
+    const { spec, warnings } = await parseWithWarnings(
+      'dropped-twin-ref.json',
+      specDoc(schemas, {
+        '/a': getOp('getA', note({ owner: refTo('GetBNoteOwner') })),
+        '/b': getOp('getB', note({ owner: obj({ city: str, zip: str }, { deprecated: true }) })),
+        '/c': getOp('getC', note({ owner: obj({ city: str }) })),
+      }),
+    );
+    const ops = opsOf(spec);
+    expect(ops.getA?.response).toEqual({ kind: 'model', name: 'Note' });
+    expect(ops.getB?.response).toEqual({ kind: 'model', name: 'GetBNote' });
+    expect(ops.getC?.response).toEqual({ kind: 'model', name: 'GetCNote' });
+    expect(fieldRef(spec, 'Note', 'owner')).toEqual({ kind: 'model', name: 'GetBNoteOwner' });
+    expect(fieldRef(spec, 'GetBNote', 'owner')).toEqual({ kind: 'model', name: 'GetBNoteOwner2' });
+    expect(fieldRef(spec, 'GetCNote', 'owner')).toEqual({ kind: 'model', name: 'NoteOwner' });
+    expect(describeModels(spec).find((m) => m.name === 'NoteOwner')).toEqual({
+      deprecated: undefined,
+      fields: ['city: string'],
+      name: 'NoteOwner',
+      required: [],
+    });
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "NoteOwner" → "GetBNoteOwner2": it is deprecated while "NoteOwner" is live',
+      '[oagen] Renamed inline model "Note" → "GetBNote": it references a renamed model and "Note" keeps another definition',
+      '[oagen] Renamed inline model "Note" → "GetCNote": it references a model the definition kept under "Note" does not',
+    ]);
+
+    // Declared the other way round, `getC`'s `Note` keeps the name, so its
+    // `owner` is its own `NoteOwner` in either order. `getA`'s `Note` folds
+    // onto it by the pass's choice, with its warning, as before: its `owner`
+    // names a component, which is the document's and never left behind, so
+    // the fold strands nothing.
+    const swapped = await parseWithWarnings(
+      'dropped-twin-ref-swapped.json',
+      specDoc(schemas, {
+        '/c': getOp('getC', note({ owner: obj({ city: str }) })),
+        '/b': getOp('getB', note({ owner: obj({ city: str, zip: str }, { deprecated: true }) })),
+        '/a': getOp('getA', note({ owner: refTo('GetBNoteOwner') })),
+      }),
+    );
+    const swappedOps = opsOf(swapped.spec);
+    expect(swappedOps.getC?.response).toEqual({ kind: 'model', name: 'Note' });
+    expect(swappedOps.getA?.response).toEqual({ kind: 'model', name: 'Note' });
+    expect(fieldRef(swapped.spec, 'Note', 'owner')).toEqual({ kind: 'model', name: 'NoteOwner' });
+    expectSound(swapped.spec, Object.keys(schemas));
+    expect(swapped.warnings).toEqual([
+      '[oagen] Renamed inline model "NoteOwner" → "GetBNoteOwner2": it is deprecated while "NoteOwner" is live',
+      '[oagen] Renamed inline model "Note" → "GetBNote": it references a renamed model and "Note" keeps another definition',
+      '[oagen] Warning: Inline model "Note" has more than one definition with different fields or field types (2 vs 2) — keeping the first definition',
+    ]);
+  });
+
+  it('qualifies the component field’s model the settle drops when the one it keeps does not reference its nested model (issue #442)', async () => {
+    // `Foo.barThings` and `FooBar.things` are maps whose values both mint
+    // `FooBarThing`; `FooBar`'s has more fields and keeps the name. Folded
+    // onto it, `Foo`'s would leave its `FooBarThingOwner` referenced by nothing.
+    const thing = (props: Record<string, unknown>) =>
+      obj({ object: { type: 'string', const: 'foo_bar_thing' }, ...props });
+    const schemas = {
+      Foo: obj({ barThings: { type: 'object', additionalProperties: thing({ owner: obj({ city: str }) }) } }),
+      FooBar: obj({
+        things: { type: 'object', additionalProperties: thing({ holder: obj({ city: str }), extra: str }) },
+      }),
+    };
+    const { spec, warnings } = await parseWithWarnings(
+      'dropped-twin-field.json',
+      specDoc(schemas, { '/foo': getOp('getFoo', refTo('Foo')), '/foo-bar': getOp('getFooBar', refTo('FooBar')) }),
+    );
+    expect(fieldRef(spec, 'Foo', 'barThings')).toEqual({
+      kind: 'map',
+      valueType: { kind: 'model', name: 'FooBarThing2' },
+    });
+    expect(fieldRef(spec, 'FooBar', 'things')).toEqual({
+      kind: 'map',
+      valueType: { kind: 'model', name: 'FooBarThing' },
+    });
+    expect(fieldRef(spec, 'FooBarThing2', 'owner')).toEqual({ kind: 'model', name: 'FooBarThingOwner' });
+    expect(fieldRef(spec, 'FooBarThing', 'holder')).toEqual({ kind: 'model', name: 'FooBarThingHolder' });
+    expectSound(spec, Object.keys(schemas));
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "FooBarThing" → "FooBarThing2": it references a model the definition kept under "FooBarThing" does not',
+    ]);
+  });
 });
 
 describe('a model of an operation without an `operationId` that a merge pass renames is named from its method and path (issue #380)', () => {
