@@ -76,8 +76,8 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  *
  * `shared` is the parser's record of every type reference a site shared
  * through `components/responses` wrote (`OperationExtractionResult.componentSites`:
- * the component's fallback or error body, a secondary body, a header), by
- * identity — the one record of which sites an operation owns and which a
+ * the component's success, fallback or error body, a secondary body, a
+ * header), by identity — the one record of which sites an operation owns and which a
  * component does. An enum such a site carries is named from the component
  * alone (`CardXMode`, `ProblemResponse`), so on a clash it steps by number
  * (`CardXMode2`, `ProblemResponse2`) — never by the status code, the
@@ -176,10 +176,13 @@ export function collectInlineEnumsFromOperations(
       // `CheckPetKindResponse202` (`CheckPetKindItem202` for an array of one),
       // while identical members share. A lone success response, and the
       // request body, carry no code and fall back to a numeric suffix
-      // (`GetPetKindResponse2`). An enum nested in a body's model is
-      // collected with every other model's (`collectInlineEnumsFromModels`).
+      // (`GetPetKindResponse2`), as does a body a component response declares
+      // (`shared`) at any status code (`CardResponse2`). An enum nested in a
+      // body's model is collected with every other model's
+      // (`collectInlineEnumsFromModels`).
       for (const { type, qualifier } of requestAndSuccessBodies(op)) {
-        collectDistinctEnums(type, qualifier, enums, enumNames, modelNames, steps);
+        const own = !shared.has(type);
+        collectDistinctEnums(type, own ? qualifier : undefined, enums, enumNames, modelNames, own ? steps : undefined);
       }
       // An error body that is itself an inline enum, or an array of one, is
       // typed by `schemaToTypeRef` and reaches no model, so it is promoted

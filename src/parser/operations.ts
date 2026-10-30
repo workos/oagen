@@ -443,9 +443,11 @@ export interface OperationExtractionResult {
   /**
    * Every type reference a site shared through `components/responses` wrote
    * (`componentSite`: the component's fallback or error body, a secondary
-   * body, a header), by identity — the parser's one record of which sites a
-   * component owns, which the IR alone cannot tell (`CardXMode` is a shared
-   * header's enum name wherever the component is returned). The enum
+   * body, a header) and each 2xx entry's `type` a component declares (typed
+   * with its operation, never deferred), by identity — the parser's one
+   * record of which sites a component owns, which the IR alone cannot tell
+   * (`CardXMode` is a shared header's enum name wherever the component is
+   * returned). The enum
    * collector reads it so an enum such a site carries steps by number from
    * the component's stem (`CardXMode2`), never by the status code or
    * fallback label that mounted the component, nor by the `Body` an
@@ -559,6 +561,9 @@ export function extractOperations(
   // operation can be told from one across two.
   const deferred: DeferredInlineType[] = [];
   const qualifierOf = new Map<Operation, string>();
+  // Each success body a `components/responses` entry declares, typed with
+  // its operation rather than deferred (`componentSites` below).
+  const componentBodies: TypeRef[] = [];
   // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
   // with every name decided before the operations — the component models
   // and enums, the components' field models (a nested object, a map's
@@ -624,6 +629,7 @@ export function extractOperations(
         envelopeCompanions: opCompanions,
         operationQualifier,
         modelQualifier,
+        componentBodies: opComponentBodies,
       } = buildOperation(
         method,
         path,
@@ -650,6 +656,7 @@ export function extractOperations(
         modelOperationIds.get(key),
       );
       inlineModels.push(...opModels);
+      componentBodies.push(...opComponentBodies);
       // The operation's models join the registry under its qualifier, so a
       // later operation's items and every deferred schema step around them;
       // its settled item models are already there (`typeInlineItems`).
@@ -735,9 +742,10 @@ export function extractOperations(
   const deferredTypes = resolveDeferredInlineTypes(deferred, registry, namingOrder);
   inlineModels.push(...deferredTypes.models);
   // The root every component-shared site wrote, by identity (every target of
-  // a site carries the one TypeRef its resolution produced), for the enum
-  // collector (`OperationExtractionResult.componentSites`).
-  const componentSites = new Set<TypeRef>();
+  // a site carries the one TypeRef its resolution produced), and each
+  // success body a component declares, for the enum collector
+  // (`OperationExtractionResult.componentSites`).
+  const componentSites = new Set<TypeRef>(componentBodies);
   for (const item of deferred) {
     if (item.componentSite === undefined) continue;
     for (const target of item.targets) if (target.type) componentSites.add(target.type);
@@ -2879,6 +2887,8 @@ function buildOperation(
   operationQualifier: string;
   /** What a merge pass prefixes to one of this operation's models it must rename (`InlineModelBundle.qualifier`). */
   modelQualifier: string;
+  /** Each success body a `components/responses` entry declares (`OperationExtractionResult.componentSites`). */
+  componentBodies: TypeRef[];
 } {
   const opLabel = operationLabel(op, path, method);
   warnOnIgnoredCallbacks(op.callbacks, opLabel);
@@ -3096,6 +3106,7 @@ function buildOperation(
     overrideProblem,
     envelopeCompanions,
     unpagedEnvelope,
+    componentBodies,
   } = extractResponses(op.responses, namingOp, pathModelBaseName, opLabel, componentSchemas, typing, {
     disabled: iteratorSource === undefined,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
@@ -3282,7 +3293,15 @@ function buildOperation(
     inlineModelBundles.push({ qualifier: modelQualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
-  return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier, modelQualifier };
+  return {
+    operation,
+    inlineModels,
+    inlineModelBundles,
+    envelopeCompanions,
+    operationQualifier,
+    modelQualifier,
+    componentBodies,
+  };
 }
 
 /**
@@ -6702,8 +6721,11 @@ function extractResponses(
   envelopeCompanions?: EnvelopeCompanion[];
   /** The primary body is a list envelope kept as a plain response model because nothing pages it (`ResponseExtractionResult.unpagedEnvelope`). */
   unpagedEnvelope?: boolean;
+  /** Each 2xx entry's `type` a `components/responses` entry declares, by identity (`OperationExtractionResult.componentSites`). */
+  componentBodies: TypeRef[];
 } {
   const errors: ErrorResponse[] = [];
+  const componentBodyTypes: TypeRef[] = [];
   let response: TypeRef = undescribedBodyType();
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
@@ -6788,7 +6810,8 @@ function extractResponses(
   // An operation without a `responses` object declares no success response,
   // so `response` is `unknown` here as it is for one that declares only
   // `default`, ranges or errors.
-  if (!responses) return { response, errors, inlineModels, isPaginated, overrideProblem };
+  if (!responses)
+    return { response, errors, inlineModels, isPaginated, overrideProblem, componentBodies: componentBodyTypes };
 
   for (const [statusCode, rawResponse] of Object.entries(responses)) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
@@ -6893,6 +6916,9 @@ function extractResponses(
         contentModelNaming(site, 'Response', code),
         ctx,
       );
+      // The component's body wherever it is mounted, so an enum it is steps
+      // by number, never by this status code (`collectInlineEnumsFromOperations`).
+      if (componentModelName !== undefined) componentBodyTypes.push(extractedType);
       allSuccessResponses.push({
         statusCode: code,
         type: extractedType,
@@ -7113,6 +7139,7 @@ function extractResponses(
     overrideProblem,
     envelopeCompanions,
     unpagedEnvelope,
+    componentBodies: componentBodyTypes,
   };
 }
 

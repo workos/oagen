@@ -905,6 +905,37 @@ describe('a stepped name is shared only by the operation whose sites stepped to 
     expect(typesOf(operation(ir, 'listPets'))).toEqual(['503 X-Policy: enum PetsXPolicy2']);
     expectSound(ir);
   });
+
+  it("a component response's 2xx enum body steps by number at whatever status code it is mounted, so every operation agrees", async () => {
+    // PR #519 review: the body was qualified by the status code of each
+    // operation that mounts it (`CardResponse200`, `CardResponse201`), which
+    // only the document-wide step search had merged into one enum.
+    const card = { $ref: '#/components/responses/Card' };
+    const ir = await parseWithoutWarnings({
+      ...doc({
+        '/a': { get: { operationId: 'getA', responses: { '200': card, '204': { description: 'none' } } } },
+        '/b': { get: { operationId: 'getB', responses: { '200': { description: 'none' }, '201': card } } },
+        '/c': { get: { operationId: 'getC', responses: { '200': card } } },
+      }),
+      components: {
+        schemas: { CardResponse: en(['old', 'new']) },
+        responses: { Card: { description: 'card', ...json(kind) } },
+      },
+    });
+    const bodyOf = (name: string): Array<string | undefined> => {
+      const op = operation(ir, name);
+      return (op.successResponses ?? [{ statusCode: op.responseStatusCode, type: op.response }]).map(
+        ({ statusCode, type }) => `${statusCode}: ${ref(type)}`,
+      );
+    };
+
+    expect(bodyOf('getA')).toEqual(['200: enum CardResponse2', '204: primitive unknown']);
+    expect(bodyOf('getB')).toEqual(['200: primitive unknown', '201: enum CardResponse2']);
+    expect(bodyOf('getC')).toEqual(['200: enum CardResponse2']);
+    expect(enumNames(ir)).toEqual(['CardResponse', 'CardResponse2']);
+    expect(enumValues(ir, 'CardResponse2')).toEqual(['cat', 'dog']);
+    expectSound(ir, ['CardResponse']);
+  });
 });
 
 describe('the record of component sites is the third argument of collectInlineEnumsFromOperations (#356)', () => {
