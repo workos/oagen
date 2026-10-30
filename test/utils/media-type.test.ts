@@ -137,6 +137,26 @@ describe('mediaTypeNamingOrder', () => {
     const reordered = ['application/yaml; b=2; a=1', 'application/yaml; a=1; b=2'];
     expect(mediaTypeNamingOrder(reordered)).toEqual([reordered[1], reordered[0]]);
   });
+
+  it('orders keys read in one spelling before as written, so quoting, spacing or reordering parameters moves none (Greptile)', () => {
+    const lower = 'application/yaml; b=2; a=1';
+    for (const upper of ['Application/YAML; b=2; a=1', 'Application/YAML; b="2"; a=1', 'Application/YAML; a=1; b=2']) {
+      expect(mediaTypeNamingOrder([upper, lower]), upper).toEqual([lower, upper]);
+      expect(mediaTypeNamingOrder([lower, upper]), upper).toEqual([lower, upper]);
+    }
+    for (const respelled of [
+      'application/yaml;b=2;a=1',
+      'application/yaml; b="2"; a=1',
+      'application/yaml; a=1; b=2',
+    ]) {
+      const upper = 'Application/YAML; b=2; a=1';
+      expect(mediaTypeNamingOrder([upper, respelled]), respelled).toEqual([respelled, upper]);
+    }
+    // A parameter's value is read decoded, so its quotes do not order it either: lower case first.
+    const values = ['application/yaml; profile=print', 'application/yaml; profile="Print"'];
+    expect(mediaTypeNamingOrder(values)).toEqual(values);
+    expect(mediaTypeNamingOrder([...values].reverse())).toEqual(values);
+  });
 });
 
 describe('isPlainJsonMediaType and isJsonMediaType', () => {

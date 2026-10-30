@@ -186,18 +186,35 @@ export function mediaTypeNameFragment(contentType: string, siblings: Iterable<st
  * `contentTypes` in the order their models are named: as written, except that
  * keys deriving one fragment among them (`mediaTypeNameFragment`) take the
  * places of that fragment's keys in one order whatever the document's — by
- * spelling, case folded, then lower case before upper case where only case
- * differs. The first takes the bare name and the next steps from it (or
- * shares it, when its shape is identical), so which key steps does not
- * depend on the keys' order: `application/yaml` beside `Application/YAML`
- * is named first wherever either is written.
+ * the key in one spelling (`namingSpelling`), case folded, then lower case
+ * before upper case where only case differs, and only then by the key as
+ * written. The first takes the bare name and the next steps from it (or
+ * shares it, when its shape is identical), so which key steps depends
+ * neither on the keys' order nor on how a key quotes, spaces or orders its
+ * parameters: `application/yaml` beside `Application/YAML` is named first
+ * wherever either is written, and so is `application/yaml; profile=print`
+ * beside `Application/YAML; profile="print"`.
  */
 export function mediaTypeNamingOrder(contentTypes: readonly string[]): string[] {
   const fragments = contentTypes.map((contentType) => mediaTypeNameFragment(contentType, contentTypes));
   const turns = new Map<string, string[]>();
   contentTypes.forEach((contentType, i) => turns.set(fragments[i], [...(turns.get(fragments[i]) ?? []), contentType]));
-  for (const keys of turns.values()) keys.sort(bySpelling);
+  const byNaming = (a: string, b: string) => bySpelling(namingSpelling(a), namingSpelling(b)) || bySpelling(a, b);
+  for (const keys of turns.values()) keys.sort(byNaming);
   return fragments.map((fragment) => turns.get(fragment)!.shift()!);
+}
+
+/**
+ * A key in one spelling whatever its quotes, spaces or parameter order: its
+ * essence as written, so its case still orders case-only spellings, then its
+ * parameters other than `charset` as `oagen diff` reads them
+ * (`mediaTypeParameters`: decoded, sorted), then its `charset`.
+ */
+function namingSpelling(contentType: string): string {
+  const charsets = parseMediaType(contentType)
+    .parameters.filter((parameter) => parameter.name === 'charset')
+    .map((parameter) => parameter.value);
+  return JSON.stringify([contentType.split(';')[0].trim(), mediaTypeParameters(contentType), charsets]);
 }
 
 /** Case folded, then lower case first where only case differs (`application/yaml` before `Application/YAML`). */

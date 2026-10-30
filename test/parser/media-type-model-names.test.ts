@@ -272,6 +272,48 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     expect(await diff(after, before)).toEqual([]);
   });
 
+  it.each<[string, [lower: string, upper: string], [lower: string, upper: string], string]>([
+    [
+      'quoting a value',
+      ['application/yaml; profile=print', 'Application/YAML; profile=print'],
+      ['application/yaml; profile=print', 'Application/YAML; profile="print"'],
+      'ProfilePrint',
+    ],
+    [
+      'dropping a space',
+      ['application/yaml; profile=print', 'Application/YAML; profile=print'],
+      ['application/yaml;profile=print', 'Application/YAML; profile=print'],
+      'ProfilePrint',
+    ],
+    [
+      'reordering the parameters',
+      ['application/yaml; b=2; a=1', 'Application/YAML; b=2; a=1'],
+      ['application/yaml; b=2; a=1', 'Application/YAML; a=1; b=2'],
+      'A1B2',
+    ],
+  ])(
+    '%s on one of two keys that differ only in case swaps no models: no change (Greptile)',
+    async (_, from, to, qualifier) => {
+      const keys = ([lower, upper]: [string, string]): Keys => [
+        [lower, 'title'],
+        [upper, 'summary'],
+      ];
+      const [before, after] = [listNotes(keys(from)), listNotes(keys(to))];
+
+      // The key with lower case takes the bare name, however either is quoted, spaced or ordered.
+      for (const [document, [lower, upper]] of [
+        [before, from],
+        [after, to],
+      ] as const) {
+        expect(await namesOf(document)).toEqual({
+          [lower]: `ListNotesApplicationYaml${qualifier}Response { title }`,
+          [upper]: `ListNotesApplicationYaml${qualifier}Response200 { summary }`,
+        });
+      }
+      expect(await diff(before, after)).toEqual([]);
+    },
+  );
+
   it.each([
     ['a `charset` edit', 'application/yaml; charset=utf-8', 'application/yaml; charset=iso-8859-1', 'Charset'],
     ['a parameter reorder', 'application/yaml; a=1; b=2', 'application/yaml; b=2; a=1', 'A1B2'],
