@@ -615,6 +615,196 @@ describe('what the SDK sends shares a component only on an identical shape (revi
   });
 });
 
+describe('a component field’s object is sent when every site reaching the component sends it (issue #400)', () => {
+  const owner = obj({ name: str }, { required: ['name'] });
+  const looser = obj({ name: str });
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const body = (schema: unknown) => ({ content: { 'application/json': { schema } } });
+  const noContent = { '204': { description: 'ok' } };
+  /** A POST `createPet` sending `requestBody`. */
+  const post = (requestBody: unknown) => ({ post: { operationId: 'createPet', requestBody, responses: noContent } });
+  /** A GET `listPets` taking `parameters` and returning a string. */
+  const getWith = (parameters: unknown[]) => ({
+    get: {
+      operationId: 'listPets',
+      parameters,
+      responses: { '200': { description: 'ok', content: { 'application/json': { schema: str } } } },
+    },
+  });
+  /** `Pet { owner }`, whose object requires `name`, beside a `PetOwner` that does not, and whatever else `components` holds. */
+  const doc = (
+    paths: Record<string, unknown>,
+    components: Record<string, Record<string, unknown>> = {},
+    extra: Record<string, unknown> = {},
+  ) => ({
+    openapi: '3.1.0',
+    info: { title: 'fold', version: '1' },
+    paths,
+    ...extra,
+    components: { ...components, schemas: { Pet: obj({ owner }), PetOwner: looser, ...components.schemas } },
+  });
+  const strict = ['Pet { owner: PetOwner2 }', 'PetOwner { name: string }', 'PetOwner2 { name!: string }'];
+  const shared = ['Pet { owner: PetOwner }', 'PetOwner { name: string }'];
+  /** The models of `Pet` and its owner, whatever else the document declares. */
+  const petModels = (spec: ApiSpec): string[] =>
+    describeModels(spec).filter((line) => /^(Pet|PetOwner|PetOwner2) /.test(line));
+
+  it('the issue’s repro: `Pet`, only sent as a request body, types its owner as the body written inline does', async () => {
+    const sent = await parse('sent', doc({ '/pets': post(body(ref('Pet'))) }));
+    expect(describeModels(sent.spec)).toEqual(strict);
+    expect(opsOf(sent.spec).createPet?.requestBody).toEqual({ kind: 'model', name: 'Pet' });
+    expect(sent.warnings).toEqual([renamed('PetOwner', 'PetOwner2')]);
+    expectSound(sent.spec, { Pet: ['owner'], PetOwner: ['name'] });
+
+    // `sent-inline.json`: the same `Pet` written inline as the body, beside a
+    // component with `PetOwner`'s shape under the name its owner takes.
+    const inline = await parse(
+      'sent-inline',
+      specDoc({ CreatePetRequestOwner: looser }, { '/pets': post(body(obj({ owner }))) }),
+    );
+    expect(describeModels(inline.spec)).toEqual([
+      'CreatePetRequestOwner { name: string }',
+      'CreatePetRequest { owner: CreatePetRequestOwner2 }',
+      'CreatePetRequestOwner2 { name!: string }',
+    ]);
+    expect(inline.warnings).toEqual([renamed('CreatePetRequestOwner', 'CreatePetRequestOwner2')]);
+  });
+
+  it('whatever sends it: a request body or parameter, written in any form, directly or through another component', async () => {
+    const cases: Array<[string, Record<string, unknown>, Record<string, Record<string, unknown>>?]> = [
+      [
+        'through another component',
+        { '/pets': post(body(ref('CreatePet'))) },
+        { schemas: { CreatePet: obj({ pet: ref('Pet') }) } },
+      ],
+      ['as array items', { '/pets': post(body({ type: 'array', items: ref('Pet') })) }],
+      ['as a map’s values', { '/pets': post(body({ type: 'object', additionalProperties: ref('Pet') })) }],
+      ['as an inline `allOf` member', { '/pets': post(body({ allOf: [ref('Pet'), obj({ tag: str })] })) }],
+      ['as a `oneOf` variant', { '/pets': post(body({ oneOf: [ref('Pet'), obj({ tag: str })] })) }],
+      [
+        'as a secondary media type',
+        {
+          '/pets': post({
+            content: { 'application/json': { schema: str }, 'application/xml': { schema: ref('Pet') } },
+          }),
+        },
+      ],
+      [
+        'through `components/requestBodies`',
+        { '/pets': post({ $ref: '#/components/requestBodies/NewPet' }) },
+        { requestBodies: { NewPet: body(ref('Pet')) } },
+      ],
+      [
+        'as a query parameter',
+        { '/pets': getWith([{ name: 'pet', in: 'query', style: 'deepObject', schema: ref('Pet') }]) },
+      ],
+      [
+        'as a parameter’s `content`',
+        { '/pets': getWith([{ name: 'pet', in: 'query', content: body(ref('Pet')).content }]) },
+      ],
+      [
+        'through `components/parameters`',
+        { '/pets': getWith([{ $ref: '#/components/parameters/PetFilter' }]) },
+        { parameters: { PetFilter: { name: 'pet', in: 'query', style: 'deepObject', schema: ref('Pet') } } },
+      ],
+      [
+        'as a Path Item’s parameter',
+        {
+          '/pets': {
+            parameters: [{ name: 'pet', in: 'query', style: 'deepObject', schema: ref('Pet') }],
+            ...getWith([]),
+          },
+        },
+      ],
+      [
+        'through a `$ref` path item',
+        { '/pets': { $ref: '#/components/pathItems/Pets' } },
+        { pathItems: { Pets: post(body(ref('Pet'))) } },
+      ],
+      // A component no site reaches is no site: what the SDK does with `Pet` is still only sending it.
+      [
+        'beside a component no site reaches',
+        { '/pets': post(body(ref('Pet'))) },
+        { schemas: { Shelter: obj({ pet: ref('Pet') }) } },
+      ],
+    ];
+    for (const [i, [label, paths, components]] of cases.entries()) {
+      const { spec, warnings } = await parse(`sent-${i}`, doc(paths, components));
+      expect(petModels(spec), label).toEqual(strict);
+      expect(warnings, label).toEqual([renamed('PetOwner', 'PetOwner2')]);
+      expectSound(spec, {
+        Pet: ['owner'],
+        PetOwner: ['name'],
+        ...Object.fromEntries(
+          Object.entries(components?.schemas ?? {}).map(([name, schema]) => [
+            name,
+            Object.keys((schema as { properties?: object }).properties ?? {}),
+          ]),
+        ),
+      });
+    }
+  });
+
+  it('received anywhere, or reached by no site, the object still shares a component that admits it', async () => {
+    const get = (operationId: string, response: unknown) => ({
+      get: { operationId, responses: { '200': { description: 'ok', ...(response as object) } } },
+    });
+    const cases: Array<
+      [string, Record<string, unknown>, Record<string, Record<string, unknown>>?, Record<string, unknown>?]
+    > = [
+      ['reached by no site', {}],
+      ['only returned', { '/pets/{id}': get('getPet', body(ref('Pet'))) }],
+      ['sent and returned', { '/pets': post(body(ref('Pet'))), '/pets/{id}': get('getPet', body(ref('Pet'))) }],
+      [
+        'sent, and returned through another component',
+        { '/pets': post(body(ref('Pet'))), '/pets/{id}': get('getShelter', body(ref('Shelter'))) },
+        { schemas: { Shelter: obj({ pet: ref('Pet') }) } },
+      ],
+      [
+        'sent, and returned as an error body',
+        {
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: body(ref('Pet')),
+              responses: { ...noContent, '409': { description: 'taken', ...body(ref('Pet')) } },
+            },
+          },
+        },
+      ],
+      [
+        'sent, and returned as a response header',
+        {
+          '/pets': post(body(ref('Pet'))),
+          '/pets/{id}': get('getPet', { headers: { 'X-Pet': { schema: ref('Pet') } }, ...body(str) }),
+        },
+      ],
+      [
+        'sent, and returned through `components/responses`',
+        {
+          '/pets': post(body(ref('Pet'))),
+          '/pets/{id}': {
+            get: { operationId: 'getPet', responses: { '200': { $ref: '#/components/responses/PetFound' } } },
+          },
+        },
+        { responses: { PetFound: { description: 'ok', ...body(ref('Pet')) } } },
+      ],
+      ['received as a webhook’s payload', {}, {}, { webhooks: { petAdopted: post(body(ref('Pet'))) } }],
+      [
+        'sent, and received as a webhook’s payload',
+        { '/pets': post(body(ref('Pet'))) },
+        {},
+        { webhooks: { petAdopted: post(body(ref('Pet'))) } },
+      ],
+    ];
+    for (const [i, [label, paths, components, extra]] of cases.entries()) {
+      const { spec, warnings } = await parse(`received-${i}`, doc(paths, components, extra));
+      expect(petModels(spec), label).toEqual(shared);
+      expect(warnings, label).toEqual([]);
+    }
+  });
+});
+
 describe('identical bodies that must leave a component’s name share one model (review)', () => {
   const widget = obj({ object: { type: 'string', const: 'widget' }, id: str, name: str });
 

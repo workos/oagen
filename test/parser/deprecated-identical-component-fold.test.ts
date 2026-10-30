@@ -6,9 +6,11 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import {
+  deprecatedFoldWarning,
   fieldAdmits,
   fieldFlagAgrees,
   flagAdmits,
+  looserFields,
   modelAdmits,
   modelFingerprint,
   modelPropertiesAdmit,
@@ -1096,5 +1098,145 @@ describe('the reverse direction is unchanged (issue #260): a live copy never fol
       '[oagen] Renamed inline model "Widget" → "GetLegacyWidgetWidget": it is live while "Widget" is deprecated',
     ]);
     expectSound(spec, ['Pet', 'PetOwner', 'CreateNoteRequest', 'Widget'], ['getWidget.response → Widget']);
+  });
+});
+
+describe('a deprecated copy beside a looser live component (issue #400’s comment)', () => {
+  const owner = obj({ name: str }, { required: ['name'], deprecated: true });
+  const looser = obj({ name: str });
+  const petRef = { $ref: '#/components/schemas/Pet' };
+  const looserFold = (name: string, how: string): string =>
+    `[oagen] Warning: Inline model "${name}" is declared both deprecated and live, with a looser live definition that ${how} — keeping the live definition under the shared name`;
+  const requiredOf = (spec: ApiSpec, model: string): string[] =>
+    spec.models
+      .find((m) => m.name === model)!
+      .fields.filter((f) => f.required)
+      .map((f) => f.name);
+
+  it('`sent-deprecated.json`: `Pet`, only sent, keeps its deprecated owner’s own model, as before #364', async () => {
+    const { spec, warnings } = await parse(
+      'sent-deprecated',
+      specDoc({ Pet: obj({ owner }), PetOwner: looser }, { '/pets': postOp('createPet', petRef) }),
+    );
+    expect(describeModels(spec)).toEqual([
+      'Pet {owner (deprecated): PetOwner2}',
+      'PetOwner {name: string}',
+      'PetOwner2 (deprecated) {name: string}',
+    ]);
+    expect(requiredOf(spec, 'PetOwner2')).toEqual(['name']);
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "PetOwner" → "PetOwner2": it is deprecated while "PetOwner" is live',
+    ]);
+    expectSound(spec, ['Pet', 'PetOwner']);
+  });
+
+  it('`returned-deprecated.json`: `Pet`, returned, keeps the fold, the warning naming what `PetOwner` does not require', async () => {
+    const { spec, warnings } = await parse(
+      'returned-deprecated',
+      specDoc({ Pet: obj({ owner }), PetOwner: looser }, { '/pets': getOp('getPet', petRef) }),
+    );
+    expect(describeModels(spec)).toEqual(['Pet {owner (deprecated): PetOwner}', 'PetOwner {name: string}']);
+    expect(warnings).toEqual([looserFold('PetOwner', 'does not require "name"')]);
+    expectSound(spec, ['Pet', 'PetOwner']);
+  });
+
+  it('the shape registry: a deprecated header schema beside a looser `PetsXOwner`, a field’s null named too', async () => {
+    const header = obj({ name: str, id: str }, { required: ['name'], deprecated: true });
+    const doc = specDoc(
+      { PetsXOwner: obj({ name: str, id: { type: ['string', 'null'] } }) },
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: {
+              '200': {
+                description: 'ok',
+                headers: { 'X-Owner': { schema: header } },
+                content: { 'application/json': { schema: str } },
+              },
+            },
+          },
+        },
+      },
+    );
+    const { spec, warnings } = await parse('header-looser', doc);
+    expect(collectResponseHeaders(opsOf(spec).listPets!).map((h) => [h.name, h.type, h.deprecated])).toEqual([
+      ['X-Owner', { kind: 'model', name: 'PetsXOwner' }, true],
+    ]);
+    expect(warnings).toEqual([looserFold('PetsXOwner', 'does not require "name" and allows null in "id"')]);
+    expectSound(spec, ['PetsXOwner']);
+  });
+
+  it('the list-envelope pass: a deprecated companion beside a looser `ListMetadata`, a nested model’s looseness named by its field', async () => {
+    const doc = (cursor: Record<string, unknown>) =>
+      specDoc(
+        {
+          ListMetadata: obj({ after: str, cursor: { $ref: '#/components/schemas/Cursor' } }),
+          Cursor: obj({ id: str }),
+        },
+        {
+          '/pets': getOp(
+            'listPets',
+            obj({
+              data: { type: 'array', items: str },
+              list_metadata: obj({ after: str, cursor }, { required: ['after'], deprecated: true }),
+            }),
+            { parameters: [{ name: 'after', in: 'query', schema: str }] },
+          ),
+        },
+      );
+    for (const [cursor, how] of [
+      [obj({ id: str }, { required: ['id'] }), 'does not require "after" and loosens "cursor"'],
+      [obj({ id: str }), 'does not require "after"'],
+      // The component itself, as the live definition references it: nothing looser there.
+      [{ $ref: '#/components/schemas/Cursor' }, 'does not require "after"'],
+    ] as const) {
+      const { spec, warnings } = await parse(`envelope-looser-${JSON.stringify(cursor).length}`, doc(cursor));
+      const envelope = opsOf(spec).listPets?.pagination?.envelopeFields ?? [];
+      expect(envelope.map((f) => [f.name, f.type, f.deprecated])).toEqual([
+        ['list_metadata', { kind: 'model', name: 'ListMetadata' }, true],
+      ]);
+      expect(describeModels(spec)).toEqual(['ListMetadata {after: string, cursor: Cursor}', 'Cursor {id: string}']);
+      expect(warnings).toEqual([looserFold('ListMetadata', how)]);
+      expectSound(spec, ['ListMetadata', 'Cursor']);
+    }
+  });
+
+  it('a copy identical but for the flag still folds with “the same shape”, whether the component is sent or returned', async () => {
+    const same = obj({ name: str }, { deprecated: true });
+    const returned = await parse(
+      'returned-same',
+      specDoc({ Pet: obj({ owner: same }), PetOwner: looser }, { '/pets': getOp('getPet', petRef) }),
+    );
+    expect(returned.warnings).toEqual([folded('PetOwner')]);
+    // Sent, an identical copy still folds: only a looser component is refused.
+    const sent = await parse(
+      'sent-same',
+      specDoc({ Pet: obj({ owner: same }), PetOwner: looser }, { '/pets': postOp('createPet', petRef) }),
+    );
+    expect(describeModels(sent.spec)).toEqual(['Pet {owner (deprecated): PetOwner}', 'PetOwner {name: string}']);
+    expect(sent.warnings).toEqual([folded('PetOwner')]);
+  });
+
+  it('`looserFields` names, in the copy’s field order, the fields the owner leaves optional, then those it makes nullable', () => {
+    const string = { kind: 'primitive', type: 'string' } as const;
+    const field = (name: string, required: boolean, nullable = false): Field => ({
+      name,
+      type: nullable ? { kind: 'nullable', inner: string } : string,
+      required,
+    });
+    const owner: Model = { name: 'M', fields: [field('b', false, true), field('a', false), field('c', true, true)] };
+    const copy: Model = {
+      name: 'M',
+      deprecated: true,
+      fields: [field('a', true), field('b', true), field('c', true)],
+    };
+    expect(modelAdmits(owner, copy)).toBe(true);
+    expect(looserFields(owner, copy)).toEqual(['does not require "a", "b"', 'allows null in "b", "c"']);
+    expect(looserFields(owner, { ...owner, deprecated: true })).toEqual([]);
+    expect(deprecatedFoldWarning('M', [])).toBe(folded('M'));
+    expect(deprecatedFoldWarning('M', looserFields(owner, copy))).toBe(
+      looserFold('M', 'does not require "a", "b" and allows null in "b", "c"'),
+    );
   });
 });

@@ -36,6 +36,7 @@ import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
+import { resolveComponentRef } from './path-item-refs.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -542,12 +543,13 @@ export interface ShapeReadOptions {
  * `<Name>Json…` child onto the `<Name>…` model that already holds its folded
  * name, every reference read under the fold; two inline models share a name
  * on an identical fingerprint only. A shape the SDK sends — a request body,
- * a parameter — is the callers' exception (`modelShares`): it shares a
- * component on an identical shape only, since typed as a looser component a
- * caller could leave out what the operation requires. The list-envelope pass
- * compares its companions by a structural rule of its own, since a
- * companion's nested models are named per operation; it reads the flag by
- * `flagAdmits` as well.
+ * a parameter, a field object of a component only those reach — is the
+ * callers' exception (`modelShares`): it shares a component on an identical
+ * shape only, since typed as a looser component a caller could leave out
+ * what the operation requires. The list-envelope pass compares its
+ * companions by a structural rule of its own, since a companion's nested
+ * models are named per operation; it reads the flag by `flagAdmits` as
+ * well.
  */
 export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
   if (!modelPropertiesAdmit(owner, candidate)) return false;
@@ -579,15 +581,58 @@ export function flagAdmits(owner: Model, candidate: Model): boolean {
  * Whether `owner`, a model the document declares — a component schema, or a
  * model a component's field minted — shares its name with `candidate`, an
  * inline model: when it admits the shape (`modelAdmits`), or, for a shape
- * the SDK sends (`sent`: a request body, a parameter), when the two are
- * identical but for the model's own `deprecated` (`shapeFingerprint`), which
- * is read as `modelAdmits` reads it (`flagAdmits`). The one question the
- * merge passes (`settleSharedNames`) and the shape registry (`ownerShares`)
- * ask of a declared model.
+ * the SDK sends (`sent`: a request body, a parameter, a field object of a
+ * component only those reach), when the two are identical but for the
+ * model's own `deprecated` (`shapeFingerprint`), which is read as
+ * `modelAdmits` reads it (`flagAdmits`). The one question the merge passes
+ * (`settleSharedNames`) and the shape registry (`ownerShares`) ask of a
+ * declared model.
  */
 export function modelShares(owner: Model, candidate: Model, sent = false): boolean {
   if (!sent) return modelAdmits(owner, candidate);
   return flagAdmits(owner, candidate) && shapeFingerprint(owner) === shapeFingerprint(candidate);
+}
+
+/**
+ * How `owner` is looser than `candidate`, which it admits (`modelAdmits`),
+ * in the only two ways `modelAdmits` lets it be, each listing the fields in
+ * `candidate`'s order: those `candidate` requires that `owner` leaves
+ * optional (`does not require "name"`), and those whose type `candidate`
+ * leaves non-null that `owner` wraps in `nullable<…>` (`allows null in
+ * "id"`). Empty when the two are the same shape but for the models' own
+ * flag. What the fold of a deprecated copy onto a live definition drops,
+ * named by the warning it is announced with (`deprecatedFoldWarning`).
+ */
+export function looserFields(owner: Model, candidate: Model): string[] {
+  const owned = new Map(owner.fields.map((field) => [field.name, field]));
+  const optional: string[] = [];
+  const nullable: string[] = [];
+  for (const field of candidate.fields) {
+    const looser = owned.get(field.name);
+    if (!looser) continue;
+    if (field.required && !looser.required) optional.push(`"${field.name}"`);
+    if (field.type.kind !== 'nullable' && looser.type.kind === 'nullable') nullable.push(`"${field.name}"`);
+  }
+  return [
+    ...(optional.length > 0 ? [`does not require ${optional.join(', ')}`] : []),
+    ...(nullable.length > 0 ? [`allows null in ${nullable.join(', ')}`] : []),
+  ];
+}
+
+/**
+ * The warning a deprecated inline copy folded onto a live definition of its
+ * name is announced with — by the merge passes (`settleSharedNames`), the
+ * shape registry (`materializeInlineSchema`) and the list-envelope pass
+ * (`resolveEnvelopeCompanionNames`) alike. It says "with the same shape"
+ * only for a copy identical to that definition but for the flag; a copy the
+ * definition admits while looser (`looser`: how, as `looserFields` words
+ * it) is said to be folded onto a looser definition, so what the copy
+ * required and the shared name no longer does is named.
+ */
+export function deprecatedFoldWarning(name: string, looser: readonly string[]): string {
+  const shape =
+    looser.length === 0 ? ' with the same shape' : `, with a looser live definition that ${looser.join(' and ')}`;
+  return `[oagen] Warning: Inline model "${name}" is declared both deprecated and live${shape} — keeping the live definition under the shared name`;
 }
 
 /**
@@ -958,6 +1003,141 @@ function schemaRootsOf(
     named(components['callbacks'], (callback) => keyed(callback, pathItem));
   }
   return roots;
+}
+
+/** Which way a site moves what it types: out with a request the SDK makes, or in. */
+type SiteDirection = 'sent' | 'received';
+
+/**
+ * The components the SDK only sends, by resolved name (`resolveSchemaName`):
+ * those reached by at least one site the parser reads and by none that the
+ * SDK receives. What an operation under `paths` sends is its request body,
+ * under every media type, and its parameters, the Path Item's included, each
+ * written inline or through `components/requestBodies` and
+ * `components/parameters`, typed by `schema` or `content`; what it receives
+ * is every response it declares — a body at any status code, `default` or
+ * range, and a header, inline or through `components/responses` and
+ * `components/headers`. A webhook's payload and parameters are received; its
+ * responses type no body (`extractWebhookResponses`), and `callbacks` are
+ * never read. A Path Item and every Reference Object are followed as the
+ * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
+ * of `paths`, `webhooks` or a Responses Object stepped over. A schema
+ * reaches the components it names through the keywords the parser types it
+ * through — `properties`, `patternProperties`, `additionalProperties`,
+ * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
+ * read as the parser reads one (the component its last segment names,
+ * `componentSchemaOf`), so a component another one reaches is reached by
+ * every site that reaches that one. A component no site reaches is no site:
+ * one that names `Pet` leaves `Pet` as only sent as it was, and is itself
+ * not among the result, since the document does not say which way it goes.
+ * Two keys that resolve to one name (`Note` and `note`) count as one
+ * component only sent when both are.
+ *
+ * A component field's object is what the SDK sends when its component is
+ * (`fieldInlineModelBundles`, `InlineModelBundle.sent`), so it shares a
+ * component named like it on an identical shape only.
+ */
+export function sentOnlyComponentNames(document: unknown): Set<string> {
+  if (!isRecord(document)) return new Set();
+  const components = isRecord(document['components']) ? document['components'] : {};
+  const schemas = isRecord(components['schemas']) ? components['schemas'] : {};
+  /** The directions each component is reached in, by `components/schemas` key. */
+  const reached = new Map<string, Set<SiteDirection>>();
+  const entered: Record<SiteDirection, WeakSet<object>> = { sent: new WeakSet(), received: new WeakSet() };
+  /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
+  const follow = (
+    value: unknown,
+    section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers',
+  ): Record<string, unknown> | undefined => {
+    const entries = components[section];
+    const seen = new Set<string>();
+    let current = value;
+    while (isRecord(current) && current['$ref'] !== undefined) {
+      const ref = current['$ref'];
+      if (typeof ref !== 'string' || seen.has(ref)) return undefined;
+      seen.add(ref);
+      current = resolveComponentRef(
+        ref,
+        section,
+        isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined,
+      );
+    }
+    return isRecord(current) ? current : undefined;
+  };
+  const schema = (value: unknown, direction: SiteDirection): void => {
+    if (!isRecord(value) || entered[direction].has(value)) return;
+    entered[direction].add(value);
+    const reach = (ref: unknown): void => {
+      if (typeof ref !== 'string') return;
+      const key = ref.split('/').pop() ?? '';
+      if (!Object.hasOwn(schemas, key)) return;
+      reached.set(key, (reached.get(key) ?? new Set<SiteDirection>()).add(direction));
+      schema(schemas[key], direction);
+    };
+    reach(value['$ref']);
+    const mapping = isRecord(value['discriminator']) ? value['discriminator']['mapping'] : undefined;
+    if (isRecord(mapping)) for (const target of Object.values(mapping)) reach(target);
+    for (const keyword of ['properties', 'patternProperties']) {
+      const properties = value[keyword];
+      if (isRecord(properties)) for (const property of Object.values(properties)) schema(property, direction);
+    }
+    schema(value['additionalProperties'], direction);
+    schema(value['items'], direction);
+    for (const keyword of ['allOf', 'oneOf', 'anyOf']) {
+      const members = value[keyword];
+      if (Array.isArray(members)) for (const member of members) schema(member, direction);
+    }
+  };
+  const content = (value: unknown, direction: SiteDirection): void => {
+    if (!isRecord(value)) return;
+    for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
+  };
+  /** A Parameter or Header Object, or a reference to one. */
+  const parameter = (value: unknown, section: 'parameters' | 'headers', direction: SiteDirection): void => {
+    const resolved = follow(value, section);
+    if (!resolved) return;
+    schema(resolved['schema'], direction);
+    content(resolved['content'], direction);
+  };
+  const parameters = (list: unknown, direction: SiteDirection): void => {
+    if (Array.isArray(list)) for (const entry of list) parameter(entry, 'parameters', direction);
+  };
+  const pathItems = (map: unknown, webhooks: boolean): void => {
+    if (!isRecord(map)) return;
+    // A webhook's request is one the SDK is sent.
+    const request: SiteDirection = webhooks ? 'received' : 'sent';
+    for (const [key, raw] of Object.entries(map)) {
+      if (key.startsWith('x-')) continue;
+      const item = follow(raw, 'pathItems');
+      if (!item) continue;
+      parameters(item['parameters'], request);
+      for (const method of PATH_ITEM_OPERATIONS) {
+        const operation = item[method];
+        if (!isRecord(operation)) continue;
+        parameters(operation['parameters'], request);
+        content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
+        const responses = operation['responses'];
+        if (webhooks || !isRecord(responses)) continue;
+        for (const [code, entry] of Object.entries(responses)) {
+          const response = follow(entry, 'responses');
+          if (code.startsWith('x-') || !response) continue;
+          content(response['content'], 'received');
+          const headers = response['headers'];
+          if (isRecord(headers)) for (const header of Object.values(headers)) parameter(header, 'headers', 'received');
+        }
+      }
+    }
+  };
+  pathItems(document['paths'], false);
+  pathItems(document['webhooks'], true);
+
+  const onlySent = new Map<string, boolean>();
+  for (const key of Object.keys(schemas)) {
+    const directions = reached.get(key);
+    const name = resolveSchemaName(key);
+    onlySent.set(name, (onlySent.get(name) ?? true) && directions?.size === 1 && directions.has('sent'));
+  }
+  return new Set([...onlySent].filter(([, only]) => only).map(([name]) => name));
 }
 
 /**
@@ -1386,13 +1566,15 @@ export interface InlineModelBundle {
   renamed?: (from: string, to: string) => void;
   /**
    * Set when the site's models are what the SDK sends — an operation's
-   * request body, primary or secondary, or an inline parameter — so a
-   * component shares a name with one of them only on an identical shape
-   * (`settleSharedNames`, as `ownerShares` decides for the registry): typed
-   * as a looser component, a caller could leave out what the operation
-   * requires. Absent for a shape the SDK receives — a response body or
-   * header, a webhook's payload or parameter — and for a component field's
-   * object, whose direction the document does not say.
+   * request body, primary or secondary, an inline parameter, or a field of
+   * a component only those reach (`sentOnlyComponentNames`,
+   * `fieldInlineModelBundles`) — so a component shares a name with one of
+   * them only on an identical shape (`settleSharedNames`, as `ownerShares`
+   * decides for the registry): typed as a looser component, a caller could
+   * leave out what the operation requires. Absent for a shape the SDK
+   * receives — a response body or header, a webhook's payload or
+   * parameter — and for the field of any other component, one a received
+   * site reaches or no site does, whose direction the document does not say.
    */
   sent?: boolean;
   /**

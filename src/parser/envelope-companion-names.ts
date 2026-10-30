@@ -1,9 +1,11 @@
 import type { Field, Model, TypeRef } from '../ir/types.js';
 import { assertNever, collectModelRefs, renameModelRefs, renameTypeRefModels } from '../ir/types.js';
 import {
+  deprecatedFoldWarning,
   fieldPropertiesAdmit,
   fieldPropertiesKey,
   flagAdmits,
+  looserFields,
   modelPropertiesAdmit,
   modelPropertiesKey,
   type InlineModelBundle,
@@ -190,11 +192,10 @@ export function resolveEnvelopeCompanionNames(
     const collapsing = group.filter(folds);
     for (const companion of collapsing) {
       // A deprecated copy a live component admits is announced once per
-      // companion, as the merge passes announce one (`settleSharedNames`).
+      // companion, as the merge passes announce one (`settleSharedNames`),
+      // with what the component, when looser, no longer holds the copy to.
       if (component && !component.deprecated && companion.models[0]!.deprecated) {
-        console.warn(
-          `[oagen] Warning: Inline model "${component.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-        );
+        console.warn(deprecatedFoldWarning(component.name, looserThanCompanion(component, componentMap, companion)));
       }
       renameCompanion(companion, finalNames);
       if (companion !== owner) {
@@ -259,6 +260,36 @@ function renameCompanion(companion: EnvelopeCompanion, names: string[]): void {
     model.name = renames.get(model.name) ?? model.name;
     renameModelRefs(model, renames);
   }
+}
+
+/**
+ * How `component` is looser than `companion`'s own model, which it admits
+ * (`admits`), for the warning the fold is announced with
+ * (`deprecatedFoldWarning`): what `modelAdmits` would read on the fields
+ * themselves (`looserFields`: a field the companion requires, a type it
+ * leaves non-null), then each field whose type the component loosens below
+ * its own nullable wrapper — a nested model's requiredness or null, an
+ * enum's members (`loosens "cursor"`). The component admits each type, so
+ * one that admits the component's back (`typeAdmits`, read the other way
+ * round) is the same shape. Empty when the two are the same shape but for
+ * the flag.
+ */
+function looserThanCompanion(
+  component: Model,
+  componentMap: Map<string, Model>,
+  companion: EnvelopeCompanion,
+): string[] {
+  const own = companion.models[0]!;
+  const local = new Map(companion.models.map((m) => [m.name, m]));
+  const inner = (type: TypeRef): TypeRef => (type.kind === 'nullable' ? type.inner : type);
+  const targets = new Map(component.fields.map((field) => [field.name, field]));
+  const deeper = own.fields
+    .filter((field) => {
+      const target = targets.get(field.name);
+      return target !== undefined && !typeAdmits(inner(field.type), local, inner(target.type), componentMap, new Set());
+    })
+    .map((field) => `"${field.name}"`);
+  return [...looserFields(component, own), ...(deeper.length > 0 ? [`loosens ${deeper.join(', ')}`] : [])];
 }
 
 /**
