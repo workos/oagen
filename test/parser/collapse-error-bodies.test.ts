@@ -419,6 +419,45 @@ describe('the shared name', () => {
     expectSound(ir, ['Note', 'ErrorBody']);
   });
 
+  it('folds onto a component schema only when its string fields admit every pinned value', async () => {
+    const bodies = {
+      ...getOp('pets', { '409': { description: 'dup', content: json(codedBody('b')) } }),
+      ...getOp('notes', { '409': { description: 'dup', content: json(codedBody('c')) } }),
+    };
+    // An open `code` admits `b` and `c`: the bodies reference the component.
+    const open = await parseWithoutWarnings(doc(bodies, { ErrorBodyWithCode: obj({ code: str, message: str }) }));
+    expect(modelNames(open)).toEqual(['ErrorBodyWithCode', 'Note']);
+    expect(open.enums).toEqual([]);
+    expect(errorType(open, 'getPets', 409)).toEqual({ kind: 'model', name: 'ErrorBodyWithCode' });
+    // A `code` pinned to `a` would narrow them: the bodies stay as they are.
+    const pinned = await parseWithWarnings(
+      doc(bodies, { ErrorBodyWithCode: obj({ code: { type: 'string', const: 'a' }, message: str }) }),
+      [
+        /would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" already holds — keeping models "GetNotesError409", "GetPetsError409" as they are/,
+      ],
+    );
+    expect(modelNames(pinned)).toEqual(['ErrorBodyWithCode', 'GetNotesError409', 'GetPetsError409', 'Note']);
+    expect(fieldSummary(pinned, 'GetPetsError409')).toEqual(['code: "b"', 'message: string']);
+    expectSound(pinned, ['Note', 'ErrorBodyWithCode']);
+  });
+
+  it("orders a union's tokens, so the name does not depend on which operation wrote the union first", async () => {
+    const forward = obj({ message: { oneOf: [str, { type: 'array', items: str }] } });
+    const backward = obj({ message: { oneOf: [{ type: 'array', items: str }, str] } });
+    for (const [first, second] of [
+      [forward, backward],
+      [backward, forward],
+    ]) {
+      const ir = await parseWithoutWarnings(
+        doc({
+          ...getOp('notes', { '400': { description: 'bad', content: json(first) } }),
+          ...getOp('pets', { '400': { description: 'bad', content: json(second) } }),
+        }),
+      );
+      expect(modelNames(ir)).toEqual(['ErrorBodyWithMessageOrMessageList', 'Note']);
+    }
+  });
+
   it('is never numbered: a component schema of another shape holding it leaves the bodies as they are, with a warning', async () => {
     const ir = await parseWithWarnings(
       doc(

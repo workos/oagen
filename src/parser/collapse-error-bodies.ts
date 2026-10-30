@@ -51,8 +51,9 @@
  * may already spend that name on a component called `Error` (Go does).
  *
  * The pass never numbers a name. A shared name a component schema of exactly
- * that shape already holds is that component: the group folds onto it. A
- * name anything else holds — a component of another shape, an enum, a shared
+ * that shape already holds — one whose string fields admit every value the
+ * bodies pin — is that component: the group folds onto it. A name anything
+ * else holds — a component of another shape, an enum, a shared
  * body of another shape — leaves the group's models exactly as the parser
  * materialized them, with every error-only model they reach or are reached
  * from, and says so in a warning naming both sides; the fold then runs
@@ -261,8 +262,15 @@ function fold(
       canonical.set(key, name);
       return;
     }
-    // A component schema of exactly this shape is the shared body.
-    if (byName.has(name) && !errorOnly.has(name) && keys.of(name) === key) {
+    // A component schema of exactly this shape, admitting every value the
+    // bodies pin, is the shared body.
+    const component = byName.get(name);
+    if (
+      component &&
+      !errorOnly.has(name) &&
+      keys.of(name) === key &&
+      componentAccepts(component, pinnedByKey.get(key)!)
+    ) {
       canonical.set(key, name);
       absorbed.add(key);
       return;
@@ -570,6 +578,34 @@ const OAUTH_ERROR_FIELDS = ['error', 'error_description'];
 /** The fields that carry an error code; a body pinned on one is named from the value alone. */
 const ERROR_CODE_FIELDS = ['code', 'error'];
 
+/**
+ * Whether `component` admits every value the group pins: a string field the
+ * group pins is, on the component, a plain string, or — when no member leaves
+ * it free — a literal or inline enum holding every pinned value. The key
+ * reads every string as one, so this is what tells a component the bodies
+ * can reference from one that would narrow their codes.
+ */
+function componentAccepts(component: Model, pinned: ReadonlyMap<string, PinnedValues>): boolean {
+  for (const [name, { values, open }] of pinned) {
+    const field = component.fields.find((f) => f.name === name);
+    if (!field) return false;
+    const type = unwrapNullable(field.type);
+    if (type.kind === 'primitive' && type.type === 'string' && !type.format) continue;
+    if (open) return false;
+    if (type.kind === 'literal') {
+      if (values.size !== 1 || !values.has(String(type.value))) return false;
+      continue;
+    }
+    if (type.kind === 'enum' && type.values) {
+      const allowed = new Set(type.values.map((value) => String(value)));
+      if ([...values].some((value) => !allowed.has(value))) return false;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /** `{ code, message? }`: a model's field names, the optional ones marked. */
 function shapeOf(model: Model): string {
   return `{ ${model.fields.map((field) => (field.required ? field.name : `${field.name}?`)).join(', ')} }`;
@@ -639,10 +675,12 @@ function fieldToken(
   const inner = unwrapNullable(type);
   switch (inner.kind) {
     case 'union': {
+      // Sorted, as the key sorts the variants: the name does not depend on
+      // which member of the group wrote the union first.
       const tokens = inner.variants.map((variant) =>
         fieldToken(name, variant, parentNames, qualify, errorOnly, byName),
       );
-      return [...new Set(tokens)].join('Or') || word;
+      return [...new Set(tokens)].sort().join('Or') || word;
     }
     case 'array': {
       const items = unwrapNullable(inner.items);
