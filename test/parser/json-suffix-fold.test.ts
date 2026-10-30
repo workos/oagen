@@ -311,17 +311,26 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
       '[oagen] Warning: Json-suffix model "PetJson" does not preserve the union rules of "Pet" — keeping both',
     ]);
 
-    // Nothing collapses by name alone: a model merely spelled `<Json>…` that the `…Json`
-    // model never references is read as a child too, and refuses the fold the same way.
+    // Nothing collapses by name alone, and nothing is renamed by it: a model merely spelled
+    // `<Json>…` that the `…Json` model never reaches is no child of the fold (#426), so it keeps
+    // its name and has no say in whether the fold goes ahead.
     const stranger = [
       ...models(),
       { name: 'PetJsonExtra', fields: [field('z')] },
       { name: 'PetExtra', fields: [field('y')] },
     ];
-    const refusedStranger = collapse(stranger);
-    expect(refusedStranger.kept.map((m) => m.name)).toEqual(stranger.map((m) => m.name));
-    expect(refusedStranger.warnings).toEqual([
-      '[oagen] Warning: Json-suffix model "PetJson" does not preserve the shape of "Pet": "PetJsonExtra" would fold onto "PetExtra", which has a different shape — keeping both',
+    const strangerKept = collapse(stranger);
+    expect(describeFolded(strangerKept.kept)).toEqual([
+      'Pet {name,tag}',
+      'PetWithName {name,inner:PetInner}',
+      'PetInner {x}',
+      'PetJsonExtra {z}',
+      'PetExtra {y}',
+    ]);
+    expect(strangerKept.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (2 fields, superset)',
+      '[oagen] Collapsed child "PetJsonWithName" into existing "PetWithName"',
+      '[oagen] Collapsed child "PetJsonInner" into existing "PetInner"',
     ]);
   });
 
@@ -456,8 +465,8 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     ]);
     expect(folded.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetFooBar"',
-      '[oagen] Renamed child "PetJson…" → "PetFooBarInner"',
+      '[oagen] Renamed child "PetJsonFooBar" → "PetFooBar"',
+      '[oagen] Renamed child "PetJsonFooBarInner" → "PetFooBarInner"',
       '[oagen] Merged "PetFooJson" into "PetFoo" (3 fields, superset)',
       '[oagen] Collapsed child "PetFooJsonBar" into existing "PetFooBar"',
       '[oagen] Collapsed child "PetFooJsonBarInner" into existing "PetFooBarInner"',
@@ -490,7 +499,7 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(describeFolded(thingFirst.kept)).toEqual(['Pet {a,b,thing:PetThing,jsonThing:PetThing}', 'PetThing {x}']);
     expect(thingFirst.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetThing"',
+      '[oagen] Renamed child "PetJsonThing" → "PetThing"',
       '[oagen] Collapsed child "PetJsonJsonThing" into existing "PetThing"',
     ]);
 
@@ -501,7 +510,7 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     ]);
     expect(jsonThingFirst.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetThing"',
+      '[oagen] Renamed child "PetJsonJsonThing" → "PetThing"',
       '[oagen] Collapsed child "PetJsonThing" into existing "PetThing"',
     ]);
 
@@ -531,7 +540,7 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     );
     expect(warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (4 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetThing"',
+      '[oagen] Renamed child "PetJsonThing" → "PetThing"',
       '[oagen] Collapsed child "PetJsonJsonThing" into existing "PetThing"',
     ]);
     expect(describeModels(spec)).toEqual(['Pet {a,b,thing,jsonThing}', 'PetThing {x}']);
@@ -569,9 +578,9 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(describeFolded(noteFirst.kept)).toEqual(expected);
     expect(noteFirst.warnings).toEqual([
       '[oagen] Merged "NoteJson" into "Note" (3 fields, superset)',
-      '[oagen] Renamed child "NoteJson…" → "NotePet"',
-      '[oagen] Renamed child "NoteJson…" → "NotePetToy"',
-      '[oagen] Renamed child "NoteJson…" → "NotePetToyInner"',
+      '[oagen] Renamed child "NoteJsonPet" → "NotePet"',
+      '[oagen] Renamed child "NoteJsonPetToy" → "NotePetToy"',
+      '[oagen] Renamed child "NoteJsonPetToyInner" → "NotePetToyInner"',
       '[oagen] Merged "NoteJsonPetJson" into "NotePet" (3 fields, superset)',
       '[oagen] Collapsed child "NoteJsonPetJsonToy" into existing "NotePetToy"',
       '[oagen] Collapsed child "NoteJsonPetJsonToyInner" into existing "NotePetToyInner"',
@@ -611,7 +620,7 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     expect(same.kept[1]?.fields[0]?.type).toEqual(inlineEnum('PetToyKind', ['k']));
     expect(same.warnings).toEqual([
       '[oagen] Merged "PetJson" into "Pet" (5 fields, superset)',
-      '[oagen] Renamed child "PetJson…" → "PetToy"',
+      '[oagen] Renamed child "PetJsonToy" → "PetToy"',
     ]);
 
     // Other members are another shape: the base keeps the values its operations accept.
@@ -823,5 +832,294 @@ describe('`<Name>Json` fold — folded children (issue #305)', () => {
     }
     // The sweep exercises folds, not only refusals.
     expect(folds).toBeGreaterThan(200);
+  });
+});
+
+/**
+ * Issue #426: the fold read every model name by prefix. A model merely
+ * spelled `PetJson…` — one `PetJson` never reaches, or one whose name only
+ * starts with the same letters (`PetJsonification`) — was renamed with the
+ * fold and could refuse it; a child could be renamed onto a name an enum
+ * holds, leaving a model and an enum under one name; the enum note named the
+ * name the reference was given rather than the one the collectors settled
+ * on; and a folded `PetJson`'s `x-*` keys were dropped.
+ */
+describe('`<Name>Json` fold — reach, enum names and extensions (issue #426)', () => {
+  /** A `pet`-tagged document whose operations `get<Name>` each return one of `returned`, around `schemas`. */
+  const returningDoc = (
+    schemas: Record<string, unknown>,
+    returned: string[],
+    parameters: Record<string, unknown[]> = {},
+  ) => ({
+    openapi: '3.1.0',
+    info: { title: 'pets', version: '1' },
+    paths: Object.fromEntries(
+      returned.map((name) => [
+        `/${name}`,
+        {
+          get: {
+            operationId: `get${name}`,
+            tags: ['pet'],
+            ...(parameters[name] ? { parameters: parameters[name] } : {}),
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: `#/components/schemas/${name}` } } },
+              },
+            },
+          },
+        },
+      ]),
+    ),
+    components: { schemas },
+  });
+
+  it('renames no model `PetJson` does not reach, so it keeps its name and has no say in the fold', async () => {
+    // The issue's repro: `PetJsonPatch` and `PetJsonification` are components of their own that
+    // `PetJson` never references. Read by prefix, they were renamed `PetPatch` and `Petification`.
+    const { spec, warnings } = await parseWithWarnings(
+      'unreached.json',
+      returningDoc(
+        {
+          Pet: obj({ name: str }),
+          PetJson: obj({ name: str, tag: str }),
+          PetJsonPatch: obj({ op: str }),
+          PetJsonification: obj({ format: str }),
+        },
+        ['Pet', 'PetJson', 'PetJsonPatch', 'PetJsonification'],
+      ),
+    );
+    expect(warnings).toEqual(['[oagen] Merged "PetJson" into "Pet" (2 fields, superset)']);
+    expect(describeModels(spec)).toEqual(['Pet {name,tag}', 'PetJsonPatch {op}', 'PetJsonification {format}']);
+    expect(describeResponses(spec)).toEqual([
+      'getPet: Pet',
+      'getPetJson: Pet',
+      'getPetJsonPatch: PetJsonPatch',
+      'getPetJsonification: PetJsonification',
+    ]);
+    expect(unresolvedReferences(spec)).toEqual([]);
+
+    // Beside a `PetPatch` of another shape, the unrelated `PetJsonPatch` refused the whole fold.
+    const beside = await parseWithWarnings(
+      'beside.json',
+      returningDoc(
+        {
+          Pet: obj({ name: str }),
+          PetJson: obj({ name: str, tag: str }),
+          PetJsonPatch: obj({ op: str }),
+          PetPatch: obj({ path: str }),
+        },
+        ['Pet', 'PetJson', 'PetJsonPatch', 'PetPatch'],
+      ),
+    );
+    expect(beside.warnings).toEqual(['[oagen] Merged "PetJson" into "Pet" (2 fields, superset)']);
+    expect(describeModels(beside.spec)).toEqual(['Pet {name,tag}', 'PetJsonPatch {op}', 'PetPatch {path}']);
+    expect(describeResponses(beside.spec)).toEqual([
+      'getPet: Pet',
+      'getPetJson: Pet',
+      'getPetJsonPatch: PetJsonPatch',
+      'getPetPatch: PetPatch',
+    ]);
+    expect(unresolvedReferences(beside.spec)).toEqual([]);
+  });
+
+  it('renames a child `PetJson` reaches through any model, and only at a word boundary', () => {
+    // `PetJsonPatch` is reached through `Wrapper`, a model of another name, so it is a child and
+    // follows the fold; `PetJsonification` is reached too, but `PetJson` + `ification` is not a
+    // name under `PetJson`, so it keeps its own. Each note names the child that moved.
+    const { kept, warnings } = collapse([
+      { name: 'Pet', fields: [field('a')] },
+      {
+        name: 'PetJson',
+        fields: [field('a'), field('wrap', modelRef('Wrapper')), field('format', modelRef('PetJsonification'))],
+      },
+      { name: 'Wrapper', fields: [field('patch', modelRef('PetJsonPatch'))] },
+      { name: 'PetJsonPatch', fields: [field('op')] },
+      { name: 'PetJsonification', fields: [field('format')] },
+    ]);
+    expect(describeFolded(kept)).toEqual([
+      'Pet {a,wrap:Wrapper,format:PetJsonification}',
+      'Wrapper {patch:PetPatch}',
+      'PetPatch {op}',
+      'PetJsonification {format}',
+    ]);
+    expect(warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonPatch" → "PetPatch"',
+    ]);
+  });
+
+  it('reads the name a child lands on again only when the fold reaches that name', () => {
+    // `PetJsonJsonThing` (the extractor's name for `PetJson.json_thing`) lands on `Pet` + `JsonThing`.
+    // A child `PetJsonThing` vacating that name is followed to `PetThing` (see the vacated-name test
+    // above); with none, `PetJsonThing` is a name the fold never reaches, so the child stops there
+    // rather than lose the `Json` word its own field name carries.
+    const { kept, warnings } = collapse([
+      { name: 'Pet', fields: [field('a')] },
+      { name: 'PetJson', fields: [field('a'), field('jsonThing', modelRef('PetJsonJsonThing'))] },
+      { name: 'PetJsonJsonThing', fields: [field('x')] },
+    ]);
+    expect(describeFolded(kept)).toEqual(['Pet {a,jsonThing:PetJsonThing}', 'PetJsonThing {x}']);
+    expect(warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (2 fields, superset)',
+      '[oagen] Renamed child "PetJsonJsonThing" → "PetJsonThing"',
+    ]);
+  });
+
+  it('refuses a fold that would rename a child onto a name an enum holds, wherever the enum sits', async () => {
+    const schemas = (extra: Record<string, unknown> = {}) => ({
+      Pet: obj({ name: str }),
+      PetJson: obj({
+        name: str,
+        mode: { type: 'string', enum: ['indoor', 'outdoor'] },
+        toy: { $ref: '#/components/schemas/PetJsonToy' },
+      }),
+      PetJsonToy: obj({ label: str }),
+      PetMode: obj({ since: str }),
+      ...extra,
+    });
+    const refusal =
+      '[oagen] Warning: Json-suffix model "PetJson" is not merged into "Pet": "PetJsonToy" would be renamed "PetToy", and enum "PetToy" owns the name — keeping both';
+    const ball = { type: 'string', enum: ['ball', 'rope'] };
+
+    // The issue's repro: beside a component enum `PetToy`, the IR declared a model and an enum
+    // `PetToy`.
+    const component = await parseWithWarnings(
+      'component-enum.json',
+      returningDoc(schemas({ PetToy: ball }), ['Pet', 'PetJson', 'PetMode']),
+    );
+    expect(component.warnings).toEqual([refusal]);
+    expect(describeModels(component.spec)).toEqual([
+      'Pet {name}',
+      'PetJson {name,mode,toy}',
+      'PetJsonToy {label}',
+      'PetMode {since}',
+    ]);
+    expect(component.spec.enums.map((e) => e.name).sort()).toEqual(['PetJsonMode', 'PetToy']);
+    expect(describeResponses(component.spec)).toEqual(['getPet: Pet', 'getPetJson: PetJson', 'getPetMode: PetMode']);
+    expect(unresolvedReferences(component.spec)).toEqual([]);
+
+    // A `toy` query enum of the `pet` service is lifted after the fold: it stepped to `PetToy2`
+    // past the renamed child, so the parameter's type depended on the fold. It keeps `PetToy`.
+    const query = await parseWithWarnings(
+      'query-enum.json',
+      returningDoc(schemas(), ['Pet', 'PetJson', 'PetMode'], {
+        Pet: [{ name: 'toy', in: 'query', schema: ball }],
+      }),
+    );
+    expect(query.warnings).toEqual([refusal]);
+    expect(query.spec.services[0]?.operations[0]?.queryParams[0]?.type).toMatchObject({ kind: 'enum', name: 'PetToy' });
+    expect(query.spec.enums.map((e) => e.name).sort()).toEqual(['PetJsonMode', 'PetToy']);
+    expect(describeModels(query.spec)).toEqual([
+      'Pet {name}',
+      'PetJson {name,mode,toy}',
+      'PetJsonToy {label}',
+      'PetMode {since}',
+    ]);
+
+    // With no enum in the way the fold goes ahead, and the note names the enum `mode` ends under:
+    // the collectors step `PetMode` past the component model of that name.
+    const folded = await parseWithWarnings('no-enum.json', returningDoc(schemas(), ['Pet', 'PetJson', 'PetMode']));
+    expect(folded.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonToy" → "PetToy"',
+      '[oagen] Folded enum "PetJsonMode" into "PetMode2"',
+    ]);
+    expect(describeModels(folded.spec)).toEqual(['Pet {name,mode,toy}', 'PetToy {label}', 'PetMode {since}']);
+    expect(folded.spec.models[0]?.fields.find((f) => f.name === 'mode')?.type).toMatchObject({
+      kind: 'enum',
+      name: 'PetMode2',
+    });
+    expect(folded.spec.enums.map((e) => e.name)).toEqual(['PetMode2']);
+    expect(unresolvedReferences(folded.spec)).toEqual([]);
+  });
+
+  it('refuses a fold that would rename a child onto an inline enum another model carries', () => {
+    const models = (): Model[] => [
+      { name: 'Pet', fields: [field('a')] },
+      { name: 'PetJson', fields: [field('a'), field('toy', modelRef('PetJsonToy'))] },
+      { name: 'PetJsonToy', fields: [field('x')] },
+      { name: 'Owner', fields: [field('toy', { kind: 'enum', name: 'PetToy', values: ['ball'] })] },
+    ];
+    const { kept, warnings } = collapse(models());
+    expect(describeFolded(kept)).toEqual(describeFolded(models()));
+    expect(warnings).toEqual([
+      '[oagen] Warning: Json-suffix model "PetJson" is not merged into "Pet": "PetJsonToy" would be renamed "PetToy", and enum "PetToy" owns the name — keeping both',
+    ]);
+
+    // A model the document keeps under the name holds it as any holder does: the child collapses
+    // onto it, so the fold puts no new type under the enum's name.
+    const held = collapse([...models(), { name: 'PetToy', fields: [field('x')] }]);
+    expect(describeFolded(held.kept)).toEqual(['Pet {a,toy:PetToy}', 'Owner {toy}', 'PetToy {x}']);
+    expect(held.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (2 fields, superset)',
+      '[oagen] Collapsed child "PetJsonToy" into existing "PetToy"',
+    ]);
+  });
+
+  it('carries the `…Json` model’s `x-*` keys onto a base that has none, as it carries its link', async () => {
+    // The issue's repro: `createPet` takes `PetJson`, whose keys were dropped with it.
+    const doc = (pet: Record<string, unknown> = {}) => ({
+      openapi: '3.1.0',
+      info: { title: 'pets', version: '1' },
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: {
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/PetJson' } } },
+            },
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+              },
+            },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Pet: { ...obj({ name: str }), ...pet },
+          PetJson: {
+            ...obj({ name: str, age: { type: 'integer' } }),
+            externalDocs: { url: 'https://example.com/pets' },
+            'x-since': '1.2',
+          },
+        },
+      },
+    });
+    const project = (spec: ApiSpec) =>
+      spec.models.map(({ externalDocs, extensions, fields, name }) => ({
+        externalDocs,
+        extensions,
+        fields: fields.map((f) => f.name),
+        name,
+      }));
+
+    const { spec, warnings } = await parseWithWarnings('keys.json', doc());
+    expect(warnings).toEqual(['[oagen] Merged "PetJson" into "Pet" (2 fields, superset)']);
+    expect(project(spec)).toEqual([
+      {
+        externalDocs: { url: 'https://example.com/pets' },
+        extensions: { 'x-since': '1.2' },
+        fields: ['name', 'age'],
+        name: 'Pet',
+      },
+    ]);
+
+    // A base with keys and a link of its own keeps both, as it keeps its own description.
+    const own = await parseWithWarnings(
+      'own-keys.json',
+      doc({ externalDocs: { url: 'https://example.com/pet' }, 'x-owner': 'pets-team' }),
+    );
+    expect(project(own.spec)).toEqual([
+      {
+        externalDocs: { url: 'https://example.com/pet' },
+        extensions: { 'x-owner': 'pets-team' },
+        fields: ['name', 'age'],
+        name: 'Pet',
+      },
+    ]);
   });
 });
