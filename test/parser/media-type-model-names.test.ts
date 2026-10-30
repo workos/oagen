@@ -314,6 +314,32 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     },
   );
 
+  it("a quote or a space on one of two keys alike but for their parameters' order swaps no models: no change (Greptile round 2)", async () => {
+    const first = 'application/yaml; b=2; a=1';
+    const before = listNotes([
+      [first, 'title'],
+      ['application/yaml; a=1; b=2', 'summary'],
+    ]);
+    for (const respelled of ['application/yaml; a=1; b="2"', 'application/yaml;a=1;b=2']) {
+      const after = listNotes([
+        [first, 'title'],
+        [respelled, 'summary'],
+      ]);
+
+      // Nothing but syntax tells the two apart, so the one written first takes the bare name.
+      for (const [document, key] of [
+        [before, 'application/yaml; a=1; b=2'],
+        [after, respelled],
+      ] as const) {
+        expect(await namesOf(document), key).toEqual({
+          [first]: 'ListNotesApplicationYamlA1B2Response { title }',
+          [key]: 'ListNotesApplicationYamlA1B2Response200 { summary }',
+        });
+      }
+      expect(await diff(before, after), respelled).toEqual([]);
+    }
+  });
+
   it.each([
     ['a `charset` edit', 'application/yaml; charset=utf-8', 'application/yaml; charset=iso-8859-1', 'Charset'],
     ['a parameter reorder', 'application/yaml; a=1; b=2', 'application/yaml; b=2; a=1', 'A1B2'],

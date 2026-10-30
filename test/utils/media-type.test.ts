@@ -129,13 +129,15 @@ describe('mediaTypeNamingOrder', () => {
       'text/csv',
       'APPLICATION/XML',
     ]);
-    // Two keys that differ only in their charset's value, or in the order of
-    // their parameters, are taken by spelling too.
+    // Two keys that differ only in their charset's value are taken by it too.
     const charsets = ['application/yaml; charset=utf-8', 'application/yaml; charset=utf-16'];
     expect(mediaTypeNamingOrder(charsets)).toEqual([charsets[1], charsets[0]]);
     expect(mediaTypeNamingOrder([...charsets].reverse())).toEqual([charsets[1], charsets[0]]);
+    // Two that differ only in the order of their parameters differ in nothing
+    // but syntax, so they keep their document order (Greptile round 2).
     const reordered = ['application/yaml; b=2; a=1', 'application/yaml; a=1; b=2'];
-    expect(mediaTypeNamingOrder(reordered)).toEqual([reordered[1], reordered[0]]);
+    expect(mediaTypeNamingOrder(reordered)).toEqual(reordered);
+    expect(mediaTypeNamingOrder([...reordered].reverse())).toEqual([...reordered].reverse());
   });
 
   it('orders keys read in one spelling before as written, so quoting, spacing or reordering parameters moves none (Greptile)', () => {
@@ -156,6 +158,19 @@ describe('mediaTypeNamingOrder', () => {
     const values = ['application/yaml; profile=print', 'application/yaml; profile="Print"'];
     expect(mediaTypeNamingOrder(values)).toEqual(values);
     expect(mediaTypeNamingOrder([...values].reverse())).toEqual(values);
+  });
+
+  it('keeps the document order of keys alike but for how they quote, space or order their parameters (Greptile round 2)', () => {
+    const first = 'application/yaml; b=2; a=1';
+    // Each respells `application/yaml; a=1; b=2`; none moves it ahead of `first`, or behind it.
+    for (const respelled of [
+      'application/yaml; a=1; b="2"',
+      'application/yaml;a=1;b=2',
+      'application/yaml; A=1; b=2',
+    ]) {
+      expect(mediaTypeNamingOrder([first, respelled]), respelled).toEqual([first, respelled]);
+      expect(mediaTypeNamingOrder([respelled, first]), respelled).toEqual([respelled, first]);
+    }
   });
 });
 

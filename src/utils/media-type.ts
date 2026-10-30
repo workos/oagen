@@ -187,20 +187,22 @@ export function mediaTypeNameFragment(contentType: string, siblings: Iterable<st
  * keys deriving one fragment among them (`mediaTypeNameFragment`) take the
  * places of that fragment's keys in one order whatever the document's — by
  * the key in one spelling (`namingSpelling`), case folded, then lower case
- * before upper case where only case differs, and only then by the key as
- * written. The first takes the bare name and the next steps from it (or
- * shares it, when its shape is identical), so which key steps depends
- * neither on the keys' order nor on how a key quotes, spaces or orders its
- * parameters: `application/yaml` beside `Application/YAML` is named first
- * wherever either is written, and so is `application/yaml; profile=print`
- * beside `Application/YAML; profile="print"`.
+ * before upper case where only case differs. The first takes the bare name
+ * and the next steps from it (or shares it, when its shape is identical), so
+ * which key steps depends neither on the keys' order nor on how a key
+ * quotes, spaces or orders its parameters: `application/yaml` beside
+ * `Application/YAML` is named first wherever either is written, and so is
+ * `application/yaml; profile=print` beside `Application/YAML;
+ * profile="print"`. Keys alike in that spelling differ in nothing but syntax
+ * (`; b=2; a=1` beside `; a=1; b=2`), so they keep their document order: the
+ * key as written never decides, or respelling one could swap them.
  */
 export function mediaTypeNamingOrder(contentTypes: readonly string[]): string[] {
   const fragments = contentTypes.map((contentType) => mediaTypeNameFragment(contentType, contentTypes));
   const turns = new Map<string, string[]>();
   contentTypes.forEach((contentType, i) => turns.set(fragments[i], [...(turns.get(fragments[i]) ?? []), contentType]));
-  const byNaming = (a: string, b: string) => bySpelling(namingSpelling(a), namingSpelling(b)) || bySpelling(a, b);
-  for (const keys of turns.values()) keys.sort(byNaming);
+  // `sort` is stable, so keys alike in `namingSpelling` keep their document order.
+  for (const keys of turns.values()) keys.sort((a, b) => bySpelling(namingSpelling(a), namingSpelling(b)));
   return fragments.map((fragment) => turns.get(fragment)!.shift()!);
 }
 
