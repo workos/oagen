@@ -693,9 +693,10 @@ describe('error models survive the other response merges', () => {
     );
     const op = onlyOperation(ir);
     expect(op.response).toEqual(model('Pet'));
-    expect(op.successResponses?.map((r) => r.type)).toEqual([model('Pet'), model('GetPetResponse')]);
+    // The 201 is named for its status code whatever the 200 declares (#435).
+    expect(op.successResponses?.map((r) => r.type)).toEqual([model('Pet'), model('GetPetResponse201')]);
     expect(op.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
-    expect(modelNames(ir)).toEqual(['Pet', 'GetPetResponse', 'GetPetError404']);
+    expect(modelNames(ir)).toEqual(['Pet', 'GetPetResponse201', 'GetPetError404']);
     expectConsistent(ir);
   });
 
