@@ -10,6 +10,7 @@ import {
   singularize,
   singularizePathSegment,
   cleanSchemaName,
+  numberedName,
   ACRONYM_SET,
 } from '../../src/utils/naming.js';
 
@@ -440,6 +441,36 @@ describe('cleanSchemaName', () => {
   });
   it('strips Userland prefix', () => {
     expect(cleanSchemaName('UserlandConnection')).toBe('Connection');
+  });
+});
+
+// workos/oagen#403: one spelling for every numbered operation, model and
+// enum name, and for the hash a path-derived or webhook stem takes.
+describe('numberedName', () => {
+  it('appends the bare number to a name that ends in a letter', () => {
+    expect(numberedName('list', 2)).toBe('list2');
+    expect(numberedName('GetPetKindResponse', 3)).toBe('GetPetKindResponse3');
+  });
+
+  it('sets the number off with `No` from a name that ends in a digit', () => {
+    expect(numberedName('listV1', 2)).toBe('listV1No2');
+    expect(numberedName('PetSizeV2', 2)).toBe('PetSizeV2No2');
+    expect(numberedName('GetPetError404', 2)).toBe('GetPetError404No2');
+  });
+
+  it('sets a hash off the same way only when it starts with a digit', () => {
+    expect(numberedName('PetsTop10', '567B59')).toBe('PetsTop10No567B59');
+    expect(numberedName('PetsTop10', 'Ba41B5')).toBe('PetsTop10Ba41B5');
+    expect(numberedName('FooBar', '546F12')).toBe('FooBar546F12');
+    expect(numberedName('', '567B59')).toBe('567B59');
+  });
+
+  it('keeps the boundary through re-casing, where an underscore would not', () => {
+    for (const name of [numberedName('PetSizeV2', 2), numberedName('PetsTop10', '567B59')]) {
+      expect(toPascalCase(name)).toBe(name);
+    }
+    expect(toCamelCase(numberedName('listTop10', 2))).toBe('listTop10No2');
+    expect(toPascalCase('PetSizeV2_2')).toBe('PetSizeV22');
   });
 });
 

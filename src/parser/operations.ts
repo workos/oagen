@@ -33,6 +33,7 @@ import {
   cleanSchemaName,
   stripListItemMarkers,
   singularizePathSegment,
+  numberedName,
 } from '../utils/naming.js';
 import {
   isJsonMediaType,
@@ -2492,20 +2493,6 @@ function nameIsFree(
 }
 
 /**
- * `name` with the numeric suffix `n`, the spelling of every numbered
- * operation name (suffixedName picks the first free `n`): `list` + 2 is
- * `list2`. A name that already ends in a digit takes the number behind
- * `No`, so that it cannot be read as part of the number the name ends with:
- * `listV1` + 2 is `listV1No2`, never `listV12`, which reads as version 12
- * of the API, and `listTop10` + 2 is `listTop10No2`. An underscore would
- * not do: splitWords reads a digit run as a word of its own, so `listV1_2`
- * re-cased by toPascalCase or toCamelCase is `ListV12` or `listV12` again.
- */
-function numberedName(name: string, n: number): string {
-  return /\d$/.test(name) ? `${name}No${n}` : `${name}${n}`;
-}
-
-/**
  * Append a qualifier to an operation name without repeating what the name
  * already says. A qualifier never contributes the same word twice in a row:
  * the deeper context of `/api/analytics/analytics/teams` is
@@ -4509,10 +4496,10 @@ function deriveOneOfVariantName(
 ): { name: string; fromContent: boolean } {
   const finalize = (name: string): string => (fromOperationId ? resolveSchemaName(name) : name);
   const existingNames = new Set(existingModels.map((m) => m.name));
-  // `name`, or `<stem><n>` counting from 2 while a model of that name exists.
+  // `name`, or `stem` numbered from 2 (numberedName) while a model of that name exists.
   const unique = (name: string, stem: string): string => {
     let candidate = name;
-    for (let suffix = 2; existingNames.has(candidate); suffix++) candidate = `${stem}${suffix}`;
+    for (let suffix = 2; existingNames.has(candidate); suffix++) candidate = numberedName(stem, suffix);
     return candidate;
   };
   // Try to use a distinguishing property (e.g., "grant_type" field's const/enum value)
@@ -5004,7 +4991,7 @@ function deferredEnumNames(item: DeferredInlineType): string[] {
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
   const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
-  const numbered = (index: number): string => `${name}${index + 2}`;
+  const numbered = (index: number): string => numberedName(name, index + 2);
   const byNumber = (index: number): string => (index === 0 ? name : numbered(index - 1));
   // A site a component response declares — its body, a secondary body, a
   // header — steps the same way from every operation, at a 404, at `default`
@@ -5037,7 +5024,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
     case 'fallback':
       return byNumber;
     case 'error':
-      return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : `${name}Body${index}`);
+      return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : numberedName(`${name}Body`, index));
     case 'param': {
       // Named like a header, with the location where a header has its
       // status code: a clash within this operation (one name in two
@@ -5253,8 +5240,12 @@ export function derivePathModelBaseName(path: string, method: HttpMethod, disamb
   );
   const resource = parts.length > 0 ? parts.join('') : 'Unknown';
   // `_` separators guarantee a word boundary on each side of the disambiguator
-  // and the method, whatever the resource ends with; splitWords drops them.
-  return toPascalCase([resource, disambiguator, method].filter(Boolean).join('_'));
+  // and the method, whatever the resource ends with; splitWords drops them,
+  // so the disambiguator is the suffix numberedName gives the resource: a
+  // hash that starts with a digit is set off from a resource that ends in one
+  // as a number is (`PetsTop10No567B59Get`, never `PetsTop10567B59Get`).
+  const hash = numberedName(resource, disambiguator).slice(resource.length);
+  return toPascalCase([resource, hash, method].filter(Boolean).join('_'));
 }
 
 /** `derivePathModelBaseName` plus the `Request` / `Response` suffix. */
@@ -5942,7 +5933,7 @@ function resolveComponentResponseModelNames(
         previous !== undefined && clashing.length === previous.length && clashing.every((c) => previous!.includes(c));
       if (stuck) break;
       previous = clashing;
-      name = `${base}${n}`;
+      name = numberedName(base, n);
       minted = mintedUnder(name);
     }
     taken.add(name);
@@ -7266,7 +7257,7 @@ function stepSecondaryBody(
     // Unbounded on purpose: the kept names and the registry are finite and
     // every step is a new number, so a free stem is always reached.
     for (let n = 2; [...names].some(([model, name]) => clashes(model, name)); n++) {
-      names = under((stem = `${context}${n}`));
+      names = under((stem = numberedName(context, n)));
     }
     if (always) ownBody?.stems.set(ownBody.key, stem);
   }

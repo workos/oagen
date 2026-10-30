@@ -1,6 +1,6 @@
 import type { Model, ModelRef, Enum, EnumValue, Extensions, Field, TypeRef, Constraints } from '../ir/types.js';
 import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
-import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords } from '../utils/naming.js';
+import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import {
@@ -1649,9 +1649,11 @@ function distinguishingProperties(variant: SchemaObject, siblings: readonly Sche
  *      order, that it declares and no other inline object variant declares:
  *      `<Base>With<Property>` (`DrawingShapeWithSide`); a property that
  *      PascalCases to nothing is skipped;
- *   3. the position counter, `<Base><position + 1>` (`DrawingShape2`), which
- *      now remains only for variants whose property sets are identical, and
- *      which keeps counting past a taken name (`DrawingShape3`).
+ *   3. the position counter, `<Base><position + 1>` (`DrawingShape2`; behind
+ *      `No` after a base that ends in a digit, `PetShapeV2No2`, see
+ *      numberedName), which now remains only for variants whose property
+ *      sets are identical, and which keeps counting past a taken name
+ *      (`DrawingShape3`).
  *
  * Every candidate is also checked against `reserved`: the inline names the
  * parent's other properties mint (`reservedInlineNames`), so a variant can
@@ -1690,7 +1692,7 @@ export function nameUndiscriminatedVariant(
   }
 
   for (let position = emitted.length + 1; ; position++) {
-    const candidate = `${base}${position}`;
+    const candidate = numberedName(base, position);
     if (!taken(candidate)) return candidate;
   }
 }

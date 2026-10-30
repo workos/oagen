@@ -1,5 +1,5 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
-import { toPascalCase, singularize } from '../utils/naming.js';
+import { numberedName, toPascalCase, singularize } from '../utils/naming.js';
 import {
   collectObjectProperties,
   detectEndOfIteration,
@@ -597,7 +597,11 @@ function typeInlineItems(
   if (settle) {
     const itemType = materializeInlineSchema(items, {
       stem: (index) =>
-        index === 0 ? itemName : index === 1 ? itemName.replace(/Item$/, 'ResponseItem') : `${itemName}${index}`,
+        index === 0
+          ? itemName
+          : index === 1
+            ? itemName.replace(/Item$/, 'ResponseItem')
+            : numberedName(itemName, index),
       componentSchemas,
       registry: settle.registry,
       operation: settle.operation,

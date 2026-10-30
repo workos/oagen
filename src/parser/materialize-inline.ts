@@ -12,7 +12,7 @@
  */
 import type { Model, TypeRef } from '../ir/types.js';
 import { collectModelTypeRefs, renameModelRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
-import { toPascalCase } from '../utils/naming.js';
+import { numberedName, toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import {
@@ -613,7 +613,7 @@ function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (in
           settledStem = stem;
         }
       }
-      if (movedRoot === undefined) movedRoot = claim((n) => `${oldRoot}${n + 1}`);
+      if (movedRoot === undefined) movedRoot = claim((n) => numberedName(oldRoot, n + 1));
       taken.add(movedRoot);
       // Decided per model, by shape: a model named under the root whose name
       // an owner that shares it already holds (a component that admits it,
@@ -631,7 +631,8 @@ function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (in
         .map((model) => model.name);
       for (const name of moving) {
         const suffix = name.slice(oldRoot.length);
-        rename(name, name === oldRoot ? movedRoot : claim((n) => `${movedRoot}${suffix}${n === 1 ? '' : n}`));
+        const moved = `${movedRoot}${suffix}`;
+        rename(name, name === oldRoot ? movedRoot : claim((n) => (n === 1 ? moved : numberedName(moved, n))));
       }
       rootName = movedRoot;
     } else {
@@ -639,7 +640,7 @@ function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (in
         const base = name.startsWith(rootName) ? name : `${rootName}${name}`;
         rename(
           name,
-          claim((n) => `${base}${n === 1 ? '' : n}`),
+          claim((n) => (n === 1 ? base : numberedName(base, n))),
         );
       }
     }

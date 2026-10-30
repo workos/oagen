@@ -1581,12 +1581,13 @@ describe('review round 2 (Greptile, after the port): a parameter enum is kept ap
 
   it.each([
     // Whichever is collected first keeps the bare name; the other steps: the
-    // parameter to a numeric suffix, the error body to `Body`.
+    // parameter to a numeric suffix, behind `No` after the status code's
+    // digits (#403), the error body to `Body`.
     [
       'error first',
       { '/a': getPetWithEnum404, '/b': listPetsWithParam(['brief', 'full']) },
       'GetPetError404',
-      'GetPetError4042',
+      'GetPetError404No2',
     ],
     [
       'parameter first',
@@ -1625,10 +1626,14 @@ describe('review round 2 (Greptile, after the port): a parameter enum is kept ap
     );
     const { getPet, listPets } = byName(ir);
     expect(getPet.responseHeaders?.[0].type).toEqual({ kind: 'enum', name: 'GetPetError404', values: ['a', 'b'] });
-    expect(listPets.queryParams[0].type).toEqual({ kind: 'enum', name: 'GetPetError4042', values: ['brief', 'full'] });
+    expect(listPets.queryParams[0].type).toEqual({
+      kind: 'enum',
+      name: 'GetPetError404No2',
+      values: ['brief', 'full'],
+    });
     expect(enumValues(ir, 'GetPetError404')).toEqual(['a', 'b']);
-    expect(enumValues(ir, 'GetPetError4042')).toEqual(['brief', 'full']);
-    expect(enumNames(ir)).toEqual(['GetPetError404', 'GetPetError4042']);
+    expect(enumValues(ir, 'GetPetError404No2')).toEqual(['brief', 'full']);
+    expect(enumNames(ir)).toEqual(['GetPetError404', 'GetPetError404No2']);
     expectConsistent(ir);
   });
 
