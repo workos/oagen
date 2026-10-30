@@ -13,6 +13,8 @@ import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 // shared models named by shape — `ErrorBody`, `ErrorBodyWithCode`, a
 // pinned value's `RateLimitExceededErrorBody` — with the pinned codes
 // gathered into one `ErrorBodyCode` enum (src/parser/collapse-error-bodies.ts).
+// A name is never numbered: a shape whose name something else holds is left
+// as the parser materialized it, with a warning.
 
 type Doc = Record<string, unknown>;
 const str = { type: 'string' };
@@ -70,6 +72,20 @@ async function parseWithoutWarnings(spec: Doc): Promise<ApiSpec> {
   try {
     const ir = await parse(spec);
     expect(warn.mock.calls).toEqual([]);
+    return ir;
+  } finally {
+    warn.mockRestore();
+  }
+}
+
+/** Parse, expecting exactly one `console.warn` per pattern, in order. */
+async function parseWithWarnings(spec: Doc, patterns: readonly RegExp[]): Promise<ApiSpec> {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    const ir = await parse(spec);
+    const messages = warn.mock.calls.map((call) => String(call[0]));
+    expect(messages).toHaveLength(patterns.length);
+    patterns.forEach((pattern, i) => expect(messages[i]).toMatch(pattern));
     return ir;
   } finally {
     warn.mockRestore();
@@ -267,7 +283,7 @@ describe('bodies pinned to different error codes', () => {
 });
 
 describe('a shape every member pins to one value', () => {
-  it('is named from the value and keeps the literal', async () => {
+  it('is named from the value and its further fields, and keeps the literal', async () => {
     const ir = await parseWithoutWarnings(
       doc({
         ...getOp('pets', {
@@ -296,8 +312,8 @@ describe('a shape every member pins to one value', () => {
         }),
       }),
     );
-    expect(modelNames(ir)).toEqual(['Note', 'RateLimitExceededErrorBody']);
-    expect(fieldSummary(ir, 'RateLimitExceededErrorBody')).toEqual([
+    expect(modelNames(ir)).toEqual(['Note', 'RateLimitExceededErrorBodyWithRetryAfter']);
+    expect(fieldSummary(ir, 'RateLimitExceededErrorBodyWithRetryAfter')).toEqual([
       'code: "rate_limit_exceeded"',
       'message: string',
       'retry_after: integer',
@@ -321,7 +337,7 @@ describe('a shape every member pins to one value', () => {
 });
 
 describe('nested error-only models', () => {
-  it('fold with their parents and are named from the parent and field', async () => {
+  it('fold with their parents and are named from the parent, their own fields and the field', async () => {
     const validation = obj({
       message: str,
       errors: { type: 'array', items: obj({ code: str, field: str }) },
@@ -332,9 +348,12 @@ describe('nested error-only models', () => {
         ...getOp('notes', { '422': { description: 'invalid', content: json(validation) } }),
       }),
     );
-    expect(modelNames(ir)).toEqual(['ErrorBodyWithErrors', 'ErrorBodyWithErrorsError', 'Note']);
-    expect(fieldSummary(ir, 'ErrorBodyWithErrors')).toEqual(['message: string', 'errors: ErrorBodyWithErrorsError[]']);
-    expect(fieldSummary(ir, 'ErrorBodyWithErrorsError')).toEqual(['code: string', 'field: string']);
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithCodeFieldError', 'ErrorBodyWithCodeFieldErrors', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodeFieldErrors')).toEqual([
+      'message: string',
+      'errors: ErrorBodyWithCodeFieldError[]',
+    ]);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodeFieldError')).toEqual(['code: string', 'field: string']);
     expectSound(ir);
   });
 });
@@ -384,8 +403,63 @@ describe('what the pass leaves alone', () => {
 });
 
 describe('the shared name', () => {
-  it('steps by number past a component schema that owns it', async () => {
+  it('is a component schema of that name and shape, which the bodies fold onto', async () => {
     const ir = await parseWithoutWarnings(
+      doc(
+        {
+          ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
+          ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+        },
+        { ErrorBody: obj({ message: str }) },
+      ),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual(['message: string']);
+    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+    expectSound(ir, ['Note', 'ErrorBody']);
+  });
+
+  it('folds onto a component schema only when its string fields admit every pinned value', async () => {
+    const bodies = {
+      ...getOp('pets', { '409': { description: 'dup', content: json(codedBody('b')) } }),
+      ...getOp('notes', { '409': { description: 'dup', content: json(codedBody('c')) } }),
+    };
+    // An open `code` admits `b` and `c`: the bodies reference the component.
+    const open = await parseWithoutWarnings(doc(bodies, { ErrorBodyWithCode: obj({ code: str, message: str }) }));
+    expect(modelNames(open)).toEqual(['ErrorBodyWithCode', 'Note']);
+    expect(open.enums).toEqual([]);
+    expect(errorType(open, 'getPets', 409)).toEqual({ kind: 'model', name: 'ErrorBodyWithCode' });
+    // A `code` pinned to `a` would narrow them: the bodies stay as they are.
+    const pinned = await parseWithWarnings(
+      doc(bodies, { ErrorBodyWithCode: obj({ code: { type: 'string', const: 'a' }, message: str }) }),
+      [
+        /would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" already holds — keeping models "GetNotesError409", "GetPetsError409" as they are/,
+      ],
+    );
+    expect(modelNames(pinned)).toEqual(['ErrorBodyWithCode', 'GetNotesError409', 'GetPetsError409', 'Note']);
+    expect(fieldSummary(pinned, 'GetPetsError409')).toEqual(['code: "b"', 'message: string']);
+    expectSound(pinned, ['Note', 'ErrorBodyWithCode']);
+  });
+
+  it("orders a union's tokens, so the name does not depend on which operation wrote the union first", async () => {
+    const forward = obj({ message: { oneOf: [str, { type: 'array', items: str }] } });
+    const backward = obj({ message: { oneOf: [{ type: 'array', items: str }, str] } });
+    for (const [first, second] of [
+      [forward, backward],
+      [backward, forward],
+    ]) {
+      const ir = await parseWithoutWarnings(
+        doc({
+          ...getOp('notes', { '400': { description: 'bad', content: json(first) } }),
+          ...getOp('pets', { '400': { description: 'bad', content: json(second) } }),
+        }),
+      );
+      expect(modelNames(ir)).toEqual(['ErrorBodyWithMessageOrMessageList', 'Note']);
+    }
+  });
+
+  it('is never numbered: a component schema of another shape holding it leaves the bodies as they are, with a warning', async () => {
+    const ir = await parseWithWarnings(
       doc(
         {
           ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
@@ -393,11 +467,101 @@ describe('the shared name', () => {
         },
         { ErrorBody: obj({ unrelated: str }) },
       ),
+      [
+        /would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+      ],
     );
-    expect(modelNames(ir)).toEqual(['ErrorBody', 'ErrorBody2', 'Note']);
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'GetNotesError404', 'GetPetsError404', 'Note']);
     expect(fieldSummary(ir, 'ErrorBody')).toEqual(['unrelated: string']);
-    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody2' });
+    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'GetPetsError404' });
     expectSound(ir, ['Note', 'ErrorBody']);
+  });
+
+  it('qualifies a field by its type, so shapes with the same field names read apart', async () => {
+    const fieldErrors = obj({ message: str, errors: { type: 'array', items: obj({ code: str, field: str }) } });
+    const constraintErrors = obj({
+      message: str,
+      errors: { type: 'array', items: obj({ property: str, constraints: { type: 'object' } }) },
+    });
+    const messageList = obj({ error: str, message: { type: 'array', items: str } });
+    const messageOrList = obj({ message: { oneOf: [str, { type: 'array', items: str }] } });
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '422': { description: 'invalid', content: json(fieldErrors) } }),
+        ...getOp('notes', { '422': { description: 'invalid', content: json(constraintErrors) } }),
+        ...getOp('tags', { '400': { description: 'bad', content: json(messageList) } }),
+        ...getOp('users', { '400': { description: 'bad', content: json(messageOrList) } }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'ErrorBodyWithCodeFieldError',
+      'ErrorBodyWithCodeFieldErrors',
+      'ErrorBodyWithConstraintsPropertyError',
+      'ErrorBodyWithConstraintsPropertyErrors',
+      'ErrorBodyWithErrorMessageList',
+      'ErrorBodyWithMessageOrMessageList',
+      'Note',
+    ]);
+    expectSound(ir);
+  });
+
+  it('names the OAuth error format, and a pinned body beside further fields from both', async () => {
+    const oauth = obj({ error: { type: 'string', const: 'invalid_grant' }, error_description: str });
+    const selection = obj({
+      code: { type: 'string', const: 'organization_selection_required' },
+      message: str,
+      organizations: { type: 'array', items: obj({ id: str, name: str }) },
+    });
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('tokens', {
+          '400': { description: 'bad', content: json(oauth) },
+          '401': { description: 'bad', content: json(obj({ error: str, error_description: str, error_uri: str })) },
+        }),
+        ...getOp('devices', { '400': { description: 'bad', content: json(oauth) } }),
+        ...getOp('sessions', {
+          '403': {
+            description: 'forbidden',
+            content: json({ oneOf: [codedBody('organization_selection_required'), selection, messageBody()] }),
+          },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'ErrorBody',
+      'InvalidGrantOAuthErrorBody',
+      'Note',
+      'OAuthErrorBodyWithErrorUri',
+      'OrganizationSelectionRequiredErrorBody',
+      'OrganizationSelectionRequiredErrorBodyWithOrganization',
+      'OrganizationSelectionRequiredErrorBodyWithOrganizations',
+    ]);
+    expect(fieldSummary(ir, 'InvalidGrantOAuthErrorBody')).toEqual([
+      'error: "invalid_grant"',
+      'error_description: string',
+    ]);
+    expect(fieldSummary(ir, 'OrganizationSelectionRequiredErrorBodyWithOrganizations')).toEqual([
+      'code: "organization_selection_required"',
+      'message: string',
+      'organizations: OrganizationSelectionRequiredErrorBodyWithOrganization[]',
+    ]);
+    expectSound(ir);
+  });
+
+  it('is never numbered for a shape that differs only in which fields are required: the later one stays as it is', async () => {
+    const ir = await parseWithWarnings(
+      doc({
+        ...getOp('pets', { '409': { description: 'dup', content: json(codedBody('taken')) } }),
+        ...getOp('notes', {
+          '409': { description: 'dup', content: json({ ...codedBody('taken'), required: ['message'] }) },
+        }),
+      }),
+      [
+        /The shared error body \{ code\?, message \} would be named "TakenErrorBody", which the shared error body "TakenErrorBody" \{ code, message \} already holds — keeping model "GetNotesError409" as it is/,
+      ],
+    );
+    expect(modelNames(ir)).toEqual(['GetNotesError409', 'Note', 'TakenErrorBody']);
+    expectSound(ir);
   });
 
   it('ignores `x-` extensions and examples when deciding what folds', async () => {
@@ -448,10 +612,10 @@ describe('every error site', () => {
 });
 
 describe('what the review asked to pin (workos/oagen#497)', () => {
-  it('reserves the names of enums already lifted, so a shared model never stands beside an enum of its name', async () => {
+  it('never stands a shared model beside an enum of its name: the bodies stay as they are, with a warning', async () => {
     // A component `Error` with a `body` enum lifts `ErrorBody` as an enum
-    // before the pass runs; the shared `{ message }` body steps past it.
-    const ir = await parseWithoutWarnings(
+    // before the pass runs; the `{ message }` bodies are left alone.
+    const ir = await parseWithWarnings(
       doc(
         {
           ...getOp('pets', {
@@ -462,26 +626,31 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
         },
         { Error: obj({ body: { type: 'string', enum: ['json', 'text'] } }) },
       ),
+      [/would be named "ErrorBody", which enum "ErrorBody" already holds/],
     );
     expect(ir.enums.map((e) => e.name)).toEqual(['ErrorBody']);
-    expect(modelNames(ir)).toEqual(['Error', 'ErrorBody2', 'Note']);
-    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody2' });
+    expect(modelNames(ir)).toEqual(['Error', 'GetNotesError404', 'GetPetsError404', 'Note']);
+    expect(errorType(ir, 'getPets', 404)).toEqual({ kind: 'model', name: 'GetPetsError404' });
     expectSound(ir, ['Note', 'Error']);
   });
 
   it('keeps string values inside arrays in the key, so bodies listing different codes stay two models', async () => {
     const codes = (code: string): Doc =>
       obj({ codes: { type: 'array', items: { type: 'string', const: code } }, message: str });
-    const ir = await parseWithoutWarnings(
+    // Nothing in the shape names the two apart, so the second stays as it is.
+    const ir = await parseWithWarnings(
       doc({
         ...getOp('pets', { '400': { description: 'bad', content: json(codes('a')) } }),
         ...getOp('notes', { '400': { description: 'bad', content: json(codes('b')) } }),
       }),
+      [
+        /would be named "ErrorBodyWithCodesList", which the shared error body "ErrorBodyWithCodesList" .* already holds — keeping model "GetNotesError400" as it is/,
+      ],
     );
-    expect(modelNames(ir)).toEqual(['ErrorBodyWithCodes', 'ErrorBodyWithCodes2', 'Note']);
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithCodesList', 'GetNotesError400', 'Note']);
     // Groups are ordered by shape (the key), not by operation: `"a"` sorts before `"b"`.
-    expect(fieldSummary(ir, 'ErrorBodyWithCodes')).toEqual(['codes: "a"[]', 'message: string']);
-    expect(fieldSummary(ir, 'ErrorBodyWithCodes2')).toEqual(['codes: "b"[]', 'message: string']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodesList')).toEqual(['codes: "a"[]', 'message: string']);
+    expect(fieldSummary(ir, 'GetNotesError400')).toEqual(['codes: "b"[]', 'message: string']);
     expectSound(ir);
   });
 
@@ -494,7 +663,7 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
           discriminator: { propertyName: 'kind', mapping },
         },
       });
-    const ir = await parseWithoutWarnings(
+    const ir = await parseWithWarnings(
       doc(
         {
           ...getOp('pets', {
@@ -512,8 +681,11 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
         },
         { Tag: obj({ label: str }) },
       ),
+      [
+        /would be named "ErrorBodyWithDetail", which the shared error body "ErrorBodyWithDetail" .* already holds — keeping model "GetNotesError400" as it is/,
+      ],
     );
-    expect(modelNames(ir)).toEqual(['ErrorBodyWithDetail', 'ErrorBodyWithDetail2', 'Note', 'Tag']);
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithDetail', 'GetNotesError400', 'Note', 'Tag']);
     expectSound(ir, ['Note', 'Tag']);
   });
 
@@ -530,14 +702,17 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
     const keyedByShared = await parse(spec, { fieldHints: { ErrorBody: { message: 'detail' } } });
     expect(keyedByShared.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBe('detail');
 
-    // A hint on one body only keeps that body apart: the domain name is part of the key.
+    // A hint on one body only keeps that body apart: the domain name is part
+    // of the key, and the shape it leaves with the same name stays as it is.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const split = await parse(spec, { fieldHints: { GetPetsError404: { message: 'detail' } } });
-    expect(modelNames(split)).toEqual(['ErrorBody', 'ErrorBody2', 'Note']);
+    expect(modelNames(split)).toEqual(['ErrorBody', 'GetNotesError404', 'Note']);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('what the human review asked to pin (workos/oagen#497, review 5704133720)', () => {
-  it('orders shapes by their structure, so `{ message: string }` keeps `ErrorBody` whichever operation declares it, and renaming an operation moves no name', async () => {
+  it('names shapes from their structure, so each keeps its name whichever operation declares it, and renaming an operation moves no name', async () => {
     const union = obj({ message: { oneOf: [str, { type: 'array', items: str }] } });
     const build = (plainOp: string, unionOp: string): Doc =>
       doc({
@@ -547,12 +722,12 @@ describe('what the human review asked to pin (workos/oagen#497, review 570413372
     // The union body's operation sorts before the plain one...
     const a = await parseWithoutWarnings(build('pets', 'notes'));
     expect(fieldSummary(a, 'ErrorBody')).toEqual(['message: string']);
-    expect(fieldSummary(a, 'ErrorBody2')).toEqual(['message: string | string[]']);
+    expect(fieldSummary(a, 'ErrorBodyWithMessageOrMessageList')).toEqual(['message: string | string[]']);
     // ...and after it: the same names.
     const b = await parseWithoutWarnings(build('notes', 'pets'));
     expect(fieldSummary(b, 'ErrorBody')).toEqual(['message: string']);
-    expect(fieldSummary(b, 'ErrorBody2')).toEqual(['message: string | string[]']);
-    // Fewer fields first for a value-named pair, in either order.
+    expect(fieldSummary(b, 'ErrorBodyWithMessageOrMessageList')).toEqual(['message: string | string[]']);
+    // A value-named pair reads the further field in its name, in either order.
     const notFound = (extra: Record<string, unknown>): Doc =>
       obj({ code: { type: 'string', const: 'not_found' }, message: str, ...extra });
     for (const [small, large] of [
@@ -566,11 +741,15 @@ describe('what the human review asked to pin (workos/oagen#497, review 570413372
         }),
       );
       expect(fieldSummary(ir, 'NotFoundErrorBody')).toEqual(['code: "not_found"', 'message: string']);
-      expect(fieldSummary(ir, 'NotFoundErrorBody2')).toEqual(['code: "not_found"', 'message: string', 'id: string']);
+      expect(fieldSummary(ir, 'NotFoundErrorBodyWithId')).toEqual([
+        'code: "not_found"',
+        'message: string',
+        'id: string',
+      ]);
     }
   });
 
-  it('shares a component enum of the same name and members instead of stepping past it', async () => {
+  it('shares a component enum of the same name and members, and leaves the fields strings when the members differ', async () => {
     const ir = await parseWithoutWarnings(
       doc(
         {
@@ -588,8 +767,8 @@ describe('what the human review asked to pin (workos/oagen#497, review 570413372
     );
     expect(ir.enums.map((e) => e.name)).toEqual(['ErrorBodyCode']);
     expect(fieldSummary(ir, 'ErrorBodyWithCode')).toEqual(['code: ErrorBodyCode', 'message: string']);
-    // Other members step, as the collectors step any inline enum.
-    const other = await parseWithoutWarnings(
+    // Other members leave the fields plain strings, with a warning.
+    const other = await parseWithWarnings(
       doc(
         {
           ...getOp('pets', {
@@ -603,9 +782,12 @@ describe('what the human review asked to pin (workos/oagen#497, review 570413372
         },
         { ErrorBodyCode: { type: 'string', enum: ['something_else'] } },
       ),
+      [
+        /would be the shared enum "ErrorBodyCode", which enum "ErrorBodyCode" already holds — keeping those fields plain strings/,
+      ],
     );
-    expect(other.enums.map((e) => e.name).sort()).toEqual(['ErrorBodyCode', 'ErrorBodyCode2']);
-    expect(fieldSummary(other, 'ErrorBodyWithCode')).toEqual(['code: ErrorBodyCode2', 'message: string']);
+    expect(other.enums.map((e) => e.name).sort()).toEqual(['ErrorBodyCode']);
+    expect(fieldSummary(other, 'ErrorBodyWithCode')).toEqual(['code: string', 'message: string']);
   });
 
   it('falls back to the field-based name when the pinned value would start with a digit', async () => {

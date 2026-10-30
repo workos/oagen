@@ -31,26 +31,44 @@
  * an array, union or map keeps its value in the key, and so does a field's
  * `domainName` (a `fieldHints` entry), so neither is lost in a fold.
  *
- * Each group becomes one model. A group whose members all pin one string
- * field to one value is named from that value (`RateLimitExceededErrorBody`,
- * `ApiKeyAlreadyExpiredErrorBody`), the way a const-discriminated variant
- * is named everywhere else; any other group from its fields
- * (`sharedBaseName`): `ErrorBody` for `{ message }`, else `ErrorBodyWith` +
- * the other fields in PascalCase (`ErrorBodyWithCode`,
- * `ErrorBodyWithCodeErrors`, `ErrorBodyWithErrorErrorDescription`). A model
- * only another error body reaches is named from its parent and field
- * (`ErrorBodyWithErrorsError`), as a nested inline object is everywhere else;
- * a taken name steps by number (`ErrorBody2`). `ErrorBody` rather than
- * `ErrorResponse` because an emitter may already spend that name on a
- * component called `Error` (Go does).
+ * Each group becomes one model, named from its shape alone (`bodyName`):
+ * `ErrorBody` for `{ message }`, `OAuthErrorBody` for the OAuth error format
+ * `{ error, error_description }`, else the base plus `With` and a token per
+ * further field. A field's token is its name in PascalCase, qualified by what
+ * its type adds so that two shapes with the same field names still read
+ * apart: an array of strings is `MessageList`, a union joins its variants
+ * with `Or` (`MessageOrMessageList`), and a nested error body is prefixed
+ * with the field names of its own (`ErrorBodyWithCodeFieldErrors` for
+ * `{ message, errors: [{ code, field }] }`). A group whose members all pin
+ * one string field to one value is named from that value instead
+ * (`RateLimitExceededErrorBody`, `InvalidGrantOAuthErrorBody`; the field's
+ * name follows the value unless it is `code` or `error`), plus `With` and
+ * the plain names of any further fields
+ * (`OrganizationSelectionRequiredErrorBodyWithOrganizations`). A model only
+ * another error body reaches is named from its parent and field
+ * (`OrganizationSelectionRequiredErrorBodyWithOrganization`, singular for an
+ * array item). `ErrorBody` rather than `ErrorResponse` because an emitter
+ * may already spend that name on a component called `Error` (Go does).
+ *
+ * The pass never numbers a name. A shared name a component schema of exactly
+ * that shape already holds — one whose string fields admit every value the
+ * bodies pin — is that component: the group folds onto it. A name anything
+ * else holds — a component of another shape, an enum, a shared
+ * body of another shape — leaves the group's models exactly as the parser
+ * materialized them, with every error-only model they reach or are reached
+ * from, and says so in a warning naming both sides; the fold then runs
+ * again without them, since a freed name may now suit another group.
  *
  * A string field a group pins to two or more values becomes an enum shared by
  * every error body that has a field of that name — `ErrorBodyCode` for
  * `code`, `ErrorBodyError` for an OAuth `error` — holding every value any
  * error body pins that field to, which the collectors lift as they lift any
  * inline enum (an emitter's enums admit an unlisted value, and the field's
- * prose says more may come). One value every member pins stays that literal,
- * and a lone pinned value beside free strings widens to `string`. A field's
+ * prose says more may come). An enum of that name the document already holds
+ * is shared when the members agree; when they do not, or a model holds the
+ * name, the fields stay plain strings, with a warning. One value every
+ * member pins stays that literal, and a lone pinned value beside free
+ * strings widens to `string`. A field's
  * description, example and extensions survive only when every member wrote
  * the same one; the response's own `description` stays on the `errors[]`
  * entry, where it always was.
@@ -96,10 +114,10 @@ export interface CollapseErrorBodiesOptions {
   componentSites?: ReadonlySet<TypeRef>;
   /**
    * The document's enums and every enum lifted before the pass. No shared
-   * model takes one of their names (a shared `ErrorBody` steps past an
-   * `ErrorBody` enum a component's `body` field minted), and a shared enum
-   * takes the name of one of them only when the members agree, sharing it as
-   * the collectors share any inline enum.
+   * model takes one of their names (bodies whose shared name an `ErrorBody`
+   * enum a component's `body` field minted would take are left as they
+   * are), and a shared enum takes the name of one of them only when the
+   * members agree, sharing it as the collectors share any inline enum.
    */
   enums?: readonly Enum[];
 }
@@ -161,6 +179,38 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   );
   if (errorOnly.size === 0) return input.models;
 
+  // A group whose shared name something of another shape already holds is
+  // left as it is, with every error-only model it reaches or is reached
+  // from, and the fold is retried without them: a name that group had taken
+  // may suit another.
+  let candidates: ReadonlySet<string> = errorOnly;
+  for (;;) {
+    const outcome = fold(candidates, { input, options, byName, slots, errorRoots });
+    if (outcome.frozen.size === 0) return outcome.models;
+    candidates = new Set([...candidates].filter((name) => !outcome.frozen.has(name)));
+    if (candidates.size === 0) return input.models;
+  }
+}
+
+interface FoldContext {
+  input: CollapseErrorBodiesInput;
+  options: CollapseErrorBodiesOptions;
+  byName: ReadonlyMap<string, Model>;
+  slots: readonly ErrorSlot[];
+  /** The model names every error site references directly. */
+  errorRoots: readonly string[];
+}
+
+/**
+ * One attempt at folding the error-only models `errorOnly`: the model list
+ * with every group folded, or — when a shared name is taken by something of
+ * another shape — the names of the models to leave as they are, so the
+ * caller can try again without them.
+ */
+function fold(
+  errorOnly: ReadonlySet<string>,
+  { input, options, byName, slots, errorRoots }: FoldContext,
+): { models: Model[]; frozen: ReadonlySet<string> } {
   // Group by structure, each group's members in name order.
   const keys = new ModelKeys(errorOnly, byName);
   const groups = new Map<string, Model[]>();
@@ -171,10 +221,9 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
     else groups.set(key, [byName.get(name)!]);
   }
   // Groups are ordered by shape, never by the operations that produced them:
-  // fewer fields first, then the key, so the smaller of two shapes asking
-  // for one name keeps the bare name (`ErrorBody` is `{ message: string }`
-  // beside `{ message: string | string[] }`) and renaming an operation moves
-  // no model name.
+  // fewer fields first, then the key, so when two shapes ask for one name the
+  // same one keeps it whichever operation declared it, and renaming an
+  // operation moves no model name.
   const orderedGroups = [...groups.entries()].sort(([keyA, a], [keyB, b]) => {
     const fields = a[0].fields.length - b[0].fields.length;
     return fields !== 0 ? fields : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
@@ -198,21 +247,45 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   // body reaches, from their parent and field.
   const topLevel = new Set(errorRoots.filter((name) => errorOnly.has(name)));
   const existingEnums = options.enums ?? [];
-  const reserved = new Set<string>([
-    ...input.models.filter((model) => !errorOnly.has(model.name)).map((model) => model.name),
-    ...options.componentNames,
-    ...existingEnums.map((e) => e.name),
-  ]);
+  // Who holds each name a shared model or enum might take.
+  const holders = new Map<string, string>();
+  for (const model of input.models) if (!errorOnly.has(model.name)) holders.set(model.name, `model "${model.name}"`);
+  for (const name of options.componentNames) holders.set(name, `component schema "${name}"`);
+  for (const e of existingEnums) holders.set(e.name, `enum "${e.name}"`);
   const canonical = new Map<string, string>(); // group key → shared name
-  const mint = (base: string): string => {
-    let name = base;
-    for (let n = 2; reserved.has(name); n++) name = `${base}${n}`;
-    reserved.add(name);
-    return name;
+  const absorbed = new Set<string>(); // group keys folded onto a component of their shape
+  const seeds = new Set<string>(); // the models of the groups left as they are
+  const claim = (name: string, key: string, members: readonly Model[]): void => {
+    const holder = holders.get(name);
+    if (holder === undefined) {
+      holders.set(name, `the shared error body "${name}" ${shapeOf(members[0])}`);
+      canonical.set(key, name);
+      return;
+    }
+    // A component schema of exactly this shape, admitting every value the
+    // bodies pin, is the shared body.
+    const component = byName.get(name);
+    if (
+      component &&
+      !errorOnly.has(name) &&
+      keys.of(name) === key &&
+      componentAccepts(component, pinnedByKey.get(key)!)
+    ) {
+      canonical.set(key, name);
+      absorbed.add(key);
+      return;
+    }
+    for (const member of members) seeds.add(member.name);
+    const list = members.map((member) => `"${member.name}"`).join(', ');
+    const kept = members.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
+    console.warn(
+      `[oagen] Warning: The shared error body ${shapeOf(members[0])} would be named "${name}", which ${holder} already holds — keeping ${kept}; give the two the same shape, or rename one`,
+    );
   };
+  const frozenOut = (members: readonly Model[]): boolean => members.some((member) => seeds.has(member.name));
   for (const [key, members] of orderedGroups) {
     if (!members.some((member) => topLevel.has(member.name))) continue;
-    canonical.set(key, mint(groupBaseName(members[0], pinnedByKey.get(key)!)));
+    claim(bodyName(members[0], pinnedByKey.get(key)!, errorOnly, byName), key, members);
   }
   // Every (parent, field) that reaches a nested error-only model, read on
   // the models before the fold.
@@ -231,39 +304,76 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   for (let progressed = true; progressed;) {
     progressed = false;
     for (const [key, members] of orderedGroups) {
-      if (canonical.has(key)) continue;
+      if (canonical.has(key) || frozenOut(members)) continue;
       const candidates = members
         .flatMap((member) => parentsOf.get(member.name) ?? [])
         .map(({ parent, field }) => {
           const parentName = canonical.get(keys.of(parent.name));
-          return parentName === undefined ? undefined : `${parentName}${nestedQualifier(field)}`;
+          return parentName === undefined ? undefined : nestedName(parentName, field);
         })
         .filter((candidate): candidate is string => candidate !== undefined)
         .sort();
       if (candidates.length === 0) continue;
-      canonical.set(key, mint(candidates[0]));
+      claim(candidates[0], key, members);
       progressed = true;
     }
   }
-  // A group nothing named reaches — only through a cycle among error bodies
-  // — is named from its own fields, like a top-level one.
+  // A group nothing named reaches — only through a cycle among error bodies,
+  // or through a group left as it is — is named from its own fields.
   for (const [key, members] of orderedGroups) {
-    if (!canonical.has(key)) canonical.set(key, mint(groupBaseName(members[0], pinnedByKey.get(key)!)));
+    if (!canonical.has(key) && !frozenOut(members)) {
+      claim(bodyName(members[0], pinnedByKey.get(key)!, errorOnly, byName), key, members);
+    }
+  }
+  if (seeds.size > 0) {
+    // A model left as it is keeps its fields, so everything it reaches stays
+    // too; and a shared parent would reference one member's child and strand
+    // the others', so everything that reaches a frozen model stays as well.
+    const errorOnlyClosure = (roots: readonly string[]): string[] =>
+      [...closure(roots, byName)].filter((name) => errorOnly.has(name));
+    const frozen = new Set(errorOnlyClosure([...seeds]));
+    for (let grew = true; grew;) {
+      grew = false;
+      for (const name of errorOnly) {
+        if (frozen.has(name)) continue;
+        const reached = errorOnlyClosure([name]);
+        if (reached.some((other) => frozen.has(other))) {
+          for (const other of reached) frozen.add(other);
+          grew = true;
+        }
+      }
+    }
+    return { models: input.models, frozen };
   }
 
   // The shared enums, one per field name some group pins to two or more
   // values, named from the same pool as the models so neither takes the
-  // other's name.
+  // other's name; a field whose enum name is taken stays a plain string.
   const enumNamesByField = new Map<string, string>();
-  for (const pinned of pinnedByKey.values()) {
-    for (const [field, { values }] of pinned) {
-      if (values.size < 2 || enumNamesByField.has(field)) continue;
+  const widened = new Set<string>();
+  for (const [key] of orderedGroups) {
+    if (absorbed.has(key)) continue;
+    for (const [field, { values }] of pinnedByKey.get(key)!) {
+      if (values.size < 2 || enumNamesByField.has(field) || widened.has(field)) continue;
       const base = `${ERROR_BODY_BASE}${toPascalCase(field)}`;
       const members = [...(enumValuesByField.get(field) ?? values)].sort().map((value) => ({ name: value, value }));
       // An enum of that name with the same members is shared, as the
-      // collectors share any inline enum; other members, or a model, step.
+      // collectors share any inline enum.
       const shared = existingEnums.find((e) => e.name === base && sameEnumShape(e.values, members));
-      enumNamesByField.set(field, shared ? shared.name : mint(base));
+      if (shared) {
+        enumNamesByField.set(field, shared.name);
+        continue;
+      }
+      const holder = holders.get(base);
+      if (holder === undefined) {
+        holders.set(base, `the shared enum "${base}"`);
+        enumNamesByField.set(field, base);
+        continue;
+      }
+      widened.add(field);
+      console.warn(
+        `[oagen] Warning: The values error bodies pin "${field}" to would be the shared enum "${base}", which ${holder} already holds — keeping those fields plain strings`,
+      );
     }
   }
 
@@ -272,6 +382,7 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
   for (const name of errorOnly) renames.set(name, canonical.get(keys.of(name))!);
   const sharedModels: Model[] = [];
   for (const [key, members] of orderedGroups) {
+    if (absorbed.has(key)) continue;
     sharedModels.push(
       buildSharedModel(
         canonical.get(key)!,
@@ -297,10 +408,13 @@ export function collapseErrorBodies(input: CollapseErrorBodiesInput, options: Co
     if (replacement !== type) slot.set(replacement);
   }
 
-  return [
-    ...input.models.filter((model) => !errorOnly.has(model.name)),
-    ...sharedModels.sort((a, b) => a.name.localeCompare(b.name)),
-  ];
+  return {
+    models: [
+      ...input.models.filter((model) => !errorOnly.has(model.name)),
+      ...sharedModels.sort((a, b) => a.name.localeCompare(b.name)),
+    ],
+    frozen: new Set(),
+  };
 }
 
 type OperationErrorSites = Pick<Service['operations'][number], 'errors' | 'rangeResponses'>;
@@ -458,35 +572,152 @@ function pinnedValues(members: readonly Model[]): Map<string, PinnedValues> {
   return pinned;
 }
 
+/** The field set of the OAuth 2.0 error response. */
+const OAUTH_ERROR_FIELDS = ['error', 'error_description'];
+
+/** The fields that carry an error code; a body pinned on one is named from the value alone. */
+const ERROR_CODE_FIELDS = ['code', 'error'];
+
 /**
- * The name a group an error site references takes. A group every member of
- * which pins exactly one string field to one value is named from that value
- * (`RateLimitExceededErrorBody`), as a const-discriminated variant is named
- * everywhere else; any other from its fields (`sharedBaseName`).
+ * Whether `component` admits every value the group pins: a string field the
+ * group pins is, on the component, a plain string, or — when no member leaves
+ * it free — a literal or inline enum holding every pinned value. The key
+ * reads every string as one, so this is what tells a component the bodies
+ * can reference from one that would narrow their codes.
  */
-function groupBaseName(representative: Model, pinned: ReadonlyMap<string, PinnedValues>): string {
-  const single = [...pinned.values()].filter(({ values, open }) => values.size === 1 && !open);
-  if (single.length === 1) {
-    const word = toPascalCase([...single[0].values][0]);
-    // A value that is empty or starts with a digit (`4001`) names nothing.
-    if (word.length > 0 && !/^\d/.test(word)) return `${word}${ERROR_BODY_BASE}`;
+function componentAccepts(component: Model, pinned: ReadonlyMap<string, PinnedValues>): boolean {
+  for (const [name, { values, open }] of pinned) {
+    const field = component.fields.find((f) => f.name === name);
+    if (!field) return false;
+    const type = unwrapNullable(field.type);
+    if (type.kind === 'primitive' && type.type === 'string' && !type.format) continue;
+    if (open) return false;
+    if (type.kind === 'literal') {
+      if (values.size !== 1 || !values.has(String(type.value))) return false;
+      continue;
+    }
+    if (type.kind === 'enum' && type.values) {
+      const allowed = new Set(type.values.map((value) => String(value)));
+      if ([...values].some((value) => !allowed.has(value))) return false;
+      continue;
+    }
+    return false;
   }
-  return sharedBaseName(representative);
+  return true;
 }
 
-/** The name a group of error bodies takes from its fields alone. */
-function sharedBaseName(representative: Model): string {
-  const names = representative.fields.map((field) => field.name).sort();
-  if (names.length === 0) return `${ERROR_BODY_BASE}Empty`;
-  const extra = names.filter((name) => name !== 'message');
-  if (extra.length === 0) return ERROR_BODY_BASE;
-  return `${ERROR_BODY_BASE}With${extra.map((name) => toPascalCase(name)).join('')}`;
+/** `{ code, message? }`: a model's field names, the optional ones marked. */
+function shapeOf(model: Model): string {
+  return `{ ${model.fields.map((field) => (field.required ? field.name : `${field.name}?`)).join(', ')} }`;
 }
 
-/** The qualifier a nested error body takes from the field that reaches it: the field in PascalCase, singular for an array. */
-function nestedQualifier(field: Field): string {
-  const bare = unwrapNullable(field.type).kind === 'array' ? singularize(field.name) : field.name;
-  return toPascalCase(bare);
+/** The one string field every member of a group pins to one value, when there is exactly one such field and the value can name a model. */
+function singlePinned(pinned: ReadonlyMap<string, PinnedValues>): { field: string; value: string } | undefined {
+  const single = [...pinned.entries()].filter(([, { values, open }]) => values.size === 1 && !open);
+  if (single.length !== 1) return undefined;
+  const [field, { values }] = single[0];
+  const value = [...values][0];
+  const word = toPascalCase(value);
+  // A value that is empty or starts with a digit (`4001`) names nothing.
+  if (word.length === 0 || /^\d/.test(word)) return undefined;
+  return { field, value };
+}
+
+/**
+ * The name a group takes: `ErrorBody` for `{ message }`, `OAuthErrorBody`
+ * for `{ error, error_description }`, else the base plus `With` and a token
+ * per further field (`fieldToken`). A group every member of which pins one
+ * string field to one value is named from the value instead — followed by
+ * the field's name unless it is `code` or `error` — plus `With` and the plain
+ * names of any further fields.
+ */
+function bodyName(
+  representative: Model,
+  pinned: ReadonlyMap<string, PinnedValues>,
+  errorOnly: ReadonlySet<string>,
+  byName: ReadonlyMap<string, Model>,
+): string {
+  const fields = [...representative.fields].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (fields.length === 0) return `${ERROR_BODY_BASE}Empty`;
+  const names = new Set(fields.map((field) => field.name));
+  const oauth = OAUTH_ERROR_FIELDS.every((name) => names.has(name));
+  const base = oauth ? `OAuth${ERROR_BODY_BASE}` : ERROR_BODY_BASE;
+  const single = singlePinned(pinned);
+  const isProse = (field: Field): boolean =>
+    (field.name === 'message' || (oauth && field.name === 'error_description')) &&
+    isStringLike(unwrapNullable(field.type));
+  const core = new Set<string>([...(oauth ? ['error'] : []), ...(single ? [single.field] : [])]);
+  const extras = fields
+    .filter((field) => !core.has(field.name) && !isProse(field))
+    .map((field) => fieldToken(field.name, field.type, names, single === undefined, errorOnly, byName));
+  const suffix = extras.length === 0 ? '' : `With${extras.join('')}`;
+  if (single === undefined) return `${base}${suffix}`;
+  const field = ERROR_CODE_FIELDS.includes(single.field) ? '' : toPascalCase(single.field);
+  return `${toPascalCase(single.value)}${field}${base}${suffix}`;
+}
+
+/**
+ * The token a field contributes to a body's name: its name in PascalCase;
+ * `List` appended for an array of plain values; a union's variants joined
+ * with `Or`; and, when `qualify` is set, a nested error body's own field
+ * names (the ones the parent lacks) prefixed, so `errors` arrays of
+ * different items read apart (`CodeFieldErrors`, `ConstraintsPropertyErrors`).
+ */
+function fieldToken(
+  name: string,
+  type: TypeRef,
+  parentNames: ReadonlySet<string>,
+  qualify: boolean,
+  errorOnly: ReadonlySet<string>,
+  byName: ReadonlyMap<string, Model>,
+): string {
+  const word = toPascalCase(name);
+  const inner = unwrapNullable(type);
+  switch (inner.kind) {
+    case 'union': {
+      // Sorted, as the key sorts the variants: the name does not depend on
+      // which member of the group wrote the union first.
+      const tokens = inner.variants.map((variant) =>
+        fieldToken(name, variant, parentNames, qualify, errorOnly, byName),
+      );
+      return [...new Set(tokens)].sort().join('Or') || word;
+    }
+    case 'array': {
+      const items = unwrapNullable(inner.items);
+      if (items.kind === 'model' || items.kind === 'union') {
+        return fieldToken(name, items, parentNames, qualify, errorOnly, byName);
+      }
+      return `${word}List`;
+    }
+    case 'model': {
+      const nested = qualify && errorOnly.has(inner.name) ? byName.get(inner.name) : undefined;
+      const own = nested
+        ? nested.fields
+            .map((field) => field.name)
+            .filter((fieldName) => !parentNames.has(fieldName))
+            .sort()
+            .map((fieldName) => toPascalCase(fieldName))
+            .join('')
+        : '';
+      return `${own}${word}`;
+    }
+    default:
+      return word;
+  }
+}
+
+/**
+ * The name of a nested error body reached through `field` of a body named
+ * `parentName`: the parent's name plus the field, singular for an array
+ * item, replacing the field where the parent's name already ends in it.
+ */
+function nestedName(parentName: string, field: Field): string {
+  const word = toPascalCase(field.name);
+  const inArray = unwrapNullable(field.type).kind === 'array';
+  const item = inArray ? toPascalCase(singularize(field.name)) : word;
+  return inArray && word.length > 0 && parentName.endsWith(word)
+    ? `${parentName.slice(0, -word.length)}${item}`
+    : `${parentName}${item}`;
 }
 
 /**
@@ -568,9 +799,10 @@ function buildSharedModel(
  * `const`, an inline `enum`, beside a plain `string` — is read as a whole:
  * two or more distinct values make the enum shared by every error body
  * with a field of that name, `<ErrorBody><Field>`, holding every value any
- * body pins it to; one value every member pins stays that literal; one value
- * beside free strings is a string. Any other type is the representative's,
- * its references to folded models repointed.
+ * body pins it to (a string when that name is taken); one value every
+ * member pins stays that literal; one value beside free strings is a
+ * string. Any other type is the representative's, its references to folded
+ * models repointed.
  */
 function sharedFieldType(
   field: Field,
@@ -582,10 +814,11 @@ function sharedFieldType(
   if (pinned) {
     const nullable = field.type.kind === 'nullable';
     let type: TypeRef;
-    if (pinned.values.size >= 2) {
+    const enumName = enumNamesByField.get(field.name);
+    if (pinned.values.size >= 2 && enumName !== undefined) {
       const enumRef: EnumRef = {
         kind: 'enum',
-        name: enumNamesByField.get(field.name) ?? `${ERROR_BODY_BASE}${toPascalCase(field.name)}`,
+        name: enumName,
         values: [...(enumValuesByField.get(field.name) ?? pinned.values)].sort(),
       };
       type = enumRef;
