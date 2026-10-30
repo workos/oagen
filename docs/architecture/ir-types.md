@@ -362,6 +362,7 @@ interface Service {
 
 interface Operation {
   name: string; // e.g., "listUsers", "getUser", "createUser"
+  operationId?: string; // The document's operationId, verbatim; absent on a path-named operation
   summary?: string; // The document's summary alone; only when it has non-whitespace content
   description?: string; // summary + "\n\n" + description when both have content, else whichever does
   externalDocs?: ExternalDocs; // The operation's own externalDocs, when usable
@@ -908,6 +909,8 @@ Source: `src/ir/operation-hints.ts`
 The operation resolver derives method names, mount targets, and wrapper metadata for all operations in the spec. It runs in `buildEmitterContext()` and produces `ResolvedOperation[]` on `ctx.resolvedOperations`.
 
 ### Algorithm
+
+The method name is a `name` hint when one is set, else the algorithm below — unless the consumer sets `operationNaming: 'operationId'` (`oagen.config.ts`; the fourth argument of `resolveOperations`), in which case an operation the document declares an `operationId` for (`Operation.operationId` is set) resolves to `Operation.name` as the parser spelled it — an `operationIdTransform` applied — converted to snake_case, so `getAuthorizationUrl` resolves to `get_authorization_url` whatever its path, and only a path-named operation goes through the algorithm. The default is `path`, since a spec whose ids are not written as method names (NestJS-style `UsersController_list`, stripped to `list` by a transform) would otherwise rename every method and collide across remounted services.
 
 `deriveMethodName(op, service)` derives a snake_case name from the HTTP method and path:
 
