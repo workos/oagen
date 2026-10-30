@@ -12,7 +12,7 @@ import type {
 } from '../ir/types.js';
 import { collectModelTypeRefs, collectOperationTypeRefs, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
 import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
-import { toPascalCase } from '../utils/naming.js';
+import { numberedName, toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment, mediaTypeNamingOrder } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
@@ -525,8 +525,12 @@ function plainStem(entry: WebhookEntry, disambiguator: string): string {
   const method = !operationId && entry.methodCount > 1 ? entry.method : '';
   const base = operationId ? operationIdModelBase(operationId) : toPascalCase(entry.name);
   // `_` separators guarantee a word boundary on each side of the disambiguator
-  // and the method, whatever the base ends with; splitWords drops them.
-  const stem = toPascalCase([base, disambiguator, method].filter(Boolean).join('_'));
+  // and the method, whatever the base ends with; splitWords drops them, so
+  // the disambiguator is the suffix numberedName gives the base: a hash that
+  // starts with a digit is set off from a base that ends in one as a number
+  // is (`PetV2No2780A4`), as an operation's path prefix sets it off.
+  const hash = numberedName(base, disambiguator).slice(base.length);
+  const stem = toPascalCase([base, hash, method].filter(Boolean).join('_'));
   if (stem === '') return 'Webhook';
   return /^\d/.test(stem) ? `Webhook${stem}` : stem;
 }
@@ -804,7 +808,9 @@ function mintSecondaryPayload(
 /**
  * A parameter's schema typed and materialized under the first synthetic
  * property whose minted names are all free: the parameter's own name, then
- * `<in>_<name>`, then `<in>_<name>_2`, `<in>_<name>_3`, …. A schema that
+ * `<in>_<name>`, then that numbered by numberedName (`query_payload2`,
+ * `query_payload3`, …; `query_v2No2` for a name that ends in a digit, which
+ * an `_` before the number would not set off once PascalCased). A schema that
  * mints nothing (a primitive, a `$ref`) keeps the parameter's name at once.
  * When a candidate changes none of the clashing names — they do not embed
  * the property, as a title-mapped union variant does not — no candidate can
@@ -829,7 +835,8 @@ function mintParameter(
   // reference and the models agree, and neither moves with the header's case.
   const stem = foldParameterName(param.in, param.name);
   for (let attempt = 0; ; attempt++) {
-    const property = attempt === 0 ? stem : attempt === 1 ? `${param.in}_${stem}` : `${param.in}_${stem}_${attempt}`;
+    const property =
+      attempt === 0 ? stem : attempt === 1 ? `${param.in}_${stem}` : numberedName(`${param.in}_${stem}`, attempt);
     const minted = mintSchema(schema, property, parent, componentSchemas, reserved);
     const clashing = [...minted.names]
       .filter((name) => taken.has(name))
@@ -887,7 +894,7 @@ function mintSchema(
     if (!reserved.enums.has(model.name)) continue;
     const from = model.name;
     let to = `${root}${from}`;
-    for (let n = 2; taken.has(to); n++) to = `${root}${from}${n}`;
+    for (let n = 2; taken.has(to); n++) to = numberedName(`${root}${from}`, n);
     taken.add(to);
     model.name = to;
     for (const other of models) {
