@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { resolveEnvelopeCompanionNames, type EnvelopeCompanion } from '../../src/parser/envelope-companion-names.js';
 import {
   fieldAdmits,
@@ -725,5 +725,73 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
         expect(onto({ [key]: docs[key] }, { [key]: other[key] }, false), `${where}, differing`).toEqual(folded);
       }
     });
+  });
+});
+
+describe('resolveEnvelopeCompanionNames – the warning a deprecated companion folds onto a looser component with (issue #400)', () => {
+  const cursorRef = { kind: 'model', name: 'Cursor' } as const;
+  const after = (required: boolean): Model['fields'] => [{ name: 'after', type: str, required }];
+  /** `Pagination { next?, cursor?: Cursor, kind?: a|b, ids?: (string | null)[] }` beside `Cursor { after? }`. */
+  const components: Model[] = [
+    {
+      name: 'Pagination',
+      fields: [
+        { name: 'next', type: str, required: false },
+        { name: 'cursor', type: cursorRef, required: false },
+        { name: 'kind', type: { kind: 'enum', name: 'PaginationKind', values: ['a', 'b'] }, required: false },
+        { name: 'ids', type: { kind: 'array', items: { kind: 'nullable', inner: str } }, required: false },
+      ],
+    },
+    { name: 'Cursor', fields: after(false) },
+  ];
+  /** The warnings a deprecated `ListA` companion folding onto `Pagination` prints, its fields `edit` applied to the component's own. */
+  const warningsFor = (edit: {
+    next?: boolean;
+    cursor?: 'ref' | 'same' | 'required';
+    kinds?: string[];
+    ids?: 'non-null';
+  }) => {
+    const nested: Model[] =
+      edit.cursor === 'ref' ? [] : [{ name: 'ListAPaginationCursor', fields: after(edit.cursor === 'required') }];
+    const fields: Model['fields'] = [
+      { name: 'next', type: str, required: !!edit.next },
+      {
+        name: 'cursor',
+        type: edit.cursor === 'ref' ? cursorRef : { kind: 'model', name: 'ListAPaginationCursor' },
+        required: false,
+      },
+      {
+        name: 'kind',
+        type: { kind: 'enum', name: 'ListAPaginationKind', values: edit.kinds ?? ['a', 'b'] },
+        required: false,
+      },
+      {
+        name: 'ids',
+        type: { kind: 'array', items: edit.ids ? str : { kind: 'nullable', inner: str } },
+        required: false,
+      },
+    ];
+    const c = companion('ListA', 'Pagination', fields, nested);
+    c.models[0].deprecated = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      expect(resolveEnvelopeCompanionNames([c], components)).toEqual([]);
+      expect(c.field.type).toEqual({ kind: 'model', name: 'Pagination' });
+      return warn.mock.calls.map(([message]) => String(message));
+    } finally {
+      warn.mockRestore();
+    }
+  };
+  const folded = (looser?: string) =>
+    `[oagen] Warning: Inline model "Pagination" is declared both deprecated and live${looser ? `, with a looser live definition that ${looser}` : ' with the same shape'} — keeping the live definition under the shared name`;
+
+  it('says “the same shape” only when the component loosens nothing, and otherwise names each field it loosens, at any depth', () => {
+    expect(warningsFor({ cursor: 'same' })).toEqual([folded()]);
+    // The component itself, referenced on both sides, is no looser than itself.
+    expect(warningsFor({ cursor: 'ref' })).toEqual([folded()]);
+    expect(warningsFor({ next: true, cursor: 'same' })).toEqual([folded('does not require "next"')]);
+    expect(warningsFor({ cursor: 'required', kinds: ['a'], ids: 'non-null' })).toEqual([
+      folded('loosens "cursor", "kind", "ids"'),
+    ]);
   });
 });

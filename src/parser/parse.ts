@@ -9,7 +9,7 @@ import {
   resolveSchemaName,
 } from './schemas.js';
 import { attachSharedRefs, extractOperations } from './operations.js';
-import type { FieldInlineModelGroup } from './inline-models.js';
+import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import { siblingDocsMode } from './reference-objects.js';
 import {
@@ -179,8 +179,15 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const mintedFor = new Map<string, Map<Model, number>>();
   // The field sites, kept for the merges below (`refreshFieldInlineModelBundles`):
   // what a fold carries onto a site here must still be there when a later
-  // pass renames the model it was carried onto.
-  const fieldInlineModelBundlesBySite = fieldInlineModelBundles(fieldInlineModelGroups, models);
+  // pass renames the model it was carried onto. The fields of a component
+  // the operations only send, read off the document since none is read yet
+  // (`sentOnlyComponentNames`), are sites the SDK sends: a field object there
+  // shares a component of its name on an identical shape only.
+  const fieldInlineModelBundlesBySite = fieldInlineModelBundles(
+    fieldInlineModelGroups,
+    models,
+    sentOnlyComponentNames(transformed),
+  );
   const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
     bundles: fieldInlineModelBundlesBySite,
     reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),

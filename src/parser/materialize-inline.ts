@@ -16,7 +16,9 @@ import { numberedName, toPascalCase } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import {
+  deprecatedFoldWarning,
   extractInlineModelsFromProperties,
+  looserFields,
   modelFingerprint,
   modelShares,
   qualifyInlineModelName,
@@ -463,11 +465,10 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
     const owner = options.registry.get(model.name);
     if (owner && ownerShares(owner, model, fingerprint, options.sent)) {
       // A deprecated copy a live declared model admits is announced once per
-      // site, as the merge passes announce one (`settleSharedNames`).
+      // site, as the merge passes announce one (`settleSharedNames`), with
+      // what the model, when looser, no longer holds the copy to.
       if (model.deprecated && owner.model && !owner.model.deprecated) {
-        console.warn(
-          `[oagen] Warning: Inline model "${model.name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-        );
+        console.warn(deprecatedFoldWarning(model.name, looserFields(owner.model, model)));
       }
       continue;
     }
