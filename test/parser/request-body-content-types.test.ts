@@ -300,10 +300,10 @@ describe('request bodies keep every media type (issue #278)', () => {
       expect(op.requestBody).toEqual({ kind: 'model', name: 'ReplaceWidgetRequest' });
       expect(op.requestBodyContents?.map((c) => c.type)).toEqual([
         { kind: 'model', name: 'ReplaceWidgetRequest' },
-        { kind: 'model', name: 'ReplaceWidgetApplicationJsonCharsetUtf8Request' },
+        { kind: 'model', name: 'ReplaceWidgetApplicationJsonCharsetRequest' },
         { kind: 'model', name: 'ReplaceWidgetApplicationJsonRequest' },
       ]);
-      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonCharsetUtf8Request')).toEqual(['title']);
+      expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonCharsetRequest')).toEqual(['title']);
       expect(fieldNames(spec.models, 'ReplaceWidgetApplicationJsonRequest')).toEqual(['age']);
       expectClosed(op, spec.models);
     });

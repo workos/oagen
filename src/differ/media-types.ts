@@ -1,7 +1,11 @@
 import type { RequestBodyContent, ResponseContent, TypeRef } from '../ir/types.js';
-import { mediaTypeEssence, parseMediaType } from '../utils/media-type.js';
+import { mediaTypeEssence, mediaTypeParameters } from '../utils/media-type.js';
 import type { RequestBodyContentTypesChange } from './types.js';
 import { sameShape, type DocumentShapes } from './shapes.js';
+
+// Read in `utils`, where a secondary body's model is named from the same
+// parameters, so the differ and the parser agree on what changed a key.
+export { mediaTypeParameters };
 
 /**
  * One media type a request body or a response entry declares, as the differ
@@ -61,30 +65,6 @@ export function mediaTypeBodies(
       own: content !== undefined && content === own,
     };
   });
-}
-
-/**
- * A media type's parameters other than `charset`, in one form whatever the
- * spelling: each parameter as `parseMediaType` reads it — name lower-cased,
- * quoted value decoded, so a `;` inside the quotes is part of the value and
- * `profile="print"` is `profile=print` — as `[name, value]` pairs sorted by
- * name, then value. So `application/pdf; version=1.7` reads
- * `[['version', '1.7']]`, `text/html; Charset=UTF-8` and `text/html` both
- * read `[]`, and `; a=1; b=2` is `; b=2 ;a=1`. The pairs stay structured
- * (compared JSON-encoded, never joined into one string), so `title="report;
- * version=2"` — one parameter — and `title=report; version=2` — two — are
- * different parameters. `charset` is left out because it never selects
- * another representation of a JSON or text body (RFC 8259 §8.1 has no
- * charset for JSON at all); any other parameter — `version`, `profile` —
- * may, which is what `reparameterized` reports.
- */
-export function mediaTypeParameters(contentType: string): Array<[string, string]> {
-  return parseMediaType(contentType)
-    .parameters.filter((parameter) => parameter.name !== 'charset')
-    .map((parameter): [string, string] => [parameter.name, parameter.value])
-    .sort(([aName, aValue], [bName, bValue]) =>
-      aName < bName ? -1 : aName > bName ? 1 : aValue < bValue ? -1 : aValue > bValue ? 1 : 0,
-    );
 }
 
 /**

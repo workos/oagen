@@ -4,6 +4,7 @@ import {
   isPlainJsonMediaType,
   mediaTypeEssence,
   mediaTypeNameFragment,
+  mediaTypeNamingOrder,
 } from '../../src/utils/media-type.js';
 
 describe('mediaTypeEssence', () => {
@@ -65,21 +66,111 @@ describe('mediaTypeNameFragment', () => {
     const siblings = ['application/json', 'application/xml', 'APPLICATION/XML; charset=utf-8'];
     // Alone among its siblings, a parameterized key keeps the bare fragment.
     expect(mediaTypeNameFragment('application/yaml; charset=utf-8', siblings)).toBe('ApplicationYaml');
-    // Beside another spelling of its essence, its parameters tell it apart, whatever the order.
-    expect(mediaTypeNameFragment('APPLICATION/XML; charset=utf-8', siblings)).toBe('ApplicationXmlCharsetUtf8');
+    // Beside another spelling of its essence, its `charset` tells it apart — by
+    // being declared, not by its value (#389) — whatever the order.
+    expect(mediaTypeNameFragment('APPLICATION/XML; charset=utf-8', siblings)).toBe('ApplicationXmlCharset');
     expect(mediaTypeNameFragment('APPLICATION/XML; charset=utf-8', [...siblings].reverse())).toBe(
-      'ApplicationXmlCharsetUtf8',
+      'ApplicationXmlCharset',
     );
     // The unparameterized spelling keeps the bare fragment either way.
     expect(mediaTypeNameFragment('application/xml', siblings)).toBe('ApplicationXml');
-    // Parameters are lower-cased before casing, in the order written.
-    expect(mediaTypeNameFragment('application/xml; Charset=UTF-8; q=1', ['application/xml'])).toBe(
-      'ApplicationXmlCharsetUtf8Q1',
-    );
+    // Parameters are lower-cased before casing; a `charset` beside another
+    // parameter is left out, as `oagen diff` leaves it out (#389).
+    expect(mediaTypeNameFragment('application/xml; Charset=UTF-8; q=1', ['application/xml'])).toBe('ApplicationXmlQ1');
     // The key itself among the siblings is not its own sibling.
     expect(mediaTypeNameFragment('application/xml; charset=utf-8', ['application/xml; charset=utf-8'])).toBe(
       'ApplicationXml',
     );
+  });
+
+  it('names a key by the parameters `oagen diff` compares: `charset` left out, the rest sorted (#389)', () => {
+    // Beside a key told apart by another parameter, a `charset` adds nothing,
+    // so the key keeps the name it had alone.
+    const versioned = ['application/json', 'application/yaml; charset=utf-8', 'application/yaml; version=2'];
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', versioned)).toBe('ApplicationYaml');
+    expect(mediaTypeNameFragment('application/yaml; version=2', versioned)).toBe('ApplicationYamlVersion2');
+    // A `charset` beside another parameter is left out of the name.
+    for (const key of ['application/yaml; version=2; charset=utf-8', 'application/yaml; Charset=UTF-16; version=2']) {
+      expect(mediaTypeNameFragment(key, ['application/yaml', key]), key).toBe('ApplicationYamlVersion2');
+    }
+    // The parameters are sorted, so their order is not in the name.
+    for (const key of ['application/yaml; a=1; b=2', 'application/yaml; b=2; A=1']) {
+      expect(mediaTypeNameFragment(key, ['application/yaml', key]), key).toBe('ApplicationYamlA1B2');
+    }
+  });
+
+  it('tells a key apart by declaring a `charset`, never by its value, only when nothing else does (#389)', () => {
+    for (const key of ['application/yaml; charset=utf-8', 'Application/YAML; Charset=ISO-8859-1']) {
+      expect(mediaTypeNameFragment(key, ['application/yaml', key]), key).toBe('ApplicationYamlCharset');
+      expect(mediaTypeNameFragment(key, [key, 'application/yaml']), key).toBe('ApplicationYamlCharset');
+      expect(mediaTypeNameFragment('application/yaml', ['application/yaml', key]), key).toBe('ApplicationYaml');
+    }
+    const versioned = ['application/yaml; version=2', 'application/yaml; version=2; charset=utf-8'];
+    expect(mediaTypeNameFragment(versioned[1], versioned)).toBe('ApplicationYamlVersion2Charset');
+    expect(mediaTypeNameFragment(versioned[0], versioned)).toBe('ApplicationYamlVersion2');
+  });
+});
+
+describe('mediaTypeNamingOrder', () => {
+  it('keeps the document order of keys that derive names of their own', () => {
+    const keys = ['text/html', 'application/json', 'application/yaml; version=2', 'application/yaml; charset=utf-8'];
+    expect(mediaTypeNamingOrder(keys)).toEqual(keys);
+    expect(mediaTypeNamingOrder([...keys].reverse())).toEqual([...keys].reverse());
+  });
+
+  it('takes keys that derive one fragment in one order whatever the document order: case folded, lower case first (#389)', () => {
+    const keys = ['APPLICATION/XML', 'text/csv', 'application/xml', 'Application/XML'];
+    // Each keeps the place of a key of its fragment; the keys that share one
+    // take those places by spelling.
+    expect(mediaTypeNamingOrder(keys)).toEqual(['application/xml', 'text/csv', 'Application/XML', 'APPLICATION/XML']);
+    expect(mediaTypeNamingOrder([...keys].reverse())).toEqual([
+      'application/xml',
+      'Application/XML',
+      'text/csv',
+      'APPLICATION/XML',
+    ]);
+    // Two keys that differ only in their charset's value are taken by it too.
+    const charsets = ['application/yaml; charset=utf-8', 'application/yaml; charset=utf-16'];
+    expect(mediaTypeNamingOrder(charsets)).toEqual([charsets[1], charsets[0]]);
+    expect(mediaTypeNamingOrder([...charsets].reverse())).toEqual([charsets[1], charsets[0]]);
+    // Two that differ only in the order of their parameters differ in nothing
+    // but syntax, so they keep their document order (Greptile round 2).
+    const reordered = ['application/yaml; b=2; a=1', 'application/yaml; a=1; b=2'];
+    expect(mediaTypeNamingOrder(reordered)).toEqual(reordered);
+    expect(mediaTypeNamingOrder([...reordered].reverse())).toEqual([...reordered].reverse());
+  });
+
+  it('orders keys read in one spelling before as written, so quoting, spacing or reordering parameters moves none (Greptile)', () => {
+    const lower = 'application/yaml; b=2; a=1';
+    for (const upper of ['Application/YAML; b=2; a=1', 'Application/YAML; b="2"; a=1', 'Application/YAML; a=1; b=2']) {
+      expect(mediaTypeNamingOrder([upper, lower]), upper).toEqual([lower, upper]);
+      expect(mediaTypeNamingOrder([lower, upper]), upper).toEqual([lower, upper]);
+    }
+    for (const respelled of [
+      'application/yaml;b=2;a=1',
+      'application/yaml; b="2"; a=1',
+      'application/yaml; a=1; b=2',
+    ]) {
+      const upper = 'Application/YAML; b=2; a=1';
+      expect(mediaTypeNamingOrder([upper, respelled]), respelled).toEqual([respelled, upper]);
+    }
+    // A parameter's value is read decoded, so its quotes do not order it either: lower case first.
+    const values = ['application/yaml; profile=print', 'application/yaml; profile="Print"'];
+    expect(mediaTypeNamingOrder(values)).toEqual(values);
+    expect(mediaTypeNamingOrder([...values].reverse())).toEqual(values);
+  });
+
+  it('keeps the document order of keys alike but for how they quote, space or order their parameters (Greptile round 2)', () => {
+    const first = 'application/yaml; b=2; a=1';
+    // Each respells `application/yaml; a=1; b=2`; none moves it ahead of `first`, or behind it.
+    for (const respelled of [
+      'application/yaml; a=1; b="2"',
+      'application/yaml;a=1;b=2',
+      'application/yaml; A=1; b=2',
+    ]) {
+      expect(mediaTypeNamingOrder([first, respelled]), respelled).toEqual([first, respelled]);
+      expect(mediaTypeNamingOrder([respelled, first]), respelled).toEqual([respelled, first]);
+    }
   });
 });
 

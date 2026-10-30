@@ -13,7 +13,7 @@ import type {
 import { collectModelTypeRefs, collectOperationTypeRefs, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
 import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { toPascalCase } from '../utils/naming.js';
-import { mediaTypeNameFragment } from '../utils/media-type.js';
+import { mediaTypeNameFragment, mediaTypeNamingOrder } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import {
@@ -731,7 +731,9 @@ function mintPayload(
       ? absorb(mintSchema(selected.schema, 'payload', stem, componentSchemas, reserved))
       : schemalessRequestBodyType(selected.encoding);
   }
-  for (const contentType of contentTypes) {
+  // Minted — and so named — in naming order; listed as written.
+  const types = new Map<string, TypeRef>();
+  for (const contentType of mediaTypeNamingOrder(contentTypes)) {
     const schema = content[contentType]?.schema;
     const type =
       selected && contentType === selected.contentType && minted.ref
@@ -739,8 +741,9 @@ function mintPayload(
         : schema
           ? absorb(mintSecondaryPayload(schema, contentType, contentTypes, stem, minted, componentSchemas, reserved))
           : schemalessRequestContentType(contentType);
-    minted.contents.push({ contentType, type });
+    types.set(contentType, type);
   }
+  for (const contentType of contentTypes) minted.contents.push({ contentType, type: types.get(contentType)! });
   return minted;
 }
 
@@ -749,10 +752,12 @@ function mintPayload(
  * `<Fragment>Payload` property whose minted names are free of everything the
  * payload has minted so far — `<Fragment>Payload`, then `<Fragment>Payload2`,
  * `…Payload3`, … — the fragment coming from the media type's essence and,
- * when another key of the same essence sits beside it, its parameters
+ * when another key of the same essence sits beside it, the parameters
+ * `oagen diff` compares, or a `charset` when nothing else tells them apart
  * (`mediaTypeNameFragment`), so `application/xml` and `APPLICATION/XML;
  * charset=utf-8` take `…ApplicationXmlPayload` and
- * `…ApplicationXmlCharsetUtf8Payload` before any candidate is tried. A
+ * `…ApplicationXmlCharsetPayload` before any candidate is tried; entries
+ * still left with one fragment are minted in `mediaTypeNamingOrder`. A
  * candidate whose names are all taken by models of the very shape this entry
  * mints shares them and mints nothing, as the operation registry shares an
  * identical shape; a name taken by a different shape (`application/xml` and
