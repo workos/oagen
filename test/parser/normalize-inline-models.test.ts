@@ -1642,4 +1642,94 @@ describe('identical copies leaving a shared name share one model (issue #314)', 
       '[oagen] Renamed inline model "Widget" → "GetAWidgetWidget": enum "Widget" owns the name (shared by 2 sites)',
     ]);
   });
+
+  it('joins the model an earlier pass minted for an identical copy of the name, counting every site that shares it (issue #443)', () => {
+    // The settle moves `Pet.owner`'s deprecated `address` off the live
+    // component's name before any operation is read. In the response merge
+    // `getOwner`'s identical copy joins it, `getShelter`'s of another shape
+    // takes its own, and `getWidget`'s, of the same shape under another
+    // name, never joins a model minted for `PetOwnerAddress`.
+    const component = model('PetOwnerAddress', ['city', 'country']);
+    const widgetComponent = model('WidgetOwnerAddress', ['city', 'country']);
+    const field = model('PetOwnerAddress', ['city'], true);
+    const fieldRef = ref('PetOwnerAddress');
+    const fieldSite: InlineModelBundle = { qualifier: 'Pet', roots: [fieldRef], models: [field] };
+    const minted = new Set<string>();
+    const mintedFor = new Map<string, Map<Model, number>>();
+    const fieldNotes = warnings(() => {
+      settleFieldInlineModels([component, widgetComponent], [field], {
+        bundles: [fieldSite],
+        reserved: new Set(['Pet', 'PetOwnerAddress', 'WidgetOwnerAddress']),
+        enums: new Set(),
+        minted,
+        mintedFor,
+      });
+    });
+    expect(field.name).toBe('PetOwnerAddress2');
+    expect(fieldNotes).toEqual([
+      '[oagen] Renamed inline model "PetOwnerAddress" → "PetOwnerAddress2": it is deprecated while "PetOwnerAddress" is live',
+    ]);
+
+    const copy = model('PetOwnerAddress', ['city'], true);
+    const other = model('PetOwnerAddress', ['city', 'zip'], true);
+    const widget = model('WidgetOwnerAddress', ['city'], true);
+    const [copyRef, otherRef, widgetRef] = [ref('PetOwnerAddress'), ref('PetOwnerAddress'), ref('WidgetOwnerAddress')];
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels(
+        [component, widgetComponent],
+        [copy, other, widget],
+        {
+          bundles: [
+            fieldSite,
+            { qualifier: 'GetOwner', roots: [copyRef], models: [copy] },
+            { qualifier: 'GetShelter', roots: [otherRef], models: [other] },
+            { qualifier: 'GetWidget', roots: [widgetRef], models: [widget] },
+          ],
+          reserved: new Set(['Pet', 'PetOwnerAddress', 'PetOwnerAddress2', 'WidgetOwnerAddress']),
+          enums: new Set(),
+          minted,
+          mintedFor,
+        },
+        [field],
+      );
+    });
+    expect(merged).toEqual([component, widgetComponent, other, widget]);
+    expect([other.name, widget.name]).toEqual(['GetShelterPetOwnerAddress', 'GetWidgetWidgetOwnerAddress']);
+    expect([fieldRef, copyRef, otherRef, widgetRef]).toEqual([
+      ref('PetOwnerAddress2'),
+      ref('PetOwnerAddress2'),
+      ref('GetShelterPetOwnerAddress'),
+      ref('GetWidgetWidgetOwnerAddress'),
+    ]);
+    // The response's site is carried onto the field's model, so a later
+    // rename of that model repoints it too.
+    expect(fieldSite.carried).toEqual([{ owner: field, roots: [copyRef], models: [] }]);
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "PetOwnerAddress" → "PetOwnerAddress2": it is deprecated while "PetOwnerAddress" is live (shared by 2 sites)',
+      '[oagen] Renamed inline model "PetOwnerAddress" → "GetShelterPetOwnerAddress": it is deprecated while "PetOwnerAddress" is live',
+      '[oagen] Renamed inline model "WidgetOwnerAddress" → "GetWidgetWidgetOwnerAddress": it is deprecated while "WidgetOwnerAddress" is live',
+    ]);
+  });
+
+  it('mints anew when the model minted earlier for the name is no longer a site’s, so nothing references a dropped model', () => {
+    const component = model('PetOwnerAddress', ['city', 'country']);
+    const dropped = model('PetOwnerAddress2', ['city'], true);
+    const copy = model('PetOwnerAddress', ['city'], true);
+    const copyRef = ref('PetOwnerAddress');
+    let merged: Model[] = [];
+    const notes = warnings(() => {
+      merged = mergeInlineResponseModels([component], [copy], {
+        bundles: [{ qualifier: 'GetOwner', roots: [copyRef], models: [copy] }],
+        reserved: new Set(['PetOwnerAddress', 'PetOwnerAddress2']),
+        enums: new Set(),
+        mintedFor: new Map([['PetOwnerAddress', new Map([[dropped, 1]])]]),
+      });
+    });
+    expect(merged).toEqual([component, copy]);
+    expect(copyRef).toEqual(ref('GetOwnerPetOwnerAddress'));
+    expect(notes).toEqual([
+      '[oagen] Renamed inline model "PetOwnerAddress" → "GetOwnerPetOwnerAddress": it is deprecated while "PetOwnerAddress" is live',
+    ]);
+  });
 });

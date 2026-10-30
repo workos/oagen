@@ -1,4 +1,4 @@
-import type { ApiSpec, AuthScheme, EnumRef } from '../ir/types.js';
+import type { ApiSpec, AuthScheme, EnumRef, Model } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -171,8 +171,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // (`InlineModelNaming.minted`). Each field's site already holds the object
   // the schema pass lifted from the field's own schema
   // (`fieldInlineModelBundles`, `liftedFieldModelsOf`), so a copy dropped
-  // here for it needs no record.
+  // here for it needs no record. The model each name was minted for goes
+  // along under the name it left (`InlineModelNaming.mintedFor`), so an
+  // operation's copy identical to a field's that left a name here joins the
+  // field's model rather than minting another.
   const mintedNames = new Set<string>();
+  const mintedFor = new Map<string, Map<Model, number>>();
   // The field sites, kept for the merges below (`refreshFieldInlineModelBundles`):
   // what a fold carries onto a site here must still be there when a later
   // pass renames the model it was carried onto.
@@ -182,6 +186,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
     enums: enumNames,
     minted: mintedNames,
+    mintedFor,
   });
 
   const { services, inlineModels, inlineModelBundles, componentSites } = extractOperations(
@@ -282,6 +287,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     reserved: reserved.all,
     enums: reserved.enums,
     minted: mintedNames,
+    mintedFor,
   };
   // The components' field models, settled above, own their names here as
   // the components do (`declared`), so a nested object of a response named
