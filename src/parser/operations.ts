@@ -5165,7 +5165,10 @@ function extractResponseHeaders(
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      deprecated: header.deprecated === true || undefined,
+      // The Header Object's flag or its schema's, so a deprecated schema that
+      // folds onto a live component leaves it on the header; the model or
+      // enum a bare `$ref` names keeps its own, as for a field.
+      deprecated: header.deprecated === true || schema?.deprecated === true || undefined,
       // The header schema's own link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
       ...externalDocsEntry(schema?.externalDocs),

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { parseSpec } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
@@ -1650,5 +1651,124 @@ components:
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('a deprecated header schema (issue #440)', () => {
+  const owner = { type: 'object', properties: { name: { type: 'string' } } };
+
+  /** `GET /pets` (`listPets`), whose 200 declares `headers`, beside the given components. */
+  const petsDoc = (
+    headers: Record<string, unknown>,
+    schemas: Record<string, unknown>,
+    componentHeaders: Record<string, unknown> = {},
+  ) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    paths: {
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          responses: {
+            '200': { description: 'ok', headers, content: { 'application/json': { schema: { type: 'string' } } } },
+          },
+        },
+      },
+    },
+    components: { schemas, headers: componentHeaders },
+  });
+
+  /** Parse `doc`, capturing every warning. */
+  async function parseDoc(doc: unknown): Promise<{ spec: ApiSpec; warnings: string[] }> {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-response-headers-'));
+    const specPath = join(dir, 'spec.json');
+    writeFileSync(specPath, JSON.stringify(doc));
+    try {
+      const spec = await parseSpec(specPath);
+      return { spec, warnings: warn.mock.calls.map((call) => String(call[0])) };
+    } finally {
+      warn.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const headersOf = (spec: ApiSpec) => spec.services.flatMap((s) => s.operations)[0].responseHeaders ?? [];
+
+  it('keeps the flag on the header when its schema folds onto a live component, so the diff reports it', async () => {
+    const before = await parseDoc(petsDoc({ 'X-Owner': { schema: owner } }, { PetsXOwner: owner }));
+    const after = await parseDoc(
+      petsDoc({ 'X-Owner': { schema: { ...owner, deprecated: true } } }, { PetsXOwner: owner }),
+    );
+
+    expect(headersOf(after.spec).map(({ deprecated, name, type }) => ({ deprecated, name, type }))).toEqual([
+      { deprecated: true, name: 'X-Owner', type: { kind: 'model', name: 'PetsXOwner' } },
+    ]);
+    // The schema folded onto the live component, which stays live: the
+    // header that wrote the schema is what carries the flag.
+    expect(after.spec.models.map(({ name, deprecated }) => ({ name, deprecated }))).toEqual([
+      { name: 'PetsXOwner', deprecated: undefined },
+    ]);
+    expect(after.warnings).toEqual([
+      '[oagen] Warning: Inline model "PetsXOwner" is declared both deprecated and live with the same shape — keeping the live definition under the shared name',
+    ]);
+
+    const { changes, summary } = diffSpecs(before.spec, after.spec);
+    expect(summary).toMatchObject({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1 });
+    expect(changes).toMatchObject([
+      {
+        kind: 'operation-modified',
+        operationName: 'listPets',
+        classification: 'additive',
+        responseHeaderChanges: [
+          {
+            kind: 'header-deprecated-changed',
+            headerName: 'X-Owner',
+            statusCode: 200,
+            classification: 'additive',
+            oldDeprecated: false,
+            newDeprecated: true,
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('reads the flag from the Header Object and the schema that types it, not from a component a bare $ref names', async () => {
+    const { spec } = await parseDoc(
+      petsDoc(
+        {
+          'X-Object': { deprecated: true, schema: { type: 'string' } },
+          'X-Schema': { schema: { type: 'string', deprecated: true } },
+          'X-Content': { content: { 'text/plain': { schema: { type: 'string', deprecated: true } } } },
+          // A `false` on one level does not stop a `true` on the other.
+          'X-Mixed': { deprecated: false, schema: { type: 'integer', deprecated: true } },
+          'X-Sibling': { schema: { $ref: '#/components/schemas/Live', deprecated: true } },
+          'X-Component': { $ref: '#/components/headers/Rate' },
+          // The referenced model carries its own flag, as a field's does.
+          'X-Ref': { schema: { $ref: '#/components/schemas/Legacy' } },
+          'X-Yes': { schema: { type: 'string', deprecated: 'yes' } },
+          'X-Live': { schema: { type: 'string' } },
+        },
+        { Legacy: { ...owner, deprecated: true }, Live: owner },
+        { Rate: { schema: { type: 'integer', deprecated: true } } },
+      ),
+    );
+
+    expect(headersOf(spec).map(({ name, deprecated }) => [name, deprecated])).toEqual([
+      ['X-Object', true],
+      ['X-Schema', true],
+      ['X-Content', true],
+      ['X-Mixed', true],
+      ['X-Sibling', true],
+      ['X-Component', true],
+      ['X-Ref', undefined],
+      ['X-Yes', undefined],
+      ['X-Live', undefined],
+    ]);
+    expect(spec.models.map(({ name, deprecated }) => [name, deprecated])).toEqual([
+      ['Legacy', true],
+      ['Live', undefined],
+    ]);
   });
 });
