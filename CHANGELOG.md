@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/workos/oagen/compare/v0.34.0...v0.34.1) (2026-10-30)
+
+
+### Bug Fixes
+
+* **parser:** name shared error bodies from their shape, never by number ([#513](https://github.com/workos/oagen/issues/513)) ([61b310f](https://github.com/workos/oagen/commit/61b310fbbf01cc31b67a576c50a1df2249cbcba5))
+
 ## [0.34.0](https://github.com/workos/oagen/compare/v0.33.0...v0.34.0) (2026-10-29)
 
 
