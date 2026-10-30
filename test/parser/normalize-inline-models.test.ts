@@ -1043,6 +1043,128 @@ describe('a parent that references a renamed model leaves a shared name by its s
       resetInheritedModelRefs();
     }
   });
+
+  it('qualifies a twin the pass’s choice drops when the definition it keeps does not reference its nested model, in either order (issue #442)', () => {
+    // `getA` mints `Note { owner: NoteOwner }`, `getC` a larger `Note {
+    // holder: NoteHolder, extra }`, which keeps the name; folded onto it,
+    // `getA`'s would leave `NoteOwner` referenced by nothing.
+    for (const order of ['a-first', 'c-first'] as const) {
+      const aOwner = owner('NoteOwner');
+      const cHolder = owner('NoteHolder');
+      const aNote: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner'))] };
+      const cNote: Model = { name: 'Note', fields: [field('holder', modelRef('NoteHolder')), field('extra')] };
+      const aRef = modelRef('Note');
+      const cRef = modelRef('Note');
+      const a = { qualifier: 'GetA', roots: [aRef], models: [aNote, aOwner] };
+      const c = { qualifier: 'GetC', roots: [cRef], models: [cNote, cHolder] };
+      const sites = order === 'a-first' ? [a, c] : [c, a];
+      const { merged, warnings } = settle(
+        mergeInlineResponseModels,
+        [],
+        sites.flatMap((site) => site.models),
+        { bundles: sites, reserved: new Set(['Note', 'NoteOwner', 'NoteHolder']), enums: new Set() },
+      );
+      expect(
+        merged.map((m) => [m.name, referencedBy(m)]).sort(([x], [y]) => String(x).localeCompare(String(y))),
+        order,
+      ).toEqual([
+        ['GetANote', ['NoteOwner']],
+        ['Note', ['NoteHolder']],
+        ['NoteHolder', []],
+        ['NoteOwner', []],
+      ]);
+      expect(aRef, order).toEqual(modelRef('GetANote'));
+      expect(cRef, order).toEqual(modelRef('Note'));
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "Note" → "GetANote": it references a model the definition kept under "Note" does not',
+      ]);
+    }
+  });
+
+  it('decides a dropped twin’s nested model before the twin, so a parent whose child had to keep a name of its own follows it', () => {
+    // Both sites mint `Note { owner: NoteOwner }`, `getC`'s with a field
+    // more at each level. `getA`'s `NoteOwner` has an `address` that
+    // `getC`'s lacks: it leaves the name first, and `getA`'s `Note`, which
+    // now references a renamed model, leaves after it — folded first, by
+    // name, the parent would have taken the renamed child down with it.
+    const address = owner('NoteOwnerAddress');
+    const aOwner: Model = { name: 'NoteOwner', fields: [field('address', modelRef('NoteOwnerAddress'))] };
+    const cOwner: Model = { name: 'NoteOwner', fields: [field('street'), field('zip')] };
+    const aNote: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner'))] };
+    const cNote: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner')), field('extra')] };
+    const aRef = modelRef('Note');
+    const cRef = modelRef('Note');
+    const { merged, warnings } = settle(mergeInlineResponseModels, [], [aNote, aOwner, address, cNote, cOwner], {
+      bundles: [
+        { qualifier: 'GetA', roots: [aRef], models: [aNote, aOwner, address] },
+        { qualifier: 'GetC', roots: [cRef], models: [cNote, cOwner] },
+      ],
+      reserved: new Set(['Note', 'NoteOwner', 'NoteOwnerAddress']),
+      enums: new Set(),
+    });
+    expect(merged.map((m) => [m.name, referencedBy(m)])).toEqual([
+      ['GetANote', ['GetANoteOwner']],
+      ['GetANoteOwner', ['NoteOwnerAddress']],
+      ['NoteOwnerAddress', []],
+      ['Note', ['NoteOwner']],
+      ['NoteOwner', []],
+    ]);
+    expect([aRef, cRef]).toEqual([modelRef('GetANote'), modelRef('Note')]);
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "NoteOwner" → "GetANoteOwner": it references a model the definition kept under "NoteOwner" does not',
+      '[oagen] Renamed inline model "Note" → "GetANote": it references a renamed model and "Note" keeps another definition',
+    ]);
+  });
+
+  it('shares one qualified model among identical twins the pass’s choice drops', () => {
+    // `getA` and `getB` mint the same `Note { owner: NoteOwner }`; `getC`'s
+    // larger `Note` keeps the name and references no `NoteOwner`.
+    const aOwner = owner('NoteOwner');
+    const bOwner = owner('NoteOwner');
+    const aNote: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner'))] };
+    const bNote: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner'))] };
+    const cNote: Model = { name: 'Note', fields: [field('object'), field('extra')] };
+    const refs = [modelRef('Note'), modelRef('Note'), modelRef('Note')];
+    const { merged, warnings } = settle(mergeInlineResponseModels, [], [aNote, aOwner, bNote, bOwner, cNote], {
+      bundles: [
+        { qualifier: 'GetA', roots: [refs[0]!], models: [aNote, aOwner] },
+        { qualifier: 'GetB', roots: [refs[1]!], models: [bNote, bOwner] },
+        { qualifier: 'GetC', roots: [refs[2]!], models: [cNote] },
+      ],
+      reserved: new Set(['Note', 'NoteOwner']),
+      enums: new Set(),
+    });
+    expect(merged.map((m) => [m.name, referencedBy(m)])).toEqual([
+      ['GetANote', ['NoteOwner']],
+      ['NoteOwner', []],
+      ['Note', []],
+    ]);
+    expect(refs).toEqual([modelRef('GetANote'), modelRef('GetANote'), modelRef('Note')]);
+    expect(warnings).toEqual([
+      '[oagen] Renamed inline model "Note" → "GetANote": it references a model the definition kept under "Note" does not (shared by 2 sites)',
+    ]);
+  });
+
+  it('leaves a twin without a site to the pass’s choice, with a warning, as every copy that cannot leave a name', () => {
+    const lone: Model = { name: 'Note', fields: [field('owner', modelRef('NoteOwner'))] };
+    const larger: Model = { name: 'Note', fields: [field('object'), field('extra')] };
+    const warnings: string[] = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    });
+    let kept: Model[] = [];
+    try {
+      kept = mergeInlineResponseModels([], [lone, owner('NoteOwner'), larger]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(kept.map((m) => m.name)).toEqual(['Note', 'NoteOwner']);
+    expect(kept[0]).toBe(larger);
+    expect(warnings).toEqual([
+      '[oagen] Warning: Inline model "Note" references a model the definition kept under "Note" does not and has no site to be renamed from — keeping the usual definition under the shared name',
+      '[oagen] Warning: Inline model "Note" has more than one definition with different fields or field types (2 vs 1) — keeping the one with more fields',
+    ]);
+  });
 });
 
 describe('a fold carries the copy’s references into the winner’s site (issue #313, review round 2)', () => {
