@@ -1057,6 +1057,23 @@ describe('`<Name>Json` fold — reach, enum names and extensions (issue #426)', 
     ]);
   });
 
+  it('applies chained folds from the deepest outward, so the base takes the shape and keys it ends with (Greptile)', () => {
+    // `PetJsonJson` folds onto `PetJson`, which folds onto `Pet`. Applied in declaration order,
+    // `Pet` copied `PetJson` before `PetJsonJson` reached it, and lost `c` and the `x-since` only
+    // `PetJsonJson` declares; reversed, it kept both.
+    const models = (): Model[] => [
+      { name: 'Pet', fields: [field('a')] },
+      { name: 'PetJson', fields: [field('a'), field('b')] },
+      { name: 'PetJsonJson', fields: [field('a'), field('b'), field('c')], extensions: { 'x-since': '1.2' } },
+    ];
+    for (const order of [models(), models().reverse()]) {
+      const { kept } = collapse(order);
+      expect(
+        kept.map(({ extensions, fields, name }) => ({ extensions, fields: fields.map((f) => f.name), name })),
+      ).toEqual([{ extensions: { 'x-since': '1.2' }, fields: ['a', 'b', 'c'], name: 'Pet' }]);
+    }
+  });
+
   it('carries the `…Json` model’s `x-*` keys onto a base that has none, as it carries its link', async () => {
     // The issue's repro: `createPet` takes `PetJson`, whose keys were dropped with it.
     const doc = (pet: Record<string, unknown> = {}) => ({

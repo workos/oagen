@@ -478,8 +478,12 @@ describe('the keys a folded `…Json` model gives its base are compared (issue #
     await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
   });
 
-  /** `createPet` takes `PetJson` and returns `Pet`; `PetJson` folds onto `Pet` with its link and `x-since`. */
-  async function parsePets(since: string): Promise<ApiSpec> {
+  /**
+   * `createPet` takes `PetJson` and returns `Pet`; `PetJson` folds onto `Pet` with its link and
+   * `x-since`. `chained` declares `PetJsonJson` after it, which `createPet` takes instead and
+   * which alone carries `x-since`: it folds onto `PetJson`, which folds onto `Pet`.
+   */
+  async function parsePets(since: string, chained = false): Promise<ApiSpec> {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-426-differ-'));
     dirs.push(dir);
     const file = path.join(dir, 'pets.json');
@@ -493,7 +497,13 @@ describe('the keys a folded `…Json` model gives its base are compared (issue #
           '/pets': {
             post: {
               operationId: 'createPet',
-              requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/PetJson' } } } },
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: { $ref: `#/components/schemas/${chained ? 'PetJsonJson' : 'PetJson'}` },
+                  },
+                },
+              },
               responses: {
                 '200': {
                   description: 'ok',
@@ -509,8 +519,16 @@ describe('the keys a folded `…Json` model gives its base are compared (issue #
             PetJson: {
               ...pet({ name: { type: 'string' }, age: { type: 'integer' } }),
               externalDocs: { url: 'https://example.com/pets' },
-              'x-since': since,
+              ...(chained ? {} : { 'x-since': since }),
             },
+            ...(chained
+              ? {
+                  PetJsonJson: {
+                    ...pet({ name: { type: 'string' }, age: { type: 'integer' }, tag: { type: 'string' } }),
+                    'x-since': since,
+                  },
+                }
+              : {}),
           },
         },
       }),
@@ -538,5 +556,21 @@ describe('the keys a folded `…Json` model gives its base are compared (issue #
       },
     ]);
     expect(report.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+  });
+
+  it('reports `x-since` moving on the deepest of two chained folds, declared last, on `Pet` (Greptile)', async () => {
+    const report = diffSpecs(await parsePets('1.2', true), await parsePets('1.3', true));
+    expect(report.changes).toEqual([
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        deprecatedChanged: false,
+        extensionsChanged: true,
+        oldExtensions: { 'x-since': '1.2' },
+        newExtensions: { 'x-since': '1.3' },
+        classification: 'additive',
+      },
+    ]);
   });
 });

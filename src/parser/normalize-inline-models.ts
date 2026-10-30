@@ -1360,9 +1360,11 @@ export function collapseJsonSuffixModels(
     const readName = read;
     const options: ShapeReadOptions = { readName };
     const jsonOf = new Map(accepted.map((candidate) => [candidate.baseModel, candidate.jsonModel]));
+    // A `…Json` model that is itself a base (`PetJson` under `PetJsonJson`)
+    // passes on the shape it ends with, as the folds are applied.
     const shapeOf = (model: Model): Model => {
       const json = jsonOf.get(model);
-      return json ? foldedShape(model, json) : model;
+      return json ? foldedShape(model, shapeOf(json)) : model;
     };
     const refused = new Set<FoldCandidate>();
     const refuse = (candidate: FoldCandidate, warning: string): void => {
@@ -1486,7 +1488,12 @@ export function collapseJsonSuffixModels(
     const name = read(model.name);
     if (name !== model.name) renames.set(model.name, name);
   }
-  for (const { baseModel, jsonModel } of accepted) applyFold(baseModel, jsonModel);
+  // The deepest fold first: a base that is itself a folded `…Json` model
+  // (`PetJson` under `PetJsonJson`) takes its shape before its own base
+  // copies it, so `Pet` ends with `PetJsonJson`'s fields and keys whatever
+  // the declaration order. A chain's `…Json` names grow by `Json` a link.
+  const deepestFirst = [...accepted].sort((a, b) => b.jsonModel.name.length - a.jsonModel.name.length);
+  for (const { baseModel, jsonModel } of deepestFirst) applyFold(baseModel, jsonModel);
 
   const removed = new Set<Model>(accepted.map((candidate) => candidate.jsonModel));
   // The model that keeps each name: the one the folds leave under it, else
