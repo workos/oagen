@@ -76,8 +76,8 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  *
  * `shared` is the parser's record of every type reference a site shared
  * through `components/responses` wrote (`OperationExtractionResult.componentSites`:
- * the component's fallback or error body, a secondary body, a header), by
- * identity — the one record of which sites an operation owns and which a
+ * the component's success, fallback or error body, a secondary body, a
+ * header), by identity — the one record of which sites an operation owns and which a
  * component does. An enum such a site carries is named from the component
  * alone (`CardXMode`, `ProblemResponse`), so on a clash it steps by number
  * (`CardXMode2`, `ProblemResponse2`) — never by the status code, the
@@ -115,18 +115,23 @@ export function collectInlineEnumsFromOperations(
   const modelNames = new Set(modelsByName.keys());
   // Each materialized model is visited once, under the first qualifier that reaches it.
   const visited = new Set<string>();
-  const collectThroughModels = (type: TypeRef, qualifier: string | undefined): void => {
-    collectDistinctEnums(type, qualifier, enums, enumNames, modelNames);
+  const collectThroughModels = (type: TypeRef, qualifier: string | undefined, steps: Set<string> | undefined): void => {
+    collectDistinctEnums(type, qualifier, enums, enumNames, modelNames, steps);
     for (const name of collectModelRefs(type)) {
       if (visited.has(name) || componentNames.has(name)) continue;
       visited.add(name);
       const model = modelsByName.get(name);
       if (!model) continue;
-      for (const field of model.fields) collectThroughModels(field.type, qualifier);
+      for (const field of model.fields) collectThroughModels(field.type, qualifier, steps);
     }
   };
   for (const service of services) {
     for (const op of service.operations) {
+      // The names this operation's own sites stepped to, the only ones a
+      // later site of it may share as a step (`distinctEnumName`); a site
+      // a component response declares (`shared`) is the component's, so it
+      // neither reads nor adds to them.
+      const steps = new Set<string>();
       for (const param of [
         ...op.pathParams,
         ...op.queryParams,
@@ -134,7 +139,7 @@ export function collectInlineEnumsFromOperations(
         ...op.headerParams,
         ...(op.cookieParams ?? []),
       ]) {
-        collectDistinctEnums(param.type, undefined, enums, enumNames, modelNames);
+        collectDistinctEnums(param.type, undefined, enums, enumNames, modelNames, steps);
       }
       // The iterator's item type is reached through `response` when detection
       // unwrapped the data array, but an explicit `dataPath` can type it from
@@ -144,9 +149,9 @@ export function collectInlineEnumsFromOperations(
       // path gave it (`ListPetsRecord`); one a component enum owns with other
       // members falls back to a numeric suffix. A model it names is walked
       // like a body's, so an enum nested in one is reached the same way.
-      if (op.pagination) collectThroughModels(op.pagination.itemType, undefined);
+      if (op.pagination) collectThroughModels(op.pagination.itemType, undefined, steps);
       for (const field of op.pagination?.envelopeFields ?? []) {
-        collectDistinctEnums(field.type, undefined, enums, enumNames, modelNames);
+        collectDistinctEnums(field.type, undefined, enums, enumNames, modelNames, steps);
       }
       // Response headers are typed like parameters, so an inline enum declared
       // on one must reach `spec.enums` the same way or the IR would point at
@@ -156,7 +161,8 @@ export function collectInlineEnumsFromOperations(
       // component.
       for (const { headers, qualifier } of responseHeaderGroups(op)) {
         for (const header of headers) {
-          collectThroughModels(header.type, shared.has(header.type) ? undefined : qualifier);
+          const own = !shared.has(header.type);
+          collectThroughModels(header.type, own ? qualifier : undefined, own ? steps : undefined);
         }
       }
       // The request body and each success body are typed by `schemaToTypeRef`
@@ -170,10 +176,13 @@ export function collectInlineEnumsFromOperations(
       // `CheckPetKindResponse202` (`CheckPetKindItem202` for an array of one),
       // while identical members share. A lone success response, and the
       // request body, carry no code and fall back to a numeric suffix
-      // (`GetPetKindResponse2`). An enum nested in a body's model is
-      // collected with every other model's (`collectInlineEnumsFromModels`).
+      // (`GetPetKindResponse2`), as does a body a component response declares
+      // (`shared`) at any status code (`CardResponse2`). An enum nested in a
+      // body's model is collected with every other model's
+      // (`collectInlineEnumsFromModels`).
       for (const { type, qualifier } of requestAndSuccessBodies(op)) {
-        collectDistinctEnums(type, qualifier, enums, enumNames, modelNames);
+        const own = !shared.has(type);
+        collectDistinctEnums(type, own ? qualifier : undefined, enums, enumNames, modelNames, own ? steps : undefined);
       }
       // An error body that is itself an inline enum, or an array of one, is
       // typed by `schemaToTypeRef` and reaches no model, so it is promoted
@@ -193,12 +202,14 @@ export function collectInlineEnumsFromOperations(
       const owned = ownedErrorBodies(op, shared);
       for (const error of op.errors) {
         if (!error.type) continue;
+        const own = owned.has(error.type);
         collectDistinctEnums(
           error.type,
-          owned.has(error.type) ? ERROR_BODY_STEP : undefined,
+          own ? ERROR_BODY_STEP : undefined,
           enums,
           enumNames,
           modelNames,
+          own ? steps : undefined,
         );
       }
       // A body declared only for a secondary media type (`text/plain` next to
@@ -215,14 +226,14 @@ export function collectInlineEnumsFromOperations(
       // `<Op>Error<code>…` like `errors[].type`, which steps to `…Body` as
       // that does.
       for (const { type } of collectResponseBodyTypes(op)) {
-        collectThroughModels(type, owned.has(type) ? ERROR_BODY_STEP : undefined);
+        collectThroughModels(type, owned.has(type) ? ERROR_BODY_STEP : undefined, shared.has(type) ? undefined : steps);
       }
       // A request body declared only for a secondary media type (`text/csv`
       // next to `application/json`) is typed like one, with its name already
       // operation-qualified (`ReplaceWidgetTextCsvRequest`), so its inline
       // enums are promoted the same way.
       for (const { type } of collectRequestBodyTypes(op)) {
-        collectThroughModels(type, undefined);
+        collectThroughModels(type, undefined, steps);
       }
     }
   }
@@ -365,7 +376,9 @@ function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifie
  * secondary body, a webhook parameter or payload. A taken name with the same
  * members is shared, as before; the first lifted copy's value descriptions
  * and link are the enum's. A component enum declared under a component
- * model's name is the document's own clash and is left as declared.
+ * model's name is the document's own clash and is left as declared. `steps`
+ * is the record of the names an operation's own sites stepped to, read and
+ * extended here; a site no operation owns passes none.
  */
 function collectDistinctEnums(
   ref: TypeRef,
@@ -373,6 +386,7 @@ function collectDistinctEnums(
   enums: Enum[],
   enumNames: Set<string>,
   modelNames: ReadonlySet<string>,
+  steps?: Set<string>,
 ): void {
   walkTypeRef(ref, {
     enum: (ref) => {
@@ -382,7 +396,8 @@ function collectDistinctEnums(
       const ownedByOtherMembers = existing !== undefined && !sameEnumShape(existing.values, values);
       const ownedByModel = existing === undefined && modelNames.has(ref.name);
       if (ownedByOtherMembers || ownedByModel) {
-        ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames);
+        ref.name = distinctEnumName(ref.name, values, qualifier, enums, modelNames, steps);
+        steps?.add(ref.name);
       }
       collectInlineEnumFromRef(ref, enums, enumNames);
     },
@@ -390,11 +405,13 @@ function collectDistinctEnums(
 }
 
 /**
- * A name the stem was already stepped to that holds the same members
- * (`isNumericStep`), else the first name not taken by a different member set,
- * nor by a model: the base qualified by the status code
- * (`DocumentsXPolicy429`), then numeric suffixes (`DocumentsXPolicy2`,
- * `DocumentsXPolicy3`, ...). An error body (`ERROR_BODY_STEP`) steps to
+ * A name the same operation's own sites already stepped the stem to that
+ * holds the same members (`steps`, `isNumericStep`), else the first name not
+ * taken by a different member set, nor by a model: the base qualified by the
+ * status code (`DocumentsXPolicy429`), then numeric suffixes
+ * (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). A site no operation owns
+ * — a model's field, a webhook's, a component response's — passes no
+ * `steps` and shares no step. An error body (`ERROR_BODY_STEP`) steps to
  * `GetPetError404Body` and then numbers under it (`GetPetError404Body2`,
  * `GetPetError404Body3`, ...), as the error models do in the shape registry,
  * never on the bare name (`GetPetError4042` is what a parameter named
@@ -414,6 +431,7 @@ function distinctEnumName(
   qualifier: string | undefined,
   enums: Enum[],
   modelNames: ReadonlySet<string>,
+  steps: ReadonlySet<string> | undefined,
 ): string {
   const isUsable = (name: string): boolean => {
     if (modelNames.has(name)) return false;
@@ -424,15 +442,24 @@ function distinctEnumName(
   // an error body, whose numbers come under `Body` so an enum body and an
   // object body past the same two taken names agree (`…Body2`).
   const stem = qualifier === ERROR_BODY_STEP ? `${base}${qualifier}` : base;
-  // A name this stem already stepped to for the same members — another
-  // status code's body or header (`…200` when this is the 202's), or an
-  // earlier numeric step (`…Body2` for an error body) — is shared before a
-  // new one is minted, so identical members on two status codes never
-  // become two enums once their plain name is taken. Only a digit-qualified
-  // name is a step of this stem: the fallback labels (`…Default`) qualify
-  // other sites, and `…Body` itself is shared through `isUsable` below.
+  // A name this operation's own sites already stepped the stem to for the
+  // same members (`steps`) — another status code's body or header (`…200`
+  // when this is the 202's), or an earlier numeric step (`…2` for a lone
+  // 2xx header beside its 503's) — is shared before a new one is minted, so
+  // identical members on two status codes never become two enums once their
+  // plain name is taken. Another operation's step (`PetsXPolicy429` for
+  // `listPets`'s 429), or a component that merely reads as one
+  // (`PetsStatus2024`, `GetPetKindResponse404`), is not in `steps` and is
+  // never shared this way: it names another site (workos/oagen#391). Only a
+  // digit-qualified name is a step of this stem: the fallback labels
+  // (`…Default`) qualify other sites, and `…Body` itself is shared through
+  // `isUsable` below.
   const stepped = enums.find(
-    (e) => isNumericStep(e.name, stem) && !modelNames.has(e.name) && sameEnumShape(e.values, values),
+    (e) =>
+      steps?.has(e.name) === true &&
+      isNumericStep(e.name, stem) &&
+      !modelNames.has(e.name) &&
+      sameEnumShape(e.values, values),
   );
   if (stepped) return stepped.name;
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;

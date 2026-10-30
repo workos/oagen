@@ -724,6 +724,220 @@ describe('identical members on another status code share the stepped name, heade
   });
 });
 
+// workos/oagen#391: the stepped-name reuse searched every enum of the
+// document, so any `<stem><digits>` holding the same members — another
+// operation's status-code step, a component named for a year or for a 404 —
+// handed its name to an unrelated site before the site's own status code or
+// number was tried. Only a name the same operation's own sites stepped the
+// stem to is shared now.
+describe('a stepped name is shared only by the operation whose sites stepped to it (#391)', () => {
+  const policy = (values: string[]) => ({ 'X-Policy': { schema: en(values) } });
+  const id = [{ name: 'id', in: 'path', required: true, schema: str }];
+  /** The issue's `steps.yaml`; `getPet` may take extra parameters or other responses. */
+  const steps = ({ parameters = [], responses }: { parameters?: Doc[]; responses?: Doc } = {}): Doc =>
+    doc(
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'status', in: 'query', schema: en(['available', 'sold']) }],
+            responses: {
+              '200': { description: 'OK', headers: policy(['fast', 'slow']) },
+              '429': { description: 'Too many requests', headers: policy(['retry', 'stop']) },
+            },
+          },
+        },
+        '/pets/{id}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [...id, ...parameters],
+            responses: responses ?? { '200': { description: 'OK', headers: policy(['retry', 'stop']) } },
+          },
+        },
+        '/pets/{id}/kind': {
+          get: {
+            operationId: 'getPetKind',
+            parameters: id,
+            responses: { '200': { description: 'OK', ...json(kind) } },
+          },
+        },
+      },
+      {
+        GetPetKindResponse: en(['bird', 'fish']),
+        GetPetKindResponse404: kind,
+        PetsStatus: en(['pending']),
+        PetsStatus2024: en(['available', 'sold']),
+      },
+    );
+  const components = ['GetPetKindResponse', 'GetPetKindResponse404', 'PetsStatus', 'PetsStatus2024'];
+  /** The issue's printout of an operation: its success and error headers, its query parameters and an enum body. */
+  const typesOf = (op: Operation): string[] => [
+    ...(op.responseHeaders ?? []).map(({ name, type }) => `${name}: ${ref(type)}`),
+    ...op.errors.flatMap(({ statusCode, headers = [] }) =>
+      headers.map(({ name, type }) => `${statusCode} ${name}: ${ref(type)}`),
+    ),
+    ...op.queryParams.map(({ name, type }) => `${name}: ${ref(type)}`),
+    ...(op.response.kind === 'enum' ? [`response: ${ref(op.response)}`] : []),
+  ];
+
+  it("the issue's repro: `getPet`'s header, `status` and `getPetKind`'s body are numbered, not named for a 429, a year or a 404", async () => {
+    const ir = await parseWithoutWarnings(steps());
+
+    // Before: `PetsXPolicy429`, `PetsStatus2024` and `GetPetKindResponse404`.
+    expect(typesOf(operation(ir, 'listPets'))).toEqual([
+      'X-Policy: enum PetsXPolicy',
+      '429 X-Policy: enum PetsXPolicy429',
+      'status: enum PetsStatus2',
+    ]);
+    expect(typesOf(operation(ir, 'getPet'))).toEqual(['X-Policy: enum PetsXPolicy2']);
+    expect(typesOf(operation(ir, 'getPetKind'))).toEqual(['response: enum GetPetKindResponse2']);
+    expect(enumValues(ir, 'PetsStatus2')).toEqual(['available', 'sold']);
+    expect(enumValues(ir, 'PetsXPolicy2')).toEqual(['retry', 'stop']);
+    expect(enumValues(ir, 'GetPetKindResponse2')).toEqual(['cat', 'dog']);
+    expectSound(ir, components);
+  });
+
+  it("the issue's `x-policy` query parameter on `getPet` is numbered too, and the operation's header shares it", async () => {
+    const ir = await parseWithoutWarnings(
+      steps({ parameters: [{ name: 'x-policy', in: 'query', schema: en(['retry', 'stop']) }] }),
+    );
+
+    // Before: both took `listPets`'s `PetsXPolicy429`.
+    expect(typesOf(operation(ir, 'getPet'))).toEqual(['X-Policy: enum PetsXPolicy2', 'x-policy: enum PetsXPolicy2']);
+    expect(enumNames(ir).filter((name) => name.startsWith('PetsXPolicy'))).toEqual([
+      'PetsXPolicy',
+      'PetsXPolicy429',
+      'PetsXPolicy2',
+    ]);
+    expectSound(ir, components);
+  });
+
+  it("a later status code of `getPet` shares the number its own lone 2xx header stepped to, not `listPets`'s `…429`", async () => {
+    const ir = await parseWithoutWarnings(
+      steps({
+        responses: {
+          '200': { description: 'OK', headers: policy(['retry', 'stop']) },
+          '503': { description: 'down', headers: policy(['retry', 'stop']) },
+        },
+      }),
+    );
+
+    expect(typesOf(operation(ir, 'getPet'))).toEqual([
+      'X-Policy: enum PetsXPolicy2',
+      '503 X-Policy: enum PetsXPolicy2',
+    ]);
+    expectSound(ir, components);
+  });
+
+  it("another operation's status-code step is not this operation's: a 503 and a `default` take `…503`, not `…429`", async () => {
+    const ir = await parseWithoutWarnings(
+      steps({
+        responses: {
+          '200': { description: 'OK', headers: policy(['fast', 'slow']) },
+          '503': { description: 'down', headers: policy(['retry', 'stop']) },
+          default: { description: 'anything else', headers: policy(['retry', 'stop']) },
+        },
+      }),
+    );
+    const op = operation(ir, 'getPet');
+
+    // Before: both took `listPets`'s `PetsXPolicy429`.
+    expect(typesOf(op)).toEqual(['X-Policy: enum PetsXPolicy', '503 X-Policy: enum PetsXPolicy503']);
+    expect(ref(op.defaultResponse?.headers?.[0].type)).toBe('enum PetsXPolicy503');
+    expect(enumValues(ir, 'PetsXPolicy503')).toEqual(['retry', 'stop']);
+    expectSound(ir, components);
+  });
+
+  it("the comment's repro: a header of a response shared through `components/responses` is numbered past a component named for a year", async () => {
+    const ir = await parseWithoutWarnings({
+      ...doc({
+        '/pets/{id}': {
+          get: {
+            operationId: 'getPet',
+            parameters: id,
+            responses: { '200': { $ref: '#/components/responses/PetFound' } },
+          },
+        },
+      }),
+      components: {
+        schemas: { PetFoundXMode: en(['auto']), PetFoundXMode2024: en(['fast', 'slow']) },
+        responses: { PetFound: { description: 'found', headers: { 'X-Mode': { schema: en(['fast', 'slow']) } } } },
+      },
+    });
+
+    // Before: `PetFoundXMode2024`.
+    expect(typesOf(operation(ir, 'getPet'))).toEqual(['X-Mode: enum PetFoundXMode2']);
+    expect(enumValues(ir, 'PetFoundXMode2')).toEqual(['fast', 'slow']);
+    expectSound(ir, ['PetFoundXMode', 'PetFoundXMode2024']);
+  });
+
+  it("a component response's header shares no operation's step, so every operation that returns it agrees on one number", async () => {
+    // A component `Pets` names its header from the stem the `Pets` service
+    // derives too (`PetsXPolicy`), beside `getPet`'s own 429 step.
+    const ir = await parseWithoutWarnings({
+      ...doc({
+        '/pets/{id}': {
+          get: {
+            operationId: 'getPet',
+            parameters: id,
+            responses: {
+              '200': { description: 'OK', headers: policy(['fast', 'slow']) },
+              '429': { description: 'Too many requests', headers: policy(['retry', 'stop']) },
+              '503': { $ref: '#/components/responses/Pets' },
+            },
+          },
+        },
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            responses: { '200': { description: 'OK' }, '503': { $ref: '#/components/responses/Pets' } },
+          },
+        },
+      }),
+      components: { responses: { Pets: { description: 'down', headers: policy(['retry', 'stop']) } } },
+    });
+
+    expect(typesOf(operation(ir, 'getPet'))).toEqual([
+      'X-Policy: enum PetsXPolicy',
+      '429 X-Policy: enum PetsXPolicy429',
+      '503 X-Policy: enum PetsXPolicy2',
+    ]);
+    expect(typesOf(operation(ir, 'listPets'))).toEqual(['503 X-Policy: enum PetsXPolicy2']);
+    expectSound(ir);
+  });
+
+  it("a component response's 2xx enum body steps by number at whatever status code it is mounted, so every operation agrees", async () => {
+    // PR #519 review: the body was qualified by the status code of each
+    // operation that mounts it (`CardResponse200`, `CardResponse201`), which
+    // only the document-wide step search had merged into one enum.
+    const card = { $ref: '#/components/responses/Card' };
+    const ir = await parseWithoutWarnings({
+      ...doc({
+        '/a': { get: { operationId: 'getA', responses: { '200': card, '204': { description: 'none' } } } },
+        '/b': { get: { operationId: 'getB', responses: { '200': { description: 'none' }, '201': card } } },
+        '/c': { get: { operationId: 'getC', responses: { '200': card } } },
+      }),
+      components: {
+        schemas: { CardResponse: en(['old', 'new']) },
+        responses: { Card: { description: 'card', ...json(kind) } },
+      },
+    });
+    const bodyOf = (name: string): Array<string | undefined> => {
+      const op = operation(ir, name);
+      return (op.successResponses ?? [{ statusCode: op.responseStatusCode, type: op.response }]).map(
+        ({ statusCode, type }) => `${statusCode}: ${ref(type)}`,
+      );
+    };
+
+    expect(bodyOf('getA')).toEqual(['200: enum CardResponse2', '204: primitive unknown']);
+    expect(bodyOf('getB')).toEqual(['200: primitive unknown', '201: enum CardResponse2']);
+    expect(bodyOf('getC')).toEqual(['200: enum CardResponse2']);
+    expect(enumNames(ir)).toEqual(['CardResponse', 'CardResponse2']);
+    expect(enumValues(ir, 'CardResponse2')).toEqual(['cat', 'dog']);
+    expectSound(ir, ['CardResponse']);
+  });
+});
+
 describe('the record of component sites is the third argument of collectInlineEnumsFromOperations (#356)', () => {
   const signature =
     'collectInlineEnumsFromOperations(services, enums, shared, models?, componentNames?): `shared` must be the Set of ' +
