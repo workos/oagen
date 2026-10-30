@@ -34,7 +34,13 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
 } from '../utils/naming.js';
-import { isJsonMediaType, isPlainJsonMediaType, mediaTypeEssence, mediaTypeNameFragment } from '../utils/media-type.js';
+import {
+  isJsonMediaType,
+  isPlainJsonMediaType,
+  mediaTypeEssence,
+  mediaTypeNameFragment,
+  mediaTypeNamingOrder,
+} from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -4057,14 +4063,18 @@ function extractRequestBodyContents(
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;
-  const contents = contentTypes.map((contentType) => {
-    const entry: RequestBodyContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+  const contents = contentTypes.map((contentType): RequestBodyContent => ({
+    contentType,
+    type: { kind: 'primitive', type: 'unknown' },
+  }));
+  // Typed — so deferred, and named — in naming order; listed as written.
+  for (const contentType of mediaTypeNamingOrder(contentTypes)) {
+    const entry = contents[contentTypes.indexOf(contentType)];
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
         : typeSecondaryRequestContent(contentType, content[contentType]?.schema, stem, ctx, entry, contentTypes);
-    return entry;
-  });
+  }
   return { contentTypes, contents };
 }
 
@@ -4078,8 +4088,10 @@ function extractRequestBodyContents(
  * `schemalessRequestContentType` types it. The media type's fragment is
  * decided among its `siblings`, the body's content keys
  * (`mediaTypeNameFragment`): two spellings of one media type declared side
- * by side take separate names by their parameters, and case-only spellings
- * that derive one name are told apart by the registry.
+ * by side take separate names by the parameters `oagen diff` compares, or by
+ * a `charset` when nothing else tells them apart, and spellings still left
+ * with one name are told apart by the registry, in the order
+ * `extractRequestBodyContents` types them (`mediaTypeNamingOrder`).
  */
 function typeSecondaryRequestContent(
   contentType: string,
@@ -4677,7 +4689,8 @@ interface ResponseTypingContext {
  * operation's own (see `extractOperations`), each in document order (path
  * order, then an operation's secondary request bodies in content order,
  * then the response keys as written; a response's headers before its error
- * body and its secondary bodies, a fallback's body before its headers) — so
+ * body and its secondary bodies, a fallback's body before its headers; a
+ * body's media types that derive one name in `mediaTypeNamingOrder`) — so
  * the first owner of a name keeps it, and a component's site is never an
  * operation's own (`registryOwner`). Every enum name decided before this
  * pass, component or minted, is held too, as a name no model may take
@@ -6204,7 +6217,9 @@ function contentModelNaming(
  * included — with a type for each. A media type is typed the way `response`
  * is when it is the only one declared, so the entry for `primaryContentType`
  * (the one the fixed-order pick read `primaryType` from) carries that very
- * TypeRef and every other entry goes through `typeSecondaryContent`. Returns
+ * TypeRef and every other entry goes through `typeSecondaryContent`, in
+ * `mediaTypeNamingOrder`, so keys that derive one model name take it in one
+ * order whatever the document's. Returns
  * `undefined` when the response declares no media type at all, so the caller
  * leaves both keys off.
  */
@@ -6218,14 +6233,18 @@ function extractResponseContents(
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;
-  const contents = contentTypes.map((contentType) => {
-    const entry: ResponseContent = { contentType, type: { kind: 'primitive', type: 'unknown' } };
+  const contents = contentTypes.map((contentType): ResponseContent => ({
+    contentType,
+    type: { kind: 'primitive', type: 'unknown' },
+  }));
+  // Typed — so deferred, and named — in naming order; listed as written.
+  for (const contentType of mediaTypeNamingOrder(contentTypes)) {
+    const entry = contents[contentTypes.indexOf(contentType)];
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
         : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes);
-    return entry;
-  });
+  }
   return { contentTypes, contents };
 }
 
@@ -6246,7 +6265,8 @@ function extractResponseContents(
  * does — with the media type's fragment taken from its essence among its
  * `siblings` (the response's content keys), so a key keeps its model name
  * however it is spelled and two spellings of one essence side by side are
- * told apart by their parameters (`mediaTypeNameFragment`). That naming
+ * told apart by the parameters `oagen diff` compares, or by a `charset` when
+ * nothing else tells them apart (`mediaTypeNameFragment`). That naming
  * waits for every primary model
  * (`resolveDeferredInlineTypes`), so a schema is deferred and `target.type`
  * — returned here as a placeholder — filled in then.

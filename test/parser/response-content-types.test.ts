@@ -2285,7 +2285,7 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     // name, so which keys share across status codes follows from which keys
     // derive one name.
     const YAML = 'CreatePetApplicationYamlResponse';
-    const YAML_CHARSET = 'CreatePetApplicationYamlCharsetUtf8Response';
+    const YAML_CHARSET = 'CreatePetApplicationYamlCharsetResponse';
     /** `{ id }` under application/json, which a 201 names `CreatePetResponse201` (#435), beside the given keys. */
     const withYaml = (keys: Record<string, unknown>, description = 'ok') => ({
       description,
