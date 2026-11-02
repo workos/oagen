@@ -214,18 +214,14 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     // A list envelope's field, which no model carries, named by the
     // operation it belongs to.
     for (const fc of c.envelopeFieldChanges ?? []) {
-      if (fc.kind !== 'field-extensions-changed') continue;
-      out.push(
-        extended(
-          {
-            node: 'envelope-field',
-            serviceName: c.serviceName,
-            operationName: c.operationName,
-            fieldName: fc.fieldName,
-          },
-          fc,
-        ),
-      );
+      const field: ExtensionsNode = {
+        node: 'envelope-field',
+        serviceName: c.serviceName,
+        operationName: c.operationName,
+        fieldName: fc.fieldName,
+      };
+      if (fc.kind === 'field-deprecated-changed') out.push(flipped(field, fc));
+      else if (fc.kind === 'field-extensions-changed') out.push(extended(field, fc));
     }
     if (c.securityChanged) {
       out.push(

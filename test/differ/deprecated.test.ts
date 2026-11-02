@@ -608,6 +608,74 @@ describe('diffSpecs – deprecated behaviorChanges and summary (issue #256)', ()
   });
 });
 
+describe('diffSpecs – a list envelope field deprecated (issue #439)', () => {
+  /** `GET /pets?after=` returning `{ data: Pet[], has_more }`, `has_more` carrying `deprecated` as given. */
+  const listPets = (deprecated?: boolean): Operation => ({
+    name: 'listPets',
+    httpMethod: 'get',
+    path: '/pets',
+    pathParams: [],
+    queryParams: [{ name: 'after', type: { kind: 'primitive', type: 'string' }, required: false }],
+    headerParams: [],
+    response: { kind: 'array', items: { kind: 'model', name: 'Pet' } },
+    errors: [],
+    injectIdempotencyKey: false,
+    pagination: {
+      strategy: 'cursor',
+      param: 'after',
+      dataPath: 'data',
+      itemType: { kind: 'model', name: 'Pet' },
+      envelopeFields: [
+        {
+          name: 'has_more',
+          type: { kind: 'primitive', type: 'boolean' },
+          required: false,
+          ...(deprecated !== undefined ? { deprecated } : {}),
+        },
+      ],
+    },
+  });
+  const withList = (op: Operation): ApiSpec => ({ ...v1, services: [{ name: 'Pets', operations: [op] }] });
+
+  it('reports the flip in envelopeFieldChanges and mirrors it as an envelope-field node, which no model carries', () => {
+    const diff = diffSpecs(withList(listPets()), withList(listPets(true)));
+    expect(diff.changes).toMatchObject([
+      {
+        kind: 'operation-modified',
+        operationName: 'listPets',
+        deprecatedChanged: false,
+        envelopeFieldChanges: [
+          {
+            kind: 'field-deprecated-changed',
+            fieldName: 'has_more',
+            classification: 'additive',
+            ...became,
+            details: 'live → deprecated',
+          },
+        ],
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.behaviorChanges).toEqual([
+      {
+        kind: 'deprecated-changed',
+        node: 'envelope-field',
+        serviceName: 'Pets',
+        operationName: 'listPets',
+        fieldName: 'has_more',
+        ...became,
+        classification: 'additive',
+      },
+    ]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+
+    expect(diffSpecs(withList(listPets(true)), withList(listPets())).behaviorChanges).toMatchObject([
+      { node: 'envelope-field', fieldName: 'has_more', ...ceased },
+    ]);
+    expect(diffSpecs(withList(listPets(false)), withList(listPets())).changes).toEqual([]);
+  });
+});
+
 describe('diffWebhooks – deprecated (Greptile round 2)', () => {
   it('reports a webhook becoming deprecated as its only change, additive, with both sides of the flip', () => {
     expect(diffWebhooks([petAdopted], [deprecatedHook])).toEqual([
