@@ -5,6 +5,10 @@ import path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 // workos/oagen#304: an inline error body is `<Op>Error<code>` (#243), but the
 // same error's body under another media type was `<Op><MediaType>Error`,
@@ -51,7 +55,7 @@ async function parse(spec: Doc): Promise<ApiSpec> {
   const file = path.join(dir, 'spec.json');
   try {
     await fs.writeFile(file, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(file);
+    return await parseSpec(file, { collapseErrorBodies: false });
   } finally {
     await fs.rm(dir, { recursive: true });
   }

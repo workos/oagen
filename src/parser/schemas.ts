@@ -167,6 +167,30 @@ interface ArrayComponentMints {
  */
 let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
 
+/**
+ * The names one discriminated union's variant models take
+ * (`planDispatcherVariants`): each object variant's name, and the names in
+ * its tree a component's model of the identical shape holds — the
+ * component's model stands for the variant's, which is not built.
+ */
+interface DispatcherUnionPlan {
+  names: Map<SchemaObject, string>;
+  shared: Set<string>;
+}
+
+/**
+ * The plans of the document's discriminated allOf + oneOf/anyOf components
+ * (`planDispatcherVariants`), keyed by the union's variant list and the
+ * component's name: what the dispatcher's mapping
+ * (`detectAllOfVariantDiscriminator`) and the variant builder
+ * (`extractDiscriminatedAllOfVariantModels`) both read, so the mapping names
+ * the models built. Decided in `extractSchemas` before any model is built
+ * and dropped with the other per-document state; empty while the plans are
+ * decided and outside an extraction, when a variant takes the name its const
+ * derives (`deriveDiscriminatedVariantName`).
+ */
+let activeDispatcherVariantPlans: Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>> = new Map();
+
 /** The array components whose reference is being built right now, so a cycle through their items is cut (`arrayComponentTypeRef`). */
 const resolvingArrayComponents = new Set<string>();
 
@@ -622,6 +646,29 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
 }
 
 /**
+ * The one variant of a single-member `oneOf`/`anyOf` — a union of exactly
+ * one variant, and that one not `null` — which the type builder keeps as a
+ * union of one variant but types by the wrapper rule, the union's
+ * documentation carried onto it (`withWrapperDocs`, in `schemaToTypeRef`'s
+ * union branch; workos/oagen#445). `undefined` otherwise: no union that
+ * types the schema (`classifyInlineSchema` — none, one under an `allOf`,
+ * which takes precedence, or one of bare limits), a `null` variant (a
+ * nullable wrapper, `nullableUnionBranch`), several variants, or a `oneOf`
+ * of consts read as an enum (`inlineEnumSpelling`), which is the schema
+ * that declares the members and so keeps its own text. Decided on a schema
+ * whose nullable wrappers are removed, as `schemaToTypeRef` decides it. The
+ * one definition for the readers that follow the type builder without
+ * typing (`unwrapCollapsedWrappers`).
+ */
+function loneUnionVariant(schema: SchemaObject): SchemaObject | undefined {
+  if (classifyInlineSchema(schema) !== 'union' || inlineEnumSpelling(schema)?.spelling === 'const-union') {
+    return undefined;
+  }
+  const variants = schema.oneOf ?? schema.anyOf ?? [];
+  return variants.length === 1 && !isNullSchema(variants[0]) ? variants[0] : undefined;
+}
+
+/**
  * The array schema `schema` is, once a nullable wrapper of any spelling is
  * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
  * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
@@ -666,17 +713,23 @@ function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
 /**
  * `schema` with every wrapper the type builder collapses stripped — a
  * nullable wrapper of any spelling (`unwrapNullableSchema`) and a
- * single-member `allOf` read as its member (`unwrappedAllOfMember`),
- * however they nest — each level's documentation carried onto what it
- * unwraps to, outermost first (`withWrapperDocs`). So its `description` is
- * the text the enum and the model built from the branch take: the
- * outermost wrapper's with content, else the next, else the branch's own.
- * A `$ref` is never followed, and a `$ref` member of an `allOf` is a
- * reference rather than a branch, so the wrapper's own text stands. Read for
- * a request body's doc text (`requestBodyDescriptionOf`).
+ * single-member `allOf` read as its member (`unwrappedAllOfMember`) — and
+ * every single-member `oneOf`/`anyOf` it keeps as a union of one variant
+ * but types by the same rule (`loneUnionVariant`), however they nest — each
+ * level's documentation carried onto what it unwraps to, outermost first
+ * (`withWrapperDocs`). So its `description` is the text the enum lifted
+ * from the branch takes: the outermost wrapper's with content, else the
+ * next, else the branch's own — and the text the model built from it takes,
+ * except under a single-member `oneOf`/`anyOf`, whose object variant's
+ * model keeps the variant's own (workos/oagen#445). A `$ref` is never
+ * followed, and a `$ref` member of an `allOf` is a reference rather than a
+ * branch, so the wrapper's own text stands. Read for a request body's doc
+ * text (`requestBodyDescriptionOf`).
  */
 export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
   const bare = unwrapNullableSchema(schema, withWrapperDocs);
+  const variant = loneUnionVariant(bare);
+  if (variant) return unwrapCollapsedWrappers(withWrapperDocs(variant, bare));
   if (!bare.allOf || classifyInlineSchema(bare) !== 'allOf' || readInlineAllOf(bare.allOf, bare) !== 'unwrapped') {
     return bare;
   }
@@ -804,9 +857,10 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
  * single-member `oneOf`/`anyOf`, which stays a union (workos/oagen#445;
  * the request body's own `oneOf` likewise), by the model extractors
  * (`unwrapNullableField` through `unwrapNullableSchema`,
- * `unwrappedAllOfMember`) and by the response path
- * (`extractDirectResource`), so a model, an enum and a field built from one
- * wrapper document themselves alike.
+ * `unwrappedAllOfMember`), by the response path (`extractDirectResource`)
+ * and by the request body's text reader, which strips the same wrappers
+ * (`unwrapCollapsedWrappers`), so a model, an enum, a field and a body's
+ * doc text built from one wrapper document themselves alike.
  */
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const carried: SchemaObject = {};
@@ -1095,6 +1149,13 @@ export function extractSchemas(
   // operation or a webhook — is then typed from its plan, by the key it
   // names.
   activeArrayComponentPlans = new Map();
+  // The discriminated variants' names, decided before the array components
+  // are planned: an array component's items step around them
+  // (`componentMints`), as they step around every other entry's names. They
+  // are decided with no plan in place, every variant read under the name
+  // its const derives.
+  activeDispatcherVariantPlans = new Map();
+  activeDispatcherVariantPlans = planDispatcherVariants(schemas);
   const arrayComponents = Object.entries(schemas)
     .filter(([, schema]) => !isEnumComponentSchema(schema) && isArrayComponentEntry(schema, schemas))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -1239,6 +1300,7 @@ export function clearSchemaNameTransform(): void {
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
   activeArrayComponentPlans = new Map();
+  activeDispatcherVariantPlans = new Map();
   markContestedTitles(undefined);
 }
 
@@ -2278,8 +2340,10 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * own first and its own declaration kept where the variant declares the same
  * property unless the variant's is the narrower (`narrowsDeclaration`: a
  * variant's `kind: { const: 'cat' }` beside an own `kind: { type: 'string' }`
- * stays `'cat'`), so the union keeps every variant, each carries the shared
- * properties and a discriminated one keeps its mapping. Every other variant
+ * stays `'cat'`, while an own `kind: { $ref: Kind }` pins the enum's values
+ * and stays over a variant's `enum` repeating them), so the union keeps
+ * every variant, each carries the shared properties and a discriminated one
+ * keeps its mapping. Every other variant
  * is typed as written: a `$ref` names a component the parser never merges
  * properties into (it may be an enum or a union it could not augment); a
  * primitive, an array or an enum is no object, so `properties` constrains
@@ -2363,10 +2427,12 @@ function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
  * variant's declaration is the narrower (`narrowsDeclaration`): JSON Schema
  * applies both, so a variant's `kind: { const: 'cat' }` beside an own
  * `kind: { type: 'string', readOnly: true }` is a read-only `'cat'`, and a
- * discriminated union keeps its mapping. The own declaration's flags,
- * documentation, limits and extensions (`declarationKeywords`) stay the
- * field's wherever the variant's sets none. The required names are the
- * union of both lists.
+ * discriminated union keeps its mapping. A `$ref` to an enum component pins
+ * that enum's values (`pinnedValues`), so an own `kind: { $ref: Kind }`
+ * stays `Kind` over a variant's `enum` that repeats its values, as an own
+ * `enum` of them does. The own declaration's flags, documentation, limits
+ * and extensions (`declarationKeywords`) stay the field's wherever the
+ * variant's sets none. The required names are the union of both lists.
  */
 function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
   if (!isInlineObjectSchema(variant)) return variant;
@@ -2387,25 +2453,87 @@ function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): Sch
 /**
  * Whether a variant's declaration of a property is narrower than the
  * schema's own (`conjoinSiblingProperties`): it is typed by the values it
- * pins (`const` or `enum`, `classifyInlineSchema`), and the own declaration
- * pins none, or pins every one of them and more. Any other pair — the same
- * values, values the own does not all admit, a variant that pins none — is
- * not, and the own declaration stays.
+ * pins (`pinnedValues`: a `const`, an `enum`, or a `$ref` to an enum
+ * component, `null` among them when it admits `null`), and the own
+ * declaration pins none — and does not forbid a `null` the variant admits
+ * (`forbidsNull`) — or pins every one of them and more. Any other pair —
+ * the same values, values the own does not all admit (`null` included, so
+ * a nullable variant beside an own that forbids `null` keeps the own), a
+ * variant that pins none — is not, and the own declaration stays.
  */
 function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
   const narrow = pinnedValues(variant);
   if (narrow === undefined) return false;
   const wide = pinnedValues(own);
-  return (
-    wide === undefined ||
-    (narrow.every((value) => wide.includes(value)) && wide.some((value) => !narrow.includes(value)))
-  );
+  if (wide === undefined) return !narrow.includes(null) || !forbidsNull(own);
+  return narrow.every((value) => wide.includes(value)) && wide.some((value) => !narrow.includes(value));
 }
 
-/** The values a declaration's `const` or `enum` pins it to, when that is what types it; `undefined` otherwise. */
-function pinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
+/**
+ * Whether a declaration that pins no values forbids `null`: it names a
+ * type (`type`) that is not `null` and admits `null` by no spelling the
+ * parser reads (`isNullableEnumSchema`). A typeless declaration, or a
+ * `$ref`, constrains nothing here.
+ */
+function forbidsNull(schema: SchemaObject): boolean {
+  return schema.type !== undefined && !isNullSchema(schema) && !isNullableEnumSchema(schema);
+}
+
+/**
+ * The values a declaration pins a property to, when that is what types it,
+ * `null` among them when the declaration admits it: its own `const`,
+ * `enum` or `oneOf`/`anyOf` of string consts (`ownPinnedValues`), or those
+ * of the schema it reaches (`referencedPinnedValues`) — the enum component
+ * its `$ref`, or a lone `allOf: [{ $ref }]` (the spelling that annotates a
+ * reference), names, read through a chain of references. So an own
+ * `kind: { $ref: Kind }`, `Kind` the enum `[cat, dog]`, pins `cat` and
+ * `dog` exactly as an own `kind: { enum: [cat, dog] }` does: it stays over
+ * a variant that repeats those values, or names more, and gives way to a
+ * variant's `const: cat`. `null` is one more value, admitted by any
+ * spelling the parser reads as nullable (`isNullableEnumSchema`: a type
+ * list naming `null`, `nullable: true`, a `null` value or variant), so a
+ * variant's `{ type: ['string', 'null'], enum: [cat] }` pins `cat` and
+ * `null` and is not narrower than an own `enum: [cat, dog]`, which forbids
+ * `null`. `undefined` for a declaration that pins none — a plain type, an
+ * object, a `$ref` to anything but an enum.
+ */
+function pinnedValues(
+  schema: SchemaObject,
+  seen: ReadonlySet<SchemaObject> = new Set(),
+): readonly unknown[] | undefined {
+  const values = ownPinnedValues(schema) ?? referencedPinnedValues(schema, seen);
+  if (values === undefined) return undefined;
+  return isNullableEnumSchema(schema) && !values.includes(null) ? [...values, null] : values;
+}
+
+/** The values `schema` pins by its own `const`, `enum` or `oneOf`/`anyOf` of string consts; `undefined` when it pins none that way. */
+function ownPinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
   const kind = classifyInlineSchema(schema);
-  return kind === 'const' ? [schema.const] : kind === 'enum' ? schema.enum : undefined;
+  if (kind === 'const') return [schema.const];
+  if (kind === 'enum') return schema.enum;
+  return isConstUnionEnumSchema(schema) ? (constUnionEnumMembers(schema) ?? undefined)?.map((m) => m.value) : undefined;
+}
+
+/**
+ * The values the one schema a declaration reaches pins (`pinnedValues`):
+ * the component its `$ref` names (`componentSchemaOf`), the one member of
+ * its lone `allOf`, or the variant its nullable union wrapper collapses to
+ * (`nullableUnionBranch`). `undefined` when it reaches none, or one already
+ * read (a cycle of references).
+ */
+function referencedPinnedValues(schema: SchemaObject, seen: ReadonlySet<SchemaObject>): readonly unknown[] | undefined {
+  const kind = classifyInlineSchema(schema);
+  const reached =
+    kind === 'ref'
+      ? schema
+      : kind === 'allOf' && schema.allOf?.length === 1
+        ? schema.allOf[0]
+        : kind === 'union'
+          ? nullableUnionBranch(schema)
+          : undefined;
+  const next = reached?.$ref ? componentSchemaOf(reached.$ref) : reached;
+  if (next === undefined || seen.has(next)) return undefined;
+  return pinnedValues(next, new Set([...seen, next]));
 }
 
 /** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
@@ -2718,6 +2846,23 @@ function mapVariantToDiscriminatorEntry(
   // Own keys only: a const spelled like an inherited property (`constructor`)
   // must not resolve to `Object.prototype`'s.
   return Object.hasOwn(discriminator.mapping, value) ? (discriminator.mapping[value] ?? null) : null;
+}
+
+/**
+ * The spec's own `discriminator.mapping` as an inline union carries it: each
+ * target with a leading `#/components/schemas/` stripped and otherwise as the
+ * document spelled it (`cat_dto` stays `cat_dto`; a target in another section
+ * stays whole) — unlike a named union's, whose targets are resolved to IR
+ * model names (`namedUnionDiscriminator`). The one reader for every site
+ * that builds an inline union, a field or a response (`schemaToTypeRef`) and
+ * a request body (`typePickedRequestBody`) alike, so the same union reads the
+ * same wherever it is written and the differ can tell a key a new variant
+ * brings from one that names no variant (#458 review).
+ */
+export function inlineMappingTargets(mapping: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(mapping ?? {}).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
+  );
 }
 
 /**
@@ -3625,12 +3770,15 @@ export function rehearse<T>(fn: () => T): T {
  * enums are read with none registered (`withoutArrayComponents`), so an
  * enum another component's items hold is never claimed for this entry. An
  * array component's items are not read here: their names come from its plan
- * (`others`), under the context it settles on.
+ * (`others`), under the context it settles on. With `dispatcherVariants`
+ * false the discriminated variants are left out: the names they are
+ * planned around (`planDispatcherVariants`).
  */
 function componentMints(
   key: string,
   schema: SchemaObject,
   schemas: Record<string, SchemaObject>,
+  dispatcherVariants = true,
 ): ReadonlyMap<string, readonly string[]> {
   const name = resolveSchemaName(key);
   return rehearse(() => {
@@ -3648,7 +3796,7 @@ function componentMints(
     }
     const extract = (): Model[] => [
       extractModel(name, schema, schemas),
-      ...extractDiscriminatedAllOfVariantModels(schema, name, schemas),
+      ...(dispatcherVariants ? extractDiscriminatedAllOfVariantModels(schema, name, schemas) : []),
       ...extractNamedUnionVariantModels(schema, name, schemas),
       ...extractInlineModelsFromSchemas({ [key]: schema }),
     ];
@@ -3906,9 +4054,11 @@ export function unionVariantsOf(schema: SchemaObject): SchemaObject[] | undefine
  * `oneOf`/`anyOf` whose variants pin one property to distinct consts is a
  * dispatcher (`detectAllOfVariantDiscriminator`): its variants' properties
  * are not read, and the discriminator is returned; otherwise every
- * variant's properties are read as branch-only, and a variant's `required`
- * is not read, since its properties are present only on that branch. With
- * `readVariants` false the union is not read at all — the dispatcher base
+ * variant's properties — those its `allOf` wrappers and the unions nested in
+ * them declare too (`flattenVariantForExtraction`) — are read as
+ * branch-only, and a variant's `required` is not read, since its properties
+ * are present only on that branch. With `readVariants` false the union is
+ * not read at all — the dispatcher base
  * reads the variant axis for its own properties only — while a nullable
  * wrapper, never a variant axis, is still applied. Shared by
  * `extractAllOfModel` and the dispatcher base of
@@ -3957,8 +4107,13 @@ function readComponentAllOfMember(
   // Flatten oneOf/anyOf variant fields into the parent model as optional
   // fields. This handles the common allOf + oneOf pattern where the spec
   // uses mutually exclusive variant groups (e.g. password vs password_hash).
+  // A variant is read as the variant builder would read it were the union
+  // dispatched (`flattenVariantForExtraction`): through its `allOf`
+  // wrappers, where the detection above finds a const too, and the unions
+  // nested in them (workos/oagen#430 review: a wrapped `{ kind: '-', meow }`
+  // lost `meow` once its nameless const sent the union here).
   for (const variant of variants) {
-    for (const [key, value] of Object.entries(variant.properties ?? {})) {
+    for (const [key, value] of Object.entries(flattenVariantForExtraction(variant).properties ?? {})) {
       if (value) declareProperty(ledger, key, value, null, true);
     }
   }
@@ -4034,7 +4189,8 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * pin one property to distinct consts makes the model a dispatcher
  * (`detectAllOfVariantDiscriminator`; its variants are built by
  * `extractDiscriminatedAllOfVariantModels`); otherwise the variants' inline
- * properties are flattened in as optional fields.
+ * properties, read through their `allOf` wrappers, are flattened in as
+ * optional fields.
  */
 function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   // One sibling set for every field of the composed model, nested `allOf`
@@ -4109,8 +4265,10 @@ function getEffectiveConstPropertyValue(schema: SchemaObject, property: string):
  * object that pins the same property to a distinct const value. Unlike
  * detectConstPropertyDiscriminator (which requires $ref or title for variant
  * model names), this version derives model names from the const value itself
- * using deriveDiscriminatedVariantName — matching how extractDiscriminatedAllOfVariantModels
- * names those models.
+ * using deriveDiscriminatedVariantName — two variants of one name, or one
+ * named as the component, make the union no axis — and maps each value to
+ * the name its model settled on (`planDispatcherVariants`), the one
+ * extractDiscriminatedAllOfVariantModels builds it under.
  *
  * Walks through allOf wrappers on each variant so a oneOf branch like
  *   { allOf: [{ properties: { type: { const: 'oauth' } } }, { oneOf: […] }] }
@@ -4144,6 +4302,7 @@ function detectAllOfVariantDiscriminator(
   // whose const gives no name, `''` or `'-'` — is as ambiguous as two
   // variants of one name (workos/oagen#430).
   const seenModelNames = new Set<string>([fallbackName]);
+  const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
   for (const v of variants) {
     const value = getEffectiveConstPropertyValue(v, candidateProperty);
     if (value === null) return null;
@@ -4151,7 +4310,7 @@ function detectAllOfVariantDiscriminator(
     // If two variants map to the same model name, the discriminator is ambiguous
     if (seenModelNames.has(modelName)) return null;
     seenModelNames.add(modelName);
-    mapping[value] = modelName;
+    mapping[value] = plan?.names.get(v) ?? modelName;
   }
 
   return { property: candidateProperty, mapping };
@@ -4217,6 +4376,14 @@ function memberUnion(
   }
 }
 
+/**
+ * The variant models of a discriminated allOf + oneOf/anyOf component: each
+ * object variant's rebuilt schema (`discriminatedVariantSchemas`) extracted
+ * with everything nested under it (`extractInlineModelDeep`) under the name
+ * the variant settled on (`planDispatcherVariants`), the one the
+ * dispatcher's mapping names. A model another entry builds for the
+ * identical shape is that entry's to build, so it is left out here.
+ */
 function extractDiscriminatedAllOfVariantModels(
   schema: SchemaObject,
   fallbackName: string,
@@ -4224,6 +4391,38 @@ function extractDiscriminatedAllOfVariantModels(
 ): Model[] {
   const models: Model[] = [];
   const seenNames = new Set<string>();
+  for (const { variants, rebuilt } of discriminatedVariantSchemas(schema, fallbackName, schemas)) {
+    const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
+    for (const { variant, merged } of rebuilt) {
+      const variantName = plan?.names.get(variant) ?? deriveDiscriminatedVariantName(variant, fallbackName);
+      for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
+        if (seenNames.has(model.name) || plan?.shared.has(model.name)) continue;
+        seenNames.add(model.name);
+        models.push(model);
+      }
+    }
+  }
+  return models;
+}
+
+/** A discriminated component's variant axis: its union's variants, and each object variant with the schema its model is built from. */
+interface DiscriminatedAxis {
+  variants: readonly SchemaObject[];
+  rebuilt: Array<{ variant: SchemaObject; merged: SchemaObject }>;
+}
+
+/**
+ * Every variant axis of a discriminated allOf + oneOf/anyOf component, each
+ * object variant rebuilt as the complete object its model is built from: the
+ * base every variant carries, then the variant's own declarations. Nothing
+ * for a component no union of which dispatches.
+ */
+function discriminatedVariantSchemas(
+  schema: SchemaObject,
+  fallbackName: string,
+  schemas?: Record<string, SchemaObject>,
+): DiscriminatedAxis[] {
+  const axesFound: DiscriminatedAxis[] = [];
 
   // Collect base-object properties + required from the allOf wrapper so each
   // variant can be emitted as a complete, self-contained type. Schemas like
@@ -4259,7 +4458,7 @@ function extractDiscriminatedAllOfVariantModels(
     }
   }
   const axes = new Set(axisVariants.keys());
-  if (axes.size === 0) return models;
+  if (axes.size === 0) return axesFound;
   const ledger = new Map<string, PropertyDeclarations>();
   const baseRequired = new Set<string>();
   const seen = new Set<SchemaObject>([schema]);
@@ -4292,6 +4491,7 @@ function extractDiscriminatedAllOfVariantModels(
   );
 
   for (const variants of axisVariants.values()) {
+    const rebuilt: DiscriminatedAxis['rebuilt'] = [];
     for (const variant of variants) {
       // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
       // OAuth branch is `allOf: [{ properties: {…} }, { oneOf: [first-party
@@ -4327,22 +4527,124 @@ function extractDiscriminatedAllOfVariantModels(
         ...externalDocsEntry(variant.externalDocs),
         ...extensionsOf(variant, SCHEMA_CONSUMED_EXTENSIONS),
       };
-
-      const variantName = deriveDiscriminatedVariantName(variant, fallbackName);
-      for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
-        if (seenNames.has(model.name)) continue;
-        seenNames.add(model.name);
-        models.push(model);
-      }
+      rebuilt.push({ variant, merged });
     }
+    axesFound.push({ variants, rebuilt });
   }
 
-  return models;
+  return axesFound;
+}
+
+/**
+ * The name of every discriminated allOf + oneOf/anyOf component's variant
+ * models, decided once per document, the components in document order, so
+ * no variant folds onto a model of another shape (workos/oagen#430 review:
+ * `CatEvent`'s `cat` variant, `CatEventCat`, was dropped for a component
+ * `CatEventCat` with more fields, and the dispatcher mapped `cat` to that
+ * component). A variant takes the name its const derives
+ * (`deriveDiscriminatedVariantName`) unless a name its tree mints there —
+ * the variant's model or one nested under it (`extractInlineModelDeep`,
+ * rehearsed) — is held with another shape: by another entry
+ * (`componentMints`: its model, enum or array, its named-union variants, the
+ * objects and enums its fields mint), by a variant an earlier dispatcher or
+ * an earlier variant of the union settled on, or, whatever its shape, by the
+ * component itself or the union's other variants. It then steps by number
+ * (`CatEventCat2`, `CatEventCat3`, …), everything nested under it moving
+ * with it. A holder of the identical shape is shared. A component's model
+ * stands for the variant's, which is not built, so the component keeps its
+ * own documentation; any other holder's copy is built as before and folds
+ * onto the other (`keepLarger`, `settleFieldInlineModels`), so the mapping
+ * never names a model a later pass may rename through another site, such as
+ * a field's object. A name that does not start with the variant's (a nested
+ * variant's title) does not move with it and is left to the rules that name
+ * it.
+ */
+function planDispatcherVariants(
+  schemas: Record<string, SchemaObject>,
+): Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>> {
+  const plans = new Map<readonly SchemaObject[], Map<string, DispatcherUnionPlan>>();
+  const dispatchers = Object.entries(schemas).flatMap(([key, schema]) => {
+    if (isEnumComponentSchema(schema) || isArrayComponentEntry(schema, schemas)) return [];
+    const name = resolveSchemaName(key);
+    const axes = discriminatedVariantSchemas(schema, name, schemas);
+    return axes.length > 0 ? [{ key, name, axes }] : [];
+  });
+  if (dispatchers.length === 0) return plans;
+  const components = componentModelNames();
+  const minted = new Map(
+    Object.entries(schemas).map(([key, schema]) => [key, componentMints(key, schema, schemas, false)] as const),
+  );
+  // Every name a variant tree settled on, with its shape, for the dispatchers after it.
+  const settled = new Map<string, string[]>();
+  for (const { key, name, axes } of dispatchers) {
+    const held = new Map<string, string[]>();
+    const hold = (holder: string, shape: string): void => {
+      held.set(holder, [...(held.get(holder) ?? []), shape]);
+    };
+    for (const [other, names] of minted) {
+      if (other !== key) for (const [holder, shapes] of names) for (const shape of shapes) hold(holder, shape);
+    }
+    for (const [holder, shapes] of settled) for (const shape of shapes) hold(holder, shape);
+    for (const { variants, rebuilt } of axes) {
+      const taken = new Set([name, ...variants.map((variant) => deriveDiscriminatedVariantName(variant, name))]);
+      const plan: DispatcherUnionPlan = { names: new Map(), shared: new Set() };
+      for (const { variant, merged } of rebuilt) {
+        const own = deriveDiscriminatedVariantName(variant, name);
+        taken.delete(own);
+        const { variantName, tree } = firstFreeVariantName(own, merged, schemas, taken, held);
+        plan.names.set(variant, variantName);
+        taken.add(variantName);
+        for (const model of tree) {
+          if (!model.name.startsWith(variantName)) continue;
+          if (held.has(model.name)) {
+            if (components.has(model.name)) plan.shared.add(model.name);
+            continue;
+          }
+          const shape = modelShapeKey(model);
+          hold(model.name, shape);
+          settled.set(model.name, [shape]);
+        }
+      }
+      plans.set(variants, new Map([...(plans.get(variants) ?? []), [name, plan]]));
+    }
+  }
+  return plans;
+}
+
+/**
+ * The first of `base`, `base2`, `base3`, … under which a variant's tree
+ * — its rebuilt schema `merged`, extracted with everything nested under it
+ * — mints no name starting with the candidate that is `taken`, or `held`
+ * with a shape other than the one it mints; with that tree. It ends: each
+ * candidate's names start with the candidate, and a held or taken name
+ * starts with finitely many of them.
+ */
+function firstFreeVariantName(
+  base: string,
+  merged: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  taken: ReadonlySet<string>,
+  held: ReadonlyMap<string, readonly string[]>,
+): { variantName: string; tree: Model[] } {
+  for (let n = 1; ; n++) {
+    const variantName = n === 1 ? base : `${base}${n}`;
+    if (taken.has(variantName)) continue;
+    const tree = rehearse(() => extractInlineModelDeep(variantName, merged, schemas));
+    const free = tree.every(
+      (model) =>
+        !model.name.startsWith(variantName) ||
+        (!taken.has(model.name) && (held.get(model.name) ?? []).every((shape) => shape === modelShapeKey(model))),
+    );
+    if (free) return { variantName, tree };
+  }
 }
 
 /**
  * Flatten a oneOf variant schema into a single object-shaped schema for
- * variant-model extraction. Recursively merges `allOf` members and folds
+ * variant-model extraction, and for a union no discriminator dispatches,
+ * whose variants a component's model flattens in
+ * (`readComponentAllOfMember`), so a variant declares the same properties
+ * either way. Recursively merges `allOf` members and folds
  * any nested `oneOf` into an inline-oneOf field group whose properties are
  * the union across sub-branches (required only when present in every
  * sub-branch). Returns the schema unchanged when no flattening is needed.
@@ -4784,10 +5086,7 @@ export function schemaToTypeRef(
     let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
     if (schema.discriminator) {
       const property = schema.discriminator.propertyName;
-      const explicitMapping = schema.discriminator.mapping ?? {};
-      let mapping: Record<string, string> = Object.fromEntries(
-        Object.entries(explicitMapping).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
-      );
+      let mapping: Record<string, string> = inlineMappingTargets(schema.discriminator.mapping);
       if (Object.keys(mapping).length === 0) {
         const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, inlineVariantNames);
         if (inlineMapping) mapping = inlineMapping;
@@ -4859,7 +5158,9 @@ export function schemaToTypeRef(
         // document wrote for its variant: the variant is typed with the
         // union's documentation by the one wrapper rule (`withWrapperDocs`),
         // so an inline enum it lifts to documents itself as under a nullable
-        // wrapper. The lookups read the variant as written.
+        // wrapper. The lookups read the variant as written. A reader that
+        // follows this decision without typing — a request body's doc text —
+        // takes it from `loneUnionVariant`.
         const typed = nonNullVariants.length === 1 ? withWrapperDocs(v, schema) : v;
         const entry = variantContexts.get(v);
         variants.push(
