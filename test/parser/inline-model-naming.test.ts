@@ -475,6 +475,35 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('keeps the plain name on POST /v1/pets/{id}/adopt/now beside POST /v1/pets/{id}:adopt:now, a literal segment (issue #378)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const idParam = [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }];
+    const colon = { post: { ...fooBar.post, parameters: idParam } };
+    const slash = { post: { ...fooSlashBar.post, parameters: idParam } };
+
+    // `{id}:adopt:now` is kept whole for its several colons and is no
+    // parameter, so it does not flatten to the slash form's `ByIdAdoptNow`.
+    const names = await namesInBothOrders([
+      ['/v1/pets/{id}:adopt:now', colon],
+      ['/v1/pets/{id}/adopt/now', slash],
+    ]);
+    expect(names).toEqual({
+      '/v1/pets/{id}/adopt/now': ['V1PetsByIdAdoptNowPostRequest', 'V1PetsByIdAdoptNowPostResponse'],
+      '/v1/pets/{id}:adopt:now': ['V1PetsIdAdoptNowPostRequest', 'V1PetsIdAdoptNowPostResponse'],
+    });
+
+    // As a literal it is irregular (pathDeviation), so the slash form it does
+    // flatten to keeps the plain name.
+    const literal = await namesInBothOrders([
+      ['/v1/pets/{id}:adopt:now', colon],
+      ['/v1/pets/id/adopt/now', fooSlashBar],
+    ]);
+    expect(literal['/v1/pets/id/adopt/now']).toEqual(['V1PetsIdAdoptNowPostRequest', 'V1PetsIdAdoptNowPostResponse']);
+    expect(literal['/v1/pets/{id}:adopt:now'][0]).not.toBe('V1PetsIdAdoptNowPostRequest');
+    expect(literal['/v1/pets/{id}:adopt:now'][1]).not.toBe('V1PetsIdAdoptNowPostResponse');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it('still hashes both GET /tags/{tag}.json and GET /tags/{tag}/json: a parameter segment is never irregular, so a path without a colon scores as before', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const tagParam = [{ name: 'tag', in: 'path', required: true, schema: { type: 'string' } }];

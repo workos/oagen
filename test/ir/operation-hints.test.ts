@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   deriveMethodName,
   findResolvedMethodCollisions,
+  isParameterSegment,
   pathSegments,
   readPath,
   resolveMountTarget,
@@ -75,6 +76,83 @@ describe('pathSegments (issue #269)', () => {
     expect(readPath('/pets:batchGet').map((s) => s.customMethod)).toEqual([false, true]);
     expect(readPath('/pets/{petId}/adopt').map((s) => s.customMethod)).toEqual([false, false, false]);
     expect(readPath('/{a:b}')).toEqual([{ text: '{a:b}', customMethod: false }]);
+  });
+});
+
+describe('readPath: a colon that is not a custom method (issue #378)', () => {
+  const service = svc('Files', []);
+
+  it('keeps a colon inside any braces of a segment, not only braces that start it', () => {
+    expect(readPath('/v1/files/file-{file_path:path}')).toEqual([
+      { text: 'v1', customMethod: false },
+      { text: 'files', customMethod: false },
+      { text: 'file-{file_path:path}', customMethod: false },
+    ]);
+    expect(readPath('/v1/files/file-{file_path:path}:download')).toEqual([
+      { text: 'v1', customMethod: false },
+      { text: 'files', customMethod: false },
+      { text: 'file-{file_path:path}', customMethod: false },
+      { text: 'download', customMethod: true },
+    ]);
+    expect(pathSegments('/files/{a}.{b:c}')).toEqual(['files', '{a}.{b:c}']);
+    expect(pathSegments('/files/{a:b}:{c:d}')).toEqual(['files', '{a:b}', '{c:d}']);
+  });
+
+  it('keeps a segment with several colons whole: AIP-136 appends a single custom method', () => {
+    expect(readPath('/things/urn:pet:1')).toEqual([
+      { text: 'things', customMethod: false },
+      { text: 'urn:pet:1', customMethod: false },
+    ]);
+    expect(pathSegments('/things/{id}:a:b')).toEqual(['things', '{id}:a:b']);
+    expect(readPath('/things/urn:pet').map((s) => s.customMethod)).toEqual([false, false, true]);
+    // Colons inside braces do not count, and a doubled colon counts as several.
+    expect(pathSegments('/pets/{a:b}:x:y')).toEqual(['pets', '{a:b}:x:y']);
+    expect(pathSegments('/pets::batchGet')).toEqual(['pets::batchGet']);
+  });
+
+  it('reads a colon at the edge of a segment and an unclosed brace as before (#461 review)', () => {
+    expect(readPath('/pets/:adopt')).toEqual([
+      { text: 'pets', customMethod: false },
+      { text: 'adopt', customMethod: true },
+    ]);
+    expect(pathSegments('/pets:')).toEqual(['pets']);
+    expect(pathSegments('/{petId}:')).toEqual(['{petId}']);
+    expect(readPath('/{x:y')).toEqual([
+      { text: '{x', customMethod: false },
+      { text: 'y', customMethod: true },
+    ]);
+  });
+
+  it('reads a segment kept whole for its several colons as a literal, even when a parameter opens it', () => {
+    const params = ['{petId}', '{pet:id}', '{tag}.json', '{a}.{b:c}', '{x'];
+    const literals = ['{petId}:adopt:now', '{a:b}:x:y', 'urn:pet:1', 'file-{file_path:path}', 'pets'];
+    expect(params.filter((segment) => !isParameterSegment(segment))).toEqual([]);
+    expect(literals.filter((segment) => isParameterSegment(segment))).toEqual([]);
+  });
+
+  it('names a segment kept whole for its several colons from its text, even one that ends with a parameter', () => {
+    const pets = svc('Pets', [op('get', '/pets/{id}'), op('get', '/pets/{id}:a:b{ext}')]);
+    expect(pets.operations.map((o) => deriveMethodName(o, pets))).toEqual(['get_pet', 'list_{id}:a:b{ext}']);
+    expect(findResolvedMethodCollisions(resolveOperations(spec([pets])))).toEqual([]);
+  });
+
+  it('names an action after a segment kept whole for its several colons from that segment, not from the collection before it (#461 review)', () => {
+    // The action's context skips parameters only, so `{id}:a:b` is the
+    // resource and the name does not collide with the action on `/pets`.
+    const pets = svc('Pets', [op('post', '/pets/{id}:a:b/verify'), op('post', '/pets/verify')]);
+    expect(pets.operations.map((o) => deriveMethodName(o, pets))).toEqual(['verify_{id}:a:b', 'verify_pet']);
+    expect(findResolvedMethodCollisions(resolveOperations(spec([pets])))).toEqual([]);
+    // A parameter segment that does not end in `}` is skipped as before.
+    expect(deriveMethodName(op('post', '/tags/{tag}.json/verify'), service)).toBe('verify_tag');
+  });
+
+  it('names the issue repro as the segments read before #322, the custom method still split off', () => {
+    // A literal segment is snake-cased as written, so the segment kept whole
+    // names the GET as `file-{file_path}` names it, never the cut `list_path}`.
+    expect(deriveMethodName(op('get', '/v1/files/file-{file_path}'), service)).toBe('list_file_{file_path}');
+    expect(deriveMethodName(op('get', '/v1/files/file-{file_path:path}'), service)).toBe('list_file_{file_path:path}');
+    expect(deriveMethodName(op('post', '/v1/files/file-{file_path:path}:download'), service)).toBe('create_download');
+    expect(deriveMethodName(op('get', '/things/urn:pet:1'), service)).toBe('list_urn:pet:1');
   });
 });
 
