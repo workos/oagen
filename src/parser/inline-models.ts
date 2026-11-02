@@ -37,6 +37,8 @@ import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from 
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { resolveComponentRef } from './path-item-refs.js';
+import { parameterTyping, type SchemaOrContent } from './operations.js';
+import { parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -892,6 +894,8 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
 
 /** The Path Item Object's operation fields, the keys the operation readers dispatch on. */
 const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
+/** The `in` locations a parameter is typed at (`extractParams`); one declared anywhere else is never read. */
+const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'query', 'header', 'cookie']);
 
 /**
  * Every schema root of the document outside `components.schemas`, found by
@@ -1012,12 +1016,20 @@ type SiteDirection = 'sent' | 'received';
  * The components the SDK only sends, by resolved name (`resolveSchemaName`):
  * those reached by at least one site the parser reads and by none that the
  * SDK receives. What an operation under `paths` sends is its request body,
- * under every media type, and its parameters, the Path Item's included, each
- * written inline or through `components/requestBodies` and
- * `components/parameters`, typed by `schema` or `content`; what it receives
+ * under every media type, and the parameters it types — the Path Item's,
+ * then its own, an operation parameter replacing a Path Item one of the same
+ * identity (`parameterKey`: location and name, a header's name case-folded)
+ * as `buildOperation` merges them, so a Path Item parameter the operation
+ * overrides is no site — each written inline or through
+ * `components/requestBodies` and `components/parameters`; what it receives
  * is every response it declares — a body at any status code, `default` or
  * range, and a header, inline or through `components/responses` and
- * `components/headers`. A webhook's payload and parameters are received; its
+ * `components/headers`. A parameter or header is read by the one schema
+ * that types it (`parameterTyping`): its `schema`, else the schema of the
+ * `content` entry `selectParameterContent` picks, so one the parser types
+ * as a string — a `content` map none of whose media types is read, or a
+ * map beside a `schema`, which wins — reaches nothing. A webhook's payload
+ * and parameters are received, merged the same way (`extractWebhooks`); its
  * responses type no body (`extractWebhookResponses`), and `callbacks` are
  * never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
@@ -1092,15 +1104,41 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
     if (!isRecord(value)) return;
     for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
   };
-  /** A Parameter or Header Object, or a reference to one. */
-  const parameter = (value: unknown, section: 'parameters' | 'headers', direction: SiteDirection): void => {
-    const resolved = follow(value, section);
-    if (!resolved) return;
-    schema(resolved['schema'], direction);
-    content(resolved['content'], direction);
+  /**
+   * A Parameter or Header Object, read by the one schema that types it
+   * (`parameterTyping`): its `schema`, else the schema of the `content`
+   * entry `selectParameterContent` picks. One typed as a string — a
+   * `content` map none of whose media types is read, or no schema at all —
+   * reaches nothing, and a `content` map beside a `schema` is not consulted.
+   */
+  const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
+    const { schema: own, content: map } = declaration;
+    schema(
+      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
+      direction,
+    );
   };
-  const parameters = (list: unknown, direction: SiteDirection): void => {
-    if (Array.isArray(list)) for (const entry of list) parameter(entry, 'parameters', direction);
+  /**
+   * The parameters `operation` types, resolved as `buildOperation` and
+   * `extractWebhooks` resolve them: the Path Item's, then its own, each
+   * Reference Object followed, an operation parameter replacing a Path Item
+   * one of the same identity (`parameterKey`: location and name, a header's
+   * name case-folded). A Path Item parameter the operation overrides is not
+   * read, and one under no operation is read by nothing.
+   */
+  const parameters = (item: Record<string, unknown>, operation: Record<string, unknown>, direction: SiteDirection) => {
+    const byIdentity = new Map<string, Record<string, unknown>>();
+    for (const list of [item['parameters'], operation['parameters']]) {
+      if (!Array.isArray(list)) continue;
+      for (const raw of list) {
+        const resolved = follow(raw, 'parameters');
+        const location = resolved?.['in'];
+        if (!resolved || !PARAMETER_LOCATIONS.has(location as ParameterLocation)) continue;
+        const name = resolved['name'];
+        byIdentity.set(parameterKey(location as ParameterLocation, typeof name === 'string' ? name : ''), resolved);
+      }
+    }
+    for (const resolved of byIdentity.values()) typed(resolved, direction);
   };
   const pathItems = (map: unknown, webhooks: boolean): void => {
     if (!isRecord(map)) return;
@@ -1110,11 +1148,10 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       if (key.startsWith('x-')) continue;
       const item = follow(raw, 'pathItems');
       if (!item) continue;
-      parameters(item['parameters'], request);
       for (const method of PATH_ITEM_OPERATIONS) {
         const operation = item[method];
         if (!isRecord(operation)) continue;
-        parameters(operation['parameters'], request);
+        parameters(item, operation, request);
         content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
         const responses = operation['responses'];
         if (webhooks || !isRecord(responses)) continue;
@@ -1123,7 +1160,11 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
           if (code.startsWith('x-') || !response) continue;
           content(response['content'], 'received');
           const headers = response['headers'];
-          if (isRecord(headers)) for (const header of Object.values(headers)) parameter(header, 'headers', 'received');
+          if (!isRecord(headers)) continue;
+          for (const header of Object.values(headers)) {
+            const resolved = follow(header, 'headers');
+            if (resolved) typed(resolved, 'received');
+          }
         }
       }
     }

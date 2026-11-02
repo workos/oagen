@@ -803,6 +803,47 @@ describe('a component field’s object is sent when every site reaching the comp
       expect(warnings, label).toEqual([]);
     }
   });
+
+  it('a parameter the parser types as a string, or never reads, sends nothing (review)', async () => {
+    // Each parameter below names `Pet` somewhere the parser does not read —
+    // it types the parameter as a string — so no operation sends `Pet`, and
+    // its owner shares `PetOwner` as it does for a component no site reaches.
+    const cases: Array<[string, Record<string, unknown>, unknown[]]> = [
+      [
+        'a `content` map none of whose media types is read',
+        { '/pets': getWith([{ name: 'pet', in: 'query', content: { 'application/xml': { schema: ref('Pet') } } }]) },
+        [expect.stringContaining('Parameter "pet" (in: query) on listPets is typed as a string')],
+      ],
+      [
+        'a `content` map beside a `schema`, which wins',
+        { '/pets': getWith([{ name: 'pet', in: 'query', schema: str, ...body(ref('Pet')) }]) },
+        [],
+      ],
+      [
+        'a Path Item parameter the operation overrides',
+        {
+          '/pets': {
+            parameters: [{ name: 'filter', in: 'query', schema: ref('Pet') }],
+            ...getWith([{ name: 'filter', in: 'query', schema: str }]),
+          },
+        },
+        [],
+      ],
+    ];
+    for (const openapi of ['3.0.3', '3.1.0']) {
+      for (const [i, [label, paths, expected]] of cases.entries()) {
+        const subject = `${label} (OpenAPI ${openapi})`;
+        const { spec, warnings } = await parse(`unread-${openapi}-${i}`, { ...doc(paths), openapi });
+        expect(petModels(spec), subject).toEqual(shared);
+        expect(warnings, subject).toEqual(expected);
+        expect(
+          opsOf(spec).listPets?.queryParams.map((p) => (p.type.kind === 'primitive' ? p.type.type : p.type.kind)),
+          subject,
+        ).toEqual(['string']);
+        expectSound(spec, { Pet: ['owner'], PetOwner: ['name'] });
+      }
+    }
+  });
 });
 
 describe('identical bodies that must leave a component’s name share one model (review)', () => {

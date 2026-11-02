@@ -5567,9 +5567,77 @@ describe('sentOnlyComponentNames: the components every site the parser reads onl
     };
     const paths = {
       '/pets': { $ref: '#/components/pathItems/Pets' },
-      '/loop': { parameters: [{ $ref: '#/components/parameters/Loop' }, { $ref: '#/components/parameters/None' }] },
+      // Read through the operation, as a Path Item's parameters are (`buildOperation`).
+      '/loop': {
+        parameters: [{ $ref: '#/components/parameters/Loop' }, { $ref: '#/components/parameters/None' }],
+        get: { responses: {} },
+      },
     };
     expect(sorted(sentOnlyComponentNames(doc(paths, components)))).toEqual(['Pet']);
+  });
+
+  it('reads a parameter by the one schema that types it, and a Path Item parameter the operation overrides not at all (review)', () => {
+    const str = { type: 'string' };
+    const list = (parameters: unknown[]) => ({ get: { operationId: 'listPets', parameters, responses: {} } });
+    const xml = { content: { 'application/xml': { schema: ref('Pet') } } };
+    const petFilter = { name: 'filter', in: 'query', schema: ref('Pet') };
+    // A parameter typed as a string (`parameterTyping`), or one the parser
+    // never reads, is no site: `Pet` is reached by nothing.
+    const unread: Array<[string, Record<string, unknown>, Record<string, unknown>?]> = [
+      ['a `content` map none of whose media types is read', { '/pets': list([{ name: 'pet', in: 'query', ...xml }]) }],
+      [
+        'a `content` map beside a `schema`, which wins',
+        { '/pets': list([{ name: 'pet', in: 'query', schema: str, ...json(ref('Pet')) }]) },
+      ],
+      [
+        'a Path Item parameter the operation overrides',
+        { '/pets': { parameters: [petFilter], ...list([{ name: 'filter', in: 'query', schema: str }]) } },
+      ],
+      [
+        'a Path Item header the operation overrides under another case',
+        {
+          '/pets': {
+            parameters: [{ name: 'X-Pet', in: 'header', schema: ref('Pet') }],
+            ...list([{ name: 'x-pet', in: 'header', schema: str }]),
+          },
+        },
+      ],
+      [
+        'a Path Item parameter overridden through `components/parameters`',
+        { '/pets': { parameters: [petFilter], ...list([{ $ref: '#/components/parameters/Filter' }]) } },
+        { parameters: { Filter: { name: 'filter', in: 'query', schema: str } } },
+      ],
+      ['a Path Item parameter under no operation', { '/pets': { parameters: [petFilter] } }],
+    ];
+    for (const [label, paths, components] of unread) {
+      expect(sorted(sentOnlyComponentNames(doc(paths, components))), label).toEqual([]);
+    }
+    const read: Array<[string, Record<string, unknown>]> = [
+      [
+        'the `content` entry the parser picks, beside one it does not read',
+        {
+          '/pets': list([
+            {
+              name: 'pet',
+              in: 'query',
+              content: { 'application/xml': { schema: str }, 'application/json': { schema: ref('Pet') } },
+            },
+          ]),
+        },
+      ],
+      [
+        'a Path Item parameter the operation keeps, its own of that name sitting elsewhere',
+        { '/pets': { parameters: [petFilter], ...list([{ name: 'filter', in: 'header', schema: str }]) } },
+      ],
+      [
+        'an operation parameter that overrides a Path Item one',
+        { '/pets': { parameters: [{ name: 'filter', in: 'query', schema: str }], ...list([petFilter]) } },
+      ],
+    ];
+    for (const [label, paths] of read) expect(sorted(sentOnlyComponentNames(doc(paths))), label).toEqual(['Pet']);
+    // A response header is read the same way: typed as a string, it receives nothing, so `Pet` stays only sent.
+    const header = create(json(ref('Pet')), { '200': { description: 'ok', headers: { 'X-Pet': xml } } });
+    expect(sorted(sentOnlyComponentNames(doc({ '/pets': header })))).toEqual(['Pet']);
   });
 
   it('counts two keys that resolve to one name as one component only sent when both are', () => {
