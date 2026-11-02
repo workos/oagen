@@ -1926,6 +1926,45 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    it('keeps the data array’s items against a member that only describes them, in the model and in the read alike (#431)', async () => {
+      // The issue's `PetPage`: one member declares `data: Pet[]`, another only
+      // documents the array and its items. A typeless `items` only annotates
+      // the typed one, whichever member comes first.
+      const typed = { type: 'object', properties: { data: petArray, has_more: { type: 'boolean' } } };
+      const described = {
+        type: 'object',
+        properties: { data: { type: 'array', description: 'The pets on this page', items: { description: 'A pet' } } },
+      };
+      const pets = { kind: 'array', items: { kind: 'model', name: 'Pet' } };
+      const expected = {
+        ...page,
+        dataPath: 'data',
+        endOfIteration: { kind: 'hasMore', path: 'has_more' },
+        itemType: 'Pet',
+      };
+      for (const [label, members] of [
+        ['typed first', [typed, described]],
+        ['described first', [described, typed]],
+      ] as const) {
+        const PetPage = { allOf: members };
+        const referencedIr = await parseJson(
+          listOp({ $ref: '#/components/schemas/PetPage' }, { dataPath: 'data' }, { PetPage }),
+        );
+        const referenced = onlyOperation(referencedIr);
+        const data = referencedIr.models.find((m) => m.name === 'PetPage')?.fields.find((f) => f.name === 'data');
+        expect(data?.type, `${label}: PetPage.data`).toEqual(pets);
+        expect(projection(referenced), `${label}: $ref wrapper`).toEqual(expected);
+        const inline = onlyOperation(await parseJson(listOp(PetPage, { dataPath: 'data' })));
+        expect(inline.response, `${label}: inline wrapper`).toEqual(pets);
+        expect(projection(inline), `${label}: inline wrapper`).toEqual({
+          ...expected,
+          dataDescription: 'The pets on this page',
+          envelopeFields: ['has_more'],
+        });
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it('names a stop field the wrapper model declares when two members declare the parent object (Greptile)', async () => {
       // Two `allOf` members declare `result`: the first with the array, the
       // second with the stop field. The model's `result` conjoins both, as the
