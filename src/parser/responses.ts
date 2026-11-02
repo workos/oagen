@@ -251,9 +251,10 @@ export function classifyAndExtractResponse(
  * the path walked), and `detectEndOfIteration` reads them as it reads an
  * unwrapped envelope's: the fields beside the array the path names first,
  * under a parent of any name (`result.total_pages` next to `result.items`),
- * then the top level, then the metadata companions, and never the array
- * itself. `undefined` when nothing recognizable is declared, or the body
- * resolves to no object at all.
+ * then those beside each object the path passes through, nearest the array
+ * first, then the top level, then the metadata companions, and never the
+ * array or an object on the path itself. `undefined` when nothing
+ * recognizable is declared, or the body resolves to no object at all.
  */
 function bodyEndOfIteration(
   schema: SchemaObject,

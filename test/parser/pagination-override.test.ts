@@ -1922,6 +1922,43 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    it('reads the stop field beside every object the path passes through, nearest the array first (#433)', async () => {
+      // The issue's three bodies, written inline and as a `$ref` to a
+      // component of the same shape.
+      const object = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+      const total_pages = { type: 'integer' };
+      const bodies: Array<[string, string, Record<string, unknown>, string]> = [
+        [
+          'grandparent',
+          'result.page.items',
+          { result: object({ page: object({ items: petArray }), total_pages }) },
+          'result.total_pages',
+        ],
+        ['parent', 'result.items', { result: object({ items: petArray, total_pages }) }, 'result.total_pages'],
+        [
+          'top',
+          'result.page.items',
+          { result: object({ page: object({ items: petArray }) }), total_pages },
+          'total_pages',
+        ],
+      ];
+      for (const [label, dataPath, properties, path] of bodies) {
+        const expected = {
+          dataPath,
+          itemType: { kind: 'model', name: 'Pet' },
+          endOfIteration: { kind: 'totalPages', path },
+        };
+        const inline = onlyOperation(await parseJson(listOp(object(properties), { dataPath })));
+        expect(inline.pagination, `${label} (inline)`).toMatchObject(expected);
+        const Envelope = object(properties);
+        const referenced = onlyOperation(
+          await parseJson(listOp({ $ref: '#/components/schemas/Envelope' }, { dataPath }, { Envelope })),
+        );
+        expect(referenced.pagination, `${label} ($ref)`).toMatchObject(expected);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
     it("ends the walk where a component reaches itself through a nullable allOf member (Greptile's cycle)", async () => {
       // `Base.allOf` holds a nullable reference back to `Base`; beside it
       // `{ data, has_more }` makes the body a recognized envelope, so the

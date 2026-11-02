@@ -260,20 +260,23 @@ export function looksLikePaginationMetadata(name: string): boolean {
  * The fields beside the array are considered first: when the path is
  * nested, the other properties of the object the array sits in, under
  * whatever name that object has (`result.total_pages` beside
- * `result.items`, `data.page.has_more` beside `data.page.items`), the
- * parent reached exactly as the path itself is resolved
- * (`resolveSchemaPath` from the merged properties), so one behind a `$ref`,
- * an `allOf` or a nullable wrapper is read as the walk reads it. Then the
- * top-level fields, then the fields one level down inside each top-level
- * object companion whose name says it is pagination metadata
+ * `result.items`, `data.page.has_more` beside `data.page.items`), then
+ * those of each object the path passes through on its way there, nearest
+ * the array first (`result.total_pages` beside `result.page` for
+ * `result.page.items`), every one reached exactly as the path itself is
+ * resolved (`resolveSchemaPath` from the merged properties), so one behind
+ * a `$ref`, an `allOf` or a nullable wrapper is read as the walk reads it.
+ * Then the top-level fields, then the fields one level down inside each
+ * top-level object companion whose name says it is pagination metadata
  * (`looksLikePaginationMetadata`: `meta`, `pagination`, `page_info`, ..., in
  * any spelling — `pageInfo` and `PageInfo` as much as `page_info`; an
  * inline object, a `$ref` to a component, an `allOf` of those, or a nullable
  * wrapper around one), so a `stats.total` beside `pagination.page` is not
- * taken for the list's size. The array itself is never a stop field,
- * whatever it is called. The path follows the `dataPath` convention —
- * `has_more`, `result.total_pages` or `pagination.totalPages` — and spells
- * each segment as the document does (`pageInfo.hasNextPage`). When several
+ * taken for the list's size. Nothing the path passes through — the array,
+ * or an object on the way to it — is ever a stop field, whatever it is
+ * called. The path follows the `dataPath` convention — `has_more`,
+ * `result.total_pages` or `pagination.totalPages` — and spells each
+ * segment as the document does (`pageInfo.hasNextPage`). When several
  * candidates exist, a `hasMore` boolean wins over a `totalPages` integer,
  * which wins over a `totalCount` integer; within one kind the first in scan
  * order wins. A candidate whose type does not fit its kind (a string
@@ -290,18 +293,19 @@ export function detectEndOfIteration(
     if (kind && !found.has(kind)) found.set(kind, path);
   };
 
+  // Every object on the path, nearest the array first, without the property
+  // the path goes on through; the top level, the outermost, comes last.
   const segments = dataPath.split('.');
-  const arrayName = segments[segments.length - 1];
-  if (segments.length > 1) {
-    const parentPath = segments.slice(0, -1).join('.');
+  for (let depth = segments.length - 1; depth > 0; depth--) {
+    const parentPath = segments.slice(0, depth).join('.');
     const parent = resolveSchemaPath({ properties }, parentPath, componentSchemas);
     for (const [inner, innerSchema] of Object.entries(parent ? objectProperties(parent, componentSchemas) : {})) {
-      if (innerSchema && inner !== arrayName) record(inner, `${parentPath}.${inner}`, innerSchema);
+      if (innerSchema && inner !== segments[depth]) record(inner, `${parentPath}.${inner}`, innerSchema);
     }
   }
 
   const companions = Object.entries(properties).filter(
-    (entry): entry is [string, SchemaObject] => entry[0] !== dataPath && entry[1] !== undefined,
+    (entry): entry is [string, SchemaObject] => entry[0] !== segments[0] && entry[1] !== undefined,
   );
   for (const [name, schema] of companions) record(name, name, schema);
   for (const [name, schema] of companions) {
@@ -460,10 +464,10 @@ function objectProperties(
  * `allOf` members, with the `required` lists that go with them — the one
  * walk through a composite schema: a list envelope's companions
  * (`extractListResponse`), a kept wrapper's stop field
- * (`bodyEndOfIteration`), a metadata companion's fields and the object
- * beside a nested array (`detectEndOfIteration`) and every segment of a
- * `dataPath` (`resolveSchemaPath`) are all read through it, so they see one
- * shape at every level.
+ * (`bodyEndOfIteration`), a metadata companion's fields and each object
+ * on the path to a nested array (`detectEndOfIteration`) and every
+ * segment of a `dataPath` (`resolveSchemaPath`) are all read through it,
+ * so they see one shape at every level.
  *
  * Every node the walk meets — the body, then each `allOf` member, however
  * deep — is read through `resolveBareSchema`, the resolver the explicit
