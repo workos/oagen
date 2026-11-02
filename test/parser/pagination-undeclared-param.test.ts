@@ -617,4 +617,70 @@ describe('a list envelope on an operation without a paging parameter (issue #309
     expect(warnings()).toEqual([]);
     expectSound(withSecondary);
   });
+
+  describe('a secondary 2xx envelope the override cannot stop on is kept too, while the primary is iterated (#436)', () => {
+    // Only the override pages the operation (`page` without a page size makes
+    // no iterator). Its `endOfIteration` resolves in the 200, so the override
+    // applies; a 201 that lacks the field, or types it otherwise, is a body
+    // the iterator cannot stop on, so its envelope stays the wire shape — as
+    // one the override's `dataPath` reaches no array in does — instead of
+    // being unwrapped into a bare array that drops its companions.
+    const withCreated = (companions: Record<string, unknown>, dataPath?: string) => {
+      const doc = petsSpec([query('page')], totalPagesEnvelope, {
+        'x-pagination': {
+          strategy: 'page',
+          ...(dataPath !== undefined && { dataPath }),
+          endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+        },
+      });
+      const created = {
+        type: 'object',
+        properties: { data: { type: 'array', items: { type: 'string' } }, ...companions },
+      };
+      Object.assign(doc.paths['/pets'].get.responses, {
+        '201': { description: 'created', content: { 'application/json': { schema: created } } },
+      });
+      return doc;
+    };
+    const unwrapped = { kind: 'array', items: { kind: 'primitive', type: 'string' } };
+
+    it.each([
+      ['lacks the stop field (the issue repro)', { has_more: { type: 'boolean' } }, undefined, ['data', 'has_more']],
+      ['types the stop field otherwise', { total_pages: { type: 'string' } }, undefined, ['data', 'total_pages']],
+      [
+        'lacks the stop field, though the dataPath reaches its array',
+        { has_more: { type: 'boolean' } },
+        'data',
+        ['data', 'has_more'],
+      ],
+    ])('a 201 that %s keeps its envelope as a plain model', async (_label, companions, dataPath, fields) => {
+      const ir = await parseJson(withCreated(companions, dataPath));
+      const op = onlyOperation(ir);
+      expect(op.response).toEqual(unwrapped);
+      expect(op.pagination).toMatchObject({
+        strategy: 'page',
+        param: 'page',
+        dataPath: 'data',
+        endOfIteration: { kind: 'totalPages', path: 'total_pages' },
+      });
+      const secondary = op.successResponses?.find((r) => r.statusCode === 201)?.type;
+      expect(secondary?.kind).toBe('model');
+      const wrapper = ir.models.find((m) => secondary?.kind === 'model' && m.name === secondary.name);
+      expect(wrapper?.fields.map((f) => f.name)).toEqual(fields);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+
+    it('a 201 that declares the stop field with the fitting type is unwrapped like the 200', async () => {
+      const ir = await parseJson(withCreated({ total_pages: { type: 'integer' } }));
+      const op = onlyOperation(ir);
+      expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
+        [200, unwrapped],
+        [201, unwrapped],
+      ]);
+      expect(ir.models).toEqual([]);
+      expect(warnings()).toEqual([]);
+      expectSound(ir);
+    });
+  });
 });
