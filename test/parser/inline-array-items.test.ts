@@ -843,6 +843,93 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
       expect(kindOf(keyword, documented, str), keyword).toBe(documented);
     }
   });
+
+  it('reads the enum a `$ref` names as the values a declaration pins, so an own `Kind` stays over a variant repeating them (#392 review)', async () => {
+    const Kind: SchemaObject = { $ref: '#/components/schemas/Kind' };
+    const kinds: SchemaObject = { type: 'string', enum: ['cat', 'dog'] };
+    const kinded = (own: SchemaObject, cat: SchemaObject, dog: SchemaObject = cat): SchemaObject =>
+      obj({ kind: own }, { oneOf: [obj({ kind: cat, meow: str }), obj({ kind: dog, bark: str })] });
+    const getPet = (response: SchemaObject) => ({
+      '/pets/{id}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+          responses: ok(response),
+        },
+      },
+    });
+    const kindDoc = (openapi: string, pet: SchemaObject, kind: SchemaObject = kinds) => ({
+      ...specDoc(getPet(obj({ pet })), { Kind: kind }),
+      openapi,
+    });
+    /** The models and enums a document gives, as the issue projects them. */
+    const shapes = async (label: string, doc: unknown) => {
+      const { spec, warnings } = await parse(label, doc);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, ['Kind', 'Holder']);
+      return {
+        models: spec.models.map(describeModel),
+        enums: spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+      };
+    };
+    const same: SchemaObject = { enum: ['cat', 'dog'] };
+    const wider: SchemaObject = { enum: ['cat', 'dog', 'bird'] };
+    const kept = {
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | GetPetResponsePetWithBark) }',
+        'GetPetResponsePet { kind: Kind, meow: string }',
+        'GetPetResponsePetWithBark { kind: Kind, bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    };
+    // An own `$ref` to the enum, or a lone `allOf` naming it, beside variants that repeat its values or
+    // name more: `Kind` stays and no per-variant enum is minted, in OAS 3.1 and 3.0 alike.
+    const owns: Array<[string, SchemaObject]> = [
+      ['ref', Kind],
+      ['allof-ref', { allOf: [Kind] }],
+    ];
+    const variants: Array<[string, SchemaObject]> = [
+      ['same', same],
+      ['wider', wider],
+    ];
+    for (const openapi of ['3.1.0', '3.0.3']) {
+      for (const [spelling, own] of owns) {
+        for (const [width, variant] of variants) {
+          const label = `kind-${openapi}-${spelling}-${width}`;
+          expect(await shapes(label, kindDoc(openapi, kinded(own, variant))), label).toEqual(kept);
+        }
+      }
+    }
+    // The enum component spelled as a `oneOf` of consts pins the same values.
+    const constUnion: SchemaObject = { oneOf: [{ const: 'cat' }, { const: 'dog' }] };
+    expect(await shapes('kind-const-union', kindDoc('3.1.0', kinded(Kind, same), constUnion))).toEqual(kept);
+    // On a component field.
+    const holder = specDoc(getPet({ $ref: '#/components/schemas/Holder' }), {
+      Kind: kinds,
+      Holder: obj({ pet: kinded(Kind, same) }),
+    });
+    expect(await shapes('kind-component-field', holder)).toEqual({
+      models: [
+        'Holder { pet: (HolderPet | HolderPetWithBark) }',
+        'HolderPet { kind: Kind, meow: string }',
+        'HolderPetWithBark { kind: Kind, bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    });
+    // A variant's `const` is still the narrower declaration beside the own `$ref`, so each variant keeps
+    // its literal and is named from it.
+    expect(await shapes('kind-ref-const', kindDoc('3.1.0', kinded(Kind, { const: 'cat' }, { const: 'dog' })))).toEqual({
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | DogGetPetResponsePet) }',
+        'GetPetResponsePet { kind: "cat", meow: string }',
+        'DogGetPetResponsePet { kind: "dog", bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    });
+    // The same values pin on either side: a variant's `$ref` to the enum is the narrower declaration
+    // beside an own plain `kind`.
+    expect(await shapes('kind-variant-ref', kindDoc('3.1.0', kinded(str, Kind)))).toEqual(kept);
+  });
 });
 
 describe('review round 1', () => {

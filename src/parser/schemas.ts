@@ -2212,8 +2212,10 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * own first and its own declaration kept where the variant declares the same
  * property unless the variant's is the narrower (`narrowsDeclaration`: a
  * variant's `kind: { const: 'cat' }` beside an own `kind: { type: 'string' }`
- * stays `'cat'`), so the union keeps every variant, each carries the shared
- * properties and a discriminated one keeps its mapping. Every other variant
+ * stays `'cat'`, while an own `kind: { $ref: Kind }` pins the enum's values
+ * and stays over a variant's `enum` repeating them), so the union keeps
+ * every variant, each carries the shared properties and a discriminated one
+ * keeps its mapping. Every other variant
  * is typed as written: a `$ref` names a component the parser never merges
  * properties into (it may be an enum or a union it could not augment); a
  * primitive, an array or an enum is no object, so `properties` constrains
@@ -2297,10 +2299,12 @@ function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
  * variant's declaration is the narrower (`narrowsDeclaration`): JSON Schema
  * applies both, so a variant's `kind: { const: 'cat' }` beside an own
  * `kind: { type: 'string', readOnly: true }` is a read-only `'cat'`, and a
- * discriminated union keeps its mapping. The own declaration's flags,
- * documentation, limits and extensions (`declarationKeywords`) stay the
- * field's wherever the variant's sets none. The required names are the
- * union of both lists.
+ * discriminated union keeps its mapping. A `$ref` to an enum component pins
+ * that enum's values (`pinnedValues`), so an own `kind: { $ref: Kind }`
+ * stays `Kind` over a variant's `enum` that repeats its values, as an own
+ * `enum` of them does. The own declaration's flags, documentation, limits
+ * and extensions (`declarationKeywords`) stay the field's wherever the
+ * variant's sets none. The required names are the union of both lists.
  */
 function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
   if (!isInlineObjectSchema(variant)) return variant;
@@ -2321,10 +2325,10 @@ function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): Sch
 /**
  * Whether a variant's declaration of a property is narrower than the
  * schema's own (`conjoinSiblingProperties`): it is typed by the values it
- * pins (`const` or `enum`, `classifyInlineSchema`), and the own declaration
- * pins none, or pins every one of them and more. Any other pair — the same
- * values, values the own does not all admit, a variant that pins none — is
- * not, and the own declaration stays.
+ * pins (`pinnedValues`: a `const`, an `enum`, or a `$ref` to an enum
+ * component), and the own declaration pins none, or pins every one of them
+ * and more. Any other pair — the same values, values the own does not all
+ * admit, a variant that pins none — is not, and the own declaration stays.
  */
 function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
   const narrow = pinnedValues(variant);
@@ -2336,10 +2340,32 @@ function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
   );
 }
 
-/** The values a declaration's `const` or `enum` pins it to, when that is what types it; `undefined` otherwise. */
-function pinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
+/**
+ * The values a declaration pins a property to, when that is what types it:
+ * its own `const` or `enum` (`classifyInlineSchema`), or those of the enum
+ * component — an `enum:` list, or a `oneOf`/`anyOf` of string consts
+ * (`isEnumComponentSchema`) — that its `$ref`, or a lone
+ * `allOf: [{ $ref }]` (the spelling that annotates a reference), names
+ * (`componentSchemaOf`), read through a chain of references. So an own
+ * `kind: { $ref: Kind }`, `Kind` the enum `[cat, dog]`, pins `cat` and
+ * `dog` exactly as an own `kind: { enum: [cat, dog] }` does: it stays over
+ * a variant that repeats those values, or names more, and gives way to a
+ * variant's `const: cat`. `undefined` for a declaration that pins none — a
+ * plain type, an object, a `$ref` to anything but an enum.
+ */
+function pinnedValues(
+  schema: SchemaObject,
+  seen: ReadonlySet<SchemaObject> = new Set(),
+): readonly unknown[] | undefined {
   const kind = classifyInlineSchema(schema);
-  return kind === 'const' ? [schema.const] : kind === 'enum' ? schema.enum : undefined;
+  if (kind === 'const') return [schema.const];
+  if (kind === 'enum') return schema.enum;
+  const ref =
+    kind === 'ref' ? schema.$ref : kind === 'allOf' && schema.allOf?.length === 1 ? schema.allOf[0].$ref : undefined;
+  const component = ref === undefined ? undefined : componentSchemaOf(ref);
+  if (component === undefined || seen.has(component)) return undefined;
+  if (isConstUnionEnumSchema(component)) return constUnionEnumMembers(component)?.map((member) => member.value);
+  return pinnedValues(component, new Set([...seen, component]));
 }
 
 /** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
