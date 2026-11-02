@@ -195,7 +195,12 @@ export function mediaTypeNameFragment(contentType: string, siblings: Iterable<st
  * `application/yaml; profile=print` beside `Application/YAML;
  * profile="print"`. Keys alike in that spelling differ in nothing but syntax
  * (`; b=2; a=1` beside `; a=1; b=2`), so they keep their document order: the
- * key as written never decides, or respelling one could swap them.
+ * key as written never decides, or respelling one could swap them. An edit
+ * that changes this order still swaps two keys' models — a case edit to one
+ * of two case-only keys, a `charset` edit to one of two keys that differ in
+ * nothing else, or a reorder of two keys that differ only in syntax — since
+ * no order stays put both when two keys are reordered and when one of them
+ * is respelled.
  */
 export function mediaTypeNamingOrder(contentTypes: readonly string[]): string[] {
   const fragments = contentTypes.map((contentType) => mediaTypeNameFragment(contentType, contentTypes));
