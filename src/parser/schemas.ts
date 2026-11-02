@@ -2615,6 +2615,23 @@ function mapVariantToDiscriminatorEntry(
 }
 
 /**
+ * The spec's own `discriminator.mapping` as an inline union carries it: each
+ * target with a leading `#/components/schemas/` stripped and otherwise as the
+ * document spelled it (`cat_dto` stays `cat_dto`; a target in another section
+ * stays whole) — unlike a named union's, whose targets are resolved to IR
+ * model names (`namedUnionDiscriminator`). The one reader for every site
+ * that builds an inline union, a field or a response (`schemaToTypeRef`) and
+ * a request body (`typePickedRequestBody`) alike, so the same union reads the
+ * same wherever it is written and the differ can tell a key a new variant
+ * brings from one that names no variant (#458 review).
+ */
+export function inlineMappingTargets(mapping: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(mapping ?? {}).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
+  );
+}
+
+/**
  * Derive a discriminator value → variant model name mapping for an inline-
  * variant `oneOf` from the names `nameInlineVariants` gave its variants
  * (`inlineVariantNames`): the explicit `discriminator:` without a `mapping:`
@@ -4595,10 +4612,7 @@ export function schemaToTypeRef(
     let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
     if (schema.discriminator) {
       const property = schema.discriminator.propertyName;
-      const explicitMapping = schema.discriminator.mapping ?? {};
-      let mapping: Record<string, string> = Object.fromEntries(
-        Object.entries(explicitMapping).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
-      );
+      let mapping: Record<string, string> = inlineMappingTargets(schema.discriminator.mapping);
       if (Object.keys(mapping).length === 0) {
         const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, inlineVariantNames);
         if (inlineMapping) mapping = inlineMapping;
