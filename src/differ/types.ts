@@ -599,8 +599,12 @@ export interface OperationModified {
  * codes pair with each other, the move reported once as
  * `responseStatusCodeChanged`; a lone 2xx that carries no code (a hand-built
  * IR) pairs with the entry of the other spec that offers its media types,
- * else with that spec's primary, and is reported with `statusCode` unset;
- * the `default` and range responses by key, with `fallback` set. Within an entry, headers pair
+ * else with that spec's primary, and is reported with `statusCode` unset,
+ * though only one that carries media types or headers pairs as the old
+ * spec's: one that carries neither, as the primary of an operation that
+ * declared no 2xx/3xx does, pairs with nothing, so a 2xx the new spec adds
+ * to it is no header change; the `default` and range responses by key,
+ * with `fallback` set. Within an entry, headers pair
  * by name case-insensitively (RFC 9110 §5.1, `foldHeaderName`), so
  * `X-Rate-Limit` and `x-rate-limit` are one header: a pair whose written
  * names differ is reported as `header-name-changed` with `oldName`/`newName`
@@ -665,7 +669,10 @@ export interface ResponseHeaderChange {
  * (`responseStatusCodeChanged` reports the move); a primary that carries no
  * code (an operation declaring no 2xx/3xx, or a hand-built IR's lone 2xx) is
  * paired with the entry of the other spec that offers its media types, else
- * with that spec's primary. A change is located at the new spec's entry,
+ * with that spec's primary, except the old spec's when it carries no media
+ * types or headers either, as the primary of an operation that declared no
+ * 2xx/3xx does: that one pairs with nothing, so a 2xx the new spec adds to
+ * it is no media-type change. A change is located at the new spec's entry,
  * or — when that entry carries no code and the change only removes, as
  * when an operation lost its only 2xx — at the old spec's entry, which
  * declared what is gone, so `statusCode` is unset only for a lone 2xx of a

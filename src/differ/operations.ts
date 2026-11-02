@@ -756,8 +756,14 @@ function diffResponseContentTypes(
  * response it most plausibly still is — and, when none does, with the other
  * side's primary; so an operation that lost its only 2xx pairs that entry
  * with its new, empty primary, and `diffResponseHeaders` and
- * `diffResponseContentTypes` report what it declared under its old code. A
- * new entry nothing pairs with is left out of the map.
+ * `diffResponseContentTypes` report what it declared under its old code.
+ * An old primary that carries no media types or headers either — the
+ * primary of an operation that declared no 2xx/3xx carries neither — has
+ * nothing to compare and pairs with nothing: every 2xx of the new spec is
+ * one it adds, which is no header or media-type change (`responseChanged`
+ * reports it), rather than one of them — the 2xx that offers no media
+ * types, else the new primary — having all its headers and media types
+ * reported added. A new entry nothing pairs with is left out of the map.
  */
 function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry[]): Map<ContentEntry, ContentEntry> {
   const before = new Map(oldEntries.map((entry) => [entry.key, entry]));
@@ -776,7 +782,9 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
     pairs.set(newPrimary, oldPrimary);
   } else if (newPrimary.statusCode === undefined) {
     pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
-  } else {
+  } else if (oldPrimary.bodies.length > 0 || oldPrimary.headers.length > 0) {
+    // Only when it has something to compare: the empty primary of an
+    // operation declaring no 2xx/3xx pairs with nothing.
     pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
   }
   return pairs;
