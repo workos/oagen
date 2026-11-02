@@ -386,3 +386,174 @@ describe('identical copies leaving a shared name share one model, in either path
     }
   });
 });
+
+describe('identical copies under a component field and under a response share one model (issue #443)', () => {
+  // `Pet.owner` and `getOwner`'s body are the same inline `owner` object,
+  // pinned to `PetOwner` by its `object` const, whose `address` mints
+  // `PetOwnerAddress`. The component fields are settled before any operation
+  // is read, so `Pet.owner.address` leaves a component's name first; the
+  // response's identical `address` joins the model it left for, and its
+  // `owner`, identical to the field's again, is typed with the field's.
+  const owner = (address: unknown) => obj({ object: { type: 'string', const: 'pet_owner' }, address });
+  const deprecatedAddress = obj({ city: str }, { deprecated: true });
+  const schemas = (address: unknown, components: Record<string, unknown> = {}) => ({
+    Pet: obj({ owner: owner(address) }),
+    ...components,
+  });
+  const paths = (address: unknown): Array<[string, unknown]> => [
+    ['/pets', getOp('getPet', { $ref: '#/components/schemas/Pet' })],
+    ['/owners', getOp('getOwner', owner(address))],
+  ];
+  /** The issue's live component `PetOwnerAddress { city?: string, zip: string }`. */
+  const PetOwnerAddress = obj({ city: str, zip: str }, { required: ['zip'] });
+  const deprecatedWhy = 'it is deprecated while "PetOwnerAddress" is live';
+
+  it('`repro.json`: one `PetOwnerAddress2` both sites reference, and `getOwner` typed `PetOwner`, as in `no-component.json`', async () => {
+    for (const { order, spec, warnings } of await parseBothOrders(
+      'repro',
+      schemas(deprecatedAddress, { PetOwnerAddress }),
+      paths(deprecatedAddress),
+    )) {
+      expect(describeModels(spec), order).toEqual([
+        'Pet {owner: PetOwner}',
+        'PetOwnerAddress {city: string, zip!: string}',
+        'PetOwner {object: literal, address: PetOwnerAddress2}',
+        'PetOwnerAddress2 (deprecated) {city: string}',
+      ]);
+      expect(opsOf(spec).getPet?.response, order).toEqual({ kind: 'model', name: 'Pet' });
+      expect(opsOf(spec).getOwner?.response, order).toEqual({ kind: 'model', name: 'PetOwner' });
+      // The field's copy leaves first, when the fields are settled; the
+      // response's joins it, and the note says how many sites share it.
+      expect(warnings, order).toEqual([
+        renamed('PetOwnerAddress', 'PetOwnerAddress2', deprecatedWhy),
+        `${renamed('PetOwnerAddress', 'PetOwnerAddress2', deprecatedWhy)} (shared by 2 sites)`,
+      ]);
+      expectSound(spec, ['Pet', 'PetOwnerAddress']);
+    }
+    // Without the component: the same models under the bare names.
+    for (const { order, spec, warnings } of await parseBothOrders(
+      'no-component',
+      schemas(deprecatedAddress),
+      paths(deprecatedAddress),
+    )) {
+      expect(describeModels(spec), order).toEqual([
+        'Pet {owner: PetOwner}',
+        'PetOwner {object: literal, address: PetOwnerAddress}',
+        'PetOwnerAddress (deprecated) {city: string}',
+      ]);
+      expect(opsOf(spec).getOwner?.response, order).toEqual({ kind: 'model', name: 'PetOwner' });
+      expect(warnings, order).toEqual([]);
+      expectSound(spec, ['Pet']);
+    }
+  });
+
+  it('a live `address` the component does not admit leaves its name the same way, through the shape rule', async () => {
+    const address = obj({ city: str });
+    for (const { order, spec, warnings } of await parseBothOrders(
+      'live-address',
+      schemas(address, { PetOwnerAddress }),
+      paths(address),
+    )) {
+      expect(describeModels(spec), order).toEqual([
+        'Pet {owner: PetOwner}',
+        'PetOwnerAddress {city: string, zip!: string}',
+        'PetOwner {object: literal, address: PetOwnerAddress2}',
+        'PetOwnerAddress2 {city: string}',
+      ]);
+      expect(opsOf(spec).getOwner?.response, order).toEqual({ kind: 'model', name: 'PetOwner' });
+      const why = 'its shape differs from component schema "PetOwnerAddress"';
+      expect(warnings, order).toEqual([
+        renamed('PetOwnerAddress', 'PetOwnerAddress2', why),
+        `${renamed('PetOwnerAddress', 'PetOwnerAddress2', why)} (shared by 2 sites)`,
+      ]);
+      expectSound(spec, ['Pet', 'PetOwnerAddress']);
+    }
+  });
+
+  it('a parent that left a component’s name at the settle too is joined the same way, after its child', async () => {
+    // A component `PetOwner` of another shape moves `Pet.owner`'s object off
+    // its name as well; `getOwner`'s object, identical once its `address`
+    // joined, joins `PetOwner2` rather than becoming `GetOwnerPetOwner`.
+    for (const { order, spec, warnings } of await parseBothOrders(
+      'parent-too',
+      schemas(deprecatedAddress, { PetOwnerAddress, PetOwner: obj({ name: str }) }),
+      paths(deprecatedAddress),
+    )) {
+      expect(opsOf(spec).getOwner?.response, order).toEqual({ kind: 'model', name: 'PetOwner2' });
+      expect(fieldType(spec, 'Pet', 'owner'), order).toEqual({ kind: 'model', name: 'PetOwner2' });
+      expect(fieldType(spec, 'PetOwner2', 'address'), order).toEqual({ kind: 'model', name: 'PetOwnerAddress2' });
+      expect(spec.models.map((m) => m.name).sort(), order).toEqual([
+        'Pet',
+        'PetOwner',
+        'PetOwner2',
+        'PetOwnerAddress',
+        'PetOwnerAddress2',
+      ]);
+      const shapeWhy = 'its shape differs from component schema "PetOwner"';
+      expect(warnings, order).toEqual([
+        renamed('PetOwnerAddress', 'PetOwnerAddress2', deprecatedWhy),
+        renamed('PetOwner', 'PetOwner2', shapeWhy),
+        `${renamed('PetOwnerAddress', 'PetOwnerAddress2', deprecatedWhy)} (shared by 2 sites)`,
+        `${renamed('PetOwner', 'PetOwner2', shapeWhy)} (shared by 2 sites)`,
+      ]);
+      expectSound(spec, ['Pet', 'PetOwner', 'PetOwnerAddress']);
+    }
+  });
+
+  it('a response copy of another shape still takes a name of its own', async () => {
+    const other = obj({ city: str, street: str }, { deprecated: true });
+    const { spec, warnings } = await parse(
+      'other-shape',
+      specDoc(
+        schemas(deprecatedAddress, { PetOwnerAddress }),
+        Object.fromEntries([paths(deprecatedAddress)[0]!, ['/owners', getOp('getOwner', owner(other))]]),
+      ),
+    );
+    expect(opsOf(spec).getOwner?.response).toEqual({ kind: 'model', name: 'GetOwnerPetOwner' });
+    expect(fieldType(spec, 'GetOwnerPetOwner', 'address')).toEqual({
+      kind: 'model',
+      name: 'GetOwnerPetOwnerAddress',
+    });
+    expect(fieldType(spec, 'PetOwner', 'address')).toEqual({ kind: 'model', name: 'PetOwnerAddress2' });
+    expect(warnings).toEqual([
+      renamed('PetOwnerAddress', 'PetOwnerAddress2', deprecatedWhy),
+      renamed('PetOwnerAddress', 'GetOwnerPetOwnerAddress', deprecatedWhy),
+      renamed('PetOwner', 'GetOwnerPetOwner', 'its shape differs from component schema "PetOwner"'),
+    ]);
+    expectSound(spec, ['Pet', 'PetOwnerAddress']);
+  });
+
+  it('a deprecated response copy identical to a field model that yielded the name to a live copy joins it', async () => {
+    // `Pet.note.owner` is a deprecated `{ city, zip }`; `getA`'s live
+    // `{ city }` owner takes `PetNoteOwner`, so the field's yields it and
+    // becomes `PetNoteOwner2`. `getB` returns `Pet.note`'s very shape: its
+    // deprecated owner shares `PetNoteOwner2`, and its note is `PetNote`.
+    const note = (noteOwner: unknown) => obj({ object: { type: 'string', const: 'pet_note' }, owner: noteOwner });
+    const legacy = obj({ city: str, zip: str }, { deprecated: true });
+    for (const { order, spec, warnings } of await parseBothOrders('yielded', { Pet: obj({ note: note(legacy) }) }, [
+      ['/pets/{id}', getOp('getPet', { $ref: '#/components/schemas/Pet' })],
+      ['/a', getOp('getA', note(obj({ city: str })))],
+      ['/b', getOp('getB', note(legacy))],
+    ])) {
+      const ops = opsOf(spec);
+      expect(ops.getA?.response, order).toEqual({ kind: 'model', name: 'GetAPetNote' });
+      expect(ops.getB?.response, order).toEqual({ kind: 'model', name: 'PetNote' });
+      expect(fieldType(spec, 'PetNote', 'owner'), order).toEqual({ kind: 'model', name: 'PetNoteOwner2' });
+      expect(fieldType(spec, 'GetAPetNote', 'owner'), order).toEqual({ kind: 'model', name: 'PetNoteOwner' });
+      expect(spec.models.map((m) => m.name).sort(), order).toEqual([
+        'GetAPetNote',
+        'Pet',
+        'PetNote',
+        'PetNoteOwner',
+        'PetNoteOwner2',
+      ]);
+      const why = 'it is deprecated while "PetNoteOwner" is live';
+      expect(warnings, order).toEqual([
+        renamed('PetNoteOwner', 'PetNoteOwner2', why),
+        `${renamed('PetNoteOwner', 'PetNoteOwner2', why)} (shared by 2 sites)`,
+        renamed('PetNote', 'GetAPetNote', 'its shape differs from component schema "PetNote"'),
+      ]);
+      expectSound(spec, ['Pet']);
+    }
+  });
+});
