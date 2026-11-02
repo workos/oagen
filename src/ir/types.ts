@@ -191,8 +191,10 @@ export interface Webhook {
    * Doc text for the payload, read as `Operation.requestBodyDescription`
    * is: the Request Body Object's own `description`, else the `description`
    * written on the schema of the content entry `requestBody` is read from (a
-   * `$ref` is not followed). Present only when one of the two has
-   * non-whitespace content, kept verbatim.
+   * `$ref` is not followed; a nullable `oneOf`/`anyOf` or a single-member
+   * `allOf`, `oneOf` or `anyOf` is read to its branch, its own text first).
+   * Present only when one of the two has non-whitespace content, kept
+   * verbatim.
    */
   requestBodyDescription?: string;
   /**
@@ -392,9 +394,11 @@ export interface Operation {
    * written on the schema of the content entry `requestBody` is read from,
    * as it stands there: a `$ref` is not followed, so a component's text
    * stays on its model, while a `description` written beside the `$ref` is
-   * read. When both have content the body's own wins. The schema's text is
-   * also the `description` of the model an inline object body is
-   * materialized as (`<Op>Request`), and the `description` of the `Enum`
+   * read; a wrapper the parser collapses or sees through — a nullable
+   * `oneOf`/`anyOf`, a single-member `allOf`, `oneOf` or `anyOf` — is read
+   * to its branch, its own text first. When both have content the body's
+   * own wins. The schema's text is also the `description` of the model an
+   * inline object body is materialized as (`<Op>Request`), and the `description` of the `Enum`
    * an inline enum body is lifted to (`<Op>Request` in `enums`); for a body
    * no model or enum carries — an inline `oneOf`, an array, a primitive —
    * this field is the only place that text reaches. Present only when one

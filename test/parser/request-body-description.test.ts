@@ -470,6 +470,184 @@ describe('request body descriptions (issue #316)', () => {
       expectSound(spec);
     });
 
+    it('reads a collapsed wrapper by the rule its enum and model follow: its own text, else its branch’s — the issue’s repro (#445)', async () => {
+      const objectBranch = { type: 'object', description: 'A note.', properties: { text: { type: 'string' } } };
+      const bodies: Record<string, unknown> = {
+        allOf: { allOf: [{ type: 'string', description: 'Note text.' }] },
+        array: {
+          oneOf: [
+            { type: 'array', items: { type: 'string' }, description: 'Tags, or null to clear.' },
+            { type: 'null' },
+          ],
+        },
+        object: { oneOf: [objectBranch, { type: 'null' }] },
+        objectBoth: { description: 'The note to add, or null.', oneOf: [objectBranch, { type: 'null' }] },
+        string: { oneOf: [{ type: 'string', description: 'Note text, or null to clear.' }, { type: 'null' }] },
+        typeList: { type: ['string', 'null'], description: 'Note text, or null to clear.' },
+      };
+      const spec = await parseDocument(
+        document(
+          Object.fromEntries(
+            Object.entries(bodies).map(([name, schema]) => [
+              `/${name}`,
+              post(`add${name[0].toUpperCase()}${name.slice(1)}`, jsonBody(schema)),
+            ]),
+          ),
+        ),
+      );
+      const ops = opsOf(spec);
+      const models = modelsOf(spec);
+
+      expect(Object.fromEntries(Object.entries(ops).map(([name, op]) => [name, op.requestBodyDescription]))).toEqual({
+        addAllOf: 'Note text.',
+        addArray: 'Tags, or null to clear.',
+        addObject: 'A note.',
+        addObjectBoth: 'The note to add, or null.',
+        addString: 'Note text, or null to clear.',
+        addTypeList: 'Note text, or null to clear.',
+      });
+      // The model built from an object branch reads the same text by the same rule.
+      expect(describeType(models, ops.addObject.requestBody)).toBe('nullable union of AddObjectRequest ("A note.")');
+      expect(describeType(models, ops.addObjectBoth.requestBody)).toBe(
+        'nullable union of AddObjectBothRequest ("The note to add, or null.")',
+      );
+      // The text moved, not the types.
+      expect(ops.addAllOf.requestBody).toEqual({ kind: 'primitive', type: 'string' });
+      expect(ops.addString.requestBody).toEqual(ops.addTypeList.requestBody);
+      expect(describeType(models, ops.addArray.requestBody)).toBe('nullable array of primitive string');
+      expectSound(spec);
+    });
+
+    it('reads nested wrappers outermost-first, never follows a $ref branch, and reads no variant of a real union (#445)', async () => {
+      const spec = await parseDocument(
+        document(
+          {
+            // The innermost text counts when no wrapper has any.
+            '/inner': post(
+              'createInner',
+              jsonBody({ oneOf: [{ allOf: [{ type: 'string', description: 'Inner.' }] }, { type: 'null' }] }),
+            ),
+            // A middle wrapper's text wins over the branch's.
+            '/middle': post(
+              'createMiddle',
+              jsonBody({
+                allOf: [
+                  { description: 'Middle.', oneOf: [{ type: 'string', description: 'Inner.' }, { type: 'null' }] },
+                ],
+              }),
+            ),
+            // Blank wrapper text is no text: the branch's counts.
+            '/blank': post(
+              'createBlank',
+              jsonBody({ description: '  ', oneOf: [{ type: 'string', description: 'Branch.' }, { type: 'null' }] }),
+            ),
+            // A `$ref` branch's component text stays on its model; text beside the `$ref` is read.
+            '/ref': post('createRef', jsonBody({ oneOf: [{ $ref: '#/components/schemas/Pet' }, { type: 'null' }] })),
+            '/sibling': post(
+              'createSibling',
+              jsonBody({ oneOf: [{ $ref: '#/components/schemas/Pet', description: 'Beside.' }, { type: 'null' }] }),
+            ),
+            // A union of several variants is no wrapper: no variant's text is the body's.
+            '/union': post(
+              'createUnion',
+              jsonBody({
+                oneOf: [
+                  { type: 'string', description: 'A string.' },
+                  { type: 'integer', description: 'An integer.' },
+                  { type: 'null' },
+                ],
+              }),
+            ),
+          },
+          {
+            webhooks: {
+              noteAdded: post(
+                'noteAdded',
+                jsonBody({ oneOf: [{ type: 'string', description: 'Payload branch.' }, { type: 'null' }] }),
+              ),
+            },
+          },
+        ),
+      );
+      const ops = opsOf(spec);
+
+      expect(ops.createInner.requestBodyDescription).toBe('Inner.');
+      expect(ops.createMiddle.requestBodyDescription).toBe('Middle.');
+      expect(ops.createBlank.requestBodyDescription).toBe('Branch.');
+      expect(ops.createRef).not.toHaveProperty('requestBodyDescription');
+      expect(ops.createRef.requestBody).toEqual({ kind: 'nullable', inner: { kind: 'model', name: 'Pet' } });
+      expect(ops.createSibling.requestBodyDescription).toBe('Beside.');
+      expect(ops.createUnion).not.toHaveProperty('requestBodyDescription');
+      // A webhook's payload is read by the same function.
+      expect(webhooksOf(spec).noteAdded.requestBodyDescription).toBe('Payload branch.');
+      expectSound(spec);
+    });
+
+    it('reads through a single-member oneOf or anyOf too, as the enum lifted from its variant does, and its allOf twin stays the same (#445 review)', async () => {
+      const objectVariant = { type: 'object', description: 'Obj.', properties: { text: { type: 'string' } } };
+      const bodies: Record<string, unknown> = {
+        // The review's three cases, each beside its `allOf` twin.
+        nullableOneOf: { anyOf: [{ oneOf: [{ type: 'string', description: 'Note text.' }] }, { type: 'null' }] },
+        nullableAllOf: { anyOf: [{ allOf: [{ type: 'string', description: 'Note text.' }] }, { type: 'null' }] },
+        oneOfEnum: { oneOf: [{ type: 'string', enum: ['draft', 'final'], description: 'Note state.' }] },
+        allOfEnum: { allOf: [{ type: 'string', enum: ['draft', 'final'], description: 'Note state.' }] },
+        oneOfObject: { oneOf: [objectVariant] },
+        allOfObject: { allOf: [objectVariant] },
+        // The wrapper's own text wins, under an `anyOf` as under a `oneOf`.
+        anyOfBoth: { description: 'Wrapper.', anyOf: [{ type: 'string', description: 'Variant.' }] },
+        // A `$ref` variant's component text stays on its model; text beside the `$ref` is read.
+        oneOfRef: { oneOf: [{ $ref: '#/components/schemas/Pet' }] },
+        oneOfRefBeside: { oneOf: [{ $ref: '#/components/schemas/Pet', description: 'Beside.' }] },
+        // A `oneOf` of consts read as an enum declares the members itself: its variant's text documents one value.
+        constEnum: { enum: ['a'], oneOf: [{ const: 'a', description: 'The a.' }] },
+      };
+      const spec = await parseDocument(
+        document(
+          Object.fromEntries(
+            Object.entries(bodies).map(([name, schema]) => [
+              `/${name}`,
+              post(`add${name[0].toUpperCase()}${name.slice(1)}`, jsonBody(schema)),
+            ]),
+          ),
+        ),
+      );
+      const ops = opsOf(spec);
+      const models = modelsOf(spec);
+
+      expect(Object.fromEntries(Object.entries(ops).map(([name, op]) => [name, op.requestBodyDescription]))).toEqual({
+        addNullableOneOf: 'Note text.',
+        addNullableAllOf: 'Note text.',
+        addOneOfEnum: 'Note state.',
+        addAllOfEnum: 'Note state.',
+        addOneOfObject: 'Obj.',
+        addAllOfObject: 'Obj.',
+        addAnyOfBoth: 'Wrapper.',
+        addOneOfRef: undefined,
+        addOneOfRefBeside: 'Beside.',
+        addConstEnum: undefined,
+      });
+      expect(ops.addOneOfRef).not.toHaveProperty('requestBodyDescription');
+      expect(ops.addConstEnum).not.toHaveProperty('requestBodyDescription');
+      // The enum lifted from the variant and the model built from it carry the same text.
+      expect(spec.enums.find((e) => e.name === 'AddOneOfEnumRequest')?.description).toBe('Note state.');
+      expect(describeType(models, ops.addOneOfObject.requestBody)).toBe('union of AddOneOfObjectRequest ("Obj.")');
+      expect(models.get('Pet')?.description).toBe('A pet in the shelter.');
+      // Only the text moved: a single-member oneOf is still a union of one variant.
+      expect(ops.addNullableOneOf.requestBody).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'union', variants: [{ kind: 'primitive', type: 'string' }], compositionKind: 'oneOf' },
+      });
+      expect(ops.addNullableAllOf.requestBody).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'primitive', type: 'string' },
+      });
+      expect(ops.addOneOfEnum.requestBody).toEqual({
+        kind: 'union',
+        variants: [{ kind: 'enum', name: 'AddOneOfEnumRequest', values: ['draft', 'final'] }],
+      });
+      expectSound(spec);
+    });
+
     it('keeps a flattened discriminated union’s text on the operation and on the flattened model', async () => {
       const spec = await parseDocument(
         document({
