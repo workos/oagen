@@ -370,7 +370,7 @@ describe('an operationId two operations declare (issue #416)', () => {
       [
         {
           "errors": [
-            "GetNoteError404",
+            "ErrorBody",
           ],
           "name": "getNote",
           "path": "/notes/{id}",
@@ -379,7 +379,7 @@ describe('an operationId two operations declare (issue #416)', () => {
         },
         {
           "errors": [
-            "GetNote2Error404",
+            "ErrorBodyWithReason",
           ],
           "name": "getNote2",
           "path": "/notes/{id}/draft",
@@ -389,10 +389,10 @@ describe('an operationId two operations declare (issue #416)', () => {
       ]
     `);
     expect([...models].sort()).toEqual([
-      'GetNote2Error404 {reason}',
+      'ErrorBody {message}',
+      'ErrorBodyWithReason {reason}',
       'GetNote2Response {title, owner}',
       'GetNote2ResponseOwner {email}',
-      'GetNoteError404 {message}',
       'GetNoteResponse {id, owner}',
       'GetNoteResponseOwner {name}',
     ]);
