@@ -130,8 +130,10 @@ export interface ResponseClassificationOptions {
    * With it, the items of an array body or a list envelope are typed under
    * the first `<Op>Item` candidate the registry does not give another shape,
    * and an identical shape shares the model it finds (`typeInlineItems`).
-   * Absent — a dry run that only reads names, a direct call — the items take
-   * `<Op>Item` as written.
+   * Absent — the dry run that reads a component response's names, a direct
+   * call — the items take `<Op>Item` as written; the dry run that reads an
+   * operation's own names settles them against a copy of the registry
+   * (`operationBodyModelNames`), so it reads the name the operation takes.
    */
   settle?: ItemSettlement;
 }
@@ -584,8 +586,11 @@ export function resolveDataPathFromSchema(
  * recorded under the operation; a reference written by sharing another
  * site's model joins that site (`attachSharedRefs`), so a later rename of
  * the shared model — a deprecated copy named like a live one — reaches this
- * array too. Without `settle` — a dry run that only reads names, a direct
- * call — the items take `<Op>Item` as written.
+ * array too. Without `settle` — the dry run that reads a component
+ * response's names, a direct call — the items take `<Op>Item` as written;
+ * the dry run that reads an operation's own names settles them against a
+ * copy of the registry as seeded, so it reads the name the operation takes
+ * (`operationBodyModelNames`).
  */
 function typeInlineItems(
   items: SchemaObject,
@@ -732,15 +737,17 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
-  // A `oneOf`/`anyOf` that types the property (`classifyInlineSchema`) with
-  // more than one variant once every `null` one is set aside (`isNullSchema`)
-  // is a union, the body's own field, however many variants carry a const
-  // and whatever properties are written beside it: unwrapping it would type
-  // the response as one variant, or as those properties alone, and drop the
-  // rest (#415). A union of bare constraint sets does not type the property;
-  // it only limits the object.
+  // A `oneOf`/`anyOf` with more than one variant once every `null` one is
+  // set aside (`isNullSchema`), any of which adds a shape the property does
+  // not already have (`variantAddsShape`), is a union, the body's own field,
+  // however many variants carry a const and whatever properties are written
+  // beside it: unwrapping it would type the response as one variant, or as
+  // those properties alone, and drop the rest (#415). A union whose every
+  // variant only limits the object — bare constraint sets, `type: 'object'`
+  // repeated, refinements of the object's own properties — does not type
+  // the property; the object still unwraps.
   const variants = (propSchema.oneOf ?? propSchema.anyOf)?.filter((v) => !isNullSchema(v)) ?? [];
-  if (variants.length > 1 && classifyInlineSchema(propSchema) === 'union') return false;
+  if (variants.length > 1 && variants.some((variant) => variantAddsShape(variant, propSchema))) return false;
 
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
@@ -752,6 +759,30 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   }
 
   return false;
+}
+
+/**
+ * Whether a `oneOf`/`anyOf` variant written beside a wrapped object adds a
+ * shape the object does not already have, so the union is the property's
+ * type rather than a limit on the object (`isSingleResourceWrapper`, #415):
+ * a `$ref`; a `type` other than `object` (a primitive, or a type list
+ * naming another type); a `const`, `enum`, `items` or composition that
+ * types it as something else (`classifyInlineSchema`); a property the
+ * object does not declare; or a const tag of its own (a second tagged
+ * object, `hasDiscriminantConstField`). A variant of only `type: 'object'`,
+ * `required`, limits, or refinements of properties the object declares
+ * (`{ required: ['a'], properties: { a: { minLength: 1 } } }`) adds none:
+ * `classifyInlineSchema` calls such a union a `union` all the same, since
+ * `type` and `properties` are typing keywords, but it only limits the
+ * object the body wraps.
+ */
+function variantAddsShape(variant: SchemaObject, object: SchemaObject): boolean {
+  if (variant.type !== undefined && [variant.type].flat().some((type) => type !== 'object')) return true;
+  const kind = classifyInlineSchema(variant);
+  if (kind !== 'object' && kind !== 'map' && kind !== 'other') return true;
+  if (hasDiscriminantConstField(variant) !== null) return true;
+  const declared = object.properties ?? {};
+  return Object.keys(variant.properties ?? {}).some((name) => !Object.hasOwn(declared, name));
 }
 
 function extractWrappedResource(
