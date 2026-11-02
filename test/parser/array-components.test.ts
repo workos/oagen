@@ -17,7 +17,7 @@ import {
   collectResponseHeaders,
   collectWebhookTypeRefs,
 } from '../../src/ir/types.js';
-import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Field, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #284: a `components/schemas` entry whose schema is an array became a
@@ -967,12 +967,16 @@ describe('every reference site', () => {
       deprecated: true,
       constraints: { minItems: 2, maxItems: 10 },
     });
-    // A field keeps its own text over the component's, takes the component's
-    // flag (there is no model to carry it; see the next describe), and a
-    // bare `$ref` declares no limits, as before.
+    // A field keeps its own text over the component's, and takes the
+    // component's flag and limits (there is no model to carry them; see the
+    // next describes): a bare `$ref` declared none before #399.
     const pets = spec.models.find((m) => m.name === 'Owner')?.fields[0];
-    expect(pets).toMatchObject({ type: array(string), description: 'Theirs', deprecated: true });
-    expect(pets).not.toHaveProperty('constraints');
+    expect(pets).toMatchObject({
+      type: array(string),
+      description: 'Theirs',
+      deprecated: true,
+      constraints: { minItems: 1, maxItems: 10 },
+    });
   });
 });
 
@@ -1058,6 +1062,332 @@ describe('the component’s documentation and flag (MichaelDeBoey)', () => {
     }
     expect(spec.models.find((m) => m.name === 'Widget')).toMatchObject({ description: 'W', deprecated: true });
     expect(spec.enums.find((e) => e.name === 'Color')).toMatchObject({ description: 'C', deprecated: true });
+  });
+});
+
+describe('what the component declares beside its items (#399)', () => {
+  // No model carries an array component's limits, flags, default or keys
+  // either, so a bare `$ref` field takes them as it takes the component's
+  // text: under its own, through every alias the reference passes.
+  const fieldOf = (spec: ApiSpec, name: string): Field | undefined =>
+    spec.models.find((m) => m.name === 'Owner')?.fields.find((f) => f.name === name);
+  /** What a field says about its array beside the type. */
+  const carried = (field: Field | undefined) => ({
+    constraints: field?.constraints,
+    default: field?.default,
+    readOnly: field?.readOnly,
+    writeOnly: field?.writeOnly,
+    extensions: field?.extensions,
+  });
+
+  it('gives the field the component’s limits, flag and default, as the array written inline (issue repro 1)', async () => {
+    const tags = {
+      type: 'array',
+      items: { type: 'string' },
+      minItems: 1,
+      maxItems: 5,
+      uniqueItems: true,
+      readOnly: true,
+      default: [],
+    };
+    const spec = await parse(
+      specDoc(
+        {
+          Tags: tags,
+          Owner: {
+            type: 'object',
+            properties: { inline: tags, narrowed: { ...ref('Tags'), maxItems: 3 }, tags: ref('Tags') },
+          },
+        },
+        {
+          '/owners': getOp('listOwners', ref('Owner'), {
+            parameters: [{ name: 'tags', in: 'query', schema: ref('Tags') }],
+          }),
+        },
+      ),
+    );
+    const limits = { minItems: 1, maxItems: 5, uniqueItems: true };
+    expect(carried(fieldOf(spec, 'inline'))).toEqual({ constraints: limits, default: [], readOnly: true });
+    expect(carried(fieldOf(spec, 'tags'))).toEqual(carried(fieldOf(spec, 'inline')));
+    expect(carried(fieldOf(spec, 'narrowed'))).toEqual({
+      constraints: { minItems: 1, maxItems: 3, uniqueItems: true },
+      default: [],
+      readOnly: true,
+    });
+    expect(opsOf(spec).listOwners.queryParams[0]).toMatchObject({ constraints: limits, default: [] });
+    expect(spec.models.map((m) => m.name)).toEqual(['Owner']);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('conjoins the limits written beside the `$ref`, the stricter winning, and keeps the field’s own default', async () => {
+    const spec = await parse(
+      specDoc({
+        Tags: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 2,
+          maxItems: 5,
+          writeOnly: true,
+          default: ['a', 'b'],
+        },
+        Owner: {
+          type: 'object',
+          properties: {
+            wider: { ...ref('Tags'), minItems: 1, maxItems: 10, default: [] },
+            stricter: { ...ref('Tags'), minItems: 3, uniqueItems: true },
+            unset: { ...ref('Tags'), default: null },
+          },
+        },
+      }),
+    );
+    expect(carried(fieldOf(spec, 'wider'))).toEqual({
+      constraints: { minItems: 2, maxItems: 5 },
+      default: [],
+      writeOnly: true,
+    });
+    expect(carried(fieldOf(spec, 'stricter'))).toEqual({
+      constraints: { minItems: 3, maxItems: 5, uniqueItems: true },
+      default: ['a', 'b'],
+      writeOnly: true,
+    });
+    // An explicit `null` is the field's own default, as `example` keeps one.
+    expect(fieldOf(spec, 'unset')).toHaveProperty('default', null);
+  });
+
+  it('merges the component’s `x-*` keys under the field’s own, as the array written inline carries them (MichaelDeBoey)', async () => {
+    const tags = { type: 'array', items: { type: 'string' }, maxItems: 5, 'x-since': '1.2' };
+    const spec = await parse(
+      specDoc({
+        Tags: tags,
+        Owner: {
+          type: 'object',
+          properties: {
+            tags: ref('Tags'),
+            narrowed: { ...ref('Tags'), 'x-internal': true },
+            inline: { ...tags, 'x-internal': true },
+            own: { ...ref('Tags'), 'x-since': '2.0' },
+          },
+        },
+      }),
+    );
+    const read = (name: string): string => {
+      const { constraints, extensions } = fieldOf(spec, name)!;
+      return JSON.stringify({ constraints, extensions });
+    };
+    expect(read('tags')).toBe('{"constraints":{"maxItems":5},"extensions":{"x-since":"1.2"}}');
+    expect(read('inline')).toBe('{"constraints":{"maxItems":5},"extensions":{"x-since":"1.2","x-internal":true}}');
+    expect(read('narrowed')).toBe(read('inline'));
+    expect(read('own')).toBe('{"constraints":{"maxItems":5},"extensions":{"x-since":"2.0"}}');
+  });
+
+  it('reads the component through every alias the reference passes, an alias’s own declaration first (issue repro 2)', async () => {
+    const wrappedArray = { type: 'array', items: ref('Pet'), maxItems: 3 };
+    const spec = await parse(
+      specDoc(
+        {
+          Pet: { type: 'object', properties: { name: { type: 'string' } } },
+          Pets: {
+            type: 'array',
+            items: ref('Pet'),
+            description: 'The owner’s pets.',
+            deprecated: true,
+            externalDocs: { url: 'https://x/pets' },
+            minItems: 1,
+            readOnly: true,
+            example: [{ name: 'Rex' }],
+            'x-since': '1',
+          },
+          PetsAlias: ref('Pets'),
+          PetsList: { allOf: [ref('Pets')] },
+          Chain: ref('PetsList'),
+          Described: {
+            allOf: [ref('Pets'), { maxItems: 9 }],
+            description: 'Some pets',
+            'x-since': '2',
+            'x-owner': 'pets',
+          },
+          // The lone member of an `allOf` is the entry's own declaration, not
+          // an entry: its text is not read, as a component model built from
+          // one does not read it, and its limits are read as written inline.
+          Nested: { allOf: [{ allOf: [ref('Pets')], description: 'The member’s text' }] },
+          Wrapped: { allOf: [{ ...wrappedArray, description: 'The member’s text' }], minItems: 1 },
+          Owner: {
+            type: 'object',
+            properties: {
+              alias: ref('PetsAlias'),
+              list: ref('PetsList'),
+              pets: ref('Pets'),
+              chain: ref('Chain'),
+              nested: ref('Nested'),
+              described: ref('Described'),
+              wrapped: ref('Wrapped'),
+              inline: { allOf: [{ ...wrappedArray, description: 'The member’s text' }], minItems: 1 },
+            },
+          },
+        },
+        {
+          '/owners/{id}': getOp('getOwner', ref('Owner'), {
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+          }),
+        },
+      ),
+    );
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Owner', 'Pet']);
+    for (const name of ['alias', 'list', 'pets', 'chain', 'nested']) {
+      expect(fieldOf(spec, name)).toMatchObject({
+        type: array(model('Pet')),
+        description: 'The owner’s pets.',
+        deprecated: true,
+        externalDocs: { url: 'https://x/pets' },
+        readOnly: true,
+        example: [{ name: 'Rex' }],
+        constraints: { minItems: 1 },
+        extensions: { 'x-since': '1' },
+      });
+    }
+    expect(fieldOf(spec, 'described')).toMatchObject({
+      type: array(model('Pet')),
+      description: 'Some pets',
+      deprecated: true,
+      readOnly: true,
+      constraints: { minItems: 1, maxItems: 9 },
+      extensions: { 'x-since': '2', 'x-owner': 'pets' },
+    });
+    const { name: _wrapped, ...wrapped } = fieldOf(spec, 'wrapped')!;
+    const { name: _inline, ...inline } = fieldOf(spec, 'inline')!;
+    expect(wrapped).toEqual(inline);
+    expect(wrapped).toMatchObject({ constraints: { minItems: 1, maxItems: 3 } });
+    expect(wrapped.description).toBeUndefined();
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Owner', 'Pet'], ['Pets', 'PetsAlias', 'PetsList', 'Chain', 'Nested', 'Described', 'Wrapped']);
+  });
+});
+
+describe('a component written as a nullable `oneOf`/`anyOf` (#399)', () => {
+  const pet = { type: 'object', properties: { name: { type: 'string' } } };
+  const doc = (maybePets: unknown, schemas: Record<string, unknown> = {}) =>
+    specDoc(
+      { Pet: pet, MaybePets: maybePets, Owner: { type: 'object', properties: { pets: ref('MaybePets') } }, ...schemas },
+      {
+        '/owners/{id}': getOp('getOwner', ref('Owner'), {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        }),
+        '/pets': getOp(
+          'listPets',
+          {
+            type: 'object',
+            properties: {
+              data: ref('MaybePets'),
+              list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+            },
+          },
+          { parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }] },
+        ),
+      },
+    );
+
+  it.each([
+    ['a oneOf', { oneOf: [{ type: 'array', items: ref('Pet') }, { type: 'null' }] }],
+    ['an anyOf, null first', { anyOf: [{ type: 'null' }, { type: 'array', items: ref('Pet') }] }],
+  ])(
+    'is the nullable array it is when written as %s, as with a type list (issue repro 3)',
+    async (_form, maybePets) => {
+      const spec = await parse(doc(maybePets));
+      expect(fieldType(spec, 'Owner', 'pets')).toEqual(nullable(array(model('Pet'))));
+      expect(opsOf(spec).listPets.response).toEqual(nullable(array(model('Pet'))));
+      expect(opsOf(spec).listPets.pagination).toMatchObject({ dataPath: 'data', itemType: model('Pet') });
+      expect(spec.models.map((m) => m.name).sort()).toEqual(['ListMetadata', 'Owner', 'Pet']);
+      expect(warnings()).toEqual([]);
+      expectSound(spec, ['Owner', 'Pet'], ['MaybePets']);
+
+      const typed = await parse(doc({ type: ['array', 'null'], items: ref('Pet') }));
+      expect(spec.models).toEqual(typed.models);
+      expect(opsOf(spec)).toEqual(opsOf(typed));
+    },
+  );
+
+  it('names its inline items from it, gives a field its text and limits, and reads a nullable `anyOf` around a `$ref` to one as an alias', async () => {
+    const spec = await parse(
+      doc(
+        {
+          oneOf: [{ type: 'array', items: pet }, { type: 'null' }],
+          description: 'Maybe some pets',
+          maxItems: 3,
+        },
+        {
+          Pets: { type: 'array', items: ref('Pet'), description: 'Some pets' },
+          MaybeAlias: { anyOf: [ref('Pets'), { type: 'null' }] },
+          Holder: { type: 'object', properties: { maybe: ref('MaybePets'), alias: ref('MaybeAlias') } },
+        },
+      ),
+    );
+    expect(fieldType(spec, 'Owner', 'pets')).toEqual(nullable(array(model('MaybePetsItem'))));
+    expect(spec.models.find((m) => m.name === 'Holder')?.fields).toMatchObject([
+      {
+        name: 'maybe',
+        type: nullable(array(model('MaybePetsItem'))),
+        description: 'Maybe some pets',
+        constraints: { maxItems: 3 },
+      },
+      { name: 'alias', type: nullable(array(model('Pet'))), description: 'Some pets' },
+    ]);
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'ListMetadata', 'MaybePetsItem', 'Owner', 'Pet']);
+    expect(warnings()).toEqual([]);
+    expectSound(spec, ['Holder', 'Owner', 'Pet'], ['MaybePets', 'MaybeAlias', 'Pets']);
+  });
+
+  it.each([
+    ['Note first', false],
+    ['Notes first', true],
+  ])('leaves the object of a key resolving to its name as it was, with %s', async (_order, reversed) => {
+    const entries: Array<[string, unknown]> = [
+      ['Note', { type: 'object', properties: { text: { type: 'string' } } }],
+      ['Notes', { oneOf: [{ type: 'array', items: ref('Note') }, { type: 'null' }] }],
+    ];
+    const spec = await parse(
+      specDoc({
+        ...Object.fromEntries(reversed ? [...entries].reverse() : entries),
+        Holder: { type: 'object', properties: { one: ref('Note'), many: ref('Notes') } },
+      }),
+    );
+    expect(fieldType(spec, 'Holder', 'one')).toEqual(model('Note'));
+    expect(fieldType(spec, 'Holder', 'many')).toEqual(nullable(array(model('Note'))));
+    expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'Note']);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('leaves a union of more than one non-null variant, and a nullable `oneOf` around an object component, the models they were', async () => {
+    const spec = await parse(
+      doc(
+        { oneOf: [{ type: 'array', items: ref('Pet') }, { type: 'integer' }, { type: 'null' }] },
+        {
+          MaybePet: { oneOf: [ref('Pet'), { type: 'null' }] },
+          Pets: { type: 'array', items: ref('Pet') },
+          // `properties` beside a `oneOf`/`anyOf` keep a component the object model it always was.
+          WithOwn: {
+            properties: { own: { type: 'string' } },
+            oneOf: [{ type: 'array', items: ref('Pet') }, { type: 'null' }],
+          },
+          WithOwnRef: { properties: { own: { type: 'string' } }, anyOf: [ref('Pets'), { type: 'null' }] },
+          Holder: {
+            type: 'object',
+            properties: { p: ref('MaybePet'), w: ref('WithOwn'), r: ref('WithOwnRef') },
+          },
+        },
+      ),
+    );
+    expect(fieldType(spec, 'Holder', 'w')).toEqual(model('WithOwn'));
+    expect(fieldType(spec, 'Holder', 'r')).toEqual(model('WithOwnRef'));
+    for (const name of ['WithOwn', 'WithOwnRef']) {
+      expect(spec.models.find((m) => m.name === name)?.fields.map((f) => f.name)).toEqual(['own']);
+    }
+    expect(fieldType(spec, 'Owner', 'pets')).toEqual(nullable(model('MaybePets')));
+    expect(spec.models.find((m) => m.name === 'MaybePets')?.variants).toEqual([
+      array(model('Pet')),
+      { kind: 'primitive', type: 'integer' },
+    ]);
+    expect(fieldType(spec, 'Holder', 'p')).toEqual(nullable(model('MaybePet')));
+    expect(spec.models.find((m) => m.name === 'MaybePet')?.variants).toEqual([model('Pet')]);
   });
 });
 
@@ -1718,12 +2048,22 @@ describe('isArrayComponentSchema', () => {
     expect(isArrayComponentSchema({ type: 'array', nullable: true, items })).toBe(true);
     expect(isArrayComponentSchema({ type: 'array', items: {} })).toBe(true);
     expect(isArrayComponentSchema({ type: 'array', items, allOf: [{ minItems: 1 }] })).toBe(true);
+    // A `oneOf`/`anyOf` beside `items` is read first, and one with a `null`
+    // variant is the nullable array its other variant is (#399).
+    expect(isArrayComponentSchema({ items, oneOf: [{ type: 'array', items }, { type: 'null' }] })).toBe(true);
+    expect(isArrayComponentSchema({ oneOf: [{ type: 'array', items }, { type: 'null' }] })).toBe(true);
+    expect(isArrayComponentSchema({ anyOf: [{ type: 'null' }, { items }] })).toBe(true);
   });
 
   it('rejects an array without items and everything that is not an array', () => {
     expect(isArrayComponentSchema({ type: 'array' })).toBe(false);
     expect(isArrayComponentSchema({ type: 'array', items, enum: ['a', 'b'] })).toBe(false);
-    expect(isArrayComponentSchema({ items, oneOf: [{ type: 'array', items }, { type: 'null' }] })).toBe(false);
+    expect(isArrayComponentSchema({ items, oneOf: [{ type: 'array', items }, { type: 'integer' }] })).toBe(false);
+    expect(isArrayComponentSchema({ oneOf: [{ type: 'array', items }, { type: 'integer' }, { type: 'null' }] })).toBe(
+      false,
+    );
+    expect(isArrayComponentSchema({ oneOf: [{ type: 'array' }, { type: 'null' }] })).toBe(false);
+    expect(isArrayComponentSchema({ oneOf: [{ $ref: '#/components/schemas/Pets' }, { type: 'null' }] })).toBe(false);
     expect(isArrayComponentSchema({ items, allOf: [{ $ref: '#/components/schemas/List' }] })).toBe(false);
     expect(isArrayComponentSchema({ type: ['array', 'string'], items })).toBe(false);
     expect(isArrayComponentSchema({ type: 'object', properties: { items } })).toBe(false);
