@@ -351,6 +351,11 @@ export interface OperationModified {
   serviceName: string;
   operationName: string;
   paramChanges: ParamChange[];
+  /**
+   * `Operation.response` changed type, or the operation gained or lost its
+   * only 2xx/3xx response (`responseStatusCode` present on one side only),
+   * with or without a body. Breaking.
+   */
   responseChanged: boolean;
   /**
    * The body appeared, disappeared, or changed type. Breaking, except that a
@@ -561,8 +566,8 @@ export interface OperationModified {
    * move breaks callers is left to a separate issue — this flag only says
    * the move happened, so a changelog can. Compared only while both sides
    * carry a code, as `requestBodyRequired` is while both carry a body; an
-   * operation gaining or losing its only 2xx/3xx is not a move. Not mirrored
-   * into `behaviorChanges`.
+   * operation gaining or losing its only 2xx/3xx is not a move but
+   * `responseChanged`. Not mirrored into `behaviorChanges`.
    */
   responseStatusCodeChanged: boolean;
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */

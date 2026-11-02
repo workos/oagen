@@ -105,7 +105,12 @@ export function diffOperations(
     if (!oldOp) continue;
 
     const paramChanges = diffParams(oldOp, newOp);
-    const responseChanged = !typeRefsEqual(oldOp.response, newOp.response);
+    // `response` is `unknown` both for a 2xx/3xx without a body (a lone `204`
+    // or `302`) and for none at all, so the operation gaining or losing its
+    // only 2xx/3xx is told by `responseStatusCode` appearing or disappearing.
+    const responseChanged =
+      !typeRefsEqual(oldOp.response, newOp.response) ||
+      (oldOp.responseStatusCode === undefined) !== (newOp.responseStatusCode === undefined);
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
     // The required flag and the encoding are compared only while both sides
     // carry a body: a body appearing or disappearing is already
@@ -154,10 +159,11 @@ export function diffOperations(
     // The status code `response` is read from (`responseStatusCode`, present
     // exactly when a 2xx or 3xx is declared), compared only while both sides
     // carry one, as `requestBodyRequired` is while both carry a body: an
-    // operation gaining or losing its only 2xx/3xx is not a move. Reported
-    // as additive: the old code may still be declared (a `200` added beside
-    // a lone `201` makes the `200` the primary), and whether a bare status
-    // move breaks callers is left to a separate issue.
+    // operation gaining or losing its only 2xx/3xx is not a move but
+    // `responseChanged`. Reported as additive: the old code may still be
+    // declared (a `200` added beside a lone `201` makes the `200` the
+    // primary), and whether a bare status move breaks callers is left to a
+    // separate issue.
     const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
     const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
     const status = responseStatusCodeChanged

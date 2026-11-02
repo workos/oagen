@@ -1216,3 +1216,51 @@ describe('diffOperations response descriptions', () => {
     expect(diffOperations('Users', [described], [getUser])).toEqual([]);
   });
 });
+
+describe('diffOperations — an operation gaining or losing its only 2xx/3xx, which has no body (issue #371)', () => {
+  /** The issue's `DELETE /pets` (`deletePets`), as the parser builds it from `responses` or from no `responses` key. */
+  const deletePets = (responses?: Record<string, unknown>): Operation[] =>
+    extractOperations({
+      '/pets': { delete: { operationId: 'deletePets', ...(responses ? { responses } : {}) } },
+    } as never).services.flatMap((s) => s.operations);
+  const none = deletePets();
+  const deleted = deletePets({ '204': { description: 'Deleted' } });
+  const notFound = deletePets({ '404': { description: 'Not found' } });
+  const redirect = deletePets({ '302': { description: 'Moved' } });
+  /** Each change as the issue prints it: kind, operation, every `…Changed` flag set, classification. */
+  const report = (from: Operation[], to: Operation[]): string[] =>
+    diffOperations('Pets', from, to).map((change) => {
+      const flags = Object.entries(change).flatMap(([key, value]) =>
+        key.endsWith('Changed') && value === true ? [` ${key}`] : [],
+      );
+      return `${change.kind} ${'operationName' in change ? change.operationName : ''}${flags.join('')}: ${change.classification}`;
+    });
+
+  it('reports it modified and breaking, as before #317, though `response` is `unknown` on both sides', () => {
+    // Only `responseStatusCode`, present on one side, tells the documents apart.
+    expect([none, deleted, notFound, redirect].map(([op]) => [op.response, op.responseStatusCode])).toEqual([
+      [{ kind: 'primitive', type: 'unknown' }, undefined],
+      [{ kind: 'primitive', type: 'unknown' }, 204],
+      [{ kind: 'primitive', type: 'unknown' }, undefined],
+      [{ kind: 'primitive', type: 'unknown' }, 302],
+    ]);
+    // Used to be `[]` both ways (exit 0).
+    expect(report(none, deleted)).toEqual(['operation-modified deletePets responseChanged: breaking']);
+    expect(report(deleted, none)).toEqual(['operation-modified deletePets responseChanged: breaking']);
+    // Used to be `errorsChanged` alone, additive (exit 1), the removed 204 missing.
+    expect(report(deleted, notFound)).toEqual([
+      'operation-modified deletePets responseChanged errorsChanged: breaking',
+    ]);
+    // A lone 3xx is the operation's only success response too.
+    expect(report(redirect, none)).toEqual(['operation-modified deletePets responseChanged: breaking']);
+  });
+
+  it('leaves a bodiless 2xx that moves to another code to responseStatusCodeChanged, and no 2xx/3xx on either side alone', () => {
+    const resetContent = deletePets({ '205': { description: 'Reset' } });
+    expect(report(deleted, resetContent)).toEqual([
+      'operation-modified deletePets responseStatusCodeChanged: additive',
+    ]);
+    expect(report(none, notFound)).toEqual(['operation-modified deletePets errorsChanged: additive']);
+    expect(report(none, none)).toEqual([]);
+  });
+});
