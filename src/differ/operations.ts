@@ -32,7 +32,7 @@ import type {
   ResponseHeaderChange,
   ServerChange,
 } from './types.js';
-import { locatedParams, paramKey, parameterContentTypeShift } from './params.js';
+import { jsonEncodedOnBothSides, locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
   classifyParamChange,
   classifyResponseHeaderChange,
@@ -938,11 +938,17 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
       }
     }
 
-    // The media type the value is serialized in (`Parameter.contentType`)
-    // moved: between `schema` and `content`, or between two essences.
+    // The media type the value is serialized in (`Parameter.contentType`,
+    // or the one an unread `content` map declares) moved: between `schema`
+    // and `content`, or between two essences. Additive only between two JSON
+    // media types the parser reads, which encode the value alike.
     const reencoded = parameterContentTypeShift(oldEntry.p, newEntry.p);
     if (reencoded) {
-      changes.push({ ...at(classifyParamChange('param-content-type-changed', name), loc), ...reencoded });
+      const jsonOnBothSides = jsonEncodedOnBothSides(oldEntry.p, newEntry.p);
+      changes.push({
+        ...at(classifyParamChange('param-content-type-changed', name, jsonOnBothSides), loc),
+        ...reencoded,
+      });
     }
 
     if (oldEntry.p.required !== newEntry.p.required) {

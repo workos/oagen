@@ -282,13 +282,20 @@ export function classifyResponseHeaderChange(
   }
 }
 
-export function classifyParamChange(kind: ParamChange['kind'], paramName: string, isRequired?: boolean): ParamChange {
+/**
+ * Classify a change to an operation's parameter, from the caller's side.
+ * `flag` is read by three kinds: `param-added` and `param-required-changed`
+ * take the new side's `required`, and `param-content-type-changed` takes
+ * whether both sides are read from a JSON media type
+ * (`jsonEncodedOnBothSides` in `params.ts`).
+ */
+export function classifyParamChange(kind: ParamChange['kind'], paramName: string, flag?: boolean): ParamChange {
   switch (kind) {
     case 'param-added':
       return {
         kind,
         paramName,
-        classification: isRequired ? 'breaking' : 'additive',
+        classification: flag ? 'breaking' : 'additive',
       };
     case 'param-removed':
       return { kind, paramName, classification: 'breaking' };
@@ -302,7 +309,7 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
       return {
         kind,
         paramName,
-        classification: isRequired ? 'breaking' : 'additive',
+        classification: flag ? 'breaking' : 'additive',
       };
     case 'param-default-changed':
       // Removing or changing a default that callers may have implicitly relied on
@@ -322,9 +329,11 @@ export function classifyParamChange(kind: ParamChange['kind'], paramName: string
     case 'param-content-type-changed':
       // See `parameterContentTypeShift`: the media type decides how the value
       // is serialized (JSON-encoded under `application/json`, by style and
-      // explode under `schema`), so a caller encoding it the old way sends a
-      // value the API no longer reads — breaking in both directions, like a
-      // type change.
-      return { kind, paramName, classification: 'breaking' };
+      // explode under `schema`, as written under a map the parser does not
+      // read), so a caller encoding it the old way sends a value the API no
+      // longer reads — breaking in both directions, like a type change.
+      // Between two JSON media types the parser reads (`flag`), the value is
+      // JSON-encoded either way and nothing a caller sends changes: additive.
+      return { kind, paramName, classification: flag ? 'additive' : 'breaking' };
   }
 }

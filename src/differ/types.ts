@@ -953,8 +953,9 @@ export interface ParamChange {
   newDeprecated?: boolean;
   /**
    * For `param-content-type-changed`: `Parameter.contentType` on each side as
-   * written, or `null` for a parameter typed by `schema` (see
-   * `parameterContentTypeShift` in `params.ts`).
+   * written — for a `content` map none of whose media types is read, the
+   * first of its `Parameter.contentTypes` — or `null` for a parameter typed
+   * by `schema` (see `parameterContentTypeShift` in `params.ts`).
    */
   oldContentType?: string | null;
   newContentType?: string | null;
@@ -968,7 +969,9 @@ export interface ParamChange {
   /**
    * For `param-deprecated-changed`: `live → deprecated` or `deprecated → live`.
    * For `param-name-changed`: `name X-Pet-Token → x-pet-token`.
-   * For `param-content-type-changed`: `content type <schema> → application/json`.
+   * For `param-content-type-changed`: `content type <schema> → application/json`,
+   * a side whose map the parser does not read followed by `(unread)`
+   * (`content type <schema> → application/xml (unread)`).
    */
   details?: string;
 }

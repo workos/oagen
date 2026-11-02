@@ -73,9 +73,13 @@ const paramsOf = (op: Operation): Parameter[] => [
   ...(op.cookieParams ?? []),
   ...(op.bodyOwnedQueryParams ?? []),
 ];
-/** A parameter without the media type it is serialized in, to compare a `content` twin with its `schema` twin. */
+/**
+ * A parameter without the media types only a `content` declaration carries —
+ * the one its value is serialized in and the ones its map declares — to
+ * compare a `content` twin with its `schema` twin.
+ */
 const withoutContentType = (p: Parameter): Partial<Parameter> =>
-  Object.fromEntries(Object.entries(p).filter(([key]) => key !== 'contentType'));
+  Object.fromEntries(Object.entries(p).filter(([key]) => key !== 'contentType' && key !== 'contentTypes'));
 const namesIn = (ref: TypeRef, kind: 'model' | 'enum'): string[] => {
   const names: string[] = [];
   walkTypeRef(ref, { [kind]: (node: { name: string }) => names.push(node.name) });
@@ -216,7 +220,8 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
     // only the `content` twin carries.
     expect(paramsOf(createNote).map(withoutContentType)).toEqual(paramsOf(copyNote));
     expect(paramsOf(createNote).map((p) => p.contentType)).toEqual(Array(5).fill('application/json'));
-    expect(paramsOf(copyNote).some((p) => 'contentType' in p)).toBe(false);
+    expect(paramsOf(createNote).map((p) => p.contentTypes)).toEqual(Array(5).fill(['application/json']));
+    expect(paramsOf(copyNote).some((p) => 'contentType' in p || 'contentTypes' in p)).toBe(false);
     expect(paramsOf(createNote).map((p) => typeLabel(p.type))).toEqual([
       'primitive integer',
       'enum NotesMood',
@@ -261,6 +266,7 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
     const { listNotes, listRecentNotes } = opsOf(spec);
     expect(paramsOf(listNotes).map(withoutContentType)).toEqual(paramsOf(listRecentNotes));
     expect(paramsOf(listNotes).map((p) => p.contentType)).toEqual(Array(3).fill('application/json'));
+    expect(paramsOf(listNotes).map((p) => p.contentTypes)).toEqual(Array(3).fill(['application/json']));
     // `prefs` is singularized by the model naming, as for a `schema` parameter.
     expect(paramsOf(listNotes).map((p) => typeLabel(p.type))).toEqual([
       'model NotesFilter',
@@ -347,6 +353,77 @@ describe('a parameter declared with `content` instead of `schema` (issue #297)',
     expect(noteAdded.headerParams[0]).toMatchObject({ name: 'X-Mood', contentType: 'application/json' });
     expect(noteAdded.queryParams[0]).not.toHaveProperty('contentType');
     expect(warnings()).toEqual([unreadWarning('Parameter "blob" (in: header) on listNotes', 'image/png')]);
+    expectSound(spec);
+  });
+
+  it('carries every media type the content map declares, as written, whether or not one is read (#410)', async () => {
+    const xml = content('application/xml', { schema: { type: 'string' } });
+    const spec = await parseDocument(
+      document(
+        {
+          '/notes': getOp('listNotes', [
+            { $ref: '#/components/parameters/Filter' },
+            { name: 'mood', in: 'query', ...content('application/json; charset=utf-8', { schema: mood }) },
+            {
+              name: 'ordered',
+              in: 'query',
+              content: {
+                'text/plain': { schema: { type: 'integer' } },
+                'application/json': { schema: { type: 'boolean' } },
+              },
+            },
+            // Not read: typed as a string, under the media type it declares.
+            { name: 'xml', in: 'query', ...xml },
+            { name: 'schemaless', in: 'header', ...content('application/json') },
+            // A `schema` wins over a map beside it, and an empty map declares nothing.
+            { name: 'both', in: 'query', schema: { type: 'integer' }, ...xml },
+            { name: 'empty', in: 'query', content: {} },
+            { name: 'plain', in: 'query', schema: { type: 'string' } },
+          ]),
+        },
+        {
+          components: {
+            parameters: {
+              Filter: { name: 'filter', in: 'query', ...content('APPLICATION/XML', { schema: { type: 'string' } }) },
+            },
+          },
+          webhooks: {
+            noteAdded: {
+              post: {
+                parameters: [{ name: 'X-Note', in: 'header', ...xml }],
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+        },
+      ),
+    );
+
+    const { listNotes } = opsOf(spec);
+    expect(paramsOf(listNotes).map((p) => [p.name, typeLabel(p.type), p.contentType, p.contentTypes])).toEqual([
+      ['filter', 'primitive string', undefined, ['APPLICATION/XML']],
+      ['mood', 'enum NotesMood', 'application/json; charset=utf-8', ['application/json; charset=utf-8']],
+      ['ordered', 'primitive boolean', 'application/json', ['text/plain', 'application/json']],
+      ['xml', 'primitive string', undefined, ['application/xml']],
+      ['both', 'primitive integer', undefined, undefined],
+      ['empty', 'primitive string', undefined, undefined],
+      ['plain', 'primitive string', undefined, undefined],
+      ['schemaless', 'primitive string', undefined, ['application/json']],
+    ]);
+    // Absent, not set to `undefined`, where nothing is declared under `content`.
+    for (const name of ['both', 'empty', 'plain']) {
+      expect(paramsOf(listNotes).find((p) => p.name === name)).not.toHaveProperty('contentTypes');
+    }
+    const [noteAdded] = spec.webhooks!;
+    expect(noteAdded.headerParams[0]).toMatchObject({ name: 'X-Note', contentTypes: ['application/xml'] });
+    expect(noteAdded.headerParams[0]).not.toHaveProperty('contentType');
+    // The unread maps are still reported, once per site.
+    expect(warnings()).toEqual([
+      unreadWarning('Parameter "filter" (in: query) on listNotes', 'APPLICATION/XML'),
+      unreadWarning('Parameter "xml" (in: query) on listNotes', 'application/xml'),
+      unreadWarning('Parameter "schemaless" (in: header) on listNotes', 'application/json'),
+      unreadWarning('Parameter "X-Note" (in: header) on webhooks.noteAdded.post', 'application/xml'),
+    ]);
     expectSound(spec);
   });
 
@@ -564,8 +641,8 @@ describe('a webhook parameter declared with `content` (the `mintParameter` twin)
   });
   /**
    * A webhook's parameter types and models with its stem replaced, so two
-   * stems can be compared; the media type only a `content` twin carries is
-   * left out and asserted on its own.
+   * stems can be compared; the media types only a `content` twin carries are
+   * left out and asserted on their own.
    */
   const shape = (hook: Webhook, models: Model[], stem: string) =>
     JSON.parse(
@@ -587,9 +664,10 @@ describe('a webhook parameter declared with `content` (the `mintParameter` twin)
     // The key as written travels with each `content` parameter; the `schema` twin carries none.
     for (const list of [adopted.headerParams, adopted.queryParams, adopted.cookieParams!]) {
       expect(list.map((p) => p.contentType)).toEqual(['application/json; charset=utf-8']);
+      expect(list.map((p) => p.contentTypes)).toEqual([['application/json; charset=utf-8']]);
     }
     for (const list of [returned.headerParams, returned.queryParams, returned.cookieParams!]) {
-      expect(list.some((p) => 'contentType' in p)).toBe(false);
+      expect(list.some((p) => 'contentType' in p || 'contentTypes' in p)).toBe(false);
     }
     expect(adopted.headerParams[0].type).toEqual({ kind: 'model', name: 'PetAdoptedXMeta' });
     expect(adopted.queryParams[0].type).toEqual({ kind: 'enum', name: 'PetAdoptedMood', values: ['calm', 'busy'] });
