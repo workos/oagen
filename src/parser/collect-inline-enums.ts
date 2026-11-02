@@ -160,17 +160,18 @@ export function collectInlineEnumsFromOperations(
         }
       }
       // The request body and each success body are typed by `schemaToTypeRef`
-      // under the operation's `<Op>Request` / `<Op>Response` name, so one that
-      // is itself an inline enum, or an array of one, reaches no model and is
-      // promoted here — neither `collectResponseBodyTypes` nor the error loop
-      // below yields it (workos/oagen#281). Every `successResponses` entry is
-      // walked on its own under its status code, as its headers are: the 200
-      // and the 202 derive the same name, so a second body with other members
-      // steps to `CheckPetKindResponse202`, while identical members share. A
-      // lone success response, and the request body, carry no code and fall
-      // back to a numeric suffix (`GetPetKindResponse2`). An enum nested in a
-      // body's model is collected with every other model's
-      // (`collectInlineEnumsFromModels`).
+      // under the operation's `<Op>Request` / `<Op>Response` name (a success
+      // body's array items under `<Op>Item`), so one that is itself an inline
+      // enum, or an array of one, reaches no model and is promoted here —
+      // neither `collectResponseBodyTypes` nor the error loop below yields it
+      // (workos/oagen#281). Every `successResponses` entry is walked on its
+      // own under its status code, as its headers are: the 200 and the 202
+      // derive the same name, so a second body with other members steps to
+      // `CheckPetKindResponse202` (`CheckPetKindItem202` for an array of one),
+      // while identical members share. A lone success response, and the
+      // request body, carry no code and fall back to a numeric suffix
+      // (`GetPetKindResponse2`). An enum nested in a body's model is
+      // collected with every other model's (`collectInlineEnumsFromModels`).
       for (const { type, qualifier } of requestAndSuccessBodies(op)) {
         collectDistinctEnums(type, qualifier, enums, enumNames, modelNames);
       }
