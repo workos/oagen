@@ -1,4 +1,4 @@
-import type { ApiSpec, AuthScheme } from '../ir/types.js';
+import type { ApiSpec, AuthScheme, EnumRef } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -306,7 +306,17 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // model reaches the array too (`attachSharedRefs`).
   attachSharedRefs(naming.bundles, componentNames);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
-  const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks, enums, componentNames);
+  // The lifted enums the fold renamed away, each with a reference that now
+  // carries the new name.
+  const foldedEnums = new Map<string, EnumRef>();
+  const finalModels = collapseJsonSuffixModels(
+    fieldMergedModels,
+    services,
+    webhooks,
+    enums,
+    componentNames,
+    foldedEnums,
+  );
   applyFieldHints(finalModels, options?.fieldHints);
   // The inline error bodies, one model per operation and status code until here,
   // fold onto shared models named by shape (`ErrorBody`, `ErrorBodyWithCode`),
@@ -324,6 +334,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   collectInlineEnumsFromModels(collapsedModels, enums);
   collectInlineEnumsFromOperations(services, enums, componentSites, collapsedModels, componentNames);
   collectInlineEnumsFromWebhooks(webhooks, enums, collapsedModels);
+  // Noted once the collectors have settled the name: `PetJsonMode` renamed
+  // to `PetMode` beside a component model `PetMode` is lifted as `PetMode2`.
+  for (const [name, ref] of foldedEnums) console.warn(`[oagen] Folded enum "${name}" into "${ref.name}"`);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 

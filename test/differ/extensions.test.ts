@@ -8,7 +8,7 @@
  * and never as a type change; a body comparison that reads a model through
  * to its shape ignores them, as it ignores a description.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -469,5 +469,108 @@ describe('every carrier of extensions has a differ comparison site (Greptile rou
     }
     // Flipping nothing reports nothing.
     expect(diffSpecs(original, structuredClone(original)).changes).toEqual([]);
+  });
+});
+
+describe('the keys a folded `…Json` model gives its base are compared (issue #426)', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  /**
+   * `createPet` takes `PetJson` and returns `Pet`; `PetJson` folds onto `Pet` with its link and
+   * `x-since`. `chained` declares `PetJsonJson` after it, which `createPet` takes instead and
+   * which alone carries `x-since`: it folds onto `PetJson`, which folds onto `Pet`.
+   */
+  async function parsePets(since: string, chained = false): Promise<ApiSpec> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-issue-426-differ-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'pets.json');
+    const pet = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        openapi: '3.1.0',
+        info: { title: 'Pets', version: '1' },
+        paths: {
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: { $ref: `#/components/schemas/${chained ? 'PetJsonJson' : 'PetJson'}` },
+                  },
+                },
+              },
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+                },
+              },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            Pet: pet({ name: { type: 'string' } }),
+            PetJson: {
+              ...pet({ name: { type: 'string' }, age: { type: 'integer' } }),
+              externalDocs: { url: 'https://example.com/pets' },
+              ...(chained ? {} : { 'x-since': since }),
+            },
+            ...(chained
+              ? {
+                  PetJsonJson: {
+                    ...pet({ name: { type: 'string' }, age: { type: 'integer' }, tag: { type: 'string' } }),
+                    'x-since': since,
+                  },
+                }
+              : {}),
+          },
+        },
+      }),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      return await parseSpec(file);
+    } finally {
+      warn.mockRestore();
+    }
+  }
+
+  it('reports `x-since` moving on `PetJson` as an additive change to `Pet`', async () => {
+    const report = diffSpecs(await parsePets('1.2'), await parsePets('1.3'));
+    expect(report.changes).toEqual([
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        deprecatedChanged: false,
+        extensionsChanged: true,
+        oldExtensions: { 'x-since': '1.2' },
+        newExtensions: { 'x-since': '1.3' },
+        classification: 'additive',
+      },
+    ]);
+    expect(report.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+  });
+
+  it('reports `x-since` moving on the deepest of two chained folds, declared last, on `Pet` (Greptile)', async () => {
+    const report = diffSpecs(await parsePets('1.2', true), await parsePets('1.3', true));
+    expect(report.changes).toEqual([
+      {
+        kind: 'model-modified',
+        name: 'Pet',
+        fieldChanges: [],
+        deprecatedChanged: false,
+        extensionsChanged: true,
+        oldExtensions: { 'x-since': '1.2' },
+        newExtensions: { 'x-since': '1.3' },
+        classification: 'additive',
+      },
+    ]);
   });
 });
