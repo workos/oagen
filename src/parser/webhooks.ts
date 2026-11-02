@@ -981,7 +981,8 @@ function buildWebhook(
     ...(requestBody ? { requestBody } : {}),
     ...(requestBodyEncoding ? { requestBodyEncoding } : {}),
     ...(requestBodyContentType ? { requestBodyContentType } : {}),
-    ...(body?.required === true ? { requestBodyRequired: true } : {}),
+    // Set only when the body declares a media type, as an operation's flag is.
+    ...(requestBodyContentTypes && body?.required === true ? { requestBodyRequired: true } : {}),
     ...(requestBodyDescription !== undefined ? { requestBodyDescription } : {}),
     // Every media type the body declares, present only when there is one, as on an operation.
     ...(requestBodyContentTypes ? { requestBodyContentTypes, requestBodyContents } : {}),
