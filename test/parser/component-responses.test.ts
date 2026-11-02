@@ -1269,10 +1269,14 @@ describe("an operation's own inline body named like a component response's body 
   const card = { '/card': { get: { operationId: 'card', responses: { '200': json(object({ j: string })) } } } };
   const getNote = { '/notes': { get: { operationId: 'getNote', responses: { '200': cardRef } } } };
 
-  async function parse(paths: Record<string, unknown>, responses: Record<string, unknown> = { Card: textCard }) {
+  async function parse(
+    paths: Record<string, unknown>,
+    responses: Record<string, unknown> = { Card: textCard },
+    otherSchemas: Record<string, unknown> = {},
+  ) {
     dir ??= mkdtempSync(join(tmpdir(), 'oagen-424-'));
     const specPath = join(dir, 'spec.json');
-    const schemas = { Pet: PET_SCHEMA };
+    const schemas = { Pet: PET_SCHEMA, ...otherSchemas };
     writeFileSync(
       specPath,
       JSON.stringify({
@@ -1434,6 +1438,74 @@ describe("an operation's own inline body named like a component response's body 
       'Pet { name }',
     ]);
     expect(warn.mock.calls).toEqual([[expect.stringContaining('the latter is renamed "card2"')]]);
+  });
+
+  /** A type as the issue's repro prints it, an array as its items followed by `[]`. */
+  const arrayOrTypeName = (type: TypeRef | undefined): string =>
+    type?.kind === 'array' ? `${typeName(type.items)}[]` : typeName(type);
+  /** `GET /card` (`card`) returning an inline array of `{ j }`, whose items derive `CardItem` from the operationId. */
+  const listCard = {
+    '/card': {
+      get: { operationId: 'card', responses: { '200': json({ type: 'array', items: object({ j: string }) }) } },
+    },
+  };
+  /** `Card` with a nested `item` object, which derives `CardResponseItem` under the component's body name. */
+  const nestedItemCard = {
+    description: 'A card',
+    content: { 'application/json': { schema: object({ text: string, item: object({ q: string }) }) } },
+  };
+
+  it("reserves the name an operation's array items settle on, not the one they first try, in either path order (#510 review)", async () => {
+    // Beside a component schema `CardItem`, `card`'s items are retried as
+    // `CardResponseItem` (`typeInlineItems`). The dry run used to reserve
+    // `CardItem` only, so the component's nested `item` model took
+    // `CardResponseItem` too: with `/card` first the merge kept `{ j }` for
+    // both, with a warning, and `getNote`'s `item` lost `q`; with `/notes`
+    // first `card` stepped on to `CardItem2` instead.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cardItem = { CardItem: object({ x: string }) };
+    const cardFirst = await parse({ ...listCard, ...getNote }, { Card: nestedItemCard }, cardItem);
+    const notesFirst = await parse({ ...getNote, ...listCard }, { Card: nestedItemCard }, cardItem);
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(arrayOrTypeName(ops.get('card')!.response)).toBe('CardResponseItem[]');
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual([
+        'CardItem { x }',
+        'CardResponse2 { text, item }',
+        'CardResponse2Item { q }',
+        'CardResponseItem { j }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it('reserves no retry the items never take: without the schema, the component keeps `CardResponse` beside `CardItem[]`', async () => {
+    // Nothing owns `CardItem`, so the items settle on it as written and
+    // `CardResponseItem` is the component's nested model alone: the
+    // component steps only when the operation would take the name.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cardFirst = await parse({ ...listCard, ...getNote }, { Card: nestedItemCard });
+    const notesFirst = await parse({ ...getNote, ...listCard }, { Card: nestedItemCard });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(arrayOrTypeName(ops.get('card')!.response)).toBe('CardItem[]');
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse');
+      expect(modelsOf(spec)).toEqual([
+        'CardItem { j }',
+        'CardResponse { text, item }',
+        'CardResponseItem { q }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
   });
 });
 
