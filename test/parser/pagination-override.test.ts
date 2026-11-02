@@ -1560,10 +1560,11 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
           itemType: { kind: 'model', name: 'ListPetsResponseResultItem' },
           endOfIteration: { kind: 'hasMore', path: 'more' },
         });
-        // Both bodies keep the wrapper the override iterates.
+        // Both bodies keep the wrapper the override iterates, the 201 under a
+        // name of its own (#435).
         expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
           [200, { kind: 'model', name: 'ListPetsResponse' }],
-          [201, { kind: 'model', name: 'ListPetsResponse' }],
+          [201, { kind: 'model', name: 'ListPetsResponse201' }],
         ]);
         expectSound(ir, []);
       });
