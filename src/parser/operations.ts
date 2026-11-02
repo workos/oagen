@@ -3240,12 +3240,15 @@ function buildOperation(
   // bundle owns the success bodies, the list envelope and the response
   // headers; the request bundle owns the body. Qualified by the stem the
   // operation's models are named from, as its list-envelope companions are:
-  // the `operationId`'s name (`GetLegacyWidgetWidget`), else the path-derived
-  // prefix (`PetsByIdLegacyWidgetGetWidget`, beside the operation's
-  // `PetsByIdLegacyWidgetGetResponse`), so the name depends on the method and
-  // path alone and a change to the name inferOperationName derives renames no
-  // type (see `headerOperationQualifier`).
-  const modelQualifier = namingOp.operationId ? toPascalCase(namingName) : pathModelBaseName;
+  // the `operationId`'s (`operationIdModelBase`: `GetLegacyWidgetWidget`;
+  // `UserListWidget` for `users.list`, beside its `UserListRequest`), else
+  // the path-derived prefix (`PetsByIdLegacyWidgetGetWidget`, beside the
+  // operation's `PetsByIdLegacyWidgetGetResponse`). So the name depends on
+  // the `operationId` or on the method and path alone, never on the
+  // operation's name — a change to what inferOperationName derives or to
+  // what an operationIdTransform makes of the `operationId` renames no type
+  // (see `headerOperationQualifier`).
+  const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
   // items may have shared another site's model (`typeInlineItems`), and the

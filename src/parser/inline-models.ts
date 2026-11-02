@@ -1363,9 +1363,10 @@ export function extractComponentFieldModels(
  * be renamed and exactly its own references repointed (see
  * `settleSharedNames` in the merge passes). `qualifier` is prefixed to the
  * new name — for an operation's bodies and list-envelope companions, the
- * PascalCase name of its `operationId`, or without one the path-derived
- * prefix they are named from (`PetsByIdLegacyWidgetGet`), never the derived
- * operation name; for a component field's, the component name; `roots`
+ * stem they are named from: its `operationId`'s, cleaned as its `…Request`
+ * model name is (`UserList` for `users.list`), or without one the
+ * path-derived prefix (`PetsByIdLegacyWidgetGet`), never the operation's
+ * name; for a component field's, the component name; `roots`
  * are the type references the site owns — an operation's response, its
  * request body, a component field's type; `models` are the models the site
  * produced, whose fields reference one another. Renaming one of `models`
