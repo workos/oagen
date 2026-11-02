@@ -3841,9 +3841,10 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
  * there: a `$ref` is not followed, so a component's text stays on its model,
  * while a `description` written beside the `$ref` is read, as a field reads
  * one. A wrapper the type builder collapses — a nullable `oneOf`/`anyOf`, a
- * single-member `allOf` — is read by the rule the enum and the model built
- * from its branch follow (`unwrapCollapsedWrappers`): its own text when it
- * has content, else its branch's. `undefined` when neither has content; a
+ * single-member `allOf` — or keeps as a union of one variant it types by the
+ * same rule — a single-member `oneOf`/`anyOf` — is read by the rule the enum
+ * lifted from its branch follows (`unwrapCollapsedWrappers`): its own text
+ * when it has content, else its branch's. `undefined` when neither has content; a
  * body none of whose media types is read has no `selected` and carries its
  * own text alone. The text is kept verbatim. Every reader of a body — the
  * operation extractor and the webhook builder — takes the body's doc text

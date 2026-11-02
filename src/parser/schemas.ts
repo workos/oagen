@@ -622,6 +622,29 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
 }
 
 /**
+ * The one variant of a single-member `oneOf`/`anyOf` — a union of exactly
+ * one variant, and that one not `null` — which the type builder keeps as a
+ * union of one variant but types by the wrapper rule, the union's
+ * documentation carried onto it (`withWrapperDocs`, in `schemaToTypeRef`'s
+ * union branch; workos/oagen#445). `undefined` otherwise: no union that
+ * types the schema (`classifyInlineSchema` — none, one under an `allOf`,
+ * which takes precedence, or one of bare limits), a `null` variant (a
+ * nullable wrapper, `nullableUnionBranch`), several variants, or a `oneOf`
+ * of consts read as an enum (`inlineEnumSpelling`), which is the schema
+ * that declares the members and so keeps its own text. Decided on a schema
+ * whose nullable wrappers are removed, as `schemaToTypeRef` decides it. The
+ * one definition for the readers that follow the type builder without
+ * typing (`unwrapCollapsedWrappers`).
+ */
+function loneUnionVariant(schema: SchemaObject): SchemaObject | undefined {
+  if (classifyInlineSchema(schema) !== 'union' || inlineEnumSpelling(schema)?.spelling === 'const-union') {
+    return undefined;
+  }
+  const variants = schema.oneOf ?? schema.anyOf ?? [];
+  return variants.length === 1 && !isNullSchema(variants[0]) ? variants[0] : undefined;
+}
+
+/**
  * The array schema `schema` is, once a nullable wrapper of any spelling is
  * removed — an OAS 3.1 type list naming `null` (`type: ['array', 'null']`),
  * OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` with one non-null variant,
@@ -666,17 +689,23 @@ function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
 /**
  * `schema` with every wrapper the type builder collapses stripped — a
  * nullable wrapper of any spelling (`unwrapNullableSchema`) and a
- * single-member `allOf` read as its member (`unwrappedAllOfMember`),
- * however they nest — each level's documentation carried onto what it
- * unwraps to, outermost first (`withWrapperDocs`). So its `description` is
- * the text the enum and the model built from the branch take: the
- * outermost wrapper's with content, else the next, else the branch's own.
- * A `$ref` is never followed, and a `$ref` member of an `allOf` is a
- * reference rather than a branch, so the wrapper's own text stands. Read for
- * a request body's doc text (`requestBodyDescriptionOf`).
+ * single-member `allOf` read as its member (`unwrappedAllOfMember`) — and
+ * every single-member `oneOf`/`anyOf` it keeps as a union of one variant
+ * but types by the same rule (`loneUnionVariant`), however they nest — each
+ * level's documentation carried onto what it unwraps to, outermost first
+ * (`withWrapperDocs`). So its `description` is the text the enum lifted
+ * from the branch takes: the outermost wrapper's with content, else the
+ * next, else the branch's own — and the text the model built from it takes,
+ * except under a single-member `oneOf`/`anyOf`, whose object variant's
+ * model keeps the variant's own (workos/oagen#445). A `$ref` is never
+ * followed, and a `$ref` member of an `allOf` is a reference rather than a
+ * branch, so the wrapper's own text stands. Read for a request body's doc
+ * text (`requestBodyDescriptionOf`).
  */
 export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
   const bare = unwrapNullableSchema(schema, withWrapperDocs);
+  const variant = loneUnionVariant(bare);
+  if (variant) return unwrapCollapsedWrappers(withWrapperDocs(variant, bare));
   if (!bare.allOf || classifyInlineSchema(bare) !== 'allOf' || readInlineAllOf(bare.allOf, bare) !== 'unwrapped') {
     return bare;
   }
@@ -804,9 +833,10 @@ export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObjec
  * single-member `oneOf`/`anyOf`, which stays a union (workos/oagen#445;
  * the request body's own `oneOf` likewise), by the model extractors
  * (`unwrapNullableField` through `unwrapNullableSchema`,
- * `unwrappedAllOfMember`) and by the response path
- * (`extractDirectResource`), so a model, an enum and a field built from one
- * wrapper document themselves alike.
+ * `unwrappedAllOfMember`), by the response path (`extractDirectResource`)
+ * and by the request body's text reader, which strips the same wrappers
+ * (`unwrapCollapsedWrappers`), so a model, an enum, a field and a body's
+ * doc text built from one wrapper document themselves alike.
  */
 export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
   const carried: SchemaObject = {};
@@ -4883,7 +4913,9 @@ export function schemaToTypeRef(
         // document wrote for its variant: the variant is typed with the
         // union's documentation by the one wrapper rule (`withWrapperDocs`),
         // so an inline enum it lifts to documents itself as under a nullable
-        // wrapper. The lookups read the variant as written.
+        // wrapper. The lookups read the variant as written. A reader that
+        // follows this decision without typing — a request body's doc text —
+        // takes it from `loneUnionVariant`.
         const typed = nonNullVariants.length === 1 ? withWrapperDocs(v, schema) : v;
         const entry = variantContexts.get(v);
         variants.push(
