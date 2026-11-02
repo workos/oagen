@@ -314,7 +314,7 @@ export function deriveMethodName(op: Operation, _service: Service): string {
   // Check if terminal is an action verb
   if (ACTION_VERBS.has(terminal)) {
     // Resource context from preceding segments
-    const context = staticSegments.slice(0, -1).filter((s) => !s.startsWith('{'));
+    const context = staticSegments.slice(0, -1).filter((s) => !isParameterSegment(s));
     const resource = context.length > 0 ? toSnake(singularize(context[context.length - 1])) : '';
     if (resource) {
       return `${terminal}_${resource}`;

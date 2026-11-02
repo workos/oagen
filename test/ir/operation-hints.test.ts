@@ -135,6 +135,16 @@ describe('readPath: a colon that is not a custom method (issue #378)', () => {
     expect(findResolvedMethodCollisions(resolveOperations(spec([pets])))).toEqual([]);
   });
 
+  it('names an action after a segment kept whole for its several colons from that segment, not from the collection before it (#461 review)', () => {
+    // The action's context skips parameters only, so `{id}:a:b` is the
+    // resource and the name does not collide with the action on `/pets`.
+    const pets = svc('Pets', [op('post', '/pets/{id}:a:b/verify'), op('post', '/pets/verify')]);
+    expect(pets.operations.map((o) => deriveMethodName(o, pets))).toEqual(['verify_{id}:a:b', 'verify_pet']);
+    expect(findResolvedMethodCollisions(resolveOperations(spec([pets])))).toEqual([]);
+    // A parameter segment that does not end in `}` is skipped as before.
+    expect(deriveMethodName(op('post', '/tags/{tag}.json/verify'), service)).toBe('verify_tag');
+  });
+
   it('names the issue repro as the segments read before #322, the custom method still split off', () => {
     // A literal segment is snake-cased as written, so the segment kept whole
     // names the GET as `file-{file_path}` names it, never the cut `list_path}`.
