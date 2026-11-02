@@ -1,0 +1,16 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets", "version": "1" },
+  "security": [{ "bearer": [] }],
+  "components": {
+    "securitySchemes": {
+      "apiKey": { "type": "apiKey", "in": "header", "name": "X-Key" },
+      "bearer": { "type": "http", "scheme": "bearer" }
+    }
+  },
+  "paths": {
+    "/pets": {
+      "get": { "operationId": "listPets", "security": [{ "apiKey": [] }], "responses": { "204": { "description": "ok" } } }
+    }
+  }
+}

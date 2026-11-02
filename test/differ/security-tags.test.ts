@@ -480,10 +480,12 @@ describe('diffSpecs – the document’s default security', () => {
     expect(diff.behaviorChanges).toEqual([
       { kind: 'security-changed', node: 'document', oldSecurity: apiKey, newSecurity: [], classification: 'breaking' },
     ]);
-    // A webhook in either document is enough (the removed webhook is reported on its own).
+    // A webhook in only one document does not read both defaults (issue
+    // #383): the removed webhook is reported on its own, and the caller's
+    // side, where the default withdrawn is additive, decides alone.
     expect(diffSpecs(withHook(apiKey), spec({ security: undefined, webhooks: [] })).changes).toMatchObject([
-      { kind: 'security-changed', classification: 'breaking' },
-      { kind: 'webhook-removed' },
+      { kind: 'security-changed', classification: 'additive' },
+      { kind: 'webhook-removed', classification: 'breaking' },
     ]);
     // A webhook that declares its own list does not inherit, so the caller's side alone decides.
     const pinned = (security?: SecurityRequirementSet[]) => spec({ security, webhooks: [hook({ security: bearer })] });
@@ -496,10 +498,20 @@ describe('diffSpecs – the document’s default security', () => {
     const before = spec({ security: apiKey, services: [{ name: 'Pets', operations: [op({ security: apiKey })] }] });
     const after = spec({ security: bearer, services: [{ name: 'Pets', operations: [op()] }] });
     const diff = diffSpecs(before, after);
+    // listPets reads the default in the new document only, so the document
+    // change, which nothing reads in both, is additive (issue #383), and the
+    // break (apiKey → bearer) is reported on the operation alone.
     expect(diff.changes).toMatchObject([
-      { kind: 'security-changed', classification: 'breaking' },
-      { kind: 'operation-modified', securityChanged: true, oldSecurity: apiKey, newSecurity: bearer },
+      { kind: 'security-changed', classification: 'additive' },
+      {
+        kind: 'operation-modified',
+        securityChanged: true,
+        oldSecurity: apiKey,
+        newSecurity: bearer,
+        classification: 'breaking',
+      },
     ]);
+    expect(diff.summary.breaking).toBe(1);
     expect(diff.behaviorChanges.map((b) => (b.kind === 'security-changed' ? b.node : b.kind))).toEqual([
       'document',
       'operation',
@@ -541,15 +553,80 @@ describe('diffSpecs – the document’s default security', () => {
       { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
     ]);
 
-    // An operation inheriting in either document brings the caller's side back.
-    expect(diffSpecs(pinnedOps(undefined), spec({ security: apiKey })).changes[0]).toMatchObject({
-      kind: 'security-changed',
-      classification: 'breaking',
-    });
-    expect(diffSpecs(spec({ security: undefined }), pinnedOps(apiKey)).changes[0]).toMatchObject({
-      kind: 'security-changed',
-      classification: 'breaking',
-    });
+    // An operation inheriting in only one document does not bring the
+    // caller's side back (issue #383): it is compared on its own, and one
+    // that needs nothing in both documents is no change at all.
+    expect(diffSpecs(pinnedOps(undefined), spec({ security: apiKey })).changes).toMatchObject([
+      { kind: 'security-changed', classification: 'additive' },
+      {
+        kind: 'operation-modified',
+        securityChanged: true,
+        oldSecurity: [],
+        newSecurity: apiKey,
+        classification: 'breaking',
+      },
+    ]);
+    expect(diffSpecs(spec({ security: undefined }), pinnedOps(apiKey)).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+    ]);
+  });
+
+  it('reports a default that no operation inherits in both documents as additive (issue #383)', async () => {
+    // `pin`: listPets inherits apiKey, then declares apiKey under a bearer
+    // default; `unpin` is the same pair swapped. listPets requires apiKey in
+    // every document, so no request reads the moved default and `oagen diff`
+    // exits 1 either way.
+    const inherited = await parseSpec(path.join(fixtures, 'security-moved-default-before.json'));
+    const pinned = await parseSpec(path.join(fixtures, 'security-moved-default-after.json'));
+    for (const [before, after, oldSecurity, newSecurity] of [
+      [inherited, pinned, apiKey, bearer],
+      [pinned, inherited, bearer, apiKey],
+    ] as const) {
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        { kind: 'security-changed', oldSecurity, newSecurity, classification: 'additive' },
+      ]);
+      expect(diff.behaviorChanges).toEqual([
+        { kind: 'security-changed', node: 'document', oldSecurity, newSecurity, classification: 'additive' },
+      ]);
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+    }
+  });
+
+  it('pairs an inheriting node across the documents as its own change does', () => {
+    // listPets added or removed is reported on its own, and so is a move to
+    // another service, which the diff reports as one service removed and
+    // another added: none of them reads both defaults.
+    const noOps = (security?: SecurityRequirementSet[]) =>
+      spec({ security, services: [{ name: 'Pets', operations: [] }] });
+    expect(diffSpecs(noOps(undefined), spec({ security: apiKey })).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+      { kind: 'operation-added', serviceName: 'Pets', operationName: 'listPets', classification: 'additive' },
+    ]);
+    expect(diffSpecs(spec({ security: undefined }), noOps(apiKey)).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+      { kind: 'operation-removed', serviceName: 'Pets', operationName: 'listPets', classification: 'breaking' },
+    ]);
+    const inStore = spec({ security: apiKey, services: [{ name: 'Store', operations: [listPets] }] });
+    expect(diffSpecs(spec({ security: undefined }), inStore).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: [], newSecurity: apiKey, classification: 'additive' },
+      { kind: 'service-added', name: 'Store', classification: 'additive' },
+      { kind: 'service-removed', name: 'Pets', classification: 'breaking' },
+    ]);
+
+    // A webhook is paired by name and method, so one whose method changed is
+    // a removal and an addition, and the receiver's side is not read either.
+    const hookOnly = (security: SecurityRequirementSet[] | undefined, httpMethod: Webhook['httpMethod']) =>
+      spec({ security, services: [], webhooks: [hook({ httpMethod })] });
+    expect(diffSpecs(hookOnly(apiKey, 'post'), hookOnly(undefined, 'put')).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: apiKey, newSecurity: [], classification: 'additive' },
+      { kind: 'webhook-added', name: 'petAdopted', httpMethod: 'put', classification: 'additive' },
+      { kind: 'webhook-removed', name: 'petAdopted', httpMethod: 'post', classification: 'breaking' },
+    ]);
+    // The same webhook under its own method reads it: withdrawn, the handler breaks.
+    expect(diffSpecs(hookOnly(apiKey, 'post'), hookOnly(undefined, 'post')).changes).toEqual([
+      { kind: 'security-changed', oldSecurity: apiKey, newSecurity: [], classification: 'breaking' },
+    ]);
   });
 
   it('is listed after the server changes and before the models', () => {
