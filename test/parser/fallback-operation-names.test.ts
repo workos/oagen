@@ -856,6 +856,57 @@ describe('plural path names (issue #268)', () => {
       'get                          GET    /api/{teamId}/notes/{noteId}',
     ]);
   });
+
+  it('restores the service noun as written when the singular is a name outside the group (issue #376)', () => {
+    const params = (...names: string[]) => ({
+      ...json,
+      parameters: names.map((name) => ({ name, in: 'path' as const, required: true, schema: { type: 'string' } })),
+    });
+    // The issue repro, untagged. `Note` would give `/api/notes/{noteId}` the
+    // name of `operationId: getNote`, and nothing else tells it from
+    // `operationId: get`, so the noun comes back as written, as a deeper
+    // segment does beside an operationId.
+    const repro = {
+      '/api/notes/{noteId}': { get: params('noteId') },
+      '/api/{teamId}/notes/{noteId}': { get: { ...params('teamId', 'noteId'), operationId: 'get' } },
+      '/api/notes/pinned': { post: { ...json, operationId: 'getNote' } },
+    };
+    expect(services(repro)).toEqual([
+      {
+        name: 'Notes',
+        operations: [
+          'getNotes: GET /api/notes/{noteId}',
+          'get: GET /api/{teamId}/notes/{noteId}',
+          'getNote: POST /api/notes/pinned',
+        ],
+      },
+    ]);
+    // The same names whatever the document order.
+    const reversed = Object.fromEntries(Object.entries(repro).reverse());
+    expect(names(reversed)).toEqual(names(repro));
+    // The plural taken as well: the number goes on the plain name, never on
+    // a name another operation had.
+    expect(names({ ...repro, '/api/notes/archived': { post: { ...json, operationId: 'getNotes' } } })).toEqual([
+      'getNotes                     POST   /api/notes/archived',
+      'getNote                      POST   /api/notes/pinned',
+      'get2                         GET    /api/notes/{noteId}',
+      'get                          GET    /api/{teamId}/notes/{noteId}',
+    ]);
+    // Only on what the singular left colliding: once the collection has
+    // taken `deleteNotes`, the item no longer collides and keeps its name,
+    // rather than meeting the collection's `Notes` and being numbered.
+    expect(
+      names({
+        '/api/notes/{noteId}': { delete: params('noteId') },
+        '/api/{noteId}/notes': { delete: params('noteId') },
+        '/api/notes/pinned': { post: { ...json, operationId: 'deleteNote' } },
+      }),
+    ).toEqual([
+      'deleteNote                   POST   /api/notes/pinned',
+      'delete                       DELETE /api/notes/{noteId}',
+      'deleteNotes                  DELETE /api/{noteId}/notes',
+    ]);
+  });
 });
 
 /**
