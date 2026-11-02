@@ -1000,4 +1000,109 @@ describe('an operation added beside an action takes no name an operation already
       'Store.updatePetUpdate          PUT    /store/pets/{id}/update',
     ]);
   });
+
+  it('does not count the name of another action still to yield as held (#480 review)', async () => {
+    // `POST /pets/create-pets` is `createPets` until it yields to
+    // `createCreatePets`, so `POST /pets/create` takes `createPets` beside
+    // it, as alone: no operation is left with a name neither had, and
+    // neither is reported removed.
+    await expectAdditive(
+      { '/pets/create': { post: op } },
+      { '/pets/create-pets': { post: op } },
+      { before: 'createPets', more: 'createCreatePets' },
+    );
+    await expectAdditive(
+      { '/pets/update': { put: op } },
+      { '/pets/update-pets': { put: op } },
+      { before: 'updatePets', more: 'updateUpdatePets' },
+    );
+    await expectAdditive(
+      { '/pets/list-all': { get: op } },
+      { '/pets/list-all-pets': { get: op } },
+      { before: 'listAllPets', more: 'listListAllPets' },
+    );
+    expect(names({ '/pets/create': { post: ok }, '/pets/create-pets': { post: ok } })).toEqual([
+      'Pets.createPets                POST   /pets/create',
+      'Pets.createCreatePets          POST   /pets/create-pets',
+    ]);
+  });
+
+  it('takes a name a path-named operation on another path holds when a qualifier then tells the two apart (#480 review)', async () => {
+    // `POST /pets/{id}/pets` is `createPets` alone, as `POST /pets/create`
+    // is. The action keeps it beside the item's collection and the
+    // parameter tells the two apart, `createPets` and `createPetsById` —
+    // as `POST /pets/pets` beside `POST /pets/{id}/pets` is told. Adding
+    // the collection beside the action is additive; adding the action
+    // beside the collection qualifies the collection by its parameter, the
+    // rename that predates #324 (`GET /users/teams` added beside
+    // `GET /users/{id}/teams`), which the issue sets aside.
+    const pairs: Array<[Method, string, string]> = [
+      ['post', 'create', 'createPets'],
+      ['put', 'update', 'updatePets'],
+      ['delete', 'delete', 'deletePets'],
+      ['get', 'list', 'listPets'],
+      ['head', 'check', 'checkPets'],
+    ];
+    for (const [method, action, name] of pairs) {
+      const existing: Paths = { [`/pets/${action}`]: { [method]: op } };
+      const added: Paths = { '/pets/{id}/pets': { [method]: itemOp } };
+      const both = withAdded(existing, added);
+      expect(names(both)).toEqual([
+        `Pets.${name}`.padEnd(30) + ` ${method.toUpperCase().padEnd(6)} /pets/${action}`,
+        `Pets.${name}ById`.padEnd(30) + ` ${method.toUpperCase().padEnd(6)} /pets/{id}/pets`,
+      ]);
+      expect(await diff(existing, both)).toEqual({
+        breaking: 0,
+        changes: [`operation-added ${name}ById: additive`],
+      });
+      expect(await diff(added, both)).toEqual({
+        breaking: 1,
+        changes: [`operation-added ${name}ById: additive`, `operation-modified ${name}: breaking`],
+      });
+    }
+    expect(
+      await diff({ '/pets/pets': { post: op } }, { '/pets/pets': { post: op }, '/pets/{id}/pets': { post: itemOp } }),
+    ).toEqual({
+      breaking: 0,
+      changes: ['operation-added createPetsById: additive'],
+    });
+    // PUT and PATCH on one path take the name together, and the actions
+    // still to yield are no holders of it either.
+    expect(
+      names({
+        '/pets/update': { put: ok, patch: ok },
+        '/pets/create': { post: ok },
+        '/pets/create-pets': { post: ok },
+        '/pets/{id}/pets': { post: item('id'), put: item('id') },
+      }),
+    ).toEqual([
+      'Pets.createPets                POST   /pets/create',
+      'Pets.createCreatePets          POST   /pets/create-pets',
+      'Pets.updatePets                PATCH  /pets/update',
+      'Pets.updatePets                PUT    /pets/update',
+      'Pets.createPetsById            POST   /pets/{id}/pets',
+      'Pets.updatePetsById            PUT    /pets/{id}/pets',
+    ]);
+    // A path-named operation nothing after could tell from the action
+    // holds the name, as it does against a qualifier (`/pets/pets` has
+    // nothing `/pets` lacks): the action takes its name without the action
+    // rule, so adding it beside the collection is additive.
+    expect(names({ '/pets/create': { post: ok }, '/pets/pets': { post: ok } })).toEqual([
+      'Pets.createCreate              POST   /pets/create',
+      'Pets.createPets                POST   /pets/pets',
+    ]);
+    expect(
+      await diff({ '/pets/pets': { post: op } }, { '/pets/pets': { post: op }, '/pets/create': { post: op } }),
+    ).toEqual({
+      breaking: 0,
+      changes: ['operation-added createCreate: additive'],
+    });
+    // When taking the collection back adds nothing, the name without the
+    // action rule is taken as before, and neither order is breaking.
+    await expectAdditive(
+      { '/store/pets/create': { post: op } },
+      { '/store/pets/{id}/pets': { post: itemOp } },
+      { before: 'createCreate', more: 'createPets' },
+    );
+  });
 });

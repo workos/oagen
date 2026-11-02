@@ -11,6 +11,10 @@ import {
 } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, TypeRef, Webhook } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 /**
  * workos/oagen#298: an inline object on an operation's parameter — a
@@ -56,7 +60,7 @@ async function writeSpec(name: string, doc: unknown): Promise<string> {
 async function parse(label: string, doc: unknown): Promise<{ spec: ApiSpec; warnings: string[] }> {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    const spec = await parseSpec(await writeSpec(`${label}.json`, doc));
+    const spec = await parseSpec(await writeSpec(`${label}.json`, doc), { collapseErrorBodies: false });
     return { spec, warnings: warn.mock.calls.map(([m]) => String(m)) };
   } finally {
     warn.mockRestore();
