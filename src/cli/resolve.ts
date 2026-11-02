@@ -13,6 +13,7 @@ export async function resolveCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
+  collapseErrorBodies?: boolean;
   mountRules?: Record<string, string>;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
@@ -20,6 +21,7 @@ export async function resolveCommand(opts: {
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
     operationHints: opts.operationHints,
+    collapseErrorBodies: opts.collapseErrorBodies,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);
