@@ -290,6 +290,47 @@ describe('classifyAndExtractResponse', () => {
         oneOf: [{ required: ['a'] }, { required: ['b'] }],
       };
       expect(classify({ pet }).response).toEqual({ kind: 'model', name: 'Pet' });
+
+      // Variants that add no shape the object does not already have — only
+      // `type: 'object'` repeated, `required`, or a refinement of one of its
+      // own properties — only limit it, under either keyword and however the
+      // tag is spelled, and it still unwraps (#415 review).
+      const typedSets: SchemaObject[] = [
+        { type: 'object', required: ['a'] },
+        { type: 'object', required: ['b'] },
+      ];
+      const unwrapped = [['Pet', ['object', 'a', 'b']]];
+      for (const limited of [
+        { ...pet, oneOf: typedSets },
+        { ...pet, anyOf: typedSets },
+        { ...pet, oneOf: [{ required: ['a'], properties: { a: { minLength: 1 } } }, { required: ['b'] }] },
+      ]) {
+        const result = classify({ pet: limited });
+        expect(result.response, JSON.stringify(limited)).toEqual({ kind: 'model', name: 'Pet' });
+        expect(result.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual(unwrapped);
+      }
+      // OAS 3.0 spells the tag `enum: ['pet']`, which names the model from
+      // the operation, as before.
+      const enumTagged: SchemaObject = {
+        ...pet,
+        properties: { ...pet.properties, object: { type: 'string', enum: ['pet'] } },
+        oneOf: typedSets,
+      };
+      expect(classify({ pet: enumTagged }).response).toEqual({ kind: 'model', name: 'GetShape' });
+
+      // A variant that does add a shape — a property the object does not
+      // declare, a `$ref`, another type, or a const tag of its own — makes
+      // the union the body's field.
+      for (const adds of [
+        { type: 'object', required: ['a'], properties: { c: { type: 'string' } } },
+        { $ref: '#/components/schemas/Cat' },
+        { type: 'string' },
+        { type: 'object', properties: { object: { const: 'cat' } } },
+      ] as SchemaObject[]) {
+        const kept = classify({ pet: { ...pet, oneOf: [adds, { required: ['b'] }] } });
+        expect(kept.response, JSON.stringify(adds)).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+        expect(kept.inlineModels[0].fields.map((f) => f.name)).toEqual(['pet']);
+      }
     });
 
     it('does not match wrapper with multiple required properties', () => {

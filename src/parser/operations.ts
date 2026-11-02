@@ -55,6 +55,7 @@ import {
   deprecatedEntry,
   collapsedNullableBranch,
   foldSiblingProperties,
+  inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
@@ -516,16 +517,44 @@ export function extractOperations(
   // path, and two distinct paths — or a path and an operationId, component
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
+  // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
+  // with every name decided before the operations — the component models
+  // and enums, the components' field models (a nested object, a map's
+  // values; not among `componentModels`, see parseSpec) and the enums their
+  // fields mint — and filled as the operations are read: each operation's
+  // models once it is built, its array items as they are typed
+  // (`typeInlineItems` settles them against it), the envelope companions
+  // once named, and every enum the operations mint. The deferred schemas are
+  // named against all of it last. Seeded before the component responses are
+  // named, so the names an operation's array items settle on can be read
+  // against a copy of it (`operationBodyModelNames`).
+  const registry: ModelShapeRegistry = new Map();
+  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
+  // Each seeded with the model itself: a declared model shares its name with
+  // every shape it admits (`ownerShares`), an operation's with an identical
+  // one only.
+  for (const model of registeredModels) {
+    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
+  }
+  // Every enum name decided so far, held as names no model may take
+  // (`reserveEnumNames`): the component enums', and every enum the component
+  // models and the components' field models reference (an inline enum's
+  // `EnumRef`, named before the enum collector may rename it; a `$ref` to a
+  // component enum names one already held). None is an operation's. The
+  // operations' own join once they are read, below.
+  const enumRefsOf = (model: Model): string[] => collectModelTypeRefs(model).flatMap(collectEnumRefs);
+  reserveEnumNames(registry, [...(componentEnums ?? []).map((e) => e.name), ...registeredModels.flatMap(enumRefsOf)]);
+
   // The model name each component response's inline body takes, decided once
   // for every operation that returns it (see resolveComponentResponseModelNames),
   // past every name an operation's own inline success body mints (read only
   // when there is a component to step, see operationBodyModelNames).
   const componentResponseNaming = resolveComponentResponseModelNames(
     componentResponses,
-    [...(componentModels ?? []), ...(componentFieldModels ?? [])],
+    registeredModels,
     componentSchemas,
     Object.keys(componentResponses ?? {}).length > 0
-      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas, componentResponses)
+      ? operationBodyModelNames(resolvedPaths, modelOperationIds, componentSchemas, componentResponses, registry)
       : [],
   );
   const componentResponseModelNames = new Map(
@@ -564,31 +593,6 @@ export function extractOperations(
   // Each success body a `components/responses` entry declares, typed with
   // its operation rather than deferred (`componentSites` below).
   const componentBodies: TypeRef[] = [];
-  // The spec-wide registry of model shapes (`InlineModelRegistry`), seeded
-  // with every name decided before the operations — the component models
-  // and enums, the components' field models (a nested object, a map's
-  // values; not among `componentModels`, see parseSpec) and the enums their
-  // fields mint — and filled as the operations are read: each operation's
-  // models once it is built, its array items as they are typed
-  // (`typeInlineItems` settles them against it), the envelope companions
-  // once named, and every enum the operations mint. The deferred schemas are
-  // named against all of it last.
-  const registry: ModelShapeRegistry = new Map();
-  const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
-  // Each seeded with the model itself: a declared model shares its name with
-  // every shape it admits (`ownerShares`), an operation's with an identical
-  // one only.
-  for (const model of registeredModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
-  }
-  // Every enum name decided so far, held as names no model may take
-  // (`reserveEnumNames`): the component enums', and every enum the component
-  // models and the components' field models reference (an inline enum's
-  // `EnumRef`, named before the enum collector may rename it; a `$ref` to a
-  // component enum names one already held). None is an operation's. The
-  // operations' own join once they are read, below.
-  const enumRefsOf = (model: Model): string[] => collectModelTypeRefs(model).flatMap(collectEnumRefs);
-  reserveEnumNames(registry, [...(componentEnums ?? []).map((e) => e.name), ...registeredModels.flatMap(enumRefsOf)]);
 
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     // Everything read at path-item level — `parameters`, `servers`, and the
@@ -1830,11 +1834,10 @@ function disambiguateOperationNames(
 
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
+  // Then, before they run (below, once `apart` is defined), an action beside
+  // a CRUD or singleton operation of its name, or one whose name such an
+  // operation would have, declared or not, yields it (yieldActionNames).
   const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
-  // Then an action beside a CRUD or singleton operation of its name, or one
-  // whose name such an operation would have, declared or not: the plain name
-  // stays with the latter, which the qualifiers would rename.
-  for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   // Each qualifier, given the group, is the word or words a path-named
   // member would add to its name: `null` or `''` when its path has none.
@@ -2028,6 +2031,13 @@ function disambiguateOperationNames(
     );
   };
 
+  // An action beside a CRUD or singleton operation of its name, or one whose
+  // name such an operation would have, declared or not: the plain name stays
+  // with the latter, which the qualifiers would rename. It asks `apart`
+  // whether a name a path-named operation holds can be joined, as the
+  // qualifiers ask it, so it runs once `apart` is defined.
+  yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, apart, rename);
+
   for (const qualifier of qualifiers) {
     for (const group of collidingGroups(operations)) {
       const words = qualifier(group);
@@ -2216,21 +2226,35 @@ function demoteSamePathNames(
  * latter (`createCreate2` when operationIds hold `createPets` and
  * `createCreate`), as it is when both are its own name (`update2` for
  * `PUT /{id}/update`, which has no collection to take back and whose
- * `PUT /{id}` is `update`). An action beside an operationId of its name is
- * left to the numeric pass (`adoptPet2`), and two actions of one name to
- * the qualifiers (`adoptPetRescue`). Actions come in name order, then path
- * order, and the renames depend only on each operation's own path, so the
- * result is deterministic. Returns the operations that fell back to their
- * non-action name.
+ * `PUT /{id}` is `update`). Two kinds of name are not held. The name of
+ * another action still to yield here, which gives it up in its turn:
+ * `POST /pets/create` takes `createPets` beside `POST /pets/create-pets`,
+ * whose `createPets` yields to `createCreatePets`, so no operation is left
+ * with a name neither had. And a name held only by path-named operations
+ * on other paths naming the noun the action names that a later pass tells
+ * from it (nameIsFree with `apart`, the rule by which a qualifier joins such
+ * a name): `POST /pets/create` takes `createPets` beside
+ * `POST /pets/{id}/pets`, and the parameter then tells the two apart,
+ * `createPets` and `createPetsById`, as it tells `POST /pets/pets` from
+ * `POST /pets/{id}/pets`; beside `POST /pets/pets`, whose path has nothing
+ * `/pets` lacks, the name counts as held and the action is `createCreate`.
+ * Declaring either operation beside the action thus never takes its name
+ * from it. An action beside an operationId of its name is left to the
+ * numeric pass (`adoptPet2`), and two actions of one name to the qualifiers
+ * (`adoptPetRescue`). Actions come in name order, then path order, and the
+ * renames depend only on each operation's own path, so the result is
+ * deterministic. An action that fell back to its non-action name is added
+ * to `demoted`, as it is renamed, so every pass after — `apart` among them,
+ * asked here for the actions still to come — reads its path as that shape.
  */
 function yieldActionNames(
   operations: Operation[],
   pathNamed: ReadonlySet<Operation>,
-  demoted: ReadonlySet<Operation>,
+  demoted: Set<Operation>,
   apiRootLengthOf: (op: Operation) => number,
+  apart: (op: Operation, other: Operation, name: string) => boolean,
   rename: (op: Operation, name: string) => void,
-): Operation[] {
-  const fellBack: Operation[] = [];
+): void {
   const isAction = (op: Operation) =>
     pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
   const meeting = new Set(
@@ -2242,29 +2266,46 @@ function yieldActionNames(
     (op) => meeting.has(op) || (isAction(op) && verblessName(op.httpMethod, op.path, apiRootLengthOf(op)) === op.name),
   );
   yielding.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || comparePaths(a, b) || methodOrder(a, b));
-  // Every name the service holds, kept current as actions are renamed, so a
-  // rename never lands on a name another operation already has — least of
-  // all one on the action's own path, which no later pass looks at again.
-  const taken = new Set(operations.map((op) => op.name));
+  // The actions still to yield, whose current names every one of them gives up.
+  const pending = new Set(yielding);
+  // Every other name the service holds, kept current as actions are renamed,
+  // so a rename never lands on a name another operation already has — least
+  // of all one on the action's own path, which no later pass looks at again.
+  const taken = new Set(operations.filter((op) => !pending.has(op)).map((op) => op.name));
+  // The noun an operation names, read as the shape it has now (qualifierPath):
+  // an action by the path its segment sits on (`Pets` for `/pets/create`),
+  // one that fell back by its whole path. What nameIsFree compares with the
+  // noun a path-named operation holding a name names.
+  const nounOf = (op: Operation): string | null => {
+    const root = apiRootLengthOf(op);
+    const path = qualifierPath(op, root, !demoted.has(op));
+    return inferResourceFromPath(path, root) ?? inferServiceNoun(path, root);
+  };
   // The name each path and verb yielded to, which PUT and PATCH on one path share.
   const yieldedOnPath = new Map<string, string>();
   for (const op of yielding) {
+    pending.delete(op);
     const root = apiRootLengthOf(op);
     const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
     const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
     const onPath = `${inferVerb(op.httpMethod, op.path)} ${op.path}`;
-    // Numbered when both are held, the CRUD operation declared or not, so
-    // declaring it later never moves the action to a number.
-    const next =
-      yieldedOnPath.get(onPath) ??
-      [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ??
-      suffixedName(plain, taken);
+    const free = (name: string) =>
+      name !== op.name &&
+      (!taken.has(name) || nameIsFree([op, ...pending], operations, pathNamed, nounOf, apart, op, name));
+    let next = yieldedOnPath.get(onPath);
+    if (next === undefined && free(qualified)) next = qualified;
+    if (next === undefined) {
+      // Read from here on as the shape it falls back to, by `apart` too.
+      demoted.add(op);
+      // Numbered when both are held, the CRUD operation declared or not, so
+      // declaring it later never moves the action to a number.
+      next = free(plain) ? plain : suffixedName(plain, taken);
+    }
     yieldedOnPath.set(onPath, next);
     rename(op, next);
     taken.add(next);
-    if (next !== qualified) fellBack.push(op);
+    if (next !== qualified) demoted.add(op);
   }
-  return fellBack;
 }
 
 /**
@@ -3212,6 +3253,9 @@ function buildOperation(
 
   const operation: Operation = {
     name: operationName,
+    // The document's operationId as written; the key is omitted when it
+    // declares none, so `name` alone says the operation is path-named.
+    ...(op.operationId ? { operationId: op.operationId } : {}),
     // Keep the summary on its own so emitters can tell it apart from the
     // description; the key is omitted (not set to undefined) when absent.
     ...(summary !== undefined ? { summary } : {}),
@@ -3278,12 +3322,15 @@ function buildOperation(
   // bundle owns the success bodies, the list envelope and the response
   // headers; the request bundle owns the body. Qualified by the stem the
   // operation's models are named from, as its list-envelope companions are:
-  // the `operationId`'s name (`GetLegacyWidgetWidget`), else the path-derived
-  // prefix (`PetsByIdLegacyWidgetGetWidget`, beside the operation's
-  // `PetsByIdLegacyWidgetGetResponse`), so the name depends on the method and
-  // path alone and a change to the name inferOperationName derives renames no
-  // type (see `headerOperationQualifier`).
-  const modelQualifier = namingOp.operationId ? toPascalCase(namingName) : pathModelBaseName;
+  // the `operationId`'s (`operationIdModelBase`: `GetLegacyWidgetWidget`;
+  // `UserListWidget` for `users.list`, beside its `UserListRequest`), else
+  // the path-derived prefix (`PetsByIdLegacyWidgetGetWidget`, beside the
+  // operation's `PetsByIdLegacyWidgetGetResponse`). So the name depends on
+  // the `operationId` or on the method and path alone, never on the
+  // operation's name — a change to what inferOperationName derives or to
+  // what an operationIdTransform makes of the `operationId` renames no type
+  // (see `headerOperationQualifier`).
+  const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
   // items may have shared another site's model (`typeInlineItems`), and the
@@ -3894,9 +3941,10 @@ export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label
  * there: a `$ref` is not followed, so a component's text stays on its model,
  * while a `description` written beside the `$ref` is read, as a field reads
  * one. A wrapper the type builder collapses — a nullable `oneOf`/`anyOf`, a
- * single-member `allOf` — is read by the rule the enum and the model built
- * from its branch follow (`unwrapCollapsedWrappers`): its own text when it
- * has content, else its branch's. `undefined` when neither has content; a
+ * single-member `allOf` — or keeps as a union of one variant it types by the
+ * same rule — a single-member `oneOf`/`anyOf` — is read by the rule the enum
+ * lifted from its branch follows (`unwrapCollapsedWrappers`): its own text
+ * when it has content, else its branch's. `undefined` when neither has content; a
  * body none of whose media types is read has no `selected` and carries its
  * own text alone. The text is kept verbatim. Every reader of a body — the
  * operation extractor and the webhook builder — takes the body's doc text
@@ -4326,12 +4374,18 @@ function typePickedRequestBody(
     const hasNull = schema.oneOf.some(
       (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
     );
+    // The mapping's targets are read as a field's or a response's inline
+    // union reads them (`inlineMappingTargets`), so the same union carries the
+    // same discriminator at every site.
     const union: TypeRef = {
       kind: 'union',
       variants,
       ...(schema.discriminator
         ? {
-            discriminator: { property: schema.discriminator.propertyName, mapping: schema.discriminator.mapping ?? {} },
+            discriminator: {
+              property: schema.discriminator.propertyName,
+              mapping: inlineMappingTargets(schema.discriminator.mapping),
+            },
           }
         : {}),
     };
@@ -5963,10 +6017,17 @@ function resolveComponentResponseModelNames(
  * `CardResponse` and the body of a component `Card` is `CardResponse2`,
  * whatever the order of the paths (workos/oagen#424), while `card`'s inline
  * 201 beside another primary takes `CardResponse201` and nothing from the
- * component. The primary is chosen by the rule `extractResponses` chooses it
- * by (`primaryResponseEntry`), a `$ref` among the entries resolved to read
- * it. A 2xx written as a `$ref` mints under its component's name or not at
- * all, and an operation that names its models from its path steps past the
+ * component. The names are read as the operation will settle them: an array
+ * body's items are settled against a copy of the registry as it is seeded
+ * before any operation is read (`typeInlineItems`), so beside a schema
+ * `CardItem` the items of `card`'s inline array are reserved as
+ * `CardResponseItem`, the name the operation takes, and a component `Card`
+ * whose body nests an `item` steps to `CardResponse2` (`CardResponse2Item`)
+ * instead of minting a second `CardResponseItem` of another shape. The
+ * primary is chosen by the rule `extractResponses` chooses it by
+ * (`primaryResponseEntry`), a `$ref` among the entries resolved to read it.
+ * A 2xx written as a `$ref` mints under its component's name or not at all,
+ * and an operation that names its models from its path steps past the
  * components itself (`resolvePathModelBaseNames`), so neither reserves
  * anything. Read silently (`rehearse`): the operation reports its body's
  * problems once, when it is built.
@@ -5976,6 +6037,7 @@ function operationBodyModelNames(
   modelOperationIds: ReadonlyMap<string, string | null>,
   componentSchemas: Record<string, SchemaObject> | undefined,
   componentResponses: Record<string, Record<string, unknown>> | undefined,
+  registry: ModelShapeRegistry,
 ): string[] {
   return rehearse(() => {
     const names: string[] = [];
@@ -5986,6 +6048,7 @@ function operationBodyModelNames(
         const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op?.operationId;
         if (!op || !operationId) continue;
         const contextName = operationIdModelName(operationId, 'Response');
+        const settle: ItemSettlement = { registry, operation: operationIdModelBase(operationId) };
         const entries = Object.entries(op.responses ?? {}).flatMap(([statusCode, response]) => {
           const responseKey = classifyResponseKey(statusCode);
           if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 400) return [];
@@ -6000,7 +6063,7 @@ function operationBodyModelNames(
         const stems = new Map<string, string>();
         for (const { code, inline, pick } of [...entries].sort((a, b) => a.code - b.code)) {
           if (!inline || !pick.schema) continue;
-          const minted = bodyModelNames(pick.schema, contextName, componentSchemas);
+          const minted = bodyModelNames(pick.schema, contextName, componentSchemas, settle);
           if (code === primaryCode || !minted.some((name) => name.includes(contextName))) {
             names.push(...minted);
             continue;
@@ -6041,16 +6104,26 @@ function componentResponseBodySchema(
  * the wire shape (`NotePageResponse`, `NotePageResponseData`). Which reading
  * each operation takes is decided when it is read (`iteratorSource`), and two
  * operations returning one component response can take different ones, so
- * both sets are reserved and the stem steps when either clashes.
+ * both sets are reserved and the stem steps when either clashes. With
+ * `settle`, each reading settles the body's array items against a copy of
+ * the registry (`typeInlineItems`) — a fresh one per reading, since an
+ * operation takes one reading only — so the names read are the ones the
+ * operation will mint beside what the registry already holds, and the
+ * registry itself is left as it was. Without it, the items are read as
+ * `<Op>Item`, as written.
  */
 function bodyModelNames(
   schema: SchemaObject,
   contextName: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  settle?: ItemSettlement,
 ): string[] {
   const names = new Set<string>();
   for (const reading of BODY_READINGS) {
-    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, {
+      ...reading,
+      ...(settle && { settle: { registry: new Map(settle.registry), operation: settle.operation } }),
+    });
     for (const model of body.inlineModels) names.add(model.name);
     for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
   }
@@ -6898,7 +6971,9 @@ function extractResponses(
                 bodyEndOfIterationProblem(pagination.endOfIteration, bodySchema, componentSchemas) !== undefined)));
         // The primary body's array items are settled against the registry
         // (`typeInlineItems`); the dry run that reads a component response's
-        // names (`bodyModelNames`) passes none and mints nothing into it.
+        // names (`bodyModelNames`) passes none and mints nothing into it, and
+        // the one that reads an operation's own (`operationBodyModelNames`)
+        // settles against a copy.
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled,
           dataPathOverride,
