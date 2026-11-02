@@ -1217,11 +1217,13 @@ export interface Enum {
    * `description` and `externalDocs` are: a nullable `oneOf`/`anyOf` or
    * single-member `allOf` wrapper the parser collapses carries its keys
    * onto the branch, the wrapper's value winning for a key both declare.
-   * The field the inline schema types carries the same keys, since they are
-   * its schema's own. When several inline schemas lift to one name, the
-   * first lifted gives the keys, as it gives the values. Present only when
-   * at least one key remains. Not shape: two inline enums that differ only
-   * here are one enum.
+   * The field the inline schema types carries the same keys when the enum
+   * schema is the field's own schema; under such a collapsed wrapper the
+   * field carries the wrapper's keys alone (see `Field.extensions`), and
+   * the branch's stay on the enum. When several inline schemas lift to one
+   * name, the first lifted gives the keys, as it gives the values. Present
+   * only when at least one key remains. Not shape: two inline enums that
+   * differ only here are one enum.
    */
   extensions?: Extensions;
 }
