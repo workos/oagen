@@ -1104,6 +1104,10 @@ describe('custom-method paths (issue #269)', () => {
       },
       { name: 'Things', operations: ['listUrnPet1: GET /things/urn:pet:1'] },
     ]);
+    // A service is named from such a segment whole as well (#461 review).
+    expect(services({ '/v1/x-{team:id}/notes': { get: jsonItem('team:id') } })).toEqual([
+      { name: 'XTeamId', operations: ['listNotes: GET /v1/x-{team:id}/notes'] },
+    ]);
   });
 
   it('reads a segment that a parameter opens and several colons follow as one literal, so its neighbours keep their names (issue #378)', () => {
