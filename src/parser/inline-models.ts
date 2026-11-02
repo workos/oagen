@@ -2117,9 +2117,11 @@ function composesObject(schema: SchemaObject): boolean {
  * What a declaration says of its property beside the type: the keywords a
  * field reads from its own schema (`LIFTED_DECLARATION_KEYWORDS`) and its
  * extensions, which an `allOf` conjoining it with another declaration
- * carries for the field it types (`combineDeclarations`).
+ * carries for the field it types (`combineDeclarations`), as a variant's
+ * narrower declaration carries a schema's own beside it
+ * (`conjoinSiblingProperties`).
  */
-function declarationKeywords(schema: SchemaObject): SchemaObject {
+export function declarationKeywords(schema: SchemaObject): SchemaObject {
   const keywords = Object.entries(schema).filter(([key]) => LIFTED_DECLARATION_KEYWORDS.includes(key));
   return { ...Object.fromEntries(keywords), ...extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS) };
 }

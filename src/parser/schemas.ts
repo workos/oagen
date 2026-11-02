@@ -2210,14 +2210,18 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * with `type: 'object'`, no `type`, or a type list naming `object`, so a
  * nullable or multi-typed object variant included) gains them, the schema's
  * own first and its own declaration kept where the variant declares the same
- * property, so the union keeps every variant and each carries the shared
- * properties. Every other variant is typed as written: a `$ref` names a
- * component the parser never merges properties into (it may be an enum or a
- * union it could not augment); a primitive, an array or an enum is no object,
- * so `properties` constrains nothing in it; a nested composition or a
- * nullable union wrapper is left to its own variants. `schemaToTypeRef`
- * reports the variants that may be objects and did not take the properties
- * (`warnOnUncarriedProperties`).
+ * property unless the variant's is the narrower (`narrowsDeclaration`: a
+ * variant's `kind: { const: 'cat' }` beside an own `kind: { type: 'string' }`
+ * stays `'cat'`, while an own `kind: { $ref: Kind }` pins the enum's values
+ * and stays over a variant's `enum` repeating them), so the union keeps
+ * every variant, each carries the shared properties and a discriminated one
+ * keeps its mapping. Every other variant
+ * is typed as written: a `$ref` names a component the parser never merges
+ * properties into (it may be an enum or a union it could not augment); a
+ * primitive, an array or an enum is no object, so `properties` constrains
+ * nothing in it; a nested composition or a nullable union wrapper is left to
+ * its own variants. `schemaToTypeRef` reports the variants that may be
+ * objects and did not take the properties (`warnOnUncarriedProperties`).
  *
  * Applies only when the schema's `type` admits an object (`object`, a type
  * list naming it, or none), it declares at least one property of its own
@@ -2291,19 +2295,117 @@ function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
 /**
  * `variant` carrying `own`'s properties and required names when it is an
  * inline object (`isInlineObjectSchema`), itself otherwise. The schema's own
- * properties come first and win where both declare a name; the required
- * names are the union of both lists.
+ * properties come first and win where both declare a name, unless the
+ * variant's declaration is the narrower (`narrowsDeclaration`): JSON Schema
+ * applies both, so a variant's `kind: { const: 'cat' }` beside an own
+ * `kind: { type: 'string', readOnly: true }` is a read-only `'cat'`, and a
+ * discriminated union keeps its mapping. A `$ref` to an enum component pins
+ * that enum's values (`pinnedValues`), so an own `kind: { $ref: Kind }`
+ * stays `Kind` over a variant's `enum` that repeats its values, as an own
+ * `enum` of them does. The own declaration's flags, documentation, limits
+ * and extensions (`declarationKeywords`) stay the field's wherever the
+ * variant's sets none. The required names are the union of both lists.
  */
 function conjoinSiblingProperties(variant: SchemaObject, own: SchemaObject): SchemaObject {
   if (!isInlineObjectSchema(variant)) return variant;
   const properties: Record<string, SchemaObject | undefined> = { ...own.properties };
   for (const [name, property] of Object.entries(variant.properties ?? {})) {
+    const held = properties[name];
     if (!Object.hasOwn(properties, name)) properties[name] = property;
+    else if (held && property && narrowsDeclaration(property, held)) {
+      properties[name] = { ...declarationKeywords(held), ...property };
+    }
   }
   const required = [...new Set([...(own.required ?? []), ...(variant.required ?? [])])];
   const folded: SchemaObject = { ...variant, properties, ...(required.length > 0 && { required }) };
   foldedVariantOrigins.set(folded, foldedVariantOrigin(variant) ?? variant);
   return folded;
+}
+
+/**
+ * Whether a variant's declaration of a property is narrower than the
+ * schema's own (`conjoinSiblingProperties`): it is typed by the values it
+ * pins (`pinnedValues`: a `const`, an `enum`, or a `$ref` to an enum
+ * component, `null` among them when it admits `null`), and the own
+ * declaration pins none — and does not forbid a `null` the variant admits
+ * (`forbidsNull`) — or pins every one of them and more. Any other pair —
+ * the same values, values the own does not all admit (`null` included, so
+ * a nullable variant beside an own that forbids `null` keeps the own), a
+ * variant that pins none — is not, and the own declaration stays.
+ */
+function narrowsDeclaration(variant: SchemaObject, own: SchemaObject): boolean {
+  const narrow = pinnedValues(variant);
+  if (narrow === undefined) return false;
+  const wide = pinnedValues(own);
+  if (wide === undefined) return !narrow.includes(null) || !forbidsNull(own);
+  return narrow.every((value) => wide.includes(value)) && wide.some((value) => !narrow.includes(value));
+}
+
+/**
+ * Whether a declaration that pins no values forbids `null`: it names a
+ * type (`type`) that is not `null` and admits `null` by no spelling the
+ * parser reads (`isNullableEnumSchema`). A typeless declaration, or a
+ * `$ref`, constrains nothing here.
+ */
+function forbidsNull(schema: SchemaObject): boolean {
+  return schema.type !== undefined && !isNullSchema(schema) && !isNullableEnumSchema(schema);
+}
+
+/**
+ * The values a declaration pins a property to, when that is what types it,
+ * `null` among them when the declaration admits it: its own `const`,
+ * `enum` or `oneOf`/`anyOf` of string consts (`ownPinnedValues`), or those
+ * of the schema it reaches (`referencedPinnedValues`) — the enum component
+ * its `$ref`, or a lone `allOf: [{ $ref }]` (the spelling that annotates a
+ * reference), names, read through a chain of references. So an own
+ * `kind: { $ref: Kind }`, `Kind` the enum `[cat, dog]`, pins `cat` and
+ * `dog` exactly as an own `kind: { enum: [cat, dog] }` does: it stays over
+ * a variant that repeats those values, or names more, and gives way to a
+ * variant's `const: cat`. `null` is one more value, admitted by any
+ * spelling the parser reads as nullable (`isNullableEnumSchema`: a type
+ * list naming `null`, `nullable: true`, a `null` value or variant), so a
+ * variant's `{ type: ['string', 'null'], enum: [cat] }` pins `cat` and
+ * `null` and is not narrower than an own `enum: [cat, dog]`, which forbids
+ * `null`. `undefined` for a declaration that pins none — a plain type, an
+ * object, a `$ref` to anything but an enum.
+ */
+function pinnedValues(
+  schema: SchemaObject,
+  seen: ReadonlySet<SchemaObject> = new Set(),
+): readonly unknown[] | undefined {
+  const values = ownPinnedValues(schema) ?? referencedPinnedValues(schema, seen);
+  if (values === undefined) return undefined;
+  return isNullableEnumSchema(schema) && !values.includes(null) ? [...values, null] : values;
+}
+
+/** The values `schema` pins by its own `const`, `enum` or `oneOf`/`anyOf` of string consts; `undefined` when it pins none that way. */
+function ownPinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'const') return [schema.const];
+  if (kind === 'enum') return schema.enum;
+  return isConstUnionEnumSchema(schema) ? (constUnionEnumMembers(schema) ?? undefined)?.map((m) => m.value) : undefined;
+}
+
+/**
+ * The values the one schema a declaration reaches pins (`pinnedValues`):
+ * the component its `$ref` names (`componentSchemaOf`), the one member of
+ * its lone `allOf`, or the variant its nullable union wrapper collapses to
+ * (`nullableUnionBranch`). `undefined` when it reaches none, or one already
+ * read (a cycle of references).
+ */
+function referencedPinnedValues(schema: SchemaObject, seen: ReadonlySet<SchemaObject>): readonly unknown[] | undefined {
+  const kind = classifyInlineSchema(schema);
+  const reached =
+    kind === 'ref'
+      ? schema
+      : kind === 'allOf' && schema.allOf?.length === 1
+        ? schema.allOf[0]
+        : kind === 'union'
+          ? nullableUnionBranch(schema)
+          : undefined;
+  const next = reached?.$ref ? componentSchemaOf(reached.$ref) : reached;
+  if (next === undefined || seen.has(next)) return undefined;
+  return pinnedValues(next, new Set([...seen, next]));
 }
 
 /** The document's variant each folded copy was made from (`conjoinSiblingProperties`). */
@@ -4905,6 +5007,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 import {
   buildInlineModel,
   collectProperties,
+  declarationKeywords,
   declareProperty,
   declaresInlineProperties,
   elementContextName,
