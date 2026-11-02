@@ -693,7 +693,11 @@ describe('parser to differ — a secondary inline body on a default or range res
       const newPath = join(dir, 'new.json');
       writeFileSync(oldPath, JSON.stringify(before));
       writeFileSync(newPath, JSON.stringify(after));
-      return diffSpecs(await parseSpec(oldPath), await parseSpec(newPath));
+      // The 4XX fallback's YAML bodies are error bodies, which fold onto shared
+      // shape-named models by default (collapse-error-bodies.ts); this block pins
+      // the per-operation names the media-type rename moves, so parse without it.
+      const legacy = { collapseErrorBodies: false };
+      return diffSpecs(await parseSpec(oldPath, legacy), await parseSpec(newPath, legacy));
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
