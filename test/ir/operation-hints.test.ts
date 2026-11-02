@@ -7,6 +7,7 @@ import {
   readPath,
   resolveMountTarget,
   resolveOperations,
+  snakeCaseOperationName,
 } from '../../src/ir/operation-hints.js';
 import type { OperationHint } from '../../src/ir/operation-hints.js';
 import type { ApiSpec, Service, Operation, HttpMethod } from '../../src/ir/types.js';
@@ -319,6 +320,52 @@ describe('deriveMethodName', () => {
 });
 
 // ---------------------------------------------------------------------------
+// snakeCaseOperationName — the operationId branch's own converter
+// ---------------------------------------------------------------------------
+
+describe('snakeCaseOperationName (#472 review)', () => {
+  it('reads a boundary at a lower-to-upper step, as a path segment is read', () => {
+    expect(snakeCaseOperationName('createPet')).toBe('create_pet');
+    expect(snakeCaseOperationName('getAuthorizationUrl')).toBe('get_authorization_url');
+    expect(snakeCaseOperationName('list')).toBe('list');
+  });
+
+  it('reads an acronym the parser spelled in capitals as a word of its own', () => {
+    expect(snakeCaseOperationName('getSSOAuthorizationUrl')).toBe('get_sso_authorization_url');
+    expect(snakeCaseOperationName('createJWTToken')).toBe('create_jwt_token');
+    expect(snakeCaseOperationName('createM2MApp')).toBe('create_m2m_app');
+    expect(snakeCaseOperationName('HTTPClient')).toBe('http_client');
+    expect(snakeCaseOperationName('getJWT')).toBe('get_jwt');
+  });
+
+  it('keeps a digit in the word it was written in, and splits before a capitalized word after it', () => {
+    expect(snakeCaseOperationName('getV2Users')).toBe('get_v2_users');
+    expect(snakeCaseOperationName('getOAuth2Token')).toBe('get_oauth2_token');
+    expect(snakeCaseOperationName('create_m2m_app')).toBe('create_m2m_app');
+  });
+
+  it("puts the parser's `OAuth` spelling back together", () => {
+    expect(snakeCaseOperationName('getOAuthToken')).toBe('get_oauth_token');
+    expect(snakeCaseOperationName('OAuthToken')).toBe('oauth_token');
+    expect(snakeCaseOperationName('oauthToken')).toBe('oauth_token');
+    // Only that spelling: a lone `o` before any other word is left as a word.
+    expect(snakeCaseOperationName('getOAuthorization')).toBe('get_o_authorization');
+  });
+
+  it('treats any character that is not a letter or digit as a separator, a run of them as one', () => {
+    expect(snakeCaseOperationName('get-sso-authorization-url')).toBe('get_sso_authorization_url');
+    expect(snakeCaseOperationName('list-pets')).toBe('list_pets');
+    expect(snakeCaseOperationName('pets:adopt')).toBe('pets_adopt');
+    expect(snakeCaseOperationName('pets.adopt')).toBe('pets_adopt');
+    expect(snakeCaseOperationName('pets/adopt')).toBe('pets_adopt');
+    expect(snakeCaseOperationName('search pets')).toBe('search_pets');
+    expect(snakeCaseOperationName('searchPets[1]')).toBe('search_pets_1');
+    expect(snakeCaseOperationName('--list--pets--')).toBe('list_pets');
+    expect(snakeCaseOperationName('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // resolveOperations — integration tests
 // ---------------------------------------------------------------------------
 
@@ -343,6 +390,136 @@ describe('resolveOperations', () => {
 
     const resolved = resolveOperations(s, hints);
     expect(resolved[0].methodName).toBe('get_authorization_url');
+  });
+
+  describe('operationNaming: operationId prefers the operationId-derived name', () => {
+    /** An operation the document named: `name` is what the parser made of the id. */
+    function named(httpMethod: HttpMethod, path: string, operationId: string, name: string): Operation {
+      return { ...op(httpMethod, path, name), operationId };
+    }
+
+    it('snake_cases the operationId-derived name instead of deriving one from the path', () => {
+      const s = spec([
+        svc('SSO', [
+          named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl'),
+          named('post', '/sso/token', 'exchangeCode', 'exchangeCode'),
+          named('get', '/sso/profile', 'getProfileAndToken', 'getProfileAndToken'),
+        ]),
+      ]);
+
+      const resolved = resolveOperations(s, undefined, undefined, 'operationId');
+      expect(resolved.map((r) => r.methodName)).toEqual([
+        'get_authorization_url',
+        'exchange_code',
+        'get_profile_and_token',
+      ]);
+      // The algorithm alone would have said otherwise for every one of them.
+      expect(deriveMethodName(s.services[0].operations[0], s.services[0])).toBe('authorize_sso');
+    });
+
+    it('is opt-in: the default keeps every name path-derived, operationId or not', () => {
+      const s = spec([svc('SSO', [named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl')])]);
+
+      expect(resolveOperations(s)[0].methodName).toBe('authorize_sso');
+      expect(resolveOperations(s, undefined, undefined, 'path')[0].methodName).toBe('authorize_sso');
+    });
+
+    it('reads the parser-spelled name, not the raw id, so an operationIdTransform is honoured', () => {
+      // `AgentBlueprintsController_create` is spelled `create` by the WorkOS transform.
+      const s = spec([
+        svc('AgentBlueprints', [named('post', '/agent_blueprints', 'AgentBlueprintsController_create', 'create')]),
+      ]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId')[0].methodName).toBe('create');
+    });
+
+    it('still yields to an explicit name hint', () => {
+      const s = spec([svc('SSO', [named('get', '/sso/authorize', 'getAuthorizationUrl', 'getAuthorizationUrl')])]);
+      const hints: Record<string, OperationHint> = { 'GET /sso/authorize': { name: 'authorize' } };
+
+      expect(resolveOperations(s, hints, undefined, 'operationId')[0].methodName).toBe('authorize');
+    });
+
+    it('leaves a path-named operation to the algorithm, whatever name the parser gave it', () => {
+      const s = spec([svc('SSO', [op('get', '/sso/authorize', 'listAuthorize2')])]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId')[0].methodName).toBe('authorize_sso');
+    });
+
+    it('keeps the word boundaries of an acronym the parser spelled in capitals (#472 review)', () => {
+      // `name` is what the parser's camelCase makes of each id with no
+      // transform: a known acronym stays in capitals, an overload marker goes.
+      const s = spec([
+        svc('Pets', [
+          named('get', '/sso/authorization-url', 'get-sso-authorization-url', 'getSSOAuthorizationUrl'),
+          named('post', '/m2m/apps', 'create_m2m_app', 'createM2MApp'),
+          named('post', '/jwt/tokens', 'createJWTToken', 'createJWTToken'),
+          named('get', '/pets', 'list-pets', 'listPets'),
+          named('post', '/pets', 'createPet', 'createPet'),
+          named('get', '/pets/search', 'searchPets[1]', 'searchPets'),
+        ]),
+      ]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId').map((r) => r.methodName)).toEqual([
+        'get_sso_authorization_url',
+        'create_m2m_app',
+        'create_jwt_token',
+        'list_pets',
+        'create_pet',
+        'search_pets',
+      ]);
+    });
+
+    it('snake_cases an id a transform hands back as written, its own separators included (#472 review)', () => {
+      // `operationIdTransform: (id) => id`: `name` is the id itself, so a
+      // snake_case id that already is the wanted method name stays as it is,
+      // and a `:` or `-` the id was written with becomes an underscore.
+      const s = spec([
+        svc('Pets', [
+          named('get', '/sso/authorization-url', 'get-sso-authorization-url', 'get-sso-authorization-url'),
+          named('post', '/m2m/apps', 'create_m2m_app', 'create_m2m_app'),
+          named('post', '/jwt/tokens', 'createJWTToken', 'createJWTToken'),
+          named('post', '/pets/{petId}:adopt', 'pets:adopt', 'pets:adopt'),
+          named('get', '/pets', 'list-pets', 'list-pets'),
+          named('post', '/pets', 'createPet', 'createPet'),
+          named('get', '/pets/search', 'searchPets[1]', 'searchPets'),
+        ]),
+      ]);
+
+      expect(resolveOperations(s, undefined, undefined, 'operationId').map((r) => r.methodName)).toEqual([
+        'get_sso_authorization_url',
+        'create_m2m_app',
+        'create_jwt_token',
+        'pets_adopt',
+        'list_pets',
+        'create_pet',
+        'search_pets',
+      ]);
+    });
+
+    it('does not change how a path segment is read under the default naming (#472 review)', () => {
+      // The operationId converter is its own; `deriveMethodName` still reads a
+      // path segment with the narrower one, so `path` names are what they were.
+      const s = spec([
+        svc('Pets', [
+          named('get', '/sso/authorization-url', 'get-sso-authorization-url', 'getSSOAuthorizationUrl'),
+          named('post', '/m2m/apps', 'create_m2m_app', 'createM2MApp'),
+          named('post', '/jwt/tokens', 'createJWTToken', 'createJWTToken'),
+          named('get', '/sso/SSOAuthorizationUrl', 'getSSOAuthorizationUrl', 'getSSOAuthorizationUrl'),
+          named('post', '/jwt/JWTTokens', 'createJWTToken', 'createJWTToken'),
+        ]),
+      ]);
+
+      const expected = [
+        'list_authorization_url',
+        'create_app',
+        'create_token',
+        'list_ssoauthorization_url',
+        'create_jwttoken',
+      ];
+      expect(resolveOperations(s).map((r) => r.methodName)).toEqual(expected);
+      expect(resolveOperations(s, undefined, undefined, 'path').map((r) => r.methodName)).toEqual(expected);
+    });
   });
 
   it('applies mountOn hint override', () => {
