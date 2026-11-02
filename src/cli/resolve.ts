@@ -1,7 +1,7 @@
 import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { resolveOperations, findResolvedMethodCollisions } from '../ir/operation-hints.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
-import type { OperationHint, ResolvedOperation } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming, ResolvedOperation } from '../ir/operation-hints.js';
 import { CommandError } from '../errors.js';
 import type { SchemaNameTransform } from '../parser/schemas.js';
 
@@ -13,19 +13,22 @@ export async function resolveCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
+  collapseErrorBodies?: boolean;
   mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
 }): Promise<void> {
   let ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
     operationHints: opts.operationHints,
+    collapseErrorBodies: opts.collapseErrorBodies,
   });
   if (opts.docUrl) {
     ir = expandDocUrls(ir, opts.docUrl);
   }
 
-  const resolved = resolveOperations(ir, opts.operationHints, opts.mountRules);
+  const resolved = resolveOperations(ir, opts.operationHints, opts.mountRules, opts.operationNaming);
 
   // Fail before printing anything. Emitters refuse to generate on a name
   // collision, but they only run inside the per-language build matrix, so
