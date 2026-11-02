@@ -1474,6 +1474,40 @@ describe('extractOperations', () => {
       // No explicit discriminator → existing union behavior is preserved.
       expect(services[0].operations[0].requestBody?.kind).toBe('union');
     });
+
+    it("reads a discriminated oneOf body's mapping targets as a field's inline union does, `#/components/schemas/` stripped (#458 review)", () => {
+      const paths = {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: {
+              required: true,
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }],
+                    discriminator: {
+                      propertyName: 'kind',
+                      mapping: { cat: '#/components/schemas/Cat', dog: 'Dog' },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'created' } },
+          },
+        },
+      };
+      const { services } = extractOperations(paths as never);
+      expect(services[0].operations[0].requestBody).toEqual({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'Cat' },
+          { kind: 'model', name: 'Dog' },
+        ],
+        discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } },
+      });
+    });
   });
 
   describe('x-mutually-exclusive-body-groups', () => {

@@ -265,7 +265,12 @@ export interface FieldChange {
   /** For `field-extensions-changed` (additive, see `ExtensionsChanged`): the field's `extensions` on each side, each when it had any there. */
   oldExtensions?: Extensions;
   newExtensions?: Extensions;
-  /** For `field-deprecated-changed`: `live → deprecated` or `deprecated → live`. */
+  /**
+   * For `field-deprecated-changed`: `live → deprecated` or `deprecated → live`.
+   * For `field-type-changed`: `type changed`, breaking, or — additive, for a
+   * field typed by an inline union that only gained variants — `variant Bird
+   * added` / `variants Bird, Fish added`.
+   */
   details?: string;
 }
 
@@ -354,13 +359,17 @@ export interface OperationModified {
   /**
    * `Operation.response` changed type, or the operation gained or lost its
    * only 2xx/3xx response (`responseStatusCode` present on one side only),
-   * with or without a body. Breaking.
+   * with or without a body. Breaking, except a response written as an
+   * inline union that only gained variants, which is additive as a named
+   * union's `variant-added` is.
    */
   responseChanged: boolean;
   /**
    * The body appeared, disappeared, or changed type. Breaking, except that a
    * body appearing with `requestBodyRequired` not `true` is additive: callers
-   * gain an argument they may leave out, like an optional `param-added`.
+   * gain an argument they may leave out, like an optional `param-added`; and
+   * so is a body written as an inline union that only gained variants, as a
+   * named union's `variant-added` is.
    */
   requestBodyChanged: boolean;
   /**
