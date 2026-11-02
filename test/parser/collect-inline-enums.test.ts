@@ -15,6 +15,10 @@ import {
 } from '../../src/ir/types.js';
 import type { ApiSpec, Enum, Operation, TypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 // workos/oagen#281: an inline enum that is an operation's primary response
 // body, one of its success bodies or its request body was referenced by name
@@ -60,7 +64,7 @@ async function parseTempSpec(spec: Doc): Promise<ApiSpec> {
   const specFile = path.join(tmpDir, 'spec.json');
   try {
     await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(specFile);
+    return await parseSpec(specFile, { collapseErrorBodies: false });
   } finally {
     await fs.rm(tmpDir, { recursive: true });
   }

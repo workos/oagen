@@ -5,6 +5,10 @@ import path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 /**
  * Issue #264: an operation that declares no 2xx or 3xx response — only
@@ -39,7 +43,7 @@ async function parseTempSpec(spec: Record<string, unknown>, fileName = 'spec.jso
   const specFile = path.join(tmpDir, fileName);
   try {
     await fs.writeFile(specFile, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(specFile);
+    return await parseSpec(specFile, { collapseErrorBodies: false });
   } finally {
     await fs.rm(tmpDir, { recursive: true });
   }
