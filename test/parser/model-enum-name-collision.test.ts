@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { parseSpec } from '../../src/parser/parse.js';
+import { parseSpec, type ParseOptions } from '../../src/parser/parse.js';
 import {
   collectModelTypeRefs,
   collectOperationTypeRefs,
@@ -12,6 +12,10 @@ import {
 } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 /**
  * workos/oagen#303: an inline body named like a component schema of the
@@ -45,11 +49,15 @@ async function writeSpec(name: string, doc: unknown): Promise<string> {
   return file;
 }
 
-/** Parse `doc`, collecting every warning instead of printing it. */
-async function parse(label: string, doc: unknown): Promise<{ spec: ApiSpec; warnings: string[] }> {
+/** Parse `doc` under `options`, collecting every warning instead of printing it. */
+async function parse(
+  label: string,
+  doc: unknown,
+  options?: ParseOptions,
+): Promise<{ spec: ApiSpec; warnings: string[] }> {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    const spec = await parseSpec(await writeSpec(`${label}.json`, doc));
+    const spec = await parseSpec(await writeSpec(`${label}.json`, doc), { collapseErrorBodies: false, ...options });
     return { spec, warnings: warn.mock.calls.map(([m]) => String(m)) };
   } finally {
     warn.mockRestore();
@@ -331,6 +339,69 @@ describe('the same rule at every other site the merge passes name', () => {
     expect(show(opsOf(spec).get.response)).toBe('model PetsByPetIdGetResponse2');
     expect(warnings).toEqual([renamed('PetsByPetIdGetResponse', 'PetsByPetIdGetResponse2')]);
     expectSound(spec, ['PetsByPetIdGetResponse']);
+  });
+
+  it('the primary body of an operation whose `operationId` cleans to another stem (#503 review)', async () => {
+    const { spec, warnings } = await parse(
+      'cleaned-stem',
+      specDoc(
+        {
+          '/pets/{id}/legacy-widget': {
+            post: { operationId: 'users.list', parameters: [idParam], responses: { '200': response(obj({ a: str })) } },
+          },
+        },
+        { UserListResponse: en(['s', 't']) },
+      ),
+    );
+    expect(bothKinds(spec)).toEqual([]);
+    // `users.list` names its body `UserListResponse` (`operationIdModelBase`)
+    // and the copy is qualified by that stem, so it steps by number as
+    // `GetPetResponse2` does — never by the operation's name `usersList`
+    // (`UsersListUserListResponse`, on #503's reviewed head).
+    expect(modelsOf(spec)).toEqual(['UserListResponse2 {a}']);
+    expect(enumsOf(spec)).toEqual(['UserListResponse [s,t]']);
+    expect(show(opsOf(spec).usersList.response)).toBe('model UserListResponse2');
+    expect(warnings).toEqual([renamed('UserListResponse', 'UserListResponse2')]);
+    expectSound(spec, ['UserListResponse']);
+  });
+
+  it('the primary body of an operation an `operationIdTransform` renames (#503 review)', async () => {
+    // `Pets_GetPet` names its body `PetsGetPetResponse` whatever the
+    // transform makes of the operation's name, and the copy steps by number
+    // under that stem — `PetsGetPetResponse2` with the `Pets_` prefix
+    // dropped (operation `GetPet`) and with the `operationId` kept as
+    // written (`Pets_GetPet`) alike. On #503's reviewed head the copy was
+    // qualified by the transformed name (`GetPetPetsGetPetResponse`), so
+    // changing the transform renamed the copy and not the body.
+    const transforms: Array<[string, (id: string) => string, string]> = [
+      ['dropped', (id) => id.replace(/^Pets_/, ''), 'GetPet'],
+      ['kept', (id) => id, 'Pets_GetPet'],
+    ];
+    for (const [label, operationIdTransform, operationName] of transforms) {
+      const { spec, warnings } = await parse(
+        `transform-${label}`,
+        specDoc(
+          {
+            '/pets/{id}': {
+              get: {
+                operationId: 'Pets_GetPet',
+                tags: ['pets'],
+                parameters: [idParam],
+                responses: { '200': response(obj({ a: str })) },
+              },
+            },
+          },
+          { PetsGetPetResponse: en(['s', 't']) },
+        ),
+        { operationIdTransform },
+      );
+      expect(bothKinds(spec), label).toEqual([]);
+      expect(modelsOf(spec), label).toEqual(['PetsGetPetResponse2 {a}']);
+      expect(enumsOf(spec), label).toEqual(['PetsGetPetResponse [s,t]']);
+      expect(show(opsOf(spec)[operationName]?.response), label).toBe('model PetsGetPetResponse2');
+      expect(warnings, label).toEqual([renamed('PetsGetPetResponse', 'PetsGetPetResponse2')]);
+      expectSound(spec, ['PetsGetPetResponse']);
+    }
   });
 
   it('an object nested under a primary body (`GetPetResponseOwner2`), its parent keeping its own name', async () => {
