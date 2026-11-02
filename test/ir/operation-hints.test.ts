@@ -104,6 +104,22 @@ describe('readPath: a colon that is not a custom method (issue #378)', () => {
     ]);
     expect(pathSegments('/things/{id}:a:b')).toEqual(['things', '{id}:a:b']);
     expect(readPath('/things/urn:pet').map((s) => s.customMethod)).toEqual([false, false, true]);
+    // Colons inside braces do not count, and a doubled colon counts as several.
+    expect(pathSegments('/pets/{a:b}:x:y')).toEqual(['pets', '{a:b}:x:y']);
+    expect(pathSegments('/pets::batchGet')).toEqual(['pets::batchGet']);
+  });
+
+  it('reads a colon at the edge of a segment and an unclosed brace as before (#461 review)', () => {
+    expect(readPath('/pets/:adopt')).toEqual([
+      { text: 'pets', customMethod: false },
+      { text: 'adopt', customMethod: true },
+    ]);
+    expect(pathSegments('/pets:')).toEqual(['pets']);
+    expect(pathSegments('/{petId}:')).toEqual(['{petId}']);
+    expect(readPath('/{x:y')).toEqual([
+      { text: '{x', customMethod: false },
+      { text: 'y', customMethod: true },
+    ]);
   });
 
   it('reads a segment kept whole for its several colons as a literal, even when a parameter opens it', () => {
