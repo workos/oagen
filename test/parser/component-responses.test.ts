@@ -1457,6 +1457,45 @@ describe("an operation's own inline body named like a component response's body 
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("steps a later body past the component's body when a schema owns a nested name under its status code too (review)", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A component schema owns `CardResponse201Owner`, the name the 201's
+    // nested `owner` would take under its status code, so the whole body
+    // steps on to a number: past the component's `CardResponse2`, to
+    // `CardResponse3`, its `owner` with it, whichever path is read first.
+    const card201 = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: { '200': json(object({ i: string })), '201': json(object({ owner: object({ id: string }) })) },
+        },
+      },
+    };
+    const owned = { CardResponse201Owner: object({ z: string }) };
+    const cardFirst = await parse({ ...card201, ...getNote }, { Card: textCard }, owned);
+    const notesFirst = await parse({ ...getNote, ...card201 }, { Card: textCard }, owned);
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(ops.get('card')!.successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`)).toEqual([
+        '200: CardResponse',
+        '201: CardResponse3',
+      ]);
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual([
+        'CardResponse { i }',
+        'CardResponse2 { text }',
+        'CardResponse201Owner { z }',
+        'CardResponse3 { owner }',
+        'CardResponse3Owner { id }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
   it('reserves the name a later body shares, not one it never takes, in either path order (Greptile)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // `card`'s 202 is declared as its 201 is, so both are `CardResponse201`
