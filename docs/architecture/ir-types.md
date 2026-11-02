@@ -765,7 +765,7 @@ An inline model never keeps a name an enum holds, whatever its shape or flag —
 
 ### Field Examples
 
-OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does. A field whose schema (and `$ref` target, if any) gives neither has no `example` and no `examples` key.
+OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `examples` list. The parser reads both: `examples` carries every value the document gives, and `example` is the document's `example` when present, otherwise the first entry of `examples`. A field whose schema is a `$ref` to a component falls back to that component's `example`/`examples`, the same way a parameter does; when the component is an array component, each value is read from the nearest level the reference passes on its way to the array (the field schema, then an alias's own, else the component's), as `description` is (see Array components). A field whose schema (and the levels its `$ref` passes, if any) gives neither has no `example` and no `examples` key.
 
 ### Constraints
 
