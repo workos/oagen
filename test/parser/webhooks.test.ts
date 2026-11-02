@@ -808,6 +808,15 @@ describe('webhooks', () => {
         expect(warn).not.toHaveBeenCalled();
       });
 
+      it('drops a whitespace-only tag, as an operation does, and keeps one with no name (issue #412)', () => {
+        const { webhooks } = extractWebhooks({
+          petAdopted: { post: { tags: [' ', 'Pets', '\t', '-'], responses: {} } },
+          petUpdated: { post: { tags: [' '], responses: {} } },
+        });
+        expect(webhooks[0].tags).toEqual(['Pets', '-']);
+        expect(webhooks[1]).not.toHaveProperty('tags');
+      });
+
       it('yields one webhook per method and skips a method that is not an object', () => {
         const { webhooks } = extractWebhooks({
           petUpdated: { post: { responses: {} }, put: null, delete: { responses: {} } },
