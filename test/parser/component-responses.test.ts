@@ -9,6 +9,10 @@ import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, ResponseContent, ResponseHeader, TypeRef } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(__dirname, '../fixtures/component-responses.yml');
@@ -616,7 +620,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             components,
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse2' });
         const own = spec.models.find((m) => m.name === 'OwnerCardResponse2');
@@ -665,7 +669,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse3' });
         const fieldsOf = (name: string) =>
@@ -712,7 +716,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.response).toEqual({ kind: 'model', name: 'OwnerCardResponse100' });
         const fieldsOf = (name: string) =>
@@ -755,7 +759,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         const op = spec.services.flatMap((s) => s.operations)[0];
         expect(op.successResponses?.map((r) => [r.statusCode, r.type])).toEqual([
           [200, { kind: 'model', name: 'OwnerCardResponse2' }],
@@ -789,7 +793,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
             components: { schemas: { Pet: PET_SCHEMA }, responses: { PetFound: petFound } },
           }),
         );
-        const spec = await parseSpec(specPath);
+        const spec = await parseSpec(specPath, { collapseErrorBodies: false });
         return spec.services.flatMap((s) => s.operations)[0];
       }
 
@@ -804,7 +808,7 @@ describe('responses written as $ref into components/responses (issue #234)', () 
 
     it('resolves every component response of the fixture with no warnings and no dangling model refs', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const spec = await parseSpec(FIXTURE);
+      const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       validateModelRefs(spec);
       expect(warn.mock.calls).toEqual([]);
 
@@ -905,7 +909,7 @@ describe('a shared inline body returned as default or in a range (issue #301)', 
     const specPath = join(dir, 'spec.json');
     const document = { openapi: '3.1.0', info: { title: 'shared', version: '1' }, paths, components };
     writeFileSync(specPath, JSON.stringify(document));
-    return parseSpec(specPath);
+    return parseSpec(specPath, { collapseErrorBodies: false });
   }
 
   const opsByName = (spec: ApiSpec): Map<string, Operation> =>
@@ -1457,6 +1461,45 @@ describe("an operation's own inline body named like a component response's body 
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it("steps a later body past the component's body when a schema owns a nested name under its status code too (review)", async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // A component schema owns `CardResponse201Owner`, the name the 201's
+    // nested `owner` would take under its status code, so the whole body
+    // steps on to a number: past the component's `CardResponse2`, to
+    // `CardResponse3`, its `owner` with it, whichever path is read first.
+    const card201 = {
+      '/card': {
+        get: {
+          operationId: 'card',
+          responses: { '200': json(object({ i: string })), '201': json(object({ owner: object({ id: string }) })) },
+        },
+      },
+    };
+    const owned = { CardResponse201Owner: object({ z: string }) };
+    const cardFirst = await parse({ ...card201, ...getNote }, { Card: textCard }, owned);
+    const notesFirst = await parse({ ...getNote, ...card201 }, { Card: textCard }, owned);
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(ops.get('card')!.successResponses?.map((r) => `${r.statusCode}: ${typeName(r.type)}`)).toEqual([
+        '200: CardResponse',
+        '201: CardResponse3',
+      ]);
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual([
+        'CardResponse { i }',
+        'CardResponse2 { text }',
+        'CardResponse201Owner { z }',
+        'CardResponse3 { owner }',
+        'CardResponse3Owner { id }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
   it('reserves the name a later body shares, not one it never takes, in either path order (Greptile)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     // `card`'s 202 is declared as its 201 is, so both are `CardResponse201`
@@ -1555,6 +1598,74 @@ describe("an operation's own inline body named like a component response's body 
     ]);
     expect(warn.mock.calls).toEqual([[expect.stringContaining('the latter is renamed "card2"')]]);
   });
+
+  /** A type as the issue's repro prints it, an array as its items followed by `[]`. */
+  const arrayOrTypeName = (type: TypeRef | undefined): string =>
+    type?.kind === 'array' ? `${typeName(type.items)}[]` : typeName(type);
+  /** `GET /card` (`card`) returning an inline array of `{ j }`, whose items derive `CardItem` from the operationId. */
+  const listCard = {
+    '/card': {
+      get: { operationId: 'card', responses: { '200': json({ type: 'array', items: object({ j: string }) }) } },
+    },
+  };
+  /** `Card` with a nested `item` object, which derives `CardResponseItem` under the component's body name. */
+  const nestedItemCard = {
+    description: 'A card',
+    content: { 'application/json': { schema: object({ text: string, item: object({ q: string }) }) } },
+  };
+
+  it("reserves the name an operation's array items settle on, not the one they first try, in either path order (#510 review)", async () => {
+    // Beside a component schema `CardItem`, `card`'s items are retried as
+    // `CardResponseItem` (`typeInlineItems`). The dry run used to reserve
+    // `CardItem` only, so the component's nested `item` model took
+    // `CardResponseItem` too: with `/card` first the merge kept `{ j }` for
+    // both, with a warning, and `getNote`'s `item` lost `q`; with `/notes`
+    // first `card` stepped on to `CardItem2` instead.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cardItem = { CardItem: object({ x: string }) };
+    const cardFirst = await parse({ ...listCard, ...getNote }, { Card: nestedItemCard }, cardItem);
+    const notesFirst = await parse({ ...getNote, ...listCard }, { Card: nestedItemCard }, cardItem);
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(arrayOrTypeName(ops.get('card')!.response)).toBe('CardResponseItem[]');
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse2');
+      expect(modelsOf(spec)).toEqual([
+        'CardItem { x }',
+        'CardResponse2 { text, item }',
+        'CardResponse2Item { q }',
+        'CardResponseItem { j }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
+
+  it('reserves no retry the items never take: without the schema, the component keeps `CardResponse` beside `CardItem[]`', async () => {
+    // Nothing owns `CardItem`, so the items settle on it as written and
+    // `CardResponseItem` is the component's nested model alone: the
+    // component steps only when the operation would take the name.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const cardFirst = await parse({ ...listCard, ...getNote }, { Card: nestedItemCard });
+    const notesFirst = await parse({ ...getNote, ...listCard }, { Card: nestedItemCard });
+    expect(warn).not.toHaveBeenCalled();
+
+    for (const spec of [cardFirst, notesFirst]) {
+      const ops = byName(spec);
+      expect(arrayOrTypeName(ops.get('card')!.response)).toBe('CardItem[]');
+      expect(typeName(ops.get('getNote')!.response)).toBe('CardResponse');
+      expect(modelsOf(spec)).toEqual([
+        'CardItem { j }',
+        'CardResponse { text, item }',
+        'CardResponseItem { q }',
+        'Pet { name }',
+      ]);
+      validateModelRefs(spec);
+    }
+    expect(diffSpecs(cardFirst, notesFirst).changes).toEqual([]);
+  });
 });
 
 describe("a component response's other media types and headers (issue #302)", () => {
@@ -1606,7 +1717,7 @@ describe("a component response's other media types and headers (issue #302)", ()
         },
       }),
     );
-    return parseSpec(specPath);
+    return parseSpec(specPath, { collapseErrorBodies: false });
   }
 
   const typeName = (type: TypeRef | undefined): string | undefined =>
@@ -2414,7 +2525,7 @@ describe('a component list envelope is reserved under both readings (#309 review
           components: { responses: { NotePage: notePage }, schemas },
         }),
       );
-      const spec = await parseSpec(specPath);
+      const spec = await parseSpec(specPath, { collapseErrorBodies: false });
       validateModelRefs(spec);
       return { spec, warnings: warn.mock.calls.map((call) => String(call[0])) };
     } finally {

@@ -218,8 +218,9 @@ export function resolveEnvelopeCompanionNames(
  * shares it, and nothing else. `survivingModels` is what the resolver
  * returned; a companion is a survivor when its own model is among them.
  * `qualifiers` gives each companion the stem the models of the operation
- * that lifted it are named from (`ListUsers`, or `UsersGet` for `GET /users`
- * without an `operationId`), to prefix a renamed model with.
+ * that lifted it are named from (`ListUsers` for `listUsers`, `UserList`
+ * for `users.list`, or `UsersGet` for `GET /users` without an
+ * `operationId`), to prefix a renamed model with.
  */
 export function companionBundles(
   companions: EnvelopeCompanion[],

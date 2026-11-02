@@ -1,6 +1,6 @@
 import type { ApiSpec } from '../ir/types.js';
 import { validateModelHints } from '../ir/types.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { Emitter, GeneratedFile } from './types.js';
 import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import { writeFiles } from './writer.js';
@@ -30,6 +30,7 @@ export async function generate(
     overlayLookup?: OverlayLookup;
     operationHints?: Record<string, OperationHint>;
     mountRules?: Record<string, string>;
+    operationNaming?: OperationNaming;
     modelHints?: Record<string, string>;
     emitterOptions?: Record<string, unknown>;
     /** When true, skip deletion of files recorded in the previous manifest but not in the current emission. */
