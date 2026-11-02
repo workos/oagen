@@ -271,6 +271,13 @@ export type SecurityRequirementSet = SecurityRequirement[];
 export interface Operation {
   name: string;
   /**
+   * The operation's `operationId`, verbatim, when the document declares one.
+   * `name` is what the parser made of it (`operationIdTransform` applied);
+   * this says that `name` came from one at all, which is what
+   * `resolveOperations` reads to prefer it over the path-derived method name.
+   */
+  operationId?: string;
+  /**
    * The `summary` alone: the OpenAPI operation's own, or — when the operation
    * declares none with non-whitespace content — the `summary` of the Path
    * Item it sits on (the `paths` entry, or the `components/pathItems` item a
@@ -1135,15 +1142,19 @@ export interface Field {
   /**
    * A single illustrative value. The field schema's `example` when present,
    * otherwise the first entry of its `examples`; when the schema is a `$ref`
-   * with neither, the same taken from the component it points at. An
-   * explicit `null` is kept. Absent when no level gives one.
+   * with neither, the same taken from the component it points at — for an
+   * array component, from the nearest level the reference passes on its way
+   * to the array (an alias's own, else the component's), as `description`
+   * is read. An explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
    * Every example value the schema gives, in document order, from the JSON
    * Schema `examples` list (OAS 3.1 deprecates `example` in its favour) —
-   * on the field schema, else on the component its `$ref` points at.
-   * Present only when the list has at least one entry.
+   * on the field schema, else on the component its `$ref` points at, an
+   * array component's read like `example`: the nearest non-empty list the
+   * reference passes on its way to the array. Present only when the list
+   * has at least one entry.
    */
   examples?: unknown[];
   /**
