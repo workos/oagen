@@ -1448,32 +1448,38 @@ describe("workos/oagen#430: a discriminated variant never takes its component's 
   });
 
   it("a variant whose nameless const sits in an `allOf` wrapper keeps the wrapper's fields when the union is flattened", async () => {
-    for (const nameless of ['', '-']) {
-      // The review's document: `kind` and `meow` inside the variant's `allOf`, beside a plain `dog`.
-      const wrapped = { allOf: [variant(nameless, { meow: str })] };
-      // And a wrapper whose second member is a union of its own.
-      const nested = { allOf: [variant(nameless, { meow: str }), { oneOf: [obj({ purr: str }), obj({ hiss: str })] }] };
-      for (const [label, cat, fields] of [
-        ['wrapped', wrapped, ['meow?: string']],
-        ['nested', nested, ['meow?: string', 'purr?: string', 'hiss?: string']],
-      ] as const) {
-        const { spec, warnings } = await parse(
-          `wrapped-nameless-const-${label}-${nameless.length}`,
-          specDoc(
-            { '/cat-events': getOp('getCatEvent', ref('CatEvent')) },
-            { Event: event, CatEvent: { allOf: [ref('Event'), { oneOf: [cat, dog] }] } },
-          ),
-        );
-        expect(modelOf(spec, 'CatEvent').discriminator, label).toBeUndefined();
-        expect(fieldsOf(spec, 'CatEvent'), label).toEqual([
-          'id: string',
-          `kind?: ${JSON.stringify(nameless)}`,
-          ...fields,
-          'bark?: string',
-        ]);
-        expect(modelNames(spec).sort(), label).toEqual(['CatEvent', 'Event']);
-        expect(warnings, label).toEqual([]);
-        expectSound(spec, ['Event', 'CatEvent']);
+    // The review's document, spelled with `oneOf` and with `anyOf` (#430 review).
+    for (const keyword of ['oneOf', 'anyOf'] as const) {
+      for (const nameless of ['', '-']) {
+        // `kind` and `meow` inside the variant's `allOf`, beside a plain `dog`.
+        const wrapped = { allOf: [variant(nameless, { meow: str })] };
+        // And a wrapper whose second member is a union of its own.
+        const nested = {
+          allOf: [variant(nameless, { meow: str }), { oneOf: [obj({ purr: str }), obj({ hiss: str })] }],
+        };
+        for (const [label, cat, fields] of [
+          ['wrapped', wrapped, ['meow?: string']],
+          ['nested', nested, ['meow?: string', 'purr?: string', 'hiss?: string']],
+        ] as const) {
+          const tag = `${keyword}-${label}-${nameless.length}`;
+          const { spec, warnings } = await parse(
+            `wrapped-nameless-const-${tag}`,
+            specDoc(
+              { '/cat-events': getOp('getCatEvent', ref('CatEvent')) },
+              { Event: event, CatEvent: { allOf: [ref('Event'), { [keyword]: [cat, dog] }] } },
+            ),
+          );
+          expect(modelOf(spec, 'CatEvent').discriminator, tag).toBeUndefined();
+          expect(fieldsOf(spec, 'CatEvent'), tag).toEqual([
+            'id: string',
+            `kind?: ${JSON.stringify(nameless)}`,
+            ...fields,
+            'bark?: string',
+          ]);
+          expect(modelNames(spec).sort(), tag).toEqual(['CatEvent', 'Event']);
+          expect(warnings, tag).toEqual([]);
+          expectSound(spec, ['Event', 'CatEvent']);
+        }
       }
     }
   });
