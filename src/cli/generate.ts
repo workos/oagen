@@ -3,7 +3,7 @@ import { generate } from '../engine/orchestrator.js';
 import { getEmitter } from '../engine/registry.js';
 import { loadOverlayContext } from './overlay-loader.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { SchemaNameTransform } from '../parser/schemas.js';
 
 export async function generateCommand(opts: {
@@ -29,6 +29,7 @@ export async function generateCommand(opts: {
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
   mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
   modelHints?: Record<string, string>;
   fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
@@ -77,6 +78,7 @@ export async function generateCommand(opts: {
     overlayLookup,
     operationHints: opts.operationHints,
     mountRules: opts.mountRules,
+    operationNaming: opts.operationNaming,
     modelHints: opts.modelHints,
     emitterOptions: opts.emitterOptions,
     noPrune: opts.prune === false,

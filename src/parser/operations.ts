@@ -2853,6 +2853,9 @@ function buildOperation(
 
   const operation: Operation = {
     name: operationName,
+    // The document's operationId as written; the key is omitted when it
+    // declares none, so `name` alone says the operation is path-named.
+    ...(op.operationId ? { operationId: op.operationId } : {}),
     // Keep the summary on its own so emitters can tell it apart from the
     // description; the key is omitted (not set to undefined) when absent.
     ...(summary !== undefined ? { summary } : {}),

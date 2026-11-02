@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import { existsSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import type { Emitter } from '../engine/types.js';
-import type { OperationHint } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { Extractor } from '../compat/types.js';
 import type { CompatConfig } from '../compat/config.js';
 import type { OpenApiDocument } from '../parser/parse.js';
@@ -71,6 +71,22 @@ export interface OagenConfig {
    * takes priority.
    */
   mountRules?: Record<string, string>;
+  /**
+   * Where the operation resolver takes an unhinted method name from. `path`
+   * (the default) derives it from the HTTP method and path; `operationId`
+   * uses the operation's own name when the document declares an
+   * `operationId` (`Operation.name`, so `operationIdTransform` applies) and
+   * the path only for an operation without one. That name is snake_cased
+   * word by word: a lower-case letter before a capital, a digit or a run of
+   * capitals before a capitalized word, and any character that is not a
+   * letter or digit mark a boundary, so `getSSOAuthorizationUrl` becomes
+   * `get_sso_authorization_url`, `createM2MApp` `create_m2m_app` and an id a
+   * transform keeps as written, `pets:adopt`, `pets_adopt`. A `name` in
+   * `operationHints` overrides either. Switching an existing SDK renames
+   * every method whose operationId and path disagree, so run `oagen resolve`
+   * and diff before flipping it.
+   */
+  operationNaming?: OperationNaming;
   /**
    * Pin specific models to a specific IR service for placement, overriding the
    * default "first service to reference the model wins" assignment.
