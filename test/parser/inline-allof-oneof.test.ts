@@ -23,6 +23,10 @@ import {
   type Operation,
   type TypeRef,
 } from '../../src/ir/types.js';
+// These tests pin the per-operation error body naming (`<Op>Error<code>`) that
+// the collapse pass folds onto shared models by default
+// (src/parser/collapse-error-bodies.ts); they parse with
+// `collapseErrorBodies: false` to keep exercising it.
 
 /**
  * workos/oagen#283: an inline schema written as `allOf: [object, { oneOf:
@@ -126,7 +130,7 @@ async function parseTempSpec(
   const file = path.join(dir, 'spec.json');
   try {
     await fs.writeFile(file, JSON.stringify(spec), 'utf-8');
-    return await parseSpec(file, transformSpec ? { transformSpec } : undefined);
+    return await parseSpec(file, { collapseErrorBodies: false, ...(transformSpec ? { transformSpec } : {}) });
   } finally {
     await fs.rm(dir, { recursive: true });
   }
@@ -889,7 +893,7 @@ describe('round 1: recursive components, shared schemas, conflicting variant dec
         ].join('\n'),
         'utf-8',
       );
-      const ir = await parseSpec(file);
+      const ir = await parseSpec(file, { collapseErrorBodies: false });
       expect(warnSpy.mock.calls).toEqual([]);
       expect(fieldsOf(modelsByName(ir)['CreatePetRequest'])).toEqual(['id: string', 'other?: string']);
       expectSound(ir, []);
