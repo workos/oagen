@@ -804,9 +804,9 @@ export interface WebhookModified {
   httpMethod: string;
   paramChanges: ParamChange[];
   /**
-   * True when the payload's type, encoding or `requestBodyRequired` changed,
-   * or — both specs declaring a payload — the media types the sender may use
-   * did; `details` says which.
+   * True when the payload's type changed, or — both specs declaring a
+   * payload — its encoding, its `requestBodyRequired` or the media types the
+   * sender may use did; `details` says which.
    */
   requestBodyChanged: boolean;
   /**

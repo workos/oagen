@@ -294,13 +294,13 @@ describe('diffWebhooks — request body encoding (issue #290)', () => {
     const [removed] = diffWebhooks([petAdopted()], [none]);
     expect(removed).toMatchObject({
       requestBodyChanged: true,
-      details: 'payload removed; body required → optional',
+      details: 'payload removed',
       classification: 'breaking',
     });
     expect(removed).not.toHaveProperty('oldRequestBodyEncoding');
     expect(removed).not.toHaveProperty('newRequestBodyEncoding');
     const [added] = diffWebhooks([none], [petAdopted()]);
-    expect(added).toMatchObject({ details: 'payload added; body optional → required', classification: 'breaking' });
+    expect(added).toMatchObject({ details: 'payload added', classification: 'breaking' });
     expect(added).not.toHaveProperty('oldRequestBodyEncoding');
     expect(added).not.toHaveProperty('newRequestBodyEncoding');
   });

@@ -1,6 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { buildDirectionIndex } from '../../src/differ/direction.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import type { ApiSpec, Model, Parameter, Webhook } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
@@ -260,6 +264,125 @@ describe('diffSpecs — webhooks', () => {
       spec([webhook({ headerParams: [header('X-Defaulted', { default: 'b' })] })]),
     );
     expect(behaviorChanges).toEqual([]);
+  });
+});
+
+describe('parseSpec to diffSpecs — a required payload appearing or disappearing (issue #404 repro)', () => {
+  /** The issue's `old.json` without `requestBody`, or `new.json` with it: `petAdopted` responding `200`. */
+  const document = (requestBody?: unknown) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    webhooks: {
+      petAdopted: { post: { ...(requestBody ? { requestBody } : {}), responses: { '200': { description: 'ok' } } } },
+    },
+    components: {
+      schemas: { Pet: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } },
+    },
+  });
+  const requiredPet = {
+    required: true,
+    content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+  };
+
+  async function parseDocuments(oldDoc: unknown, newDoc: unknown): Promise<[ApiSpec, ApiSpec]> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-404-'));
+    try {
+      writeFileSync(join(dir, 'old.json'), JSON.stringify(oldDoc));
+      writeFileSync(join(dir, 'new.json'), JSON.stringify(newDoc));
+      return [await parseSpec(join(dir, 'old.json')), await parseSpec(join(dir, 'new.json'))];
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('says `payload added` / `payload removed` alone, still breaking, as an operation reports no required flip beside a body', async () => {
+    const [before, after] = await parseDocuments(document(), document(requiredPet));
+    expect(after.webhooks?.[0]).toMatchObject({ requestBodyRequired: true, requestBodyEncoding: 'json' });
+    for (const [details, oldSpec, newSpec] of [
+      ['payload added', before, after],
+      ['payload removed', after, before],
+    ] as const) {
+      expect(diffSpecs(oldSpec, newSpec).changes.filter((c) => c.kind === 'webhook-modified')).toEqual([
+        {
+          kind: 'webhook-modified',
+          name: 'petAdopted',
+          httpMethod: 'post',
+          paramChanges: [],
+          requestBodyChanged: true,
+          responsesChanged: false,
+          deprecatedChanged: false,
+          securityChanged: false,
+          tagsChanged: false,
+          details,
+          classification: 'breaking',
+        },
+      ]);
+    }
+  });
+});
+
+describe('parseSpec to diffSpecs — a required flag on a body the parser reads no payload from (#404 review)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** `createPet` and `petAdopted` declaring the same `requestBody`, or none, both responding `200`. */
+  const document = (requestBody?: unknown) => {
+    const body = requestBody ? { requestBody } : {};
+    return {
+      openapi: '3.1.0',
+      info: { title: 'Pets', version: '1' },
+      paths: { '/pets': { post: { operationId: 'createPet', ...body, responses: { '200': { description: 'ok' } } } } },
+      webhooks: { petAdopted: { post: { ...body, responses: { '200': { description: 'ok' } } } } },
+      components: {
+        schemas: { Pet: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } },
+      },
+    };
+  };
+  /** The review's bodies, none of which the parser reads a payload from. */
+  const bodies: Record<string, (required: boolean) => unknown> = {
+    'application/xml': (required) => ({
+      required,
+      content: { 'application/xml': { schema: { $ref: '#/components/schemas/Pet' } } },
+    }),
+    'content: {}': (required) => ({ required, content: {} }),
+    'application/json without a schema': (required) => ({ required, content: { 'application/json': {} } }),
+  };
+
+  async function parseDocument(doc: unknown): Promise<ApiSpec> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-404-'));
+    try {
+      writeFileSync(join(dir, 'spec.json'), JSON.stringify(doc));
+      return await parseSpec(join(dir, 'spec.json'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('keeps the flag on a payload carried in requestBodyContents alone, without a requestBody', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { webhooks } = await parseDocument(document(bodies['application/xml'](true)));
+    expect(webhooks?.[0]).not.toHaveProperty('requestBody');
+    expect(webhooks?.[0]).toMatchObject({ requestBodyRequired: true, requestBodyContentTypes: ['application/xml'] });
+  });
+
+  it('reports nothing when such a body appears, disappears or flips its flag, as on an operation', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const none = await parseDocument(document());
+    for (const [label, body] of Object.entries(bodies)) {
+      const required = await parseDocument(document(body(true)));
+      const optional = await parseDocument(document(body(false)));
+      expect(required.webhooks?.[0], label).not.toHaveProperty('requestBody');
+      for (const [oldSpec, newSpec] of [
+        [required, none],
+        [none, required],
+        [required, optional],
+        [optional, required],
+      ]) {
+        // Neither the webhook nor the operation declaring the same body is modified: `oagen diff` exits 0.
+        expect(diffSpecs(oldSpec, newSpec).changes, label).toEqual([]);
+      }
+    }
   });
 });
 
