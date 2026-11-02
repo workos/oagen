@@ -58,15 +58,22 @@ const ENUM_VALUE_DOC_KEYS: ReadonlySet<string> = new Set(['description']);
  * discriminator (property and mapped shapes); an enum ref is read through to
  * its values (name, value, deprecation). Documentation (descriptions, links,
  * examples) does not count. Without `shapes`, or for a name either document
- * lacks, the two refs are different shapes. A pair of models met again while
- * comparing their own fields (a self-referential shape) is taken as equal, so
- * the comparison terminates.
+ * lacks, the two refs are different shapes. So are two names both documents
+ * declare, however alike: neither was renamed, so a body moved from `Note` to
+ * an identical `NoteCopy` is typed by another model, and no `model-removed`
+ * or `model-added` reports it. A pair of models met again while comparing
+ * their own fields (a self-referential shape) is taken as equal, so the
+ * comparison terminates.
  *
  * This is what lets a body the parser names after its media type keep
  * comparing equal across a rename: a parameter edit on a key declared beside
  * another spelling of its essence (`application/yaml; version=1` →
  * `; version=3`) renames the model minted for it, and that rename is the
- * models diff's to report (`model-removed` + `model-added`), not a retype.
+ * models diff's to report (`model-removed` + `model-added`), not a retype. A
+ * rename may also hand the old name to another body: a form body that is
+ * `CreatePetRequest` alone is `CreatePetApplicationXWwwFormUrlencodedRequest`
+ * once a JSON body takes `CreatePetRequest`, which is still a rename, since
+ * the new name is one the old document lacks.
  */
 export function sameShape(a: TypeRef, b: TypeRef, shapes?: DocumentShapes): boolean {
   return sameShapeWithin(a, b, shapes, new Set());
@@ -80,7 +87,7 @@ function sameShapeWithin(a: TypeRef, b: TypeRef, shapes: DocumentShapes | undefi
       if (b.kind !== 'model') return false;
       const oldModel = shapes.old.models.get(a.name);
       const newModel = shapes.new.models.get(b.name);
-      if (!oldModel || !newModel) return false;
+      if (!oldModel || !newModel || (shapes.new.models.has(a.name) && shapes.old.models.has(b.name))) return false;
       const pair = `model:${a.name}\u0000${b.name}`;
       if (seen.has(pair)) return true;
       seen.add(pair);
@@ -90,7 +97,7 @@ function sameShapeWithin(a: TypeRef, b: TypeRef, shapes: DocumentShapes | undefi
       if (b.kind !== 'enum') return false;
       const oldEnum = shapes.old.enums.get(a.name);
       const newEnum = shapes.new.enums.get(b.name);
-      if (!oldEnum || !newEnum) return false;
+      if (!oldEnum || !newEnum || (shapes.new.enums.has(a.name) && shapes.old.enums.has(b.name))) return false;
       return sameEnumShape(oldEnum, newEnum);
     }
     case 'array':

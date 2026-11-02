@@ -141,6 +141,33 @@ describe('sameShape', () => {
     expect(sameShape(model('OldPage'), model('NewPage'), shapes)).toBe(true);
   });
 
+  it('compares two models or enums both documents declare by name, so a body moved between them is no rename (issue #390)', () => {
+    const note = (name: string): Model => ({ name, fields: [{ name: 'title', type: string, required: true }] });
+    const both = { models: [note('Note'), note('NoteCopy')], enums: [level('Level'), level('LevelCopy')] };
+    const shapes = shapesOf(both, both);
+    expect(sameShape(model('Note'), model('NoteCopy'), shapes)).toBe(false);
+    expect(
+      sameShape({ kind: 'array', items: model('Note') }, { kind: 'array', items: model('NoteCopy') }, shapes),
+    ).toBe(false);
+    expect(sameShape(enumRef('Level'), enumRef('LevelCopy'), shapes)).toBe(false);
+    // Read through a rename, a field moved between two such models is still a change.
+    const metas = [meta('Meta', 'Level'), meta('MetaCopy', 'Level')];
+    expect(
+      sameShape(
+        model('OldPage'),
+        model('NewPage'),
+        shapesOf(
+          { models: [page('OldPage', 'Meta'), ...metas], enums: [level('Level')] },
+          { models: [page('NewPage', 'MetaCopy'), ...metas], enums: [level('Level')] },
+        ),
+      ),
+    ).toBe(false);
+    // A name one document alone declares is what a rename leaves: the old
+    // name gone, or a new one minted while the old name moved to another body.
+    expect(sameShape(model('Note'), model('NoteCopy'), shapesOf(both, { models: [note('NoteCopy')] }))).toBe(true);
+    expect(sameShape(model('Note'), model('NoteCopy'), shapesOf({ models: [note('Note')] }, both))).toBe(true);
+  });
+
   it('compares by name alone without the documents, or for a name a document lacks', () => {
     expect(sameShape(model('OldPage'), model('NewPage'))).toBe(false);
     expect(sameShape(model('Page'), model('Page'))).toBe(true);
