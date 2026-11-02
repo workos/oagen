@@ -49,6 +49,7 @@ import {
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSchemaName,
+  inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
@@ -2854,6 +2855,9 @@ function buildOperation(
 
   const operation: Operation = {
     name: operationName,
+    // The document's operationId as written; the key is omitted when it
+    // declares none, so `name` alone says the operation is path-named.
+    ...(op.operationId ? { operationId: op.operationId } : {}),
     // Keep the summary on its own so emitters can tell it apart from the
     // description; the key is omitted (not set to undefined) when absent.
     ...(summary !== undefined ? { summary } : {}),
@@ -3935,12 +3939,18 @@ function typePickedRequestBody(
     const hasNull = schema.oneOf.some(
       (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
     );
+    // The mapping's targets are read as a field's or a response's inline
+    // union reads them (`inlineMappingTargets`), so the same union carries the
+    // same discriminator at every site.
     const union: TypeRef = {
       kind: 'union',
       variants,
       ...(schema.discriminator
         ? {
-            discriminator: { property: schema.discriminator.propertyName, mapping: schema.discriminator.mapping ?? {} },
+            discriminator: {
+              property: schema.discriminator.propertyName,
+              mapping: inlineMappingTargets(schema.discriminator.mapping),
+            },
           }
         : {}),
     };
