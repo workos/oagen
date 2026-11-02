@@ -237,6 +237,25 @@ describe('a numeric suffix on a name that ends in a digit (#289)', () => {
     }
   });
 
+  it('numbers an action whose every name is held the same way: listListTop10No2 (#403)', () => {
+    // yieldActionNames: `GET /pets/list-top10` is the action `listTop10`,
+    // the name `GET /pets/top-10` would have, so it yields; the collection
+    // it dropped (`listTop10Pets`) and its name without the action rule
+    // (`listListTop10`) are both operationIds of the service, so it is
+    // numbered on the latter, which ends in a digit.
+    const paths: Paths = {
+      '/pets/list-top10': get,
+      '/pets/a': { get: { ...ok, operationId: 'listTop10Pets' } },
+      '/pets/b': { get: { ...ok, operationId: 'listListTop10' } },
+    };
+    expect(names(paths)).toEqual({
+      'GET /pets/list-top10': 'Pets.listListTop10No2',
+      'GET /pets/a': 'Pets.listTop10Pets',
+      'GET /pets/b': 'Pets.listListTop10',
+    });
+    expect(names(reversed(paths))).toEqual(names(paths));
+  });
+
   it('leaves the bare number on a name that ends in a letter', () => {
     // `/notes` beside `/api/v1/notes` differ only by the root: `list` and
     // `list2`, exactly as before.

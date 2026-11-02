@@ -106,6 +106,25 @@ export function toUpperSnakeCase(s: string): string {
     .join('_');
 }
 
+/**
+ * `name` with the numeric suffix `n`, the one spelling of every numbered
+ * operation, model and enum name: `list` + 2 is `list2`. A name that already
+ * ends in a digit takes the number behind `No`, so that it cannot be read as
+ * part of the number the name ends with: `listV1` + 2 is `listV1No2`, never
+ * `listV12`, which reads as version 12 of the API, and `PetSizeV2` + 2 is
+ * `PetSizeV2No2`. The hex hash that sets a path-derived or webhook stem
+ * apart is appended the same way, so one that starts with a digit is set off
+ * too (`PetsTop10` + `567B59` is `PetsTop10No567B59`, never
+ * `PetsTop10567B59`) and one that starts with a letter follows the name as
+ * it is (`PetsTop10Ba41B5`). An underscore would not do: splitWords reads a
+ * digit run as a word of its own, so `listV1_2` re-cased by toPascalCase or
+ * toCamelCase is `ListV12` or `listV12` again.
+ */
+export function numberedName(name: string, n: number | string): string {
+  const suffix = String(n);
+  return /\d$/.test(name) && /^\d/.test(suffix) ? `${name}No${suffix}` : `${name}${suffix}`;
+}
+
 const BACKEND_SUFFIXES = ['Controller'];
 
 export function stripBackendSuffixes(name: string): string {

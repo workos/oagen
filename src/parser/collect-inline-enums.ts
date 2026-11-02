@@ -7,6 +7,7 @@ import {
   collectModelRefs,
   collectWebhookTypeRefs,
 } from '../ir/types.js';
+import { numberedName } from '../utils/naming.js';
 import { collectInlineEnumFromRef } from './schemas.js';
 import { enumValuesOf, sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange, STATUS_RANGE_LABELS } from './responses.js';
@@ -61,7 +62,7 @@ export function collectInlineEnumsFromModels(models: Model[], enums: Enum[]): vo
  * earlier operation's inline 404 enum body or `Error404` response header was
  * promoted under (`GetPetError404`), and whichever was collected first would
  * otherwise hand its values to the other's reference. A different value set
- * is renamed to a distinct name before it is promoted (`GetPetError4042`);
+ * is renamed to a distinct name before it is promoted (`GetPetError404No2`);
  * identical members are shared, as a parameter repeated across the
  * operations of a service always was.
  *
@@ -409,12 +410,13 @@ function collectDistinctEnums(
  * holds the same members (`steps`, `isNumericStep`), else the first name not
  * taken by a different member set, nor by a model: the base qualified by the
  * status code (`DocumentsXPolicy429`), then numeric suffixes
- * (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...). A site no operation owns
+ * (`DocumentsXPolicy2`, `DocumentsXPolicy3`, ...), spelled by numberedName
+ * (`PetSizeV2No2` for a base that ends in a digit). A site no operation owns
  * — a model's field, a webhook's, a component response's — passes no
  * `steps` and shares no step. An error body (`ERROR_BODY_STEP`) steps to
  * `GetPetError404Body` and then numbers under it (`GetPetError404Body2`,
  * `GetPetError404Body3`, ...), as the error models do in the shape registry,
- * never on the bare name (`GetPetError4042` is what a parameter named
+ * never on the bare name (`GetPetError404No2` is what a parameter named
  * `error404` steps to, a different site). Deterministic for a given spec,
  * since it depends only on declaration order. The collectors
  * run after every model is named, and the merge passes mint against every
@@ -464,13 +466,17 @@ function distinctEnumName(
   if (stepped) return stepped.name;
   if (qualifier && isUsable(`${base}${qualifier}`)) return `${base}${qualifier}`;
   let suffix = 2;
-  while (!isUsable(`${stem}${suffix}`)) suffix++;
-  return `${stem}${suffix}`;
+  while (!isUsable(numberedName(stem, suffix))) suffix++;
+  return numberedName(stem, suffix);
 }
 
-/** Whether `name` is `base` followed by one or more digits: a status-code or numeric-suffix step of the stem. */
+/**
+ * Whether `name` is a step of `base`: `base` followed by a status code
+ * (`PetsXPolicy429`), or numbered as numberedName numbers it
+ * (`PetsXPolicy2`, and `PetsXModeV2No2` for a base that ends in a digit).
+ */
 function isNumericStep(name: string, base: string): boolean {
-  if (name.length <= base.length || !name.startsWith(base)) return false;
-  for (const char of name.slice(base.length)) if (char < '0' || char > '9') return false;
-  return true;
+  if (!name.startsWith(base)) return false;
+  const step = name.slice(base.length);
+  return /^\d+$/.test(step) || (/\d$/.test(base) && /^No\d+$/.test(step));
 }

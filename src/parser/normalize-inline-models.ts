@@ -10,6 +10,7 @@ import {
   renameModelRefs,
   renameTypeRefModels,
 } from '../ir/types.js';
+import { numberedName } from '../utils/naming.js';
 import { modelFingerprint } from './operations.js';
 import { isComponentModelRef } from './schemas.js';
 import { unionShapeKey } from './union-shape.js';
@@ -776,15 +777,16 @@ function preferredDefinition(models: Model[]): Model {
  * (`GetLegacyWidgetWidget`), or — when the name already starts with the
  * qualifier, as a request body named from its operation does — the name
  * itself; then, while that is taken, a numeric suffix (`CreateNoteRequest2`,
- * `…3`), the fallback a header model uses. `reserved` holds every name in
- * play, so the search stops at the first free suffix and the result collides
- * with nothing any pass has minted or will mint.
+ * `…3`; `GetPetError404No2` and `PetTagV2No2` for a name that ends in a
+ * digit, see numberedName), the fallback a header model uses. `reserved`
+ * holds every name in play, so the search stops at the first free suffix and
+ * the result collides with nothing any pass has minted or will mint.
  */
 function mintQualifiedName(name: string, qualifier: string, reserved: ReadonlySet<string>): string {
   const base = name.startsWith(qualifier) ? name : `${qualifier}${name}`;
   if (base !== name && !reserved.has(base)) return base;
   for (let n = 2; ; n++) {
-    const candidate = `${base}${n}`;
+    const candidate = numberedName(base, n);
     if (!reserved.has(candidate)) return candidate;
   }
 }
