@@ -1217,6 +1217,24 @@ describe('(3) a nullable array is the array it is, however the null is written',
     }
   });
 
+  it('reads it through an allOf of one member on either side of the null, as a body and as data (#395)', () => {
+    const plain = spellings.oneOfAlone;
+    const wrapped: Record<string, SchemaObject> = {
+      allOfAroundOneOf: { allOf: [plain] },
+      allOfAroundTypeList: { allOf: [spellings.typeList] },
+      oneOfAroundAllOf: { oneOf: [{ allOf: [{ type: 'array', items: pet }] }, { type: 'null' }] },
+    };
+    const envelope = (data: SchemaObject) => obj({ data, list_metadata: obj({ after: str }) });
+    for (const [name, schema] of Object.entries(wrapped)) {
+      expect(classifyAndExtractResponse(schema, 'ListPetsResponse'), name).toEqual(
+        classifyAndExtractResponse(plain, 'ListPetsResponse'),
+      );
+      expect(classifyAndExtractResponse(envelope(schema), 'ListPetsResponse'), name).toEqual(
+        classifyAndExtractResponse(envelope(plain), 'ListPetsResponse'),
+      );
+    }
+  });
+
   it('keeps the items of a nullable data array when a later allOf branch only constrains it', () => {
     const result = classifyAndExtractResponse(
       {

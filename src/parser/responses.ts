@@ -382,10 +382,10 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   }
 
   // Find array properties — typed, `items` with no `type`, or either under a
-  // nullable wrapper of any spelling (`arraySchemaOf`), or a `$ref` to an
-  // array component under such a wrapper (`isArrayComponentRef`), which
-  // `schemaToTypeRef` types as the array the component declares — and
-  // non-array companion properties
+  // nullable wrapper of any spelling or an `allOf` read as its member
+  // (`arraySchemaOf`), or a `$ref` to an array component under such wrappers
+  // (`isArrayComponentRef`), which `schemaToTypeRef` types as the array the
+  // component declares — and non-array companion properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
@@ -460,8 +460,8 @@ function extractListResponse(
     const array = dataType.kind === 'nullable' ? dataType.inner : dataType;
     if (array.kind === 'array') itemTypeRef = array.items;
   } else {
-    // The array under whatever nullable wrapper the data property wears
-    // (`arraySchemaOf`); its items, whatever their shape, are typed and
+    // The array under whatever nullable wrapper or `allOf` the data property
+    // wears (`arraySchemaOf`); its items, whatever their shape, are typed and
     // materialized as `<Operation>Item` (`typeInlineItems`).
     const dataArray = dataProp ? arraySchemaOf(dataProp) : undefined;
     if (dataArray?.items) {
