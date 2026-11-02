@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
+import { resolveOperations } from '../../src/ir/operation-hints.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import type { Enum } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
@@ -464,6 +466,51 @@ describe('extractOperations', () => {
     // A path-named operation has no key at all, not an undefined one.
     expect(pathNamed.name).toBe('create');
     expect('operationId' in pathNamed).toBe(false);
+  });
+
+  it('spells an acronym in capitals, which operationNaming: operationId reads as its own word (#472 review)', () => {
+    const ok = { responses: { '200': { description: 'ok' } } };
+    const paths = {
+      '/sso/authorization-url': { get: { operationId: 'get-sso-authorization-url', ...ok } },
+      '/m2m/apps': { post: { operationId: 'create_m2m_app', ...ok } },
+      '/jwt/tokens': { post: { operationId: 'createJWTToken', ...ok } },
+      '/pets/{petId}:adopt': {
+        post: {
+          operationId: 'pets:adopt',
+          parameters: [{ name: 'petId', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          ...ok,
+        },
+      },
+    };
+    const resolve = (transform?: (id: string) => string) => {
+      const { services } = extractOperations(paths, transform);
+      const spec = {
+        name: 'Pets',
+        version: '1',
+        baseUrl: '',
+        services,
+        models: [],
+        enums: [],
+        sdk: defaultSdkBehavior(),
+      };
+      const names = services.flatMap((s) => s.operations.map((o) => o.name));
+      const resolved = resolveOperations(spec, undefined, undefined, 'operationId').map((r) => r.methodName);
+      return { names, resolved };
+    };
+
+    // Without a transform the parser's camelCase keeps SSO, M2M and JWT in
+    // capitals; the resolver reads each as a word of its own.
+    expect(resolve()).toEqual({
+      names: ['getSSOAuthorizationUrl', 'createM2MApp', 'createJWTToken', 'petsAdopt'],
+      resolved: ['get_sso_authorization_url', 'create_m2m_app', 'create_jwt_token', 'pets_adopt'],
+    });
+    // An identity transform hands each id back as written; a snake_case id
+    // is already the method name, and `:` is a separator, not a character
+    // the method name keeps.
+    expect(resolve((id) => id)).toEqual({
+      names: ['get-sso-authorization-url', 'create_m2m_app', 'createJWTToken', 'pets:adopt'],
+      resolved: ['get_sso_authorization_url', 'create_m2m_app', 'create_jwt_token', 'pets_adopt'],
+    });
   });
 
   it('reads x-oagen-async extension', () => {

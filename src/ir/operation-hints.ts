@@ -8,6 +8,46 @@ function toSnake(s: string): string {
     .toLowerCase();
 }
 
+/**
+ * snake_case for a method name read from an `operationId` (`Operation.name`,
+ * as the parser spelled it). The parser's camelCase keeps an acronym in
+ * capitals (`getSSOAuthorizationUrl`, `createM2MApp`, `createJWTToken`), and
+ * an `operationIdTransform` can hand the id back as written (`list-pets`,
+ * `create_m2m_app`, `pets:adopt`), so a boundary is read wherever such a
+ * name writes one, not only at the lower-to-upper step that is all `toSnake`
+ * looks for in a path segment:
+ *
+ * - a lower-case letter before a capital (`createPet` → `create_pet`);
+ * - a run of capitals before a capitalized word (`SSOAuthorization` →
+ *   `sso_authorization`, `JWTToken` → `jwt_token`, `M2MApp` → `m2m_app`);
+ * - a digit before a capitalized word (`V2Users` → `v2_users`); a digit
+ *   otherwise stays in the word it was written in (`m2m`, `v2`, `oauth2`);
+ * - any character that is not a letter or digit — `-`, `:`, `.`, `/`, a
+ *   space, a bracket — is a separator, and a run of them is one.
+ *
+ * `OAuth`, which the parser's camelCase spells so and the acronym rule would
+ * read as `o_auth`, is put back together (`getOAuth2Token` → `get_oauth2_token`).
+ */
+export function snakeCaseOperationName(name: string): string {
+  const words = name
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/([a-z])([A-Z])/g, '$1_$2')
+    .replace(/([0-9])([A-Z][a-z])/g, '$1_$2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .toLowerCase()
+    .split('_')
+    .filter((word) => word.length > 0);
+  const joined: string[] = [];
+  for (const word of words) {
+    if (joined[joined.length - 1] === 'o' && /^auth\d*$/.test(word)) {
+      joined[joined.length - 1] = `o${word}`;
+    } else {
+      joined.push(word);
+    }
+  }
+  return joined.join('_');
+}
+
 /** One segment of a path template as readPath reads it. */
 export interface PathSegment {
   /** A `{param}`, a literal, or the verb of a custom method. */
@@ -376,8 +416,9 @@ export function resolveMountTarget(name: string, mounts: Record<string, string>)
  * Where a method name comes from when no `name` hint sets it: `path` derives
  * it from the HTTP method and path (`deriveMethodName`); `operationId` takes
  * the operation's own name when the document declares an `operationId`
- * (`Operation.name`, as the parser spelled it, in snake_case) and derives it
- * from the path only for a path-named operation.
+ * (`Operation.name`, as the parser spelled it, in snake_case — see
+ * {@link snakeCaseOperationName} for where the word boundaries are read) and
+ * derives it from the path only for a path-named operation.
  */
 export type OperationNaming = 'path' | 'operationId';
 
@@ -410,10 +451,13 @@ export function resolveOperations(
       // Resolve method name: hint > algorithm, or — when the consumer asked
       // for `operationId` naming — hint > operationId > algorithm. An operation
       // the document named then keeps that name (as the parser spelled it, so
-      // an operationIdTransform is honoured), snake_cased; only a path-named
-      // operation gets a name derived from its method and path.
+      // an operationIdTransform is honoured), snake_cased word by word (the
+      // parser's camelCase writes acronyms in capitals, and a transform may
+      // keep the id's own separators); only a path-named operation gets a
+      // name derived from its method and path.
       const fromOperationId = operationNaming === 'operationId' && op.operationId !== undefined;
-      const methodName = hint?.name ?? (fromOperationId ? toSnake(op.name) : deriveMethodName(op, service));
+      const methodName =
+        hint?.name ?? (fromOperationId ? snakeCaseOperationName(op.name) : deriveMethodName(op, service));
 
       // Resolve mount target: per-op hint > service mount rule > original service
       const mountOn = hint?.mountOn ?? resolveMountTarget(service.name, mounts);
