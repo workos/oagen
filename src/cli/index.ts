@@ -47,8 +47,10 @@ let configTransformSpec:
 let configDocUrl: string | undefined;
 let configOperationHints: Record<string, import('../ir/operation-hints.js').OperationHint> | undefined;
 let configMountRules: Record<string, string> | undefined;
+let configOperationNaming: import('../ir/operation-hints.js').OperationNaming | undefined;
 let configModelHints: Record<string, string> | undefined;
 let configFieldHints: Record<string, Record<string, string>> | undefined;
+let configCollapseErrorBodies: boolean | undefined;
 let configEmitterOptions: Record<string, Record<string, unknown>> | undefined;
 let configCompat: import('../compat/config.js').CompatConfig | undefined;
 try {
@@ -62,8 +64,10 @@ try {
     configDocUrl = config.docUrl;
     configOperationHints = config.operationHints;
     configMountRules = config.mountRules;
+    configOperationNaming = config.operationNaming;
     configModelHints = config.modelHints;
     configFieldHints = config.fieldHints;
+    configCollapseErrorBodies = config.collapseErrorBodies;
     configEmitterOptions = config.emitterOptions;
     configCompat = config.compat;
   }
@@ -92,6 +96,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       operationHints: configOperationHints,
     });
   });
@@ -123,8 +128,10 @@ program
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
+      operationNaming: configOperationNaming,
       modelHints: configModelHints,
       fieldHints: configFieldHints,
+      collapseErrorBodies: configCollapseErrorBodies,
       emitterOptions: configEmitterOptions?.[opts.lang],
     }).catch(handleError);
   });
@@ -142,6 +149,7 @@ program
       transformSpec: configTransformSpec,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
+      collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
 
@@ -169,6 +177,7 @@ program
       ...opts,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
 
@@ -227,6 +236,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       compatConfig: configCompat,
       compatReport: opts.compatReport,
       compatFailOn: opts.compatFailOn,
@@ -251,9 +261,11 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      collapseErrorBodies: configCollapseErrorBodies,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
       mountRules: configMountRules,
+      operationNaming: configOperationNaming,
     }).catch(handleError);
   });
 
