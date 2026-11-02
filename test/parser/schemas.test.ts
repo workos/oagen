@@ -5,6 +5,7 @@ import {
   schemaToTypeRef,
   clearSchemaNameTransform,
 } from '../../src/parser/schemas.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -704,6 +705,106 @@ describe('nullable enum components (#174)', () => {
       expect(enums[0].values.map((v) => v.value)).toEqual(['a', 'b']);
       expect(enums[0].values.map((v) => v.name)).toEqual(['A', 'B']);
     });
+  });
+});
+
+describe('a null variant written as `{ const: null }` or `{ enum: [null] }` (#394)', () => {
+  afterEach(() => clearSchemaNameTransform());
+
+  const components = (nullVariant: SchemaObject): Record<string, SchemaObject> => ({
+    Thing: {
+      type: 'object',
+      properties: {
+        name: { anyOf: [{ type: 'string', maxLength: 8 }, nullVariant] },
+        status: { $ref: '#/components/schemas/Status' },
+        inline_status: { oneOf: [{ const: 'on' }, { const: 'off' }, nullVariant] },
+        pet: { $ref: '#/components/schemas/Pet' },
+      },
+    },
+    Status: { oneOf: [{ const: 'on' }, { const: 'off' }, nullVariant] },
+    Pet: { oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }, nullVariant] },
+    Cat: { type: 'object', properties: { meow: { type: 'string' } } },
+    Dog: { type: 'object', properties: { bark: { type: 'string' } } },
+  });
+
+  it('is set aside as `{ type: "null" }` is: a wrapper collapses, an enum of consts and a named union admit null', () => {
+    const expected = extractSchemas(components({ type: 'null' }));
+    const thing = expected.models.find((m) => m.name === 'Thing')!;
+    expect(Object.fromEntries(thing.fields.map((f) => [f.name, f.type]))).toEqual({
+      name: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } },
+      status: { kind: 'nullable', inner: { kind: 'enum', name: 'Status' } },
+      inline_status: { kind: 'nullable', inner: { kind: 'enum', name: 'ThingInlineStatus', values: ['on', 'off'] } },
+      pet: { kind: 'nullable', inner: { kind: 'model', name: 'Pet' } },
+    });
+    expect(thing.fields.find((f) => f.name === 'name')?.constraints).toEqual({ maxLength: 8 });
+    expect(expected.enums.map((e) => [e.name, e.values.map((v) => v.value)])).toEqual([
+      ['Status', ['on', 'off']],
+      ['ThingInlineStatus', ['on', 'off']],
+    ]);
+    for (const spelling of [
+      { const: null },
+      { enum: [null] },
+      { enum: [null, null] },
+      { nullable: true, enum: [null] },
+      { const: null, description: 'No value.' },
+    ]) {
+      expect(extractSchemas(components(spelling)), JSON.stringify(spelling)).toEqual(expected);
+    }
+  });
+
+  it('sets aside every null variant of a union, however many and however mixed', () => {
+    const thing = (...nulls: SchemaObject[]): Record<string, SchemaObject> => ({
+      Thing: {
+        type: 'object',
+        properties: {
+          tag: { oneOf: [{ type: 'string' }, ...nulls] },
+          pet: { oneOf: [{ type: 'object', properties: { name: { type: 'string' } } }, ...nulls] },
+        },
+      },
+    });
+    const expected = extractSchemas(thing({ type: 'null' }));
+    expect(expected.models.find((m) => m.name === 'Thing')?.fields.map((f) => f.type)).toEqual([
+      { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } },
+      { kind: 'nullable', inner: { kind: 'model', name: 'ThingPet' } },
+    ]);
+    expect(expected.enums).toEqual([]);
+    for (const nulls of [
+      [{ type: 'null' }, { type: 'null' }],
+      [{ type: 'null' }, { enum: [null] }],
+      [{ const: null }, { enum: [null] }],
+    ]) {
+      expect(extractSchemas(thing(...nulls)), JSON.stringify(nulls)).toEqual(expected);
+    }
+  });
+
+  it('keeps a variant that admits another value, or that a `type`, `$ref` or composition beside it types', () => {
+    const string = { kind: 'primitive', type: 'string' };
+    const cases: Array<[SchemaObject, unknown]> = [
+      [{ enum: [null, 'x'] }, { kind: 'nullable', inner: { kind: 'literal', value: 'x' } }],
+      [
+        { enum: [null], const: 'x' },
+        { kind: 'literal', value: 'x' },
+      ],
+      [
+        { type: 'string', const: null },
+        { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } },
+      ],
+      [
+        { $ref: '#/components/schemas/Cat', const: null },
+        { kind: 'model', name: 'Cat' },
+      ],
+      [
+        { allOf: [{ $ref: '#/components/schemas/Cat' }], const: null },
+        { kind: 'model', name: 'Cat' },
+      ],
+    ];
+    for (const [variant, typed] of cases) {
+      expect(schemaToTypeRef({ anyOf: [{ type: 'string' }, variant] }, 'name'), JSON.stringify(variant)).toEqual({
+        kind: 'union',
+        variants: [string, typed],
+        compositionKind: 'anyOf',
+      });
+    }
   });
 });
 

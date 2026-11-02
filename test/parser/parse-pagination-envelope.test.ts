@@ -544,6 +544,54 @@ describe('parseSpec — pagination envelope fields', () => {
       expect(ir).toEqual(await parseList(withTags(tags)));
     });
   });
+
+  describe('a null variant written as `{ const: null }` or `{ enum: [null] }`', () => {
+    const nulls = (nickname: unknown, tag: unknown, data: unknown) => ({
+      openapi: '3.1.0',
+      info: { title: 'nulls', version: '1' },
+      paths: {
+        '/pets': listOp({}, 'listPets', [{ name: 'after', in: 'query', schema: { type: 'string' } }], {
+          type: 'object',
+          properties: {
+            data: { oneOf: [{ type: 'array', items: { $ref: '#/components/schemas/Pet' } }, data] },
+            list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+          },
+        }),
+      },
+      components: {
+        schemas: {
+          Pet: {
+            type: 'object',
+            properties: {
+              nickname: { oneOf: [{ type: 'string' }, nickname] },
+              tag: { oneOf: [{ type: 'string' }, tag] },
+            },
+          },
+        },
+      },
+    });
+    const typeNull = { type: 'null' };
+    const nullableString: TypeRef = { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } };
+
+    it('parses as `{ type: "null" }` does: no unknown, no empty enum, the list envelope unwrapped (#394 repro)', async () => {
+      const expected = await parseJson(nulls(typeNull, typeNull, typeNull));
+      for (const data of [{ const: null }, { enum: [null] }]) {
+        const ir = await parseJson(nulls({ const: null }, { enum: [null] }, data));
+        const [op] = ir.services.flatMap((s) => s.operations);
+        expect(op.response, JSON.stringify(data)).toEqual({
+          kind: 'nullable',
+          inner: { kind: 'array', items: { kind: 'model', name: 'Pet' } },
+        });
+        expect(op.pagination?.dataPath, JSON.stringify(data)).toBe('data');
+        expect(ir.models.find((m) => m.name === 'Pet')?.fields.map((f) => [f.name, f.type])).toEqual([
+          ['nickname', nullableString],
+          ['tag', nullableString],
+        ]);
+        expect(ir.enums, JSON.stringify(data)).toEqual([]);
+        expect(ir, JSON.stringify(data)).toEqual(expected);
+      }
+    });
+  });
 });
 
 describe('validateModelRefs — pagination envelope fields', () => {
