@@ -1538,8 +1538,12 @@ function extractNestedSchema(
   // Handle array with inline items — typed, nullable, or `items` with no
   // `type`: `isArraySchema` is `classifyInlineSchema`'s answer once the
   // nullable type list is unwrapped, the same test `schemaToTypeRef` applied
-  // when it named the ref.
-  if (isArraySchema(schema) && schema.items?.properties) {
+  // when it named the ref. Only items it typed as an object are built here:
+  // `properties` beside a `oneOf`/`anyOf` or `allOf` that types the items are
+  // carried into that composition, whose models the field pass builds
+  // (`extractComponentFieldModels`) — a model of the properties alone would
+  // take their name.
+  if (isArraySchema(schema) && schema.items?.properties && classifyInlineSchema(schema.items) === 'object') {
     const requiredSet = new Set(schema.items.required ?? []);
     const siblings = collectProperties(schema.items);
     const fields: Field[] = [];
