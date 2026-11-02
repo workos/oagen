@@ -130,8 +130,10 @@ export interface ResponseClassificationOptions {
    * With it, the items of an array body or a list envelope are typed under
    * the first `<Op>Item` candidate the registry does not give another shape,
    * and an identical shape shares the model it finds (`typeInlineItems`).
-   * Absent — a dry run that only reads names, a direct call — the items take
-   * `<Op>Item` as written.
+   * Absent — the dry run that reads a component response's names, a direct
+   * call — the items take `<Op>Item` as written; the dry run that reads an
+   * operation's own names settles them against a copy of the registry
+   * (`operationBodyModelNames`), so it reads the name the operation takes.
    */
   settle?: ItemSettlement;
 }
@@ -584,8 +586,11 @@ export function resolveDataPathFromSchema(
  * recorded under the operation; a reference written by sharing another
  * site's model joins that site (`attachSharedRefs`), so a later rename of
  * the shared model — a deprecated copy named like a live one — reaches this
- * array too. Without `settle` — a dry run that only reads names, a direct
- * call — the items take `<Op>Item` as written.
+ * array too. Without `settle` — the dry run that reads a component
+ * response's names, a direct call — the items take `<Op>Item` as written;
+ * the dry run that reads an operation's own names settles them against a
+ * copy of the registry as seeded, so it reads the name the operation takes
+ * (`operationBodyModelNames`).
  */
 function typeInlineItems(
   items: SchemaObject,
