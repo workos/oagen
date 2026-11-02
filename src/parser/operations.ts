@@ -531,7 +531,7 @@ export function extractOperations(
   const inlineModels: Model[] = [];
   const inlineModelBundles: InlineModelBundle[] = [];
   const envelopeCompanions: EnvelopeCompanion[] = [];
-  /** The PascalCase operation name each companion was lifted under, to qualify it should a merge pass rename it. */
+  /** The qualifier of the operation each companion was lifted under (`modelQualifier`), should a merge pass rename it. */
   const companionQualifiers = new Map<EnvelopeCompanion, string>();
   // Service name each tagged operation was grouped under, keyed by operation
   // identity. The path-prefix split moves operations between services, so
@@ -611,6 +611,7 @@ export function extractOperations(
         inlineModelBundles: opBundles,
         envelopeCompanions: opCompanions,
         operationQualifier,
+        modelQualifier,
       } = buildOperation(
         method,
         path,
@@ -645,9 +646,8 @@ export function extractOperations(
       inlineModelBundles.push(...opBundles);
       if (opCompanions) {
         envelopeCompanions.push(...opCompanions);
-        // Qualified as the operation's own models are (`buildOperation`'s `namingName`).
-        const qualifier = toPascalCase(modelOperationIds.get(key) ?? operation.name);
-        for (const companion of opCompanions) companionQualifiers.set(companion, qualifier);
+        // Qualified as the operation's own models are.
+        for (const companion of opCompanions) companionQualifiers.set(companion, modelQualifier);
       }
       // Same truthiness check as inferServiceName: for a tagged operation the
       // service name *is* the normalized tag, so it doubles as the lookup key.
@@ -2888,6 +2888,8 @@ function buildOperation(
   envelopeCompanions?: EnvelopeCompanion[];
   /** What the shape registry records as the owner of this operation's models (see `headerOperationQualifier`). */
   operationQualifier: string;
+  /** What a merge pass prefixes to one of this operation's models it must rename (`InlineModelBundle.qualifier`). */
+  modelQualifier: string;
 } {
   const opLabel = operationLabel(op, path, method);
   warnOnIgnoredCallbacks(op.callbacks, opLabel);
@@ -3277,19 +3279,27 @@ function buildOperation(
   // deprecated response named like a live one, say — can qualify it by this
   // operation and repoint only this operation's references: the response
   // bundle owns the success bodies, the list envelope and the response
-  // headers; the request bundle owns the body. Qualified as a header model or
-  // list-envelope companion is (`GetLegacyWidgetWidget`).
-  const qualifier = toPascalCase(namingName);
+  // headers; the request bundle owns the body. Qualified by the stem the
+  // operation's models are named from, as its list-envelope companions are:
+  // the `operationId`'s (`operationIdModelBase`: `GetLegacyWidgetWidget`;
+  // `UserListWidget` for `users.list`, beside its `UserListRequest`), else
+  // the path-derived prefix (`PetsByIdLegacyWidgetGetWidget`, beside the
+  // operation's `PetsByIdLegacyWidgetGetResponse`). So the name depends on
+  // the `operationId` or on the method and path alone, never on the
+  // operation's name — a change to what inferOperationName derives or to
+  // what an operationIdTransform makes of the `operationId` renames no type
+  // (see `headerOperationQualifier`).
+  const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
   // items may have shared another site's model (`typeInlineItems`), and the
   // reference must follow that model's rename (`attachSharedRefs`).
-  inlineModelBundles.push({ qualifier, roots: responseTypeRefs(operation), models: responseModels });
+  inlineModelBundles.push({ qualifier: modelQualifier, roots: responseTypeRefs(operation), models: responseModels });
   if (reqBodyModels.length > 0 && requestBody) {
-    inlineModelBundles.push({ qualifier, roots: [requestBody], models: reqBodyModels, sent: true });
+    inlineModelBundles.push({ qualifier: modelQualifier, roots: [requestBody], models: reqBodyModels, sent: true });
   }
 
-  return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier };
+  return { operation, inlineModels, inlineModelBundles, envelopeCompanions, operationQualifier, modelQualifier };
 }
 
 /**

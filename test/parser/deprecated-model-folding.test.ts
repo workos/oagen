@@ -2,7 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { parseSpec } from '../../src/parser/parse.js';
+import { parseSpec, type ParseOptions } from '../../src/parser/parse.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { collectModelRefs, collectResponseHeaders } from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
@@ -169,11 +169,12 @@ function expectSound(spec: ApiSpec, componentNames: string[], declaredDeprecated
   expect(deprecatedReferences(spec)).toEqual([...declaredDeprecated].sort());
 }
 
-/** Parse `paths` in both orders and return both results with their warnings. */
+/** Parse `paths` in both orders, under `options`, and return both results with their warnings. */
 async function parseBothOrders(
   label: string,
   schemas: Record<string, unknown>,
   paths: Array<[string, unknown]>,
+  options?: ParseOptions,
 ): Promise<Array<{ order: string; spec: ApiSpec; warnings: string[] }>> {
   const results = [];
   for (const [order, ordered] of [
@@ -184,6 +185,7 @@ async function parseBothOrders(
     try {
       const spec = await parseSpec(
         await writeSpec(`${label}-${order}.json`, specDoc(schemas, Object.fromEntries(ordered))),
+        options,
       );
       results.push({ order, spec, warnings: warn.mock.calls.map(([m]) => String(m)) });
     } finally {
@@ -1821,6 +1823,210 @@ describe('a renamed nested model goes with the parent that references it (issue 
         '[oagen] Renamed inline model "PetNoteOwner" → "PetNoteOwner2": it is deprecated while "PetNoteOwner" is live',
         '[oagen] Renamed inline model "PetNote" → "GetAPetNote": its shape differs from component schema "PetNote"',
       ]);
+    }
+  });
+});
+
+describe('a model of an operation without an `operationId` that a merge pass renames is named from its method and path (issue #380)', () => {
+  const str = { type: 'string' };
+  /** A GET without an `operationId` whose 200 body is `schema`, each of `params` a path parameter. */
+  const pathOp = (params: string[], schema: unknown, tags?: string[]) => ({
+    get: {
+      ...(tags && { tags }),
+      parameters: params.map((name) => ({ name, in: 'path', required: true, schema: str })),
+      responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+    },
+  });
+  const opAt = (spec: ApiSpec, at: string): Operation | undefined =>
+    spec.services.flatMap((s) => s.operations).find((op) => op.path === at);
+
+  it('qualifies the deprecated copy by the prefix the operation’s models take, never by its derived name (the issue’s repro)', async () => {
+    // The deprecated response leaves `Widget` under `PetsByIdLegacyWidgetGet`,
+    // the prefix of the operation's own `PetsByIdLegacyWidgetGetResponse`, so
+    // the name `inferOperationName` derives — `listLegacyWidget` before #324,
+    // `getPetLegacyWidget` since — is no part of it. The tag names the
+    // service, not the prefix: the name is the same under any tag or none.
+    const widget = (extra: Record<string, unknown>) => ({
+      type: 'object',
+      ...extra,
+      properties: { object: { type: 'string', const: 'widget' }, size: str },
+    });
+    for (const tags of [['Pets'], ['Widgets'], undefined]) {
+      const label = tags?.[0] ?? 'untagged';
+      for (const { order, spec, warnings } of await parseBothOrders(`path-named-${label}`, {}, [
+        ['/pets/{id}/legacy-widget', pathOp(['id'], widget({ deprecated: true }), tags)],
+        ['/pets/{id}/widgets/{widgetId}', pathOp(['id', 'widgetId'], widget({ required: ['size'] }), tags)],
+      ])) {
+        const where = `${label}, ${order}`;
+        const ops = opsOf(spec);
+        expect(ops.getPetLegacyWidget?.response, where).toEqual({
+          kind: 'model',
+          name: 'PetsByIdLegacyWidgetGetWidget',
+        });
+        expect(ops.getWidget?.response, where).toEqual({ kind: 'model', name: 'Widget' });
+        expect(spec.models.map((m) => [m.name, m.deprecated]).sort(), where).toEqual([
+          ['PetsByIdLegacyWidgetGetWidget', true],
+          ['Widget', undefined],
+        ]);
+        expectSound(spec, [], ['getPetLegacyWidget.response → PetsByIdLegacyWidgetGetWidget']);
+        expect(warnings, where).toEqual([
+          '[oagen] Renamed inline model "Widget" → "PetsByIdLegacyWidgetGetWidget": it is deprecated while "Widget" is live',
+        ]);
+      }
+    }
+  });
+
+  it('qualifies a deprecated list-envelope companion the same way: under the name its envelope gave it', async () => {
+    // `GET /legacy-users` is the only list operation, so its deprecated
+    // `list_metadata` companion takes the bare `ListMetadata`, which the live
+    // `object: list_metadata` response mints with other fields. The companion
+    // leaves the name under the operation's prefix, the name the envelope
+    // pass first gave it (`LegacyUsersGetListMetadata`), as an operation
+    // `listLegacyUsers` leaves it under `ListLegacyUsersListMetadata` — not
+    // under the derived `list` (`ListMetadata2`).
+    const schemas = { User: { type: 'object', properties: { id: str } } };
+    const legacyUsers = {
+      get: {
+        parameters: [{ name: 'after', in: 'query', schema: str }],
+        responses: {
+          '200': {
+            description: 'ok',
+            content: {
+              'application/json': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    object: { type: 'string', const: 'list' },
+                    list_metadata: {
+                      type: 'object',
+                      deprecated: true,
+                      properties: { before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } },
+                    },
+                    data: { type: 'array', items: { $ref: '#/components/schemas/User' } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+    const liveMetadata = pathOp([], {
+      type: 'object',
+      properties: { object: { type: 'string', const: 'list_metadata' }, page: { type: 'integer' } },
+    });
+    for (const { order, spec, warnings } of await parseBothOrders('path-named-companion', schemas, [
+      ['/legacy-users', legacyUsers],
+      ['/list-metadata', liveMetadata],
+    ])) {
+      const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+      const meta = opAt(spec, '/legacy-users')?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+      expect(meta?.type, order).toEqual({ kind: 'model', name: 'LegacyUsersGetListMetadata' });
+      expect(meta?.deprecated, order).toBe(true);
+      expect(byName.LegacyUsersGetListMetadata?.deprecated, order).toBe(true);
+      expect(opAt(spec, '/list-metadata')?.response, order).toEqual({ kind: 'model', name: 'ListMetadata' });
+      expect(byName.ListMetadata?.deprecated, order).toBeUndefined();
+      expect(Object.keys(byName).sort(), order).toEqual(['LegacyUsersGetListMetadata', 'ListMetadata', 'User']);
+      expectSound(spec, Object.keys(schemas));
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "ListMetadata" → "LegacyUsersGetListMetadata": it is deprecated while "ListMetadata" is live',
+      ]);
+    }
+  });
+});
+
+describe('a model of an operation with an `operationId` that a merge pass renames is named from the stem its models take (#503 review)', () => {
+  const str = { type: 'string' };
+  const idParam = { name: 'id', in: 'path', required: true, schema: str };
+  const widget = (extra: Record<string, unknown>) => ({
+    type: 'object',
+    ...extra,
+    properties: { object: { type: 'string', const: 'widget' }, size: str },
+  });
+  const ok = (schema: unknown) => ({ '200': { description: 'OK', content: { 'application/json': { schema } } } });
+  /** `GET /pets/{id}/widgets/{widgetId}` under `operationId`: the live `Widget`. */
+  const liveWidget = (operationId: string) => ({
+    get: {
+      operationId,
+      parameters: [idParam, { ...idParam, name: 'widgetId' }],
+      responses: ok(widget({ required: ['size'] })),
+    },
+  });
+  const opAt = (spec: ApiSpec, at: string): Operation | undefined =>
+    spec.services.flatMap((s) => s.operations).find((op) => op.path === at);
+
+  it('qualifies the deprecated copy by the stem the `operationId` names the operation’s models from, not by the operation’s name', async () => {
+    // `users.list` names its request body `UserListRequest`
+    // (`operationIdModelBase`), so its deprecated response leaves `Widget`
+    // under that stem — `UserListWidget` — not under the operation's name
+    // `usersList` (`UsersListWidget`, on #503's reviewed head).
+    const legacy = {
+      post: {
+        operationId: 'users.list',
+        parameters: [idParam],
+        requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { name: str } } } } },
+        responses: ok(widget({ deprecated: true })),
+      },
+    };
+    for (const { order, spec, warnings } of await parseBothOrders('cleaned-stem', {}, [
+      ['/pets/{id}/legacy-widget', legacy],
+      ['/pets/{id}/widgets/{widgetId}', liveWidget('getWidget')],
+    ])) {
+      const ops = opsOf(spec);
+      expect(ops.usersList?.requestBody, order).toEqual({ kind: 'model', name: 'UserListRequest' });
+      expect(ops.usersList?.response, order).toEqual({ kind: 'model', name: 'UserListWidget' });
+      expect(ops.getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(spec.models.map((m) => [m.name, m.deprecated]).sort(), order).toEqual([
+        ['UserListRequest', undefined],
+        ['UserListWidget', true],
+        ['Widget', undefined],
+      ]);
+      expectSound(spec, [], ['usersList.response → UserListWidget']);
+      expect(warnings, order).toEqual([
+        '[oagen] Renamed inline model "Widget" → "UserListWidget": it is deprecated while "Widget" is live',
+      ]);
+    }
+  });
+
+  it('keeps that name whatever an `operationIdTransform` makes of the operation’s name', async () => {
+    // The stem is the `operationId`'s (`PetsGetLegacyWidget`), so the copy is
+    // `PetsGetLegacyWidgetWidget` whether the transform drops the `Pets_`
+    // prefix (operation `GetLegacyWidget`) or keeps the `operationId` as
+    // written (`Pets_GetLegacyWidget`): changing the transform renames the
+    // operation and no model. On #503's reviewed head the copy followed the
+    // transformed name (`GetLegacyWidgetWidget`) while the operation's own
+    // bodies did not.
+    const legacy = {
+      get: { operationId: 'Pets_GetLegacyWidget', parameters: [idParam], responses: ok(widget({ deprecated: true })) },
+    };
+    const transforms: Array<[string, (id: string) => string, string]> = [
+      ['dropped', (id) => id.replace(/^Pets_/, ''), 'GetLegacyWidget'],
+      ['kept', (id) => id, 'Pets_GetLegacyWidget'],
+    ];
+    for (const [label, operationIdTransform, operationName] of transforms) {
+      for (const { order, spec, warnings } of await parseBothOrders(
+        `transform-${label}`,
+        {},
+        [
+          ['/pets/{id}/legacy-widget', legacy],
+          ['/pets/{id}/widgets/{widgetId}', liveWidget('Pets_GetWidget')],
+        ],
+        { operationIdTransform },
+      )) {
+        const where = `${label}, ${order}`;
+        const legacyOp = opAt(spec, '/pets/{id}/legacy-widget');
+        expect(legacyOp?.name, where).toBe(operationName);
+        expect(legacyOp?.response, where).toEqual({ kind: 'model', name: 'PetsGetLegacyWidgetWidget' });
+        expect(opAt(spec, '/pets/{id}/widgets/{widgetId}')?.response, where).toEqual({ kind: 'model', name: 'Widget' });
+        expect(spec.models.map((m) => [m.name, m.deprecated]).sort(), where).toEqual([
+          ['PetsGetLegacyWidgetWidget', true],
+          ['Widget', undefined],
+        ]);
+        expectSound(spec, [], [`${operationName}.response → PetsGetLegacyWidgetWidget`]);
+        expect(warnings, where).toEqual([
+          '[oagen] Renamed inline model "Widget" → "PetsGetLegacyWidgetWidget": it is deprecated while "Widget" is live',
+        ]);
+      }
     }
   });
 });
