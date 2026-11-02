@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { mediaTypeNameFragment } from '../../src/utils/media-type.js';
 import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
@@ -66,9 +67,10 @@ describe('mediaTypeNameFragment', () => {
   it('appends a key’s own parameters only when another key of its essence sits beside it, whatever the order', () => {
     const siblings = ['application/json', 'application/yaml', 'application/yaml; charset=utf-8'];
     expect(mediaTypeNameFragment('application/yaml', siblings)).toBe('ApplicationYaml');
-    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', siblings)).toBe('ApplicationYamlCharsetUtf8');
+    // A `charset` tells the key apart by being declared, not by its value (#389).
+    expect(mediaTypeNameFragment('application/yaml; charset=utf-8', siblings)).toBe('ApplicationYamlCharset');
     expect(mediaTypeNameFragment('application/yaml; charset=utf-8', [...siblings].reverse())).toBe(
-      'ApplicationYamlCharsetUtf8',
+      'ApplicationYamlCharset',
     );
     // Alone among its essence, a parameterized key keeps the bare name.
     expect(mediaTypeNameFragment('application/yaml; charset=utf-8', ['application/json'])).toBe('ApplicationYaml');
@@ -111,15 +113,15 @@ describe('inline models for secondary media types are named by essence (issue #2
     );
     expect(secondaryTypes(inOrder)).toEqual([
       { kind: 'model', name: 'GetReportApplicationYamlResponse' },
-      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetResponse' },
     ]);
     expect(secondaryTypes(reversed)).toEqual([
-      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetResponse' },
       { kind: 'model', name: 'GetReportApplicationYamlResponse' },
     ]);
     for (const spec of [inOrder, reversed]) {
       expect(fieldsOf(spec, 'GetReportApplicationYamlResponse')).toEqual(['title']);
-      expect(fieldsOf(spec, 'GetReportApplicationYamlCharsetUtf8Response')).toEqual(['summary']);
+      expect(fieldsOf(spec, 'GetReportApplicationYamlCharsetResponse')).toEqual(['summary']);
       // Every model minted for a secondary body is referenced, and every reference resolves.
       const minted = spec.models.filter((m) => m.name !== 'Report').map((m) => m.name);
       const referenced = secondaryTypes(spec).map((t) => (t.kind === 'model' ? t.name : ''));
@@ -130,7 +132,7 @@ describe('inline models for secondary media types are named by essence (issue #2
     const same = await parseDocument(document({ 'application/yaml': yaml, 'application/yaml; charset=utf-8': yaml }));
     expect(secondaryTypes(same)).toEqual([
       { kind: 'model', name: 'GetReportApplicationYamlResponse' },
-      { kind: 'model', name: 'GetReportApplicationYamlCharsetUtf8Response' },
+      { kind: 'model', name: 'GetReportApplicationYamlCharsetResponse' },
     ]);
   });
 
@@ -146,5 +148,456 @@ describe('inline models for secondary media types are named by essence (issue #2
       { kind: 'model', name: 'GetReportApplicationYamlResponse200' },
     ]);
     expect(fieldsOf(spec, 'GetReportApplicationYamlResponse200')).toEqual(['summary']);
+  });
+});
+
+describe('a model name stays put under edits `oagen diff` reads as no change or additive (issue #389)', () => {
+  type Keys = Array<[key: string, property: string]>;
+  const note = { schema: { $ref: '#/components/schemas/Note' } };
+  /** Each key's body: an inline object with the one `string` property named. */
+  const bodies = (keys: Keys) =>
+    Object.fromEntries(keys.map(([key, property]) => [key, { schema: obj({ [property]: str }) }]));
+  const notes = (paths: Record<string, unknown>, webhooks?: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'Notes', version: '1' },
+    paths,
+    ...(webhooks && { webhooks }),
+    components: { schemas: { Note: obj({ id: str, title: str }) } },
+  });
+  /** The issue's `GET /notes` (`listNotes`): `Note` under `application/json`, then `keys`, on the response at `code`. */
+  const listNotes = (keys: Keys, code = '200') =>
+    notes({
+      '/notes': {
+        get: {
+          operationId: 'listNotes',
+          responses: {
+            '200': { description: 'OK', content: { 'application/json': note } },
+            [code]: { description: 'OK', content: { 'application/json': note, ...bodies(keys) } },
+          },
+        },
+      },
+    });
+  /** `POST /notes` (`createNote`) sending `Note` as `application/json`, or `keys`. */
+  const createNote = (keys: Keys) =>
+    notes({
+      '/notes': {
+        post: {
+          operationId: 'createNote',
+          requestBody: { content: { 'application/json': note, ...bodies(keys) } },
+          responses: { '204': { description: 'created' } },
+        },
+      },
+    });
+  /** A `noteAdded` webhook delivering `Note` as `application/json`, or `keys`. */
+  const noteAdded = (keys: Keys) =>
+    notes(
+      {},
+      {
+        noteAdded: {
+          post: {
+            requestBody: { content: { 'application/json': note, ...bodies(keys) } },
+            responses: { '200': { description: 'received' } },
+          },
+        },
+      },
+    );
+
+  /** Each change as the issue's script prints it. */
+  const diff = async (before: Record<string, unknown>, after: Record<string, unknown>) =>
+    diffSpecs(await parseDocument(before), await parseDocument(after)).changes.map((change) => {
+      const { classification, kind, name, operationName } = change as typeof change & {
+        name?: string;
+        operationName?: string;
+      };
+      return `${classification} ${kind} ${name ?? operationName}`;
+    });
+  /** The model each key's body is typed by, keyed by the key: every entry of every response, request body and webhook. */
+  const namesOf = async (document: Record<string, unknown>): Promise<Record<string, string>> => {
+    const spec = await parseDocument(document);
+    const entries = [
+      ...spec.services
+        .flatMap((s) => s.operations)
+        .flatMap((op) => [
+          ...(op.successResponses ?? []).flatMap((r) => r.contents ?? []),
+          ...(op.responseContents ?? []),
+          ...op.errors.flatMap((e) => e.contents ?? []),
+          ...(op.rangeResponses ?? []).flatMap((r) => r.contents ?? []),
+          ...(op.requestBodyContents ?? []),
+        ]),
+      ...(spec.webhooks ?? []).flatMap((w) => w.requestBodyContents ?? []),
+    ];
+    return Object.fromEntries(
+      entries
+        .filter(({ type }) => type.kind === 'model' && type.name !== 'Note')
+        .map(({ contentType, type }) => [
+          contentType,
+          `${(type as { name: string }).name} { ${fieldsOf(spec, (type as { name: string }).name)} }`,
+        ]),
+    );
+  };
+
+  it('adding a key of another parameter leaves an unchanged sibling its model: additive, as before #330 (case 1)', async () => {
+    const before = listNotes([['application/yaml; charset=utf-8', 'title']]);
+    const after = listNotes([
+      ['application/yaml; charset=utf-8', 'title'],
+      ['application/yaml; version=2', 'summary'],
+    ]);
+
+    expect(await namesOf(after)).toEqual({
+      'application/yaml; charset=utf-8': 'ListNotesApplicationYamlResponse { title }',
+      'application/yaml; version=2': 'ListNotesApplicationYamlVersion2Response { summary }',
+    });
+    expect(await diff(before, after)).toEqual([
+      'additive model-added ListNotesApplicationYamlVersion2Response',
+      'additive operation-modified listNotes',
+    ]);
+  });
+
+  it('reordering two keys that differ only in case swaps no models: no change (case 2)', async () => {
+    const keys: Keys = [
+      ['application/yaml', 'title'],
+      ['Application/YAML', 'summary'],
+    ];
+    const before = listNotes(keys);
+    const after = listNotes([...keys].reverse());
+
+    // The key with lower case takes the bare name, wherever it is written.
+    for (const document of [before, after]) {
+      expect(await namesOf(document)).toEqual({
+        'application/yaml': 'ListNotesApplicationYamlResponse { title }',
+        'Application/YAML': 'ListNotesApplicationYamlResponse200 { summary }',
+      });
+    }
+    expect(await diff(before, after)).toEqual([]);
+    expect(await diff(after, before)).toEqual([]);
+  });
+
+  it.each<[string, [lower: string, upper: string], [lower: string, upper: string], string]>([
+    [
+      'quoting a value',
+      ['application/yaml; profile=print', 'Application/YAML; profile=print'],
+      ['application/yaml; profile=print', 'Application/YAML; profile="print"'],
+      'ProfilePrint',
+    ],
+    [
+      'dropping a space',
+      ['application/yaml; profile=print', 'Application/YAML; profile=print'],
+      ['application/yaml;profile=print', 'Application/YAML; profile=print'],
+      'ProfilePrint',
+    ],
+    [
+      'reordering the parameters',
+      ['application/yaml; b=2; a=1', 'Application/YAML; b=2; a=1'],
+      ['application/yaml; b=2; a=1', 'Application/YAML; a=1; b=2'],
+      'A1B2',
+    ],
+  ])(
+    '%s on one of two keys that differ only in case swaps no models: no change (Greptile)',
+    async (_, from, to, qualifier) => {
+      const keys = ([lower, upper]: [string, string]): Keys => [
+        [lower, 'title'],
+        [upper, 'summary'],
+      ];
+      const [before, after] = [listNotes(keys(from)), listNotes(keys(to))];
+
+      // The key with lower case takes the bare name, however either is quoted, spaced or ordered.
+      for (const [document, [lower, upper]] of [
+        [before, from],
+        [after, to],
+      ] as const) {
+        expect(await namesOf(document)).toEqual({
+          [lower]: `ListNotesApplicationYaml${qualifier}Response { title }`,
+          [upper]: `ListNotesApplicationYaml${qualifier}Response200 { summary }`,
+        });
+      }
+      expect(await diff(before, after)).toEqual([]);
+    },
+  );
+
+  it("a quote or a space on one of two keys alike but for their parameters' order swaps no models: no change (Greptile round 2)", async () => {
+    const first = 'application/yaml; b=2; a=1';
+    const before = listNotes([
+      [first, 'title'],
+      ['application/yaml; a=1; b=2', 'summary'],
+    ]);
+    for (const respelled of ['application/yaml; a=1; b="2"', 'application/yaml;a=1;b=2']) {
+      const after = listNotes([
+        [first, 'title'],
+        [respelled, 'summary'],
+      ]);
+
+      // Nothing but syntax tells the two apart, so the one written first takes the bare name.
+      for (const [document, key] of [
+        [before, 'application/yaml; a=1; b=2'],
+        [after, respelled],
+      ] as const) {
+        expect(await namesOf(document), key).toEqual({
+          [first]: 'ListNotesApplicationYamlA1B2Response { title }',
+          [key]: 'ListNotesApplicationYamlA1B2Response200 { summary }',
+        });
+      }
+      expect(await diff(before, after), respelled).toEqual([]);
+    }
+  });
+
+  it.each([
+    ['a `charset` edit', 'application/yaml; charset=utf-8', 'application/yaml; charset=iso-8859-1', 'Charset'],
+    ['a parameter reorder', 'application/yaml; a=1; b=2', 'application/yaml; b=2; a=1', 'A1B2'],
+    ['a dropped `charset`', 'application/yaml; version=2; charset=utf-8', 'application/yaml; version=2', 'Version2'],
+  ])('%s on a key beside `application/yaml` renames no model: no change (case 3)', async (_, from, to, qualifier) => {
+    const before = listNotes([
+      ['application/yaml', 'title'],
+      [from, 'summary'],
+    ]);
+    const after = listNotes([
+      ['application/yaml', 'title'],
+      [to, 'summary'],
+    ]);
+
+    for (const [document, key] of [
+      [before, from],
+      [after, to],
+    ] as const) {
+      expect(await namesOf(document)).toEqual({
+        'application/yaml': 'ListNotesApplicationYamlResponse { title }',
+        [key]: `ListNotesApplicationYaml${qualifier}Response { summary }`,
+      });
+    }
+    expect(await diff(before, after)).toEqual([]);
+  });
+
+  it('a `charset` edit on a request body renames no model: no change (case 3)', async () => {
+    const before = createNote([
+      ['application/yaml', 'title'],
+      ['application/yaml; charset=utf-8', 'summary'],
+    ]);
+    const after = createNote([
+      ['application/yaml', 'title'],
+      ['application/yaml; charset=latin1', 'summary'],
+    ]);
+
+    expect(await namesOf(before)).toEqual({
+      'application/yaml': 'CreateNoteApplicationYamlRequest { title }',
+      'application/yaml; charset=utf-8': 'CreateNoteApplicationYamlCharsetRequest { summary }',
+    });
+    expect(await namesOf(after)).toEqual({
+      'application/yaml': 'CreateNoteApplicationYamlRequest { title }',
+      'application/yaml; charset=latin1': 'CreateNoteApplicationYamlCharsetRequest { summary }',
+    });
+    expect(await diff(before, after)).toEqual([]);
+  });
+
+  it('adding a key of another parameter leaves an inline error body at a status code its model: additive', async () => {
+    const before = listNotes([['application/yaml; charset=utf-8', 'title']], '404');
+    const after = listNotes(
+      [
+        ['application/yaml; charset=utf-8', 'title'],
+        ['application/yaml; version=2', 'summary'],
+      ],
+      '404',
+    );
+
+    expect(await namesOf(after)).toEqual({
+      'application/yaml; charset=utf-8': 'ErrorBodyWithTitle { title }',
+      'application/yaml; version=2': 'ErrorBodyWithSummary { summary }',
+    });
+    expect(await diff(before, after)).toEqual([
+      'additive model-added ErrorBodyWithSummary',
+      'additive operation-modified listNotes',
+    ]);
+  });
+
+  it('a `charset` edit on an inline error body at a range renames no model: no change', async () => {
+    const keys = (charset: string): Keys => [
+      ['application/yaml', 'title'],
+      [`application/yaml; charset=${charset}`, 'summary'],
+    ];
+    const before = listNotes(keys('utf-8'), '4XX');
+    const after = listNotes(keys('iso-8859-1'), '4XX');
+
+    expect(await namesOf(before)).toEqual({
+      'application/yaml': 'ErrorBodyWithTitle { title }',
+      'application/yaml; charset=utf-8': 'ErrorBodyWithSummary { summary }',
+    });
+    expect(await namesOf(after)).toEqual({
+      'application/yaml': 'ErrorBodyWithTitle { title }',
+      'application/yaml; charset=iso-8859-1': 'ErrorBodyWithSummary { summary }',
+    });
+    expect(await diff(before, after)).toEqual([]);
+  });
+
+  it('neither a `charset` edit nor a reorder of case-only keys renames a webhook payload model', async () => {
+    const before = noteAdded([
+      ['application/yaml', 'title'],
+      ['application/yaml; charset=utf-8', 'summary'],
+      ['APPLICATION/YAML', 'body'],
+    ]);
+    const after = noteAdded([
+      ['APPLICATION/YAML', 'body'],
+      ['application/yaml; charset=utf-16', 'summary'],
+      ['application/yaml', 'title'],
+    ]);
+
+    expect(await namesOf(before)).toEqual({
+      'application/yaml': 'NoteAddedApplicationYamlPayload { title }',
+      'application/yaml; charset=utf-8': 'NoteAddedApplicationYamlCharsetPayload { summary }',
+      'APPLICATION/YAML': 'NoteAddedApplicationYamlPayload2 { body }',
+    });
+    expect(await namesOf(after)).toEqual({
+      'APPLICATION/YAML': 'NoteAddedApplicationYamlPayload2 { body }',
+      'application/yaml; charset=utf-16': 'NoteAddedApplicationYamlCharsetPayload { summary }',
+      'application/yaml': 'NoteAddedApplicationYamlPayload { title }',
+    });
+    expect(await diff(before, after)).toEqual([]);
+  });
+
+  it('the same reorder renames no request body model either', async () => {
+    const keys: Keys = [
+      ['application/yaml', 'title'],
+      ['APPLICATION/YAML', 'body'],
+    ];
+    const before = createNote(keys);
+    const after = createNote([...keys].reverse());
+
+    for (const document of [before, after]) {
+      expect(await namesOf(document)).toEqual({
+        'application/yaml': 'CreateNoteApplicationYamlRequest { title }',
+        'APPLICATION/YAML': 'CreateNoteApplicationYamlRequest2 { body }',
+      });
+    }
+    expect(await diff(before, after)).toEqual([]);
+  });
+
+  describe('edits that still swap or rename a model, as `ir-types.md` and `cli.md` document (#517 review)', () => {
+    it.each<[string, (keys: Keys) => Record<string, unknown>, string, string, string]>([
+      [
+        'response',
+        listNotes,
+        'ListNotesApplicationYamlResponse',
+        'ListNotesApplicationYamlResponse200',
+        'operation-modified listNotes',
+      ],
+      [
+        'request body',
+        createNote,
+        'CreateNoteApplicationYamlRequest',
+        'CreateNoteApplicationYamlRequest2',
+        'operation-modified createNote',
+      ],
+      [
+        'webhook payload',
+        noteAdded,
+        'NoteAddedApplicationYamlPayload',
+        'NoteAddedApplicationYamlPayload2',
+        'webhook-modified noteAdded',
+      ],
+    ])(
+      'a case edit to one of two case-only keys swaps their models on a %s: breaking',
+      async (_, build, bare, stepped, site) => {
+        const before = build([
+          ['application/yaml', 'title'],
+          ['Application/YAML', 'summary'],
+        ]);
+        const after = build([
+          ['APPLICATION/YAML', 'title'],
+          ['Application/YAML', 'summary'],
+        ]);
+
+        // The order is read from the keys' case, so the edit moves `Application/YAML` first.
+        expect(await namesOf(before)).toEqual({
+          'application/yaml': `${bare} { title }`,
+          'Application/YAML': `${stepped} { summary }`,
+        });
+        expect(await namesOf(after)).toEqual({
+          'APPLICATION/YAML': `${stepped} { title }`,
+          'Application/YAML': `${bare} { summary }`,
+        });
+        expect(await diff(before, after)).toEqual([
+          `breaking model-modified ${bare}`,
+          `breaking model-modified ${stepped}`,
+          `breaking ${site}`,
+        ]);
+      },
+    );
+
+    it('a `charset` edit to one of two keys that differ in nothing else swaps their models: breaking', async () => {
+      const utf8 = 'application/yaml; charset=utf-8';
+      const before = listNotes([
+        [utf8, 'title'],
+        ['application/yaml; charset=latin1', 'summary'],
+      ]);
+      const after = listNotes([
+        [utf8, 'title'],
+        ['application/yaml; charset=windows-1252', 'summary'],
+      ]);
+
+      // Both carry `Charset` without its value, so the value is all that orders them:
+      // `latin1` before `utf-8`, `utf-8` before `windows-1252`.
+      expect(await namesOf(before)).toEqual({
+        [utf8]: 'ListNotesApplicationYamlCharsetResponse200 { title }',
+        'application/yaml; charset=latin1': 'ListNotesApplicationYamlCharsetResponse { summary }',
+      });
+      expect(await namesOf(after)).toEqual({
+        [utf8]: 'ListNotesApplicationYamlCharsetResponse { title }',
+        'application/yaml; charset=windows-1252': 'ListNotesApplicationYamlCharsetResponse200 { summary }',
+      });
+      expect(await diff(before, after)).toEqual([
+        'breaking model-modified ListNotesApplicationYamlCharsetResponse',
+        'breaking model-modified ListNotesApplicationYamlCharsetResponse200',
+        'breaking operation-modified listNotes',
+      ]);
+    });
+
+    it('reordering two keys that differ only in syntax swaps their models, as on the base: breaking', async () => {
+      const keys: Keys = [
+        ['application/yaml; b=2; a=1', 'title'],
+        ['application/yaml; a=1; b=2', 'summary'],
+      ];
+      const before = listNotes(keys);
+      const after = listNotes([...keys].reverse());
+
+      // Nothing but syntax tells them apart, so the one written first takes the bare name.
+      expect(await namesOf(before)).toEqual({
+        'application/yaml; b=2; a=1': 'ListNotesApplicationYamlA1B2Response { title }',
+        'application/yaml; a=1; b=2': 'ListNotesApplicationYamlA1B2Response200 { summary }',
+      });
+      expect(await namesOf(after)).toEqual({
+        'application/yaml; a=1; b=2': 'ListNotesApplicationYamlA1B2Response { summary }',
+        'application/yaml; b=2; a=1': 'ListNotesApplicationYamlA1B2Response200 { title }',
+      });
+      expect(await diff(before, after)).toEqual([
+        'breaking model-modified ListNotesApplicationYamlA1B2Response',
+        'breaking model-modified ListNotesApplicationYamlA1B2Response200',
+        'breaking operation-modified listNotes',
+      ]);
+    });
+
+    it('adding a key without parameters beside a `charset` key and a `version` key renames the `charset` key’s model: breaking', async () => {
+      const charset: [string, string] = ['application/yaml; charset=utf-8', 'title'];
+      const version: [string, string] = ['application/yaml; version=2', 'summary'];
+      const bare: [string, string] = ['application/yaml', 'x'];
+
+      // A `charset` reaches the name only beside a key with the same other parameters, which `application/yaml` is.
+      expect(await namesOf(listNotes([charset, version]))).toEqual({
+        'application/yaml; charset=utf-8': 'ListNotesApplicationYamlResponse { title }',
+        'application/yaml; version=2': 'ListNotesApplicationYamlVersion2Response { summary }',
+      });
+      expect(await namesOf(listNotes([charset, version, bare]))).toEqual({
+        'application/yaml; charset=utf-8': 'ListNotesApplicationYamlCharsetResponse { title }',
+        'application/yaml; version=2': 'ListNotesApplicationYamlVersion2Response { summary }',
+        'application/yaml': 'ListNotesApplicationYamlResponse { x }',
+      });
+      expect(await diff(listNotes([charset, version]), listNotes([charset, version, bare]))).toEqual([
+        'additive model-added ListNotesApplicationYamlCharsetResponse',
+        'breaking model-modified ListNotesApplicationYamlResponse',
+        'additive operation-modified listNotes',
+      ]);
+
+      // The reverse edit ends in the same three keys, and only one of the two can rename nothing: this one.
+      expect(await diff(listNotes([bare, version]), listNotes([bare, version, charset]))).toEqual([
+        'additive model-added ListNotesApplicationYamlCharsetResponse',
+        'additive operation-modified listNotes',
+      ]);
+    });
   });
 });

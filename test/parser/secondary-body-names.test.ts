@@ -132,9 +132,9 @@ describe('secondary-body names step around every owner (issue #278, round 2)', (
         const op = opsOf(spec).replaceWidget;
         const byKey = Object.fromEntries(op.requestBodyContents!.map((c) => [c.contentType, modelName(c.type)]));
         expect(byKey['application/xml']).toBe('ReplaceWidgetApplicationXmlRequest');
-        expect(byKey['APPLICATION/XML; charset=utf-8']).toBe('ReplaceWidgetApplicationXmlCharsetUtf8Request');
+        expect(byKey['APPLICATION/XML; charset=utf-8']).toBe('ReplaceWidgetApplicationXmlCharsetRequest');
         expect(fieldNames(spec.models, 'ReplaceWidgetApplicationXmlRequest')).toEqual(['title']);
-        expect(fieldNames(spec.models, 'ReplaceWidgetApplicationXmlCharsetUtf8Request')).toEqual(['other']);
+        expect(fieldNames(spec.models, 'ReplaceWidgetApplicationXmlCharsetRequest')).toEqual(['other']);
         expectNameInvariants(spec);
       }
     });
@@ -193,10 +193,10 @@ describe('secondary-body names step around every owner (issue #278, round 2)', (
       expect(webhook.requestBodyContents?.map((c) => modelName(c.type))).toEqual([
         'PetAdoptedPayload',
         'PetAdoptedApplicationXmlPayload',
-        'PetAdoptedApplicationXmlCharsetUtf8Payload',
+        'PetAdoptedApplicationXmlCharsetPayload',
       ]);
       expect(fieldNames(inlineModels, 'PetAdoptedApplicationXmlPayload')).toEqual(['title']);
-      expect(fieldNames(inlineModels, 'PetAdoptedApplicationXmlCharsetUtf8Payload')).toEqual(['other']);
+      expect(fieldNames(inlineModels, 'PetAdoptedApplicationXmlCharsetPayload')).toEqual(['other']);
     });
 
     it('case-only spellings on a webhook: different shapes take separate names, one shape shares', () => {
