@@ -587,8 +587,11 @@ function objectProperties(
  * objects merge their properties — `pagination.next` from one member and
  * `pagination.total` from another both belong to the response, as they do
  * to the wrapper's model — two arrays combine their `items` by the same
- * rule, and otherwise the first declaration that declares a type types it, a
- * typeless one only annotating it. (Envelope detection reads the
+ * rule, an inline object and a `$ref` to an object component become the
+ * `allOf` of both, read through as any `allOf` member is (`result.items`
+ * from `PetPage` beside `result.total_pages`), and otherwise the first
+ * declaration that declares a type types it, a typeless one only annotating
+ * it. (Envelope detection reads the
  * members' own `properties`; a `oneOf`/`anyOf` member with more than one
  * non-null variant declares none, so it contributes no property here; it is
  * listed in `unions`, with every other `oneOf`/`anyOf` the walk meets — the
