@@ -158,6 +158,22 @@ describe('diffModels — a variant added to an inline union (issue #428)', () =>
         union([cat, inner([dog, fish, bird], 'anyOf')]),
       ],
       [
+        // `typeRefsEqual` passes over the keyword, so the inner union would read as the same variant (Greptile).
+        "the inner union's keyword changed beside an outer addition",
+        union([cat, inner([dog, fish], 'anyOf')]),
+        union([cat, inner([dog, fish]), bird]),
+      ],
+      [
+        "a wrapped inner union's keyword changed beside an outer addition",
+        union([cat, arrayOf(inner([dog, fish], 'anyOf'))]),
+        union([cat, arrayOf(inner([dog, fish])), bird]),
+      ],
+      [
+        "an inner union's own inner union's keyword changed beside an outer addition",
+        union([cat, inner([dog, inner([fish, string], 'anyOf')])]),
+        union([cat, inner([dog, inner([fish, string])]), bird]),
+      ],
+      [
         "a key for a kept variant beside the inner union's addition",
         mapped([cat, inner([dog, fish])], { cat: 'Cat', dog: 'Dog', fish: 'Fish' }),
         mapped([cat, inner([dog, fish, bird])], { cat: 'Cat', dog: 'Dog', fish: 'Fish', bird: 'Dog' }),

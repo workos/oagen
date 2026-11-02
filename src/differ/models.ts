@@ -287,7 +287,9 @@ function quoteKeys(keys: readonly string[]): string {
  * union is otherwise compared as one type, variant by variant in order
  * (`typeRefsEqual`), so a reorder or a repeat is not this — and every other
  * variant one no old variant is. An old variant is still there when the
- * variant in its place is the same, or is itself a union, bare or under the
+ * variant in its place is the same — composition keyword included, through
+ * every wrapper and nested union (`sameCompositionKinds`), which
+ * `typeRefsEqual` alone passes over — or is itself a union, bare or under the
  * same wrapper, that only gained variants by this same rule: a union that
  * widens a variant which is itself a union is still only a widening, and
  * what the inner union gained is listed with what the outer one did, in
@@ -322,8 +324,16 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
   for (const variant of newType.variants) {
     const old = oldType.variants[kept];
     // The next old variant, in its place as it was (nothing gained) or
-    // widened by this same rule (what its inner union gained).
-    const gained = old === undefined ? undefined : typeRefsEqual(old, variant) ? [] : addedUnionVariants(old, variant);
+    // widened by this same rule (what its inner union gained). `typeRefsEqual`
+    // passes over a union's composition keyword, so it is read beside it: an
+    // `anyOf: [Dog, Fish]` become `oneOf: [Dog, Fish]` is neither the same
+    // variant nor a widening (Greptile).
+    const gained =
+      old === undefined
+        ? undefined
+        : typeRefsEqual(old, variant) && sameCompositionKinds(old, variant)
+          ? []
+          : addedUnionVariants(old, variant);
     if (gained) {
       kept++;
       if (gained.length > 0) widened++;
@@ -345,6 +355,25 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
   if (removed !== widened) return undefined;
   if (changes.some((change) => change.kind !== 'variant-added' && change.kind !== 'variant-removed')) return undefined;
   return added;
+}
+
+/**
+ * Whether two types `typeRefsEqual` reads as one carry the same composition
+ * keyword on every union in them, through each `nullable`, array or map
+ * wrapper and each nested union: `typeRefsEqual` compares a union by its
+ * variants and discriminator alone, and a keyword change is no widening
+ * (`anyOf` → `oneOf` rejects values that match more than one branch).
+ */
+function sameCompositionKinds(a: TypeRef, b: TypeRef): boolean {
+  if (a.kind === 'nullable' && b.kind === 'nullable') return sameCompositionKinds(a.inner, b.inner);
+  if (a.kind === 'array' && b.kind === 'array') return sameCompositionKinds(a.items, b.items);
+  if (a.kind === 'map' && b.kind === 'map') return sameCompositionKinds(a.valueType, b.valueType);
+  if (a.kind !== 'union' || b.kind !== 'union') return true;
+  if (a.compositionKind !== b.compositionKind) return false;
+  return a.variants.every((variant, i) => {
+    const other = b.variants[i];
+    return other !== undefined && sameCompositionKinds(variant, other);
+  });
 }
 
 /** A short, human-readable label for a union variant in a change report. */
