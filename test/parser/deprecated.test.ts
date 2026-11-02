@@ -379,7 +379,8 @@ describe('extractOperations – deprecated', () => {
     // `type: ['object', 'null']` beside a multi-variant `oneOf` unwraps to a
     // copy that still carries the union; it is not a branch, so each variant
     // is built from itself, keeps its fields and its own flag, and the
-    // wrapper's flag is not carried onto it.
+    // wrapper's flag is not carried onto it. Nor is such a union a wrapped
+    // resource (#415): `data` stays the body's own field, every variant kept.
     const { inlineModels } = extractOperations({
       '/a': body(
         {
@@ -418,8 +419,21 @@ describe('extractOperations – deprecated', () => {
             "k",
           ],
         },
-        "ThingX": {
+        "GetCResponse": {
           "deprecated": undefined,
+          "fields": [
+            "data",
+          ],
+        },
+        "GetCResponseData": {
+          "deprecated": undefined,
+          "fields": [
+            "object",
+            "k",
+          ],
+        },
+        "ThingYGetCResponseData": {
+          "deprecated": true,
           "fields": [
             "object",
             "k",

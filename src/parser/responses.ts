@@ -728,15 +728,52 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   const propSchema = schema.properties[wrapperKey];
   if (!propSchema) return false;
 
+  // A `oneOf`/`anyOf` with more than one variant once every `null` one is
+  // set aside (`isNullSchema`), any of which adds a shape the property does
+  // not already have (`variantAddsShape`), is a union, the body's own field,
+  // however many variants carry a const and whatever properties are written
+  // beside it: unwrapping it would type the response as one variant, or as
+  // those properties alone, and drop the rest (#415). A union whose every
+  // variant only limits the object — bare constraint sets, `type: 'object'`
+  // repeated, refinements of the object's own properties — does not type
+  // the property; the object still unwraps.
+  const variants = (propSchema.oneOf ?? propSchema.anyOf)?.filter((v) => !isNullSchema(v)) ?? [];
+  if (variants.length > 1 && variants.some((variant) => variantAddsShape(variant, propSchema))) return false;
+
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;
 
-  // oneOf with object + null (nullable resource)
+  // A `oneOf` of one such object, with or without `null` variants (a
+  // nullable resource).
   if (propSchema.oneOf) {
-    return propSchema.oneOf.some((v) => v.type === 'object' && hasDiscriminantConstField(v) !== null);
+    return variants.length === 1 && variants[0].type === 'object' && hasDiscriminantConstField(variants[0]) !== null;
   }
 
   return false;
+}
+
+/**
+ * Whether a `oneOf`/`anyOf` variant written beside a wrapped object adds a
+ * shape the object does not already have, so the union is the property's
+ * type rather than a limit on the object (`isSingleResourceWrapper`, #415):
+ * a `$ref`; a `type` other than `object` (a primitive, or a type list
+ * naming another type); a `const`, `enum`, `items` or composition that
+ * types it as something else (`classifyInlineSchema`); a property the
+ * object does not declare; or a const tag of its own (a second tagged
+ * object, `hasDiscriminantConstField`). A variant of only `type: 'object'`,
+ * `required`, limits, or refinements of properties the object declares
+ * (`{ required: ['a'], properties: { a: { minLength: 1 } } }`) adds none:
+ * `classifyInlineSchema` calls such a union a `union` all the same, since
+ * `type` and `properties` are typing keywords, but it only limits the
+ * object the body wraps.
+ */
+function variantAddsShape(variant: SchemaObject, object: SchemaObject): boolean {
+  if (variant.type !== undefined && [variant.type].flat().some((type) => type !== 'object')) return true;
+  const kind = classifyInlineSchema(variant);
+  if (kind !== 'object' && kind !== 'map' && kind !== 'other') return true;
+  if (hasDiscriminantConstField(variant) !== null) return true;
+  const declared = object.properties ?? {};
+  return Object.keys(variant.properties ?? {}).some((name) => !Object.hasOwn(declared, name));
 }
 
 function extractWrappedResource(
@@ -759,8 +796,8 @@ function extractWrappedResource(
       const modelName = deriveModelName(objectVariant, resourceName);
       // `oneOf: [object, null]` is a nullable wrapper: the model built from
       // its one branch takes the wrapper's `deprecated` and limits, as every
-      // other nullable unwrap gives it (`collapsedNullableBranch`); a
-      // multi-variant union's variant is built as written.
+      // other nullable unwrap gives it (`collapsedNullableBranch`); otherwise
+      // the variant is built as written.
       const source = collapsedNullableBranch(propSchema) ?? objectVariant;
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 

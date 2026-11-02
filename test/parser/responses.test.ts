@@ -196,6 +196,143 @@ describe('classifyAndExtractResponse', () => {
       }
     });
 
+    it('keeps a body whose one property is a union of several const-tagged objects, as a second property keeps it (#415)', () => {
+      // The issue's `getShape` 200 body: `shape` is a circle or a square, each
+      // an object pinning `kind`. Unwrapping it typed the response as the
+      // first variant and dropped the body, its other properties and every
+      // other variant.
+      const circle: SchemaObject = {
+        type: 'object',
+        properties: { kind: { const: 'circle' }, radius: { type: 'number' } },
+      };
+      const square: SchemaObject = {
+        type: 'object',
+        properties: { kind: { const: 'square' }, side: { type: 'number' } },
+      };
+      const id: SchemaObject = { type: 'string' };
+      const shape: SchemaObject = { oneOf: [circle, square] };
+      const classify = (properties: Record<string, SchemaObject>, required?: string[]) =>
+        classifyAndExtractResponse({ type: 'object', properties, ...(required && { required }) }, 'GetShapeResponse');
+
+      // The body with a second, optional property was never a wrapper.
+      const two = classify({ id, shape });
+      expect(two.response).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+      const [body, ...variants] = two.inlineModels;
+      expect(body.fields.map((f) => [f.name, f.required])).toEqual([
+        ['id', false],
+        ['shape', false],
+      ]);
+      expect(variants.map((m) => m.name)).toEqual(['GetShapeResponseShape', 'SquareGetShapeResponseShape']);
+      const [idField, shapeField] = body.fields;
+      expect(shapeField.type).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'GetShapeResponseShape' },
+          { kind: 'model', name: 'SquareGetShapeResponseShape' },
+        ],
+      });
+      const withFields = (fields: typeof body.fields) => ({ ...two, inlineModels: [{ ...body, fields }, ...variants] });
+
+      // one.json: `shape` alone; required-one.json: `id` beside a required `shape`.
+      expect(classify({ shape })).toEqual(withFields([shapeField]));
+      expect(classify({ id, shape }, ['shape'])).toEqual(withFields([idField, { ...shapeField, required: true }]));
+
+      // Titled variants, a `null` beside them or another kind of variant are
+      // still several variants: the body keeps them all.
+      const titled = classify({
+        shape: {
+          oneOf: [
+            { ...circle, title: 'Circle' },
+            { ...square, title: 'Square' },
+          ],
+        },
+      });
+      expect(titled.response).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+      expect(titled.inlineModels.map((m) => m.name)).toEqual(['GetShapeResponse', 'Circle', 'Square']);
+      const nullable = classify({ shape: { oneOf: [circle, square, { type: 'null' }] } });
+      expect(nullable.response).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+      expect(nullable.inlineModels[0].fields).toEqual([
+        { ...shapeField, type: { kind: 'nullable', inner: shapeField.type } },
+      ]);
+      for (const other of [{ $ref: '#/components/schemas/Square' }, { type: ['string', 'null'] }] as SchemaObject[]) {
+        const mixed = classify({ shape: { oneOf: [circle, other] } });
+        expect(mixed.response, JSON.stringify(other)).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+        expect(mixed.inlineModels[0].fields.map((f) => f.name)).toEqual(['shape']);
+      }
+
+      // Nor does a const written beside the union, under `oneOf` or `anyOf`,
+      // make it one tagged object: each variant carries it, as on a field.
+      const tagged: SchemaObject = { type: 'object', properties: { object: { const: 'shape' } } };
+      for (const beside of [
+        { ...tagged, oneOf: [circle, square] },
+        { ...tagged, anyOf: [circle, square] },
+      ]) {
+        const kept = classify({ shape: beside });
+        expect(kept.response, JSON.stringify(beside)).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+        expect(kept.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual([
+          ['GetShapeResponse', ['shape']],
+          ['GetShapeResponseShape', ['object', 'kind', 'radius']],
+          ['SquareGetShapeResponseShape', ['object', 'kind', 'side']],
+        ]);
+      }
+
+      // A `oneOf` of one object, with or without `null` beside it, is still
+      // the resource it wraps, and so is a tagged object a `oneOf` of bare
+      // constraint sets only limits.
+      expect(classify({ shape: { oneOf: [circle] } }).response).toEqual({ kind: 'model', name: 'Circle' });
+      expect(classify({ shape: { oneOf: [circle, { type: 'null' }] } }).response).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'model', name: 'Circle' },
+      });
+      const pet: SchemaObject = {
+        type: 'object',
+        properties: { object: { const: 'pet' }, a: { type: 'string' }, b: { type: 'string' } },
+        oneOf: [{ required: ['a'] }, { required: ['b'] }],
+      };
+      expect(classify({ pet }).response).toEqual({ kind: 'model', name: 'Pet' });
+
+      // Variants that add no shape the object does not already have — only
+      // `type: 'object'` repeated, `required`, or a refinement of one of its
+      // own properties — only limit it, under either keyword and however the
+      // tag is spelled, and it still unwraps (#415 review).
+      const typedSets: SchemaObject[] = [
+        { type: 'object', required: ['a'] },
+        { type: 'object', required: ['b'] },
+      ];
+      const unwrapped = [['Pet', ['object', 'a', 'b']]];
+      for (const limited of [
+        { ...pet, oneOf: typedSets },
+        { ...pet, anyOf: typedSets },
+        { ...pet, oneOf: [{ required: ['a'], properties: { a: { minLength: 1 } } }, { required: ['b'] }] },
+      ]) {
+        const result = classify({ pet: limited });
+        expect(result.response, JSON.stringify(limited)).toEqual({ kind: 'model', name: 'Pet' });
+        expect(result.inlineModels.map((m) => [m.name, m.fields.map((f) => f.name)])).toEqual(unwrapped);
+      }
+      // OAS 3.0 spells the tag `enum: ['pet']`, which names the model from
+      // the operation, as before.
+      const enumTagged: SchemaObject = {
+        ...pet,
+        properties: { ...pet.properties, object: { type: 'string', enum: ['pet'] } },
+        oneOf: typedSets,
+      };
+      expect(classify({ pet: enumTagged }).response).toEqual({ kind: 'model', name: 'GetShape' });
+
+      // A variant that does add a shape — a property the object does not
+      // declare, a `$ref`, another type, or a const tag of its own — makes
+      // the union the body's field.
+      for (const adds of [
+        { type: 'object', required: ['a'], properties: { c: { type: 'string' } } },
+        { $ref: '#/components/schemas/Cat' },
+        { type: 'string' },
+        { type: 'object', properties: { object: { const: 'cat' } } },
+      ] as SchemaObject[]) {
+        const kept = classify({ pet: { ...pet, oneOf: [adds, { required: ['b'] }] } });
+        expect(kept.response, JSON.stringify(adds)).toEqual({ kind: 'model', name: 'GetShapeResponse' });
+        expect(kept.inlineModels[0].fields.map((f) => f.name)).toEqual(['pet']);
+      }
+    });
+
     it('does not match wrapper with multiple required properties', () => {
       const schema = {
         type: 'object',
