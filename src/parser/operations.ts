@@ -49,6 +49,7 @@ import {
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSchemaName,
+  inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
   nonObjectVariantContexts,
@@ -3923,12 +3924,18 @@ function typePickedRequestBody(
     const hasNull = schema.oneOf.some(
       (v: SchemaObject) => v.type === 'null' || (Array.isArray(v.type) && v.type.includes('null')),
     );
+    // The mapping's targets are read as a field's or a response's inline
+    // union reads them (`inlineMappingTargets`), so the same union carries the
+    // same discriminator at every site.
     const union: TypeRef = {
       kind: 'union',
       variants,
       ...(schema.discriminator
         ? {
-            discriminator: { property: schema.discriminator.propertyName, mapping: schema.discriminator.mapping ?? {} },
+            discriminator: {
+              property: schema.discriminator.propertyName,
+              mapping: inlineMappingTargets(schema.discriminator.mapping),
+            },
           }
         : {}),
     };
