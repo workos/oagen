@@ -17,10 +17,12 @@ import { isComponentModelRef } from './schemas.js';
 import { unionShapeKey } from './union-shape.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import {
+  deprecatedFoldWarning,
   fieldAdmits,
   inheritedModelRefsOf,
   isInheritedModelRef,
   liftedFieldModelsOf,
+  looserFields,
   modelAdmits,
   modelShares,
   recordFieldModelRename,
@@ -104,8 +106,17 @@ export interface InlineModelNaming {
  * wrote by sharing it joins the field's site like one sharing a field model
  * (`attachSharedRefs`, run over the bundles once the operations are read)
  * and follows the site's renames.
+ *
+ * The fields of a component the SDK only sends (`sent`: the names
+ * `sentOnlyComponentNames` gives) are sites the SDK sends
+ * (`InlineModelBundle.sent`): their models share a component named like
+ * them on an identical shape only, as an operation's request body does.
  */
-export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models: Model[]): InlineModelBundle[] {
+export function fieldInlineModelBundles(
+  groups: FieldInlineModelGroup[],
+  models: Model[],
+  sent: ReadonlySet<string> = new Set(),
+): InlineModelBundle[] {
   const byName = new Map(models.map((m) => [m.name, m]));
   return groups.map(({ parentName, fieldName, models: fieldModels }) => {
     const parent = byName.get(parentName);
@@ -116,6 +127,7 @@ export function fieldInlineModelBundles(groups: FieldInlineModelGroup[], models:
       roots: [...own, ...inheritedModelRefsOf(parentName, fieldName)],
       models: [...fieldModels, ...liftedFieldModelsOf(parentName, fieldName)],
       renamed: (from, to) => recordFieldModelRename(parentName, fieldName, from, to),
+      ...(sent.has(parentName) ? { sent: true } : {}),
     };
   });
 }
@@ -309,9 +321,11 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  *   themselves are settled by document order (first declared, or the one with
  *   more fields), as they always were; a deprecated copy never inherits that
  *   tie and is qualified instead, so its name is the same in every order;
- * - folds onto a live owner, with the same warning, when the owner shares
- *   its name with it (`ownerSharesWith`, the flag read apart from the shape
- *   by `flagAdmits`): the copy is dropped and its references resolve to the
+ * - folds onto a live owner, with the same warning — or, when the owner is
+ *   looser, one naming what it no longer requires (`deprecatedFoldWarning`,
+ *   `looserFields`) — when the owner shares its name with it
+ *   (`ownerSharesWith`, the flag read apart from the shape by
+ *   `flagAdmits`): the copy is dropped and its references resolve to the
  *   owner, the deprecated schema's own field, parameter or envelope field
  *   still carrying the flag (a request body or response has no flag of its
  *   own to carry it). An owner is never renamed and never takes a
@@ -583,7 +597,8 @@ function settleSharedNames(
     // owner shares its name with (`ownerSharesWith`, the flag read by
     // `flagAdmits`) is folded onto it — a deprecated copy onto a live owner
     // with the warning two inline copies get, since the shared name keeps
-    // the live definition; a deprecated owner shares with no live copy. The
+    // the live definition, naming what a looser owner no longer requires
+    // (`looserFields`); a deprecated owner shares with no live copy. The
     // copies that agree with the name's flag and that the owner does not
     // share leave the owner's name, one model per shape (`renameClusters`).
     // A copy whose flag disagrees and that the owner does not share leaves
@@ -593,11 +608,7 @@ function settleSharedNames(
       if (!owner) continue;
       const bundle = naming && bundleOf.get(copy);
       if (ownerSharesWith(owner, copy, bundle)) {
-        if (!!copy.deprecated !== nameDeprecated) {
-          console.warn(
-            `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-          );
-        }
+        if (!!copy.deprecated !== nameDeprecated) console.warn(deprecatedFoldWarning(name, looserFields(owner, copy)));
         foldOnto(copy, owner, bundleOf, folded);
         continue;
       }
@@ -633,9 +644,7 @@ function settleSharedNames(
       // are settled by document order, as always; a deprecated copy must not
       // inherit that order, so it is qualified whenever they disagree.
       if (live.length > 0 && live.every((l) => differOnlyByDeprecation(l, copy))) {
-        console.warn(
-          `[oagen] Warning: Inline model "${name}" is declared both deprecated and live with the same shape — keeping the live definition under the shared name`,
-        );
+        console.warn(deprecatedFoldWarning(name, []));
         foldOnto(copy, preferredDefinition(live), bundleOf, folded);
         continue;
       }
@@ -658,12 +667,13 @@ function settleSharedNames(
 /**
  * Whether `owner`, a component, shares its name with `copy` (`modelShares`):
  * when it admits the shape (`modelAdmits`) — or, for a copy the SDK sends
- * (`bundle.sent`: a request body, a parameter), only when the shapes are
- * identical, since a caller typed against a looser component could leave
- * out what the operation requires — the flag read apart from the shape
- * either way (`flagAdmits`: a live owner shares with a deprecated copy, a
- * deprecated owner only with a deprecated one). The same question
- * `ownerShares` answers for the shape registry.
+ * (`bundle.sent`: a request body, a parameter, a field object of a component
+ * only those reach), only when the shapes are identical, since a caller
+ * typed against a looser component could leave out what the operation
+ * requires — the flag read apart from the shape either way (`flagAdmits`: a
+ * live owner shares with a deprecated copy, a deprecated owner only with a
+ * deprecated one). The same question `ownerShares` answers for the shape
+ * registry.
  */
 function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | undefined): boolean {
   return modelShares(owner, copy, !!bundle?.sent);
@@ -1024,9 +1034,10 @@ export function mergeInlineResponseModels(
  * operation or webhook is read (see `parseSpec`): a field object, array
  * item or union variant named like a component shares the name when the
  * component admits it — a deprecated one beside a live component included,
- * the field keeping the flag — and is dropped, the field resolving to the
- * component; one the component does not admit, a live one beside a
- * deprecated component included, takes its qualified name now
+ * the field keeping the flag; only an identical one when the SDK only sends
+ * its component (`InlineModelBundle.sent`) — and is dropped, the field
+ * resolving to the component; one the component does not admit, a live one
+ * beside a deprecated component included, takes its qualified name now
  * (`PetOwner2`), its field and every `allOf` copy of it repointed
  * (`settleSharedNames`). Settling the fields first means every
  * later comparison with a component — the shape registry's, the response
