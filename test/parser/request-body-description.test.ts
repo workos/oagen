@@ -583,6 +583,71 @@ describe('request body descriptions (issue #316)', () => {
       expectSound(spec);
     });
 
+    it('reads through a single-member oneOf or anyOf too, as the enum lifted from its variant does, and its allOf twin stays the same (#445 review)', async () => {
+      const objectVariant = { type: 'object', description: 'Obj.', properties: { text: { type: 'string' } } };
+      const bodies: Record<string, unknown> = {
+        // The review's three cases, each beside its `allOf` twin.
+        nullableOneOf: { anyOf: [{ oneOf: [{ type: 'string', description: 'Note text.' }] }, { type: 'null' }] },
+        nullableAllOf: { anyOf: [{ allOf: [{ type: 'string', description: 'Note text.' }] }, { type: 'null' }] },
+        oneOfEnum: { oneOf: [{ type: 'string', enum: ['draft', 'final'], description: 'Note state.' }] },
+        allOfEnum: { allOf: [{ type: 'string', enum: ['draft', 'final'], description: 'Note state.' }] },
+        oneOfObject: { oneOf: [objectVariant] },
+        allOfObject: { allOf: [objectVariant] },
+        // The wrapper's own text wins, under an `anyOf` as under a `oneOf`.
+        anyOfBoth: { description: 'Wrapper.', anyOf: [{ type: 'string', description: 'Variant.' }] },
+        // A `$ref` variant's component text stays on its model; text beside the `$ref` is read.
+        oneOfRef: { oneOf: [{ $ref: '#/components/schemas/Pet' }] },
+        oneOfRefBeside: { oneOf: [{ $ref: '#/components/schemas/Pet', description: 'Beside.' }] },
+        // A `oneOf` of consts read as an enum declares the members itself: its variant's text documents one value.
+        constEnum: { enum: ['a'], oneOf: [{ const: 'a', description: 'The a.' }] },
+      };
+      const spec = await parseDocument(
+        document(
+          Object.fromEntries(
+            Object.entries(bodies).map(([name, schema]) => [
+              `/${name}`,
+              post(`add${name[0].toUpperCase()}${name.slice(1)}`, jsonBody(schema)),
+            ]),
+          ),
+        ),
+      );
+      const ops = opsOf(spec);
+      const models = modelsOf(spec);
+
+      expect(Object.fromEntries(Object.entries(ops).map(([name, op]) => [name, op.requestBodyDescription]))).toEqual({
+        addNullableOneOf: 'Note text.',
+        addNullableAllOf: 'Note text.',
+        addOneOfEnum: 'Note state.',
+        addAllOfEnum: 'Note state.',
+        addOneOfObject: 'Obj.',
+        addAllOfObject: 'Obj.',
+        addAnyOfBoth: 'Wrapper.',
+        addOneOfRef: undefined,
+        addOneOfRefBeside: 'Beside.',
+        addConstEnum: undefined,
+      });
+      expect(ops.addOneOfRef).not.toHaveProperty('requestBodyDescription');
+      expect(ops.addConstEnum).not.toHaveProperty('requestBodyDescription');
+      // The enum lifted from the variant and the model built from it carry the same text.
+      expect(spec.enums.find((e) => e.name === 'AddOneOfEnumRequest')?.description).toBe('Note state.');
+      expect(describeType(models, ops.addOneOfObject.requestBody)).toBe('union of AddOneOfObjectRequest ("Obj.")');
+      expect(models.get('Pet')?.description).toBe('A pet in the shelter.');
+      // Only the text moved: a single-member oneOf is still a union of one variant.
+      expect(ops.addNullableOneOf.requestBody).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'union', variants: [{ kind: 'primitive', type: 'string' }], compositionKind: 'oneOf' },
+      });
+      expect(ops.addNullableAllOf.requestBody).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'primitive', type: 'string' },
+      });
+      expect(ops.addOneOfEnum.requestBody).toEqual({
+        kind: 'union',
+        variants: [{ kind: 'enum', name: 'AddOneOfEnumRequest', values: ['draft', 'final'] }],
+      });
+      expectSound(spec);
+    });
+
     it('keeps a flattened discriminated union’s text on the operation and on the flattened model', async () => {
       const spec = await parseDocument(
         document({

@@ -1171,19 +1171,24 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
 
     // The review's `meta`; the union as a `$ref` to an `anyOf`, beside a
     // `null` variant, one `allOf` deeper, or the whole `meta` a component; a
-    // path one segment further; and a second union that declares the field
-    // in every variant where the first does not.
+    // path one segment further; the same `allOf` one segment down
+    // (`meta.page.has_more`); and a second union that declares the field in
+    // every variant where the first does not.
     expect(problem(beside({ oneOf: [after, numbered] }))).toBeUndefined();
     expect(problem(beside({ $ref: '#/components/schemas/MetaUnion' }))).toBeUndefined();
     expect(problem(beside({ oneOf: [after, numbered, { type: 'null' }] }))).toBeUndefined();
     expect(problem({ allOf: [beside({ oneOf: [after, numbered] }), object({ x: boolean })] })).toBeUndefined();
     expect(problem({ $ref: '#/components/schemas/Meta' })).toBeUndefined();
     expect(problem(beside({ oneOf: [after, numbered] }), 'meta.page.last')).toBeUndefined();
+    expect(problem(object({ page: beside({ oneOf: [after, numbered] }) }), 'meta.page.has_more')).toBeUndefined();
     expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [after, numbered] }] })).toBeUndefined();
 
-    // A field only some variants of each union declare resolves to no field;
-    // one a variant types otherwise is not a boolean.
+    // A field only some variants of each union declare resolves to no field,
+    // one segment down too; one a variant types otherwise is not a boolean.
     expect(problem(beside({ oneOf: [after, trace] }))).toBe(missing('meta.has_more'));
+    expect(problem(object({ page: beside({ oneOf: [after, trace] }) }), 'meta.page.has_more')).toBe(
+      missing('meta.page.has_more'),
+    );
     expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [numbered, trace] }] })).toBe(
       missing('meta.has_more'),
     );

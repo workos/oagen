@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { extractOperations } from '../../src/parser/operations.js';
+import { resolveOperations } from '../../src/ir/operation-hints.js';
+import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
 import type { Enum } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
@@ -440,6 +442,75 @@ describe('extractOperations', () => {
 
     const { services } = extractOperations(paths, (id) => id);
     expect(services[0].operations[0].name).toBe('FooController_bar');
+  });
+
+  it('carries the operationId verbatim beside the name the transform made of it', () => {
+    const paths = {
+      '/foo': {
+        get: {
+          operationId: 'FooController_bar[0]',
+          responses: { '200': { description: 'ok' } },
+        },
+        post: {
+          responses: { '201': { description: 'created' } },
+        },
+      },
+    };
+
+    const { services } = extractOperations(paths, (id) => id.replace(/Controller_/, '.').replace(/\[\d+\]$/, ''));
+    const [named, pathNamed] = services[0].operations;
+    // The transform (and the parser's own `[n]` stripping) shape `name`; the
+    // id itself is kept as the document wrote it, overload marker included.
+    expect(named.name).toBe('Foo.bar');
+    expect(named.operationId).toBe('FooController_bar[0]');
+    // A path-named operation has no key at all, not an undefined one.
+    expect(pathNamed.name).toBe('create');
+    expect('operationId' in pathNamed).toBe(false);
+  });
+
+  it('spells an acronym in capitals, which operationNaming: operationId reads as its own word (#472 review)', () => {
+    const ok = { responses: { '200': { description: 'ok' } } };
+    const paths = {
+      '/sso/authorization-url': { get: { operationId: 'get-sso-authorization-url', ...ok } },
+      '/m2m/apps': { post: { operationId: 'create_m2m_app', ...ok } },
+      '/jwt/tokens': { post: { operationId: 'createJWTToken', ...ok } },
+      '/pets/{petId}:adopt': {
+        post: {
+          operationId: 'pets:adopt',
+          parameters: [{ name: 'petId', in: 'path' as const, required: true, schema: { type: 'string' } }],
+          ...ok,
+        },
+      },
+    };
+    const resolve = (transform?: (id: string) => string) => {
+      const { services } = extractOperations(paths, transform);
+      const spec = {
+        name: 'Pets',
+        version: '1',
+        baseUrl: '',
+        services,
+        models: [],
+        enums: [],
+        sdk: defaultSdkBehavior(),
+      };
+      const names = services.flatMap((s) => s.operations.map((o) => o.name));
+      const resolved = resolveOperations(spec, undefined, undefined, 'operationId').map((r) => r.methodName);
+      return { names, resolved };
+    };
+
+    // Without a transform the parser's camelCase keeps SSO, M2M and JWT in
+    // capitals; the resolver reads each as a word of its own.
+    expect(resolve()).toEqual({
+      names: ['getSSOAuthorizationUrl', 'createM2MApp', 'createJWTToken', 'petsAdopt'],
+      resolved: ['get_sso_authorization_url', 'create_m2m_app', 'create_jwt_token', 'pets_adopt'],
+    });
+    // An identity transform hands each id back as written; a snake_case id
+    // is already the method name, and `:` is a separator, not a character
+    // the method name keeps.
+    expect(resolve((id) => id)).toEqual({
+      names: ['get-sso-authorization-url', 'create_m2m_app', 'createJWTToken', 'pets:adopt'],
+      resolved: ['get_sso_authorization_url', 'create_m2m_app', 'create_jwt_token', 'pets_adopt'],
+    });
   });
 
   it('reads x-oagen-async extension', () => {
@@ -1402,6 +1473,40 @@ describe('extractOperations', () => {
       const { services } = extractOperations(paths as never);
       // No explicit discriminator → existing union behavior is preserved.
       expect(services[0].operations[0].requestBody?.kind).toBe('union');
+    });
+
+    it("reads a discriminated oneOf body's mapping targets as a field's inline union does, `#/components/schemas/` stripped (#458 review)", () => {
+      const paths = {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: {
+              required: true,
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }],
+                    discriminator: {
+                      propertyName: 'kind',
+                      mapping: { cat: '#/components/schemas/Cat', dog: 'Dog' },
+                    },
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'created' } },
+          },
+        },
+      };
+      const { services } = extractOperations(paths as never);
+      expect(services[0].operations[0].requestBody).toEqual({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'Cat' },
+          { kind: 'model', name: 'Dog' },
+        ],
+        discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } },
+      });
     });
   });
 

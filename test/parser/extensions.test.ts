@@ -1261,6 +1261,46 @@ describe('x-* extensions reach the IR (issue #352)', () => {
       expectSound(spec, ['Pet']);
     });
 
+    it('the field a collapsed wrapper types carries the wrapper’s keys alone, and the branch’s stay on the enum (#502 review)', async () => {
+      const branch = { type: 'string', enum: ['draft', 'final'], 'x-since': '2.0' };
+      const spec = await parseDocument(
+        document({
+          '/notes/{id}': getOp(
+            'getNote',
+            {
+              type: 'object',
+              properties: {
+                viaAnyOf: { anyOf: [branch, { type: 'null' }], 'x-owner': 'notes' },
+                viaOneOf: { oneOf: [branch, { type: 'null' }], 'x-owner': 'notes' },
+                viaAllOf: { allOf: [branch], 'x-owner': 'notes' },
+                bareWrapper: { anyOf: [branch, { type: 'null' }] },
+                items: { type: 'array', 'x-outer': 'a', items: branch },
+                bare: branch,
+                viaTypeList: { type: ['string', 'null'], enum: ['draft', 'final'], 'x-since': '2.0' },
+              },
+            },
+            { parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }] },
+          ),
+        }),
+      );
+      const note = byName(spec.models, 'GetNoteResponse');
+      for (const name of ['viaAnyOf', 'viaOneOf', 'viaAllOf']) {
+        const enumName = `GetNoteResponse${name[0].toUpperCase()}${name.slice(1)}`;
+        expect(byName(spec.enums, enumName).extensions, enumName).toEqual({ 'x-since': '2.0', 'x-owner': 'notes' });
+        expect(fieldOf(note, name).extensions, name).toEqual({ 'x-owner': 'notes' });
+      }
+      expect(byName(spec.enums, 'GetNoteResponseBareWrapper').extensions).toEqual({ 'x-since': '2.0' });
+      expect(fieldOf(note, 'bareWrapper')).not.toHaveProperty('extensions');
+      expect(byName(spec.enums, 'GetNoteResponseItems').extensions).toEqual({ 'x-since': '2.0' });
+      expect(fieldOf(note, 'items').extensions).toEqual({ 'x-outer': 'a' });
+      for (const name of ['bare', 'viaTypeList']) {
+        const enumName = `GetNoteResponse${name[0].toUpperCase()}${name.slice(1)}`;
+        expect(byName(spec.enums, enumName).extensions, enumName).toEqual({ 'x-since': '2.0' });
+        expect(fieldOf(note, name).extensions, name).toEqual({ 'x-since': '2.0' });
+      }
+      expectSound(spec);
+    });
+
     it('when two inline schemas lift to one name with the same members, the first lifted gives the keys', async () => {
       const spec = await parseDocument(
         document({

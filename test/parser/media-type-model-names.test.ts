@@ -398,11 +398,11 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     );
 
     expect(await namesOf(after)).toEqual({
-      'application/yaml; charset=utf-8': 'ListNotesError404ApplicationYaml { title }',
-      'application/yaml; version=2': 'ListNotesError404ApplicationYamlVersion2 { summary }',
+      'application/yaml; charset=utf-8': 'ErrorBodyWithTitle { title }',
+      'application/yaml; version=2': 'ErrorBodyWithSummary { summary }',
     });
     expect(await diff(before, after)).toEqual([
-      'additive model-added ListNotesError404ApplicationYamlVersion2',
+      'additive model-added ErrorBodyWithSummary',
       'additive operation-modified listNotes',
     ]);
   });
@@ -416,12 +416,12 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     const after = listNotes(keys('iso-8859-1'), '4XX');
 
     expect(await namesOf(before)).toEqual({
-      'application/yaml': 'ListNotesError4XxApplicationYaml { title }',
-      'application/yaml; charset=utf-8': 'ListNotesError4XxApplicationYamlCharset { summary }',
+      'application/yaml': 'ErrorBodyWithTitle { title }',
+      'application/yaml; charset=utf-8': 'ErrorBodyWithSummary { summary }',
     });
     expect(await namesOf(after)).toEqual({
-      'application/yaml': 'ListNotesError4XxApplicationYaml { title }',
-      'application/yaml; charset=iso-8859-1': 'ListNotesError4XxApplicationYamlCharset { summary }',
+      'application/yaml': 'ErrorBodyWithTitle { title }',
+      'application/yaml; charset=iso-8859-1': 'ErrorBodyWithSummary { summary }',
     });
     expect(await diff(before, after)).toEqual([]);
   });
