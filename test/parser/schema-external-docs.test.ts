@@ -729,8 +729,8 @@ describe('ResponseHeader.externalDocs', () => {
             'X-Content': { content: { 'text/plain': { schema: { type: 'string', externalDocs: link('content') } } } },
             'X-Component': { $ref: '#/components/headers/Rate', description: 'Overridden.' },
             'X-Sibling': { schema: { $ref: '#/components/schemas/Id', externalDocs: link('sibling') } },
-            // A header reads only its own schema, as its description and
-            // deprecated read only the Header Object: the referenced model
+            // A header reads only its own schema, never the component its
+            // `$ref` names, as its deprecated does: the referenced model
             // carries its own link.
             'X-Ref': { schema: { $ref: '#/components/schemas/Id' } },
             'X-Bare': { schema: { type: 'string' } },
