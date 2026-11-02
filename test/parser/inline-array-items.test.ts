@@ -930,6 +930,117 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
     // beside an own plain `kind`.
     expect(await shapes('kind-variant-ref', kindDoc('3.1.0', kinded(str, Kind)))).toEqual(kept);
   });
+
+  it('counts a `null` a declaration admits as one more value it pins, so a nullable variant is not narrower than an own declaration forbidding `null` (#392 review)', async () => {
+    const kinds: SchemaObject = { type: 'string', enum: ['cat', 'dog'] };
+    const nullableKinds: SchemaObject = { type: ['string', 'null'], enum: ['cat', 'dog'] };
+    const nullableCat: SchemaObject = { type: ['string', 'null'], const: 'cat' };
+    // The own declaration, the variant's, and the one kept.
+    const cases: Array<[string, SchemaObject, SchemaObject, SchemaObject]> = [
+      ['a nullable enum beside an enum', kinds, { type: ['string', 'null'], enum: ['cat'] }, kinds],
+      ['a nullable const beside an enum', kinds, nullableCat, kinds],
+      ['an OAS 3.0 nullable enum beside an enum', kinds, { type: 'string', nullable: true, enum: ['cat'] }, kinds],
+      ['an enum naming null beside an enum', kinds, { enum: ['cat', null] }, kinds],
+      ['a const with a null variant beside an enum', kinds, { oneOf: [{ const: 'cat' }, { type: 'null' }] }, kinds],
+      ['a nullable const beside a plain type', str, nullableCat, str],
+      ['a nullable const beside a nullable type', { type: ['string', 'null'] }, nullableCat, nullableCat],
+      ['a nullable const beside a nullable enum', nullableKinds, nullableCat, nullableCat],
+      [
+        'a nullable const beside an OAS 3.0 nullable enum',
+        { type: 'string', nullable: true, enum: ['cat', 'dog'] },
+        nullableCat,
+        nullableCat,
+      ],
+      [
+        'an enum naming null beside an enum naming it',
+        { enum: ['cat', 'dog', null] },
+        { enum: ['cat', null] },
+        { enum: ['cat', null] },
+      ],
+      ['a const beside a nullable enum', nullableKinds, { const: 'cat' }, { const: 'cat' }],
+      ['every value and null beside a nullable enum', nullableKinds, nullableKinds, nullableKinds],
+      [
+        'a nullable const beside a typeless declaration',
+        { description: 'Pet kind' },
+        nullableCat,
+        { description: 'Pet kind', ...nullableCat },
+      ],
+    ];
+    const kindOf = (keyword: 'oneOf' | 'anyOf', own: SchemaObject, variant: SchemaObject) =>
+      foldSiblingProperties(obj({ kind: own }, { [keyword]: [obj({ kind: variant }), note] }))[keyword]?.[0].properties
+        ?.kind;
+    for (const keyword of ['oneOf', 'anyOf'] as const) {
+      for (const [label, own, variant, kept] of cases) {
+        expect(kindOf(keyword, own, variant), `${keyword}: ${label}`).toEqual(kept);
+      }
+    }
+    // Through the parser, with the variants pinning one value each and admitting `null`: an own enum
+    // forbidding `null` stays, so no variant's `kind` admits it; an own `$ref` to such an enum stays
+    // `Kind`; an own `$ref` to a nullable enum gives way, and each variant's `kind` is its nullable literal.
+    const kinded = (own: SchemaObject): SchemaObject =>
+      obj(
+        { kind: own },
+        {
+          oneOf: [
+            obj({ kind: { type: ['string', 'null'], enum: ['cat'] }, meow: str }),
+            obj({ kind: { type: ['string', 'null'], enum: ['dog'] }, bark: str }),
+          ],
+        },
+      );
+    const petDoc = (own: SchemaObject, schemas: Record<string, SchemaObject> = {}) =>
+      specDoc(
+        {
+          '/pets/{id}': {
+            get: {
+              operationId: 'getPet',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: ok(obj({ pet: kinded(own) })),
+            },
+          },
+        },
+        schemas,
+      );
+    const shapes = async (label: string, doc: unknown, components: string[] = []) => {
+      const { spec, warnings } = await parse(label, doc);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, components);
+      return {
+        models: spec.models.map(describeModel),
+        enums: spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+      };
+    };
+    expect(await shapes('null-own-enum', petDoc(kinds))).toEqual({
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | GetPetResponsePetWithBark) }',
+        'GetPetResponsePet { kind: GetPetResponsePetKind, meow: string }',
+        'GetPetResponsePetWithBark { kind: GetPetResponsePetWithBarkKind, bark: string }',
+      ],
+      enums: [
+        ['GetPetResponsePetKind', ['cat', 'dog']],
+        ['GetPetResponsePetWithBarkKind', ['cat', 'dog']],
+      ],
+    });
+    expect(await shapes('null-own-ref', petDoc({ $ref: '#/components/schemas/Kind' }, { Kind: kinds }))).toEqual({
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | GetPetResponsePetWithBark) }',
+        'GetPetResponsePet { kind: Kind, meow: string }',
+        'GetPetResponsePetWithBark { kind: Kind, bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    });
+    expect(
+      await shapes('null-own-nullable-ref', petDoc({ $ref: '#/components/schemas/Kind' }, { Kind: nullableKinds }), [
+        'Kind',
+      ]),
+    ).toEqual({
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | DogGetPetResponsePet) }',
+        'GetPetResponsePet { kind: "cat" | null, meow: string }',
+        'DogGetPetResponsePet { kind: "dog" | null, bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    });
+  });
 });
 
 describe('review round 1', () => {
