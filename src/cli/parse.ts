@@ -8,12 +8,14 @@ export async function parseCommand(opts: {
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   operationHints?: Record<string, OperationHint>;
+  collapseErrorBodies?: boolean;
 }): Promise<void> {
   const ir = await parseSpec(opts.spec, {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
     operationHints: opts.operationHints,
+    collapseErrorBodies: opts.collapseErrorBodies,
   });
   console.log(JSON.stringify(ir, null, 2));
 }

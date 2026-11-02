@@ -49,6 +49,7 @@ import {
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSchemaName,
+  inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
   isNullSchema,
@@ -1793,11 +1794,10 @@ function disambiguateOperationNames(
 
   // One path first: the qualifiers below tell paths apart and leave a name
   // shared on one path alone, so that sharing is settled before they run.
+  // Then, before they run (below, once `apart` is defined), an action beside
+  // a CRUD or singleton operation of its name, or one whose name such an
+  // operation would have, declared or not, yields it (yieldActionNames).
   const demoted = demoteSamePathNames(operations, pathNamed, serviceName, apiRootLengthOf, rename);
-  // Then an action beside a CRUD or singleton operation of its name, or one
-  // whose name such an operation would have, declared or not: the plain name
-  // stays with the latter, which the qualifiers would rename.
-  for (const op of yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, rename)) demoted.add(op);
 
   // Each qualifier, given the group, is the word or words a path-named
   // member would add to its name: `null` or `''` when its path has none.
@@ -1991,6 +1991,13 @@ function disambiguateOperationNames(
     );
   };
 
+  // An action beside a CRUD or singleton operation of its name, or one whose
+  // name such an operation would have, declared or not: the plain name stays
+  // with the latter, which the qualifiers would rename. It asks `apart`
+  // whether a name a path-named operation holds can be joined, as the
+  // qualifiers ask it, so it runs once `apart` is defined.
+  yieldActionNames(operations, pathNamed, demoted, apiRootLengthOf, apart, rename);
+
   for (const qualifier of qualifiers) {
     for (const group of collidingGroups(operations)) {
       const words = qualifier(group);
@@ -2179,21 +2186,35 @@ function demoteSamePathNames(
  * latter (`createCreate2` when operationIds hold `createPets` and
  * `createCreate`), as it is when both are its own name (`update2` for
  * `PUT /{id}/update`, which has no collection to take back and whose
- * `PUT /{id}` is `update`). An action beside an operationId of its name is
- * left to the numeric pass (`adoptPet2`), and two actions of one name to
- * the qualifiers (`adoptPetRescue`). Actions come in name order, then path
- * order, and the renames depend only on each operation's own path, so the
- * result is deterministic. Returns the operations that fell back to their
- * non-action name.
+ * `PUT /{id}` is `update`). Two kinds of name are not held. The name of
+ * another action still to yield here, which gives it up in its turn:
+ * `POST /pets/create` takes `createPets` beside `POST /pets/create-pets`,
+ * whose `createPets` yields to `createCreatePets`, so no operation is left
+ * with a name neither had. And a name held only by path-named operations
+ * on other paths naming the noun the action names that a later pass tells
+ * from it (nameIsFree with `apart`, the rule by which a qualifier joins such
+ * a name): `POST /pets/create` takes `createPets` beside
+ * `POST /pets/{id}/pets`, and the parameter then tells the two apart,
+ * `createPets` and `createPetsById`, as it tells `POST /pets/pets` from
+ * `POST /pets/{id}/pets`; beside `POST /pets/pets`, whose path has nothing
+ * `/pets` lacks, the name counts as held and the action is `createCreate`.
+ * Declaring either operation beside the action thus never takes its name
+ * from it. An action beside an operationId of its name is left to the
+ * numeric pass (`adoptPet2`), and two actions of one name to the qualifiers
+ * (`adoptPetRescue`). Actions come in name order, then path order, and the
+ * renames depend only on each operation's own path, so the result is
+ * deterministic. An action that fell back to its non-action name is added
+ * to `demoted`, as it is renamed, so every pass after — `apart` among them,
+ * asked here for the actions still to come — reads its path as that shape.
  */
 function yieldActionNames(
   operations: Operation[],
   pathNamed: ReadonlySet<Operation>,
-  demoted: ReadonlySet<Operation>,
+  demoted: Set<Operation>,
   apiRootLengthOf: (op: Operation) => number,
+  apart: (op: Operation, other: Operation, name: string) => boolean,
   rename: (op: Operation, name: string) => void,
-): Operation[] {
-  const fellBack: Operation[] = [];
+): void {
   const isAction = (op: Operation) =>
     pathNamed.has(op) && !demoted.has(op) && inferAction(op.httpMethod, op.path, apiRootLengthOf(op)) !== null;
   const meeting = new Set(
@@ -2205,29 +2226,46 @@ function yieldActionNames(
     (op) => meeting.has(op) || (isAction(op) && verblessName(op.httpMethod, op.path, apiRootLengthOf(op)) === op.name),
   );
   yielding.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) || comparePaths(a, b) || methodOrder(a, b));
-  // Every name the service holds, kept current as actions are renamed, so a
-  // rename never lands on a name another operation already has — least of
-  // all one on the action's own path, which no later pass looks at again.
-  const taken = new Set(operations.map((op) => op.name));
+  // The actions still to yield, whose current names every one of them gives up.
+  const pending = new Set(yielding);
+  // Every other name the service holds, kept current as actions are renamed,
+  // so a rename never lands on a name another operation already has — least
+  // of all one on the action's own path, which no later pass looks at again.
+  const taken = new Set(operations.filter((op) => !pending.has(op)).map((op) => op.name));
+  // The noun an operation names, read as the shape it has now (qualifierPath):
+  // an action by the path its segment sits on (`Pets` for `/pets/create`),
+  // one that fell back by its whole path. What nameIsFree compares with the
+  // noun a path-named operation holding a name names.
+  const nounOf = (op: Operation): string | null => {
+    const root = apiRootLengthOf(op);
+    const path = qualifierPath(op, root, !demoted.has(op));
+    return inferResourceFromPath(path, root) ?? inferServiceNoun(path, root);
+  };
   // The name each path and verb yielded to, which PUT and PATCH on one path share.
   const yieldedOnPath = new Map<string, string>();
   for (const op of yielding) {
+    pending.delete(op);
     const root = apiRootLengthOf(op);
     const qualified = appendQualifier(op.name, inferServiceNoun(qualifierPath(op, root), root));
     const plain = fallbackOperationName(op.httpMethod, op.path, root, false);
     const onPath = `${inferVerb(op.httpMethod, op.path)} ${op.path}`;
-    // Numbered when both are held, the CRUD operation declared or not, so
-    // declaring it later never moves the action to a number.
-    const next =
-      yieldedOnPath.get(onPath) ??
-      [qualified, plain].find((name) => name !== op.name && !taken.has(name)) ??
-      suffixedName(plain, taken);
+    const free = (name: string) =>
+      name !== op.name &&
+      (!taken.has(name) || nameIsFree([op, ...pending], operations, pathNamed, nounOf, apart, op, name));
+    let next = yieldedOnPath.get(onPath);
+    if (next === undefined && free(qualified)) next = qualified;
+    if (next === undefined) {
+      // Read from here on as the shape it falls back to, by `apart` too.
+      demoted.add(op);
+      // Numbered when both are held, the CRUD operation declared or not, so
+      // declaring it later never moves the action to a number.
+      next = free(plain) ? plain : suffixedName(plain, taken);
+    }
     yieldedOnPath.set(onPath, next);
     rename(op, next);
     taken.add(next);
-    if (next !== qualified) fellBack.push(op);
+    if (next !== qualified) demoted.add(op);
   }
-  return fellBack;
 }
 
 /**
@@ -3170,6 +3208,9 @@ function buildOperation(
 
   const operation: Operation = {
     name: operationName,
+    // The document's operationId as written; the key is omitted when it
+    // declares none, so `name` alone says the operation is path-named.
+    ...(op.operationId ? { operationId: op.operationId } : {}),
     // Keep the summary on its own so emitters can tell it apart from the
     // description; the key is omitted (not set to undefined) when absent.
     ...(summary !== undefined ? { summary } : {}),
@@ -4255,12 +4296,18 @@ function typePickedRequestBody(
     const hasNull = schema.oneOf.some(
       (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
     );
+    // The mapping's targets are read as a field's or a response's inline
+    // union reads them (`inlineMappingTargets`), so the same union carries the
+    // same discriminator at every site.
     const union: TypeRef = {
       kind: 'union',
       variants,
       ...(schema.discriminator
         ? {
-            discriminator: { property: schema.discriminator.propertyName, mapping: schema.discriminator.mapping ?? {} },
+            discriminator: {
+              property: schema.discriminator.propertyName,
+              mapping: inlineMappingTargets(schema.discriminator.mapping),
+            },
           }
         : {}),
     };
