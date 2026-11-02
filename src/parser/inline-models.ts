@@ -2275,14 +2275,17 @@ export function declareProperty(
  * the merged model's own — whatever a variant says: a
  * variant can only narrow what every instance
  * carries. A property only variants declare is typed as the union of its
- * distinct declarations (`unionOfDeclarations`): one declaration, or several
- * of one shape, is that declaration (the first, carrying only the flags,
- * documentation and limits they agree on); several shapes become a `oneOf` of
- * them, which the type builder reads as it reads any inline union — string
- * consts pinned differently per variant (`kind: cat` | `kind: dog`) collapse
- * to an inline enum, other literals and types to a union — so the field is
- * never typed from one variant's value alone. Such a property is marked
- * `conditional`: it holds on a branch, so its `const` does not name a
+ * distinct declarations (`unionOfDeclarations`; the flags, documentation
+ * and limits make no shape, at a declaration's top level or inside its
+ * array items and map values): one declaration, or several of one shape, is
+ * that declaration (the first, carrying only the flags, documentation and
+ * limits they agree on); several shapes become a `oneOf` of them, each the
+ * first declaration of its shape, deprecated only when every declaration of
+ * the shape is, which the type builder reads as it reads any inline union —
+ * string consts pinned differently per variant (`kind: cat` | `kind: dog`)
+ * collapse to an inline enum, other literals and types to a union — so the
+ * field is never typed from one variant's value alone. Such a property is
+ * marked `conditional`: it holds on a branch, so its `const` does not name a
  * response body (`extractDirectResource`, workos/oagen#396). Properties keep
  * the order they were first declared in.
  *
@@ -2401,7 +2404,8 @@ export function mergeAllOfMembers(
  * documentation `buildFieldFromSchema` reads and the validation keywords
  * `extractConstraints` reads — which `unionOfDeclarations` lifts onto a
  * combined declaration when every declaration agrees on them, and which
- * therefore make no shape of their own there.
+ * therefore make no shape of their own there, at a declaration's top level
+ * or inside its array items and map values (`withoutLiftedKeywords`).
  */
 const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'readOnly',
@@ -2429,13 +2433,77 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'uniqueItems',
   'dependentRequired',
 ];
+const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+
+/**
+ * The keywords under which a declaration nests the one schema its array
+ * items or map values are typed from, where the IR carries none of
+ * `LIFTED_DECLARATION_KEYWORDS` (`ArrayType`, `MapType`): the lifted
+ * keywords written there make no shape either (`withoutLiftedKeywords`),
+ * and `deprecated` there follows the shape's agreement (`shapeVariant`).
+ */
+const NESTED_DECLARATION_KEYWORDS = ['items', 'additionalProperties'] as const;
+
+/**
+ * `schema` as `unionOfDeclarations` compares it: without
+ * `LIFTED_DECLARATION_KEYWORDS` at its top level, and without them inside
+ * its `items` and `additionalProperties` schemas, recursively
+ * (`NESTED_DECLARATION_KEYWORDS`), since the IR carries none of them for
+ * an array's items or a map's values: `{ type: array, items: { type:
+ * string } }` beside `{ type: array, items: { type: string, readOnly:
+ * true } }`, or with `maxLength: 5` on the items, is one `string[]`
+ * (workos/oagen#397 review: it was `(string[] | string[])`, and two maps
+ * `(map | map)`). Inside `properties` they stay: a field reads them, so two
+ * objects whose `t` differs in `readOnly` are two shapes.
+ */
+function withoutLiftedKeywords(schema: SchemaObject): SchemaObject {
+  const stripped = omitKeys(schema, LIFTED_DECLARATION_KEYWORD_SET);
+  for (const keyword of NESTED_DECLARATION_KEYWORDS) {
+    const nested = schema[keyword];
+    if (isRecord(nested)) stripped[keyword] = withoutLiftedKeywords(nested);
+  }
+  return stripped;
+}
+
+/**
+ * The schema that stands for one shape in `unionOfDeclarations`: the first
+ * declaration of the shape (`group`, in order), as written, except that
+ * `deprecated: true` is kept only when every declaration of the shape has
+ * it, at the top level and inside `items` and `additionalProperties` alike
+ * (`NESTED_DECLARATION_KEYWORDS`): one live declaration means the shape is
+ * not deprecated, as the single-shape outcome already reads it. Before
+ * (workos/oagen#397 review), the first declaration decided, so `[{ object
+ * t, deprecated }, { object t }, { integer }]` gave a deprecated
+ * `<Model>Kind` and the swapped order a live one, with `diffSpecs`
+ * reporting a `deprecatedChanged` between them; `{ const: cat, deprecated
+ * }`, `{ const: cat }` and `{ const: dog }` gave a deprecated `CAT`. Every
+ * other keyword stays the first declaration's, so an enum member or a
+ * variant model still carries its own description and limits.
+ */
+function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
+  const first = group[0]!;
+  let variant = first;
+  if (first.deprecated === true && !group.every((declaration) => declaration.deprecated === true)) {
+    variant = omitKeys(first, new Set(['deprecated']));
+  }
+  for (const keyword of NESTED_DECLARATION_KEYWORDS) {
+    const nested = first[keyword];
+    if (!isRecord(nested)) continue;
+    const agreed = shapeVariant(group.map((declaration) => declaration[keyword]).filter(isRecord));
+    if (agreed !== nested) variant = { ...variant, [keyword]: agreed };
+  }
+  return variant;
+}
 
 /**
  * The one schema that types a property several variants declare: the first
  * declaration when every declaration has the same shape (`schemaShapeKey`
- * of the declaration less `LIFTED_DECLARATION_KEYWORDS`, so documentation,
- * flags and limits ignored), else a `oneOf` of the distinct shapes, each the
- * first declaration of its shape, in order. See `mergeAllOfMembers`.
+ * of the declaration less `LIFTED_DECLARATION_KEYWORDS`, at its top level
+ * and inside its array items and map values — `withoutLiftedKeywords` — so
+ * documentation, flags and limits ignored), else a `oneOf` of the distinct
+ * shapes, each the first declaration of its shape, in order, deprecated only
+ * when every declaration of that shape is (`shapeVariant`). See
+ * `mergeAllOfMembers`.
  *
  * A field reads its flags, documentation and limits from its own schema
  * (`buildFieldFromSchema`, `extractConstraints`), never from a union's
@@ -2450,14 +2518,18 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
  * and keys in place of its own, so two `type: 'string'` declarations, one
  * `readOnly` or documented otherwise, are a plain `string` field
  * (workos/oagen#397: they were `(string | string)`, or the first's
- * description). The declarations themselves are kept as
- * written inside the `oneOf`, so an enum member or a variant model still
- * carries its own description and limits. A `null` any declaration admits
- * (`nullable: true`, or a `type` list naming `null`) is a value the property
- * takes on that branch, so the union admits it: the admission moves to a
- * `{ type: 'null' }` variant of the `oneOf` — the one place the type builder
- * reads a union's nullability from, and one a union of string consts would
- * otherwise lose when it collapses to an enum — and off the declarations.
+ * description). The declarations themselves are kept as written inside the
+ * `oneOf`, so an enum member or a variant model still carries its own
+ * description and limits — `deprecated` apart, which a shape's variant keeps
+ * only when every declaration of the shape has it, so a `oneOf` of two
+ * object declarations and an integer, the first object deprecated and the
+ * second not, types a live variant model whichever object comes first. A
+ * `null` any declaration admits (`nullable: true`, or a `type` list naming
+ * `null`) is a value the property takes on that branch, so the union admits
+ * it: the admission moves to a `{ type: 'null' }` variant of the `oneOf` —
+ * the one place the type builder reads a union's nullability from, and one
+ * a union of string consts would otherwise lose when it collapses to an
+ * enum — and off the declarations.
  */
 function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
@@ -2469,14 +2541,17 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
   // alone and kept the `1`).
   const extensions = agreedExtensions(declarations);
   const agreed = agreedDeclarationKeys(declarations, LIFTED_DECLARATION_KEYWORDS);
-  // The keywords the field reads by that agreement make no shape.
-  const lifted = new Set(LIFTED_DECLARATION_KEYWORDS);
-  const distinct = new Map<string, SchemaObject>();
+  // The keywords the field reads by that agreement make no shape, nor do
+  // they inside array items or map values; every declaration of a shape is
+  // kept, in order, for the shape's own `deprecated` agreement.
+  const groups = new Map<string, SchemaObject[]>();
   for (const declaration of declarations) {
-    const key = schemaShapeKey(omitKeys(declaration, lifted));
-    if (!distinct.has(key)) distinct.set(key, declaration);
+    const key = schemaShapeKey(withoutLiftedKeywords(declaration));
+    const group = groups.get(key);
+    if (group) group.push(declaration);
+    else groups.set(key, [declaration]);
   }
-  const shapes = [...distinct.values()];
+  const shapes = [...groups.values()].map(shapeVariant);
   // One shape: the first declaration, carrying the agreed keywords and
   // extensions in place of its own.
   if (shapes.length === 1) {
