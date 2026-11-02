@@ -30,6 +30,7 @@ import {
 } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
+import { collapseErrorBodies } from './collapse-error-bodies.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServers, type RawServerObject } from './servers.js';
 import { externalDocsEntry, type RawExternalDocs } from './external-docs.js';
@@ -69,6 +70,13 @@ export interface ParseOptions {
    * and over name-based detection (see `PaginationHint`).
    */
   operationHints?: Record<string, OperationHint>;
+  /**
+   * Fold the models materialized for inline error bodies onto shared models
+   * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
+   * see `collapseErrorBodies`). On by default; `false` keeps one model per
+   * operation and status code (`<Op>Error<code>`).
+   */
+  collapseErrorBodies?: boolean;
   /**
    * Pre-IR overlay applied to the bundled OpenAPI document before any IR
    * extraction runs. Use this when the upstream spec can't be changed but you
@@ -300,12 +308,22 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   const finalModels = collapseJsonSuffixModels(fieldMergedModels, services, webhooks, enums, componentNames);
   applyFieldHints(finalModels, options?.fieldHints);
+  // The inline error bodies, one model per operation and status code until here,
+  // fold onto shared models named by shape (`ErrorBody`, `ErrorBodyWithCode`),
+  // their pinned `code`s gathered into one enum the collectors below lift.
+  const collapsedModels =
+    options?.collapseErrorBodies === false
+      ? finalModels
+      : collapseErrorBodies({ services, webhooks, models: finalModels }, { componentNames, componentSites, enums });
+  // A hint keyed by a shared model's name (`ErrorBodyWithCode`) applies here;
+  // one keyed by a folded model's name was applied above and rode along.
+  applyFieldHints(collapsedModels, options?.fieldHints);
   // Each collector steps a renamed enum around every model name as well as
   // every enum's, so the merge passes above (which mint against every enum
   // name an `EnumRef` carries) and the collectors never meet on one name.
-  collectInlineEnumsFromModels(finalModels, enums);
-  collectInlineEnumsFromOperations(services, enums, componentSites, finalModels, componentNames);
-  collectInlineEnumsFromWebhooks(webhooks, enums, finalModels);
+  collectInlineEnumsFromModels(collapsedModels, enums);
+  collectInlineEnumsFromOperations(services, enums, componentSites, collapsedModels, componentNames);
+  collectInlineEnumsFromWebhooks(webhooks, enums, collapsedModels);
 
   const auth = extractAuthSchemes(spec.components?.securitySchemes);
 
@@ -321,7 +339,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     // Omitted, not an empty list, for a document without webhooks so its IR
     // keeps the shape it had before the key existed.
     ...(webhooks.length > 0 ? { webhooks } : {}),
-    models: finalModels,
+    models: collapsedModels,
     enums,
     auth,
     security: extractSecurityRequirements(spec.security, 'the document'),

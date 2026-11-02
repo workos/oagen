@@ -108,6 +108,82 @@ describe('diffModels — a variant added to an inline union (issue #428)', () =>
     }
   });
 
+  it('reads a variant that is itself a union, widened by the same rule, as kept (#458 review)', () => {
+    /** An inner `oneOf`, undiscriminated, as the parser reads a union nested in a union. */
+    const inner = (variants: TypeRef[], compositionKind: UnionType['compositionKind'] = 'oneOf'): UnionType => ({
+      kind: 'union',
+      variants,
+      compositionKind,
+    });
+    const arrayOf = (items: TypeRef): TypeRef => ({ kind: 'array', items });
+    // `pet: { oneOf: [Cat, { oneOf: [Dog, Fish] }] }` gaining Bird in the inner oneOf.
+    expect(petChanges(union([cat, inner([dog, fish])]), union([cat, inner([dog, fish, bird])]))).toEqual([
+      additive('variant Bird added'),
+    ]);
+    // What the inner union gained is listed with what the outer one did, in order.
+    expect(petChanges(union([cat, inner([dog, fish])]), union([cat, inner([dog, bird, fish]), integer]))).toEqual([
+      additive('variants Bird, integer added'),
+    ]);
+    expect(petChanges(union([inner([dog, fish]), cat]), union([string, inner([dog, fish, bird]), cat]))).toEqual([
+      additive('variants string, Bird added'),
+    ]);
+    // Under the same wrapper, and however deep.
+    expect(
+      petChanges(union([cat, arrayOf(inner([dog, fish]))]), union([cat, arrayOf(inner([dog, fish, bird]))])),
+    ).toEqual([additive('variant Bird added')]);
+    expect(
+      petChanges(union([cat, inner([dog, inner([fish])])]), union([cat, inner([dog, inner([fish, bird])])])),
+    ).toEqual([additive('variant Bird added')]);
+    // A mapping key the inner union's new variant brings is part of its addition.
+    expect(
+      petChanges(
+        mapped([cat, inner([dog, fish])], { cat: 'Cat', dog: 'Dog', fish: 'Fish' }),
+        mapped([cat, inner([dog, fish, bird])], { cat: 'Cat', dog: 'Dog', fish: 'Fish', bird: 'Bird' }),
+      ),
+    ).toEqual([additive('variant Bird added')]);
+    // The reverse, and every other change to the inner union, stays breaking.
+    const cases: Array<[string, TypeRef, TypeRef]> = [
+      ['the inner variant removed', union([cat, inner([dog, fish, bird])]), union([cat, inner([dog, fish])])],
+      ['the inner variant swapped', union([cat, inner([dog, fish])]), union([cat, inner([dog, bird])])],
+      [
+        'the inner variants reordered beside the addition',
+        union([cat, inner([dog, fish])]),
+        union([cat, inner([fish, dog, bird])]),
+      ],
+      ['the widened inner union moved', union([cat, inner([dog, fish])]), union([inner([dog, fish, bird]), cat])],
+      ['the inner union removed', union([cat, inner([dog, fish])]), union([cat])],
+      [
+        "the inner union's keyword changed beside the addition",
+        union([cat, inner([dog, fish])]),
+        union([cat, inner([dog, fish, bird], 'anyOf')]),
+      ],
+      [
+        // `typeRefsEqual` passes over the keyword, so the inner union would read as the same variant (Greptile).
+        "the inner union's keyword changed beside an outer addition",
+        union([cat, inner([dog, fish], 'anyOf')]),
+        union([cat, inner([dog, fish]), bird]),
+      ],
+      [
+        "a wrapped inner union's keyword changed beside an outer addition",
+        union([cat, arrayOf(inner([dog, fish], 'anyOf'))]),
+        union([cat, arrayOf(inner([dog, fish])), bird]),
+      ],
+      [
+        "an inner union's own inner union's keyword changed beside an outer addition",
+        union([cat, inner([dog, inner([fish, string], 'anyOf')])]),
+        union([cat, inner([dog, inner([fish, string])]), bird]),
+      ],
+      [
+        "a key for a kept variant beside the inner union's addition",
+        mapped([cat, inner([dog, fish])], { cat: 'Cat', dog: 'Dog', fish: 'Fish' }),
+        mapped([cat, inner([dog, fish, bird])], { cat: 'Cat', dog: 'Dog', fish: 'Fish', bird: 'Dog' }),
+      ],
+    ];
+    for (const [label, before, after] of cases) {
+      expect([label, petChanges(before, after)]).toEqual([label, [breaking]]);
+    }
+  });
+
   it('keeps every other change to an inline union a breaking type change', () => {
     const cases: Array<[string, TypeRef, TypeRef]> = [
       ['a variant removed', union([cat, dog, bird]), union([cat, dog])],
@@ -236,6 +312,24 @@ describe('diffOperations — a variant added to an inline union body (issue #428
     const { responseStatusCode: _code, ...noSuccess } = getPet(union([cat, dog, bird]));
     expect(flags(diffOperations('Pets', [getPet(union([cat, dog]))], [noSuccess]))).toEqual([
       'getPet responseChanged=true requestBodyChanged=false: breaking',
+    ]);
+  });
+
+  it('reads a body whose variant is itself a union that only gained variants as widened (#458 review)', () => {
+    const inner = (variants: TypeRef[]): TypeRef => ({ kind: 'union', variants, compositionKind: 'oneOf' });
+    const before = union([cat, inner([dog, fish])]);
+    const after = union([cat, inner([dog, fish, bird])]);
+    expect(flags(diffOperations('Pets', [getPet(before)], [getPet(after)]))).toEqual([
+      'getPet responseChanged=true requestBodyChanged=false: additive',
+    ]);
+    expect(flags(diffOperations('Pets', [createPet(before)], [createPet(after)]))).toEqual([
+      'createPet responseChanged=false requestBodyChanged=true: additive',
+    ]);
+    expect(flags(diffOperations('Pets', [getPet(after)], [getPet(before)]))).toEqual([
+      'getPet responseChanged=true requestBodyChanged=false: breaking',
+    ]);
+    expect(flags(diffOperations('Pets', [createPet(after)], [createPet(before)]))).toEqual([
+      'createPet responseChanged=false requestBodyChanged=true: breaking',
     ]);
   });
 });
@@ -382,5 +476,83 @@ describe("diffSpecs — the issue's documents, end to end (issue #428)", () => {
       changes: ['Owner pet variant integer added: additive'],
       breaking: 0,
     });
+  });
+
+  it('reads a request body with a written mapping as a field or a response does, so the key the variant brings is additive (#458 review)', async () => {
+    const mappedUnion = (names: string[]) => ({
+      oneOf: names.map((name) => ({ $ref: ref(name) })),
+      discriminator: {
+        propertyName: 'kind',
+        mapping: Object.fromEntries(names.map((name) => [name.toLowerCase(), ref(name)])),
+      },
+    });
+    const oldSpec = await parse('mapped-request-old', requestDocument(mappedUnion(['Cat', 'Dog'])));
+    const newSpec = await parse('mapped-request-new', requestDocument(mappedUnion(['Cat', 'Dog', 'Bird'])));
+    // The request-body parser strips `#/components/schemas/` as the field path does, so the key names the new variant.
+    const createPet = newSpec.services.flatMap((s) => s.operations).find((op) => op.name === 'createPet');
+    expect(createPet?.requestBody).toMatchObject({
+      discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' } },
+    });
+    expect(summarize(diffSpecs(oldSpec, newSpec))).toEqual({
+      changes: ['createPet requestBodyChanged: additive'],
+      breaking: 0,
+    });
+    expect(summarize(diffSpecs(newSpec, oldSpec))).toEqual({
+      changes: ['createPet requestBodyChanged: breaking'],
+      breaking: 1,
+    });
+    // The same union written as a field and as a response.
+    const asField = [
+      await parse('mapped-field-old', fieldDocument(mappedUnion(['Cat', 'Dog']))),
+      await parse('mapped-field-new', fieldDocument(mappedUnion(['Cat', 'Dog', 'Bird']))),
+    ] as const;
+    expect(summarize(diffSpecs(...asField))).toEqual({
+      changes: ['Owner pet variant Bird added: additive'],
+      breaking: 0,
+    });
+    const asResponse = [
+      await parse(
+        'mapped-response-old',
+        document({ '/pets/{id}': getById('getPet', mappedUnion(['Cat', 'Dog'])) }, {}),
+      ),
+      await parse(
+        'mapped-response-new',
+        document({ '/pets/{id}': getById('getPet', mappedUnion(['Cat', 'Dog', 'Bird'])) }, {}),
+      ),
+    ] as const;
+    expect(summarize(diffSpecs(...asResponse))).toEqual({ changes: ['getPet responseChanged: additive'], breaking: 0 });
+  });
+
+  it("reads a variant added to a union nested in a union as that union's widening, at every site (#458 review)", async () => {
+    // `pet: { oneOf: [Cat, { oneOf: [Dog, Fish] }] }` gaining Bird in the inner oneOf.
+    const nested = (inner: string[]) => ({
+      oneOf: [{ $ref: ref('Cat') }, { oneOf: inner.map((name) => ({ $ref: ref(name) })) }],
+    });
+    const withFish = (doc: ReturnType<typeof document>) => ({
+      ...doc,
+      components: { schemas: { ...doc.components.schemas, Fish: variant('fish') } },
+    });
+    const sites: Array<[string, (schema: object) => ReturnType<typeof document>, string, string]> = [
+      ['field', fieldDocument, 'Owner pet variant Bird added', 'Owner pet type changed'],
+      [
+        'response',
+        (schema) => document({ '/pets/{id}': getById('getPet', schema) }, {}),
+        'getPet responseChanged',
+        'getPet responseChanged',
+      ],
+      ['request', requestDocument, 'createPet requestBodyChanged', 'createPet requestBodyChanged'],
+    ];
+    for (const [site, build, added, reverse] of sites) {
+      const oldSpec = await parse(`nested-${site}-old`, withFish(build(nested(['Dog', 'Fish']))));
+      const newSpec = await parse(`nested-${site}-new`, withFish(build(nested(['Dog', 'Fish', 'Bird']))));
+      expect([site, summarize(diffSpecs(oldSpec, newSpec))]).toEqual([
+        site,
+        { changes: [`${added}: additive`], breaking: 0 },
+      ]);
+      expect([site, summarize(diffSpecs(newSpec, oldSpec))]).toEqual([
+        site,
+        { changes: [`${reverse}: breaking`], breaking: 1 },
+      ]);
+    }
   });
 });
