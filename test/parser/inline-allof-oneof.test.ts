@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
 import { extractSchemas, schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
@@ -980,8 +981,10 @@ describe('round 1: recursive components, shared schemas, conflicting variant dec
     const models = modelsByName(ir);
     const request = models['CreatePetRequest']!;
     const typeOf = (field: string): TypeRef | undefined => request.fields.find((f) => f.name === field)?.type;
-    // Documentation does not make a second shape: the first declaration stands.
-    expect(request.fields.find((f) => f.name === 'same')).toMatchObject({ type: str, description: 'first' });
+    // Documentation does not make a second shape: one declaration types the
+    // field, without the description the two disagree on (#397).
+    expect(request.fields.find((f) => f.name === 'same')).toMatchObject({ type: str });
+    expect(request.fields.find((f) => f.name === 'same')?.description).toBeUndefined();
     // Two literals: a union of them, never the first alone.
     expect(typeOf('flag')).toEqual({
       kind: 'union',
@@ -1170,6 +1173,279 @@ describe('round 2: keywords the declarations of a combined property agree on', (
     );
     expect(merged.properties).toEqual([
       { name: 'kind', origin: null, schema: { readOnly: true, description: 'Kind', oneOf: [cat, dog] } },
+    ]);
+  });
+});
+
+describe('declarations that differ only in a keyword the field reads by agreement are one shape (#397)', () => {
+  /** The issue's `POST /pets` 200 body: a required `name`, and `kind` declared once by each variant. */
+  const createPet = (...kinds: SchemaObject[]) => ({
+    openapi: '3.1.0',
+    info,
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          responses: {
+            '200': jsonResponse({
+              allOf: [
+                { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                { oneOf: kinds.map((kind) => ({ type: 'object', properties: { kind } })) },
+              ],
+            }),
+          },
+        },
+      },
+    },
+  });
+  const kindOf = (ir: ApiSpec) => modelsByName(ir)['CreatePetResponse']?.fields.find((f) => f.name === 'kind');
+
+  it("types the issue's documents as one string with no keyword the declarations dispute, so none of them changes the field", async () => {
+    const first: SchemaObject = { type: 'string', description: 'A' };
+    const same = await parseWithoutWarnings(createPet(first, { type: 'string', description: 'B' }));
+    // `A` and `B` disagree, so the description is nobody's.
+    expect(kindOf(same)).toEqual({ name: 'kind', type: str, required: false });
+    for (const second of [
+      { type: 'string', readOnly: true },
+      { type: 'string', writeOnly: true },
+      { type: 'string', default: 'b' },
+      { type: 'string', deprecated: true },
+      { type: 'string', maxLength: 5 },
+      { type: 'string', example: 'b' },
+    ]) {
+      const ir = await parseWithoutWarnings(createPet(first, second));
+      // Not `(string | string)`, and without what only one declaration says.
+      expect(kindOf(ir), JSON.stringify(second)).toEqual({ name: 'kind', type: str, required: false });
+      // `oagen diff --old same.json --new <this>`: nothing changed.
+      expect(diffSpecs(same, ir).changes, JSON.stringify(second)).toEqual([]);
+    }
+    expectSound(same, []);
+  });
+
+  it('keeps on one shape every keyword the declarations write the same way, as a union of shapes does', async () => {
+    const shared = { description: 'The kind', readOnly: true, default: 'cat', deprecated: true, maxLength: 3 };
+    const ir = await parseWithoutWarnings(
+      createPet({ type: 'string', ...shared }, { type: 'string', ...shared, example: 'dog' }),
+    );
+    expect(kindOf(ir)).toEqual({
+      name: 'kind',
+      type: str,
+      required: false,
+      description: 'The kind',
+      readOnly: true,
+      default: 'cat',
+      deprecated: true,
+      constraints: { maxLength: 3 },
+    });
+    expectSound(ir, []);
+  });
+
+  it('gives an inline enum or object of one shape only what its declarations agree on, as one enum or model', async () => {
+    const values = ['a', 'b'];
+    const enumOf = (ir: ApiSpec) => ir.enums.find((e) => e.name === 'CreatePetResponseKind');
+    const kindEnum = { kind: 'enum', name: 'CreatePetResponseKind', values };
+    // The text and the `x-since` the two declarations dispute are neither the
+    // field's nor the enum's.
+    const disputed = await parseWithoutWarnings(
+      createPet(
+        { type: 'string', enum: values, description: 'A', 'x-since': '1.0' },
+        { type: 'string', enum: values, description: 'B', 'x-since': '2.0' },
+      ),
+    );
+    expect(kindOf(disputed)).toEqual({ name: 'kind', type: kindEnum, required: false });
+    expect(enumOf(disputed)).not.toHaveProperty('description');
+    expect(enumOf(disputed)).not.toHaveProperty('extensions');
+    expect(enumOf(disputed)?.values.map((v) => v.value)).toEqual(values);
+    // Text both write is both the field's and the enum's.
+    const agreed = await parseWithoutWarnings(
+      createPet(
+        { type: 'string', enum: values, description: 'Kinds' },
+        { type: 'string', enum: values, description: 'Kinds', readOnly: true },
+      ),
+    );
+    expect(kindOf(agreed)).toEqual({ name: 'kind', type: kindEnum, required: false, description: 'Kinds' });
+    expect(enumOf(agreed)?.description).toBe('Kinds');
+    expectSound(disputed, []);
+
+    // An object deprecated on one branch only is one live model, not a
+    // deprecated `CreatePetResponseKind` beside a live `CreatePetResponseKind2`.
+    const size = { type: 'object', properties: { size: { type: 'integer' } } };
+    const objects = await parseWithoutWarnings(createPet({ ...size, deprecated: true, description: 'A' }, size));
+    expect(kindOf(objects)).toEqual({ name: 'kind', type: model('CreatePetResponseKind'), required: false });
+    expect(objects.models.map((m) => m.name).sort()).toEqual(['CreatePetResponse', 'CreatePetResponseKind']);
+    expect(modelsByName(objects)['CreatePetResponseKind']).toEqual({
+      name: 'CreatePetResponseKind',
+      fields: [{ name: 'size', type: { kind: 'primitive', type: 'integer' }, required: false }],
+    });
+    expectSound(objects, []);
+  });
+
+  it('reads each shape once in a union of shapes, whatever keyword the field reads its repeats differ in', async () => {
+    const ir = await parseWithoutWarnings(
+      createPet(
+        { type: 'string', readOnly: true },
+        { type: 'string', default: 'b' },
+        { type: 'integer', readOnly: true },
+      ),
+    );
+    expect(kindOf(ir)).toEqual({
+      name: 'kind',
+      type: { kind: 'union', compositionKind: 'oneOf', variants: [str, { kind: 'primitive', type: 'integer' }] },
+      required: false,
+    });
+    expectSound(ir, []);
+  });
+
+  it('keeps a shape deprecated in a union of shapes only when every declaration of the shape is (#484 review)', async () => {
+    const live: SchemaObject = { type: 'object', properties: { t: { type: 'string' } } };
+    const deprecated: SchemaObject = { ...live, deprecated: true };
+    const integer: SchemaObject = { type: 'integer' };
+    const kindModel = model('CreatePetResponseKind');
+    const union = {
+      kind: 'union',
+      compositionKind: 'oneOf',
+      variants: [kindModel, { kind: 'primitive', type: 'integer' }],
+    };
+    // Beside a third shape, the union branch: one live `CreatePetResponseKind`
+    // whichever object comes first, and no `CreatePetResponseKind2`.
+    const deprecatedFirst = await parseWithoutWarnings(createPet(deprecated, live, integer));
+    const liveFirst = await parseWithoutWarnings(createPet(live, deprecated, integer));
+    for (const ir of [deprecatedFirst, liveFirst]) {
+      expect(kindOf(ir)).toEqual({ name: 'kind', type: union, required: false });
+      expect(ir.models.map((m) => m.name).sort()).toEqual(['CreatePetResponse', 'CreatePetResponseKind']);
+      expect(modelsByName(ir)['CreatePetResponseKind']).not.toHaveProperty('deprecated');
+      expectSound(ir, []);
+    }
+    // `oagen diff` between the two orders: nothing changed.
+    expect(diffSpecs(deprecatedFirst, liveFirst).changes).toEqual([]);
+    // Without the third shape, the single-shape branch reads the same way.
+    const deprecatedFirstAlone = await parseWithoutWarnings(createPet(deprecated, live));
+    const liveFirstAlone = await parseWithoutWarnings(createPet(live, deprecated));
+    for (const ir of [deprecatedFirstAlone, liveFirstAlone]) {
+      expect(kindOf(ir)).toEqual({ name: 'kind', type: kindModel, required: false });
+      expect(modelsByName(ir)['CreatePetResponseKind']).not.toHaveProperty('deprecated');
+    }
+    expect(diffSpecs(deprecatedFirstAlone, liveFirstAlone).changes).toEqual([]);
+    // Every declaration of the shape deprecated: so is its variant model.
+    const both = await parseWithoutWarnings(createPet(deprecated, { ...deprecated, description: 'Old' }, integer));
+    expect(kindOf(both)).toEqual({ name: 'kind', type: union, required: false });
+    expect(modelsByName(both)['CreatePetResponseKind']?.deprecated).toBe(true);
+  });
+
+  it('keeps an enum member deprecated only when every declaration of its const is (#484 review)', async () => {
+    const cat: SchemaObject = { type: 'string', const: 'cat' };
+    const deprecatedCat: SchemaObject = { ...cat, deprecated: true };
+    const dog: SchemaObject = { type: 'string', const: 'dog' };
+    const membersOf = (ir: ApiSpec) =>
+      ir.enums
+        .find((e) => e.name === 'CreatePetResponseKind')
+        ?.values.map((v) => `${v.value}${v.deprecated ? ' (deprecated)' : ''}`);
+    const deprecatedFirst = await parseWithoutWarnings(createPet(deprecatedCat, cat, dog));
+    const liveFirst = await parseWithoutWarnings(createPet(cat, deprecatedCat, dog));
+    for (const ir of [deprecatedFirst, liveFirst]) {
+      expect(kindOf(ir)).toEqual({
+        name: 'kind',
+        type: { kind: 'enum', name: 'CreatePetResponseKind', values: ['cat', 'dog'] },
+        required: false,
+      });
+      expect(membersOf(ir)).toEqual(['cat', 'dog']);
+    }
+    expect(diffSpecs(deprecatedFirst, liveFirst).changes).toEqual([]);
+    const both = await parseWithoutWarnings(createPet(deprecatedCat, deprecatedCat, dog));
+    expect(membersOf(both)).toEqual(['cat (deprecated)', 'dog']);
+    // At the schema level, with and without the third declaration: the first
+    // declaration of the shape, less the `deprecated` the shape disputes.
+    const mergedKind = (...kinds: SchemaObject[]) =>
+      mergeAllOfMembers({ allOf: [{ oneOf: kinds.map((kind) => ({ properties: { kind } })) }] }, undefined)
+        .properties[0]?.schema;
+    expect(mergedKind(deprecatedCat, cat, dog)).toEqual({ oneOf: [cat, dog] });
+    expect(mergedKind(cat, deprecatedCat, dog)).toEqual({ oneOf: [cat, dog] });
+    expect(mergedKind(deprecatedCat, cat)).toEqual(cat);
+    expect(mergedKind(cat, deprecatedCat)).toEqual(cat);
+    expect(mergedKind(deprecatedCat, deprecatedCat, dog)).toEqual({ oneOf: [deprecatedCat, dog] });
+  });
+
+  it('ignores the lifted keywords inside array items and map values, where the IR carries none (#484 review)', async () => {
+    const strings: SchemaObject = { type: 'array', items: { type: 'string' } };
+    const stringArray = { kind: 'array', items: str };
+    const plain = await parseWithoutWarnings(createPet(strings, strings));
+    expect(kindOf(plain)).toEqual({ name: 'kind', type: stringArray, required: false });
+    for (const items of [
+      { type: 'string', readOnly: true },
+      { type: 'string', maxLength: 5 },
+      { type: 'string', default: 'a', description: 'One' },
+    ]) {
+      const other: SchemaObject = { type: 'array', items };
+      for (const declarations of [
+        [strings, other],
+        [other, strings],
+      ]) {
+        const ir = await parseWithoutWarnings(createPet(...declarations));
+        // Not `(string[] | string[])`.
+        expect(kindOf(ir), JSON.stringify(declarations)).toEqual({ name: 'kind', type: stringArray, required: false });
+        // `oagen diff` against the two plain declarations: nothing changed.
+        expect(diffSpecs(plain, ir).changes, JSON.stringify(declarations)).toEqual([]);
+      }
+    }
+    // At any depth.
+    const nested = await parseWithoutWarnings(
+      createPet(
+        { type: 'array', items: strings },
+        { type: 'array', items: { type: 'array', items: { type: 'string', readOnly: true } } },
+      ),
+    );
+    expect(kindOf(nested)?.type).toEqual({ kind: 'array', items: stringArray });
+    // Map values the same way.
+    const map: SchemaObject = { type: 'object', additionalProperties: { type: 'string' } };
+    const maps = await parseWithoutWarnings(createPet(map, map));
+    const readOnlyValues = await parseWithoutWarnings(
+      createPet(map, { type: 'object', additionalProperties: { type: 'string', readOnly: true } }),
+    );
+    expect(kindOf(maps)).toEqual({ name: 'kind', type: { kind: 'map', valueType: str }, required: false });
+    expect(kindOf(readOnlyValues)).toEqual(kindOf(maps));
+    expect(diffSpecs(maps, readOnlyValues).changes).toEqual([]);
+    // Items of an object shape deprecated on one branch only: one live
+    // model, whichever declaration comes first.
+    const object: SchemaObject = { type: 'object', properties: { t: { type: 'string' } } };
+    const deprecatedFirst = await parseWithoutWarnings(
+      createPet({ type: 'array', items: { ...object, deprecated: true } }, { type: 'array', items: object }),
+    );
+    const liveFirst = await parseWithoutWarnings(
+      createPet({ type: 'array', items: object }, { type: 'array', items: { ...object, deprecated: true } }),
+    );
+    for (const ir of [deprecatedFirst, liveFirst]) {
+      expect(kindOf(ir)?.type).toEqual({ kind: 'array', items: model('CreatePetResponseKind') });
+      expect(modelsByName(ir)['CreatePetResponseKind']).not.toHaveProperty('deprecated');
+      expectSound(ir, []);
+    }
+    expect(diffSpecs(deprecatedFirst, liveFirst).changes).toEqual([]);
+    // Inside `properties` a field reads them, so there they still make a shape.
+    const withT = (t: SchemaObject): SchemaObject => ({ type: 'object', properties: { t } });
+    const fields = await parseWithoutWarnings(
+      createPet(withT({ type: 'string' }), withT({ type: 'string', readOnly: true })),
+    );
+    expect(fields.models.map((m) => m.name).sort()).toEqual([
+      'CreatePetResponse',
+      'CreatePetResponseKind',
+      'CreatePetResponseKind2',
+    ]);
+    expectSound(fields, []);
+  });
+
+  it('drops from one shape only the lifted keywords the declarations dispute, and still tells apart what types them', () => {
+    const mergedKind = (...kinds: SchemaObject[]) =>
+      mergeAllOfMembers({ allOf: [{ oneOf: kinds.map((kind) => ({ properties: { kind } })) }] }, undefined).properties;
+    expect(
+      mergedKind(
+        { type: 'string', format: 'uuid', readOnly: true, description: 'A' },
+        { type: 'string', format: 'uuid', readOnly: true, description: 'B', default: 'x' },
+      ),
+    ).toEqual([{ name: 'kind', origin: null, schema: { type: 'string', format: 'uuid', readOnly: true } }]);
+    // A `format` types the declaration, as a `const` or an `enum` does: still two shapes.
+    const uuid: SchemaObject = { type: 'string', format: 'uuid', readOnly: true };
+    const plain: SchemaObject = { type: 'string', readOnly: true, description: 'Plain' };
+    expect(mergedKind(uuid, plain)).toEqual([
+      { name: 'kind', origin: null, schema: { readOnly: true, oneOf: [uuid, plain] } },
     ]);
   });
 });
