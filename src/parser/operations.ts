@@ -4438,11 +4438,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
   if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
 
   const variants = schema.oneOf as SchemaObject[];
-  const discValues: string[] = [];
-  // Each pinned value's text, aligned with `discValues`: the `description` of
-  // the declaration that pins it — the first's, for a value two variants pin,
-  // as an inline `allOf` keeps the first declaration of a repeated shape.
-  const discValueTexts: unknown[] = [];
+  // Every declaration that pins each value, in variant order, the values in
+  // the order they are first pinned.
+  const pins = new Map<string, SchemaObject[]>();
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
@@ -4458,10 +4456,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
           ? dp.enum[0]
           : undefined;
     if (constVal === undefined) return null;
-    if (!discValues.includes(constVal)) {
-      discValues.push(constVal);
-      discValueTexts.push(dp?.description);
-    }
+    const pinning = pins.get(constVal);
+    if (pinning) pinning.push(dp!);
+    else pins.set(constVal, [dp!]);
   }
 
   const variantCount = variants.length;
@@ -4491,18 +4488,31 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
     const declared = declarations.get(name)!;
     properties[name] =
       name === discProp
-        ? // The discriminator collapses to an enum of the pinned values, each
-          // documented by the declaration that pins it, as a `oneOf` of string
-          // consts documents its members (`x-enum-descriptions`, read onto
-          // each `EnumValue`); the enum and the field carry the text and keys
-          // every declaration agrees on (workos/oagen#446: the first
-          // variant's text, which documents one value, was the enum's).
+        ? // The discriminator collapses to an enum of the pinned values: a
+          // `oneOf` of string consts, which gives each `EnumValue` its const's
+          // `description` and `deprecated` (`constUnionEnumMembers`). A value
+          // takes the text of the declaration that pins it — the first's,
+          // for a value two variants pin — and is deprecated only when every
+          // declaration that pins it is, as an inline `allOf` reads a
+          // repeated shape (`shapeVariant`; workos/oagen#501: the flag was
+          // dropped). A lone value stays a one-value `enum`, a literal, where
+          // a `oneOf` of one const would be a union. The enum and the field
+          // carry the text and keys every declaration agrees on
+          // (workos/oagen#446: the first variant's text, which documents one
+          // value, was the enum's).
           {
             type: 'string',
-            enum: discValues,
+            ...(pins.size === 1
+              ? { enum: [...pins.keys()] }
+              : {
+                  oneOf: [...pins].map(([value, pinning]) => ({
+                    const: value,
+                    ...(pinning[0]!.description !== undefined ? { description: pinning[0]!.description } : {}),
+                    ...(pinning.every((dp) => dp.deprecated === true) ? { deprecated: true } : {}),
+                  })),
+                }),
             ...agreedDeclarationKeys(declared, ['description']),
             ...agreedExtensions(declared),
-            'x-enum-descriptions': discValueTexts,
           }
         : withAgreedExtensions(declared[0]!, agreedExtensions(declared));
   }
