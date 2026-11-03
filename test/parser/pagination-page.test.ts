@@ -1203,6 +1203,21 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
         { ...schemas, Meta2: referenced },
       ),
     ).toBeUndefined();
+    // Decided by shape, not object identity (Greptile): one union object a
+    // `transformSpec` shares between a component and the inline `allOf` is
+    // written inline there, so the model reads it and the override is kept —
+    // whichever of the two sites the walk meets it at first.
+    const shared: SchemaObject = { oneOf: [after, numbered] };
+    expect(
+      bodyEndOfIterationProblem(
+        { kind: 'hasMore', path: 'meta.has_more' },
+        object({
+          data: { type: 'array', items: { type: 'string' } },
+          meta: { allOf: [{ $ref: '#/components/schemas/Shared' }, shared, trace] },
+        }),
+        { ...schemas, Shared: { allOf: [trace, shared] } },
+      ),
+    ).toBeUndefined();
 
     // A field only some variants of each union declare resolves to no field,
     // one segment down too; one a variant types otherwise is not a boolean.

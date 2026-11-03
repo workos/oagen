@@ -5748,6 +5748,42 @@ describe('sentOnlyComponentNames: the components every site the parser reads onl
     expect(sorted(sentOnlyComponentNames(doc(paths, {}, { webhooks: extension })))).toEqual(['Pet']);
   });
 
+  // Greptile (#421 review): the walk read every parameter of the four
+  // locations, so a webhook's `Authorization` header — which the readers
+  // ignore (#414) — or its `path` parameter, which `extractWebhooks` drops,
+  // counted its schema as received, and a component only an operation sends
+  // lost its sent-only standing for a parameter nothing types.
+  it('reads no parameter the readers ignore: an Accept, Content-Type or Authorization header, or a webhook’s path parameter', () => {
+    const param = (name: string, location: string) => ({ name, in: location, schema: ref('Pet') });
+    const ignored = (parameters: unknown[]) => ({
+      post: { operationId: 'petReturned', parameters, responses: { '200': { description: 'ok' } } },
+    });
+    const sends = { '/pets': create(json(ref('Pet'))) };
+    for (const [label, parameters] of [
+      ['an Authorization header', [param('Authorization', 'header')]],
+      ['a content-type header, whatever its case', [param('content-type', 'header')]],
+      ['an ACCEPT header through a ref', [{ $ref: '#/components/parameters/Accept' }]],
+      ['a path parameter', [param('petId', 'path')]],
+    ] as Array<[string, unknown[]]>) {
+      const webhooks = { 'x-pet-returned': ignored(parameters), petAdopted: ignored(parameters) };
+      const components = { parameters: { Accept: param('ACCEPT', 'header') } };
+      expect(sorted(sentOnlyComponentNames(doc(sends, components, { webhooks }))), label).toEqual(['Pet']);
+    }
+    // A header or a query parameter the webhook does type is received, as before.
+    for (const [label, parameters] of [
+      ['an X-Pet header', [param('X-Pet', 'header')]],
+      ['a query parameter named Authorization', [param('Authorization', 'query')]],
+    ] as Array<[string, unknown[]]>) {
+      const webhooks = { petAdopted: ignored(parameters) };
+      expect(sorted(sentOnlyComponentNames(doc(sends, {}, { webhooks }))), label).toEqual([]);
+    }
+    // On an operation the ignored header is not read either: a component only it names is read by nothing.
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', parameters: [param('Accept', 'header')], responses: {} } },
+    };
+    expect(sorted(sentOnlyComponentNames(doc(paths)))).toEqual([]);
+  });
+
   it('follows every Reference Object as the readers do, and ends on one that loops or leads nowhere', () => {
     const components = {
       requestBodies: { NewPet: { $ref: '#/components/requestBodies/PetBody' }, PetBody: json(ref('Pet')) },
