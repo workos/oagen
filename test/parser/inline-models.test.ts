@@ -5262,6 +5262,12 @@ describe('a title two unions give different shapes at different depths of one ro
         }),
       },
       {
+        label: 'a webhook named `x-event` (#421)',
+        document: (schema) => ({
+          webhooks: { 'x-event': { post: { requestBody: { content: { 'application/json': { schema } } } } } },
+        }),
+      },
+      {
         label: 'a `components.responses` entry named `x-resp`',
         document: (schema) => ({
           components: { responses: { 'x-resp': { content: { 'application/json': { schema } } } } },
@@ -5354,20 +5360,21 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
     });
 
-    it('steps over an `x-` key in the Paths Object, the `webhooks` map, a Responses Object and a Callback Object, where it is an extension (#350)', () => {
+    it('steps over an `x-` key in the Paths Object, a Responses Object and a Callback Object, where it is an extension (#350), and reads one in the `webhooks` map as a webhook (#421)', () => {
       // A contested pair under each extension: marked only if the extension
       // is read. The path, webhook, status-code and expression entries beside
-      // them are. A `paths` or `webhooks` key starting with `x-` is an
-      // extension by the specification, which `extractOperations` and
-      // `extractWebhooks` step over, so the walker steps over it too, whatever
-      // its value — even one shaped like a path item.
+      // them are. A `paths` key starting with `x-` is an extension by the
+      // specification, which `extractOperations` steps over, so the walker
+      // steps over it too, whatever its value — even one shaped like a path
+      // item. The `webhooks` map takes no extensions: an `x-` key there is a
+      // webhook, which `extractWebhooks` reads, so the walker reads it too.
       const read = [byRadius(), byDiameter()] as const;
       const inResponsesExtension = [byRadius(), byDiameter()] as const;
       const inCallbackExtension = [byRadius(), byDiameter()] as const;
       const underCallback = [byRadius(), byDiameter()] as const;
       const inPathsExtension = [byRadius(), byDiameter()] as const;
       const underWebhook = [byRadius(), byDiameter()] as const;
-      const inWebhooksExtension = [byRadius(), byDiameter()] as const;
+      const underXWebhook = [byRadius(), byDiameter()] as const;
       const body = (pair: readonly [SchemaObject, SchemaObject]) => ({
         content: { 'application/json': { schema: nested(pair[0], pair[1]) } },
       });
@@ -5390,18 +5397,13 @@ describe('a title two unions give different shapes at different depths of one ro
         webhooks: {
           'x-note': 'text',
           petAdopted: { post: { requestBody: body(underWebhook) } },
-          'x-event': { post: { requestBody: body(inWebhooksExtension) } },
+          'x-event': { post: { requestBody: body(underXWebhook) } },
         },
       });
-      for (const union of [...read, ...underCallback, ...underWebhook]) {
+      for (const union of [...read, ...underCallback, ...underWebhook, ...underXWebhook]) {
         expect(variantsOf(union).map(isContestedTitle)).toEqual([true, true]);
       }
-      for (const union of [
-        ...inResponsesExtension,
-        ...inCallbackExtension,
-        ...inPathsExtension,
-        ...inWebhooksExtension,
-      ]) {
+      for (const union of [...inResponsesExtension, ...inCallbackExtension, ...inPathsExtension]) {
         expect(variantsOf(union).map(isContestedTitle)).toEqual([false, false]);
       }
     });
@@ -5725,6 +5727,47 @@ describe('sentOnlyComponentNames: the components every site the parser reads onl
     };
     const webhooks = { petAdopted: { post: { responses: { '200': json(ref('Pet')) } } }, 'x-pets': {} };
     expect(sorted(sentOnlyComponentNames(doc(unread, {}, { webhooks })))).toEqual(['Pet']);
+  });
+
+  it('reads a `webhooks` key that starts with `x-` as a webhook, whose payload is received (#421)', () => {
+    const webhooks = { 'x-pet-returned': create(json(ref('Pet'))) };
+    expect(sorted(sentOnlyComponentNames(doc({ '/pets': create(json(ref('Pet'))) }, {}, { webhooks })))).toEqual([]);
+  });
+
+  // Greptile (#421 review): the walk read every parameter of the four
+  // locations, so a webhook's `Authorization` header — which the readers
+  // ignore (#414) — or its `path` parameter, which `extractWebhooks` drops,
+  // counted its schema as received, and a component only an operation sends
+  // lost its sent-only standing for a parameter nothing types.
+  it('reads no parameter the readers ignore: an Accept, Content-Type or Authorization header, or a webhook’s path parameter', () => {
+    const param = (name: string, location: string) => ({ name, in: location, schema: ref('Pet') });
+    const ignored = (parameters: unknown[]) => ({
+      post: { operationId: 'petReturned', parameters, responses: { '200': { description: 'ok' } } },
+    });
+    const sends = { '/pets': create(json(ref('Pet'))) };
+    for (const [label, parameters] of [
+      ['an Authorization header', [param('Authorization', 'header')]],
+      ['a content-type header, whatever its case', [param('content-type', 'header')]],
+      ['an ACCEPT header through a ref', [{ $ref: '#/components/parameters/Accept' }]],
+      ['a path parameter', [param('petId', 'path')]],
+    ] as Array<[string, unknown[]]>) {
+      const webhooks = { 'x-pet-returned': ignored(parameters), petAdopted: ignored(parameters) };
+      const components = { parameters: { Accept: param('ACCEPT', 'header') } };
+      expect(sorted(sentOnlyComponentNames(doc(sends, components, { webhooks }))), label).toEqual(['Pet']);
+    }
+    // A header or a query parameter the webhook does type is received, as before.
+    for (const [label, parameters] of [
+      ['an X-Pet header', [param('X-Pet', 'header')]],
+      ['a query parameter named Authorization', [param('Authorization', 'query')]],
+    ] as Array<[string, unknown[]]>) {
+      const webhooks = { petAdopted: ignored(parameters) };
+      expect(sorted(sentOnlyComponentNames(doc(sends, {}, { webhooks }))), label).toEqual([]);
+    }
+    // On an operation the ignored header is not read either: a component only it names is read by nothing.
+    const paths = {
+      '/pets': { get: { operationId: 'listPets', parameters: [param('Accept', 'header')], responses: {} } },
+    };
+    expect(sorted(sentOnlyComponentNames(doc(paths)))).toEqual([]);
   });
 
   it('follows every Reference Object as the readers do, and ends on one that loops or leads nowhere', () => {

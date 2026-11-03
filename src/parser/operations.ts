@@ -419,8 +419,9 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
  * (OpenAPI 3.1) — in document order, through `resolvePathItemRef`, the
  * resolver a `webhooks` entry goes through too. A key starting with `x-` is
  * a specification extension of the Paths Object, not a path, and is
- * stepped over without a warning whatever its value, as
- * `collectWebhookEntries` steps over one under `webhooks`. Resolved once,
+ * stepped over without a warning whatever its value; the `webhooks` map
+ * takes no extensions, so `collectWebhookEntries` reads every key (#421).
+ * Resolved once,
  * before any pass reads the map, so the model-name reservation
  * (`resolvePathModelBaseNames`), the API root (`documentApiRoot`) and the
  * operation loop all see the same items, and a referenced item's
