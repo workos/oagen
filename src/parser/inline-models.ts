@@ -37,7 +37,7 @@ import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from 
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { resolveComponentRef } from './path-item-refs.js';
-import { parameterTyping, type SchemaOrContent } from './operations.js';
+import { isIgnoredHeaderParameter, parameterTyping, type ParameterObject, type SchemaOrContent } from './operations.js';
 import { parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
@@ -1030,8 +1030,13 @@ type SiteDirection = 'sent' | 'received';
  * that types it (`parameterTyping`): its `schema`, else the schema of the
  * `content` entry `selectParameterContent` picks, so one the parser types
  * as a string — a `content` map none of whose media types is read, or a
- * map beside a `schema`, which wins — reaches nothing. A webhook's payload
- * and parameters are received, merged the same way (`extractWebhooks`); its
+ * map beside a `schema`, which wins — reaches nothing. A parameter the
+ * readers never type reaches nothing either: an `Accept`, `Content-Type` or
+ * `Authorization` header, which OpenAPI says to ignore
+ * (`isIgnoredHeaderParameter`, #414), on an operation or a webhook, and a
+ * webhook's `path` parameter, which `extractWebhooks` drops. A webhook's
+ * payload and the parameters it keeps are received, merged the same way
+ * (`extractWebhooks`); its
  * responses type no body (`extractWebhookResponses`), and `callbacks` are
  * never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
@@ -1138,6 +1143,11 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         const location = resolved?.['in'];
         if (!resolved || !PARAMETER_LOCATIONS.has(location as ParameterLocation)) continue;
         const name = resolved['name'];
+        // Nothing types an `Accept`, `Content-Type` or `Authorization` header
+        // (#414), nor a webhook's `path` parameter, which `extractWebhooks`
+        // drops: neither reaches a component (Greptile, #421 review).
+        if (typeof name === 'string' && isIgnoredHeaderParameter({ in: location, name } as ParameterObject)) continue;
+        if (direction === 'received' && location === 'path') continue;
         byIdentity.set(parameterKey(location as ParameterLocation, typeof name === 'string' ? name : ''), resolved);
       }
     }
