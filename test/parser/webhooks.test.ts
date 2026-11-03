@@ -1354,3 +1354,120 @@ describe('#565', () => {
     }
   });
 });
+
+describe('#564', () => {
+  // A webhook's `operationId` that names nothing — no ASCII letter or digit
+  // once its trailing overload markers are stripped — still named the stem:
+  // `plainStem` cleaned it to nothing and fell back to `Webhook`, so a lone
+  // webhook declaring `'-'` got a `WebhookPayload`, two declaring `'-'` and
+  // `' '` got the hashed `Webhook3Bc15CPayload` and `B858CbPayload`, two
+  // declaring `'-'` were warned about as a duplicate, and `Webhook.operationId`
+  // kept the id. An operation's has counted as absent since #547.
+  let warn: ReturnType<typeof vi.spyOn>;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-webhooks-564-'));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** The issue's webhook: a `POST` whose request body is an inline `{ id: string }`, with `operationId` when given. */
+  function post(operationId?: string) {
+    return {
+      post: {
+        ...(operationId !== undefined ? { operationId } : {}),
+        requestBody: {
+          content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+        },
+        responses: { '200': { description: 'ok' } },
+      },
+    };
+  }
+
+  async function parseRepro(openapi: string, webhooks: Record<string, unknown>): Promise<ApiSpec> {
+    const specFile = path.join(tmpDir, 'repro.json');
+    const doc = { openapi, info: { title: 'Pets', version: '1' }, paths: {}, webhooks };
+    await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
+    return parseSpec(specFile);
+  }
+
+  /** Each webhook's key, `operationId` and payload model name, as the issue prints them. */
+  function summarize(spec: ApiSpec): string[] {
+    return (spec.webhooks ?? []).map(
+      ({ name, operationId, requestBody }) =>
+        `${name} ${JSON.stringify(operationId)} ${requestBody?.kind === 'model' ? requestBody.name : String(requestBody)}`,
+    );
+  }
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    describe(`OpenAPI ${openapi}`, () => {
+      it('names the payloads from the keys when the operationIds name nothing, as when none is declared', async () => {
+        const none = await parseRepro(openapi, { petAdopted: post(), petReturned: post() });
+        const blank = await parseRepro(openapi, { petAdopted: post('-'), petReturned: post(' ') });
+        const same = await parseRepro(openapi, { petAdopted: post('-'), petReturned: post('-') });
+
+        expect(summarize(none)).toEqual([
+          'petAdopted undefined PetAdoptedPayload',
+          'petReturned undefined PetReturnedPayload',
+        ]);
+        expect(none.models.map((m) => m.name)).toEqual(['PetAdoptedPayload', 'PetReturnedPayload']);
+        for (const spec of [blank, same]) {
+          expect(summarize(spec)).toEqual(summarize(none));
+          expect(spec.models).toEqual(none.models);
+          expect(spec.webhooks).toEqual(none.webhooks);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('names a lone webhook from its key, with no operationId, whatever names-nothing id it declares', async () => {
+        for (const operationId of ['', ' ', '-', '[1]', '[1][2]', '[1] [2] ']) {
+          const spec = await parseRepro(openapi, { petAdopted: post(operationId) });
+          expect(summarize(spec), JSON.stringify(operationId)).toEqual(['petAdopted undefined PetAdoptedPayload']);
+          expect(
+            spec.models.map((m) => m.name),
+            JSON.stringify(operationId),
+          ).toEqual(['PetAdoptedPayload']);
+          expect('operationId' in spec.webhooks![0], JSON.stringify(operationId)).toBe(false);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('still names the stem from an operationId that names something, its trailing markers stripped', async () => {
+        const spec = await parseRepro(openapi, { anything: post('petAdopted[1][2]') });
+        expect(summarize(spec)).toEqual(['anything "petAdopted[1][2]" PetAdoptedPayload']);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('still warns about an operationId that names something and two operations declare', async () => {
+        const spec = await parseRepro(openapi, { petAdopted: post('petEvent'), petReturned: post('petEvent') });
+        expect(summarize(spec)).toEqual([
+          'petAdopted "petEvent" PetAdoptedPayload',
+          'petReturned "petEvent" PetReturnedPayload',
+        ]);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain(
+          'operationId "petEvent" is declared by more than one webhook operation (webhooks.petAdopted.post, webhooks.petReturned.post)',
+        );
+      });
+    });
+  }
+
+  it('reads a names-nothing operationId as absent in the extractor, so the stem comes from the key', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    for (const operationId of [' ', '-', '[1]', '[1][2]']) {
+      const { webhooks, inlineModels } = extractWebhooks({ petAdopted: postWith(petSchema, { operationId }) });
+      expect('operationId' in webhooks[0], operationId).toBe(false);
+      expect(
+        inlineModels.map((m) => m.name),
+        operationId,
+      ).toEqual(['PetAdoptedPayload']);
+      expect(webhooks[0].requestBody, operationId).toEqual({ kind: 'model', name: 'PetAdoptedPayload' });
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+});

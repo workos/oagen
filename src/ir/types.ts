@@ -129,7 +129,13 @@ export interface ApiSpec {
 export interface Webhook {
   /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
   name: string;
-  /** The operation's `operationId`, when the document declares one. */
+  /**
+   * The operation's `operationId`, verbatim, when the document declares one
+   * that names something: one with no ASCII letter or digit once its trailing
+   * overload markers are stripped (`' '`, `'-'`, `'[1]'`, `'[1][2]'`) is left
+   * out, as `''` is and as on an `Operation`, and the webhook's models are
+   * named from its key (#564). No `operationIdTransform` is applied to it.
+   */
   operationId?: string;
   httpMethod: HttpMethod;
   /**

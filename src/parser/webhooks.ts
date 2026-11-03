@@ -28,6 +28,7 @@ import {
   extractParams,
   extractTags,
   isIgnoredHeaderParameter,
+  namesNothing,
   operationIdModelBase,
   parameterSchema,
   presentText,
@@ -101,9 +102,10 @@ interface WebhookEntry {
   /** How many methods the entry's path item declares; a second one qualifies a key-derived stem. */
   methodCount: number;
   /**
-   * The operationId the stem is named from: the operation's own, unless a
-   * different operation object declares the same one (see
-   * `collectWebhookEntries`). Absent, the stem comes from the key.
+   * The operationId the stem is named from: the operation's own, when it
+   * names something (`namesNothing`; #564) and no different operation
+   * object declares the same one (see `collectWebhookEntries`). Absent, the
+   * stem comes from the key.
    */
   stemOperationId?: string;
 }
@@ -391,15 +393,20 @@ function collectWebhookEntries(
     }
   }
 
-  // An operationId names the stem only when exactly one operation object
-  // declares it. Two keys that `$ref` one path item resolve to the same
-  // object and are fine — they will share a stem (see `groupEntries`); two
-  // different objects declaring one id is a document error OpenAPI forbids,
-  // so neither is named from it, with a warning.
+  // An operationId names the stem only when it names something and exactly
+  // one operation object declares it. One with no ASCII letter or digit
+  // once its trailing overload markers are stripped (`' '`, `'-'`, `'[1]'`,
+  // `'[1][2]'`) counts as absent, as `''` does and as an operation's does
+  // (`namesNothing`; #564): it neither names the stem nor counts toward a
+  // duplicate, so the key names the models, as when no id is declared. Two
+  // keys that `$ref` one path item resolve to the same object and are fine
+  // — they will share a stem (see `groupEntries`); two different objects
+  // declaring one id is a document error OpenAPI forbids, so neither is
+  // named from it, with a warning.
   const objectsByOperationId = new Map<string, Set<OperationObject>>();
   for (const entry of entries) {
     const id = entry.op.operationId;
-    if (typeof id !== 'string' || id === '') continue;
+    if (typeof id !== 'string' || namesNothing(id)) continue;
     const objects = objectsByOperationId.get(id) ?? new Set<OperationObject>();
     objects.add(entry.op);
     objectsByOperationId.set(id, objects);
@@ -424,10 +431,12 @@ function collectWebhookEntries(
  * `<Const><Stem>Payload` for a const-discriminated variant, `<Stem><Param>`
  * for an inline parameter object or enum.
  *
- * The plain stem is the `operationId` when the operation declares one — run
- * through the same cleaning an operation's own `…Request` model gets, so a
- * webhook and an operation with the same id name their models alike — and
- * the PascalCase of the webhook's key otherwise. When a key's path item
+ * The plain stem is the `operationId` when the operation declares one that
+ * names something — run through the same cleaning an operation's own
+ * `…Request` model gets, so a webhook and an operation with the same id name
+ * their models alike; one that names nothing (`namesNothing`: `' '`, `'-'`,
+ * `'[1][2]'`) counts as absent, as an operation's does (#564) — and the
+ * PascalCase of the webhook's key otherwise. When a key's path item
  * declares several methods, a key-derived stem has the method appended
  * (`PetUpdatedPut`) so the bodies never share a model. An operationId is
  * unique per document and needs no qualifier, with one caveat: two keys that
@@ -993,7 +1002,10 @@ function buildWebhook(
 
   return {
     name,
-    ...(typeof op.operationId === 'string' && op.operationId !== '' ? { operationId: op.operationId } : {}),
+    // The document's operationId as written, when it names something; one
+    // that names nothing is left out, as on an operation (`namesNothing`;
+    // #564). No `operationIdTransform` is applied to a webhook's.
+    ...(typeof op.operationId === 'string' && !namesNothing(op.operationId) ? { operationId: op.operationId } : {}),
     httpMethod: method,
     ...(summary !== undefined ? { summary } : {}),
     ...(description !== undefined ? { description } : {}),
