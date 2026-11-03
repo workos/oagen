@@ -569,4 +569,97 @@ describe('header parameters named Accept, Content-Type or Authorization, which O
     expect(hook.queryParams.map((p) => p.name)).toEqual(['Accept']);
     expect(inlineModels).toEqual([]);
   });
+
+  // Review round 1 (MichaelDeBoey): a dropped header is missing from the
+  // parameter map the group builder reads, so a variant naming it failed the
+  // whole parse with `references parameter "Authorization" which does not
+  // exist in the operation's parameters[]` — but the parameter is there, and
+  // the document parsed before #414. The member is dropped with a warning
+  // that names the cause instead, as is a variant or a group left empty.
+  it('drops one an x-mutually-exclusive-parameter-groups variant names, with a warning, rather than failing the parse', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { op } = single({
+      '/notes': {
+        get: {
+          operationId: 'listNotes',
+          parameters: [
+            { name: 'Authorization', in: 'header', schema: { type: 'string' } },
+            { name: 'api_key', in: 'query', schema: { type: 'string' } },
+            { name: 'token', in: 'query', schema: { type: 'string' } },
+          ],
+          'x-mutually-exclusive-parameter-groups': {
+            auth: {
+              optional: true,
+              // `both` spells the header in another case: a header name is case-insensitive.
+              variants: { header: ['Authorization'], query: ['api_key'], both: ['authorization', 'token'] },
+            },
+            bearer: { optional: false, variants: { header: ['Authorization'] } },
+          },
+          responses: ok,
+        },
+      },
+    });
+    expect(op.headerParams).toEqual([]);
+    expect(
+      op.parameterGroups?.map((group) => [
+        group.name,
+        group.optional,
+        group.variants.map((variant) => [variant.name, variant.parameters.map((p) => p.name)]),
+      ]),
+    ).toEqual([
+      [
+        'auth',
+        true,
+        [
+          ['query', ['api_key']],
+          ['both', ['token']],
+        ],
+      ],
+    ]);
+    // The kept members are the operation's own parameter objects, as always.
+    expect(op.parameterGroups![0].variants[1].parameters[0]).toBe(op.queryParams.find((p) => p.name === 'token'));
+    const dropped = (variant: string, name: string) =>
+      `[oagen] Warning: x-mutually-exclusive-parameter-groups.auth.variants.${variant} in listNotes names the header ` +
+      `parameter "${name}", which OpenAPI says to ignore (an Accept, Content-Type or Authorization header is set by ` +
+      "the request's media types and security, not by a parameter). Dropping it from the variant.";
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      dropped('header', 'Authorization'),
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.auth.variants.header in listNotes names only header ' +
+        'parameters OpenAPI says to ignore. Dropping the variant.',
+      dropped('both', 'authorization'),
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer.variants.header in listNotes names the header ' +
+        'parameter "Authorization", which OpenAPI says to ignore (an Accept, Content-Type or Authorization header is ' +
+        "set by the request's media types and security, not by a parameter). Dropping it from the variant.",
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer.variants.header in listNotes names only header ' +
+        'parameters OpenAPI says to ignore. Dropping the variant.',
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer in listNotes is left with no variant once the ' +
+        'header parameters OpenAPI says to ignore are dropped. Dropping the group.',
+    ]);
+  });
+
+  it('still fails the parse over a variant member no parameter declares, ignored header or not', () => {
+    const parse = (member: string) =>
+      single({
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            parameters: [
+              { name: 'Accept', in: 'header', schema: { type: 'string' } },
+              { name: 'api_key', in: 'query', schema: { type: 'string' } },
+            ],
+            'x-mutually-exclusive-parameter-groups': {
+              auth: { optional: true, variants: { header: [member], query: ['api_key'] } },
+            },
+            responses: ok,
+          },
+        },
+      });
+    // `Authorization` is not declared at all here, so it is no ignored header of this operation.
+    for (const member of ['X-Api-Key', 'Authorization']) {
+      expect(() => parse(member)).toThrow(
+        `x-mutually-exclusive-parameter-groups.auth.variants.header references parameter "${member}" which does not ` +
+          "exist in the operation's parameters[] (listNotes).",
+      );
+    }
+  });
 });
