@@ -1195,6 +1195,12 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
  * for every root but the components', resolves the `$ref` members of an
  * `allOf` merged into one model, which is read as that model
  * (`mergedAllOfProperties`); without it every schema is read as written.
+ * The merges build one object per pair of declarations they combine
+ * (`titleWalkCombinations`), so the guards stop at a conjunction already
+ * read, however often a merge builds it again: `Note.reply`, a `$ref` to
+ * `Note` beside an inline object, which every merge of `Note` conjoins
+ * (workos/oagen#531: each merge built a new object that no guard had seen,
+ * and the walk never ended).
  */
 function markContestedTitlesUnderRoot(
   roots: readonly SchemaObject[],
@@ -1206,6 +1212,8 @@ function markContestedTitlesUnderRoot(
   // The properties of a merged `allOf`'s model, each read once: a property
   // starts a group of its own, so a second read finds the same claims, and a
   // chain of components each merging the next would be read once per path.
+  // A conjunction the merges build is one object within the root
+  // (`titleWalkCombinations`), so it is read once too.
   const mergedRead = new WeakSet<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
   // already claimed for the union this schema is reached from without
@@ -1281,7 +1289,12 @@ function markContestedTitlesUnderRoot(
     }
     ancestors.delete(schema);
   };
-  for (const root of roots) walk(root);
+  titleWalkCombinations = new WeakMap();
+  try {
+    for (const root of roots) walk(root);
+  } finally {
+    titleWalkCombinations = null;
+  }
   for (const { shapes, variants } of byTitle.values()) {
     if (shapes.size > 1) for (const variant of variants) contestedTitledVariants.add(variant);
   }
@@ -2360,6 +2373,14 @@ export function declaresType(schema: SchemaObject): boolean {
 }
 
 /**
+ * The declarations `combineDeclarations` builds while one root's titles are
+ * walked (`markContestedTitlesUnderRoot`), by the two each is built from, so
+ * the walk meets one object for a combination however often the merges it
+ * reads build it again; `null` outside the walk.
+ */
+let titleWalkCombinations: WeakMap<SchemaObject, WeakMap<SchemaObject, SchemaObject>> | null = null;
+
+/**
  * The always-applying declaration of one property once a second arrives, in
  * document order — the one rule for a name two members declare, applied by
  * `declareProperty` for every `allOf` merge (a merged model's, a component's)
@@ -2404,9 +2425,22 @@ export function declaresType(schema: SchemaObject): boolean {
  * `dataPath` through the other was rejected), while a `$ref` to an array,
  * an enum, a primitive or a union component is no object to conjoin. Any
  * other pair keeps the first as written. Returns `held` itself when `next`
- * adds nothing to it, so a lone declaration keeps its identity.
+ * adds nothing to it, so a lone declaration keeps its identity. While a
+ * root's titles are walked, the same two declarations combine into the same
+ * object (`titleWalkCombinations`); elsewhere each call builds its own.
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  const memo = titleWalkCombinations;
+  if (!memo) return combineAfresh(held, next);
+  let byNext = memo.get(held);
+  if (!byNext) memo.set(held, (byNext = new WeakMap()));
+  let combined = byNext.get(next);
+  if (!combined) byNext.set(next, (combined = combineAfresh(held, next)));
+  return combined;
+}
+
+/** What `combineDeclarations` returns, built anew on every call. */
+function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
   const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
