@@ -316,3 +316,119 @@ describe('text beside a $ref through the parser', () => {
     expect(read('ignore')).toEqual(['Component text.', 'Component text.', 'Component text.']);
   });
 });
+
+/**
+ * Covers issue #444: an OAS 3.0 document gives a Reference Object no field
+ * but `$ref`, yet a response `$ref` nothing under `components/responses`
+ * answers kept the `description` written beside it, since the walk applied
+ * the document's version only to the text it kept along the chain and
+ * returned the ref it stopped at as written. That ref's text now follows the
+ * same rule: ignored in a 3.0 document, read in a 3.1 one, while a component
+ * the walk reaches keeps its own.
+ */
+describe('the text beside a ref the walk cannot resolve, read by the document’s version (#444)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  type Described = { description?: string; summary?: string; value?: unknown };
+
+  it("leaves out the text beside the ref a failed walk stops at under 'ignore', whatever the failure", () => {
+    const components = {
+      Dangling: { $ref: '#/components/schemas/Limit', description: 'Inner text.' },
+      Loop: { $ref: '#/components/parameters/Loop', description: 'Loop text.' },
+    };
+    const read = (raw: object, section: 'parameters' | 'examples' = 'parameters') =>
+      followReference<Described>(raw as Described, section, components, 'ignore');
+
+    expect(read({ $ref: '#/components/schemas/Limit', description: 'Beside.' })).toEqual({
+      outcome: 'unresolved',
+      ref: '#/components/schemas/Limit',
+      value: { $ref: '#/components/schemas/Limit' },
+    });
+    expect(read({ $ref: '#/components/parameters/Dangling', description: 'Outer text.' })).toEqual({
+      outcome: 'unresolved',
+      ref: '#/components/schemas/Limit',
+      value: { $ref: '#/components/schemas/Limit' },
+    });
+    expect(read({ $ref: '#/components/parameters/Loop' })).toEqual({
+      outcome: 'circular',
+      ref: '#/components/parameters/Loop',
+      value: { $ref: '#/components/parameters/Loop' },
+    });
+    expect(read({ $ref: 5, description: 'Beside.' })).toEqual({ outcome: 'malformed', ref: '5', value: { $ref: 5 } });
+    // An Example Object's `summary` is text beside the ref too; what else is written there stays.
+    expect(
+      read({ $ref: '#/components/examples/Missing', summary: 'S.', description: 'D.', value: 1 }, 'examples'),
+    ).toEqual({
+      outcome: 'unresolved',
+      ref: '#/components/examples/Missing',
+      value: { $ref: '#/components/examples/Missing', value: 1 },
+    });
+    // A ref with no text beside it keeps its identity, and 'override' still reads the text.
+    const bare = { $ref: '#/components/parameters/Missing' };
+    expect(read(bare).value).toBe(bare);
+    expect(
+      followReference<Described>({ $ref: '#/components/parameters/Dangling' }, 'parameters', components, 'override')
+        .value,
+    ).toEqual({ $ref: '#/components/schemas/Limit', description: 'Inner text.' });
+  });
+
+  const pet = { type: 'object', properties: { name: { type: 'string' } } };
+  const beside = { $ref: '#/components/schemas/Pet', description: 'Not adopted yet.' };
+  /** The issue's document: `getPet` returns `Pet`, answers 404 with `notFound`, and 410 with a ref that resolves. */
+  const document = (openapi: string, notFound: unknown) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: {
+            '200': {
+              description: 'The pet.',
+              content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+            },
+            '404': notFound,
+            '410': { $ref: '#/components/responses/Gone', description: 'Beside a ref that resolves.' },
+          },
+        },
+      },
+    },
+    components: {
+      schemas: { Pet: pet },
+      responses: { NotAdopted: beside, Gone: { description: 'Gone for good.' } },
+    },
+  });
+  const errorsOf = async (openapi: string, notFound: unknown) =>
+    opsOf(await parseDocument(document(openapi, notFound))).getPet.errors;
+
+  it('ignores it in an OAS 3.0 document, beside the ref the operation writes or one a component writes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Both used to carry `description: 'Not adopted yet.'` on the 404.
+    for (const notFound of [beside, { $ref: '#/components/responses/NotAdopted' }]) {
+      expect(await errorsOf('3.0.3', notFound)).toEqual([
+        { statusCode: 404 },
+        { statusCode: 410, description: 'Gone for good.' },
+      ]);
+    }
+    expect(warn.mock.calls.map((call) => String(call[0]))).toEqual(
+      Array(2).fill(
+        '[oagen] Warning: Unresolved response $ref "#/components/schemas/Pet" in 404 response of getPet: no matching entry under components/responses — reading the response as written, without a body or headers',
+      ),
+    );
+  });
+
+  it('still reads it in an OAS 3.1 document', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    for (const notFound of [beside, { $ref: '#/components/responses/NotAdopted' }]) {
+      expect(await errorsOf('3.1.0', notFound)).toEqual([
+        { statusCode: 404, description: 'Not adopted yet.' },
+        { statusCode: 410, description: 'Beside a ref that resolves.' },
+      ]);
+    }
+  });
+});

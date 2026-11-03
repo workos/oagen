@@ -23,13 +23,13 @@ export type { ReferenceObject };
  * nothing under `components/responses` answers (a pointer into another
  * section, or one a bundler wrote to the first place it inlined a repeated
  * external ref, `#/paths/~1pets/get/responses/200`) is warned about and
- * returned as written, so the response reads as it always did: no body, no
- * headers, its sibling `description` kept. A document that parsed before any
- * response ref was resolved still parses. Only a circular chain throws,
- * since no reader could resolve it. Under `onFailure: 'silent'` neither
- * failure is reported and the ref is returned as written; that is for a
- * reader that only pre-computes names, leaving the report to the operation
- * that declares the ref.
+ * returned as written: no body, no headers, its sibling `description` kept
+ * under `'override'` and, as beside every ref, ignored under `'ignore'`. A
+ * document that parsed before any response ref was resolved still parses.
+ * Only a circular chain throws, since no reader could resolve it. Under
+ * `onFailure: 'silent'` neither failure is reported and the ref is returned
+ * as written; that is for a reader that only pre-computes names, leaving the
+ * report to the operation that declares the ref.
  */
 export function resolveResponseRef<T extends object>(
   raw: T | ReferenceObject,

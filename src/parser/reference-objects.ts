@@ -67,9 +67,11 @@ export interface FollowedReference<T> {
   /**
    * The object the walk ended on, with the text kept from the refs along the
    * chain applied over its own: the component for `resolved`, else the
-   * Reference Object the walk stopped at, as written. The object itself when
-   * nothing was kept, so an inline object or an undescribed ref keeps its
-   * identity. Typed as the caller expects; for a failure it is the ref.
+   * Reference Object the walk stopped at, as written — less the text beside
+   * its `$ref` under `'ignore'`, where no ref's is read. The object itself
+   * when nothing was kept or left out, so an inline object or an undescribed
+   * ref keeps its identity. Typed as the caller expects; for a failure it is
+   * the ref.
    */
   value: T;
   /** The `$ref` the walk stopped at, for a failure (`String()` of a malformed one); absent when resolved. */
@@ -94,11 +96,17 @@ export function followReference<T extends object>(
   const seen = new Set<string>();
   const kept: Partial<Record<ReferenceDocField, string>> = {};
   let current: object = raw;
-  const ended = (outcome: ReferenceOutcome, ref?: string): FollowedReference<T> => ({
-    outcome,
-    value: (Object.keys(kept).length === 0 ? current : { ...current, ...kept }) as T,
-    ...(ref !== undefined ? { ref } : {}),
-  });
+  const ended = (outcome: ReferenceOutcome, ref?: string): FollowedReference<T> => {
+    let value: object = Object.keys(kept).length === 0 ? current : { ...current, ...kept };
+    // A failed walk stops at a Reference Object, whose text OAS 3.0 ignores
+    // as it ignores every other ref's; a component's own text is kept.
+    if (outcome !== 'resolved' && siblings === 'ignore' && fields.some((field) => field in current)) {
+      const rest: Record<string, unknown> = { ...current };
+      for (const field of fields) delete rest[field];
+      value = rest;
+    }
+    return { outcome, value: value as T, ...(ref !== undefined ? { ref } : {}) };
+  };
 
   while ('$ref' in current) {
     const ref = (current as { $ref: unknown }).$ref;

@@ -1020,8 +1020,8 @@ function buildWebhook(
  * component's under `siblingDocs: 'override'` (OpenAPI 3.1) and is ignored
  * under `'ignore'` (3.0), as beside every Reference Object
  * (`followReference`). A ref that leads nowhere, or anywhere else, keeps the
- * status code without a description, with a warning. A blank description is
- * omitted.
+ * status code with a warning, and the description beside it by that rule, as
+ * an operation's response does. A blank description is omitted.
  */
 function extractWebhookResponses(
   responses: OperationObject['responses'],
@@ -1046,7 +1046,9 @@ function extractWebhookResponses(
  * the outermost sibling description with content wins under `'override'`
  * and the component's own is read under `'ignore'`. A chain that loops, a
  * `$ref` that is not a string, or a ref nothing answers is warned about and
- * the walk's last object read as written.
+ * the walk's last object read as written, by the same rule: the text beside
+ * the refs under `'override'`, none under `'ignore'`. The warning says
+ * whether that leaves a description beside the status code.
  */
 function resolveResponseDescription(
   raw: unknown,
@@ -1057,16 +1059,19 @@ function resolveResponseDescription(
 ): string | undefined {
   if (!isRecord(raw)) return undefined;
   const followed = followReference<{ description?: unknown }>(raw, 'responses', componentResponses, siblingDocs);
+  const { description } = followed.value;
+  const text = typeof description === 'string' ? description : undefined;
+  const keeping =
+    presentText(text) === undefined ? 'the status code only' : 'the status code and the description beside the $ref';
   if (followed.outcome === 'circular' || followed.outcome === 'malformed') {
     console.warn(
-      `[oagen] Warning: Circular or malformed response $ref for status ${code} in ${label}; keeping the status code only.`,
+      `[oagen] Warning: Circular or malformed response $ref for status ${code} in ${label}; keeping ${keeping}.`,
     );
   } else if (followed.outcome === 'unresolved') {
     console.warn(
       `[oagen] Warning: Unresolved response $ref "${followed.ref}" for status ${code} in ${label}: ` +
-        'no matching entry under components/responses. Keeping the status code only.',
+        `no matching entry under components/responses. Keeping ${keeping}.`,
     );
   }
-  const { description } = followed.value;
-  return typeof description === 'string' ? description : undefined;
+  return text;
 }
