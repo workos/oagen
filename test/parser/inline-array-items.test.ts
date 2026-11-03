@@ -1171,6 +1171,92 @@ describe('(2) `properties` beside a composition are carried into it, wherever th
       enums: [['Kind', ['cat', 'dog']]],
     });
   });
+
+  describe('#530', () => {
+    // The issue's `pet`: its own `kind` annotates the `Kind` reference with a second `allOf` member, beside
+    // variants whose `kind` repeats `Kind`'s values (`same.json`) or names `bird` too (`wider.json`). The
+    // `allOf` is typed as `Kind` itself, so it pins `cat` and `dog`, as the lone `allOf` of `wider-lone.json` does.
+    const Kind: SchemaObject = { $ref: '#/components/schemas/Kind' };
+    const annotated: SchemaObject = { allOf: [Kind, { description: "The pet's kind" }] };
+    const lone: SchemaObject = { allOf: [Kind], description: "The pet's kind" };
+    const wider: SchemaObject = { enum: ['cat', 'dog', 'bird'] };
+    const kinded = (own: SchemaObject, cat: SchemaObject, dog: SchemaObject = cat): SchemaObject =>
+      obj({ kind: own }, { oneOf: [obj({ kind: cat, meow: str }), obj({ kind: dog, bark: str })] });
+    const petDoc = (openapi: string, pet: SchemaObject) => ({
+      ...specDoc(
+        {
+          '/pets/{id}': {
+            get: {
+              operationId: 'getPet',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: ok(obj({ pet })),
+            },
+          },
+        },
+        { Kind: { type: 'string', enum: ['cat', 'dog'] } },
+      ),
+      openapi,
+    });
+    /** The models and enums a document gives, as the issue projects them. */
+    const shapes = async (label: string, doc: unknown) => {
+      const { spec, warnings } = await parse(label, doc);
+      expect(warnings, label).toEqual([]);
+      expectSound(spec, ['Kind']);
+      return {
+        models: spec.models.map(describeModel),
+        enums: spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]),
+      };
+    };
+    const kept = {
+      models: [
+        'GetPetResponse { pet: (GetPetResponsePet | GetPetResponsePetWithBark) }',
+        'GetPetResponsePet { kind: Kind, meow: string }',
+        'GetPetResponsePetWithBark { kind: Kind, bark: string }',
+      ],
+      enums: [['Kind', ['cat', 'dog']]],
+    };
+
+    it("keeps the own `Kind` over a variant's `enum` of its values or more, annotated in either order, in OAS 3.1 and 3.0", async () => {
+      const owns: Array<[string, SchemaObject]> = [
+        ['annotated', annotated],
+        ['annotation-first', { allOf: [{ description: "The pet's kind" }, Kind] }],
+        ['lone', lone],
+      ];
+      const variants: Array<[string, SchemaObject]> = [
+        ['same', { enum: ['cat', 'dog'] }],
+        ['wider', wider],
+      ];
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        for (const [spelling, own] of owns) {
+          for (const [width, variant] of variants) {
+            const label = `annotated-kind-${openapi}-${spelling}-${width}`;
+            expect(await shapes(label, petDoc(openapi, kinded(own, variant))), label).toEqual(kept);
+          }
+        }
+      }
+    });
+
+    it("gives way to a variant's `const`, and pins `Kind`'s values on a variant beside an own plain `kind`", async () => {
+      const consts = kinded(annotated, { const: 'cat' }, { const: 'dog' });
+      expect(await shapes('annotated-kind-const', petDoc('3.1.0', consts))).toEqual({
+        models: [
+          'GetPetResponse { pet: (GetPetResponsePet | DogGetPetResponsePet) }',
+          'GetPetResponsePet { kind: "cat", meow: string }',
+          'DogGetPetResponsePet { kind: "dog", bark: string }',
+        ],
+        enums: [['Kind', ['cat', 'dog']]],
+      });
+      expect(await shapes('annotated-kind-variant', petDoc('3.1.0', kinded(str, annotated)))).toEqual(kept);
+    });
+
+    it('reads moving the `description` into the `allOf` as no change to `oagen diff`', async () => {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const { spec: before } = await parse(`annotated-kind-lone-${openapi}`, petDoc(openapi, kinded(lone, wider)));
+        const { spec: after } = await parse(`annotated-kind-${openapi}`, petDoc(openapi, kinded(annotated, wider)));
+        expect(diffSpecs(before, after).changes, openapi).toEqual([]);
+      }
+    });
+  });
 });
 
 describe('review round 1', () => {
