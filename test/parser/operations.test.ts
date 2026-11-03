@@ -2540,7 +2540,7 @@ describe('extractOperations – Service.description from document tags (issue #1
 describe('operation summary', () => {
   const responses = { '204': { description: 'ok' } };
 
-  it('keeps summary on its own and folds it into description when both are declared', () => {
+  it('keeps summary on its own and out of description when both are declared', () => {
     const paths = {
       '/pets': {
         get: {
@@ -2554,10 +2554,10 @@ describe('operation summary', () => {
 
     const op = extractOperations(paths).services[0].operations[0];
     expect(op.summary).toBe('List pets');
-    expect(op.description).toBe('List pets\n\nReturns every pet in the store, newest first.');
+    expect(op.description).toBe('Returns every pet in the store, newest first.');
   });
 
-  it('keeps summary and mirrors it into description when only summary is declared', () => {
+  it('keeps summary and leaves description undefined when only summary is declared', () => {
     const paths = {
       '/pets': {
         post: {
@@ -2570,7 +2570,7 @@ describe('operation summary', () => {
 
     const op = extractOperations(paths).services[0].operations[0];
     expect(op.summary).toBe('Create a pet');
-    expect(op.description).toBe('Create a pet');
+    expect(op.description).toBeUndefined();
   });
 
   it('omits the summary key when only description is declared', () => {
@@ -2625,7 +2625,7 @@ describe('operation summary', () => {
 describe('operation summary and description with empty or whitespace-only text', () => {
   const responses = { '204': { description: 'ok' } };
 
-  it('treats an empty description as absent so description falls back to the summary', () => {
+  it('treats an empty description as absent so description is undefined', () => {
     const paths = {
       '/pets': {
         get: {
@@ -2639,10 +2639,10 @@ describe('operation summary and description with empty or whitespace-only text',
 
     const op = extractOperations(paths).services[0].operations[0];
     expect(op.summary).toBe('List pets');
-    expect(op.description).toBe('List pets');
+    expect(op.description).toBeUndefined();
   });
 
-  it('treats a whitespace-only description as absent so description falls back to the summary', () => {
+  it('treats a whitespace-only description as absent so description is undefined', () => {
     const paths = {
       '/pets': {
         get: {
@@ -2656,7 +2656,7 @@ describe('operation summary and description with empty or whitespace-only text',
 
     const op = extractOperations(paths).services[0].operations[0];
     expect(op.summary).toBe('List pets');
-    expect(op.description).toBe('List pets');
+    expect(op.description).toBeUndefined();
   });
 
   it('omits a whitespace-only summary from both summary and description', () => {
@@ -2707,7 +2707,67 @@ describe('operation summary and description with empty or whitespace-only text',
 
     const op = extractOperations(paths).services[0].operations[0];
     expect(op.summary).toBe('List pets');
-    expect(op.description).toBe('List pets\n\nLists pets.\n');
+    expect(op.description).toBe('Lists pets.\n');
+  });
+});
+
+describe('#470', () => {
+  const responses = { '200': { description: 'OK' } };
+
+  it('keeps the summary out of description, on an operation and a webhook alike (the issue’s repro)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-470-'));
+    try {
+      const file = join(dir, 'repro.json');
+      const doc = {
+        openapi: '3.1.0',
+        info: { title: 'Pets', version: '1' },
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              summary: 'List pets',
+              description: 'Returns every pet in the store, newest first.',
+              responses,
+            },
+            post: { operationId: 'createPet', summary: 'Create a pet', responses },
+          },
+          '/pets/{petId}': {
+            get: {
+              operationId: 'getPet',
+              description: 'Returns one pet.',
+              parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+              responses,
+            },
+          },
+        },
+        // The same three shapes, as webhooks.
+        webhooks: {
+          petAdopted: { post: { summary: 'Pet adopted', description: 'Sent when a pet is adopted.', responses } },
+          petReturned: { post: { summary: 'Pet returned', responses } },
+          petLost: { post: { description: 'Sent when a pet is lost.', responses } },
+        },
+      };
+      await writeFile(file, JSON.stringify(doc));
+      const spec = await parseSpec(file);
+
+      const operations = spec.services.flatMap((service) => service.operations);
+      expect(operations.map(({ name, summary, description }) => ({ name, summary, description }))).toEqual([
+        { name: 'listPets', summary: 'List pets', description: 'Returns every pet in the store, newest first.' },
+        { name: 'createPet', summary: 'Create a pet', description: undefined },
+        { name: 'getPet', summary: undefined, description: 'Returns one pet.' },
+      ]);
+      expect(spec.webhooks!.map(({ name, summary, description }) => ({ name, summary, description }))).toEqual([
+        { name: 'petAdopted', summary: 'Pet adopted', description: 'Sent when a pet is adopted.' },
+        { name: 'petReturned', summary: 'Pet returned', description: undefined },
+        { name: 'petLost', summary: undefined, description: 'Sent when a pet is lost.' },
+      ]);
+      // An operation keeps the `description` key it has always had; a webhook
+      // omits it, as it omits `summary`.
+      expect(operations[1]).toHaveProperty('description', undefined);
+      expect(spec.webhooks![1]).not.toHaveProperty('description');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -190,7 +190,7 @@ describe('path items written as a $ref (issue #300)', () => {
       expect(getPet.pathParams.map((p) => p.name)).toEqual(['id']);
       expect(getPet.servers).toEqual([{ url: 'https://pets.example.com' }]);
       expect(getPet.summary).toBe('A pet');
-      expect(getPet.description).toBe('A pet\n\nOne pet by id.');
+      expect(getPet.description).toBe('One pet by id.');
       expect(warn).not.toHaveBeenCalled();
     });
 

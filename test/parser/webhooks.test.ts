@@ -142,9 +142,7 @@ describe('webhooks', () => {
       expect(returned).toMatchInlineSnapshot(`
         {
           "deprecated": true,
-          "description": "Pet returned
-
-        Sent when an adopted pet is returned to the shelter.",
+          "description": "Sent when an adopted pet is returned to the shelter.",
           "headerParams": [
             {
               "default": undefined,
@@ -802,8 +800,8 @@ describe('webhooks', () => {
           },
         });
         expect(webhooks.map((w) => [w.httpMethod, w.summary, w.description, w.externalDocs])).toEqual([
-          ['post', 'Pet adopted', 'Pet adopted\n\nSent when a pet is adopted.', { url: 'https://example.com/adopted' }],
-          ['put', 'Pet re-adopted', 'Pet re-adopted\n\nSent when a pet is adopted.', undefined],
+          ['post', 'Pet adopted', 'Sent when a pet is adopted.', { url: 'https://example.com/adopted' }],
+          ['put', 'Pet re-adopted', 'Sent when a pet is adopted.', undefined],
         ]);
         expect('externalDocs' in webhooks[1]).toBe(false);
         expect(warn).not.toHaveBeenCalled();

@@ -138,8 +138,9 @@ export interface Webhook {
    */
   summary?: string;
   /**
-   * Combined doc text, built as `Operation.description` is from the same
-   * two-level read. Absent when neither level gives any text.
+   * The `description` alone, read as `Operation.description` is: the
+   * operation's own, else the path item's, never the summary. Absent when
+   * neither has content.
    */
   description?: string;
   /**
@@ -287,20 +288,17 @@ export interface Operation {
    * leads to), which OpenAPI applies to every operation on that
    * path. Present only when one of the two has content; a summary that is not
    * a string, or is empty or whitespace-only, is treated as absent at either
-   * level. Read this to use the
-   * summary as a one-line label; `description` below still carries the
-   * combined form, so emitters that only print `description` are unchanged.
+   * level. `description` below never includes it, so an emitter that
+   * shows the summary — as a one-line label, or above the description —
+   * reads it from here.
    */
   summary?: string;
   /**
-   * Doc text for the operation, combined from a `summary` and a `description`
-   * each read as `summary` above is: the operation's own, else the Path
-   * Item's, field by field. When both have content, this is
-   * `summary + "\n\n" + description`; when only one has content (or both are
-   * identical), this is that one. A value that is not a string, or is empty
-   * or whitespace-only, is treated as absent, and text with content is kept
-   * verbatim. The parts are
-   * not separable from this field alone — use `summary` for that.
+   * The `description` alone, read as `summary` above is: the operation's own,
+   * else the Path Item's. It never repeats the summary, so an operation that
+   * declares only a `summary` has none. A value that is not a string, or is
+   * empty or whitespace-only, is treated as absent, and text with content is
+   * kept verbatim.
    */
   description?: string;
   /** The operation's own `externalDocs`, when it declares a usable one. */
