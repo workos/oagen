@@ -36,7 +36,7 @@ import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
-import { resolveComponentRef } from './path-item-refs.js';
+import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import { isIgnoredHeaderParameter, parameterTyping, type ParameterObject, type SchemaOrContent } from './operations.js';
 import { parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
@@ -925,9 +925,10 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * `readFallbackResponse` steps over it, and in a Callback Object, where the
  * specification makes it an extension (the parser reads no callbacks, so
  * nothing named under one is ever typed). A `$ref` entry
- * anywhere carries no schema of its own: the target is a component, read
- * under its own map. A `schema` is yielded and not entered, so one shared by
- * two sites is yielded for each; every other object is entered once, which
+ * anywhere carries no schema of its own: the target is a component, or
+ * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
+ * read under its own map. A `schema` is yielded and not entered, so one
+ * shared by two sites is yielded for each; every other object is entered once, which
  * ends the walk on a document that refers back to itself. `example`,
  * `examples`, `links` and extensions are never entered.
  */
@@ -1070,17 +1071,17 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
     section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers',
   ): Record<string, unknown> | undefined => {
     const entries = components[section];
+    const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
     const seen = new Set<string>();
     let current = value;
     while (isRecord(current) && current['$ref'] !== undefined) {
       const ref = current['$ref'];
       if (typeof ref !== 'string' || seen.has(ref)) return undefined;
       seen.add(ref);
-      current = resolveComponentRef(
-        ref,
-        section,
-        isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined,
-      );
+      // A Path Item's `$ref` may also name another `paths` or `webhooks`
+      // entry, as `resolvePathItemRef` reads it (#422).
+      current =
+        section === 'pathItems' ? pathItemRefTarget(ref, map, document) : resolveComponentRef(ref, section, map);
     }
     return isRecord(current) ? current : undefined;
   };

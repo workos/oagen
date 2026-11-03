@@ -59,7 +59,10 @@ export interface WebhookComponents {
   requestBodies?: Record<string, Record<string, unknown>>;
   responses?: Record<string, Record<string, unknown>>;
   examples?: Record<string, Record<string, unknown>>;
-  /** `components.pathItems` (OpenAPI 3.1), the only target a webhook entry's `$ref` may point at. */
+  /**
+   * `components.pathItems` (OpenAPI 3.1), which a webhook entry's `$ref` may
+   * point into, as it may name another `webhooks` or `paths` entry.
+   */
   pathItems?: Record<string, Record<string, unknown>>;
 }
 
@@ -86,7 +89,7 @@ interface WebhookEntry {
   op: OperationObject;
   /**
    * The path item the operation sits on — the entry itself, or the
-   * `components/pathItems` item its `$ref` leads to — whose `summary` and
+   * Path Item its `$ref` leads to — whose `summary` and
    * `description` apply to the operation (`resolveOperationDocs`).
    */
   pathItem: PathItem;
@@ -140,12 +143,13 @@ type MintedShape = Pick<
  * in document order. The key is kept verbatim as `Webhook.name`, one
  * starting with `x-` included: OpenAPI gives the `webhooks` map no
  * specification extensions, unlike `paths`, so `x-pet-returned` is a webhook
- * like any other (#421). An entry
- * that is a `$ref` into `components/pathItems` is resolved (chains included,
- * with a cycle guard) by `resolvePathItemRef`, the resolver a `paths` entry
- * goes through too; one that points anywhere else, or that cannot be
- * resolved, is warned about and skipped rather than failing the parse, as is
- * an entry that is not an object. A `webhooks` value that is not an object
+ * like any other (#421). An entry that is a `$ref` into
+ * `components/pathItems`, or to another `webhooks` or `paths` entry
+ * (`#/webhooks/petAdopted`, `#/paths/~1pets`; #422), is resolved (chains
+ * included, with a cycle guard) by `resolvePathItemRef`, the resolver a
+ * `paths` entry goes through too; one that points anywhere else, or that
+ * cannot be resolved, is warned about and skipped rather than failing the
+ * parse, as is an entry that is not an object. A `webhooks` value that is not an object
  * at all is warned about and ignored. Nothing is read from `x-webhooks`, the
  * pre-3.1 convention: the parser reads the standard key only.
  *
@@ -187,6 +191,9 @@ export function extractWebhooks(
   // (OAS 3.1) or is ignored (OAS 3.0): the document's mode, as the operations
   // read it (`siblingDocsMode`), applied to every Reference Object here.
   siblingDocs: SiblingDocs = 'override',
+  // The document's `paths` map, as written, whose entries a webhook entry's
+  // `$ref` may name (`resolvePathItemRef`), as it may name another webhook's.
+  paths?: unknown,
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   if (!isRecord(webhooks)) {
@@ -194,7 +201,7 @@ export function extractWebhooks(
     return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
   }
 
-  const entries = collectWebhookEntries(webhooks, components, siblingDocs);
+  const entries = collectWebhookEntries(webhooks, components, siblingDocs, paths);
   const { groups, groupOf } = groupEntries(entries);
   const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
   const stems = resolveWebhookModelStems(groups, reserved, components, siblingDocs);
@@ -327,16 +334,21 @@ function collectWebhookEntries(
   webhooks: Record<string, unknown>,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
+  paths: unknown,
 ): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
   // Every key, an `x-` one included: unlike `paths`, the map takes no
   // specification extensions (#421).
   for (const [name, raw] of Object.entries(webhooks)) {
     // The same resolver `extractOperations` reads a `paths` entry through, so
-    // a `$ref` into `components/pathItems` is followed the same way here.
-    const pathItem = resolvePathItemRef(raw, components.pathItems, { kind: 'webhook', key: name }) as
-      | PathItem
-      | undefined;
+    // a `$ref` into `components/pathItems`, or to another `webhooks` or
+    // `paths` entry, is followed the same way here.
+    const pathItem = resolvePathItemRef(
+      raw,
+      components.pathItems,
+      { kind: 'webhook', key: name },
+      { paths, webhooks },
+    ) as PathItem | undefined;
     if (!pathItem) continue;
     // The path item's own key order, as the IR promises document order; an
     // entry declaring `put` before `post` keeps `put` first.
