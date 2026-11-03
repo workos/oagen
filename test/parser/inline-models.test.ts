@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { nameInlineVariantEntries, schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
 import {
@@ -4579,6 +4580,168 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(modelNames(ir)).toEqual(['Base', 'Circle', root, 'Square'].sort());
       expectConsistent(ir, ['Base']);
     }
+  });
+
+  describe('#531', () => {
+    // The issue's `repro.json`: `Note`'s members declare `reply` as a `$ref`
+    // back to `Note` and as an inline object, so every merge of `Note`
+    // conjoins the two into an `allOf: [{ $ref: Note }, { … }]` of its own —
+    // the response's merge among them, whose `reply` merges `Note` again.
+    const s: SchemaObject = { type: 'string' };
+    const bool: SchemaObject = { type: 'boolean' };
+    const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+    const note: SchemaObject = { allOf: [obj({ id: s, reply: ref('Note') }), obj({ reply: obj({ quoted: bool }) })] };
+    /** `GET /notes/{id}` (`getNote`) returning `body`, beside `schemas`. */
+    const withNote = (body: SchemaObject, schemas: Record<string, SchemaObject> = { Note: note }) =>
+      doc({
+        paths: {
+          '/notes/{id}': {
+            get: {
+              operationId: 'getNote',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: s }],
+              responses: { '200': { description: 'ok', ...json(body) } },
+            },
+          },
+        },
+        components: { schemas },
+      });
+    const merged: SchemaObject = { allOf: [ref('Note'), obj({ author: s })] };
+    /** Each model as the issue prints it. */
+    const summaries = (ir: ApiSpec): string[] =>
+      ir.models.map(({ fields, name }) => `${name} {${fields.map((f) => f.name).join(', ')}}`);
+
+    it("parses the issue's document to the models it had before #498, as an array response and in OAS 3.0 too", async () => {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const spec = (body: SchemaObject) => ({ ...withNote(body), openapi });
+        const ir = await parseWithoutWarnings(spec(merged));
+        expect(summaries(ir), openapi).toEqual([
+          'Note {id, reply}',
+          'GetNoteResponse {id, reply, author}',
+          'GetNoteResponseReply {id, reply, quoted}',
+          'NoteReply {id, reply, quoted}',
+        ]);
+        // The response builds its own `reply`; the one inside that is `Note`'s.
+        const types = fieldTypesByModel(ir.models);
+        expect(types['GetNoteResponse']?.['reply']).toEqual(model('GetNoteResponseReply'));
+        expect(types['GetNoteResponseReply']?.['reply']).toEqual(model('NoteReply'));
+        expect(types['NoteReply']?.['reply']).toEqual(model('NoteReply'));
+        expectConsistent(ir, ['Note']);
+        // `oagen diff` of the document against itself reads no change.
+        expect(diffSpecs(ir, await parseWithoutWarnings(spec(merged))).changes).toEqual([]);
+        const list = await parseWithoutWarnings(spec({ type: 'array', items: merged }));
+        expect(summaries(list), openapi).toEqual([
+          'Note {id, reply}',
+          'GetNoteItem {id, reply, author}',
+          'NoteReply {id, reply, quoted}',
+        ]);
+        expectConsistent(list, ['Note']);
+      }
+    });
+
+    it.each<{ label: string; schemas: (shape: SchemaObject) => Record<string, SchemaObject> }>([
+      {
+        label: "a `$ref` and an inline object (the issue's)",
+        schemas: (shape) => ({ Note: { allOf: [obj({ id: s, reply: ref('Note') }), obj({ reply: obj({ shape }) })] } }),
+      },
+      {
+        label: 'an inline object and a `$ref`',
+        schemas: (shape) => ({ Note: { allOf: [obj({ id: s, reply: obj({ shape }) }), obj({ reply: ref('Note') })] } }),
+      },
+      {
+        label: 'a `$ref` and two inline objects',
+        schemas: (shape) => ({
+          Note: {
+            allOf: [
+              obj({ id: s, reply: ref('Note') }),
+              obj({ reply: obj({ quoted: bool }) }),
+              obj({ reply: obj({ shape }) }),
+            ],
+          },
+        }),
+      },
+      {
+        label: 'two inline objects and a `$ref`',
+        schemas: (shape) => ({
+          Note: {
+            allOf: [
+              obj({ id: s, reply: obj({ quoted: bool }) }),
+              obj({ reply: obj({ shape }) }),
+              obj({ reply: ref('Note') }),
+            ],
+          },
+        }),
+      },
+      {
+        label: 'a bare `description`, a `$ref` and an inline object',
+        schemas: (shape) => ({
+          Note: {
+            allOf: [
+              obj({ id: s, reply: { description: 'The reply' } }),
+              obj({ reply: ref('Note') }),
+              obj({ reply: obj({ shape }) }),
+            ],
+          },
+        }),
+      },
+      {
+        label: 'arrays whose items are a `$ref` and an inline object',
+        schemas: (shape) => ({
+          Note: {
+            allOf: [
+              obj({ id: s, replies: { type: 'array', items: ref('Note') } }),
+              obj({ replies: { type: 'array', items: obj({ shape }) } }),
+            ],
+          },
+        }),
+      },
+      {
+        label: 'a `$ref` to a component that conjoins one back, and an inline object',
+        schemas: (shape) => ({
+          Note: { allOf: [obj({ id: s, reply: ref('Other') }), obj({ reply: obj({ shape }) })] },
+          Other: { allOf: [obj({ back: ref('Note') }), obj({ back: obj({ seen: bool }) })] },
+        }),
+      },
+    ])(
+      "reads `Note`'s conjoined reply once, declared as $label, its union compared with the root's",
+      async ({ schemas }) => {
+        // The response's model holds the reply's `shape` beside a `shape` of
+        // its own: when the two give `Circle` and `Square` other shapes, the
+        // titles are contested and each union is qualified where it is built;
+        // when they give the same shapes, both keep the bare titles.
+        const body: SchemaObject = { allOf: [ref('Note'), obj({ shape: byRadius() })] };
+        const contested = await parseWithoutWarnings(withNote(body, schemas(byDiameter())));
+        let types = fieldTypesByModel(contested.models);
+        expect(types['GetNoteResponse']?.['shape']).toEqual(
+          unionOf('CircleGetNoteResponseShape', 'SquareGetNoteResponseShape'),
+        );
+        expect(types['GetNoteResponseReply']?.['shape']).toEqual(
+          unionOf('CircleGetNoteResponseReplyShape', 'SquareGetNoteResponseReplyShape'),
+        );
+        expect(types['CircleGetNoteResponseReplyShape']).toEqual({ ...kind('circle'), diameter: num });
+        expectConsistent(contested, Object.keys(schemas(byDiameter())));
+        const shared = await parseWithoutWarnings(withNote(body, schemas(byRadius())));
+        types = fieldTypesByModel(shared.models);
+        expect(types['GetNoteResponse']?.['shape']).toEqual(unionOf('Circle', 'Square'));
+        expect(types['GetNoteResponseReply']?.['shape']).toEqual(unionOf('Circle', 'Square'));
+        expectConsistent(shared, Object.keys(schemas(byRadius())));
+      },
+    );
+
+    it('reads apart the conjunctions of distinct declarations: two merges of `Note` under one root, each adding its own reply', async () => {
+      // `first.reply` and `second.reply` each conjoin `Note.reply` with an
+      // inline object of their own: two conjunctions, each read with its union.
+      const adding = (shape: SchemaObject): SchemaObject => ({ allOf: [ref('Note'), obj({ reply: obj({ shape }) })] });
+      const ir = await parseWithoutWarnings(withNote(obj({ first: adding(byRadius()), second: adding(byDiameter()) })));
+      const types = fieldTypesByModel(ir.models);
+      for (const [owner, field] of [
+        ['GetNoteResponseFirstReply', 'radius'],
+        ['GetNoteResponseSecondReply', 'diameter'],
+      ] as const) {
+        expect(types[owner]?.['shape']).toEqual(unionOf(`Circle${owner}Shape`, `Square${owner}Shape`));
+        expect(types[`Circle${owner}Shape`]).toEqual({ ...kind('circle'), [field]: num });
+      }
+      expectConsistent(ir, ['Note']);
+    });
   });
 
   describe('markContestedTitles', () => {
