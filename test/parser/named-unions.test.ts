@@ -1113,6 +1113,48 @@ ${animals}${extra}`);
       }
     });
   });
+
+  describe('#512', () => {
+    /** `wrappedPets` with a primitive component `BirdId` beside the animals. */
+    const idPets = (third: string, keyword: boolean) =>
+      parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Cat'
+        - $ref: '#/components/schemas/Dog'
+        - ${third}
+${keyword ? '      discriminator:\n        propertyName: kind\n' : ''}    Bird:
+      type: object
+      properties:
+        kind: { const: bird }
+      required: [kind]
+    BirdId:
+      type: string
+      format: uuid
+${animals}`);
+    const birdOr = (other: string) => `{ oneOf: [{ $ref: '#/components/schemas/Bird' }, ${other}] }`;
+    const mapped = { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' } };
+
+    it('maps a variant whose wrapper holds the one model beside a $ref to a primitive component, as beside the primitive inline', async () => {
+      for (const keyword of [true, false]) {
+        const pet = model(await idPets(birdOr("{ $ref: '#/components/schemas/BirdId' }"), keyword), 'Pet');
+        expect(pet.variants, `keyword: ${keyword}`).toEqual([
+          modelRef('Cat'),
+          modelRef('Dog'),
+          {
+            kind: 'union',
+            variants: [modelRef('Bird'), { kind: 'primitive', type: 'string', format: 'uuid' }],
+            compositionKind: 'oneOf',
+          },
+        ]);
+        expect(pet.discriminator, `keyword: ${keyword}`).toEqual(mapped);
+        const written = model(await idPets(birdOr('{ type: string, format: uuid }'), keyword), 'Pet');
+        expect(written.discriminator, `inline, keyword: ${keyword}`).toEqual(mapped);
+      }
+    });
+  });
 });
 
 describe('named unions: renames and folds', () => {
@@ -1446,11 +1488,12 @@ ${animals}`;
     ]);
     expect(model(ir, 'PetVariant1ItemChild').fields.map((f) => f.name)).toEqual(['x']);
     expect(model(ir, 'PetVariant1ItemTags').fields.map((f) => f.name)).toEqual(['t']);
-    // Nothing lands under the base the variant stepped off; only the component owns it.
+    // Nothing lands under the base the variant stepped off; only the component
+    // owns it, and a primitive component becomes no model (#512).
     const underBase = ir.models.filter(
       (m) => m.name.startsWith('PetVariant1') && !m.name.startsWith('PetVariant1Item'),
     );
-    expect(underBase.map((m) => m.name)).toEqual(['PetVariant1']);
+    expect(underBase.map((m) => m.name)).toEqual([]);
     expect(unresolvedRefs(ir)).toEqual([]);
   });
 

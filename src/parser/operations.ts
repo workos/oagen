@@ -3650,8 +3650,8 @@ export function extractParams(
       ]);
       // Like default/example, fall back per value: the `$ref` target's keywords
       // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
-      // one bound without discarding the target's others. The alias also becomes
-      // a fieldless model, but a parameter should be readable on its own.
+      // one bound without discarding the target's others. A primitive or array
+      // component becomes no model, and a parameter should be readable on its own.
       const own = schema ? extractConstraints(schema) : undefined;
       const inherited = refTarget ? extractConstraints(refTarget) : undefined;
       const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);

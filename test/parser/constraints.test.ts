@@ -347,8 +347,9 @@ describe('extractSchemas – constraints', () => {
       expect(pet?.fields.map((f) => [f.name, f.type.kind, f.constraints])).toEqual([
         ['nickname', 'primitive', { maxLength: 3 }],
         ['motto', 'primitive', { minLength: 2, maxLength: 5 }],
-        // The sibling is the member's own; Name's minLength stays on Name.
-        ['name', 'model', { maxLength: 3 }],
+        // The sibling is the member's own. Name is a primitive component, so the
+        // field is the string, and a $ref under an allOf reads none of Name's limits (#512).
+        ['name', 'primitive', { maxLength: 3 }],
       ]);
     } finally {
       warn.mockRestore();
@@ -367,11 +368,13 @@ describe('extractSchemas – constraints', () => {
       },
     });
     const pet = models.find((m) => m.name === 'Pet');
+    // Name is a primitive component, which becomes no model to keep its limits,
+    // so a bare $ref carries them under the field's own (#512).
     expect(pet?.fields.map((f) => [f.name, f.constraints])).toEqual([
-      ['nickname', { minLength: 2 }],
-      ['name', undefined],
+      ['nickname', { maxLength: 50, minLength: 2 }],
+      ['name', { maxLength: 50 }],
     ]);
-    expect(pet?.fields[1]).not.toHaveProperty('constraints');
+    expect(models.map((m) => m.name)).toEqual(['Pet']);
   });
 
   it('attaches a field’s own keywords and leaves the key absent on fields without any', () => {
