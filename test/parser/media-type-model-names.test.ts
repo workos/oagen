@@ -7,12 +7,15 @@ import { parseSpec } from '../../src/parser/parse.js';
 import { mediaTypeNameFragment } from '../../src/utils/media-type.js';
 import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
 
-async function parseDocument(document: Record<string, unknown>): Promise<ApiSpec> {
+async function parseDocument(
+  document: Record<string, unknown>,
+  options?: Parameters<typeof parseSpec>[1],
+): Promise<ApiSpec> {
   const dir = mkdtempSync(join(tmpdir(), 'oagen-media-type-names-'));
   try {
     const file = join(dir, 'spec.json');
     writeFileSync(file, JSON.stringify(document));
-    return await parseSpec(file);
+    return await parseSpec(file, options);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -597,6 +600,251 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
       expect(await diff(listNotes([bare, version]), listNotes([bare, version, charset]))).toEqual([
         'additive model-added ListNotesApplicationYamlCharsetResponse',
         'additive operation-modified listNotes',
+      ]);
+    });
+  });
+});
+
+describe("a later 2xx's secondary body is named for its status code, as its primary body is (issue #538)", () => {
+  const yaml = (properties: Record<string, unknown>) => ({ schema: obj(properties) });
+  /** `POST /pets` (`createPet`) with the given responses, each `{ description, content }` as written. */
+  const createPet = (
+    openapi: string,
+    responses: Record<string, unknown>,
+    components: Record<string, unknown> = {},
+  ) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: { '/pets': { post: { operationId: 'createPet', responses } } },
+    components,
+  });
+  /** A response with `{ id }` under `application/json` and the given properties under `application/yaml`. */
+  const jsonAndYaml = (yamlProperties: Record<string, unknown>, description = 'ok') => ({
+    description,
+    content: { 'application/json': { schema: obj({ id: str }) }, 'application/yaml': yaml(yamlProperties) },
+  });
+  const typeName = (type: TypeRef) => (type.kind === 'model' || type.kind === 'enum' ? type.name : type.kind);
+  const operationOf = (spec: ApiSpec) => spec.services.flatMap((s) => s.operations)[0];
+  /** Each success entry's media types with the model each is typed by. */
+  const contentsOf = (spec: ApiSpec) =>
+    operationOf(spec).successResponses!.map(
+      ({ contents, statusCode }) =>
+        `${statusCode}: ${(contents ?? []).map(({ contentType, type }) => `${contentType} → ${typeName(type)}`).join(', ')}`,
+    );
+  /** Each success entry's `application/yaml` body, as the issue's script prints it. */
+  const yamlOf = (spec: ApiSpec) =>
+    operationOf(spec).successResponses!.map(({ contents, statusCode }) => {
+      const body = contents?.find(({ contentType }) => contentType === 'application/yaml');
+      return `${statusCode}: ${body ? typeName(body.type) : 'none'}`;
+    });
+  const modelsOf = (spec: ApiSpec) =>
+    spec.models.map(({ fields, name }) => `${name} { ${fields.map((f) => f.name).join(', ')} }`);
+  /** Each change as the issue's script prints it, with the retyped media types, and the exit code `oagen diff` ends with. */
+  const diff = (before: ApiSpec, after: ApiSpec) => {
+    const { changes, summary } = diffSpecs(before, after);
+    return {
+      changes: changes.map((change) => {
+        const { classification, kind, name, operationName, responseContentTypeChanges } = change as typeof change & {
+          name?: string;
+          operationName?: string;
+          responseContentTypeChanges?: Array<{ statusCode?: number; retyped?: string[] }>;
+        };
+        const retyped = (responseContentTypeChanges ?? []).flatMap(({ retyped = [], statusCode }) =>
+          retyped.map((contentType) => `${statusCode} retyped ${contentType}`),
+        );
+        return [classification, kind, name ?? operationName, ...retyped].join(' ');
+      }),
+      exit: summary.breaking > 0 ? 2 : summary.modified + summary.removed + summary.added > 0 ? 1 : 0,
+    };
+  };
+
+  describe.each(['3.1.0', '3.0.3'])('OAS %s', (openapi) => {
+    const YAML = 'CreatePetApplicationYamlResponse';
+    const same = (responses: Record<string, unknown> = {}, components?: Record<string, unknown>) =>
+      createPet(
+        openapi,
+        { '200': jsonAndYaml({ id: str }), '201': jsonAndYaml({ id: str }, 'created'), ...responses },
+        components,
+      );
+
+    it('the issue repro: the 201 YAML body is `CreatePetApplicationYamlResponse201` in every document, so an edit to either body is additive', async () => {
+      const before = await parseDocument(same());
+      const tag201 = await parseDocument(same({ '201': jsonAndYaml({ id: str, tag: str }, 'created') }));
+      const tag200 = await parseDocument(same({ '200': jsonAndYaml({ id: str, tag: str }) }));
+
+      for (const spec of [before, tag201, tag200]) {
+        expect(yamlOf(spec)).toEqual([`200: ${YAML}`, `201: ${YAML}201`]);
+      }
+      const json = ['CreatePetResponse { id }', 'CreatePetResponse201 { id }'];
+      expect(modelsOf(before)).toEqual([...json, `${YAML} { id }`, `${YAML}201 { id }`]);
+      expect(modelsOf(tag201)).toEqual([...json, `${YAML} { id }`, `${YAML}201 { id, tag }`]);
+      expect(modelsOf(tag200)).toEqual([...json, `${YAML} { id, tag }`, `${YAML}201 { id }`]);
+      expect(diff(before, tag201)).toEqual({ changes: [`additive model-modified ${YAML}201`], exit: 1 });
+      expect(diff(before, tag200)).toEqual({ changes: [`additive model-modified ${YAML}`], exit: 1 });
+    });
+
+    it('names a `+json` secondary body for the 201 too, and the YAML body beside a `+json` primary', async () => {
+      const vendor = (description = 'ok') => ({
+        description,
+        content: {
+          'application/json': { schema: obj({ id: str }) },
+          'application/vnd.pet+json': { schema: obj({ name: str }) },
+        },
+      });
+      const secondary = await parseDocument(createPet(openapi, { '200': vendor(), '201': vendor('created') }));
+      expect(contentsOf(secondary)).toEqual([
+        '200: application/json → CreatePetResponse, application/vnd.pet+json → CreatePetApplicationVndPetJsonResponse',
+        '201: application/json → CreatePetResponse201, application/vnd.pet+json → CreatePetApplicationVndPetJsonResponse201',
+      ]);
+
+      // With no `application/json`, the `+json` body is the primary pick and
+      // the YAML body beside it the secondary.
+      const primary = (description = 'ok') => ({
+        description,
+        content: { 'application/vnd.pet+json': { schema: obj({ id: str }) }, 'application/yaml': yaml({ id: str }) },
+      });
+      const vendorPrimary = await parseDocument(createPet(openapi, { '200': primary(), '201': primary('created') }));
+      expect(contentsOf(vendorPrimary)).toEqual([
+        `200: application/vnd.pet+json → CreatePetResponse, application/yaml → ${YAML}`,
+        `201: application/vnd.pet+json → CreatePetResponse201, application/yaml → ${YAML}201`,
+      ]);
+    });
+
+    it('shares a later body with an earlier later body of its shape, never with the primary', async () => {
+      const spec = await parseDocument(
+        same({
+          '202': jsonAndYaml({ id: str }, 'accepted'),
+          '203': jsonAndYaml({ id: str, eta: str }, 'non-authoritative'),
+          '206': jsonAndYaml({ id: str, eta: str }, 'partial'),
+        }),
+      );
+
+      expect(yamlOf(spec)).toEqual([
+        `200: ${YAML}`,
+        `201: ${YAML}201`,
+        `202: ${YAML}201`,
+        `203: ${YAML}203`,
+        `206: ${YAML}203`,
+      ]);
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
+        `${YAML} { id }`,
+        `${YAML}201 { id }`,
+        `${YAML}203 { id, eta }`,
+      ]);
+    });
+
+    it('names the nested models and inline enums of a later body under its stem, whatever the 200 declares', async () => {
+      const nested = { owner: obj({ id: str }), status: { type: 'string', enum: ['a', 'b'] } };
+      const spec = await parseDocument(same({ '200': jsonAndYaml(nested), '201': jsonAndYaml(nested, 'created') }));
+      const fieldTypes = (name: string) =>
+        spec.models.find((m) => m.name === name)!.fields.map((f) => `${f.name}: ${typeName(f.type)}`);
+
+      expect(modelsOf(spec)).toEqual([
+        'CreatePetResponse { id }',
+        'CreatePetResponse201 { id }',
+        `${YAML} { owner, status }`,
+        `${YAML}Owner { id }`,
+        `${YAML}201 { owner, status }`,
+        `${YAML}201Owner { id }`,
+      ]);
+      expect(fieldTypes(YAML)).toEqual([`owner: ${YAML}Owner`, `status: ${YAML}Status`]);
+      expect(fieldTypes(`${YAML}201`)).toEqual([`owner: ${YAML}201Owner`, `status: ${YAML}201Status`]);
+      expect(spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value).join(', ')}]`)).toEqual([
+        `${YAML}Status [a, b]`,
+        `${YAML}201Status [a, b]`,
+      ]);
+    });
+
+    it('gives the same names whichever status code the document declares first', async () => {
+      const forward = await parseDocument(same());
+      const reversed = await parseDocument(
+        createPet(openapi, { '201': jsonAndYaml({ id: str }, 'created'), '200': jsonAndYaml({ id: str }) }),
+      );
+
+      expect(yamlOf(reversed)).toEqual(yamlOf(forward));
+      expect(modelsOf(reversed)).toEqual(modelsOf(forward));
+      expect(diff(forward, reversed)).toEqual({ changes: [], exit: 0 });
+    });
+
+    it('keeps the bare name for the primary status code, the lowest 2xx with a typed body, not for the 200', async () => {
+      const spec = await parseDocument(
+        createPet(openapi, {
+          '200': { description: 'no body' },
+          '201': jsonAndYaml({ id: str }, 'created'),
+          '202': jsonAndYaml({ id: str }, 'accepted'),
+        }),
+      );
+
+      expect(operationOf(spec).responseStatusCode).toBe(201);
+      expect(yamlOf(spec)).toEqual(['200: none', `201: ${YAML}`, `202: ${YAML}202`]);
+    });
+
+    it('steps a later body past a schema that owns its status-coded name by number, never onto the primary', async () => {
+      const owned = (...names: string[]) => ({
+        schemas: Object.fromEntries(names.map((name) => [name, obj({ other: str })])),
+      });
+      const one = await parseDocument(same({}, owned(`${YAML}201`)));
+      expect(yamlOf(one)).toEqual([`200: ${YAML}`, `201: ${YAML}2`]);
+      expect(modelsOf(one)).toContain(`${YAML}2 { id }`);
+
+      // The bare name, `…Response200` and `…Response201` all owned: the 200
+      // steps to `…Response2`, and the 201, the same shape, past it to
+      // `…Response3` rather than onto the 200's model.
+      const all = await parseDocument(same({}, owned(YAML, `${YAML}200`, `${YAML}201`)));
+      expect(yamlOf(all)).toEqual([`200: ${YAML}2`, `201: ${YAML}3`]);
+      expect(modelsOf(all)).toEqual(
+        expect.arrayContaining([
+          `${YAML} { other }`,
+          `${YAML}200 { other }`,
+          `${YAML}201 { other }`,
+          `${YAML}2 { id }`,
+          `${YAML}3 { id }`,
+        ]),
+      );
+    });
+
+    it('leaves a component response, a 3xx, an error and a default entry named as before', async () => {
+      const code = { 'application/json': { schema: obj({ code: str }) }, 'application/yaml': yaml({ code: str }) };
+      const spec = await parseDocument(
+        same(
+          {
+            '201': { $ref: '#/components/responses/Card' },
+            '302': { description: 'moved', content: { 'application/yaml': yaml({ id: str }) } },
+            '404': { description: 'missing', content: code },
+            default: { description: 'other', content: code },
+          },
+          {
+            responses: {
+              Card: {
+                description: 'card',
+                content: {
+                  'application/json': { schema: obj({ text: str }) },
+                  'application/yaml': yaml({ text: str }),
+                },
+              },
+            },
+          },
+        ),
+        // The error bodies as the parser names them, before the collapse pass folds them into one model.
+        { collapseErrorBodies: false },
+      );
+      const op = operationOf(spec);
+
+      expect(contentsOf(spec)).toEqual([
+        `200: application/json → CreatePetResponse, application/yaml → ${YAML}`,
+        // The component's wherever it is mounted, never `CardApplicationYamlResponse201`.
+        '201: application/json → CardResponse, application/yaml → CardApplicationYamlResponse',
+        // A 3xx entry is not a later 2xx: its body shares the 200's model as before.
+        `302: application/yaml → ${YAML}`,
+      ]);
+      expect(op.errors.map((e) => e.contents!.map((c) => typeName(c.type)).join(', '))).toEqual([
+        'CreatePetError404, CreatePetError404ApplicationYaml',
+      ]);
+      expect(op.defaultResponse!.contents!.map((c) => typeName(c.type))).toEqual([
+        'CreatePetDefaultResponse',
+        'CreatePetDefaultApplicationYamlResponse',
       ]);
     });
   });

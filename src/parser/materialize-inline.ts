@@ -131,11 +131,14 @@ export interface SettledSite {
  * creates it (`createSiblingSites`) and hands the same object to every site
  * of the bare name. Each call reads `settled`, tries those stems right after
  * the bare name (the bare name itself with the renames of the site that
- * settled on it), so a shape identical to an earlier site's shares that
- * site's model under whichever stem it took (`…Response200`, not a fresh
- * `…Response201`), and a different shape steps past them to the site's own
- * candidates; then it appends the site it settles — the only argument a call
- * mutates, and only this field of it.
+ * settled on it) — or before its first candidate, for a site with no bare
+ * name (`siblingsFirst`) — so a shape identical to an earlier site's shares
+ * that site's model under whichever stem it took (a 202's `…Response201`,
+ * not a fresh `…Response202`), and a different shape steps past them to the
+ * site's own candidates; then it appends the site it settles — the only
+ * argument a call mutates, and only this field of it. A container can also
+ * be handed to the sites of another group as `taken`: the stems recorded
+ * in it are then left out of their candidates, never tried and never shared.
  */
 export interface SiblingSites {
   /** The settlements so far, in the order the sites were resolved; appended to by `materializeInlineSchema`. */
@@ -194,6 +197,25 @@ export interface MaterializeInlineOptions {
    * nothing is recorded.
    */
   siblings?: SiblingSites | SettledSites | SiblingStems;
+  /**
+   * Set for a site with no bare name — a later status code's secondary
+   * body, whose first candidate already carries its status code
+   * (workos/oagen#538): the stems its `siblings` settled on are tried before
+   * its candidates rather than between the first and the rest, so a 202
+   * body identical to the 201's shares `…Response201` instead of taking a
+   * free `…Response202`, and a different one steps to `…Response202`.
+   */
+  siblingsFirst?: boolean;
+  /**
+   * The settlements of the sites this one must never share with — for a
+   * later status code's secondary body, the primary status code's bodies of
+   * the same bare name, and the reverse (workos/oagen#538): a stem recorded
+   * there is left out of this site's candidates, so a 201 body identical to
+   * the 200's never resolves to the 200's model under a numbered stem
+   * either, whichever of the two is named first. Read as the sites resolve,
+   * so the container is shared, not copied.
+   */
+  taken?: SiblingSites;
   /** The parent the schema is a property of; none for a body. */
   parentName?: string;
   componentSchemas?: Record<string, SchemaObject>;
@@ -264,15 +286,18 @@ const MAX_RENAME_ROUNDS = 64;
  *
  * The stems are tried in the order `candidateStem` gives: the caller's bare
  * name, then the stems earlier sites of the same bare name settled on
- * (`options.siblings`), then the caller's own qualified candidates. A trial
- * under an earlier site's stem replays that site's renames first, so the
- * `application/vnd.pet+json` body of a 201 whose bare name a component owns
- * tries the `…Response200` its 200 settled on before its own `…Response201`,
- * and shares the 200's models when the shapes are identical — nested
- * `…Response200Circle` included — where a name-only comparison would mint a
- * second model of the same shape. The site's own settlement — the stem the
- * trial was under or the one its root moved to, with the renames made under
- * it — is appended to `options.siblings` for the sites after it.
+ * (`options.siblings`), then the caller's own qualified candidates — or,
+ * for a site with no bare name (`options.siblingsFirst`), the siblings'
+ * stems and then every candidate of the caller's; a stem the sites of
+ * another group settled on (`options.taken`) is never tried. A trial under
+ * an earlier site's stem replays that site's renames first, so the
+ * `application/vnd.pet+json` body of a 202 tries the `…Response201` its 201
+ * settled on before its own `…Response202`, and shares the 201's models when
+ * the shapes are identical — nested `…Response201Circle` included — where a
+ * name-only comparison would mint a second model of the same shape. The
+ * site's own settlement — the stem the trial was under or the one its root
+ * moved to, with the renames made under it — is appended to
+ * `options.siblings` for the sites after it.
  */
 export function materializeInlineSchema(schema: SchemaObject, given: MaterializeInlineOptions): TypeRef {
   const options: ResolvedOptions = { ...given, siblings: siblingSitesOf(given.siblings) };
@@ -345,22 +370,33 @@ interface Candidate {
  * bare name settled on (`options.siblings`), with its renames, then the
  * caller's other candidates in the caller's order, leaving out any stem a
  * sibling settled on — the same stem tried twice in a row would read to the
- * fixed-point test as an advance that changed nothing. The caller's
- * candidates end in an unbounded numbered run, so at most as many of them as
- * there are siblings are left out and the search is bounded; past the bound
- * the caller's own `index`-th candidate is the fallback.
+ * fixed-point test as an advance that changed nothing — and any stem the
+ * sites of another group settled on (`options.taken`), which this site must
+ * never resolve to. A site with no bare name (`options.siblingsFirst`) tries
+ * every sibling's stem first, then every candidate of the caller's, left out
+ * the same way. The caller's candidates end in an unbounded numbered run, so
+ * at most as many of them as there are siblings and taken stems are left out
+ * and the search is bounded; past the bound the caller's own `index`-th
+ * candidate is the fallback.
  */
 function candidateStem(index: number, options: ResolvedOptions, firstClashOwners: InlineModelOwner[]): Candidate {
   const own = (i: number): string => options.stem(i, firstClashOwners);
-  const bare = own(0);
   const sites = options.siblings?.settled ?? [];
-  if (index === 0) return { stem: bare, renames: sites.find((site) => site.stem === bare)?.renames ?? [] };
-  const others = sites.filter((site) => site.stem !== bare);
-  if (index <= others.length) return others[index - 1];
-  let remaining = index - others.length;
-  for (let i = 1; i <= index + others.length; i++) {
+  const taken = options.taken?.settled ?? [];
+  const bare = options.siblingsFirst ? undefined : own(0);
+  if (bare !== undefined && index === 0) {
+    return { stem: bare, renames: sites.find((site) => site.stem === bare)?.renames ?? [] };
+  }
+  // The candidates tried before the siblings' stems: the bare name, or none.
+  const before = bare === undefined ? 0 : 1;
+  const others = bare === undefined ? sites : sites.filter((site) => site.stem !== bare);
+  if (index - before < others.length) return others[index - before];
+  const leftOut = (stem: string): boolean =>
+    others.some((site) => site.stem === stem) || taken.some((site) => site.stem === stem);
+  let remaining = index - before - others.length + 1;
+  for (let i = before; i <= index + others.length + taken.length; i++) {
     const stem = own(i);
-    if (others.some((site) => site.stem === stem)) continue;
+    if (leftOut(stem)) continue;
     if (--remaining === 0) return { stem, renames: [] };
   }
   return { stem: own(index), renames: [] };
