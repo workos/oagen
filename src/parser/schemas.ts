@@ -2708,12 +2708,62 @@ function wrappedReference(schema: SchemaObject): { reference: SchemaObject; leve
 }
 
 /**
+ * What a field or parameter schema that references an array or primitive
+ * component reads the component's declarations through (#399, #512). Such a
+ * component names no model that could carry what it declares beside its
+ * items or its type, so the site reads that from every entry the reference
+ * passes on its way to the declaration — the entry it names, each alias in
+ * turn, the component itself (`componentEntries`, nearest first) — under its
+ * own. A bare `$ref` reads all of it: text, flags, default, examples, `x-*`
+ * keys and limits, as the same schema written inline carries them. Under a
+ * wrapper the type builder reads through — a nullable one, an `allOf` read
+ * as the reference (`wrappedReference`) — the site documents itself: its
+ * text, flags, default, examples and keys come from the wrapper and the
+ * members written beside the `$ref`, and none from the component (#335
+ * review). Its limits are another matter: the wire enforces the component's
+ * whether or not the `$ref` is wrapped, and no model carries them, so they
+ * conjoin with the site's own exactly as a bare `$ref`'s do (#512 review).
+ * `undefined` for a schema that is no such reference — an inline schema, or
+ * a `$ref` to a model, named union or enum, which leaves all of it on that
+ * node — and outside an extraction, as `isArrayComponentRef` is.
+ */
+export interface ComponentReference {
+  /** The schemas on the way to the `$ref`, nearest first: the site's own and, under a wrapper, each wrapper, the members beside the `$ref` and the `$ref` schema with whatever is written beside it (`wrappedReference`). */
+  own: SchemaObject[];
+  /** The entries the reference passes on its way to the array or primitive, nearest first (`componentEntries`). */
+  entries: SchemaObject[];
+  /** Whether the schema is the bare `$ref`, which reads the entries' documentation as well as their limits. */
+  bare: boolean;
+}
+
+export function componentReference(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): ComponentReference | undefined {
+  const wrapped = wrappedReference(schema);
+  if (!wrapped || !componentSchemas) return undefined;
+  const { reference } = wrapped;
+  const declares = isArrayComponentRef(reference)
+    ? isArrayComponentSchema
+    : isPrimitiveComponentRef(reference)
+      ? isPrimitiveComponentSchema
+      : undefined;
+  const target = declares && resolveComponentSchemaRef(reference, componentSchemas);
+  if (!declares || !target) return undefined;
+  return {
+    own: wrapped.levels,
+    entries: componentEntries(target, componentSchemas, declares) ?? [target],
+    bare: schema.$ref !== undefined,
+  };
+}
+
+/**
  * Build a single Field from a schema property entry. Shared across all
  * extraction sites. Pass `componentSchemas` where they are at hand so a
  * field whose schema is a bare `$ref` can take `example`/`examples` from the
  * component it points at, as a parameter does, and what an array or
  * primitive component declares beside its items or its type through its
- * aliases. `siblingProperties` are the
+ * aliases (`componentReference`). `siblingProperties` are the
  * other properties of the object the field belongs to (`collectProperties`);
  * array items and map values use them to step aside from a sibling that
  * would take their singular name (`elementContextName`).
@@ -2726,40 +2776,16 @@ export function buildFieldFromSchema(
   componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): Field {
-  // A bare `$ref` to an array or primitive component names no model that
-  // could carry what the component declares beside its items or its type, so
-  // the field reads that from every entry the reference passes on its way to
-  // the declaration — the entry it names, each alias in turn, the component
-  // itself (`componentEntries`) — under its own, the nearer entry's first, as
-  // the same schema written inline carries it (#399, #512). A `$ref` to a
-  // model, named union or enum leaves all of it on that node but the
-  // `example` and `examples` a field takes from any component it names.
-  //
-  // Under a wrapper the type builder reads through — a nullable one, an
-  // `allOf` read as the reference (`wrappedReference`) — the field documents
-  // itself: its own text, flags, default, examples and keys, read from the
-  // wrapper and the members written beside the `$ref`, and none of the
-  // component's (#335 review). Its limits are another matter: the wire
-  // enforces the component's whether or not the `$ref` is wrapped, and no
-  // model carries them, so they conjoin with the field's own exactly as a
-  // bare `$ref`'s do (#512 review).
-  const wrapped = wrappedReference(fieldSchema);
-  const reference = wrapped?.reference;
-  const declares =
-    reference === undefined
-      ? undefined
-      : isArrayComponentRef(reference)
-        ? isArrayComponentSchema
-        : isPrimitiveComponentRef(reference)
-          ? isPrimitiveComponentSchema
-          : undefined;
-  const refTarget = resolveComponentSchemaRef(declares ? reference : fieldSchema, componentSchemas);
-  const aliases =
-    refTarget && componentSchemas && declares
-      ? (componentEntries(refTarget, componentSchemas, declares) ?? [refTarget])
-      : [];
+  // What the field reads from an array or primitive component it references
+  // (`componentReference`): every entry's limits, and a bare `$ref`'s
+  // documentation too. A `$ref` to a model, named union or enum leaves all of
+  // it on that node but the `example` and `examples` a field takes from any
+  // component a bare `$ref` names.
+  const reference = componentReference(fieldSchema, componentSchemas);
+  const refTarget = reference ? reference.entries[0] : resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  const own = declares && wrapped ? wrapped.levels : [fieldSchema];
+  const own = reference?.own ?? [fieldSchema];
   const levels = bare ? [...own, ...aliases] : own;
   const limitLevels = [...own, ...aliases];
   const { example, examples } = resolveExamples(

@@ -10,7 +10,7 @@ import {
 } from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Field } from '../../src/ir/types.js';
+import type { ApiSpec, Field, Parameter } from '../../src/ir/types.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -1461,6 +1461,66 @@ describe('#512', () => {
       ]);
     },
   );
+
+  // Greptile (review round 2): a parameter read one `$ref` level only, so
+  // through an alias (`Alias: { $ref: Name }`), a lone `allOf` or a nullable
+  // wrapper it lost `Name`'s limits, and with `Name` no longer a model they
+  // were nowhere in the IR. A parameter now reads the component as a field
+  // does (`componentReference`).
+  it('reads a primitive or array component on a parameter through its aliases and wrappers, as a field does', async () => {
+    const parameter = (name: string, schema: unknown) => ({ name, in: 'query', schema });
+    const spec = await parse(
+      {
+        Name: { type: 'string', minLength: 1, description: 'A name.', default: 'n', deprecated: true },
+        Alias: ref('Name'),
+        Tags: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Tags.' },
+        TagsAlias: ref('Tags'),
+      },
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [
+              parameter('bare', ref('Name')),
+              parameter('alias', ref('Alias')),
+              parameter('beside', { ...ref('Alias'), maxLength: 3 }),
+              parameter('lone', { allOf: [ref('Name')] }),
+              parameter('annotated', { allOf: [ref('Name'), { description: 'Annotated.' }] }),
+              parameter('maybe', { oneOf: [ref('Name'), { type: 'null' }] }),
+              parameter('tags', ref('TagsAlias')),
+              parameter('tags_lone', { allOf: [ref('Tags')] }),
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    );
+    expect(spec.models.map((m) => m.name)).toEqual([]);
+    const [listPets] = spec.services.flatMap((service) => service.operations);
+    const own = ({ name, type, constraints, description, default: fallback, deprecated }: Parameter) => ({
+      name,
+      type,
+      constraints,
+      description,
+      default: fallback,
+      deprecated,
+    });
+    const none = { description: undefined, default: undefined, deprecated: undefined };
+    const named = { description: 'A name.', default: 'n', deprecated: true };
+    const tags = { kind: 'array', items: string } as const;
+    expect(listPets.queryParams.map(own)).toEqual([
+      // A bare `$ref` reads the component's text, default and flag through every alias, and its limits.
+      { name: 'bare', type: string, constraints: { minLength: 1 }, ...named },
+      { name: 'alias', type: string, constraints: { minLength: 1 }, ...named },
+      { name: 'beside', type: string, constraints: { minLength: 1, maxLength: 3 }, ...named },
+      // Under a wrapper the limits alone; the text is the wrapper's own.
+      { name: 'lone', type: string, constraints: { minLength: 1 }, ...none },
+      { name: 'annotated', type: string, constraints: { minLength: 1 }, ...none, description: 'Annotated.' },
+      { name: 'maybe', type: { kind: 'nullable', inner: string }, constraints: { minLength: 1 }, ...none },
+      { name: 'tags', type: tags, constraints: { minItems: 1 }, ...none, description: 'Tags.' },
+      { name: 'tags_lone', type: tags, constraints: { minItems: 1 }, ...none },
+    ]);
+  });
 
   it('types the reference as the primitive at every other site', async () => {
     const spec = await parse(
