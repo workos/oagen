@@ -445,3 +445,221 @@ describe('response headers – two keys of one response that differ in case alon
     expectSound(op, inlineModels);
   });
 });
+
+/**
+ * Covers issue #414: OpenAPI says the definition of a header parameter named
+ * `Accept`, `Content-Type` or `Authorization` "SHALL be ignored" — the
+ * request's media types and `security` set those headers — but the parser
+ * kept all three in `headerParams`, on operations and webhooks alike,
+ * whatever their case. They are now dropped once a `components/parameters`
+ * ref is resolved, before anything types them, wherever they are declared.
+ */
+describe('header parameters named Accept, Content-Type or Authorization, which OpenAPI says to ignore (#414)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("drops them from the operation and the webhook alike, whatever their case, through parseSpec (the issue's document)", async () => {
+    const spec = await parseSpec(resolve(fixtures, 'header-param-ignored-after.json'));
+    const [listPets] = spec.services.flatMap((service) => service.operations);
+    // Used to be `['X-Pet-Token', 'Accept', 'content-type', 'AUTHORIZATION']`.
+    expect(listPets.headerParams.map((p) => p.name)).toEqual(['X-Pet-Token']);
+    // Used to be `['authorization', 'Content-Type', 'ACCEPT']`, the first from the path item.
+    expect(spec.webhooks!.map((hook) => [hook.name, hook.headerParams])).toEqual([['petAdded', []]]);
+  });
+
+  it('drops one a Path Item declares or a `components/parameters` ref names, keeping every other header', () => {
+    const { services } = extractOperations(
+      {
+        '/pets': {
+          parameters: [
+            { name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } },
+            { name: 'X-Pet-Token', in: 'header', schema: { type: 'string' } },
+          ],
+          post: {
+            operationId: 'createPet',
+            parameters: [
+              { $ref: '#/components/parameters/Accept' },
+              { name: 'authorization', in: 'header', schema: { type: 'string' } },
+              { name: 'IDEMPOTENCY-KEY', in: 'header', schema: { type: 'string' } },
+              { name: 'Accept-Language', in: 'header', schema: { type: 'string' } },
+            ],
+            responses: ok,
+          },
+        },
+      } as never,
+      undefined,
+      undefined,
+      { Accept: { name: 'ACCEPT', in: 'header', required: true, schema: { type: 'string' } } },
+    );
+    const [op] = services.flatMap((s) => s.operations);
+    expect(op.headerParams.map((p) => p.name)).toEqual(['X-Pet-Token', 'Accept-Language']);
+    // The idempotency header is still detected, and still the SDK's to inject.
+    expect(op.injectIdempotencyKey).toBe(true);
+  });
+
+  it('types nothing from one: no model or enum from its schema, no warning about its `content` map', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { op, inlineModels } = single({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'Accept', in: 'header', schema: { type: 'string', enum: ['application/json', 'text/csv'] } },
+            {
+              name: 'Content-Type',
+              in: 'header',
+              schema: { type: 'object', properties: { charset: { type: 'string' } } },
+            },
+            { name: 'Authorization', in: 'header', content: { 'application/xml': { schema: { type: 'string' } } } },
+          ],
+          responses: ok,
+        },
+      },
+    });
+    expect(op.headerParams).toEqual([]);
+    expect(inlineModels).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps a query parameter or a cookie of those names, since only a header is ignored', () => {
+    const { op } = single({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'Accept', in: 'query', schema: { type: 'string' } },
+            { name: 'Authorization', in: 'cookie', schema: { type: 'string' } },
+            { name: 'Content-Type', in: 'header', schema: { type: 'string' } },
+          ],
+          responses: ok,
+        },
+      },
+    });
+    expect(op.queryParams.map((p) => p.name)).toEqual(['Accept']);
+    expect(op.cookieParams!.map((p) => p.name)).toEqual(['Authorization']);
+    expect(op.headerParams).toEqual([]);
+  });
+
+  it('drops them from a webhook, one its path item declares through a ref included, minting nothing for them', () => {
+    const { webhooks, inlineModels } = extractWebhooks(
+      {
+        petAdded: {
+          parameters: [
+            { $ref: '#/components/parameters/Auth' },
+            { name: 'X-Pet-Signature', in: 'header', required: true, schema: { type: 'string' } },
+          ],
+          post: {
+            parameters: [
+              {
+                name: 'content-type',
+                in: 'header',
+                schema: { type: 'object', properties: { charset: { type: 'string' } } },
+              },
+              { name: 'Accept', in: 'query', schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+      { parameters: { Auth: { name: 'AUTHORIZATION', in: 'header', required: true, schema: { type: 'string' } } } },
+    );
+    const [hook] = webhooks;
+    expect(hook.headerParams.map((p) => p.name)).toEqual(['X-Pet-Signature']);
+    expect(hook.queryParams.map((p) => p.name)).toEqual(['Accept']);
+    expect(inlineModels).toEqual([]);
+  });
+
+  // Review round 1 (MichaelDeBoey): a dropped header is missing from the
+  // parameter map the group builder reads, so a variant naming it failed the
+  // whole parse with `references parameter "Authorization" which does not
+  // exist in the operation's parameters[]` — but the parameter is there, and
+  // the document parsed before #414. The member is dropped with a warning
+  // that names the cause instead, as is a variant or a group left empty.
+  it('drops one an x-mutually-exclusive-parameter-groups variant names, with a warning, rather than failing the parse', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { op } = single({
+      '/notes': {
+        get: {
+          operationId: 'listNotes',
+          parameters: [
+            { name: 'Authorization', in: 'header', schema: { type: 'string' } },
+            { name: 'api_key', in: 'query', schema: { type: 'string' } },
+            { name: 'token', in: 'query', schema: { type: 'string' } },
+          ],
+          'x-mutually-exclusive-parameter-groups': {
+            auth: {
+              optional: true,
+              // `both` spells the header in another case: a header name is case-insensitive.
+              variants: { header: ['Authorization'], query: ['api_key'], both: ['authorization', 'token'] },
+            },
+            bearer: { optional: false, variants: { header: ['Authorization'] } },
+          },
+          responses: ok,
+        },
+      },
+    });
+    expect(op.headerParams).toEqual([]);
+    expect(
+      op.parameterGroups?.map((group) => [
+        group.name,
+        group.optional,
+        group.variants.map((variant) => [variant.name, variant.parameters.map((p) => p.name)]),
+      ]),
+    ).toEqual([
+      [
+        'auth',
+        true,
+        [
+          ['query', ['api_key']],
+          ['both', ['token']],
+        ],
+      ],
+    ]);
+    // The kept members are the operation's own parameter objects, as always.
+    expect(op.parameterGroups![0].variants[1].parameters[0]).toBe(op.queryParams.find((p) => p.name === 'token'));
+    const dropped = (variant: string, name: string) =>
+      `[oagen] Warning: x-mutually-exclusive-parameter-groups.auth.variants.${variant} in listNotes names the header ` +
+      `parameter "${name}", which OpenAPI says to ignore (an Accept, Content-Type or Authorization header is set by ` +
+      "the request's media types and security, not by a parameter). Dropping it from the variant.";
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      dropped('header', 'Authorization'),
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.auth.variants.header in listNotes names only header ' +
+        'parameters OpenAPI says to ignore. Dropping the variant.',
+      dropped('both', 'authorization'),
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer.variants.header in listNotes names the header ' +
+        'parameter "Authorization", which OpenAPI says to ignore (an Accept, Content-Type or Authorization header is ' +
+        "set by the request's media types and security, not by a parameter). Dropping it from the variant.",
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer.variants.header in listNotes names only header ' +
+        'parameters OpenAPI says to ignore. Dropping the variant.',
+      '[oagen] Warning: x-mutually-exclusive-parameter-groups.bearer in listNotes is left with no variant once the ' +
+        'header parameters OpenAPI says to ignore are dropped. Dropping the group.',
+    ]);
+  });
+
+  it('still fails the parse over a variant member no parameter declares, ignored header or not', () => {
+    const parse = (member: string) =>
+      single({
+        '/notes': {
+          get: {
+            operationId: 'listNotes',
+            parameters: [
+              { name: 'Accept', in: 'header', schema: { type: 'string' } },
+              { name: 'api_key', in: 'query', schema: { type: 'string' } },
+            ],
+            'x-mutually-exclusive-parameter-groups': {
+              auth: { optional: true, variants: { header: [member], query: ['api_key'] } },
+            },
+            responses: ok,
+          },
+        },
+      });
+    // `Authorization` is not declared at all here, so it is no ignored header of this operation.
+    for (const member of ['X-Api-Key', 'Authorization']) {
+      expect(() => parse(member)).toThrow(
+        `x-mutually-exclusive-parameter-groups.auth.variants.header references parameter "${member}" which does not ` +
+          "exist in the operation's parameters[] (listNotes).",
+      );
+    }
+  });
+});

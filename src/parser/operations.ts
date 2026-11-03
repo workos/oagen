@@ -286,6 +286,22 @@ export function resolveParameterRef(
   return followed.value;
 }
 
+/** The header parameter names OpenAPI says to ignore, folded (`foldHeaderName`). */
+const IGNORED_HEADER_PARAMETERS: ReadonlySet<string> = new Set(['accept', 'content-type', 'authorization']);
+
+/**
+ * Whether `param` is a header parameter whose definition OpenAPI says
+ * "SHALL be ignored" (OAS 3.x, Parameter Object): one named `Accept`,
+ * `Content-Type` or `Authorization`, whatever its case, headers the
+ * request's media types and `security` already set. Asked once its `$ref`
+ * is resolved (`resolveParameterRef`) and before anything types it, so an
+ * operation or a webhook never carries it, nor a model or enum its schema
+ * would mint.
+ */
+export function isIgnoredHeaderParameter(param: ParameterObject): boolean {
+  return param.in === 'header' && IGNORED_HEADER_PARAMETERS.has(foldHeaderName(param.name));
+}
+
 export interface RequestBodyObject {
   description?: string;
   required?: boolean;
@@ -2711,11 +2727,20 @@ function inferDeeperContext(path: string, apiRootLength = 0, singularItem = true
  * Extract mutually-exclusive parameter groups from the `x-mutually-exclusive-parameter-groups`
  * operation extension. Cross-references grouped parameter names against the already-extracted
  * IR parameter arrays so emitters get object-identity references.
+ *
+ * `ignoredHeaders` are the case-folded names of the `Accept`, `Content-Type`
+ * and `Authorization` headers the operation declared and the parser dropped
+ * (`isIgnoredHeaderParameter`, #414). A variant member naming one is in
+ * `parameters[]` but is no parameter the SDK sends, so it is dropped from
+ * the variant with a warning — as is a variant left with no member, and a
+ * group left with no variant — rather than failing the parse with a message
+ * that says the parameter does not exist.
  */
 function extractParameterGroups(
   op: OperationObject,
   allIRParams: Parameter[],
   operationContext: string,
+  ignoredHeaders: ReadonlySet<string> = new Set(),
 ): ParameterGroup[] | undefined {
   const raw = op['x-mutually-exclusive-parameter-groups'];
   if (!raw || typeof raw !== 'object') return undefined;
@@ -2752,23 +2777,54 @@ function extractParameterGroups(
       );
     }
 
-    const variants = Object.entries(groupDef.variants).map(([variantName, paramNames]) => {
+    const variants = Object.entries(groupDef.variants).flatMap(([variantName, paramNames]) => {
       if (!Array.isArray(paramNames) || paramNames.length === 0) {
         throw new Error(
           `Malformed x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} in ${operationContext}: expected a non-empty array of parameter names.`,
         );
       }
-      const parameters: Parameter[] = paramNames.map((pName) => {
+      const variantPath = `x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName}`;
+      const parameters: Parameter[] = [];
+      for (const pName of paramNames) {
         const irParam = paramByName.get(pName);
-        if (!irParam) {
-          throw new Error(
-            `x-mutually-exclusive-parameter-groups.${groupName}.variants.${variantName} references parameter "${pName}" which does not exist in the operation's parameters[] (${operationContext}).`,
-          );
+        if (irParam) {
+          parameters.push(irParam);
+          continue;
         }
-        return irParam;
-      });
-      return { name: variantName, parameters };
+        // The member names a header the operation declared and OpenAPI says
+        // to ignore (#414): it is in `parameters[]`, so the error below would
+        // point at the wrong cause. The header is set by the request's media
+        // types or its `security`, never by a parameter, so the member is
+        // dropped from the variant.
+        if (typeof pName === 'string' && ignoredHeaders.has(foldHeaderName(pName))) {
+          console.warn(
+            `[oagen] Warning: ${variantPath} in ${operationContext} names the header parameter "${pName}", ` +
+              'which OpenAPI says to ignore (an Accept, Content-Type or Authorization header is set by the ' +
+              "request's media types and security, not by a parameter). Dropping it from the variant.",
+          );
+          continue;
+        }
+        throw new Error(
+          `${variantPath} references parameter "${pName}" which does not exist in the operation's parameters[] (${operationContext}).`,
+        );
+      }
+      if (parameters.length === 0) {
+        console.warn(
+          `[oagen] Warning: ${variantPath} in ${operationContext} names only header parameters OpenAPI says to ignore. ` +
+            'Dropping the variant.',
+        );
+        return [];
+      }
+      return [{ name: variantName, parameters }];
     });
+
+    if (variants.length === 0) {
+      console.warn(
+        `[oagen] Warning: x-mutually-exclusive-parameter-groups.${groupName} in ${operationContext} is left with no ` +
+          'variant once the header parameters OpenAPI says to ignore are dropped. Dropping the group.',
+      );
+      continue;
+    }
 
     groups.push({
       name: groupName,
@@ -2940,10 +2996,18 @@ function buildOperation(
   // `x-pet-token` are one header (#295) — rather than adding a second entry.
   // Operation params come last, so last-write-wins; Map.set keeps the
   // original insertion position, so path-level parameter ordering is
-  // preserved.
+  // preserved. An `Accept`, `Content-Type` or `Authorization` header is
+  // dropped, as OpenAPI requires (`isIgnoredHeaderParameter`, #414).
   const paramsByIdentity = new Map<string, ParameterObject>();
+  // The dropped headers' names, case-folded, for `extractParameterGroups`:
+  // a group variant that names one has the member dropped, not the parse failed.
+  const ignoredHeaders = new Set<string>();
   for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
     const param = resolveParameterRef(raw, componentParameters, opLabel, refSiblingDescriptions);
+    if (isIgnoredHeaderParameter(param)) {
+      ignoredHeaders.add(foldHeaderName(param.name));
+      continue;
+    }
     paramsByIdentity.set(parameterKey(param.in, param.name), param);
   }
   const allParams = [...paramsByIdentity.values()];
@@ -3223,7 +3287,7 @@ function buildOperation(
 
   // Extract mutually-exclusive parameter groups (query/path/header/cookie)
   const allIRParams = [...pathParams, ...queryParams, ...headerParams, ...cookieParams];
-  const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel);
+  const queryParamGroups = extractParameterGroups(op, allIRParams, opLabel, ignoredHeaders);
 
   // Extract mutually-exclusive body parameter groups
   const bodyParamGroups = extractBodyParameterGroups(op, requestBodyObject, opLabel, componentSchemas);
