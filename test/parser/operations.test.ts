@@ -1,9 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { extractOperations } from '../../src/parser/operations.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import { resolveOperations } from '../../src/ir/operation-hints.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
-import type { Enum } from '../../src/ir/types.js';
+import type { Enum, Service } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('extractOperations', () => {
@@ -3308,5 +3312,135 @@ describe('extractOperations – a first tag with no name (issue #412)', () => {
       { name: 'Notes', operations: ['listNotes ["-"]'] },
       { name: 'Labels', operations: ['listLabels undefined'] },
     ]);
+  });
+});
+
+describe('extractOperations – an operationId that names nothing (issue #526)', () => {
+  // `''` always counted as absent; the other three are only whitespace,
+  // only punctuation and only an overload marker, which camel-case to nothing.
+  const nameless = ['', ' ', '-', '[1]'];
+  const responses = { '204': { description: 'No content' } };
+  const teamId = { name: 'teamId', in: 'path' as const, required: true, schema: { type: 'string' } };
+
+  /** The method name of every operation, under each `operationNaming`. */
+  const methodNames = (services: Service[]) => {
+    const spec = {
+      name: 'Pets',
+      version: '1',
+      baseUrl: '',
+      services,
+      models: [],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+    return {
+      path: resolveOperations(spec, undefined, undefined, 'path').map((r) => r.methodName),
+      operationId: resolveOperations(spec, undefined, undefined, 'operationId').map((r) => r.methodName),
+    };
+  };
+
+  it('names the issue repro from its path under either operationNaming, in OAS 3.1 and 3.0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-526-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        for (const operationId of nameless) {
+          const file = join(dir, 'pets.json');
+          const paths = { '/pets': { get: { operationId, responses } } };
+          await writeFile(file, JSON.stringify({ openapi, info: { title: 'Pets', version: '1' }, paths }));
+          const { services } = await parseSpec(file);
+          const [operation] = services[0].operations;
+          expect(operation.name).toBe('list');
+          expect(operation).not.toHaveProperty('operationId');
+          expect(methodNames(services)).toEqual({ path: ['list_pets'], operationId: ['list_pets'] });
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('tells two such operations in one service apart by their paths, with no warning', () => {
+    for (const operationId of nameless) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { services } = extractOperations({
+          '/v1/notes': { get: { operationId, responses } },
+          '/v1/{teamId}/notes': { get: { operationId, parameters: [teamId], responses } },
+        });
+        // Not `''` and, renamed with a warning, `2`: the operationId names neither.
+        expect(services[0].operations.map((op) => op.name)).toEqual(['list', 'listByTeamId']);
+        expect(methodNames(services)).toEqual({
+          path: ['list_notes', 'list_v1_notes'],
+          operationId: ['list_notes', 'list_v1_notes'],
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it('qualifies such an operation beside an operationId-named one, which keeps its name', () => {
+    for (const operationId of nameless) {
+      const { services } = extractOperations({
+        '/api/notes': { get: { operationId, responses } },
+        '/api/{teamId}/notes': { get: { operationId: 'list', parameters: [teamId], responses } },
+      });
+      expect(services[0].operations.map((op) => op.name)).toEqual(['listNotes', 'list']);
+      expect(methodNames(services)).toEqual({
+        path: ['list_notes', 'list_api_notes'],
+        operationId: ['list_notes', 'list'],
+      });
+    }
+  });
+
+  it('reads the operation, its models included, exactly as one without an operationId', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const json = (schema: SchemaObject) => ({ content: { 'application/json': { schema } } });
+    const paths = (operationId?: string) => ({
+      '/pets': {
+        post: {
+          ...(operationId === undefined ? {} : { operationId }),
+          requestBody: json(object({ name: { type: 'string' } })),
+          responses: {
+            '201': { description: 'Created', ...json(object({ id: { type: 'string' }, owner: object({}) })) },
+            '404': { description: 'Not found', ...json(object({ message: { type: 'string' } })) },
+          },
+        },
+      },
+    });
+
+    const pathNamed = extractOperations(paths());
+    // Named from the path, never `Request`, `Response` and `Error404`.
+    expect(pathNamed.inlineModels.map((model) => model.name)).toEqual([
+      'PetsPostResponse',
+      'PetsPostResponseOwner',
+      'PetsPostRequest',
+      'PetsPostError404',
+    ]);
+    for (const operationId of nameless) expect(extractOperations(paths(operationId))).toEqual(pathNamed);
+  });
+
+  it('never hands it to operationIdTransform, which still names an operation whose operationId names something', () => {
+    for (const operationId of nameless) {
+      const seen: string[] = [];
+      const transform = (id: string) => {
+        seen.push(id);
+        return id.split('_').pop()!;
+      };
+      const { services } = extractOperations(
+        { '/pets': { get: { operationId, responses }, post: { operationId: 'PetsController_create[0]', responses } } },
+        transform,
+      );
+      expect(seen).toEqual(['PetsController_create']);
+      expect(services[0].operations.map((op) => [op.name, op.operationId])).toEqual([
+        ['list', undefined],
+        ['create', 'PetsController_create[0]'],
+      ]);
+      expect(methodNames(services)).toEqual({
+        path: ['list_pets', 'create_pet'],
+        operationId: ['list_pets', 'create'],
+      });
+    }
   });
 });

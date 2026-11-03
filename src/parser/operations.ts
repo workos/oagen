@@ -447,6 +447,36 @@ function resolvePathItems(
   return resolved;
 }
 
+/**
+ * The resolved `paths` map with every `operationId` that names nothing read
+ * as absent: one with no ASCII letter or digit once a trailing overload
+ * marker is stripped, which camel-cases to nothing as inferOperationName
+ * reads it — `' '`, `'-'`, `'[1]'`. Its operation is read as one without an
+ * `operationId`, as one declaring `''` always was: named from its method and
+ * path, and renamed as a path-named operation when that name collides
+ * (planOperations), its models named from its path, and given no
+ * `Operation.operationId`, so `resolveOperations` derives its method name
+ * from the path under either `operationNaming` (#526). An
+ * `operationIdTransform` is never called with it. A Path Item without one is
+ * kept as it is; one with one is copied, its other operations kept as they
+ * are.
+ */
+function dropNamelessOperationIds(paths: Record<string, PathItem>): Record<string, PathItem> {
+  const result: Record<string, PathItem> = {};
+  for (const [path, pathItem] of Object.entries(paths)) {
+    let item = pathItem;
+    for (const method of HTTP_METHODS) {
+      const op = item[method];
+      if (typeof op?.operationId !== 'string' || toCamelCase(normalizeOperationIdForNaming(op.operationId)) !== '') {
+        continue;
+      }
+      item = { ...item, [method]: { ...op, operationId: undefined } };
+    }
+    result[path] = item;
+  }
+  return result;
+}
+
 export interface OperationExtractionResult {
   services: Service[];
   inlineModels: Model[];
@@ -507,8 +537,10 @@ export function extractOperations(
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // `components/pathItems` item its `$ref` leads to, with an entry that
-  // resolves to nothing left out after one warning (see resolvePathItems).
-  const resolvedPaths = resolvePathItems(paths, componentPathItems);
+  // resolves to nothing left out after one warning (see resolvePathItems),
+  // and an `operationId` that names nothing left out of its operation (see
+  // dropNamelessOperationIds).
+  const resolvedPaths = dropNamelessOperationIds(resolvePathItems(paths, componentPathItems));
 
   // Whether text written beside a `$ref` overrides the referenced component's
   // (OAS 3.1, and a version not recognised) or is ignored (OAS 3.0), for every
