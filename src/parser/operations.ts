@@ -704,7 +704,7 @@ export function extractOperations(
         componentResponseModelNames,
         // Same "METHOD /path" key the operation resolver uses for the rest of the hint.
         operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
-        componentModels,
+        registeredModels,
         registry,
         modelOperationIds.get(key),
       );
@@ -2985,6 +2985,7 @@ function buildOperation(
   refSiblingDescriptions: SiblingDocs = 'override',
   componentResponseModelNames?: ReadonlyMap<string, string>,
   paginationHint?: unknown,
+  /** The component models and the models their fields mint (`PaginationExtractionOptions.componentModels`). */
   componentModels?: Model[],
   registry?: ModelShapeRegistry,
   /**
@@ -5815,9 +5816,11 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * body. The IR answers first — the detected data array itself, an envelope
  * companion's field (companion models included, so the parser's own item
  * model is reused and follows any later renaming), or the response model's
- * fields — and the document (`schema`, classified under `contextName`)
- * answers when the path crosses a model the parser has not materialized,
- * minting inline items under a path-derived name.
+ * fields, through the models a component's fields mint too (`result.items`
+ * through a `result` two `allOf` members of `PetPage` conjoin yields the
+ * items `PetPageResult` holds) — and the document (`schema`, classified
+ * under `contextName`) answers when the path crosses a model the parser has
+ * not materialized, minting inline items under a path-derived name.
  */
 function resolveOverrideItemType(
   result: ResponseExtractionResult,
@@ -5866,7 +5869,11 @@ interface PaginationExtractionOptions {
    * fits its kind, or the override is unusable.
    */
   endOfIteration?: PaginationEndOfIteration;
-  /** Component models, so the IR walk can follow a `$ref` wrapper's fields. */
+  /**
+   * Component models and the models their fields mint (a nested object, an
+   * `allOf` merge, array items), so the IR walk can follow a `$ref`
+   * wrapper's fields into the models the parser already built for them.
+   */
   componentModels?: Model[];
   /**
    * The override is the only source of an iterator: no query parameter

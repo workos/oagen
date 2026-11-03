@@ -478,6 +478,118 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
+    describe('#529', () => {
+      // The issue's `PetPage`: one `allOf` member declares `result` as a `$ref`
+      // to `Meta`, another inline with `items`, and the two are conjoined into
+      // `PetPageResult`, a model the component's field mints rather than a
+      // component. The iterator yields the items that field holds, never a
+      // copy minted under the path-derived `ListPetsResultItem`.
+      const object = (properties: Record<string, unknown>) => ({ type: 'object', properties });
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const Meta = object({ total_pages: { type: 'integer' } });
+      const inlineResult = (items: unknown = object({ name: { type: 'string' } })) =>
+        object({ items: { type: 'array', items } });
+      const issuePage = (result = inlineResult()) => ({ allOf: [object({ result: ref('Meta') }), object({ result })] });
+      const pageSpec = (body: unknown, schemas: Record<string, unknown>, operation: Record<string, unknown> = {}) =>
+        petsSpec(
+          { responses: jsonResponse(body), 'x-pagination': { dataPath: 'result.items' }, ...operation },
+          { schemas },
+        );
+      /** The iterator yields `itemType`, the very type the response's `result.items` holds. */
+      const expectFieldItems = (ir: ApiSpec, itemType: TypeRef) => {
+        const op = onlyOperation(ir);
+        const field = (type: TypeRef | undefined, name: string) =>
+          type?.kind === 'model'
+            ? ir.models.find((m) => m.name === type.name)?.fields.find((f) => f.name === name)?.type
+            : undefined;
+        expect(op.pagination).toMatchObject({ dataPath: 'result.items', itemType });
+        expect(field(field(op.response, 'result'), 'items')).toEqual({ kind: 'array', items: op.pagination?.itemType });
+        expect(warn).not.toHaveBeenCalled();
+      };
+
+      it.each(['3.1.0', '3.0.3'])(
+        'iterates the items PetPage.result holds, as the same allOf written inline as the body does (the issue, OAS %s)',
+        async (openapi) => {
+          const component = await parseJson({ ...pageSpec(ref('PetPage'), { Meta, PetPage: issuePage() }), openapi });
+          expectFieldItems(component, { kind: 'model', name: 'PetPageResultItem' });
+          expect(component.models.map((m) => m.name)).toEqual([
+            'Meta',
+            'PetPage',
+            'PetPageResult',
+            'PetPageResultItem',
+          ]);
+          const inline = await parseJson({ ...pageSpec(issuePage(), { Meta }), openapi });
+          expectFieldItems(inline, { kind: 'model', name: 'ListPetsResponseResultItem' });
+          expect(inline.models.map((m) => m.name)).toEqual([
+            'Meta',
+            'ListPetsResponse',
+            'ListPetsResponseResult',
+            'ListPetsResponseResultItem',
+          ]);
+        },
+      );
+
+      it('iterates them when result is itself the allOf of the $ref and the inline object, as before #483', async () => {
+        const PetPage = object({ result: { allOf: [ref('Meta'), inlineResult()] } });
+        const ir = await parseJson(pageSpec(ref('PetPage'), { Meta, PetPage }));
+        expectFieldItems(ir, { kind: 'model', name: 'PetPageResultItem' });
+        expect(ir.models.map((m) => m.name)).toEqual(['Meta', 'PetPage', 'PetPageResult', 'PetPageResultItem']);
+      });
+
+      it('iterates the items #482 conjoins when the $ref declares items too', async () => {
+        const Pet = object({ id: { type: 'string' } });
+        const PetMeta = object({ total_pages: { type: 'integer' }, items: { type: 'array', items: ref('Pet') } });
+        const PetPage = issuePage(inlineResult(object({ extra: { type: 'string' } })));
+        const ir = await parseJson(pageSpec(ref('PetPage'), { Pet, Meta: PetMeta, PetPage }));
+        expectFieldItems(ir, { kind: 'model', name: 'PetPageResultItem' });
+        expect(ir.models.find((m) => m.name === 'PetPageResultItem')?.fields.map((f) => f.name)).toEqual([
+          'id',
+          'extra',
+        ]);
+        expect(ir.models.map((m) => m.name)).toEqual(['Pet', 'Meta', 'PetPage', 'PetPageResult', 'PetPageResultItem']);
+      });
+
+      const shapes: Array<[string, unknown, TypeRef]> = [
+        ['an inline enum', { type: 'string', enum: ['cat', 'dog'] }, { kind: 'enum', name: 'PetPageResultItems' }],
+        [
+          'a nullable object',
+          { oneOf: [object({ name: { type: 'string' } }), { type: 'null' }] },
+          { kind: 'nullable', inner: { kind: 'model', name: 'PetPageResultItem' } },
+        ],
+      ];
+      it.each(shapes)(
+        'yields the type the field holds when the items are %s, minting no copy',
+        async (_, items, type) => {
+          const ir = await parseJson(pageSpec(ref('PetPage'), { Meta, PetPage: issuePage(inlineResult(items)) }));
+          expectFieldItems(ir, type);
+          const names = [...ir.models, ...ir.enums].map((t) => t.name);
+          expect(names.filter((name) => name.startsWith('ListPets'))).toEqual([]);
+        },
+      );
+
+      it("follows the field's item model when a later pass renames it", async () => {
+        // A `result_item` query enum of the `PetPage` service is lifted as
+        // `PetPageResultItem`, so the field's item model moves off the name.
+        const ir = await parseJson(
+          pageSpec(
+            ref('PetPage'),
+            { Meta, PetPage: issuePage() },
+            {
+              tags: ['PetPage'],
+              parameters: [...pageParams, query('result_item', { type: 'string', enum: ['a', 'b'] })],
+            },
+          ),
+        );
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+          '[oagen] Renamed inline model "PetPageResultItem" → "PetPageResultItem2": enum "PetPageResultItem" owns the name',
+        );
+        warn.mockClear();
+        expectFieldItems(ir, { kind: 'model', name: 'PetPageResultItem2' });
+        expect(ir.models.map((m) => m.name)).toEqual(['Meta', 'PetPage', 'PetPageResult', 'PetPageResultItem2']);
+      });
+    });
+
     it('reuses the detected item type when the override restates the detected path', async () => {
       const op = onlyOperation(await parseJson(petsSpec({ 'x-pagination': { dataPath: 'pets' } })));
       expect(op.pagination).toMatchObject({ dataPath: 'pets', itemType: { kind: 'primitive', type: 'string' } });
