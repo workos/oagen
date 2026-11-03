@@ -16,7 +16,12 @@
  * item's. `summary` is applied only where the referenced object type has one
  * — an Example Object; OpenAPI says it has no effect elsewhere — so a
  * Parameter, Request Body, Response or Header never gains a `summary` key
- * (`REFERENCE_DOC_FIELDS`).
+ * (`REFERENCE_DOC_FIELDS`). Neither version lets a Reference Object carry
+ * anything else — "any properties added SHALL be ignored" — so a `content`
+ * or `headers` written beside a response `$ref`, or a `value` beside an
+ * example's, is never read: a ref that resolves reads the component, and
+ * one that fails is returned with nothing but its `$ref` and the text the
+ * rule above keeps (#562).
  *
  * A Path Item's `$ref` is not a Reference Object: OpenAPI leaves a field
  * present on both sides undefined, and `resolvePathItemRef` takes the
@@ -67,11 +72,13 @@ export interface FollowedReference<T> {
   /**
    * The object the walk ended on, with the text kept from the refs along the
    * chain applied over its own: the component for `resolved`, else the
-   * Reference Object the walk stopped at, as written — less the text beside
-   * its `$ref` under `'ignore'`, where no ref's is read. The object itself
-   * when nothing was kept or left out, so an inline object or an undescribed
-   * ref keeps its identity. Typed as the caller expects; for a failure it is
-   * the ref.
+   * Reference Object the walk stopped at, reduced to what one may carry —
+   * its `$ref` and, under `'override'`, that text. Every other key written
+   * beside the `$ref` is left out (#562), and under `'ignore'`, where no
+   * ref's text is read, so is the text (#444). The object itself when
+   * nothing was kept or left out, so an inline object or an undescribed ref
+   * keeps its identity. Typed as the caller expects; for a failure it is the
+   * ref.
    */
   value: T;
   /** The `$ref` the walk stopped at, for a failure (`String()` of a malformed one); absent when resolved. */
@@ -97,13 +104,21 @@ export function followReference<T extends object>(
   const kept: Partial<Record<ReferenceDocField, string>> = {};
   let current: object = raw;
   const ended = (outcome: ReferenceOutcome, ref?: string): FollowedReference<T> => {
-    let value: object = Object.keys(kept).length === 0 ? current : { ...current, ...kept };
-    // A failed walk stops at a Reference Object, whose text OAS 3.0 ignores
-    // as it ignores every other ref's; a component's own text is kept.
-    if (outcome !== 'resolved' && siblings === 'ignore' && fields.some((field) => field in current)) {
-      const rest: Record<string, unknown> = { ...current };
-      for (const field of fields) delete rest[field];
-      value = rest;
+    let value: object;
+    if (outcome === 'resolved') {
+      value = Object.keys(kept).length === 0 ? current : { ...current, ...kept };
+    } else {
+      // A failed walk stops at a Reference Object, which carries nothing but
+      // its `$ref` and the text the rule above keeps: the text beside it is
+      // read under 'override' and, as every other ref's, ignored under
+      // 'ignore' (#444), and every other key written beside the `$ref` — a
+      // response's `content` or `headers`, an example's `value` — is left
+      // out, as OpenAPI says of any property added to a Reference Object
+      // (#562), so no reader takes it for the object's own. The ref itself
+      // when that leaves it as written, so an undescribed ref keeps its
+      // identity.
+      const reference: Record<string, unknown> = { $ref: (current as { $ref: unknown }).$ref, ...kept };
+      value = holdsExactly(current, reference) ? current : reference;
     }
     return { outcome, value: value as T, ...(ref !== undefined ? { ref } : {}) };
   };
@@ -111,13 +126,15 @@ export function followReference<T extends object>(
   while ('$ref' in current) {
     const ref = (current as { $ref: unknown }).$ref;
     if (ref === undefined) break;
-    if (typeof ref !== 'string') return ended('malformed', String(ref));
+    // The text beside this ref is read before the walk can end on it, so a
+    // malformed ref's own travels with it as a dangling one's does.
     if (siblings === 'override') {
       for (const field of fields) {
         const text = (current as Partial<Record<ReferenceDocField, unknown>>)[field];
         if (kept[field] === undefined && typeof text === 'string' && text.trim() !== '') kept[field] = text;
       }
     }
+    if (typeof ref !== 'string') return ended('malformed', String(ref));
     if (seen.has(ref)) return ended('circular', ref);
     seen.add(ref);
     const resolved = resolveComponentRef(ref, section, components);
@@ -125,4 +142,13 @@ export function followReference<T extends object>(
     current = resolved;
   }
   return ended('resolved');
+}
+
+/** Whether `object` holds exactly `entries`, key for key and value for value, so it can stand for them as it is. */
+function holdsExactly(object: object, entries: Record<string, unknown>): boolean {
+  const own = object as Record<string, unknown>;
+  const keys = Object.keys(own);
+  return (
+    keys.length === Object.keys(entries).length && keys.every((key) => key in entries && own[key] === entries[key])
+  );
 }

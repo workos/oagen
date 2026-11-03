@@ -5800,9 +5800,12 @@ function collectOperationConstPrefixes(
     // fallback or a key OpenAPI does not define reserves nothing.
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
-    // A `$ref` into `components/responses` has no `content` here and is not
-    // followed either: its inline body is named after the component, so the
-    // consts it pins never prefix a path-derived name.
+    // A Reference Object is not followed, and nothing beside its `$ref` is
+    // read (#562): a `$ref` into `components/responses` names its inline
+    // body after the component, so the consts it pins never prefix a
+    // path-derived name, and a ref nothing answers gives the operation no
+    // body at all — not the `content` written beside it either.
+    if ('$ref' in response) continue;
     for (const media of Object.values(response.content ?? {})) {
       collectConstPrefixes(media?.schema, prefixes, 0);
     }

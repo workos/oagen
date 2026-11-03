@@ -1295,6 +1295,46 @@ describe('path-derived names that would otherwise collide', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('reads no const prefix from the content beside a 2xx $ref, ignored as beside every Reference Object (#562)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The 200 is a ref nothing under `components/responses` answers, with a
+    // union pinning `kind: email` written beside it. The operation reads the
+    // response without a body, so `Email` prefixes none of its path-derived
+    // names and the component `EmailTagsPostRequest` reserves nothing
+    // against them: the request body keeps the plain name.
+    const spec = {
+      ...api({
+        '/tags': {
+          post: {
+            requestBody: jsonBody(inlineObject({ name: { type: 'string' } })),
+            responses: {
+              '200': {
+                $ref: '#/components/schemas/Tag',
+                content: { 'application/json': { schema: constVariants('to', 'number') } },
+              },
+            },
+          },
+        },
+      }),
+      components: {
+        schemas: {
+          Tag: inlineObject({ id: { type: 'string' } }),
+          EmailTagsPostRequest: inlineObject({ x: { type: 'string' } }),
+        },
+      },
+    };
+
+    const { ops, models } = await parseInline(spec, summarizeAll);
+    expect(ops[0].requestBody).toBe('TagsPostRequest');
+    expect(ops[0].response).toEqual({ kind: 'primitive', type: 'unknown' });
+    expect(fieldsOf(models, 'TagsPostRequest')).toEqual(['name']);
+    expect(fieldsOf(models, 'EmailTagsPostRequest')).toEqual(['x']);
+    expect(models.map((m) => m.name)).not.toContain('EmailTagsPostResponse');
+    expect(warnSpy.mock.calls.map(([message]) => message)).toEqual([
+      expect.stringContaining('Unresolved response $ref "#/components/schemas/Tag" in 200 response of'),
+    ]);
+  });
+
   it('reserves const-prefixed response variants: SmsTagsGetResponsePayload beside an unnamed GET /tags', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const spec = {

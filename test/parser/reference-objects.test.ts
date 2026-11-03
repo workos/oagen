@@ -357,13 +357,14 @@ describe('the text beside a ref the walk cannot resolve, read by the document’
       value: { $ref: '#/components/parameters/Loop' },
     });
     expect(read({ $ref: 5, description: 'Beside.' })).toEqual({ outcome: 'malformed', ref: '5', value: { $ref: 5 } });
-    // An Example Object's `summary` is text beside the ref too; what else is written there stays.
+    // An Example Object's `summary` is text beside the ref too; what else is
+    // written there is left out as well, as beside every failed ref (#562).
     expect(
       read({ $ref: '#/components/examples/Missing', summary: 'S.', description: 'D.', value: 1 }, 'examples'),
     ).toEqual({
       outcome: 'unresolved',
       ref: '#/components/examples/Missing',
-      value: { $ref: '#/components/examples/Missing', value: 1 },
+      value: { $ref: '#/components/examples/Missing' },
     });
     // A ref with no text beside it keeps its identity, and 'override' still reads the text.
     const bare = { $ref: '#/components/parameters/Missing' };
@@ -430,5 +431,131 @@ describe('the text beside a ref the walk cannot resolve, read by the document’
         { statusCode: 410, description: 'Beside a ref that resolves.' },
       ]);
     }
+  });
+});
+
+/**
+ * Covers issue #562: a walk that failed returned the Reference Object it
+ * stopped at with every key written beside its `$ref`, less only the text
+ * under `'ignore'`, so a response's `content` and `headers` reached the
+ * reader that then read them as the response's own. A Reference Object
+ * carries nothing but `$ref` and, in OAS 3.1, `summary` and `description`;
+ * OpenAPI says any other property added to one SHALL be ignored. A failed
+ * walk now returns the ref with its `$ref` and the text the sibling rule
+ * keeps, and nothing else, whatever the section and the failure.
+ */
+describe('#562', () => {
+  type Loaded = {
+    description?: string;
+    summary?: string;
+    content?: unknown;
+    headers?: unknown;
+    value?: unknown;
+    'x-note'?: unknown;
+  };
+  /** Keys a Reference Object may not carry: a response's, an example's and an extension. */
+  const beside = { content: { 'application/json': {} }, headers: { 'X-Rate-Limit': {} }, value: 1, 'x-note': 'ext' };
+  const dangling = { $ref: '#/components/schemas/Pet', description: 'Beside.', ...beside };
+
+  it('returns a ref nothing answers with its $ref and the text kept, whatever else is written beside it', () => {
+    for (const section of ['parameters', 'requestBodies', 'responses', 'headers'] as const) {
+      expect(followReference<Loaded>(dangling, section, {}, 'override')).toEqual({
+        outcome: 'unresolved',
+        ref: '#/components/schemas/Pet',
+        value: { $ref: '#/components/schemas/Pet', description: 'Beside.' },
+      });
+      expect(followReference<Loaded>(dangling, section, {}, 'ignore')).toEqual({
+        outcome: 'unresolved',
+        ref: '#/components/schemas/Pet',
+        value: { $ref: '#/components/schemas/Pet' },
+      });
+    }
+    // An Example Object's `summary` is kept with its `description`; its `value` is not.
+    const example = { $ref: '#/components/examples/Missing', summary: 'S.', description: 'D.', ...beside };
+    expect(followReference<Loaded>(example, 'examples', {}, 'override').value).toEqual({
+      $ref: '#/components/examples/Missing',
+      summary: 'S.',
+      description: 'D.',
+    });
+    expect(followReference<Loaded>(example, 'examples', {}, 'ignore').value).toEqual({
+      $ref: '#/components/examples/Missing',
+    });
+  });
+
+  it('does the same at the end of a chain, on a circular chain and on a malformed $ref', () => {
+    const components = {
+      Dangling: { $ref: '#/components/schemas/Pet', description: 'Inner.', ...beside },
+      Loop: { $ref: '#/components/parameters/Loop', ...beside },
+      Broken: { $ref: 42, description: 'Broken.', ...beside },
+    };
+    const read = (raw: object, siblings: 'override' | 'ignore' = 'override') =>
+      followReference<Loaded>(raw as Loaded, 'parameters', components, siblings);
+
+    // The outermost text wins; the keys beside either ref are left out.
+    expect(read({ $ref: '#/components/parameters/Dangling', description: 'Outer.', ...beside })).toEqual({
+      outcome: 'unresolved',
+      ref: '#/components/schemas/Pet',
+      value: { $ref: '#/components/schemas/Pet', description: 'Outer.' },
+    });
+    expect(read({ $ref: '#/components/parameters/Dangling', ...beside }).value).toEqual({
+      $ref: '#/components/schemas/Pet',
+      description: 'Inner.',
+    });
+    expect(read({ $ref: '#/components/parameters/Dangling', ...beside }, 'ignore').value).toEqual({
+      $ref: '#/components/schemas/Pet',
+    });
+    expect(read({ $ref: '#/components/parameters/Loop' })).toEqual({
+      outcome: 'circular',
+      ref: '#/components/parameters/Loop',
+      value: { $ref: '#/components/parameters/Loop' },
+    });
+    // A malformed ref's own text travels with it, as a dangling one's does.
+    expect(read({ $ref: '#/components/parameters/Broken' })).toEqual({
+      outcome: 'malformed',
+      ref: '42',
+      value: { $ref: 42, description: 'Broken.' },
+    });
+    expect(read({ $ref: 42, description: 'Broken.', ...beside })).toEqual({
+      outcome: 'malformed',
+      ref: '42',
+      value: { $ref: 42, description: 'Broken.' },
+    });
+    expect(read({ $ref: 42, description: 'Broken.', ...beside }, 'ignore')).toEqual({
+      outcome: 'malformed',
+      ref: '42',
+      value: { $ref: 42 },
+    });
+  });
+
+  it('keeps the identity of a ref with nothing to leave out, and reads the component alone from a ref that resolves', () => {
+    const bare = { $ref: '#/components/parameters/Missing' };
+    expect(followReference<Loaded>(bare, 'parameters', {}, 'override').value).toBe(bare);
+    expect(followReference<Loaded>(bare, 'parameters', {}, 'ignore').value).toBe(bare);
+    const described = { $ref: '#/components/parameters/Missing', description: 'Beside.' };
+    expect(followReference<Loaded>(described, 'parameters', {}, 'override').value).toBe(described);
+    // A blank description is no text, so the ref is returned without it.
+    expect(
+      followReference<Loaded>(
+        { $ref: '#/components/parameters/Missing', description: '  ' },
+        'parameters',
+        {},
+        'override',
+      ).value,
+    ).toEqual({ $ref: '#/components/parameters/Missing' });
+    // A ref that resolves reads the component, the keys beside the ref ignored as before.
+    const limit = { description: 'Component text.', value: 10 };
+    const components = { Limit: limit };
+    expect(
+      followReference<Loaded>(
+        { $ref: '#/components/parameters/Limit', ...beside },
+        'parameters',
+        components,
+        'override',
+      ).value,
+    ).toBe(limit);
+    expect(
+      followReference<Loaded>({ $ref: '#/components/parameters/Limit', ...beside }, 'parameters', components, 'ignore')
+        .value,
+    ).toBe(limit);
   });
 });
