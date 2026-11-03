@@ -1066,3 +1066,142 @@ describe('a deprecated enum member is shape wherever models are folded by shape 
     expectEnumsConsistent(spec);
   });
 });
+
+describe('a flattened discriminated body deprecates the values its variants deprecate (#501)', () => {
+  /** A POST whose JSON request body is `schema`. */
+  const post = (operationId: string, schema: unknown) => ({
+    post: {
+      operationId,
+      requestBody: { content: { 'application/json': { schema } } },
+      responses: { '204': { description: 'Created' } },
+    },
+  });
+  /** A discriminated `oneOf` of objects, each pinning `kind` by one of `declarations`. */
+  const union = (declarations: Record<string, unknown>[]) => ({
+    oneOf: declarations.map((kind, index) => ({
+      type: 'object',
+      properties: { kind, [`field_${index}`]: { type: 'boolean' } },
+      required: ['kind'],
+    })),
+    discriminator: { propertyName: 'kind' },
+  });
+  /** `schema` as the second member of an inline `allOf`, beside an object of its own. */
+  const inAllOf = (schema: unknown) => ({
+    allOf: [{ type: 'object', properties: { name: { type: 'string' } } }, schema],
+  });
+
+  it('marks a value its variant deprecates, as the same union under an inline `allOf` does (the issue repro)', async () => {
+    const pets = {
+      oneOf: [
+        {
+          type: 'object',
+          properties: {
+            kind: { type: 'string', const: 'cat', description: 'A cat.', deprecated: true },
+            meows: { type: 'boolean' },
+          },
+          required: ['kind'],
+        },
+        {
+          type: 'object',
+          properties: { kind: { type: 'string', const: 'dog', description: 'A dog.' }, barks: { type: 'boolean' } },
+          required: ['kind'],
+        },
+      ],
+      discriminator: { propertyName: 'kind' },
+    };
+    const flattened = await parseDocument(specDoc({}, { '/pets': post('createPet', pets) }));
+    const allOf = await parseDocument(specDoc({}, { '/pets': post('createPet', inAllOf(pets)) }));
+
+    const expected = [
+      { name: 'CAT', value: 'cat', description: 'A cat.', deprecated: true },
+      { name: 'DOG', value: 'dog', description: 'A dog.' },
+    ];
+    expect(enumByName(flattened, 'CreatePetRequestKind').values).toEqual(expected);
+    expect(keysOf(enumByName(flattened, 'CreatePetRequestKind').values[1]!)).toEqual(['description', 'name', 'value']);
+    expect(enumByName(allOf, 'CreatePetRequestKind').values).toEqual(expected);
+
+    // The body is still one flattened model, its `kind` the enum and live.
+    expect(flattened.services[0].operations[0].requestBody).toEqual({ kind: 'model', name: 'CreatePetRequest' });
+    const kind = flattened.models.find((m) => m.name === 'CreatePetRequest')?.fields.find((f) => f.name === 'kind');
+    expect(kind?.type).toEqual({ kind: 'enum', name: 'CreatePetRequestKind', values: ['cat', 'dog'] });
+    expect(kind?.deprecated).toBeUndefined();
+    expectEnumsConsistent(flattened);
+  });
+
+  it('deprecates a value several variants pin only when every one does, as the inline `allOf` does', async () => {
+    const cases: Record<string, Record<string, unknown>[]> = {
+      // `cat` deprecated by one of its two declarations, first or second, is live.
+      deprecatedFirst: [
+        { const: 'cat', description: 'A cat.', deprecated: true },
+        { const: 'cat', description: 'Another cat.' },
+        { const: 'dog' },
+      ],
+      deprecatedSecond: [
+        { const: 'cat', description: 'A cat.' },
+        { const: 'cat', description: 'Another cat.', deprecated: true },
+        { const: 'dog' },
+      ],
+      // Deprecated by both, it is deprecated, with the first one's text.
+      deprecatedBoth: [
+        { const: 'cat', description: 'A cat.', deprecated: true },
+        { const: 'cat', deprecated: true },
+        { const: 'dog' },
+      ],
+      // A one-value `enum` pins a value as a `const` does; only the literal `true` deprecates.
+      enumPin: [
+        { type: 'string', enum: ['cat'], deprecated: true },
+        { const: 'dog', deprecated: 'yes' },
+      ],
+    };
+    const paths: Record<string, unknown> = {};
+    for (const [name, declarations] of Object.entries(cases)) {
+      paths[`/${name}`] = post(name, union(declarations));
+      paths[`/${name}/all-of`] = post(`${name}AllOf`, inAllOf(union(declarations)));
+    }
+    const spec = await parseDocument(specDoc({}, paths));
+
+    const values = (name: string) => enumByName(spec, name).values;
+    expect(values('DeprecatedFirstRequestKind')).toEqual([
+      { name: 'CAT', value: 'cat', description: 'A cat.' },
+      { name: 'DOG', value: 'dog' },
+    ]);
+    expect(values('DeprecatedSecondRequestKind')).toEqual([
+      { name: 'CAT', value: 'cat', description: 'A cat.' },
+      { name: 'DOG', value: 'dog' },
+    ]);
+    expect(values('DeprecatedBothRequestKind')).toEqual([
+      { name: 'CAT', value: 'cat', description: 'A cat.', deprecated: true },
+      { name: 'DOG', value: 'dog' },
+    ]);
+    expect(values('EnumPinRequestKind')).toEqual([
+      { name: 'CAT', value: 'cat', deprecated: true },
+      { name: 'DOG', value: 'dog' },
+    ]);
+    for (const name of ['DeprecatedFirst', 'DeprecatedSecond', 'DeprecatedBoth', 'EnumPin']) {
+      expect(values(`${name}RequestKind`).map(keysOf)).toEqual(values(`${name}AllOfRequestKind`).map(keysOf));
+      expect(values(`${name}RequestKind`)).toEqual(values(`${name}AllOfRequestKind`));
+    }
+    expectEnumsConsistent(spec);
+  });
+
+  it('keeps a lone pinned value a literal, deprecated or not', async () => {
+    const spec = await parseDocument(
+      specDoc(
+        {},
+        {
+          '/cats': post(
+            'createCat',
+            union([
+              { const: 'cat', deprecated: true },
+              { const: 'cat', deprecated: true },
+            ]),
+          ),
+        },
+      ),
+    );
+
+    const kind = spec.models.find((m) => m.name === 'CreateCatRequest')?.fields.find((f) => f.name === 'kind');
+    expect(kind?.type).toEqual({ kind: 'literal', value: 'cat' });
+    expect(spec.enums).toEqual([]);
+  });
+});
