@@ -3255,8 +3255,8 @@ function namedUnionEntry(
  * values and properties are read from (a `$ref` resolved against the
  * components, so a discriminator pinned inside the referenced schema is
  * seen) and the model name it is referenced by. A variant that wraps one
- * reference (`wrappedVariantReference`) is read as that reference, so its
- * const reaches a derived mapping as a bare `$ref` variant's does (#427).
+ * reference to a model (`wrappedVariantReference`) is read as that reference,
+ * so its const reaches a derived mapping as a bare `$ref` variant's does (#427).
  */
 function namedUnionMembers(
   schema: SchemaObject,
@@ -3266,7 +3266,7 @@ function namedUnionMembers(
   const members: NamedUnionMember[] = [];
   for (const raw of schema.oneOf ?? schema.anyOf ?? []) {
     if (isNullSchema(raw)) continue;
-    const named = raw.$ref || inlineNames.has(raw) ? raw : (wrappedVariantReference(raw) ?? raw);
+    const named = raw.$ref || inlineNames.has(raw) ? raw : (wrappedVariantReference(raw, schemas) ?? raw);
     let resolved = raw;
     if (named.$ref) {
       const refName = named.$ref.split('/').pop() ?? '';
@@ -3279,24 +3279,33 @@ function namedUnionMembers(
 }
 
 /**
- * The one `$ref` a named union's variant wraps, read through the wrappers the
- * differ reads a variant's models through (`variantModelNames`): a nullable
- * wrapper (`unwrapNullableSchema`: `anyOf: [{ $ref: Bird }, { type: 'null' }]`),
- * an `allOf` read as its reference (`allOfReadAsMember`), and a nested
- * `oneOf`/`anyOf`, whose primitive, enum, array or map members name no model
- * (`oneOf: [{ $ref: Bird }, { type: 'string' }]`). `undefined` when it wraps
- * no reference, two, or one beside a model the extractor names (an inline
- * object, a merged `allOf`): a mapping key read off that one reference would
- * leave the other model out.
+ * The one `$ref` to a model a named union's variant wraps, read through the
+ * wrappers the differ reads a variant's models through (`variantModelNames`):
+ * a nullable wrapper (`unwrapNullableSchema`: `anyOf: [{ $ref: Bird }, { type:
+ * 'null' }]`), an `allOf` read as its reference (`allOfReadAsMember`), and a
+ * nested `oneOf`/`anyOf`, whose primitive, enum, array or map members name no
+ * model (`oneOf: [{ $ref: Bird }, { type: 'string' }]`) — nor does a `$ref` to
+ * an enum or array component, which `extractSchemas` builds no model for
+ * (`oneOf: [{ $ref: Bird }, { $ref: Song }]`, typed `union<Bird|Song>`).
+ * `undefined` when it wraps no reference to a model, two, or one beside a
+ * model the extractor names (an inline object, a merged `allOf`): a mapping
+ * key read off that one reference would leave the other model out.
  */
-function wrappedVariantReference(variant: SchemaObject): SchemaObject | undefined {
+function wrappedVariantReference(
+  variant: SchemaObject,
+  schemas: Record<string, SchemaObject> = {},
+): SchemaObject | undefined {
   const refs: SchemaObject[] = [];
   const visit = (schema: SchemaObject): boolean => {
     const bare = unwrapNullableSchema(schema);
     switch (classifyInlineSchema(bare)) {
-      case 'ref':
-        refs.push(bare);
+      case 'ref': {
+        // The component itself, not `activeArrayComponentPlans`, which is
+        // empty when `planDispatcherVariants` rehearses (and memoizes) this plan.
+        const target = componentSchemaOf(bare.$ref ?? '', schemas);
+        if (!target || !(isEnumComponentSchema(target) || isArrayComponentEntry(target, schemas))) refs.push(bare);
         return true;
+      }
       case 'allOf': {
         const member = allOfReadAsMember(bare);
         return member !== undefined && visit(member);

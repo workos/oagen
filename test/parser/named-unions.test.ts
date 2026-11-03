@@ -1018,6 +1018,101 @@ ${animals}`);
     expect(model(await wrappedPets(third, true), 'Pet').discriminator).toEqual({ property: 'kind', mapping: {} });
     expect(model(await wrappedPets(third, false), 'Pet').discriminator).toBeUndefined();
   });
+
+  describe('#532', () => {
+    /**
+     * `wrappedPets` with an enum component `Song` and an array component
+     * `Birds` of `Bird` beside the animals, and `extra` components after them.
+     */
+    const songPets = (third: string, keyword: boolean, extra = '') =>
+      parseInline(`${header}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - $ref: '#/components/schemas/Cat'
+        - $ref: '#/components/schemas/Dog'
+        - ${third}
+${keyword ? '      discriminator:\n        propertyName: kind\n' : ''}    Bird:
+      type: object
+      properties:
+        kind: { const: bird }
+      required: [kind]
+    Fish:
+      type: object
+      properties:
+        kind: { const: fish }
+      required: [kind]
+    Song:
+      type: string
+      enum: [chirp, tweet]
+    Birds:
+      type: array
+      items: { $ref: '#/components/schemas/Bird' }
+${animals}${extra}`);
+    const birdOr = (other: string) => `{ oneOf: [{ $ref: '#/components/schemas/Bird' }, ${other}] }`;
+    const mapped = { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' } };
+
+    it.each([
+      ['an enum', 'Song', '{ type: string, enum: [chirp, tweet] }', { kind: 'enum', name: 'Song' }],
+      [
+        'an array',
+        'Birds',
+        "{ type: array, items: { $ref: '#/components/schemas/Bird' } }",
+        { kind: 'array', items: modelRef('Bird') },
+      ],
+    ] as const)(
+      'maps a variant whose wrapper holds the one model beside a $ref to %s component, as beside the member inline, keyword or not',
+      async (_, component, inline, member) => {
+        for (const keyword of [true, false]) {
+          const pet = model(await songPets(birdOr(`{ $ref: '#/components/schemas/${component}' }`), keyword), 'Pet');
+          expect(pet.variants, `keyword: ${keyword}`).toEqual([
+            modelRef('Cat'),
+            modelRef('Dog'),
+            { kind: 'union', variants: [modelRef('Bird'), member], compositionKind: 'oneOf' },
+          ]);
+          expect(pet.discriminator, `keyword: ${keyword}`).toEqual(mapped);
+          const written = model(await songPets(birdOr(inline), keyword), 'Pet');
+          expect(written.discriminator, `inline, keyword: ${keyword}`).toEqual(mapped);
+        }
+      },
+    );
+
+    it('still names no variant whose wrapper holds two models beside the enum or array component', async () => {
+      for (const component of ['Song', 'Birds']) {
+        const third = birdOr(`{ $ref: '#/components/schemas/Fish' }, { $ref: '#/components/schemas/${component}' }`);
+        expect(model(await songPets(third, true), 'Pet').discriminator, component).toEqual({
+          property: 'kind',
+          mapping: {},
+        });
+        expect(model(await songPets(third, false), 'Pet').discriminator, component).toBeUndefined();
+      }
+    });
+
+    it('maps it beside an allOf+oneOf dispatcher, whose plan reads the union before any array component is known', async () => {
+      const event = `    Event:
+      allOf:
+        - type: object
+          properties:
+            event: { type: string }
+          required: [event]
+        - oneOf:
+            - type: object
+              properties:
+                event: { const: created }
+              required: [event]
+            - type: object
+              properties:
+                event: { const: deleted }
+              required: [event]
+`;
+      for (const keyword of [true, false]) {
+        const ir = await songPets(birdOr("{ $ref: '#/components/schemas/Birds' }"), keyword, event);
+        expect(model(ir, 'Event').discriminator?.property).toBe('event');
+        expect(model(ir, 'Pet').discriminator, `keyword: ${keyword}`).toEqual(mapped);
+      }
+    });
+  });
 });
 
 describe('named unions: renames and folds', () => {

@@ -829,4 +829,67 @@ describe('diffSpecs — a variant added to a discriminated union, end to end (is
       ]);
     },
   );
+
+  describe('#532', () => {
+    /** `derivedDocument` under `openapi`, with an enum component `Song` and an array component `Birds` of `Bird`. */
+    const songDocument = (extra: object[], keyword: boolean, openapi: string) => {
+      const document = derivedDocument(extra, keyword);
+      const Song = { type: 'string', enum: ['chirp', 'tweet'] };
+      const Birds = { type: 'array', items: { $ref: ref('Bird') } };
+      return { ...document, openapi, components: { schemas: { ...document.components.schemas, Song, Birds } } };
+    };
+
+    it.each([
+      ['Song', 'union<Bird|Song>'],
+      ['Birds', 'union<Bird|array<Bird>>'],
+    ])(
+      'a variant of Bird or a $ref to %s brings its derived mapping key, additive, and takes it, breaking, keyword or not, in OAS 3.1 and 3.0',
+      async (component, label) => {
+        for (const keyword of [true, false]) {
+          for (const openapi of ['3.1.0', '3.0.3']) {
+            const name = `532-${component}-${keyword ? 'keyword' : 'implicit'}-${openapi}`;
+            const wrapped = { oneOf: [{ $ref: ref('Bird') }, { $ref: ref(component) }] };
+            const oldSpec = await parse(`${name}-old`, songDocument([], keyword, openapi));
+            const newSpec = await parse(`${name}-new`, songDocument([wrapped], keyword, openapi));
+            expect(newSpec.models.find((m) => m.name === 'Pet')?.discriminator, name).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' },
+            });
+            const added = diffSpecs(oldSpec, newSpec);
+            expect(added.changes, name).toMatchObject([
+              {
+                kind: 'model-modified',
+                name: 'Pet',
+                classification: 'additive',
+                variantChanges: [
+                  {
+                    kind: 'variant-added',
+                    variant: label,
+                    classification: 'additive',
+                    details: "mapping added for 'bird'",
+                  },
+                ],
+              },
+            ]);
+            expect(added.summary, name).toMatchObject({ breaking: 0, additive: 1 });
+            expect(diffSpecs(newSpec, oldSpec).changes, name).toMatchObject([
+              {
+                kind: 'model-modified',
+                name: 'Pet',
+                classification: 'breaking',
+                variantChanges: [
+                  {
+                    kind: 'variant-removed',
+                    variant: label,
+                    classification: 'breaking',
+                    details: "mapping removed for 'bird'",
+                  },
+                ],
+              },
+            ]);
+          }
+        }
+      },
+    );
+  });
 });
