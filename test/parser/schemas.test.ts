@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   extractSchemas,
   extractInlineModelsFromSchemas,
@@ -6,6 +9,8 @@ import {
   clearSchemaNameTransform,
 } from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
+import { parseSpec } from '../../src/parser/parse.js';
+import type { ApiSpec, Field, Parameter } from '../../src/ir/types.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -1172,5 +1177,391 @@ describe('extractSchemas – fields fall back to a referenced component (PR #198
     });
     const owner = inlineModels.find((m) => m.name === 'PetOwner')!;
     expect(projected(owner.fields)).toEqual([{ name: 'preference', example: 'dog', examples: ['dog', 'cat'] }]);
+  });
+});
+
+describe('#512', () => {
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const string = { kind: 'primitive', type: 'string' } as const;
+
+  /** Parse a document of `schemas` and `paths` from a file, as a spec is read. */
+  async function parse(
+    schemas: Record<string, unknown>,
+    paths: Record<string, unknown> = {},
+    openapi = '3.1.0',
+  ): Promise<ApiSpec> {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-512-'));
+    try {
+      const file = join(dir, 'spec.json');
+      const doc = { openapi, info: { title: 'Pets', version: '1' }, paths, components: { schemas } };
+      await writeFile(file, JSON.stringify(doc));
+      return await parseSpec(file);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const fieldsOf = (spec: ApiSpec, model: string): Field[] => spec.models.find((m) => m.name === model)?.fields ?? [];
+  const typed = ({ name, type, constraints }: Pick<Field, 'name' | 'type' | 'constraints'>) => ({
+    name,
+    type,
+    constraints,
+  });
+
+  it('types a $ref to a primitive component as that primitive, on a field and a path parameter (the issue’s repro)', async () => {
+    const spec = await parse(
+      {
+        Pet: {
+          type: 'object',
+          required: ['age', 'id', 'vaccinated'],
+          properties: { age: ref('Age'), id: ref('PetId'), vaccinated: ref('Vaccinated') },
+        },
+        Age: { type: 'integer', minimum: 0 },
+        PetId: { type: 'string', pattern: '^pet_[0-9A-Z]{26}$' },
+        Vaccinated: { type: 'boolean' },
+      },
+      {
+        '/pets/{petId}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: ref('PetId') }],
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Pet') } } } },
+          },
+        },
+      },
+    );
+
+    // No empty `Age`, `PetId` or `Vaccinated` model.
+    expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+    expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
+      { name: 'age', type: { kind: 'primitive', type: 'integer' }, constraints: { minimum: 0 } },
+      { name: 'id', type: string, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
+      { name: 'vaccinated', type: { kind: 'primitive', type: 'boolean' }, constraints: undefined },
+    ]);
+    const [getPet] = spec.services.flatMap((service) => service.operations);
+    expect(getPet.pathParams.map(typed)).toEqual([
+      { name: 'petId', type: string, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
+    ]);
+    expect(getPet.response).toEqual({ kind: 'model', name: 'Pet' });
+  });
+
+  it('carries the component’s format, docs, flags, default and limits under what the field writes beside the $ref', async () => {
+    const spec = await parse({
+      Pet: {
+        type: 'object',
+        properties: {
+          id: ref('PetId'),
+          owner_id: { ...ref('PetId'), description: 'The owner.', maxLength: 10 },
+          limit: ref('Limit'),
+        },
+      },
+      PetId: {
+        type: 'string',
+        format: 'uuid',
+        description: 'A pet id.',
+        externalDocs: { url: 'https://example.com/ids' },
+        maxLength: 36,
+        readOnly: true,
+        deprecated: true,
+        example: '0f8fad5b-d9cb-469f-a165-70867728950e',
+        'x-kind': 'id',
+      },
+      Limit: { type: 'integer', minimum: 1, maximum: 100, default: 10 },
+    });
+
+    expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+    const [id, ownerId, limit] = fieldsOf(spec, 'Pet');
+    expect(id).toMatchObject({
+      type: { kind: 'primitive', type: 'string', format: 'uuid' },
+      description: 'A pet id.',
+      externalDocs: { url: 'https://example.com/ids' },
+      readOnly: true,
+      deprecated: true,
+      example: '0f8fad5b-d9cb-469f-a165-70867728950e',
+      constraints: { maxLength: 36 },
+      extensions: { 'x-kind': 'id' },
+    });
+    // The field's own text and stricter limit win; the component fills in the rest.
+    expect(ownerId).toMatchObject({ description: 'The owner.', readOnly: true, constraints: { maxLength: 10 } });
+    expect(limit).toMatchObject({
+      type: { kind: 'primitive', type: 'integer' },
+      default: 10,
+      constraints: { minimum: 1, maximum: 100 },
+    });
+  });
+
+  it('keeps the component’s nullability, in every spelling', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: { list: ref('TypeList'), one_of: ref('OneOfNull'), any_of: ref('AnyOfNull') },
+      },
+      TypeList: { type: ['string', 'null'], maxLength: 3 },
+      OneOfNull: { oneOf: [{ type: 'string', format: 'date' }, { type: 'null' }] },
+      AnyOfNull: { anyOf: [{ type: 'null' }, { type: 'integer', minimum: 1 }] },
+    });
+    const spec30 = await parse(
+      { Holder: { type: 'object', properties: { flag: ref('Flag') } }, Flag: { type: 'boolean', nullable: true } },
+      {},
+      '3.0.3',
+    );
+
+    for (const parsed of [spec, spec30]) expect(parsed.models.map((m) => m.name)).toEqual(['Holder']);
+    expect(fieldsOf(spec, 'Holder').map(typed)).toEqual([
+      { name: 'list', type: { kind: 'nullable', inner: string }, constraints: { maxLength: 3 } },
+      {
+        name: 'one_of',
+        type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string', format: 'date' } },
+        constraints: undefined,
+      },
+      {
+        name: 'any_of',
+        type: { kind: 'nullable', inner: { kind: 'primitive', type: 'integer' } },
+        constraints: { minimum: 1 },
+      },
+    ]);
+    expect(fieldsOf(spec30, 'Holder').map(typed)).toEqual([
+      {
+        name: 'flag',
+        type: { kind: 'nullable', inner: { kind: 'primitive', type: 'boolean' } },
+        constraints: undefined,
+      },
+    ]);
+  });
+
+  it('reads through an alias of a primitive component, the nearer entry’s text first', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: { alias: ref('NameAlias'), nickname: ref('Nickname'), maybe: ref('MaybeName') },
+      },
+      Name: { type: 'string', minLength: 1, description: 'A name.' },
+      NameAlias: ref('Name'),
+      Nickname: { allOf: [ref('Name')], description: 'A nickname.', maxLength: 20 },
+      MaybeName: { oneOf: [ref('Name'), { type: 'null' }] },
+    });
+
+    expect(spec.models.map((m) => m.name)).toEqual(['Holder']);
+    expect(fieldsOf(spec, 'Holder').map(({ description, ...field }) => ({ ...typed(field), description }))).toEqual([
+      { name: 'alias', type: string, constraints: { minLength: 1 }, description: 'A name.' },
+      { name: 'nickname', type: string, constraints: { minLength: 1, maxLength: 20 }, description: 'A nickname.' },
+      {
+        name: 'maybe',
+        type: { kind: 'nullable', inner: string },
+        constraints: { minLength: 1 },
+        description: 'A name.',
+      },
+    ]);
+  });
+
+  // Review round 1 (MichaelDeBoey): the component's limits were read for a
+  // bare `$ref` only, so `{ allOf: [{ $ref: PetId }, { description }] }` —
+  // the usual OAS 3.0 way to document a reference — read none of `PetId`'s,
+  // and with `PetId` no longer a model its `pattern` was nowhere in the IR.
+  // The wire enforces them wrapped or not, so they conjoin as a bare
+  // `$ref`'s do; the text, flags, default and keys stay the field's own,
+  // read from the wrapper and the members beside the `$ref` (as for an
+  // array component, #335).
+  it.each(['3.1.0', '3.0.3'])(
+    'conjoins the component’s limits through an allOf or a nullable wrapper around the $ref, the field documenting itself (OAS %s)',
+    async (openapi) => {
+      const spec = await parse(
+        {
+          Pet: {
+            type: 'object',
+            required: ['id'],
+            properties: {
+              id: { allOf: [ref('PetId'), { description: 'The pet.' }] },
+              lone: { allOf: [ref('PetId')] },
+              beside: { allOf: [{ ...ref('PetId'), maxLength: 40 }], minLength: 5, description: 'Beside.' },
+              flagged: { allOf: [ref('PetId'), { deprecated: true, default: 'pet_1', 'x-kind': 'legacy' }] },
+              maybe: { oneOf: [ref('PetId'), { type: 'null' }] },
+              any: { anyOf: [ref('PetId'), { type: 'null' }], description: 'Maybe a pet.' },
+              nested: { oneOf: [{ allOf: [ref('PetId'), { description: 'Nested.' }] }, { type: 'null' }] },
+              alias: { allOf: [ref('Nickname')] },
+              tags: { allOf: [ref('Tags'), { description: 'The tags.' }] },
+              more: { oneOf: [ref('Tags'), { type: 'null' }] },
+            },
+          },
+          PetId: {
+            type: 'string',
+            format: 'uuid',
+            pattern: '^pet_',
+            description: 'A pet id.',
+            default: 'pet_0',
+            deprecated: true,
+            'x-kind': 'id',
+          },
+          Nickname: { allOf: [ref('PetId')], maxLength: 20, description: 'A nickname.' },
+          Tags: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Some tags.', deprecated: true },
+        },
+        {},
+        openapi,
+      );
+      expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+      const uuid = { kind: 'primitive', type: 'string', format: 'uuid' } as const;
+      const own = ({ name, type, constraints, description, default: fallback, deprecated, extensions }: Field) => ({
+        name,
+        type,
+        constraints,
+        description,
+        default: fallback,
+        deprecated,
+        extensions,
+      });
+      const none = { description: undefined, default: undefined, deprecated: undefined, extensions: undefined };
+      expect(fieldsOf(spec, 'Pet').map(own)).toEqual([
+        { name: 'id', type: uuid, constraints: { pattern: '^pet_' }, ...none, description: 'The pet.' },
+        { name: 'lone', type: uuid, constraints: { pattern: '^pet_' }, ...none },
+        {
+          name: 'beside',
+          type: uuid,
+          constraints: { pattern: '^pet_', maxLength: 40, minLength: 5 },
+          ...none,
+          description: 'Beside.',
+        },
+        {
+          name: 'flagged',
+          type: uuid,
+          constraints: { pattern: '^pet_' },
+          ...none,
+          deprecated: true,
+          default: 'pet_1',
+          extensions: { 'x-kind': 'legacy' },
+        },
+        { name: 'maybe', type: { kind: 'nullable', inner: uuid }, constraints: { pattern: '^pet_' }, ...none },
+        {
+          name: 'any',
+          type: { kind: 'nullable', inner: uuid },
+          constraints: { pattern: '^pet_' },
+          ...none,
+          description: 'Maybe a pet.',
+        },
+        {
+          name: 'nested',
+          type: { kind: 'nullable', inner: uuid },
+          constraints: { pattern: '^pet_' },
+          ...none,
+          description: 'Nested.',
+        },
+        { name: 'alias', type: uuid, constraints: { pattern: '^pet_', maxLength: 20 }, ...none },
+        {
+          name: 'tags',
+          type: { kind: 'array', items: string },
+          constraints: { minItems: 1 },
+          ...none,
+          description: 'The tags.',
+        },
+        {
+          name: 'more',
+          type: { kind: 'nullable', inner: { kind: 'array', items: string } },
+          constraints: { minItems: 1 },
+          ...none,
+        },
+      ]);
+    },
+  );
+
+  // Greptile (review round 2): a parameter read one `$ref` level only, so
+  // through an alias (`Alias: { $ref: Name }`), a lone `allOf` or a nullable
+  // wrapper it lost `Name`'s limits, and with `Name` no longer a model they
+  // were nowhere in the IR. A parameter now reads the component as a field
+  // does (`componentReference`).
+  it('reads a primitive or array component on a parameter through its aliases and wrappers, as a field does', async () => {
+    const parameter = (name: string, schema: unknown) => ({ name, in: 'query', schema });
+    const spec = await parse(
+      {
+        Name: { type: 'string', minLength: 1, description: 'A name.', default: 'n', deprecated: true },
+        Alias: ref('Name'),
+        Tags: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Tags.' },
+        TagsAlias: ref('Tags'),
+      },
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [
+              parameter('bare', ref('Name')),
+              parameter('alias', ref('Alias')),
+              parameter('beside', { ...ref('Alias'), maxLength: 3 }),
+              parameter('looser', { ...ref('Name'), minLength: 0 }),
+              parameter('lone', { allOf: [ref('Name')] }),
+              parameter('annotated', { allOf: [ref('Name'), { description: 'Annotated.' }] }),
+              parameter('maybe', { oneOf: [ref('Name'), { type: 'null' }] }),
+              parameter('tags', ref('TagsAlias')),
+              parameter('tags_lone', { allOf: [ref('Tags')] }),
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    );
+    expect(spec.models.map((m) => m.name)).toEqual([]);
+    const [listPets] = spec.services.flatMap((service) => service.operations);
+    const own = ({ name, type, constraints, description, default: fallback, deprecated }: Parameter) => ({
+      name,
+      type,
+      constraints,
+      description,
+      default: fallback,
+      deprecated,
+    });
+    const none = { description: undefined, default: undefined, deprecated: undefined };
+    const named = { description: 'A name.', default: 'n', deprecated: true };
+    const tags = { kind: 'array', items: string } as const;
+    expect(listPets.queryParams.map(own)).toEqual([
+      // A bare `$ref` reads the component's text, default and flag through every alias, and its limits.
+      { name: 'bare', type: string, constraints: { minLength: 1 }, ...named },
+      { name: 'alias', type: string, constraints: { minLength: 1 }, ...named },
+      { name: 'beside', type: string, constraints: { minLength: 1, maxLength: 3 }, ...named },
+      // A looser keyword beside the `$ref` does not loosen it: the stricter bound wins, as on a field (review round 3).
+      { name: 'looser', type: string, constraints: { minLength: 1 }, ...named },
+      // Under a wrapper the limits alone; the text is the wrapper's own.
+      { name: 'lone', type: string, constraints: { minLength: 1 }, ...none },
+      { name: 'annotated', type: string, constraints: { minLength: 1 }, ...none, description: 'Annotated.' },
+      { name: 'maybe', type: { kind: 'nullable', inner: string }, constraints: { minLength: 1 }, ...none },
+      { name: 'tags', type: tags, constraints: { minItems: 1 }, ...none, description: 'Tags.' },
+      { name: 'tags_lone', type: tags, constraints: { minItems: 1 }, ...none },
+    ]);
+  });
+
+  it('types the reference as the primitive at every other site', async () => {
+    const spec = await parse(
+      {
+        Pet: {
+          type: 'object',
+          properties: {
+            tags: { type: 'array', items: ref('Tag') },
+            labels: { type: 'object', additionalProperties: ref('Tag') },
+            all: ref('Tags'),
+          },
+        },
+        Tags: { type: 'array', items: ref('Tag') },
+        TagOrPet: { oneOf: [ref('Tag'), ref('Pet')] },
+        Tag: { type: 'string', maxLength: 10 },
+      },
+      {
+        '/tags': {
+          post: {
+            operationId: 'createTag',
+            parameters: [{ name: 'tag', in: 'query', schema: ref('Tag') }],
+            requestBody: { content: { 'application/json': { schema: ref('Tag') } } },
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('TagOrPet') } } } },
+          },
+        },
+      },
+    );
+
+    expect(spec.models.map((m) => m.name)).toEqual(['Pet', 'TagOrPet']);
+    expect(fieldsOf(spec, 'Pet').map(({ name, type }) => ({ name, type }))).toEqual([
+      { name: 'tags', type: { kind: 'array', items: string } },
+      { name: 'labels', type: { kind: 'map', valueType: string } },
+      { name: 'all', type: { kind: 'array', items: string } },
+    ]);
+    expect(spec.models.find((m) => m.name === 'TagOrPet')?.variants).toEqual([string, { kind: 'model', name: 'Pet' }]);
+    const [createTag] = spec.services.flatMap((service) => service.operations);
+    expect(createTag.queryParams.map(typed)).toEqual([{ name: 'tag', type: string, constraints: { maxLength: 10 } }]);
+    expect(createTag.requestBody).toEqual(string);
+    expect(createTag.response).toEqual({ kind: 'model', name: 'TagOrPet' });
   });
 });

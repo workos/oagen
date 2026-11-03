@@ -21,6 +21,7 @@ import type {
   ExternalDocs,
   ServerEntry,
   StatusRange,
+  Constraints,
 } from '../ir/types.js';
 import { isParameterSegment, pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
@@ -52,6 +53,8 @@ import {
   resolveExamples,
   resolveComponentSchemaRef,
   extractConstraints,
+  combineConstraints,
+  componentReference,
   constraintsEntry,
   deprecatedEntry,
   collapsedNullableBranch,
@@ -3673,6 +3676,22 @@ export function extractParams(
       // `schema`, so a parameter declared either way is typed by one rule.
       const { schema, media, contentType, contentTypes } = parameterTyping(p);
       const refTarget = resolveComponentSchemaRef(schema, componentSchemas);
+      // A `$ref` to an array or primitive component, bare or under a wrapper
+      // the type builder reads through, is read as a field reads one
+      // (`componentReference`, #512 review): the component's limits, and its
+      // aliases', through every entry the reference passes; its text, flags,
+      // default and examples too for a bare `$ref` — through the aliases,
+      // nearest first — while under a wrapper those are the parameter's own,
+      // read from the wrapper and the members beside the `$ref`. Any other
+      // `$ref` falls back to the one component it names, as before.
+      const reference = schema ? componentReference(schema, componentSchemas) : undefined;
+      const fallbacks: SchemaObject[] = reference
+        ? reference.bare
+          ? reference.entries
+          : reference.own.slice(1)
+        : refTarget
+          ? [refTarget]
+          : [];
       const exampleContext = `parameter "${p.name}" in ${opLabel ?? location}`;
       // Each level is resolved on its own — the parameter's declaration, the
       // Media Type Object its schema was read from (when it was), the schema,
@@ -3693,20 +3712,41 @@ export function extractParams(
             ]
           : []),
         { example: schema?.example, examples: nonEmptyExamples(schema?.examples) },
-        { example: refTarget?.example, examples: nonEmptyExamples(refTarget?.examples) },
+        ...fallbacks.map((level) => ({ example: level.example, examples: nonEmptyExamples(level.examples) })),
       ]);
       // Like default/example, fall back per value: the `$ref` target's keywords
       // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
-      // one bound without discarding the target's others. The alias also becomes
-      // a fieldless model, but a parameter should be readable on its own.
+      // one bound without discarding the target's others. A primitive or array
+      // component becomes no model, and a parameter should be readable on its
+      // own — through every alias and wrapper, its entries' limits conjoined
+      // as JSON Schema applies them, the stricter bound winning.
       const own = schema ? extractConstraints(schema) : undefined;
-      const inherited = refTarget ? extractConstraints(refTarget) : undefined;
-      const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
-      // The schema's link, else the `$ref` target's — the same fallback chain
-      // `description` and `deprecated` follow, with an unusable entry at one
-      // level falling through to the next as an empty description does. A
-      // Parameter Object declares no `externalDocs` of its own.
-      const externalDocs = readExternalDocs(schema?.externalDocs) ?? readExternalDocs(refTarget?.externalDocs);
+      const inherited = reference
+        ? reference.entries.reduceRight<Constraints | undefined>(
+            (limits, entry) => combineConstraints(limits, extractConstraints(entry)),
+            undefined,
+          )
+        : refTarget
+          ? extractConstraints(refTarget)
+          : undefined;
+      // For an array or primitive component the two conjoin as a field's do
+      // (`combineConstraints`), the stricter bound winning: the wire enforces
+      // the component's limit whatever is written beside the `$ref`, and no
+      // model is left to carry it, so `{ $ref: Limit, minimum: 1 }` beside
+      // `Limit`'s `minimum: 5` keeps `5` (Greptile, review round 3). A `$ref`
+      // to a model or enum keeps the override, as before.
+      const constraints = reference
+        ? combineConstraints(inherited, own)
+        : own && inherited
+          ? { ...inherited, ...own }
+          : (own ?? inherited);
+      // The schema's link, else the fallbacks' — the same chain `description`
+      // and `deprecated` follow, with an unusable entry at one level falling
+      // through to the next as an empty description does. A Parameter Object
+      // declares no `externalDocs` of its own.
+      const externalDocs =
+        readExternalDocs(schema?.externalDocs) ??
+        fallbacks.map((level) => readExternalDocs(level.externalDocs)).find((docs) => docs !== undefined);
       return {
         name: p.name,
         // Typed under the name the parameter is compared by (`foldParameterName`:
@@ -3721,10 +3761,18 @@ export function extractParams(
             )
           : ({ kind: 'primitive', type: 'string' } as TypeRef),
         required: p.required ?? false,
-        description: firstDescription(p.description, schema?.description, refTarget?.description),
-        deprecated: p.deprecated === true || schema?.deprecated === true || refTarget?.deprecated === true || undefined,
+        description: firstDescription(
+          p.description,
+          schema?.description,
+          ...fallbacks.map((level) => level.description),
+        ),
+        deprecated:
+          p.deprecated === true ||
+          schema?.deprecated === true ||
+          fallbacks.some((level) => level.deprecated === true) ||
+          undefined,
         ...(externalDocs ? { externalDocs } : {}),
-        default: schema?.default ?? refTarget?.default,
+        default: schema?.default ?? fallbacks.find((level) => level.default !== undefined)?.default,
         example,
         ...(examples ? { examples } : {}),
         style: p.style as Parameter['style'],

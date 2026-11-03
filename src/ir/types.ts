@@ -932,9 +932,8 @@ export interface Parameter {
    * Validation keywords from the parameter's schema. When that schema is a
    * `$ref`, the target's keywords are merged underneath the parameter's own
    * — the per-value fallback `default` and `example` use — so a parameter
-   * can be read on its own without chasing the target (a primitive
-   * component becomes a fieldless model; an array component becomes no
-   * model). Absent when neither declares any.
+   * can be read on its own without chasing the target (a primitive or an
+   * array component becomes no model). Absent when neither declares any.
    */
   constraints?: Constraints;
 }
@@ -1002,18 +1001,24 @@ export interface TypeParam {
 
 /**
  * Model definition (maps to an SDK model/data class). Every
- * `components/schemas` entry becomes one, except an enum (`Enum`) and an
- * array component — a schema that is an array and declares `items` (a
- * nullable `oneOf`/`anyOf` around one included), or an alias of one (a bare
- * `$ref`, a nullable `oneOf`/`anyOf` around a `$ref`, or an `allOf` of a
- * `$ref` and limits) — which becomes no model at all: a `$ref` to it
- * resolves to the array it declares (`{ kind: 'array' }`, under `nullable`
- * when the component admits null), and what its items reference is
- * extracted under `<Component>Item…`; what the component and its aliases
- * declare beside the items — text, link, flags, limits, `default`, `x-*`
- * keys — is read by a field that names it with a bare `$ref` (`Field`). The
- * inline schemas the parser materializes — request bodies, responses, union
- * variants, nested objects, array items, map values — are models too.
+ * `components/schemas` entry becomes one, except an enum (`Enum`), an array
+ * component and a primitive component. An array component — a schema
+ * that is an array and declares `items` (a nullable `oneOf`/`anyOf` around
+ * one included), or an alias of one (a bare `$ref`, a nullable
+ * `oneOf`/`anyOf` around a `$ref`, or an `allOf` of a `$ref` and limits)
+ * — becomes no model at all: a `$ref` to it resolves to the array it
+ * declares (`{ kind: 'array' }`, under `nullable` when the component admits
+ * null), and what its items reference is extracted under `<Component>Item…`.
+ * A primitive component — a `string`, `integer`, `number` or `boolean`
+ * schema, nullable in any spelling, or an alias of one — becomes no
+ * model either: a `$ref` to it resolves to the primitive it declares
+ * (`{ kind: 'primitive' }` with its `format`, under `nullable` when the
+ * component admits null). What either component and its aliases declare
+ * beside the items or the type — text, link, flags, limits, `default`,
+ * `x-*` keys — is read by a field that names it with a bare `$ref`
+ * (`Field`). The inline schemas the parser materializes — request bodies,
+ * responses, union variants, nested objects, array items, map values — are
+ * models too.
  */
 export interface Model {
   name: string;
@@ -1106,69 +1111,81 @@ export interface Field {
   type: TypeRef;
   required: boolean;
   /**
-   * The field schema's own `description`; for a bare `$ref` to an array
-   * component — which names no model to carry the component's text — the
-   * nearest the reference passes on its way to the array (an alias's own,
-   * else the component's), as `example` falls back to it. A `$ref` to a
-   * model, named union or enum leaves the text on it.
+   * The field schema's own `description`; for a bare `$ref` to an array or
+   * primitive component — which names no model to carry the component's
+   * text — the nearest the reference passes on its way to the array or
+   * primitive (an alias's own, else the component's), as `example` falls
+   * back to it. A `$ref` to a model, named union or enum leaves the text on
+   * it. Under a wrapper — a nullable one, an `allOf` read as the reference
+   * (`{ allOf: [{ $ref: PetId }, { description }] }`) — the field documents
+   * itself: the wrapper's text or a member's written beside the `$ref`,
+   * never the component's; the same holds for every annotation, flag, default
+   * and key below, while `constraints` conjoin through a wrapper.
    */
   description?: string;
   /**
    * The field schema's own `externalDocs`, when it declares a usable one —
    * read like `description`: for a `$ref` with an `externalDocs` sibling
    * (legal in OAS 3.1), the sibling's link, while the referenced model keeps
-   * its own; a bare `$ref` yields none, unless it names an array component,
-   * whose link the field then carries. Absent otherwise. Documentation, not
-   * shape: two fields that differ only here are one shape.
+   * its own; a bare `$ref` yields none, unless it names an array or
+   * primitive component, whose link the field then carries. Absent
+   * otherwise. Documentation, not shape: two fields that differ only here
+   * are one shape.
    */
   externalDocs?: ExternalDocs;
   /**
    * `true` when the field schema says `readOnly: true`, or when a bare `$ref`
-   * names an array component that says so, or an alias of it on the way
-   * (see `description`). `writeOnly` is read the same way.
+   * names an array or primitive component that says so, or an alias of it
+   * on the way (see `description`). `writeOnly` is read the same way.
    */
   readOnly?: boolean;
   writeOnly?: boolean;
   /**
    * Present, and `true`, when the field schema says `deprecated: true` — a
    * keyword written beside a `$ref` included — or when a bare `$ref` names
-   * an array component that says so, or an alias of it on the way, since no
-   * model carries that component's flag. The flag of a model, named union or
-   * enum a `$ref` names stays on it.
+   * an array or primitive component that says so, or an alias of it on the
+   * way, since no model carries that component's flag. The flag of a
+   * model, named union or enum a `$ref` names stays on it.
    */
   deprecated?: boolean;
   /**
    * The field schema's own `default`, an explicit `null` included; for a
-   * bare `$ref` to an array component that declares none, the nearest the
-   * reference passes (see `description`).
+   * bare `$ref` to an array or primitive component that declares none, the
+   * nearest the reference passes (see `description`).
    */
   default?: unknown;
   /**
    * A single illustrative value. The field schema's `example` when present,
    * otherwise the first entry of its `examples`; when the schema is a `$ref`
    * with neither, the same taken from the component it points at — for an
-   * array component, from the nearest level the reference passes on its way
-   * to the array (an alias's own, else the component's), as `description`
-   * is read. An explicit `null` is kept. Absent when no level gives one.
+   * array or primitive component, from the nearest level the reference
+   * passes on its way to the array or primitive (an alias's own, else the
+   * component's), as `description` is read. An explicit `null` is kept.
+   * Absent when no level gives one.
    */
   example?: unknown;
   /**
    * Every example value the schema gives, in document order, from the JSON
    * Schema `examples` list (OAS 3.1 deprecates `example` in its favour) —
    * on the field schema, else on the component its `$ref` points at, an
-   * array component's read like `example`: the nearest non-empty list the
-   * reference passes on its way to the array. Present only when the list
-   * has at least one entry.
+   * array or primitive component's read like `example`: the nearest
+   * non-empty list the reference passes on its way to the array or
+   * primitive. Present only when the list has at least one entry.
    */
   examples?: unknown[];
   /**
    * Validation keywords declared on the field's schema, including any
    * written beside a `$ref` (OpenAPI 3.1 allows siblings). A `$ref` to a
    * model, named union or enum adds none, since the referenced node carries
-   * its own limits; a `$ref` to an array component, which names no model,
-   * conjoins the component's limits and its aliases' with the field's own
-   * (`{ $ref: Tags, maxItems: 3 }` beside `Tags`'s `minItems: 1, maxItems:
-   * 5` is `{ minItems: 1, maxItems: 3 }`). Absent when no level declares any.
+   * its own limits; a `$ref` to an array or primitive component, which
+   * names no model, conjoins the component's limits and its aliases' with
+   * the field's own (`{ $ref: Tags, maxItems: 3 }` beside `Tags`'s
+   * `minItems: 1, maxItems: 5` is `{ minItems: 1, maxItems: 3 }`) — bare
+   * or under a wrapper the type builder reads through, since the wire
+   * enforces them either way and nothing else carries them: `{ allOf: [{
+   * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
+   * that `pattern`, as `{ allOf: [{ $ref: PetId }] }` and `oneOf: [{ $ref:
+   * PetId }, { type: 'null' }]` do. Absent when no level declares any.
    */
   constraints?: Constraints;
   /**
@@ -1176,9 +1193,9 @@ export interface Field {
    * `x-enum-descriptions` / `x-enumDescriptions`, read like `constraints`:
    * keys written beside a `$ref` (legal in OAS 3.1) are the field's, a bare
    * `$ref` yields none — the referenced model, union or enum carries its
-   * own — unless it names an array component, whose keys and its aliases'
-   * the field then carries under its own, the field's winning per key, as
-   * it carries that component's `description`. A property
+   * own — unless it names an array or primitive component, whose keys and
+   * its aliases' the field then carries under its own, the field's winning
+   * per key, as it carries that component's `description`. A property
    * several `allOf` members always declare is typed by the first typing
    * declaration, keys included (a typeless one fills in what it leaves
    * unset); a property only variants declare carries exactly the keys

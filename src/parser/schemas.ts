@@ -168,6 +168,17 @@ interface ArrayComponentMints {
 let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
 
 /**
+ * Every primitive component of the document being extracted
+ * (`isPrimitiveComponentEntry`), by its `components/schemas` key as written,
+ * for the reason an array component is keyed so. Such a component becomes no
+ * `Model`: a `$ref` to it resolves to the primitive it declares
+ * (`schemaToTypeRef`). Decided in `extractSchemas` before any TypeRef is built
+ * and dropped with the other per-document state, so outside an extraction a
+ * `$ref` to such a key is a plain model reference.
+ */
+let activePrimitiveComponentKeys: ReadonlySet<string> = new Set();
+
+/**
  * The names one discriminated union's variant models take
  * (`planDispatcherVariants`): each object variant's name, and the names in
  * its tree a component's model of the identical shape holds — the
@@ -1110,6 +1121,14 @@ export function extractSchemas(
   activeNullableEnumSchemaNames = new Set();
   activeNullableUnionSchemaNames = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
+  // The primitive components, by key, before any TypeRef is built: a `$ref`
+  // to one is the primitive wherever it is typed, an array component's items
+  // included.
+  activePrimitiveComponentKeys = new Set(
+    Object.entries(schemas)
+      .filter(([, schema]) => !isEnumComponentSchema(schema) && isPrimitiveComponentEntry(schema, schemas))
+      .map(([key]) => key),
+  );
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
     if (isEnumComponentSchema(schema)) {
@@ -1118,9 +1137,10 @@ export function extractSchemas(
     } else if (
       isNamedUnionSchema(schema) &&
       isNullableUnionSchema(schema) &&
-      // A nullable wrapper around an array is no union but an array
-      // component, which a `$ref` names by its key.
-      !isArrayComponentEntry(schema, schemas)
+      // A nullable wrapper around an array or a primitive is no union but an
+      // array or primitive component, which a `$ref` names by its key.
+      !isArrayComponentEntry(schema, schemas) &&
+      !activePrimitiveComponentKeys.has(name)
     ) {
       activeNullableUnionSchemaNames.add(resolved);
     }
@@ -1241,6 +1261,8 @@ export function extractSchemas(
     } else if (activeArrayComponentPlans.has(name)) {
       // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
       for (const inlineModel of extractArrayComponentModels(name, schemas)) keepLarger(inlineModel);
+    } else if (activePrimitiveComponentKeys.has(name)) {
+      // No model of its own either: a `$ref` to it is the primitive it declares.
     } else {
       keepComponent(name, extractModel(pascalName, schema, schemas));
 
@@ -1300,6 +1322,7 @@ export function clearSchemaNameTransform(): void {
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
   activeArrayComponentPlans = new Map();
+  activePrimitiveComponentKeys = new Set();
   activeDispatcherVariantPlans = new Map();
   markContestedTitles(undefined);
 }
@@ -2649,11 +2672,98 @@ export function variantMemberSchemas(variant: SchemaObject, variantName: string)
 }
 
 /**
+ * The `$ref` a field's schema is typed as, read through the wrappers
+ * `schemaToTypeRef` reads through — a nullable wrapper of any spelling
+ * (`unwrapNullableSchema`) and an `allOf` read as its lone member or as a
+ * plain reference (`allOfReadAsMember`), however they nest — with every
+ * schema on the way that documents or limits the field, nearest first: the
+ * field's own, each wrapper it unwraps to, the members written beside the
+ * `$ref` in an `allOf` (`{ allOf: [{ $ref: PetId }, { description }] }`,
+ * the usual OAS 3.0 way to document a reference) and the `$ref` schema
+ * itself, with whatever is written beside it. A bare `$ref` is itself, with
+ * the field's schema as its one level. `undefined` when the schema is typed
+ * as no reference: an inline schema, or an `allOf` merged into a model.
+ */
+function wrappedReference(schema: SchemaObject): { reference: SchemaObject; levels: SchemaObject[] } | undefined {
+  const levels: SchemaObject[] = [];
+  let current = schema;
+  for (;;) {
+    if (current.$ref !== undefined) {
+      levels.push(current);
+      return { reference: current, levels };
+    }
+    levels.push(current);
+    const bare = unwrapNullableSchema(current);
+    if (bare.$ref !== undefined) {
+      levels.push(bare);
+      return { reference: bare, levels };
+    }
+    if (bare !== current) levels.push(bare);
+    const member = allOfReadAsMember(bare);
+    if (member === undefined) return undefined;
+    // A plain reference: the other members annotate or limit the field.
+    if (member.$ref !== undefined) levels.push(...(bare.allOf ?? []).filter((other) => other !== member));
+    current = member;
+  }
+}
+
+/**
+ * What a field or parameter schema that references an array or primitive
+ * component reads the component's declarations through (#399, #512). Such a
+ * component names no model that could carry what it declares beside its
+ * items or its type, so the site reads that from every entry the reference
+ * passes on its way to the declaration — the entry it names, each alias in
+ * turn, the component itself (`componentEntries`, nearest first) — under its
+ * own. A bare `$ref` reads all of it: text, flags, default, examples, `x-*`
+ * keys and limits, as the same schema written inline carries them. Under a
+ * wrapper the type builder reads through — a nullable one, an `allOf` read
+ * as the reference (`wrappedReference`) — the site documents itself: its
+ * text, flags, default, examples and keys come from the wrapper and the
+ * members written beside the `$ref`, and none from the component (#335
+ * review). Its limits are another matter: the wire enforces the component's
+ * whether or not the `$ref` is wrapped, and no model carries them, so they
+ * conjoin with the site's own exactly as a bare `$ref`'s do (#512 review).
+ * `undefined` for a schema that is no such reference — an inline schema, or
+ * a `$ref` to a model, named union or enum, which leaves all of it on that
+ * node — and outside an extraction, as `isArrayComponentRef` is.
+ */
+export interface ComponentReference {
+  /** The schemas on the way to the `$ref`, nearest first: the site's own and, under a wrapper, each wrapper, the members beside the `$ref` and the `$ref` schema with whatever is written beside it (`wrappedReference`). */
+  own: SchemaObject[];
+  /** The entries the reference passes on its way to the array or primitive, nearest first (`componentEntries`). */
+  entries: SchemaObject[];
+  /** Whether the schema is the bare `$ref`, which reads the entries' documentation as well as their limits. */
+  bare: boolean;
+}
+
+export function componentReference(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): ComponentReference | undefined {
+  const wrapped = wrappedReference(schema);
+  if (!wrapped || !componentSchemas) return undefined;
+  const { reference } = wrapped;
+  const declares = isArrayComponentRef(reference)
+    ? isArrayComponentSchema
+    : isPrimitiveComponentRef(reference)
+      ? isPrimitiveComponentSchema
+      : undefined;
+  const target = declares && resolveComponentSchemaRef(reference, componentSchemas);
+  if (!declares || !target) return undefined;
+  return {
+    own: wrapped.levels,
+    entries: componentEntries(target, componentSchemas, declares) ?? [target],
+    bare: schema.$ref !== undefined,
+  };
+}
+
+/**
  * Build a single Field from a schema property entry. Shared across all
  * extraction sites. Pass `componentSchemas` where they are at hand so a
  * field whose schema is a bare `$ref` can take `example`/`examples` from the
- * component it points at, as a parameter does, and what an array component
- * declares beside its items through its aliases. `siblingProperties` are the
+ * component it points at, as a parameter does, and what an array or
+ * primitive component declares beside its items or its type through its
+ * aliases (`componentReference`). `siblingProperties` are the
  * other properties of the object the field belongs to (`collectProperties`);
  * array items and map values use them to step aside from a sibling that
  * would take their singular name (`elementContextName`).
@@ -2666,22 +2776,20 @@ export function buildFieldFromSchema(
   componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): Field {
-  const refTarget = resolveComponentSchemaRef(fieldSchema, componentSchemas);
-  // A bare `$ref` to an array component names no model that could carry what
-  // the component declares beside its items, so the field reads that from
-  // every entry the reference passes on its way to the array — the entry it
-  // names, each alias in turn, the component itself (`arrayComponentEntries`)
-  // — under its own, the nearer entry's first, as the same array written
-  // inline carries it (#399). A `$ref` to a model, named union or enum leaves
-  // all of it on that node but the `example` and `examples` a field takes
-  // from any component it names.
-  const aliases =
-    refTarget && componentSchemas && isArrayComponentRef(fieldSchema)
-      ? (arrayComponentEntries(refTarget, componentSchemas) ?? [refTarget])
-      : [];
-  const levels = [fieldSchema, ...aliases];
+  // What the field reads from an array or primitive component it references
+  // (`componentReference`): every entry's limits, and a bare `$ref`'s
+  // documentation too. A `$ref` to a model, named union or enum leaves all of
+  // it on that node but the `example` and `examples` a field takes from any
+  // component a bare `$ref` names.
+  const reference = componentReference(fieldSchema, componentSchemas);
+  const refTarget = reference ? reference.entries[0] : resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const aliases = reference?.entries ?? [];
+  const bare = fieldSchema.$ref !== undefined;
+  const own = reference?.own ?? [fieldSchema];
+  const levels = bare ? [...own, ...aliases] : own;
+  const limitLevels = [...own, ...aliases];
   const { example, examples } = resolveExamples(
-    [fieldSchema, ...(aliases.length > 0 ? aliases : [refTarget])].map((level) => ({
+    [...own, ...(bare ? (aliases.length > 0 ? aliases : [refTarget]) : [])].map((level) => ({
       example: level?.example,
       examples: nonEmptyExamples(level?.examples),
     })),
@@ -2690,7 +2798,7 @@ export function buildFieldFromSchema(
   // Limits conjoin, as JSON Schema applies every level at once; an `x-*` key
   // the nearer level declares wins, as a collapsed wrapper's does
   // (`withWrapperDocs`). Both start from the component, so its keys come first.
-  const constraints = levels.reduceRight<Constraints | undefined>(
+  const constraints = limitLevels.reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
@@ -3285,8 +3393,9 @@ function namedUnionMembers(
  * 'null' }]`), an `allOf` read as its reference (`allOfReadAsMember`), and a
  * nested `oneOf`/`anyOf`, whose primitive, enum, array or map members name no
  * model (`oneOf: [{ $ref: Bird }, { type: 'string' }]`) — nor does a `$ref` to
- * an enum or array component, which `extractSchemas` builds no model for
- * (`oneOf: [{ $ref: Bird }, { $ref: Song }]`, typed `union<Bird|Song>`).
+ * an enum, array or primitive component, which `extractSchemas` builds no
+ * model for (`oneOf: [{ $ref: Bird }, { $ref: Song }]`, typed
+ * `union<Bird|Song>`).
  * `undefined` when it wraps no reference to a model, two, or one beside a
  * model the extractor names (an inline object, a merged `allOf`): a mapping
  * key read off that one reference would leave the other model out.
@@ -3303,7 +3412,12 @@ function wrappedVariantReference(
         // The component itself, not `activeArrayComponentPlans`, which is
         // empty when `planDispatcherVariants` rehearses (and memoizes) this plan.
         const target = componentSchemaOf(bare.$ref ?? '', schemas);
-        if (!target || !(isEnumComponentSchema(target) || isArrayComponentEntry(target, schemas))) refs.push(bare);
+        const modelless =
+          target !== undefined &&
+          (isEnumComponentSchema(target) ||
+            isArrayComponentEntry(target, schemas) ||
+            isPrimitiveComponentEntry(target, schemas));
+        if (!modelless) refs.push(bare);
         return true;
       }
       case 'allOf': {
@@ -3521,6 +3635,24 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
 }
 
 /**
+ * True for a `components/schemas` entry the parser reads as a primitive
+ * component: a schema `schemaToTypeRef` types as a string, integer, number
+ * or boolean — that `type`, and no keyword beside it that types the schema
+ * otherwise (`classifyInlineSchema` reads it as `other`, so an `enum:` list,
+ * a `const` or a composition is read as it is everywhere else) — once a
+ * nullable wrapper is removed as it is from an array component
+ * (`unwrapNullableComponent`): an OAS 3.1 type list naming `null`, OAS 3.0
+ * `nullable: true`, or a `oneOf`/`anyOf` whose one variant beside a `null`
+ * one is such a primitive.
+ */
+function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
+  const bare = unwrapNullableComponent(schema);
+  return (
+    typeof bare.type === 'string' && Object.hasOwn(PRIMITIVE_TYPES, bare.type) && classifyInlineSchema(bare) === 'other'
+  );
+}
+
+/**
  * A component schema with a nullable `oneOf`/`anyOf` wrapper removed, as
  * `schemaToTypeRef` removes it (`unwrapNullableSchema`) — unless the
  * component declares `properties` of its own: those keep the object model a
@@ -3544,40 +3676,54 @@ function unwrapNullableComponent(schema: SchemaObject): SchemaObject {
  * member; an `allOf` of one member, read as that member
  * (`unwrappedAllOfMember`) — followed through aliases of aliases, so a
  * `$ref` to the alias resolves to the array exactly as the same schema
- * written on a field does (`arrayComponentEntries`).
+ * written on a field does (`componentEntries`).
  */
 export function isArrayComponentEntry(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
-  return arrayComponentEntries(schema, schemas) !== undefined;
+  return componentEntries(schema, schemas, isArrayComponentSchema) !== undefined;
+}
+
+/**
+ * Whether a `components/schemas` entry is read as a primitive component: a
+ * primitive schema itself (`isPrimitiveComponentSchema`), or an alias of one,
+ * read through the nullable wrappers, `$ref`s and `allOf`s an array
+ * component's alias is read through (`componentEntries`).
+ */
+function isPrimitiveComponentEntry(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
+  return componentEntries(schema, schemas, isPrimitiveComponentSchema) !== undefined;
 }
 
 /**
  * The `components/schemas` entries a reference to `schema` reads through to
- * the array it is, nearest first: `schema` itself, each alias it names in
- * turn, and last the entry that declares the array — `[PetsList, Pets]` for
- * `PetsList: { allOf: [{ $ref: Pets }] }` — or `undefined` when `schema` is
- * no array component (see `isArrayComponentEntry`). A field that names one
- * with a bare `$ref` reads what each entry declares beside the array, since
- * none of them is a model that could carry it (`buildFieldFromSchema`).
+ * the array or primitive it is — the schema `declares` accepts
+ * (`isArrayComponentSchema`, `isPrimitiveComponentSchema`) — nearest first:
+ * `schema` itself, each alias it names in turn, and last the entry that
+ * declares it — `[PetsList, Pets]` for `PetsList: { allOf: [{ $ref: Pets }]
+ * }` — or `undefined` when `schema` is no such component (see
+ * `isArrayComponentEntry`). A field that names one with a bare `$ref` reads
+ * what each entry declares beside the array or primitive, since none of them
+ * is a model that could carry it (`buildFieldFromSchema`).
  * `properties` written beside the composition are folded in first
  * (`unwrapNullableComponent`), as `schemaToTypeRef` folds them. The lone
  * member of an `allOf` is the
  * entry's own declaration, not an entry of its own. A chain that returns to
- * an entry it has visited names no array: such an entry stays the fieldless
- * model it always became, as an alias of an object component does.
+ * an entry it has visited names no array or primitive: such an entry stays
+ * the fieldless model it always became, as an alias of an object component
+ * does.
  */
-function arrayComponentEntries(
+function componentEntries(
   schema: SchemaObject,
   schemas: Record<string, SchemaObject>,
+  declares: (schema: SchemaObject) => boolean,
   seen: Set<SchemaObject> = new Set(),
 ): SchemaObject[] | undefined {
-  if (isArrayComponentSchema(schema)) return [schema];
+  if (declares(schema)) return [schema];
   if (seen.has(schema)) return undefined;
   seen.add(schema);
   const bare = unwrapNullableComponent(schema);
   const aliasOf = (ref: string | undefined): SchemaObject[] | undefined => {
     const key = ref === undefined ? undefined : componentKeyOf(ref);
     const aliased = key === undefined ? undefined : schemas[key];
-    const entries = aliased === undefined ? undefined : arrayComponentEntries(aliased, schemas, seen);
+    const entries = aliased === undefined ? undefined : componentEntries(aliased, schemas, declares, seen);
     return entries && [schema, ...entries];
   };
   if (bare.$ref) return aliasOf(bare.$ref);
@@ -3585,7 +3731,7 @@ function arrayComponentEntries(
   const reading = readInlineAllOf(bare.allOf, bare, schemas);
   if (reading === 'reference') return aliasOf(bare.allOf.find((member) => member.$ref)?.$ref);
   if (reading !== 'unwrapped') return undefined;
-  const entries = arrayComponentEntries(unwrappedAllOfMember(bare, bare.allOf[0]), schemas, seen);
+  const entries = componentEntries(unwrappedAllOfMember(bare, bare.allOf[0]), schemas, declares, seen);
   return entries && [schema, ...entries.slice(1)];
 }
 
@@ -3772,8 +3918,9 @@ export function rehearse<T>(fn: () => T): T {
  * with the shape(s) it stands for, read off a rehearsal of the passes that
  * take them rather than a list of those passes kept in step by hand: the
  * entry's own name — a model's fingerprint (`extractModel`), an enum's
- * members (`extractEnum`), or `'array'` for an array component, a shape no
- * model or enum can share — its discriminated allOf+oneOf variants
+ * members (`extractEnum`), or `'array'` for an array component and
+ * `'primitive'` for a primitive one, shapes no model or enum can share — its
+ * discriminated allOf+oneOf variants
  * (`extractDiscriminatedAllOfVariantModels`), its named-union variants and
  * `variant_<n>` members (`extractNamedUnionVariantModels`), the inline
  * models its fields mint (`extractInlineModelsFromSchemas`, the field pass),
@@ -3809,6 +3956,10 @@ function componentMints(
     }
     if (isArrayComponentEntry(schema, schemas)) {
       claim(name, 'array');
+      return shapes;
+    }
+    if (activePrimitiveComponentKeys.has(key)) {
+      claim(name, 'primitive');
       return shapes;
     }
     const extract = (): Model[] => [
@@ -3919,6 +4070,16 @@ export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
   if (!bare.$ref) return isArrayComponentRef(allOfReadAsMember(bare));
   const segments = bare.$ref.split('/');
   return activeArrayComponentPlans.has(segments[segments.length - 1]);
+}
+
+/**
+ * Whether `schema` is a bare `$ref` to a primitive component, by the key the
+ * `$ref` names, as `schemaToTypeRef` resolves it. False outside an
+ * extraction, as `isArrayComponentRef` is.
+ */
+function isPrimitiveComponentRef(schema: SchemaObject): boolean {
+  const segments = schema.$ref?.split('/');
+  return segments !== undefined && activePrimitiveComponentKeys.has(segments[segments.length - 1]);
 }
 
 /**
@@ -4887,6 +5048,11 @@ export function schemaToTypeRef(
     // the array whatever another key resolving to `Note` is.
     const arrayAlias = arrayComponentTypeRef(rawName);
     if (arrayAlias) return arrayAlias;
+    // A primitive component is no model either: the reference is the
+    // primitive it declares, `format` and nullability included, typed as the
+    // same schema written inline (an alias resolving in turn).
+    const primitive = activePrimitiveComponentKeys.has(rawName) ? componentSchemaOf(schema.$ref) : undefined;
+    if (primitive) return schemaToTypeRef(primitive);
     const resolved = resolveSchemaName(rawName);
     if (activeEnumSchemaNames.has(resolved)) {
       const enumRef: TypeRef = { kind: 'enum', name: resolved };
