@@ -1,0 +1,31 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Pets", "version": "1" },
+  "paths": {
+    "/pets": {
+      "get": {
+        "operationId": "listPets",
+        "parameters": [{ "name": "X-Pet-Token", "in": "header", "schema": { "type": "string" } }],
+        "responses": { "200": { "description": "OK", "content": { "application/json": { "schema": { "type": "string" } } } } }
+      }
+    }
+  },
+  "webhooks": {
+    "petAdded": {
+      "parameters": [{ "name": "authorization", "in": "header", "schema": { "type": "string" } }],
+      "post": {
+        "operationId": "petAdded",
+        "parameters": [
+          { "name": "Content-Type", "in": "header", "schema": { "type": "string" } },
+          { "name": "ACCEPT", "in": "header", "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": { "schema": { "type": "object", "properties": { "pet_id": { "type": "string" } } } }
+          }
+        },
+        "responses": { "200": { "description": "Acknowledged" } }
+      }
+    }
+  }
+}

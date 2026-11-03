@@ -286,6 +286,22 @@ export function resolveParameterRef(
   return followed.value;
 }
 
+/** The header parameter names OpenAPI says to ignore, folded (`foldHeaderName`). */
+const IGNORED_HEADER_PARAMETERS: ReadonlySet<string> = new Set(['accept', 'content-type', 'authorization']);
+
+/**
+ * Whether `param` is a header parameter whose definition OpenAPI says
+ * "SHALL be ignored" (OAS 3.x, Parameter Object): one named `Accept`,
+ * `Content-Type` or `Authorization`, whatever its case, headers the
+ * request's media types and `security` already set. Asked once its `$ref`
+ * is resolved (`resolveParameterRef`) and before anything types it, so an
+ * operation or a webhook never carries it, nor a model or enum its schema
+ * would mint.
+ */
+export function isIgnoredHeaderParameter(param: ParameterObject): boolean {
+  return param.in === 'header' && IGNORED_HEADER_PARAMETERS.has(foldHeaderName(param.name));
+}
+
 export interface RequestBodyObject {
   description?: string;
   required?: boolean;
@@ -2940,10 +2956,12 @@ function buildOperation(
   // `x-pet-token` are one header (#295) — rather than adding a second entry.
   // Operation params come last, so last-write-wins; Map.set keeps the
   // original insertion position, so path-level parameter ordering is
-  // preserved.
+  // preserved. An `Accept`, `Content-Type` or `Authorization` header is
+  // dropped, as OpenAPI requires (`isIgnoredHeaderParameter`, #414).
   const paramsByIdentity = new Map<string, ParameterObject>();
   for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
     const param = resolveParameterRef(raw, componentParameters, opLabel, refSiblingDescriptions);
+    if (isIgnoredHeaderParameter(param)) continue;
     paramsByIdentity.set(parameterKey(param.in, param.name), param);
   }
   const allParams = [...paramsByIdentity.values()];

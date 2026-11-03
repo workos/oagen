@@ -445,3 +445,128 @@ describe('response headers – two keys of one response that differ in case alon
     expectSound(op, inlineModels);
   });
 });
+
+/**
+ * Covers issue #414: OpenAPI says the definition of a header parameter named
+ * `Accept`, `Content-Type` or `Authorization` "SHALL be ignored" — the
+ * request's media types and `security` set those headers — but the parser
+ * kept all three in `headerParams`, on operations and webhooks alike,
+ * whatever their case. They are now dropped once a `components/parameters`
+ * ref is resolved, before anything types them, wherever they are declared.
+ */
+describe('header parameters named Accept, Content-Type or Authorization, which OpenAPI says to ignore (#414)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("drops them from the operation and the webhook alike, whatever their case, through parseSpec (the issue's document)", async () => {
+    const spec = await parseSpec(resolve(fixtures, 'header-param-ignored-after.json'));
+    const [listPets] = spec.services.flatMap((service) => service.operations);
+    // Used to be `['X-Pet-Token', 'Accept', 'content-type', 'AUTHORIZATION']`.
+    expect(listPets.headerParams.map((p) => p.name)).toEqual(['X-Pet-Token']);
+    // Used to be `['authorization', 'Content-Type', 'ACCEPT']`, the first from the path item.
+    expect(spec.webhooks!.map((hook) => [hook.name, hook.headerParams])).toEqual([['petAdded', []]]);
+  });
+
+  it('drops one a Path Item declares or a `components/parameters` ref names, keeping every other header', () => {
+    const { services } = extractOperations(
+      {
+        '/pets': {
+          parameters: [
+            { name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } },
+            { name: 'X-Pet-Token', in: 'header', schema: { type: 'string' } },
+          ],
+          post: {
+            operationId: 'createPet',
+            parameters: [
+              { $ref: '#/components/parameters/Accept' },
+              { name: 'authorization', in: 'header', schema: { type: 'string' } },
+              { name: 'IDEMPOTENCY-KEY', in: 'header', schema: { type: 'string' } },
+              { name: 'Accept-Language', in: 'header', schema: { type: 'string' } },
+            ],
+            responses: ok,
+          },
+        },
+      } as never,
+      undefined,
+      undefined,
+      { Accept: { name: 'ACCEPT', in: 'header', required: true, schema: { type: 'string' } } },
+    );
+    const [op] = services.flatMap((s) => s.operations);
+    expect(op.headerParams.map((p) => p.name)).toEqual(['X-Pet-Token', 'Accept-Language']);
+    // The idempotency header is still detected, and still the SDK's to inject.
+    expect(op.injectIdempotencyKey).toBe(true);
+  });
+
+  it('types nothing from one: no model or enum from its schema, no warning about its `content` map', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { op, inlineModels } = single({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'Accept', in: 'header', schema: { type: 'string', enum: ['application/json', 'text/csv'] } },
+            {
+              name: 'Content-Type',
+              in: 'header',
+              schema: { type: 'object', properties: { charset: { type: 'string' } } },
+            },
+            { name: 'Authorization', in: 'header', content: { 'application/xml': { schema: { type: 'string' } } } },
+          ],
+          responses: ok,
+        },
+      },
+    });
+    expect(op.headerParams).toEqual([]);
+    expect(inlineModels).toEqual([]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('keeps a query parameter or a cookie of those names, since only a header is ignored', () => {
+    const { op } = single({
+      '/pets': {
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'Accept', in: 'query', schema: { type: 'string' } },
+            { name: 'Authorization', in: 'cookie', schema: { type: 'string' } },
+            { name: 'Content-Type', in: 'header', schema: { type: 'string' } },
+          ],
+          responses: ok,
+        },
+      },
+    });
+    expect(op.queryParams.map((p) => p.name)).toEqual(['Accept']);
+    expect(op.cookieParams!.map((p) => p.name)).toEqual(['Authorization']);
+    expect(op.headerParams).toEqual([]);
+  });
+
+  it('drops them from a webhook, one its path item declares through a ref included, minting nothing for them', () => {
+    const { webhooks, inlineModels } = extractWebhooks(
+      {
+        petAdded: {
+          parameters: [
+            { $ref: '#/components/parameters/Auth' },
+            { name: 'X-Pet-Signature', in: 'header', required: true, schema: { type: 'string' } },
+          ],
+          post: {
+            parameters: [
+              {
+                name: 'content-type',
+                in: 'header',
+                schema: { type: 'object', properties: { charset: { type: 'string' } } },
+              },
+              { name: 'Accept', in: 'query', schema: { type: 'string' } },
+            ],
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      },
+      { parameters: { Auth: { name: 'AUTHORIZATION', in: 'header', required: true, schema: { type: 'string' } } } },
+    );
+    const [hook] = webhooks;
+    expect(hook.headerParams.map((p) => p.name)).toEqual(['X-Pet-Signature']);
+    expect(hook.queryParams.map((p) => p.name)).toEqual(['Accept']);
+    expect(inlineModels).toEqual([]);
+  });
+});

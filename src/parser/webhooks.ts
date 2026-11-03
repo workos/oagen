@@ -27,6 +27,7 @@ import {
   HTTP_METHODS,
   extractParams,
   extractTags,
+  isIgnoredHeaderParameter,
   operationIdModelBase,
   parameterSchema,
   presentText,
@@ -153,7 +154,9 @@ type MintedShape = Pick<
  * resolved, path-item-level parameters overridden by operation-level ones of
  * the same identity), so a malformed reference fails the parse the way it
  * does on an operation. A `path` parameter has nowhere to go — a webhook has
- * no path — and is dropped with a warning. A response that is a `$ref` into
+ * no path — and is dropped with a warning; an `Accept`, `Content-Type` or
+ * `Authorization` header is ignored, as OpenAPI requires and as on an
+ * operation (`isIgnoredHeaderParameter`). A response that is a `$ref` into
  * `components/responses` is followed for its description.
  *
  * The payload schema is typed and materialized as the `payload` property of a
@@ -348,10 +351,12 @@ function collectWebhookEntries(
       warnOnIgnoredCallbacks(op.callbacks, label);
       // Same precedence as buildOperation: an operation-level parameter replaces
       // a path-item-level one of the same identity (`parameterKey`: location
-      // and name, a header's name case-folded), in the path-level position.
+      // and name, a header's name case-folded), in the path-level position;
+      // an `Accept`, `Content-Type` or `Authorization` header is dropped.
       const paramsByIdentity = new Map<string, ParameterObject>();
       for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
         const param = resolveParameterRef(rawParam, components.parameters, label, siblingDocs);
+        if (isIgnoredHeaderParameter(param)) continue;
         paramsByIdentity.set(parameterKey(param.in, param.name), param);
       }
       const params: ParameterObject[] = [];

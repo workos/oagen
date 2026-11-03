@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { resolve } from 'node:path';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { diffCommand } from '../../src/cli/diff.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { parseSpec } from '../../src/parser/parse.js';
@@ -401,5 +404,107 @@ describe('diffSpecs – a webhook header whose name changed case alone', () => {
       ],
       classification: 'breaking',
     });
+  });
+});
+
+/**
+ * Covers issue #414: a header parameter named `Accept`, `Content-Type` or
+ * `Authorization` is one OpenAPI says to ignore, but the parser kept it, so
+ * `diffSpecs` reported declaring one as a `param-added` — breaking for a
+ * required `Authorization` — and `oagen diff` exited 2. The parser now
+ * drops them, so there is nothing to compare.
+ */
+describe("diffSpecs – the issue's documents (#414)", () => {
+  const before = resolve(fixtures, 'header-param-ignored-before.json');
+  const after = resolve(fixtures, 'header-param-ignored-after.json');
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports nothing when an operation declares Accept, Content-Type and a required Authorization header', async () => {
+    const diff = diffSpecs(await parseSpec(before), await parseSpec(after));
+    // Used to be three `param-added` entries, the required `AUTHORIZATION` one breaking.
+    expect(diff.changes).toEqual([]);
+    expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 0, breaking: 0, additive: 0, behaviorChanges: 0 });
+  });
+
+  it('makes `oagen diff` exit 0, not 2', async () => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = (await diffCommand({ old: before, new: after }).catch((e: unknown) => e)) as { exitCode: number };
+    expect(error.exitCode).toBe(0);
+  });
+});
+
+describe('diffSpecs – an ignored header declared through a Path Item or a `components/parameters` ref (#414)', () => {
+  /** `GET /pets` and the `petAdded` webhook, with the ignored headers or without them. */
+  const document = (withIgnored: boolean) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    paths: {
+      '/pets': {
+        parameters: withIgnored ? [{ $ref: '#/components/parameters/Authorization' }] : [],
+        get: {
+          operationId: 'listPets',
+          parameters: [
+            { name: 'X-Pet-Token', in: 'header', schema: { type: 'string' } },
+            ...(withIgnored ? [{ $ref: '#/components/parameters/Accept' }] : []),
+          ],
+          responses: {
+            '200': { description: 'OK', content: { 'application/json': { schema: { type: 'string' } } } },
+          },
+        },
+      },
+    },
+    webhooks: {
+      petAdded: {
+        parameters: withIgnored ? [{ $ref: '#/components/parameters/Authorization' }] : [],
+        post: {
+          parameters: withIgnored
+            ? [
+                {
+                  name: 'Content-Type',
+                  in: 'header',
+                  required: true,
+                  schema: { type: 'object', properties: { charset: { type: 'string' } } },
+                },
+              ]
+            : [],
+          responses: { '200': { description: 'Acknowledged' } },
+        },
+      },
+    },
+    components: {
+      parameters: {
+        Authorization: { name: 'Authorization', in: 'header', required: true, schema: { type: 'string' } },
+        Accept: {
+          name: 'accept',
+          in: 'header',
+          required: true,
+          schema: { type: 'string', enum: ['application/json', 'text/csv'] },
+        },
+      },
+    },
+  });
+
+  async function parseDocument(doc: unknown): Promise<ApiSpec> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-414-'));
+    try {
+      writeFileSync(join(dir, 'spec.json'), JSON.stringify(doc));
+      return await parseSpec(join(dir, 'spec.json'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('reports nothing, and mints no model or enum from their schemas', async () => {
+    const before = await parseDocument(document(false));
+    const after = await parseDocument(document(true));
+    expect(after.models).toEqual([]);
+    expect(after.enums).toEqual([]);
+    // Used to be a `model-added` (`PetAddedContentType`) and an `enum-added`
+    // (`PetsAccept`) beside a `param-added` for each header: breaking for the
+    // operation's two, additive for the webhook's.
+    expect(diffSpecs(before, after).changes).toEqual([]);
   });
 });
