@@ -10,6 +10,7 @@ import { collectInlineEnumsFromWebhooks } from '../../src/parser/collect-inline-
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
 import { collectReferencedNames } from '../../src/engine/generate-files.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { assignModelsToServices, collectModelRefs, collectWebhookTypeRefs } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Enum, Model, Webhook } from '../../src/ir/types.js';
@@ -1266,5 +1267,65 @@ describe('a webhook response whose $ref resolves to nothing (#444)', () => {
         "[oagen] Warning: Circular or malformed response $ref for status 422 in webhooks.petAdopted.post; keeping the status code only.",
       ]
     `);
+  });
+});
+
+/**
+ * Covers issue #421: since #350 a `webhooks` key starting with `x-` was
+ * stepped over as a specification extension, its payload model with it, so
+ * adding or removing one was no change to `oagen diff`. OpenAPI gives the
+ * `webhooks` map no extensions, unlike `paths`: every key is a webhook.
+ */
+describe('#421', () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-webhooks-421-'));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** The issue's webhook entry: a POST whose body is an inline `{ id: string }`. */
+  const petEvent = postWith({ type: 'object', properties: { id: { type: 'string' } } });
+
+  /** The issue's document, `old.json` or `new.json`, with the given `webhooks`. */
+  async function parseWebhooks(file: string, webhooks: Record<string, unknown>): Promise<ApiSpec> {
+    const specFile = path.join(tmpDir, file);
+    const doc = { openapi: '3.1.0', info: { title: 'Pets', version: '1' }, paths: {}, webhooks };
+    await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
+    return parseSpec(specFile);
+  }
+
+  it('reads `x-pet-returned` as a webhook with its payload model (the issue’s repro)', async () => {
+    const spec = await parseWebhooks('new.json', { petAdopted: petEvent, 'x-pet-returned': petEvent });
+
+    expect(spec.webhooks!.map(({ httpMethod, name }) => `${name} ${httpMethod}`)).toEqual([
+      'petAdopted post',
+      'x-pet-returned post',
+    ]);
+    expect(spec.models.map(({ name }) => name)).toEqual(['PetAdoptedPayload', 'XPetReturnedPayload']);
+    expect(spec.webhooks![1]!.requestBody).toEqual({ kind: 'model', name: 'XPetReturnedPayload' });
+    expect(fieldsOf(spec, spec.webhooks![1]!.requestBody)).toEqual(['id']);
+    expectResolvedAndReferenced(spec, warn);
+  });
+
+  it('reports adding it to `oagen diff` as additive, and removing it as breaking', async () => {
+    const oldSpec = await parseWebhooks('old.json', { petAdopted: petEvent });
+    const newSpec = await parseWebhooks('new.json', { petAdopted: petEvent, 'x-pet-returned': petEvent });
+
+    expect(diffSpecs(oldSpec, newSpec).changes).toEqual([
+      { kind: 'model-added', name: 'XPetReturnedPayload', classification: 'additive' },
+      { kind: 'webhook-added', name: 'x-pet-returned', httpMethod: 'post', classification: 'additive' },
+    ]);
+    expect(diffSpecs(newSpec, oldSpec).changes).toEqual([
+      { kind: 'model-removed', name: 'XPetReturnedPayload', classification: 'breaking' },
+      { kind: 'webhook-removed', name: 'x-pet-returned', httpMethod: 'post', classification: 'breaking' },
+    ]);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

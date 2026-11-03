@@ -137,16 +137,16 @@ type MintedShape = Pick<
  * Read the document's top-level `webhooks` map (OpenAPI 3.1) into the IR.
  *
  * Each key names a path item, and each HTTP method on it is one `Webhook`,
- * in document order. The key is kept verbatim as `Webhook.name`. An entry
+ * in document order. The key is kept verbatim as `Webhook.name`, one
+ * starting with `x-` included: OpenAPI gives the `webhooks` map no
+ * specification extensions, unlike `paths`, so `x-pet-returned` is a webhook
+ * like any other (#421). An entry
  * that is a `$ref` into `components/pathItems` is resolved (chains included,
  * with a cycle guard) by `resolvePathItemRef`, the resolver a `paths` entry
  * goes through too; one that points anywhere else, or that cannot be
  * resolved, is warned about and skipped rather than failing the parse, as is
- * an entry that is not an object. A key starting with `x-` is a
- * specification extension, not a webhook, and is stepped over without a
- * warning whatever its value, as `extractOperations` steps over one under
- * `paths`. A `webhooks` value that is not an object at all is warned about
- * and ignored. Nothing is read from `x-webhooks`, the
+ * an entry that is not an object. A `webhooks` value that is not an object
+ * at all is warned about and ignored. Nothing is read from `x-webhooks`, the
  * pre-3.1 convention: the parser reads the standard key only.
  *
  * Parameters and request bodies go through the same resolvers and extractors
@@ -329,10 +329,9 @@ function collectWebhookEntries(
   siblingDocs: SiblingDocs,
 ): WebhookEntry[] {
   const entries: WebhookEntry[] = [];
+  // Every key, an `x-` one included: unlike `paths`, the map takes no
+  // specification extensions (#421).
   for (const [name, raw] of Object.entries(webhooks)) {
-    // A specification extension, never a webhook: stepped over whatever its
-    // value, as `resolvePathItems` steps over one under `paths`.
-    if (name.startsWith('x-')) continue;
     // The same resolver `extractOperations` reads a `paths` entry through, so
     // a `$ref` into `components/pathItems` is followed the same way here.
     const pathItem = resolvePathItemRef(raw, components.pathItems, { kind: 'webhook', key: name }) as

@@ -347,7 +347,7 @@ describe('path items written as a $ref (issue #300)', () => {
     });
   });
 
-  describe('x- keys, which are specification extensions and never path items', () => {
+  describe('x- keys: specification extensions under `paths`, never path items; webhook names under `webhooks` (#421)', () => {
     const pets = { get: { operationId: 'listPets', responses } };
     const adopted = { post: { operationId: 'adopted', responses } };
 
@@ -375,17 +375,17 @@ describe('path items written as a $ref (issue #300)', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
-    it('steps over a scalar extension beside a webhook, without a warning', () => {
+    it('reads a scalar `x-` key beside a webhook as an entry that is not a path item, warned about and skipped (#421)', () => {
       const { webhooks } = extractWebhooks({ 'x-internal': true, petAdopted: adopted });
 
       expect(webhooks.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
-      expect(warn).not.toHaveBeenCalled();
+      expect(warnings()).toEqual(['[oagen] Warning: Webhook "x-internal" is not a path item object; skipping it.']);
     });
 
-    it('steps over an object-valued extension beside a webhook, even one shaped like a path item or a ref', () => {
+    it('reads an object-valued `x-` key beside a webhook as a webhook, a ref resolved or warned about as any entry’s (#421)', () => {
       const { webhooks } = extractWebhooks(
         {
-          'x-event': { post: { operationId: 'notAWebhook', responses } },
+          'x-event': { post: { operationId: 'xEvent', responses } },
           'x-alias': { $ref: '#/components/pathItems/Adopted' },
           'x-ref': { $ref: '#/components/pathItems/Missing' },
           petAdopted: adopted,
@@ -393,11 +393,17 @@ describe('path items written as a $ref (issue #300)', () => {
         { pathItems: { Adopted: adopted } },
       );
 
-      expect(webhooks.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
-      expect(warn).not.toHaveBeenCalled();
+      expect(webhooks.map((w) => [w.name, w.operationId])).toEqual([
+        ['x-event', 'xEvent'],
+        ['x-alias', 'adopted'],
+        ['petAdopted', 'adopted'],
+      ]);
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Unresolved path item $ref "#/components/pathItems/Missing" for webhook "x-ref": no matching entry under components/pathItems. Skipping the webhook.',
+      ]);
     });
 
-    it('keeps the extensions out of the IR through parseSpec, paths and webhooks alike', async () => {
+    it('keeps the `paths` extensions out of the IR through parseSpec, and reads every `webhooks` key as a webhook (#421)', async () => {
       const spec = await parseDocument({
         openapi: '3.1.0',
         info: { title: 'ext', version: '1' },
@@ -409,7 +415,7 @@ describe('path items written as a $ref (issue #300)', () => {
         },
         webhooks: {
           'x-note': 'text',
-          'x-event': { post: { operationId: 'notAWebhook', responses } },
+          'x-event': { post: { operationId: 'xEvent', responses } },
           'x-alias': { $ref: '#/components/pathItems/Adopted' },
           petAdopted: adopted,
         },
@@ -418,8 +424,18 @@ describe('path items written as a $ref (issue #300)', () => {
 
       expect(spec.services.map((s) => s.name)).toEqual(['Pets']);
       expect(allOperations(spec).map((op) => [op.name, op.path])).toEqual([['listPets', '/pets']]);
-      expect(spec.webhooks?.map((w) => [w.name, w.operationId])).toEqual([['petAdopted', 'adopted']]);
-      expect(warn).not.toHaveBeenCalled();
+      expect(spec.webhooks?.map((w) => [w.name, w.operationId])).toEqual([
+        ['x-event', 'xEvent'],
+        ['x-alias', 'adopted'],
+        ['petAdopted', 'adopted'],
+      ]);
+      // Each `x-` key is an entry like any other: a scalar is no path item,
+      // and once written to the file `components/pathItems/Adopted` is an
+      // operation object of its own that declares `petAdopted`'s operationId.
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Webhook "x-note" is not a path item object; skipping it.',
+        '[oagen] Warning: operationId "adopted" is declared by more than one webhook operation (webhooks.x-alias.post, webhooks.petAdopted.post); naming their models from the webhook keys instead.',
+      ]);
       expectResolvedAndReferenced(spec);
     });
   });

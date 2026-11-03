@@ -842,11 +842,11 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * The roots are found by following the OpenAPI object model
  * (`schemaRootsOf`), the way the operation, response and webhook readers
  * do, so a name is never mistaken for a specification extension: a header
- * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`
- * or a property `x-id` is read like any other, and an `x-` key is stepped
- * over only where the readers step over it or read nothing: the Paths
- * Object's and the `webhooks` map's (extensions by the specification, which
- * `extractOperations` and `extractWebhooks` step over), a Responses
+ * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`,
+ * a webhook named `x-event` or a property `x-id` is read like any other, and
+ * an `x-` key is stepped over only where the readers step over it or read
+ * nothing: the Paths Object's (an extension by the specification, which
+ * `extractOperations` steps over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
  * the specification; the parser reads no callbacks). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
@@ -901,9 +901,9 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * Every schema root of the document outside `components.schemas`, found by
  * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
  *
- *   - the OpenAPI Object's `paths` and `webhooks` (a path or a name per
- *     key, an `x-` extension stepped over) to Path Item Objects; the
- *     Components Object's `responses`,
+ *   - the OpenAPI Object's `paths` (a path per key, an `x-` extension
+ *     stepped over) and `webhooks` (a name per key) to Path Item Objects;
+ *     the Components Object's `responses`,
  *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
  *     (a name per key);
  *   - a Path Item's `parameters` list and operations; an Operation's
@@ -916,10 +916,12 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  *     `headers` (a name per key); a Media Type's `schema` and `encoding` (a
  *     property name per key, each an Encoding Object with `headers`).
  *
- * A map whose keys are names is read whole, whatever the keys look like.
- * An `x-` key is stepped over in the Paths Object and the `webhooks` map,
- * where the specification makes it an extension and `extractOperations`
- * and `extractWebhooks` step over it, in a Responses Object, as
+ * A map whose keys are names is read whole, whatever the keys look like,
+ * the `webhooks` map among them: OpenAPI gives it no extensions, and
+ * `extractWebhooks` reads every key as a webhook (#421).
+ * An `x-` key is stepped over in the Paths Object, where the specification
+ * makes it an extension and `extractOperations` steps over it, in a
+ * Responses Object, as
  * `readFallbackResponse` steps over it, and in a Callback Object, where the
  * specification makes it an extension (the parser reads no callbacks, so
  * nothing named under one is ever typed). A `$ref` entry
@@ -994,10 +996,10 @@ function schemaRootsOf(
     named(value['callbacks'], (callback) => keyed(callback, pathItem));
   };
 
-  // Both maps step over `x-` extensions, as `extractOperations` and
-  // `extractWebhooks` do.
+  // `paths` steps over `x-` extensions, as `extractOperations` does; every
+  // `webhooks` key is a webhook, as `extractWebhooks` reads it (#421).
   keyed(document['paths'], pathItem);
-  keyed(document['webhooks'], pathItem);
+  named(document['webhooks'], pathItem);
   if (components) {
     named(components['responses'], response);
     named(components['parameters'], parameter);
@@ -1033,7 +1035,8 @@ type SiteDirection = 'sent' | 'received';
  * responses type no body (`extractWebhookResponses`), and `callbacks` are
  * never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths`, `webhooks` or a Responses Object stepped over. A schema
+ * of `paths` or a Responses Object stepped over and every `webhooks` key
+ * read as a webhook. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1145,7 +1148,8 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
     // A webhook's request is one the SDK is sent.
     const request: SiteDirection = webhooks ? 'received' : 'sent';
     for (const [key, raw] of Object.entries(map)) {
-      if (key.startsWith('x-')) continue;
+      // An extension under `paths`; a webhook's name under `webhooks` (#421).
+      if (!webhooks && key.startsWith('x-')) continue;
       const item = follow(raw, 'pathItems');
       if (!item) continue;
       for (const method of PATH_ITEM_OPERATIONS) {
