@@ -455,34 +455,82 @@ function resolvePathItems(
 }
 
 /**
+ * Whether an `operationId` — as the document declares it, or as an
+ * `operationIdTransform` returns it (#570) — names nothing: no ASCII letter
+ * or digit is left once its trailing overload markers are stripped
+ * (normalizeOperationIdForNaming), so it camel-cases to nothing — `''`,
+ * `' '`, `'-'`, `'[1]'` and `'[1][2]'` alike, since every marker at the end
+ * goes (#565). The one reading of the rule, so the document's id and what a
+ * transform makes of it cannot be judged differently.
+ */
+function namesNothing(id: string): boolean {
+  return toCamelCase(normalizeOperationIdForNaming(id)) === '';
+}
+
+/** The resolved `paths` map read for its operationIds (readOperationIds). */
+interface OperationIdReading {
+  /** `paths`, with every `operationId` that names nothing left out of its operation. */
+  paths: Record<string, PathItem>;
+  /** What each kept `operationId` names, by operation key (`${method} ${path}`): its operation's name. */
+  names: ReadonlyMap<string, string>;
+}
+
+/**
  * The resolved `paths` map with every `operationId` that names nothing read
- * as absent: one with no ASCII letter or digit once its trailing overload
- * markers are stripped (normalizeOperationIdForNaming), which camel-cases to
- * nothing as inferOperationName reads it — `' '`, `'-'`, `'[1]'`, and
- * `'[1][2]'`, since every marker at the end goes (#565). Its operation is
+ * as absent, and the name every other one gives its operation, settled once
+ * before any pass reads an `operationId`.
+ *
+ * An `operationId` names nothing when it has no ASCII letter or digit once
+ * its trailing overload markers are stripped (namesNothing) — `' '`, `'-'`,
+ * `'[1]'`, `'[1][2]'` — and, when an `operationIdTransform` is set, when what
+ * the transform returns for one that names something names nothing by the
+ * same reading, or is not a string at all (`(id) => id.split('.').at(1)`
+ * returns `undefined` for `getPet`): the transform is asked for the name, so
+ * its result is read as the document's `operationId` is (#570). The first
+ * is left out silently and never handed to the transform; the second is
+ * warned about once, by the document's id and the operation, since the
+ * transform was given a name and made nothing of it. Either operation is
  * read as one without an `operationId`, as one declaring `''` always was:
  * named from its method and path, and renamed as a path-named operation when
  * that name collides (planOperations), its models named from its path, and
  * given no `Operation.operationId`, so `resolveOperations` derives its method
- * name from the path under either `operationNaming` (#526). An
- * `operationIdTransform` is never called with it. A Path Item without one is
- * kept as it is; one with one is copied, its other operations kept as they
- * are.
+ * name from the path under either `operationNaming` (#526). A Path Item
+ * without one is kept as it is; one with one is copied, its other operations
+ * kept as they are.
+ *
+ * `names` is the one place the transform is called — once per operation,
+ * with the id's trailing markers stripped (operationIdName) — so a transform
+ * sees each id once and every pass after reads the one name it gave
+ * (planOperations, through inferOperationName).
  */
-function dropNamelessOperationIds(paths: Record<string, PathItem>): Record<string, PathItem> {
+function readOperationIds(
+  paths: Record<string, PathItem>,
+  operationIdTransform: ((id: string) => string) | undefined,
+): OperationIdReading {
   const result: Record<string, PathItem> = {};
+  const names = new Map<string, string>();
   for (const [path, pathItem] of Object.entries(paths)) {
     let item = pathItem;
     for (const method of HTTP_METHODS) {
       const op = item[method];
-      if (typeof op?.operationId !== 'string' || toCamelCase(normalizeOperationIdForNaming(op.operationId)) !== '') {
-        continue;
+      if (typeof op?.operationId !== 'string') continue;
+      if (!namesNothing(op.operationId)) {
+        const name: unknown = operationIdName(op.operationId, operationIdTransform);
+        if (typeof name === 'string' && !namesNothing(name)) {
+          names.set(`${method} ${path}`, name);
+          continue;
+        }
+        const returned = typeof name === 'string' ? JSON.stringify(name) : String(name);
+        console.warn(
+          `[oagen] Warning: operationIdTransform returned ${returned}, which names nothing, for operationId ` +
+            `"${op.operationId}" on ${method.toUpperCase()} ${path}; naming the operation from its path`,
+        );
       }
       item = { ...item, [method]: { ...op, operationId: undefined } };
     }
     result[path] = item;
   }
-  return result;
+  return { paths: result, names };
 }
 
 export interface OperationExtractionResult {
@@ -548,9 +596,13 @@ export function extractOperations(
   // Every pass below reads the resolved map: each entry as itself, or as the
   // Path Item its `$ref` leads to, with an entry that resolves to nothing
   // left out after one warning (see resolvePathItems), and an `operationId`
-  // that names nothing left out of its operation (see
-  // dropNamelessOperationIds).
-  const resolvedPaths = dropNamelessOperationIds(resolvePathItems(paths, componentPathItems, documentWebhooks));
+  // that names nothing — or that the operationIdTransform makes nothing of —
+  // left out of its operation, every other one's name settled (see
+  // readOperationIds).
+  const { paths: resolvedPaths, names: operationIdNames } = readOperationIds(
+    resolvePathItems(paths, componentPathItems, documentWebhooks),
+    operationIdTransform,
+  );
 
   // Whether text written beside a `$ref` overrides the referenced component's
   // (OAS 3.1, and a version not recognised) or is ignored (OAS 3.0), for every
@@ -568,7 +620,7 @@ export function extractOperations(
   // operationId the document reuses can follow the name it ends up with, and
   // no two such operations name their models alike (see
   // resolveReusedOperationIds).
-  const plan = planOperations(resolvedPaths, apiRoot, operationIdTransform);
+  const plan = planOperations(resolvedPaths, apiRoot, operationIdNames);
   const { modelOperationIds, sharedWith } = resolveReusedOperationIds(resolvedPaths, plan);
 
   // Operations without an operationId — or left none by the reuse of their
@@ -868,8 +920,9 @@ interface OperationPlan {
  * built, so an operation's models can follow the name it ends up with
  * (resolveReusedOperationIds). Each operation starts in the service its tag
  * or its path gives it (inferServiceName), under the name its `operationId`
- * or its method and path give it (inferOperationName, the one place
- * `operationIdTransform` is called). Then a tagged service whose tag groups
+ * gives it — settled once, `operationIdTransform` applied, before this pass
+ * (readOperationIds) — or its method and path give it (inferOperationName).
+ * Then a tagged service whose tag groups
  * operations from several first path segments — `/organizations` and
  * `/organization_domains` both tagged `organizations` — is split into one
  * service per segment, decided over the tagged operations alone, so an
@@ -886,7 +939,7 @@ interface OperationPlan {
 function planOperations(
   paths: Record<string, PathItem>,
   apiRoot: readonly string[],
-  operationIdTransform: ((id: string) => string) | undefined,
+  operationIdNames: ReadonlyMap<string, string>,
 ): OperationPlan {
   const serviceMap = new Map<string, Operation[]>();
   const started = new Map<Operation, { key: string; initialName: string }>();
@@ -905,7 +958,7 @@ function planOperations(
       const tag = serviceTag(op.tags);
       const apiRootLength = tag ? 0 : apiRootLengthOf(path, apiRoot);
       const serviceName = inferServiceName(path, tag, apiRootLength);
-      const name = inferOperationName(method, path, op.operationId, operationIdTransform, apiRootLength);
+      const name = inferOperationName(method, path, operationIdNames.get(`${method} ${path}`), apiRootLength);
       const stub = { name, path, httpMethod: method } as Operation;
       started.set(stub, { key: `${method} ${path}`, initialName: name });
       if (tag) tagServiceByOperation.set(stub, serviceName);
@@ -1340,20 +1393,32 @@ export function operationIdModelBase(operationId: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)));
 }
 
+/**
+ * What an `operationId` that names something names: what
+ * `operationIdTransform` returns for it with its trailing overload markers
+ * stripped, so the transform never has to know about NestJS-style `[0]`
+ * suffixes, else that camelCased. The one place the transform is called,
+ * once per operation (readOperationIds), which also reads its result: one
+ * that names nothing drops the `operationId` instead of naming the operation
+ * (#570).
+ */
+function operationIdName(operationId: string, operationIdTransform: ((id: string) => string) | undefined): string {
+  const normalized = normalizeOperationIdForNaming(operationId);
+  return operationIdTransform ? operationIdTransform(normalized) : toCamelCase(normalized);
+}
+
+/**
+ * An operation's name: what its `operationId` names, when it declares one
+ * that names something (`operationIdName`, settled by readOperationIds before
+ * any operation is planned), else a name built from its method and path.
+ */
 function inferOperationName(
   method: HttpMethod,
   path: string,
-  operationId?: string,
-  operationIdTransform?: (id: string) => string,
+  nameFromId: string | undefined,
   apiRootLength = 0,
 ): string {
-  if (operationId) {
-    const normalized = normalizeOperationIdForNaming(operationId);
-    if (operationIdTransform) {
-      return operationIdTransform(normalized);
-    }
-    return toCamelCase(normalized);
-  }
+  if (nameFromId !== undefined) return nameFromId;
 
   // Fallback when no operationId is available — use method + path to build
   // a descriptive name like "listUsers", "getOrganization", "deleteAuthFactor",
@@ -3428,7 +3493,8 @@ function buildOperation(
   // the `operationId` or on the method and path alone, never on the
   // operation's name — a change to what inferOperationName derives or to
   // what an operationIdTransform makes of the `operationId` renames no type
-  // (see `headerOperationQualifier`).
+  // (see `headerOperationQualifier`), unless the transform makes nothing of
+  // it, which reads the `operationId` as absent (readOperationIds).
   const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
