@@ -38,8 +38,9 @@ export function generateResources(services: Service[], _ctx: EmitterContext): Ge
       const paramStr = params.join(', ');
       const asyncPrefix = plan.isAsync ? 'async ' : '';
 
-      // `description` never includes the summary, so the doc comment joins them.
-      const doc = [op.summary, op.description].filter(Boolean).join('\n\n');
+      // `description` never includes the summary, so the doc comment joins them,
+      // printing the text once when the two are the same.
+      const doc = [...new Set([op.summary, op.description])].filter(Boolean).join('\n\n');
       if (doc) {
         lines.push(`  /** ${escapeBlockComment(doc)} */`);
       }
