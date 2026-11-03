@@ -2486,8 +2486,10 @@ function forbidsNull(schema: SchemaObject): boolean {
  * `null` among them when the declaration admits it: its own `const`,
  * `enum` or `oneOf`/`anyOf` of string consts (`ownPinnedValues`), or those
  * of the schema it reaches (`referencedPinnedValues`) — the enum component
- * its `$ref`, or a lone `allOf: [{ $ref }]` (the spelling that annotates a
- * reference), names, read through a chain of references. So an own
+ * its `$ref`, or an `allOf` read as that reference (the spellings that
+ * annotate one: a lone `allOf: [{ $ref }]`, or one whose other members add
+ * nothing to it, `allOf: [{ $ref }, { description }]`), names, read through
+ * a chain of references. So an own
  * `kind: { $ref: Kind }`, `Kind` the enum `[cat, dog]`, pins `cat` and
  * `dog` exactly as an own `kind: { enum: [cat, dog] }` does: it stays over
  * a variant that repeats those values, or names more, and gives way to a
@@ -2518,18 +2520,22 @@ function ownPinnedValues(schema: SchemaObject): readonly unknown[] | undefined {
 
 /**
  * The values the one schema a declaration reaches pins (`pinnedValues`):
- * the component its `$ref` names (`componentSchemaOf`), the one member of
- * its lone `allOf`, or the variant its nullable union wrapper collapses to
- * (`nullableUnionBranch`). `undefined` when it reaches none, or one already
- * read (a cycle of references).
+ * the component its `$ref` names (`componentSchemaOf`), the member its
+ * `allOf` is typed as (`allOfReadAsMember`: a lone member, or the `$ref`
+ * member beside members that add nothing to it), or the variant its
+ * nullable union wrapper collapses to (`nullableUnionBranch`). `undefined`
+ * when it reaches none — an `allOf` merged into a model among them — or one
+ * already read (a cycle of references, which runs through a `$ref`: the
+ * copy `allOfReadAsMember` makes of a lone inline member is never reached
+ * twice).
  */
 function referencedPinnedValues(schema: SchemaObject, seen: ReadonlySet<SchemaObject>): readonly unknown[] | undefined {
   const kind = classifyInlineSchema(schema);
   const reached =
     kind === 'ref'
       ? schema
-      : kind === 'allOf' && schema.allOf?.length === 1
-        ? schema.allOf[0]
+      : kind === 'allOf'
+        ? allOfReadAsMember(schema)
         : kind === 'union'
           ? nullableUnionBranch(schema)
           : undefined;
