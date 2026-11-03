@@ -118,11 +118,32 @@ export function toUpperSnakeCase(s: string): string {
  * `PetsTop10567B59`) and one that starts with a letter follows the name as
  * it is (`PetsTop10Ba41B5`). An underscore would not do: splitWords reads a
  * digit run as a word of its own, so `listV1_2` re-cased by toPascalCase or
- * toCamelCase is `ListV12` or `listV12` again.
+ * toCamelCase is `ListV12` or `listV12` again. The name is read as given, so
+ * a caller numbers a name in its final spelling; one that is cased only
+ * later is numbered by numberedProperty.
  */
 export function numberedName(name: string, n: number | string): string {
   const suffix = String(n);
   return /\d$/.test(name) && /^\d/.test(suffix) ? `${name}No${suffix}` : `${name}${suffix}`;
+}
+
+/**
+ * `property` with the numeric suffix `n`, for a property name that is cased
+ * only later: the raw parameter or header name the shape registry and a
+ * webhook's `mintParameter` extract a schema under, which toPascalCase turns
+ * into the model name. The number is spelled as numberedName spells it on the
+ * cased name, so one that ends in a digit once the characters that are
+ * neither letters nor digits are dropped (`filter[v2]`, `x-meta-v2_`,
+ * `filter_v2_`) takes it behind `No` too: `filter[v2]` + 2 is
+ * `filter[v2]No2`, cased `FilterV2No2`, never `filter[v2]2`, which cases to
+ * `FilterV22` and reads as version 22 (#533); `query_payload` + 2 is still
+ * `query_payload2`. The property is returned as written, not cased: the
+ * stems a site's siblings settled on are compared as strings, and
+ * toPascalCase is not idempotent (`sso_v2` is `SSOV2`, re-cased `Ssov2`).
+ */
+export function numberedProperty(property: string, n: number | string): string {
+  const cased = toPascalCase(property);
+  return `${property}${numberedName(cased, n).slice(cased.length)}`;
 }
 
 const BACKEND_SUFFIXES = ['Controller'];

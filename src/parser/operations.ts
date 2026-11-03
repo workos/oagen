@@ -35,6 +35,7 @@ import {
   stripListItemMarkers,
   singularizePathSegment,
   numberedName,
+  numberedProperty,
 } from '../utils/naming.js';
 import {
   isJsonMediaType,
@@ -1364,7 +1365,7 @@ interface ServiceSplit {
  * id that ends in several (`listPets[1][2]`, `listPets[2] [3]`) normalizes
  * to `listPets` and never keeps the first marker's digit (`listPets1`), and
  * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
- * (dropNamelessOperationIds), as `[1]` does (#565). Brackets at the end (or
+ * (readOperationIds), as `[1]` does (#565). Brackets at the end (or
  * with trailing whitespace) are common in NestJS-style backends; this regex
  * is intentionally narrow to avoid eating legitimate digits like `oauth2`,
  * and a marker not at the end (`list[1]Pets`) is left as written.
@@ -5267,7 +5268,11 @@ function deferredEnumNames(item: DeferredInlineType): string[] {
 function deferredNamingStem(item: DeferredInlineType): (index: number, firstClashOwners: InlineModelOwner[]) => string {
   const { name, statusCode = '', operationQualifier } = item;
   const byStatus = `${name}${statusCode}`;
-  const numbered = (index: number): string => numberedName(name, index + 2);
+  // Numbered as the cased name will read, not as the raw parameter or header
+  // name is written (`numberedProperty`): `filter[v2]` and `x-meta-v2_` end
+  // in a digit once cased, so their number goes behind `No` (`FilterV2No2`,
+  // `XMetaV2No2`) as `filterV2`'s does, never `FilterV22` (#533).
+  const numbered = (index: number): string => numberedProperty(name, index + 2);
   const byNumber = (index: number): string => (index === 0 ? name : numbered(index - 1));
   // A site a component response declares — its body, a secondary body, a
   // header — steps the same way from every operation, at a 404, at `default`
@@ -5300,7 +5305,7 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
     case 'fallback':
       return byNumber;
     case 'error':
-      return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : numberedName(`${name}Body`, index));
+      return (index) => (index === 0 ? name : index === 1 ? `${name}Body` : numberedProperty(`${name}Body`, index));
     case 'param': {
       // Named like a header, with the location where a header has its
       // status code: a clash within this operation (one name in two

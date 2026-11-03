@@ -11,6 +11,7 @@ import {
   singularizePathSegment,
   cleanSchemaName,
   numberedName,
+  numberedProperty,
   ACRONYM_SET,
 } from '../../src/utils/naming.js';
 
@@ -508,5 +509,40 @@ describe('acronym customization', () => {
     expect(ACRONYM_SET.has('SSO')).toBe(true);
     expect(ACRONYM_SET.has('FGA')).toBe(true);
     expect(ACRONYM_SET.has('SAML')).toBe(true);
+  });
+});
+
+describe('#533', () => {
+  // workos/oagen#533: a property name the shape registry or a webhook's
+  // `mintParameter` numbers is cased only later, so the number is spelled as
+  // the cased name takes it (`numberedProperty`), never as the raw name
+  // suggests: `filter[v2]` doesn't end in a digit as written, but `FilterV2`
+  // does.
+  it('sets the number off from a digit the cased name ends in', () => {
+    expect(numberedProperty('filter[v2]', 2)).toBe('filter[v2]No2');
+    expect(numberedProperty('x-meta-v2_', 2)).toBe('x-meta-v2_No2');
+    expect(numberedProperty('filter_v2_', 3)).toBe('filter_v2_No3');
+    expect(numberedProperty('query_filter[v2]', 2)).toBe('query_filter[v2]No2');
+  });
+
+  it('appends the bare number where the cased name ends in a letter, as numberedName does', () => {
+    expect(numberedProperty('query_payload', 2)).toBe('query_payload2');
+    expect(numberedProperty('filter[v2]a', 2)).toBe('filter[v2]a2');
+    expect(numberedProperty('getPetError404Body', 2)).toBe('getPetError404Body2');
+  });
+
+  it('spells a name that ends in a digit as written exactly as numberedName does', () => {
+    for (const name of ['filterV2', 'x-meta-v2', 'v2', 'query_v2', 'PetSizeV2']) {
+      expect(numberedProperty(name, 2)).toBe(numberedName(name, 2));
+    }
+  });
+
+  it('keeps the property as written, so that re-casing it reads as the cased name numbered', () => {
+    // A cased stem would not survive a second casing: `SSOV2` is `Ssov2`.
+    expect(toPascalCase(numberedProperty('filter[v2]', 2))).toBe('FilterV2No2');
+    expect(toPascalCase(numberedProperty('x-meta-v2_', 2))).toBe('XMetaV2No2');
+    expect(toPascalCase(numberedProperty('sso_v2', 2))).toBe('SSOV2No2');
+    expect(toPascalCase(numberedProperty('filter[v2]', 2))).toBe(numberedName(toPascalCase('filter[v2]'), 2));
+    expect(toPascalCase('filter[v2]2')).toBe('FilterV22');
   });
 });
