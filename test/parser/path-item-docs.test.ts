@@ -177,7 +177,7 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       [undefined, undefined, 'Pets', undefined, 'Pets', undefined],
       [undefined, undefined, undefined, 'Every pet.', undefined, 'Every pet.'],
       [undefined, 'Pets', 'Pets', undefined, 'Pets', 'Pets'],
-      // A path item summary identical to its own description is not repeated.
+      // A path item summary identical to its own description is kept in both fields.
       [undefined, undefined, 'Pets', 'Pets', 'Pets', 'Pets'],
       [undefined, undefined, '', '   ', undefined, undefined],
       [undefined, undefined, undefined, undefined, undefined, undefined],
