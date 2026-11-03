@@ -468,16 +468,21 @@ function fieldsAtPath(
  * `mergeAllOfMembers`, which reads no union a `$ref` member's component
  * carries either — `{ allOf: [{ $ref: MetaUnion }, { properties: {
  * trace_id } }] }` is a model of `trace_id` alone, whatever `MetaUnion`'s
- * variants write inline — so there only a union reached without following
- * a `$ref` counts (`inlineUnions`); the same `allOf` as a component is its
- * own model, which does read it (#527 review). `undefined` when there is none.
+ * variants write inline — so there only a union written in `node` itself
+ * counts: the unions the walk meets without the component map, which
+ * follows no `$ref` (`collectObjectProperties(node)`), the same reading
+ * the variant check makes without it. Decided by the document's shape, not
+ * by object identity, so a schema object a `transformSpec` shares between
+ * an inline site and a component is read at each. The same `allOf` as a
+ * component is its own model, which does read such a union (#527 review).
+ * `undefined` when there is none.
  */
 function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject[] | undefined {
-  const { properties, unions, inlineUnions } = collectObjectProperties(node, componentSchemas);
+  const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
   if (own) return [own];
   // `resolveBareSchema` reads through a component's lone `allOf` member,
@@ -488,9 +493,11 @@ function fieldsNamed(
   const flattened = [bare, ...components].some((schema) => schema?.allOf !== undefined);
   // `node` resolves to an `allOf` without following a `$ref`: the inline
   // `allOf` `mergeAllOfMembers` flattens, which reads no union behind a
-  // `$ref` member. A component's `allOf` (`followed` names it) reads them.
+  // `$ref` member — so only the unions written in `node` count, read
+  // without the component map. A component's `allOf` (`followed` names it)
+  // reads them all.
   const inline = flattened && followed.size === 0;
-  for (const union of inline ? inlineUnions : unions) {
+  for (const union of inline ? collectObjectProperties(node).unions : unions) {
     const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
     const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
     // Without the component map, a variant's properties are those it writes inline.
@@ -629,36 +636,22 @@ function objectProperties(
 export function collectObjectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-): {
-  properties: Record<string, SchemaObject>;
-  required: string[];
-  unions: SchemaObject[];
-  /** The entries of `unions` the walk reached without following a `$ref` — written in `schema` itself, however deep its inline `allOf` members nest. */
-  inlineUnions: SchemaObject[];
-} {
+): { properties: Record<string, SchemaObject>; required: string[]; unions: SchemaObject[] } {
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
   const unions: SchemaObject[] = [];
-  const inlineUnions: SchemaObject[] = [];
   const seenRefs = new Set<string>();
   const seenNodes = new WeakSet<SchemaObject>();
 
-  const visit = (s: SchemaObject, referenced: boolean): void => {
+  const visit = (s: SchemaObject): void => {
     if (seenNodes.has(s)) return;
     seenNodes.add(s);
-    const followed = seenRefs.size;
     const bare = resolveBareSchema(s, componentSchemas, seenRefs);
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
-    // Reached through a `$ref` — one `s` is or wraps, or one on the way to
-    // `s` — so `bare` is a component's schema, not written in `schema`.
-    const viaRef = referenced || seenRefs.size > followed;
-    if (bare.oneOf ?? bare.anyOf) {
-      unions.push(bare);
-      if (!viaRef) inlineUnions.push(bare);
-    }
-    for (const sub of bare.allOf ?? []) visit(sub, viaRef);
+    if (bare.oneOf ?? bare.anyOf) unions.push(bare);
+    for (const sub of bare.allOf ?? []) visit(sub);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       const existing = properties[key];
@@ -666,9 +659,9 @@ export function collectObjectProperties(
     }
     if (bare.required) required.push(...bare.required);
   };
-  visit(schema, false);
+  visit(schema);
 
-  return { properties, required, unions, inlineUnions };
+  return { properties, required, unions };
 }
 
 // ---------------------------------------------------------------------------
