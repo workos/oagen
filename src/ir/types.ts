@@ -1113,7 +1113,11 @@ export interface Field {
    * text — the nearest the reference passes on its way to the array or
    * primitive (an alias's own, else the component's), as `example` falls
    * back to it. A `$ref` to a model, named union or enum leaves the text on
-   * it.
+   * it. Under a wrapper — a nullable one, an `allOf` read as the reference
+   * (`{ allOf: [{ $ref: PetId }, { description }] }`) — the field documents
+   * itself: the wrapper's text or a member's written beside the `$ref`,
+   * never the component's; the same holds for every annotation, flag, default
+   * and key below, while `constraints` conjoin through a wrapper.
    */
   description?: string;
   /**
@@ -1173,8 +1177,12 @@ export interface Field {
    * its own limits; a `$ref` to an array or primitive component, which
    * names no model, conjoins the component's limits and its aliases' with
    * the field's own (`{ $ref: Tags, maxItems: 3 }` beside `Tags`'s
-   * `minItems: 1, maxItems: 5` is `{ minItems: 1, maxItems: 3 }`). Absent
-   * when no level declares any.
+   * `minItems: 1, maxItems: 5` is `{ minItems: 1, maxItems: 3 }`) — bare
+   * or under a wrapper the type builder reads through, since the wire
+   * enforces them either way and nothing else carries them: `{ allOf: [{
+   * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
+   * that `pattern`, as `{ allOf: [{ $ref: PetId }] }` and `oneOf: [{ $ref:
+   * PetId }, { type: 'null' }]` do. Absent when no level declares any.
    */
   constraints?: Constraints;
   /**

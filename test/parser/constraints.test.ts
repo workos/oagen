@@ -348,8 +348,9 @@ describe('extractSchemas – constraints', () => {
         ['nickname', 'primitive', { maxLength: 3 }],
         ['motto', 'primitive', { minLength: 2, maxLength: 5 }],
         // The sibling is the member's own. Name is a primitive component, so the
-        // field is the string, and a $ref under an allOf reads none of Name's limits (#512).
-        ['name', 'primitive', { maxLength: 3 }],
+        // field is the string, and the $ref under the allOf conjoins Name's limits
+        // with it, as a bare $ref does (#512 review).
+        ['name', 'primitive', { minLength: 1, maxLength: 3 }],
       ]);
     } finally {
       warn.mockRestore();

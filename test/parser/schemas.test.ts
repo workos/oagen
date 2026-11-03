@@ -1354,6 +1354,114 @@ describe('#512', () => {
     ]);
   });
 
+  // Review round 1 (MichaelDeBoey): the component's limits were read for a
+  // bare `$ref` only, so `{ allOf: [{ $ref: PetId }, { description }] }` —
+  // the usual OAS 3.0 way to document a reference — read none of `PetId`'s,
+  // and with `PetId` no longer a model its `pattern` was nowhere in the IR.
+  // The wire enforces them wrapped or not, so they conjoin as a bare
+  // `$ref`'s do; the text, flags, default and keys stay the field's own,
+  // read from the wrapper and the members beside the `$ref` (as for an
+  // array component, #335).
+  it.each(['3.1.0', '3.0.3'])(
+    'conjoins the component’s limits through an allOf or a nullable wrapper around the $ref, the field documenting itself (OAS %s)',
+    async (openapi) => {
+      const spec = await parse(
+        {
+          Pet: {
+            type: 'object',
+            required: ['id'],
+            properties: {
+              id: { allOf: [ref('PetId'), { description: 'The pet.' }] },
+              lone: { allOf: [ref('PetId')] },
+              beside: { allOf: [{ ...ref('PetId'), maxLength: 40 }], minLength: 5, description: 'Beside.' },
+              flagged: { allOf: [ref('PetId'), { deprecated: true, default: 'pet_1', 'x-kind': 'legacy' }] },
+              maybe: { oneOf: [ref('PetId'), { type: 'null' }] },
+              any: { anyOf: [ref('PetId'), { type: 'null' }], description: 'Maybe a pet.' },
+              nested: { oneOf: [{ allOf: [ref('PetId'), { description: 'Nested.' }] }, { type: 'null' }] },
+              alias: { allOf: [ref('Nickname')] },
+              tags: { allOf: [ref('Tags'), { description: 'The tags.' }] },
+              more: { oneOf: [ref('Tags'), { type: 'null' }] },
+            },
+          },
+          PetId: {
+            type: 'string',
+            format: 'uuid',
+            pattern: '^pet_',
+            description: 'A pet id.',
+            default: 'pet_0',
+            deprecated: true,
+            'x-kind': 'id',
+          },
+          Nickname: { allOf: [ref('PetId')], maxLength: 20, description: 'A nickname.' },
+          Tags: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Some tags.', deprecated: true },
+        },
+        {},
+        openapi,
+      );
+      expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+      const uuid = { kind: 'primitive', type: 'string', format: 'uuid' } as const;
+      const own = ({ name, type, constraints, description, default: fallback, deprecated, extensions }: Field) => ({
+        name,
+        type,
+        constraints,
+        description,
+        default: fallback,
+        deprecated,
+        extensions,
+      });
+      const none = { description: undefined, default: undefined, deprecated: undefined, extensions: undefined };
+      expect(fieldsOf(spec, 'Pet').map(own)).toEqual([
+        { name: 'id', type: uuid, constraints: { pattern: '^pet_' }, ...none, description: 'The pet.' },
+        { name: 'lone', type: uuid, constraints: { pattern: '^pet_' }, ...none },
+        {
+          name: 'beside',
+          type: uuid,
+          constraints: { pattern: '^pet_', maxLength: 40, minLength: 5 },
+          ...none,
+          description: 'Beside.',
+        },
+        {
+          name: 'flagged',
+          type: uuid,
+          constraints: { pattern: '^pet_' },
+          ...none,
+          deprecated: true,
+          default: 'pet_1',
+          extensions: { 'x-kind': 'legacy' },
+        },
+        { name: 'maybe', type: { kind: 'nullable', inner: uuid }, constraints: { pattern: '^pet_' }, ...none },
+        {
+          name: 'any',
+          type: { kind: 'nullable', inner: uuid },
+          constraints: { pattern: '^pet_' },
+          ...none,
+          description: 'Maybe a pet.',
+        },
+        {
+          name: 'nested',
+          type: { kind: 'nullable', inner: uuid },
+          constraints: { pattern: '^pet_' },
+          ...none,
+          description: 'Nested.',
+        },
+        { name: 'alias', type: uuid, constraints: { pattern: '^pet_', maxLength: 20 }, ...none },
+        {
+          name: 'tags',
+          type: { kind: 'array', items: string },
+          constraints: { minItems: 1 },
+          ...none,
+          description: 'The tags.',
+        },
+        {
+          name: 'more',
+          type: { kind: 'nullable', inner: { kind: 'array', items: string } },
+          constraints: { minItems: 1 },
+          ...none,
+        },
+      ]);
+    },
+  );
+
   it('types the reference as the primitive at every other site', async () => {
     const spec = await parse(
       {

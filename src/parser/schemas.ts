@@ -2672,6 +2672,42 @@ export function variantMemberSchemas(variant: SchemaObject, variantName: string)
 }
 
 /**
+ * The `$ref` a field's schema is typed as, read through the wrappers
+ * `schemaToTypeRef` reads through — a nullable wrapper of any spelling
+ * (`unwrapNullableSchema`) and an `allOf` read as its lone member or as a
+ * plain reference (`allOfReadAsMember`), however they nest — with every
+ * schema on the way that documents or limits the field, nearest first: the
+ * field's own, each wrapper it unwraps to, the members written beside the
+ * `$ref` in an `allOf` (`{ allOf: [{ $ref: PetId }, { description }] }`,
+ * the usual OAS 3.0 way to document a reference) and the `$ref` schema
+ * itself, with whatever is written beside it. A bare `$ref` is itself, with
+ * the field's schema as its one level. `undefined` when the schema is typed
+ * as no reference: an inline schema, or an `allOf` merged into a model.
+ */
+function wrappedReference(schema: SchemaObject): { reference: SchemaObject; levels: SchemaObject[] } | undefined {
+  const levels: SchemaObject[] = [];
+  let current = schema;
+  for (;;) {
+    if (current.$ref !== undefined) {
+      levels.push(current);
+      return { reference: current, levels };
+    }
+    levels.push(current);
+    const bare = unwrapNullableSchema(current);
+    if (bare.$ref !== undefined) {
+      levels.push(bare);
+      return { reference: bare, levels };
+    }
+    if (bare !== current) levels.push(bare);
+    const member = allOfReadAsMember(bare);
+    if (member === undefined) return undefined;
+    // A plain reference: the other members annotate or limit the field.
+    if (member.$ref !== undefined) levels.push(...(bare.allOf ?? []).filter((other) => other !== member));
+    current = member;
+  }
+}
+
+/**
  * Build a single Field from a schema property entry. Shared across all
  * extraction sites. Pass `componentSchemas` where they are at hand so a
  * field whose schema is a bare `$ref` can take `example`/`examples` from the
@@ -2690,7 +2726,6 @@ export function buildFieldFromSchema(
   componentSchemas?: Record<string, SchemaObject>,
   siblingProperties?: ReadonlyMap<string, SchemaObject>,
 ): Field {
-  const refTarget = resolveComponentSchemaRef(fieldSchema, componentSchemas);
   // A bare `$ref` to an array or primitive component names no model that
   // could carry what the component declares beside its items or its type, so
   // the field reads that from every entry the reference passes on its way to
@@ -2699,18 +2734,36 @@ export function buildFieldFromSchema(
   // the same schema written inline carries it (#399, #512). A `$ref` to a
   // model, named union or enum leaves all of it on that node but the
   // `example` and `examples` a field takes from any component it names.
-  const declares = isArrayComponentRef(fieldSchema)
-    ? isArrayComponentSchema
-    : isPrimitiveComponentRef(fieldSchema)
-      ? isPrimitiveComponentSchema
-      : undefined;
+  //
+  // Under a wrapper the type builder reads through — a nullable one, an
+  // `allOf` read as the reference (`wrappedReference`) — the field documents
+  // itself: its own text, flags, default, examples and keys, read from the
+  // wrapper and the members written beside the `$ref`, and none of the
+  // component's (#335 review). Its limits are another matter: the wire
+  // enforces the component's whether or not the `$ref` is wrapped, and no
+  // model carries them, so they conjoin with the field's own exactly as a
+  // bare `$ref`'s do (#512 review).
+  const wrapped = wrappedReference(fieldSchema);
+  const reference = wrapped?.reference;
+  const declares =
+    reference === undefined
+      ? undefined
+      : isArrayComponentRef(reference)
+        ? isArrayComponentSchema
+        : isPrimitiveComponentRef(reference)
+          ? isPrimitiveComponentSchema
+          : undefined;
+  const refTarget = resolveComponentSchemaRef(declares ? reference : fieldSchema, componentSchemas);
   const aliases =
     refTarget && componentSchemas && declares
       ? (componentEntries(refTarget, componentSchemas, declares) ?? [refTarget])
       : [];
-  const levels = [fieldSchema, ...aliases];
+  const bare = fieldSchema.$ref !== undefined;
+  const own = declares && wrapped ? wrapped.levels : [fieldSchema];
+  const levels = bare ? [...own, ...aliases] : own;
+  const limitLevels = [...own, ...aliases];
   const { example, examples } = resolveExamples(
-    [fieldSchema, ...(aliases.length > 0 ? aliases : [refTarget])].map((level) => ({
+    [...own, ...(bare ? (aliases.length > 0 ? aliases : [refTarget]) : [])].map((level) => ({
       example: level?.example,
       examples: nonEmptyExamples(level?.examples),
     })),
@@ -2719,7 +2772,7 @@ export function buildFieldFromSchema(
   // Limits conjoin, as JSON Schema applies every level at once; an `x-*` key
   // the nearer level declares wins, as a collapsed wrapper's does
   // (`withWrapperDocs`). Both start from the component, so its keys come first.
-  const constraints = levels.reduceRight<Constraints | undefined>(
+  const constraints = limitLevels.reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
