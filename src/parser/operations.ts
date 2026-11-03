@@ -3444,7 +3444,7 @@ export type PathItemDocs = Pick<PathItem, 'summary' | 'description'>;
 export interface OperationDocs {
   /** The resolved `summary` alone; `undefined` when neither level has one with content. */
   summary: string | undefined;
-  /** The resolved `description` alone, never the summary; `undefined` when neither level has one with content. */
+  /** The resolved `description` alone, never built from the summary (text identical to it is kept); `undefined` when neither level has one with content. */
   description: string | undefined;
 }
 
@@ -3456,7 +3456,8 @@ export interface OperationDocs {
  * The two fields fall back one by one, so an operation with a `summary` of
  * its own and no `description` shows its own `summary` and the Path Item's
  * `description`. Each is kept on its own, as the document writes it: the
- * `description` never repeats the `summary`. Text with content wins at either
+ * `description` is never built from the `summary`, and one identical to it
+ * is kept in both, since each is the document's own text. Text with content wins at either
  * level, kept verbatim; a value that is not a string, or is blank, counts as
  * absent at either level (`presentText`), so `summary: ""` on the operation
  * still takes the Path Item's. Either field is `undefined` when neither level

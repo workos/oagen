@@ -139,7 +139,8 @@ export interface Webhook {
   summary?: string;
   /**
    * The `description` alone, read as `Operation.description` is: the
-   * operation's own, else the path item's, never the summary. Absent when
+   * operation's own, else the path item's, never built from the summary (a
+   * `description` identical to the `summary` is kept in both). Absent when
    * neither has content.
    */
   description?: string;
@@ -295,8 +296,10 @@ export interface Operation {
   summary?: string;
   /**
    * The `description` alone, read as `summary` above is: the operation's own,
-   * else the Path Item's. It never repeats the summary, so an operation that
-   * declares only a `summary` has none. A value that is not a string, or is
+   * else the Path Item's. It is never built from the summary, so an operation
+   * that declares only a `summary` has none; a `description` identical to the
+   * `summary` is kept in both, since each is the document's own text. A value
+   * that is not a string, or is
    * empty or whitespace-only, is treated as absent, and text with content is
    * kept verbatim.
    */
