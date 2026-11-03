@@ -141,7 +141,8 @@ import { followReference, siblingDocsMode, type SiblingDocs } from './reference-
 export interface PathItem {
   /**
    * A reference to another Path Item, which OpenAPI 3.1 lets a `paths` entry
-   * be written as (`$ref: '#/components/pathItems/Pets'`). Resolved by
+   * be written as (`$ref: '#/components/pathItems/Pets'`, or another `paths`
+   * or `webhooks` entry: `$ref: '#/paths/~1pets'`). Resolved by
    * `resolvePathItems` before anything else is read from the entry, so no
    * item the passes of `extractOperations` read carries one.
    */
@@ -415,9 +416,10 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
 
 /**
  * The `paths` map with every entry resolved to the Path Item it denotes —
- * the entry itself, or the `components/pathItems` item its `$ref` leads to
- * (OpenAPI 3.1) — in document order, through `resolvePathItemRef`, the
- * resolver a `webhooks` entry goes through too. A key starting with `x-` is
+ * the entry itself, or the `components/pathItems` item or the other `paths`
+ * or `webhooks` entry its `$ref` leads to (OpenAPI 3.1; #422) — in document
+ * order, through `resolvePathItemRef`, the resolver a `webhooks` entry goes
+ * through too. A key starting with `x-` is
  * a specification extension of the Paths Object, not a path, and is
  * stepped over without a warning whatever its value; the `webhooks` map
  * takes no extensions, so `collectWebhookEntries` reads every key (#421).
@@ -428,21 +430,22 @@ export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delet
  * operations, `parameters`, `servers`, `summary` and `description` are read
  * exactly as an inline item's (fields written beside the `$ref` are not, and
  * the resolver reports them). An entry the resolver rejects — not an
- * object, a non-string `$ref`, a ref outside `components/pathItems`, a
- * dangling ref, a cycle — is warned about once, naming the path, and left
- * out. Two paths that `$ref` one entry map to one object, read once per
- * path.
+ * object, a non-string `$ref`, a ref that names no Path Item, a dangling
+ * ref, a cycle — is warned about once, naming the path, and left out. Two
+ * paths that `$ref` one entry, or one path that `$ref`s another, map to one
+ * object, read once per path.
  */
 function resolvePathItems(
   paths: Record<string, PathItem>,
   componentPathItems: Record<string, Record<string, unknown>> | undefined,
+  webhooks: unknown,
 ): Record<string, PathItem> {
   const resolved: Record<string, PathItem> = {};
   for (const [path, raw] of Object.entries(paths)) {
     // A specification extension of the Paths Object, never a path item:
     // stepped over whatever its value, before the resolver can warn about it.
     if (path.startsWith('x-')) continue;
-    const pathItem = resolvePathItemRef(raw, componentPathItems, { kind: 'path', key: path });
+    const pathItem = resolvePathItemRef(raw, componentPathItems, { kind: 'path', key: path }, { paths, webhooks });
     if (pathItem) resolved[path] = pathItem as PathItem;
   }
   return resolved;
@@ -533,15 +536,17 @@ export function extractOperations(
   /** The component enums, whose names no deferred or item model may take (see `reserveEnumNames`). */
   componentEnums?: readonly Enum[],
   componentPathItems?: Record<string, Record<string, unknown>>,
+  /** The document's `webhooks` map, as written, whose entries a `paths` entry's `$ref` may name. */
+  documentWebhooks?: unknown,
 ): OperationExtractionResult {
   if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], componentSites: new Set() };
 
   // Every pass below reads the resolved map: each entry as itself, or as the
-  // `components/pathItems` item its `$ref` leads to, with an entry that
-  // resolves to nothing left out after one warning (see resolvePathItems),
-  // and an `operationId` that names nothing left out of its operation (see
+  // Path Item its `$ref` leads to, with an entry that resolves to nothing
+  // left out after one warning (see resolvePathItems), and an `operationId`
+  // that names nothing left out of its operation (see
   // dropNamelessOperationIds).
-  const resolvedPaths = dropNamelessOperationIds(resolvePathItems(paths, componentPathItems));
+  const resolvedPaths = dropNamelessOperationIds(resolvePathItems(paths, componentPathItems, documentWebhooks));
 
   // Whether text written beside a `$ref` overrides the referenced component's
   // (OAS 3.1, and a version not recognised) or is ignored (OAS 3.0), for every
@@ -647,8 +652,8 @@ export function extractOperations(
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     // Everything read at path-item level — `parameters`, `servers`, and the
     // `summary`/`description` an operation falls back to — comes from this one
-    // object: the entry itself, or the `components/pathItems` item its `$ref`
-    // leads to, resolved by `resolvePathItems` above (issue #300).
+    // object: the entry itself, or the Path Item its `$ref` leads to,
+    // resolved by `resolvePathItems` above (issues #300, #422).
     const pathLevelParams = pathItem.parameters ?? [];
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,

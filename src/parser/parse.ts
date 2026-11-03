@@ -226,6 +226,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     // A `paths` entry may be a `$ref` into this map (OpenAPI 3.1); the
     // webhooks below resolve theirs against the same one.
     spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    // Or a `$ref` to a `webhooks` entry, as a webhook's may name a `paths` one.
+    spec.webhooks,
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -251,6 +253,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
     // Text beside a `$ref` is read by the document's version, as for operations.
     siblingDocsMode(version),
+    // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
+    spec.paths,
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 

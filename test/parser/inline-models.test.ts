@@ -5734,6 +5734,20 @@ describe('sentOnlyComponentNames: the components every site the parser reads onl
     expect(sorted(sentOnlyComponentNames(doc({ '/pets': create(json(ref('Pet'))) }, {}, { webhooks })))).toEqual([]);
   });
 
+  it('follows a Path Item `$ref` to another `paths` or `webhooks` entry as the readers do, an `x-` extension under `paths` aside (#422)', () => {
+    const paths = { '/pets': create(json(ref('Pet'))), 'x-pets': create(json(ref('Pet'))) };
+    // `petReturned` receives what `/pets` sends.
+    const returned = { petReturned: { $ref: '#/paths/~1pets' } };
+    expect(sorted(sentOnlyComponentNames(doc(paths, {}, { webhooks: returned })))).toEqual([]);
+    // `/adoptions` reads the responses of `petAdopted`, which a webhook does not.
+    const adopted = { petAdopted: { post: { responses: { '200': { description: 'ok', ...json(ref('Pet')) } } } } };
+    const adoptions = { ...paths, '/adoptions': { $ref: '#/webhooks/petAdopted' } };
+    expect(sorted(sentOnlyComponentNames(doc(adoptions, {}, { webhooks: adopted })))).toEqual([]);
+    // An extension under `paths` is no Path Item, so a `$ref` to it reaches nothing.
+    const extension = { petReturned: { $ref: '#/paths/x-pets' } };
+    expect(sorted(sentOnlyComponentNames(doc(paths, {}, { webhooks: extension })))).toEqual(['Pet']);
+  });
+
   it('follows every Reference Object as the readers do, and ends on one that loops or leads nowhere', () => {
     const components = {
       requestBodies: { NewPet: { $ref: '#/components/requestBodies/PetBody' }, PetBody: json(ref('Pet')) },

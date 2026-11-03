@@ -7,6 +7,7 @@ import { extractOperations } from '../../src/parser/operations.js';
 import { extractWebhooks } from '../../src/parser/webhooks.js';
 import { resolveComponentRef, resolvePathItemRef } from '../../src/parser/path-item-refs.js';
 import { collectReferencedNames } from '../../src/engine/generate-files.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { collectResponseHeaders, collectWebhookTypeRefs, walkTypeRef } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
@@ -311,7 +312,8 @@ describe('path items written as a $ref (issue #300)', () => {
           '/null': null,
           '/non-string-ref': { $ref: 42 },
           '/elsewhere': { $ref: '#/components/schemas/Pet' },
-          '/another-path': { $ref: '#/paths/~1kept' },
+          // A pointer into another `paths` entry, not at it: an Operation, no Path Item (#422).
+          '/another-path': { $ref: '#/paths/~1kept/get' },
           '/dangling': { $ref: '#/components/pathItems/Missing' },
           '/loop': { $ref: '#/components/pathItems/Loop' },
           '/kept': { get: { operationId: 'kept', responses } },
@@ -330,7 +332,7 @@ describe('path items written as a $ref (issue #300)', () => {
           "[oagen] Warning: Path "/null" is not a path item object; skipping it.",
           "[oagen] Warning: Path "/non-string-ref" has a non-string $ref; skipping it.",
           "[oagen] Warning: Unresolved path item $ref "#/components/schemas/Pet" for path "/elsewhere": no matching entry under components/pathItems. Skipping the path.",
-          "[oagen] Warning: Unresolved path item $ref "#/paths/~1kept" for path "/another-path": no matching entry under components/pathItems. Skipping the path.",
+          "[oagen] Warning: Unresolved path item $ref "#/paths/~1kept/get" for path "/another-path": no matching entry under paths. Skipping the path.",
           "[oagen] Warning: Unresolved path item $ref "#/components/pathItems/Missing" for path "/dangling": no matching entry under components/pathItems. Skipping the path.",
           "[oagen] Warning: Circular path item $ref chain starting at "#/components/pathItems/Loop" for path "/loop"; skipping it.",
         ]
@@ -569,5 +571,239 @@ describe('path items written as a $ref (issue #300)', () => {
       expect(resolveComponentRef('#/components/pathItems/', 'pathItems', components)).toBeUndefined();
       expect(resolveComponentRef('#/components/pathItems/Pet', 'pathItems', undefined)).toBeUndefined();
     });
+  });
+});
+
+/**
+ * Covers issue #422: a Path Item `$ref` to another `webhooks` or `paths`
+ * entry (`#/webhooks/petAdopted`, `#/paths/~1pets`) was warned about and
+ * skipped, since only a `components/pathItems` target was followed, so adding
+ * such an alias was no change to `oagen diff`. OpenAPI lets a Path Item's
+ * `$ref` point at any Path Item Object: the entry is read as the item it
+ * names, the pointer decoded as the bundler decodes it.
+ */
+describe('#422', () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** Every warning emitted so far. */
+  const warnings = (): string[] => warn.mock.calls.map((call: unknown[]) => String(call[0]));
+
+  const body = {
+    content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+  };
+  /** The issue's webhook: a POST whose body is an inline `{ id: string }`. */
+  const petAdopted = { post: { requestBody: body, responses } };
+  const pets = { get: { operationId: 'listPets', responses } };
+  const pet = {
+    parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+    get: { operationId: 'getPet', responses },
+  };
+  /** What the issue's `new.json` adds: a webhook and two paths, each a `$ref` to an entry `old.json` declares. */
+  const aliases = {
+    paths: {
+      '/animals': { $ref: '#/paths/~1pets' },
+      // A fragment percent-encodes the braces of a templated path (RFC 6901 §6).
+      '/animals/{petId}': { $ref: '#/paths/~1pets~1%7BpetId%7D' },
+    },
+    webhooks: { petReturned: { $ref: '#/webhooks/petAdopted' } },
+  };
+
+  /** The issue's `old.json`, or, given `added`, `new.json`: its entries after the ones `old.json` declares. */
+  function petsDocument(added: { paths?: Record<string, unknown>; webhooks?: Record<string, unknown> } = {}) {
+    return {
+      openapi: '3.1.0',
+      info: { title: 'Pets', version: '1' },
+      paths: { '/pets': pets, '/pets/{petId}': pet, ...added.paths },
+      webhooks: { petAdopted, ...added.webhooks },
+    };
+  }
+
+  it('reads `petReturned` as `petAdopted`, and `/animals` as `/pets`, percent-encoded braces included (the issue’s repro)', async () => {
+    const spec = await parseDocument(petsDocument(aliases));
+
+    expect(spec.webhooks?.map(({ httpMethod, name }) => `${name} ${httpMethod}`)).toEqual([
+      'petAdopted post',
+      'petReturned post',
+    ]);
+    expect(spec.webhooks?.map((w) => w.requestBody)).toEqual([
+      { kind: 'model', name: 'PetAdoptedPayload' },
+      { kind: 'model', name: 'PetReturnedPayload' },
+    ]);
+    expect(allOperations(spec).map((op) => [op.name, op.path, op.pathParams.map((p) => p.name)])).toEqual([
+      ['listPets', '/pets', []],
+      ['getPet', '/pets/{petId}', ['petId']],
+      ['listPets', '/animals', []],
+      ['getPet', '/animals/{petId}', ['petId']],
+    ]);
+    expect(warnings()).toEqual([]);
+    expectResolvedAndReferenced(spec);
+  });
+
+  it('gives the IR of the same items written inline under the aliases', async () => {
+    const viaRef = await parseDocument(petsDocument(aliases));
+    const inline = await parseDocument(
+      petsDocument({ paths: { '/animals': pets, '/animals/{petId}': pet }, webhooks: { petReturned: petAdopted } }),
+    );
+
+    expect(viaRef.services).toEqual(inline.services);
+    expect(viaRef.webhooks).toEqual(inline.webhooks);
+    expect(viaRef.models).toEqual(inline.models);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('reports adding the aliases to `oagen diff` as additive, and removing them as breaking', async () => {
+    const oldSpec = await parseDocument(petsDocument());
+    const newSpec = await parseDocument(petsDocument(aliases));
+
+    const added = diffSpecs(oldSpec, newSpec);
+    expect(added.changes).toEqual([
+      { kind: 'model-added', name: 'PetReturnedPayload', classification: 'additive' },
+      { kind: 'service-added', name: 'Animals', classification: 'additive' },
+      { kind: 'webhook-added', name: 'petReturned', httpMethod: 'post', classification: 'additive' },
+    ]);
+    // Changes, none of them breaking: `oagen diff` exits 1.
+    expect(added.summary.breaking).toBe(0);
+    expect(diffSpecs(newSpec, oldSpec).changes).toEqual([
+      { kind: 'model-removed', name: 'PetReturnedPayload', classification: 'breaking' },
+      { kind: 'service-removed', name: 'Animals', classification: 'breaking' },
+      { kind: 'webhook-removed', name: 'petReturned', httpMethod: 'post', classification: 'breaking' },
+    ]);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('reads a `paths` entry that `$ref`s a webhook, and a webhook that `$ref`s a `paths` entry, through parseSpec', async () => {
+    const spec = await parseDocument(
+      petsDocument({
+        paths: { '/adoptions': { $ref: '#/webhooks/petAdopted' } },
+        webhooks: { petListed: { $ref: '#/paths/~1pets' } },
+      }),
+    );
+
+    expect(allOperations(spec).map((op) => [op.httpMethod, op.path])).toEqual([
+      ['get', '/pets'],
+      ['get', '/pets/{petId}'],
+      ['post', '/adoptions'],
+    ]);
+    expect(spec.webhooks?.map((w) => [w.name, w.httpMethod, w.operationId])).toEqual([
+      ['petAdopted', 'post', undefined],
+      ['petListed', 'get', 'listPets'],
+    ]);
+    expect(warnings()).toEqual([]);
+    expectResolvedAndReferenced(spec);
+  });
+
+  it('follows a chain through either map and `components/pathItems`, in any order', () => {
+    const target: Record<string, unknown> = { get: { operationId: 'listPets', responses } };
+    const maps = {
+      paths: { '/pets': { $ref: '#/components/pathItems/Pets' }, '/animals': { $ref: '#/webhooks/petListed' } },
+      webhooks: { petListed: { $ref: '#/paths/~1pets' } },
+    };
+    const pathItems: ComponentPathItems = { Pets: target, Alias: { $ref: '#/webhooks/petListed' } };
+
+    expect(resolvePathItemRef(maps.paths['/animals'], pathItems, { kind: 'path', key: '/animals' }, maps)).toBe(target);
+    expect(resolvePathItemRef(maps.webhooks.petListed, pathItems, { kind: 'webhook', key: 'petListed' }, maps)).toBe(
+      target,
+    );
+    expect(
+      resolvePathItemRef({ $ref: '#/components/pathItems/Alias' }, pathItems, { kind: 'path', key: '/alias' }, maps),
+    ).toBe(target);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('decodes the pointer as the bundler does: `~1` and `~0`, percent-escapes, and braces written as they are', () => {
+    const target: Record<string, unknown> = { get: { operationId: 'getPet', responses } };
+    const maps = {
+      paths: { '/pets/{petId}': target, '/a~b': target },
+      webhooks: { 'pet adopted': target, 'pet/adopted': target },
+    };
+
+    for (const ref of [
+      '#/paths/~1pets~1%7BpetId%7D',
+      '#/paths/~1pets~1{petId}',
+      '#/paths/~1a~0b',
+      '#/webhooks/pet%20adopted',
+      '#/webhooks/pet~1adopted',
+    ]) {
+      expect(resolvePathItemRef({ $ref: ref }, undefined, { kind: 'path', key: '/alias' }, maps), ref).toBe(target);
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns once, naming the map, about a ref that names no entry of it, points deeper into one, or at an `x-` extension under `paths`', () => {
+    const maps = {
+      paths: { '/pets': pets, 'x-shared': pets },
+      webhooks: { petAdopted },
+    };
+
+    for (const ref of [
+      '#/paths/~1missing',
+      '#/webhooks/missing',
+      '#/paths/~1pets/get',
+      '#/paths/x-shared',
+      '#/paths/',
+      '#/webhooks/constructor',
+    ]) {
+      expect(
+        resolvePathItemRef({ $ref: ref }, undefined, { kind: 'webhook', key: 'alias' }, maps),
+        ref,
+      ).toBeUndefined();
+    }
+    expect(warnings()).toMatchInlineSnapshot(`
+      [
+        "[oagen] Warning: Unresolved path item $ref "#/paths/~1missing" for webhook "alias": no matching entry under paths. Skipping the webhook.",
+        "[oagen] Warning: Unresolved path item $ref "#/webhooks/missing" for webhook "alias": no matching entry under webhooks. Skipping the webhook.",
+        "[oagen] Warning: Unresolved path item $ref "#/paths/~1pets/get" for webhook "alias": no matching entry under paths. Skipping the webhook.",
+        "[oagen] Warning: Unresolved path item $ref "#/paths/x-shared" for webhook "alias": no matching entry under paths. Skipping the webhook.",
+        "[oagen] Warning: Unresolved path item $ref "#/paths/" for webhook "alias": no matching entry under paths. Skipping the webhook.",
+        "[oagen] Warning: Unresolved path item $ref "#/webhooks/constructor" for webhook "alias": no matching entry under webhooks. Skipping the webhook.",
+      ]
+    `);
+  });
+
+  it('ends a cycle through either map with one warning per entry, and keeps every other entry', () => {
+    const { services } = operationsOf({
+      '/a': { $ref: '#/paths/~1b' },
+      '/b': { $ref: '#/paths/~1a' },
+      '/self': { $ref: '#/paths/~1self' },
+      '/pets': pets,
+    });
+    const { webhooks } = extractWebhooks({ a: { $ref: '#/webhooks/b' }, b: { $ref: '#/webhooks/a' }, petAdopted });
+
+    expect(allOperations({ services }).map((op) => [op.name, op.path])).toEqual([['listPets', '/pets']]);
+    expect(webhooks.map((w) => w.name)).toEqual(['petAdopted']);
+    expect(warnings()).toMatchInlineSnapshot(`
+      [
+        "[oagen] Warning: Circular path item $ref chain starting at "#/paths/~1b" for path "/a"; skipping it.",
+        "[oagen] Warning: Circular path item $ref chain starting at "#/paths/~1a" for path "/b"; skipping it.",
+        "[oagen] Warning: Circular path item $ref chain starting at "#/paths/~1self" for path "/self"; skipping it.",
+        "[oagen] Warning: Circular path item $ref chain starting at "#/webhooks/b" for webhook "a"; skipping it.",
+        "[oagen] Warning: Circular path item $ref chain starting at "#/webhooks/a" for webhook "b"; skipping it.",
+      ]
+    `);
+  });
+
+  it('takes the named entry whole, its operation shared and the fields beside the $ref reported once, as for a components/pathItems target', () => {
+    const { webhooks, inlineModels } = extractWebhooks({
+      petAdopted: { summary: 'Pet adopted', post: { operationId: 'adopted', requestBody: body, responses } },
+      petReturned: { $ref: '#/webhooks/petAdopted', summary: 'Beside the ref', 'x-internal': true },
+    });
+
+    // One Operation Object, so one operationId: the two keys share its stem and payload model.
+    expect(webhooks.map((w) => [w.name, w.operationId, w.summary, w.requestBody])).toEqual([
+      ['petAdopted', 'adopted', 'Pet adopted', { kind: 'model', name: 'AdoptedPayload' }],
+      ['petReturned', 'adopted', 'Pet adopted', { kind: 'model', name: 'AdoptedPayload' }],
+    ]);
+    expect(inlineModels.map((m) => m.name)).toEqual(['AdoptedPayload']);
+    expect(warnings()).toEqual([
+      '[oagen] Warning: Webhook "petReturned" has fields beside its $ref ("summary") that are not read: the referenced path item is taken whole.',
+    ]);
   });
 });
