@@ -1175,3 +1175,96 @@ describe('webhooks', () => {
     });
   });
 });
+
+/**
+ * Covers issue #444: a webhook response written as a `$ref` nothing under
+ * `components/responses` answers kept the `description` written beside it,
+ * as an operation's does, while the warning said it kept the status code
+ * only. The text now follows the document's version — read in a 3.1
+ * document, ignored in a 3.0 one, as beside every ref — and the warning says
+ * which the status code keeps.
+ */
+describe('a webhook response whose $ref resolves to nothing (#444)', () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-webhooks-444-'));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** The issue's document: `petAdopted` takes `Pet` and answers 200 with a ref into `components/schemas`. */
+  async function parseRepro(openapi: string): Promise<ApiSpec> {
+    const specFile = path.join(tmpDir, 'repro.json');
+    const doc = {
+      openapi,
+      info: { title: 'Pets', version: '1' },
+      paths: {},
+      webhooks: {
+        petAdopted: {
+          post: {
+            requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } } },
+            responses: { '200': { $ref: '#/components/schemas/Pet', description: 'Not adopted yet.' } },
+          },
+        },
+      },
+      components: { schemas: { Pet: { type: 'object', properties: { name: { type: 'string' } } } } },
+    };
+    await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
+    return parseSpec(specFile);
+  }
+
+  it('keeps the text in an OAS 3.1 document and says so (the issue’s repro)', async () => {
+    const { webhooks } = await parseRepro('3.1.0');
+
+    expect(webhooks![0].responses).toEqual([{ statusCode: 200, description: 'Not adopted yet.' }]);
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toEqual([
+      '[oagen] Warning: Unresolved response $ref "#/components/schemas/Pet" for status 200 in webhooks.petAdopted.post: no matching entry under components/responses. Keeping the status code and the description beside the $ref.',
+    ]);
+  });
+
+  it('ignores the text in an OAS 3.0 document, keeping the status code only', async () => {
+    const { webhooks } = await parseRepro('3.0.3');
+
+    // Used to be `[{ statusCode: 200, description: 'Not adopted yet.' }]`.
+    expect(webhooks![0].responses).toEqual([{ statusCode: 200 }]);
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toEqual([
+      '[oagen] Warning: Unresolved response $ref "#/components/schemas/Pet" for status 200 in webhooks.petAdopted.post: no matching entry under components/responses. Keeping the status code only.',
+    ]);
+  });
+
+  it('reads a circular chain or a $ref that is not a string by the same rule', () => {
+    const webhooks = {
+      petAdopted: {
+        post: {
+          responses: {
+            '400': { $ref: '#/components/responses/Loop', description: 'Beside a loop.' },
+            '422': { $ref: 42, description: 'Beside a number.' },
+          },
+        },
+      },
+    };
+    const components = { responses: { Loop: { $ref: '#/components/responses/Loop', description: 'Inner text.' } } };
+    const read = (mode: 'override' | 'ignore') =>
+      extractWebhooks(webhooks, components, [], [], mode).webhooks[0].responses;
+
+    expect(read('override')).toEqual([
+      { statusCode: 400, description: 'Beside a loop.' },
+      { statusCode: 422, description: 'Beside a number.' },
+    ]);
+    expect(read('ignore')).toEqual([{ statusCode: 400 }, { statusCode: 422 }]);
+    expect(warn.mock.calls.map((c: unknown[]) => String(c[0]))).toMatchInlineSnapshot(`
+      [
+        "[oagen] Warning: Circular or malformed response $ref for status 400 in webhooks.petAdopted.post; keeping the status code and the description beside the $ref.",
+        "[oagen] Warning: Circular or malformed response $ref for status 422 in webhooks.petAdopted.post; keeping the status code and the description beside the $ref.",
+        "[oagen] Warning: Circular or malformed response $ref for status 400 in webhooks.petAdopted.post; keeping the status code only.",
+        "[oagen] Warning: Circular or malformed response $ref for status 422 in webhooks.petAdopted.post; keeping the status code only.",
+      ]
+    `);
+  });
+});

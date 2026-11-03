@@ -98,3 +98,43 @@ describe('resolveResponseRef', () => {
     );
   });
 });
+
+/**
+ * Covers issue #444: under `'ignore'` (OAS 3.0) a ref nothing under
+ * `components/responses` answers was returned with the `description`
+ * written beside it, though no other ref's is read there. It is now returned
+ * without it, written beside the operation's ref or one a component writes.
+ */
+describe('resolveResponseRef on a ref it cannot resolve, under ignore (#444)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns the ref without the description beside it, direct or at the end of a chain', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const beside = { $ref: '#/components/schemas/Pet', description: 'Not adopted yet.' };
+    const components = { NotAdopted: beside, Problem: problem };
+
+    expect(resolveResponseRef<Response>(beside, components, '404 of getPet', 'ignore')).toEqual({
+      $ref: '#/components/schemas/Pet',
+    });
+    expect(
+      resolveResponseRef<Response>(
+        { $ref: '#/components/responses/NotAdopted' },
+        components,
+        '404 of getPet',
+        'ignore',
+      ),
+    ).toEqual({ $ref: '#/components/schemas/Pet' });
+    // Still warned about, and read as written; a ref that resolves keeps the component's own description.
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect(
+      resolveResponseRef<Response>(
+        { $ref: '#/components/responses/Problem', description: 'Beside.' },
+        components,
+        'ctx',
+        'ignore',
+      ),
+    ).toBe(problem);
+  });
+});
