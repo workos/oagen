@@ -456,14 +456,15 @@ function resolvePathItems(
 
 /**
  * The resolved `paths` map with every `operationId` that names nothing read
- * as absent: one with no ASCII letter or digit once a trailing overload
- * marker is stripped, which camel-cases to nothing as inferOperationName
- * reads it — `' '`, `'-'`, `'[1]'`. Its operation is read as one without an
- * `operationId`, as one declaring `''` always was: named from its method and
- * path, and renamed as a path-named operation when that name collides
- * (planOperations), its models named from its path, and given no
- * `Operation.operationId`, so `resolveOperations` derives its method name
- * from the path under either `operationNaming` (#526). An
+ * as absent: one with no ASCII letter or digit once its trailing overload
+ * markers are stripped (normalizeOperationIdForNaming), which camel-cases to
+ * nothing as inferOperationName reads it — `' '`, `'-'`, `'[1]'`, and
+ * `'[1][2]'`, since every marker at the end goes (#565). Its operation is
+ * read as one without an `operationId`, as one declaring `''` always was:
+ * named from its method and path, and renamed as a path-named operation when
+ * that name collides (planOperations), its models named from its path, and
+ * given no `Operation.operationId`, so `resolveOperations` derives its method
+ * name from the path under either `operationNaming` (#526). An
  * `operationIdTransform` is never called with it. A Path Item without one is
  * kept as it is; one with one is copied, its other operations kept as they
  * are.
@@ -1304,12 +1305,17 @@ interface ServiceSplit {
  * method handles multiple routes) from an operationId so derived names never
  * leak the bracketed digit. Without this, `authenticate[0]` would surface as
  * `authenticate0` in method names and `Authenticate0Request` in body model
- * names. Brackets at the end (or with trailing whitespace) are common in
- * NestJS-style backends; this regex is intentionally narrow to avoid eating
- * legitimate digits like `oauth2`.
+ * names. Every marker at the end goes, whitespace after each included, so an
+ * id that ends in several (`listPets[1][2]`, `listPets[2] [3]`) normalizes
+ * to `listPets` and never keeps the first marker's digit (`listPets1`), and
+ * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
+ * (dropNamelessOperationIds), as `[1]` does (#565). Brackets at the end (or
+ * with trailing whitespace) are common in NestJS-style backends; this regex
+ * is intentionally narrow to avoid eating legitimate digits like `oauth2`,
+ * and a marker not at the end (`list[1]Pets`) is left as written.
  */
 function normalizeOperationIdForNaming(operationId: string): string {
-  return operationId.replace(/\[\d+\]\s*$/, '');
+  return operationId.replace(/(?:\[\d+\]\s*)+$/, '');
 }
 
 /**

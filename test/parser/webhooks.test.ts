@@ -1327,3 +1327,30 @@ describe('#421', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 });
+
+describe('#565', () => {
+  // A webhook's model stem is named through the operation normalizer, so a
+  // webhook declaring `operationId: '[1][2]'` got a `Webhook1Payload` from the
+  // same one-marker strip; `petAdopted[1][2]` got `PetAdopted1Payload`.
+  it('names the payload with every trailing marker stripped, as with one marker', () => {
+    for (const operationId of ['petAdopted[1]', 'petAdopted[1][2]', 'petAdopted[2] [3]', 'petAdopted[1] [2] ']) {
+      const { webhooks, inlineModels } = extractWebhooks({ anything: postWith(petSchema, { operationId }) });
+
+      expect(webhooks[0].operationId).toBe(operationId);
+      expect(inlineModels.map((m) => m.name)).toEqual(['PetAdoptedPayload']);
+      expect(webhooks[0].requestBody).toEqual({ kind: 'model', name: 'PetAdoptedPayload' });
+    }
+  });
+
+  it('names the payload of an operationId of nothing but markers as it names one with one marker', () => {
+    const oneMarker = extractWebhooks({ petAdopted: postWith(petSchema, { operationId: '[1]' }) });
+    expect(oneMarker.inlineModels.map((m) => m.name)).not.toContain('Webhook1Payload');
+
+    for (const operationId of ['[1][2]', '[1] [2]', '[1][2] ', '[0][1][2]']) {
+      const { webhooks, inlineModels } = extractWebhooks({ petAdopted: postWith(petSchema, { operationId }) });
+
+      expect(inlineModels).toEqual(oneMarker.inlineModels);
+      expect(webhooks[0].requestBody).toEqual(oneMarker.webhooks[0].requestBody);
+    }
+  });
+});

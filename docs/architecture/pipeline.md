@@ -39,7 +39,7 @@ Entry point: `parse.ts` → `parseSpec(specPath: string): Promise<ApiSpec>`
 
 ### Operation Name Inference
 
-If an `operationId` is present, it takes precedence, unless it names nothing: one with no ASCII letter or digit once a trailing overload marker is stripped (`' '`, `'-'`, `'[1]'`) counts as absent, as `''` does. Names are inferred from HTTP method + path pattern:
+If an `operationId` is present, it takes precedence, read with every overload marker at its end stripped (`listPets[1]`, `listPets[1][2]` and `listPets[2] [3]` all name `listPets`), unless it names nothing: one with no ASCII letter or digit once those markers are stripped (`' '`, `'-'`, `'[1]'`, `'[1][2]'`) counts as absent, as `''` does. Names are inferred from HTTP method + path pattern:
 
 | Method | Path Pattern                  | Inferred Name        |
 | ------ | ----------------------------- | -------------------- |
