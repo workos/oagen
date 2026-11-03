@@ -49,6 +49,7 @@ export async function verifyCommand(opts: {
   operationIdTransform?: (id: string) => string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
+  fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
   namespace?: string;
   compatConfig?: CompatConfig;
@@ -71,6 +72,7 @@ export async function verifyCommand(opts: {
     operationIdTransform,
     schemaNameTransform,
     transformSpec,
+    fieldHints,
     collapseErrorBodies,
     compatConfig,
     compatReport,
@@ -102,6 +104,7 @@ export async function verifyCommand(opts: {
         operationIdTransform,
         schemaNameTransform,
         transformSpec,
+        fieldHints,
         collapseErrorBodies,
       });
     } else if (effectiveScope === 'spec-only') {
@@ -214,12 +217,14 @@ export async function verifyCommand(opts: {
       operationIdTransform,
       schemaNameTransform,
       transformSpec,
+      fieldHints,
       collapseErrorBodies,
     });
     const newParsedSpec = await parseSpec(spec, {
       operationIdTransform,
       schemaNameTransform,
       transformSpec,
+      fieldHints,
       collapseErrorBodies,
     });
     const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
