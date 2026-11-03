@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFile } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import * as os from 'node:os';
 import { loadConfig } from '../../src/cli/config-loader.js';
 import { applyConfig } from '../../src/cli/plugin-loader.js';
@@ -501,5 +501,176 @@ describe('collapseErrorBodies from config reaches every command that parses a sp
       .filter((c) => c.kind === 'model-added')
       .map((c) => c.name);
     expect(added).toEqual(['GetPetsError409']);
+  });
+});
+
+describe('fieldHints from config reach every command that parses a spec (#507)', () => {
+  // A hinted field's `domainName` is part of an error body's fold key (#497),
+  // so hinting getPet's 404 keeps it apart from getNote's identical one:
+  // generation reads `ErrorBody` (`message` → `detail`) beside the kept
+  // `GetNoteError404`, where a parse without the hint folds both onto one
+  // `ErrorBody`. Every other command has to read the models generation writes.
+  const dir = resolve(os.tmpdir(), `oagen-field-hints-config-${process.pid}`);
+  const config = resolve(dir, 'oagen.config.mjs');
+  const spec = resolve(dir, 'spec.json');
+  const withToys = resolve(dir, 'with-toys.json');
+  const surface = resolve(dir, 'surface.json');
+  const runner = resolve(dir, 'smoke-runner.mjs');
+  const get = (operationId: string) => ({
+    get: {
+      operationId,
+      responses: {
+        '200': { description: 'ok', content: { 'application/json': { schema: { type: 'object' } } } },
+        '404': {
+          description: 'nf',
+          content: {
+            'application/json': {
+              schema: { type: 'object', properties: { message: { type: 'string' } }, required: ['message'] },
+            },
+          },
+        },
+      },
+    },
+  });
+  const doc = (paths: Record<string, unknown>) => ({ openapi: '3.1.0', info: { title: 'hints', version: '1' }, paths });
+  // The SDK generated from with-toys.json under the hint, as an extractor reads it.
+  const iface = (name: string) => ({
+    name,
+    fields: { message: { name: 'message', type: 'string', optional: false } },
+    extends: [],
+  });
+  const sdkSurface = {
+    language: 'field-hints',
+    extractedFrom: dir,
+    extractedAt: '2026-01-01T00:00:00.000Z',
+    classes: {},
+    interfaces: Object.fromEntries(['ErrorBody', 'GetNoteError404', 'GetToyError404'].map((n) => [n, iface(n)])),
+    typeAliases: {},
+    enums: {},
+    exports: {},
+  };
+
+  beforeEach(() => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      config,
+      `export default {
+        fieldHints: { GetPetError404: { message: 'detail' } },
+        extractors: [{
+          language: 'field-hints',
+          hints: { derivedModelNames: () => [] },
+          extract: async () => (${JSON.stringify(sdkSurface)}),
+        }],
+      };\n`,
+    );
+    writeFileSync(spec, JSON.stringify(doc({ '/pets': get('getPet'), '/notes': get('getNote') })));
+    writeFileSync(
+      withToys,
+      JSON.stringify(doc({ '/pets': get('getPet'), '/notes': get('getNote'), '/toys': get('getToy') })),
+    );
+    writeFileSync(surface, JSON.stringify(sdkSurface));
+    writeFileSync(runner, '');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const modelsOf = (stdout: string): string[] =>
+    (JSON.parse(stdout).models as Array<{ name: string; fields: Array<{ name: string; domainName?: string }> }>)
+      .map(
+        ({ name, fields }) =>
+          `${name} { ${fields.map((f) => (f.domainName ? `${f.name} → ${f.domainName}` : f.name)).join(', ')} }`,
+      )
+      .sort();
+
+  it('parse: keeps the hinted body apart from its unhinted twin, as generation does', async () => {
+    const unhinted = await run(['parse', '--spec', spec]);
+    expect(unhinted.code).toBe(0);
+    expect(modelsOf(unhinted.stdout)).toEqual(['ErrorBody { message }']);
+
+    const hinted = await run(['--config', config, 'parse', '--spec', spec]);
+    expect(hinted.code).toBe(0);
+    expect(modelsOf(hinted.stdout)).toEqual(['ErrorBody { message → detail }', 'GetNoteError404 { message }']);
+  });
+
+  it('diff: reports the model a new unhinted body adds beside the hinted one, as generation would', async () => {
+    // `diff` exits 1 when it reports non-breaking changes (the new Toys service itself).
+    const addedModels = (stdout: string) =>
+      (JSON.parse(stdout).changes as Array<{ kind: string; name?: string }>)
+        .filter((c) => c.kind === 'model-added')
+        .map((c) => c.name);
+    const unhinted = await run(['diff', '--old', spec, '--new', withToys]);
+    expect(unhinted.code).toBe(1);
+    expect(addedModels(unhinted.stdout)).toEqual([]);
+
+    const hinted = await run(['--config', config, 'diff', '--old', spec, '--new', withToys]);
+    expect(hinted.code).toBe(1);
+    expect(addedModels(hinted.stdout)).toEqual(['GetToyError404']);
+  });
+
+  it('resolve: warns about the body the hint keeps apart, as generation does', async () => {
+    // `resolve` prints no model; the fold's warning naming the kept one tells.
+    const result = await run(['--config', config, 'resolve', '--spec', spec, '--format', 'json']);
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain('GetNoteError404');
+  });
+
+  it('compat-extract: gives the kept model’s SDK symbols their schema name', async () => {
+    const result = await run([
+      '--config',
+      config,
+      'compat-extract',
+      '--sdk-path',
+      dir,
+      '--lang',
+      'field-hints',
+      '--output',
+      dir,
+      '--spec',
+      spec,
+    ]);
+    expect(result.code).toBe(0);
+    const snapshot = JSON.parse(readFileSync(resolve(dir, '.oagen-compat-snapshot.json'), 'utf8'));
+    expect((snapshot.symbols as Array<{ schemaName?: string }>).map((s) => s.schemaName).filter(Boolean)).toEqual([
+      'ErrorBody',
+      'ErrorBody.message',
+      'GetNoteError404',
+      'GetNoteError404.message',
+    ]);
+  });
+
+  it('verify: scopes compat and detects staleness on the models generation writes', async () => {
+    const result = await run([
+      '--config',
+      config,
+      'verify',
+      '--spec',
+      spec,
+      '--old-spec',
+      withToys,
+      '--lang',
+      'field-hints',
+      '--output',
+      dir,
+      '--api-surface',
+      surface,
+      '--max-retries',
+      '0',
+      '--raw-results',
+      resolve(dir, 'smoke-results-raw.json'),
+      '--smoke-runner',
+      runner,
+    ]);
+    expect(result.code).toBe(0);
+    // Each of the three parses needs the hint: without it, the compat parse of
+    // the new spec keeps only `ErrorBody` in scope (1/3), the staleness parse
+    // of the old spec finds nothing removed, and that of the new spec reports
+    // `GetNoteError404` stale as well.
+    expect(result.stdout).toContain('(scoped to spec: 2/3 baseline symbols in scope)');
+    expect(result.stdout).toContain('Found 1 stale symbol(s):');
+    expect(result.stdout).toContain(
+      'GetToyError404 — Interface "GetToyError404" is no longer defined in the OpenAPI spec',
+    );
   });
 });

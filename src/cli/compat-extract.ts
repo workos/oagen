@@ -129,6 +129,7 @@ export async function compatExtractCommand(opts: {
   spec?: string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
+  fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
@@ -157,6 +158,7 @@ export async function compatExtractCommand(opts: {
     const parsedSpec = await parseSpec(opts.spec, {
       schemaNameTransform: opts.schemaNameTransform,
       transformSpec: opts.transformSpec,
+      fieldHints: opts.fieldHints,
       collapseErrorBodies: opts.collapseErrorBodies,
     });
     enrichWithSpecContext(snapshot, parsedSpec);

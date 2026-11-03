@@ -13,6 +13,7 @@ export async function resolveCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   docUrl?: string;
   operationHints?: Record<string, OperationHint>;
+  fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
   mountRules?: Record<string, string>;
   operationNaming?: OperationNaming;
@@ -21,6 +22,7 @@ export async function resolveCommand(opts: {
     operationIdTransform: opts.operationIdTransform,
     schemaNameTransform: opts.schemaNameTransform,
     transformSpec: opts.transformSpec,
+    fieldHints: opts.fieldHints,
     operationHints: opts.operationHints,
     collapseErrorBodies: opts.collapseErrorBodies,
   });

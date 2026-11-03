@@ -96,6 +96,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      fieldHints: configFieldHints,
       collapseErrorBodies: configCollapseErrorBodies,
       operationHints: configOperationHints,
     });
@@ -149,6 +150,7 @@ program
       transformSpec: configTransformSpec,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
+      fieldHints: configFieldHints,
       collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
@@ -177,6 +179,7 @@ program
       ...opts,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      fieldHints: configFieldHints,
       collapseErrorBodies: configCollapseErrorBodies,
     }).catch(handleError);
   });
@@ -236,6 +239,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      fieldHints: configFieldHints,
       collapseErrorBodies: configCollapseErrorBodies,
       compatConfig: configCompat,
       compatReport: opts.compatReport,
@@ -261,6 +265,7 @@ program
       operationIdTransform: configOperationIdTransform,
       schemaNameTransform: configSchemaNameTransform,
       transformSpec: configTransformSpec,
+      fieldHints: configFieldHints,
       collapseErrorBodies: configCollapseErrorBodies,
       docUrl: configDocUrl,
       operationHints: configOperationHints,
