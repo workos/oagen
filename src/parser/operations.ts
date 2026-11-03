@@ -6592,7 +6592,9 @@ function fillFallbackResponse(
   const headers = extractResponseHeaders(resp.headers, sink.opLabel, label, sink.ctx, site);
   if (headers) entry.headers = headers;
   // The response's own `description`, read as for a success or error entry —
-  // a sibling beside a `$ref` included, since `resolveResponseRef` kept it.
+  // a sibling beside a `$ref` included only as `ctx.refSiblingDescriptions`
+  // reads it (kept in an OAS 3.1 document, dropped in a 3.0 one, whether or
+  // not the ref resolved), as the status-code loop below reads one.
   const description = presentText(resp.description);
   if (description) entry.description = description;
 }
