@@ -141,7 +141,7 @@ Use the shared utilities from `@workos/oagen` (`toPascalCase`, `toSnakeCase`, `t
 - Each `Operation` has (the authoritative list is `Operation` in `src/ir/types.ts`):
   - `name` — method name, e.g. `listUsers`
   - `summary?` — the `summary` alone: the operation's own, else its Path Item's
-  - `description?` — combined doc text: `summary + "\n\n" + description`, or whichever one has content; each part is the operation's own, else its Path Item's
+  - `description?` — the `description` alone: the operation's own, else its Path Item's; it never includes the summary, so render `summary` yourself when the doc comment should show it
   - `externalDocs?` — the operation's own link, when usable
   - `httpMethod` — `get` | `post` | `put` | `patch` | `delete` | `head` | `options` | `trace`
   - `path` — e.g. `/organizations/{id}`

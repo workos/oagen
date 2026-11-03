@@ -144,20 +144,19 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       ] = spec.services;
       const [hook] = spec.webhooks!;
 
-      // The issue's own projection of the two nodes. `description` is the
-      // combined form every operation carries, built from the path item's
-      // two texts exactly as it is from an operation's own.
+      // The issue's own projection of the two nodes. Each field is the path
+      // item's text alone, exactly as an operation's own would be (#470).
       expect({
         operation: { description: op.description, externalDocs: op.externalDocs, summary: op.summary },
         webhook: { description: hook.description, externalDocs: hook.externalDocs, summary: hook.summary },
       }).toEqual({
         operation: {
-          description: 'Pets\n\nEvery pet in the store.',
+          description: 'Every pet in the store.',
           externalDocs: { url: 'https://example.com/pets' },
           summary: 'Pets',
         },
         webhook: {
-          description: 'Pet adopted\n\nSent when a pet is adopted.',
+          description: 'Sent when a pet is adopted.',
           externalDocs: { url: 'https://example.com/adopted' },
           summary: 'Pet adopted',
         },
@@ -170,15 +169,15 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
   describe('resolveOperationDocs', () => {
     it.each([
       // op.summary, op.description, pathItem.summary, pathItem.description → summary, description
-      [undefined, undefined, 'Pets', 'Every pet.', 'Pets', 'Pets\n\nEvery pet.'],
-      ['List', undefined, 'Pets', 'Every pet.', 'List', 'List\n\nEvery pet.'],
-      [undefined, 'All pets.', 'Pets', 'Every pet.', 'Pets', 'Pets\n\nAll pets.'],
-      ['List', 'All pets.', 'Pets', 'Every pet.', 'List', 'List\n\nAll pets.'],
-      ['', '   ', 'Pets', 'Every pet.', 'Pets', 'Pets\n\nEvery pet.'],
-      [undefined, undefined, 'Pets', undefined, 'Pets', 'Pets'],
+      [undefined, undefined, 'Pets', 'Every pet.', 'Pets', 'Every pet.'],
+      ['List', undefined, 'Pets', 'Every pet.', 'List', 'Every pet.'],
+      [undefined, 'All pets.', 'Pets', 'Every pet.', 'Pets', 'All pets.'],
+      ['List', 'All pets.', 'Pets', 'Every pet.', 'List', 'All pets.'],
+      ['', '   ', 'Pets', 'Every pet.', 'Pets', 'Every pet.'],
+      [undefined, undefined, 'Pets', undefined, 'Pets', undefined],
       [undefined, undefined, undefined, 'Every pet.', undefined, 'Every pet.'],
       [undefined, 'Pets', 'Pets', undefined, 'Pets', 'Pets'],
-      // A path item summary identical to its own description is not repeated.
+      // A path item summary identical to its own description is kept in both fields.
       [undefined, undefined, 'Pets', 'Pets', 'Pets', 'Pets'],
       [undefined, undefined, '', '   ', undefined, undefined],
       [undefined, undefined, undefined, undefined, undefined, undefined],
@@ -212,7 +211,7 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
           post: { operationId: 'createPet', responses },
         },
       });
-      const inherited = { summary: 'Pets', description: 'Pets\n\nEvery pet in the store.', keys: withBoth };
+      const inherited = { summary: 'Pets', description: 'Every pet in the store.', keys: withBoth };
       expect(ops).toEqual({ listPets: inherited, createPet: inherited });
     });
 
@@ -227,9 +226,9 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
         },
       });
       expect(ops).toEqual({
-        listPets: { summary: 'List pets', description: 'List pets\n\nEvery pet in the store.', keys: withBoth },
-        createPet: { summary: 'Pets', description: 'Pets\n\nAdds a pet.', keys: withBoth },
-        replacePets: { summary: 'Replace', description: 'Replace\n\nReplaces them all.', keys: withBoth },
+        listPets: { summary: 'List pets', description: 'Every pet in the store.', keys: withBoth },
+        createPet: { summary: 'Pets', description: 'Adds a pet.', keys: withBoth },
+        replacePets: { summary: 'Replace', description: 'Replaces them all.', keys: withBoth },
       });
     });
 
@@ -243,7 +242,7 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
         '/toys': { summary: ' ', description: '', get: { operationId: 'listToys', responses } },
       });
       expect(ops).toEqual({
-        listPets: { summary: 'Pets', description: 'Pets', keys: withBoth },
+        listPets: { summary: 'Pets', description: undefined, keys: withBoth },
         // `summary` is omitted and `description` present-but-undefined, the
         // shape an operation without any doc text has always had.
         listToys: { summary: undefined, description: undefined, keys: ['description'] },
@@ -302,12 +301,12 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       expect(hooks).toEqual({
         'post petAdopted': {
           summary: 'Pet adopted',
-          description: 'Pet adopted\n\nSent when a pet is adopted.',
+          description: 'Sent when a pet is adopted.',
           keys: withBoth,
         },
         'put petAdopted': {
           summary: 'Pet re-adopted',
-          description: 'Pet re-adopted\n\nSent when a pet is adopted.',
+          description: 'Sent when a pet is adopted.',
           keys: withBoth,
         },
       });
@@ -324,7 +323,7 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
       );
       expect(hooks['post petAdopted']).toEqual({
         summary: 'Pet adopted',
-        description: 'Pet adopted\n\nSent when a pet is adopted.',
+        description: 'Sent when a pet is adopted.',
         keys: withBoth,
       });
       // The text beside the ref is not read, and that is said once (#350).
@@ -355,11 +354,7 @@ describe('path item summary and description, webhook externalDocs (issue #270)',
           },
         },
       );
-      const expected = [
-        'Pet adopted',
-        'Pet adopted\n\nSent when a pet is adopted.',
-        { kind: 'model', name: 'SharedPayload' },
-      ];
+      const expected = ['Pet adopted', 'Sent when a pet is adopted.', { kind: 'model', name: 'SharedPayload' }];
       expect(webhooks.map((hook) => [hook.name, hook.summary, hook.description, hook.requestBody])).toEqual([
         ['a', ...expected],
         ['b', ...expected],

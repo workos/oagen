@@ -108,7 +108,7 @@ A missing kind means an entire category of types won't generate correctly.
 
 #### Operation
 
-- `description` — Method-level description (the operation's own `summary` and `description`, each falling back to its Path Item's)
+- `summary`, `description` — Method-level doc text (the operation's own `summary` and `description`, each falling back to its Path Item's); `description` never includes the summary, so an emitter that prints only `description` drops it
 - `externalDocs` — The operation's link, for the method doc comment
 - `deprecated` — Deprecation marker on methods (the Operation Object's own keyword)
 - `async` — Async operation marker

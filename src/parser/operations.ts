@@ -3336,9 +3336,9 @@ function buildOperation(
     queryParamGroups || bodyParamGroups ? [...(queryParamGroups ?? []), ...(bodyParamGroups ?? [])] : undefined;
 
   // The operation's own `summary` and `description`, or its Path Item's for
-  // each it declares none for (`resolveOperationDocs`). An empty or
-  // whitespace-only text counts as absent at either level, so it neither gets
-  // its own field nor leaks into the description as a blank first paragraph.
+  // each it declares none for (`resolveOperationDocs`), each on its own field.
+  // An empty or whitespace-only text counts as absent at either level, so it
+  // gets no field and never hides the Path Item's.
   const { summary, description } = resolveOperationDocs(op, pathItemDocs);
 
   const operation: Operation = {
@@ -3490,7 +3490,7 @@ export type PathItemDocs = Pick<PathItem, 'summary' | 'description'>;
 export interface OperationDocs {
   /** The resolved `summary` alone; `undefined` when neither level has one with content. */
   summary: string | undefined;
-  /** The combined form `buildDescription` makes of the two resolved texts; `undefined` when neither has content. */
+  /** The resolved `description` alone, never built from the summary (text identical to it is kept); `undefined` when neither level has one with content. */
   description: string | undefined;
 }
 
@@ -3500,33 +3500,20 @@ export interface OperationDocs {
  * no content for, from the Path Item it sits on: OpenAPI defines a Path
  * Item's `summary` and `description` as applying to every operation on it.
  * The two fields fall back one by one, so an operation with a `summary` of
- * its own and no `description` shows its own `summary` over the Path Item's
- * `description`. Text with content wins at either level; a value that is not
- * a string, or is blank, counts as absent at either level (`presentText`), so
- * `summary: ""` on the operation still takes the Path Item's. Either field is
- * `undefined` when
- * neither level gives it; the caller decides whether the key is then omitted
- * (`Webhook`) or present (`Operation.description`).
+ * its own and no `description` shows its own `summary` and the Path Item's
+ * `description`. Each is kept on its own, as the document writes it: the
+ * `description` is never built from the `summary`, and one identical to it
+ * is kept in both, since each is the document's own text. Text with content wins at either
+ * level, kept verbatim; a value that is not a string, or is blank, counts as
+ * absent at either level (`presentText`), so `summary: ""` on the operation
+ * still takes the Path Item's. Either field is `undefined` when neither level
+ * gives it; the caller decides whether the key is then omitted (`Webhook`) or
+ * present (`Operation.description`).
  */
 export function resolveOperationDocs(op: OperationObject, pathItem: PathItemDocs): OperationDocs {
   const summary = presentText(op.summary) ?? presentText(pathItem.summary);
   const description = presentText(op.description) ?? presentText(pathItem.description);
-  return { summary, description: buildDescription(summary, description) };
-}
-
-/**
- * Combine an operation's `summary` and `description` into one doc text.
- * Empty or whitespace-only text counts as absent, so `summary: "List pets"`
- * with `description: ""` yields `"List pets"` rather than `""`. Text that has
- * content is kept verbatim, surrounding whitespace included.
- */
-export function buildDescription(summary: string | undefined, description: string | undefined): string | undefined {
-  const presentSummary = presentText(summary);
-  const presentDescription = presentText(description);
-  if (presentSummary && presentDescription && presentSummary !== presentDescription) {
-    return `${presentSummary}\n\n${presentDescription}`;
-  }
-  return presentDescription ?? presentSummary;
+  return { summary, description };
 }
 
 /** The text itself when it has non-whitespace content, otherwise `undefined`. */

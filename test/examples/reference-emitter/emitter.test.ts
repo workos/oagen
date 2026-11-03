@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { typescriptEmitter } from '../../../examples/reference-emitter/src/index.js';
 import type { EmitterContext } from '../../../src/engine/types.js';
-import type { ApiSpec, Model, Enum, Service } from '../../../src/ir/types.js';
+import type { ApiSpec, Model, Enum, Operation, Service } from '../../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../../src/ir/sdk-behavior.js';
 
 const minimalCtx: EmitterContext = {
@@ -91,6 +91,35 @@ describe('reference emitter', () => {
     expect(files[0].path).toBe('resources/repos.ts');
     expect(files[0].content).toContain('class Repos');
     expect(files[0].content).toContain('listRepos');
+  });
+
+  it('joins an operation summary and description in its doc comment, printing identical text once', () => {
+    const operation = (name: string, summary: string, description: string): Operation => ({
+      name,
+      summary,
+      description,
+      httpMethod: 'get',
+      path: `/${name}`,
+      pathParams: [],
+      queryParams: [],
+      headerParams: [],
+      response: { kind: 'model', name: 'Repository' },
+      errors: [],
+      injectIdempotencyKey: false,
+    });
+    const services: Service[] = [
+      {
+        name: 'Repos',
+        operations: [
+          operation('listRepos', 'List repos', 'Every repository.'),
+          operation('getRepo', 'Get a repo', 'Get a repo'),
+        ],
+      },
+    ];
+
+    const content = typescriptEmitter.generateResources(services, minimalCtx)[0].content;
+    expect(content).toContain('/** List repos\n\nEvery repository. */');
+    expect(content).toContain('/** Get a repo */');
   });
 
   it('generates client class', () => {
