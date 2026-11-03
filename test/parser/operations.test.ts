@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { extractOperations } from '../../src/parser/operations.js';
 import { parseSpec } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { resolveOperations } from '../../src/ir/operation-hints.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import { collectInlineEnumsFromOperations } from '../../src/parser/collect-inline-enums.js';
-import type { Enum, Service } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Service } from '../../src/ir/types.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 
 describe('extractOperations', () => {
@@ -3903,6 +3904,240 @@ describe('#570', () => {
       } finally {
         warn.mockRestore();
       }
+    }
+  });
+});
+
+describe('#537', () => {
+  // `headerOperationQualifier` returned the PascalCase operation name for an
+  // operation with an `operationId` — the name after `operationIdTransform`
+  // — so a response-header or parameter model that clashed with another
+  // operation's was renamed by every change to the transform
+  // (`PetsAnimalsListNotesXMeta` → `PetsListNotesXMeta`, a breaking
+  // `model-removed` in `diffSpecs`), while the operation's bodies and the
+  // copies a merge pass renames were qualified by the id's stem
+  // (`operationIdModelBase`, #503) and kept their names. Now every model the
+  // operation mints is qualified by that one stem, `AnimalListNotes` beside
+  // `AnimalListNotesResponse`, whatever the transform returns.
+  const str: SchemaObject = { type: 'string' };
+  const obj = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+  const id = { name: 'id', in: 'path' as const, required: true, schema: str };
+  /** An operation with a `200` header `X-Meta`, a `deepObject` query `filter`, a header parameter `X-Trace` and an inline body. */
+  const operation = (
+    operationId: string | undefined,
+    header: Record<string, SchemaObject>,
+    param: Record<string, SchemaObject>,
+    body: Record<string, SchemaObject>,
+  ) => ({
+    ...(operationId === undefined ? {} : { operationId }),
+    tags: ['Pets'],
+    parameters: [
+      id,
+      { name: 'filter', in: 'query' as const, style: 'deepObject', explode: true, schema: obj(param) },
+      { name: 'X-Trace', in: 'header' as const, schema: obj(param) },
+    ],
+    responses: {
+      '200': {
+        description: 'ok',
+        headers: { 'X-Meta': { schema: obj(header) } },
+        content: { 'application/json': { schema: obj(body) } },
+      },
+    },
+  });
+  /** The issue's document: `GET /pets/{id}` and `GET /pets/{id}/notes`, each site clashing with the other's. */
+  const document = (openapi: string, getPet: string | undefined, listNotes: string | undefined) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: {
+      '/pets/{id}': { get: operation(getPet, { page: str }, { kind: str }, { name: str }) },
+      '/pets/{id}/notes': { get: operation(listNotes, { cursor: str }, { text: str }, { text: str }) },
+    },
+  });
+  /** What the issue's script prints for each operation, plus the header parameter. */
+  const names = (spec: ApiSpec) =>
+    spec.services
+      .flatMap(({ operations }) => operations)
+      .map(({ name, queryParams, headerParams, response, responseHeaders }) => ({
+        name,
+        filter: queryParams[0].type.kind === 'model' ? queryParams[0].type.name : queryParams[0].type.kind,
+        trace: headerParams[0].type.kind === 'model' ? headerParams[0].type.name : headerParams[0].type.kind,
+        header: responseHeaders?.[0].type.kind === 'model' ? responseHeaders[0].type.name : undefined,
+        response: response.kind === 'model' ? response.name : response.kind,
+      }));
+  /** The transforms the issue compares: none, and one that drops the `Animals_` prefix. */
+  const dropPrefix = (operationId: string) => (operationId.startsWith('Animals_') ? operationId.slice(8) : operationId);
+  /** The names of the models a diff from `before` to `after` removes or adds. */
+  const modelChanges = (before: ApiSpec, after: ApiSpec) =>
+    diffSpecs(before, after)
+      .changes.filter((change) => change.kind === 'model-removed' || change.kind === 'model-added')
+      .map((change) => `${change.kind} ${change.name}`);
+
+  const parse = async (
+    dir: string,
+    label: string,
+    doc: Record<string, unknown>,
+    operationIdTransform?: (operationId: string) => string,
+  ) => {
+    const specFile = join(dir, `${label}.json`);
+    await writeFile(specFile, JSON.stringify(doc));
+    return parseSpec(specFile, { operationIdTransform });
+  };
+
+  it('keeps the header and parameter models of the issue repro named whatever the transform returns, in OAS 3.1 and 3.0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-537-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const doc = document(openapi, 'Animals_GetPet', 'Animals_ListNotes');
+        const label = openapi.replaceAll('.', '-');
+        const plain = await parse(dir, `repro-${label}`, doc);
+        const transformed = await parse(dir, `repro-${label}-transformed`, doc, dropPrefix);
+        // `getPet`'s sites take the bare names; `listNotes`'s clash with them
+        // and are qualified by the stem its body is named from —
+        // `AnimalListNotes`, the id cleaned as `AnimalListNotesResponse` is —
+        // never `AnimalsListNotes` (the untransformed name, before #537) or
+        // `ListNotes` (the transformed one).
+        const expected = (listNotes: string, getPet: string) => [
+          {
+            name: getPet,
+            filter: 'PetsFilter',
+            trace: 'PetsXTrace',
+            header: 'PetsXMeta',
+            response: 'AnimalGetPetResponse',
+          },
+          {
+            name: listNotes,
+            filter: 'PetsAnimalListNotesFilter',
+            trace: 'PetsAnimalListNotesXTrace',
+            header: 'PetsAnimalListNotesXMeta',
+            response: 'AnimalListNotesResponse',
+          },
+        ];
+        expect(names(plain), openapi).toEqual(expected('animalsListNotes', 'animalsGetPet'));
+        expect(names(transformed), openapi).toEqual(expected('ListNotes', 'GetPet'));
+        // The transform renames the operations and nothing else.
+        const models = [
+          'AnimalGetPetResponse',
+          'AnimalListNotesResponse',
+          'PetsXMeta',
+          'PetsFilter',
+          'PetsXTrace',
+          'PetsAnimalListNotesXMeta',
+          'PetsAnimalListNotesFilter',
+          'PetsAnimalListNotesXTrace',
+        ];
+        expect(
+          plain.models.map((model) => model.name),
+          openapi,
+        ).toEqual(models);
+        expect(
+          transformed.models.map((model) => model.name),
+          openapi,
+        ).toEqual(models);
+        expect(modelChanges(plain, transformed), openapi).toEqual([]);
+        expect(modelChanges(transformed, plain), openapi).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('spells the qualifier as the body stem is spelled: `notes.list` gives `PetsNoteListXMeta` beside `NoteListResponse`', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-537-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const doc = document(openapi, 'pets.get', 'notes.list');
+        // Before #537 the operation's name qualified the header
+        // (`PetsNotesListXMeta`), one spelling beside the body's other.
+        const expected = (listNotes: string, getPet: string) => [
+          { name: getPet, filter: 'PetsFilter', trace: 'PetsXTrace', header: 'PetsXMeta', response: 'PetsGetResponse' },
+          {
+            name: listNotes,
+            filter: 'PetsNoteListFilter',
+            trace: 'PetsNoteListXTrace',
+            header: 'PetsNoteListXMeta',
+            response: 'NoteListResponse',
+          },
+        ];
+        const label = openapi.replaceAll('.', '-');
+        const plain = await parse(dir, `dotted-${label}`, doc);
+        expect(names(plain), openapi).toEqual(expected('notesList', 'petsGet'));
+        // A transform that keeps the id as written, and one that keeps what follows the dot.
+        const kept = await parse(dir, `dotted-${label}-kept`, doc, (operationId) => operationId);
+        expect(names(kept), openapi).toEqual(expected('notes.list', 'pets.get'));
+        const afterDot = await parse(dir, `dotted-${label}-after-dot`, doc, (operationId) =>
+          operationId.split('.').at(-1)!,
+        );
+        expect(names(afterDot), openapi).toEqual(expected('list', 'get'));
+        expect(modelChanges(plain, kept), openapi).toEqual([]);
+        expect(modelChanges(plain, afterDot), openapi).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves a path-named operation qualified by its path stem, with or without a transform', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-537-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const doc = document(openapi, undefined, undefined);
+        const label = openapi.replaceAll('.', '-');
+        const expected = [
+          {
+            name: 'get',
+            filter: 'PetsFilter',
+            trace: 'PetsXTrace',
+            header: 'PetsXMeta',
+            response: 'PetsByIdGetResponse',
+          },
+          {
+            name: 'listNotes',
+            filter: 'PetsByIdNotesGetFilter',
+            trace: 'PetsByIdNotesGetXTrace',
+            header: 'PetsByIdNotesGetXMeta',
+            response: 'PetsByIdNotesGetResponse',
+          },
+        ];
+        const transform = vi.fn(dropPrefix);
+        const plain = await parse(dir, `path-named-${label}`, doc);
+        const transformed = await parse(dir, `path-named-${label}-transformed`, doc, transform);
+        expect(names(plain), openapi).toEqual(expected);
+        expect(names(transformed), openapi).toEqual(expected);
+        expect(transform).not.toHaveBeenCalled();
+        expect(modelChanges(plain, transformed), openapi).toEqual([]);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('qualifies the sites of one operation alike in extractOperations, under every transform', () => {
+    // The deferred sites — the response header, the query object, the
+    // header parameter — are all qualified by `AnimalListNotes`, so a
+    // transform that renames the operation renames none of them, and one
+    // that keeps the id as written gives the same names as none.
+    const paths = document('3.1.0', 'Animals_GetPet', 'Animals_ListNotes').paths;
+    const expected = [
+      'AnimalGetPetResponse',
+      'AnimalListNotesResponse',
+      'PetsXMeta',
+      'PetsFilter',
+      'PetsXTrace',
+      'PetsAnimalListNotesXMeta',
+      'PetsAnimalListNotesFilter',
+      'PetsAnimalListNotesXTrace',
+    ];
+    for (const transform of [
+      undefined,
+      dropPrefix,
+      (operationId: string) => operationId,
+      (operationId: string) => operationId.toLowerCase(),
+    ]) {
+      const { inlineModels } = extractOperations(paths, transform);
+      expect(
+        inlineModels.map((model) => model.name),
+        String(transform),
+      ).toEqual(expected);
     }
   });
 });

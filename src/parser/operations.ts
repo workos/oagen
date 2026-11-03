@@ -3094,10 +3094,8 @@ function buildOperation(
   warnOnIgnoredCallbacks(op.callbacks, opLabel);
   // The Operation Object as every model name reads it (the request and
   // response bodies, the error and fallback bodies, the qualifiers): with
-  // the `operationId` the reuse of its own leaves it, if any. The name its
-  // models are qualified by goes with it.
+  // the `operationId` the reuse of its own leaves it, if any.
   const namingOp = modelOperationId === undefined ? op : { ...op, operationId: modelOperationId ?? undefined };
-  const namingName = modelOperationId ?? operationName;
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
   const requestBodyObject = resolveRequestBodyRef(
@@ -3167,7 +3165,7 @@ function buildOperation(
   const opContext = serviceName;
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(namingOp, namingName, pathModelBaseName, opContext);
+  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext);
   // What the typing of a parameter, a response header or a secondary,
   // fallback or error body reads from the operation and the spec; a schema
   // deferred through it is typed once every operation has been read
@@ -3495,9 +3493,11 @@ function buildOperation(
   // operation's `PetsByIdLegacyWidgetGetResponse`). So the name depends on
   // the `operationId` or on the method and path alone, never on the
   // operation's name — a change to what inferOperationName derives or to
-  // what an operationIdTransform makes of the `operationId` renames no type
-  // (see `headerOperationQualifier`), unless the transform makes nothing of
-  // it, which reads the `operationId` as absent (readOperationIds).
+  // what an operationIdTransform makes of the `operationId` renames no type,
+  // unless the transform makes nothing of it, which reads the `operationId`
+  // as absent (readOperationIds). The header and parameter models are
+  // qualified by the same stem (`headerOperationQualifier`, since #537), so
+  // the rule holds for every model the operation mints.
   const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
@@ -3538,24 +3538,31 @@ function responseTypeRefs(op: Operation): TypeRef[] {
 }
 
 /**
- * The qualifier that tells one operation's header models from another's
- * (`deferredNamingStem`'s `byOperationName` candidate), and that the shape
- * registry records as the owner of its models. An `operationId` names the
- * operation. A path-named operation uses the path-derived stem its request
- * and response models are built from, so the model name depends only on the
- * method and path and never on the derived operation name — a verb or
- * singular change in inferOperationName must not rename a generated type.
- * The stem's leading service word is dropped when it ends on a word boundary,
- * since the model name already starts with the service:
+ * The qualifier that tells one operation's header and parameter models from
+ * another's (`deferredNamingStem`'s `byOperationName` candidate), and that
+ * the shape registry records as the owner of its models. It is the stem the
+ * operation's request and response models are built from, so the model name
+ * depends only on the `operationId` or on the method and path and never on
+ * the operation's name. An operation with an `operationId` uses the id's
+ * stem (`operationIdModelBase`), cleaned exactly as its `…Response` model
+ * name is: `Animals_ListNotes` gives `Pets` + `AnimalListNotes` + `XMeta`
+ * beside `AnimalListNotesResponse`, and `notes.list` gives `PetsNoteListXMeta`
+ * beside `NoteListResponse`, whatever an `operationIdTransform` names the
+ * operation — the operation's PascalCase name, before #537, renamed the
+ * header and parameter models (`PetsListNotesXMeta`) with every change to
+ * the transform while the bodies kept their names. A path-named operation
+ * uses the path-derived stem, so a verb or singular change in
+ * inferOperationName must not rename a generated type either. That stem's
+ * leading service word is dropped when it ends on a word boundary, since the
+ * model name already starts with the service:
  * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
  */
 function headerOperationQualifier(
   op: OperationObject,
-  operationName: string,
   pathModelBaseName: string,
   serviceName: string | undefined,
 ): string {
-  if (op.operationId) return toPascalCase(operationName);
+  if (op.operationId) return operationIdModelBase(op.operationId);
   const parent = serviceName ? toPascalCase(serviceName) : '';
   const rest = pathModelBaseName.slice(parent.length);
   return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
