@@ -1484,6 +1484,7 @@ describe('#512', () => {
               parameter('bare', ref('Name')),
               parameter('alias', ref('Alias')),
               parameter('beside', { ...ref('Alias'), maxLength: 3 }),
+              parameter('looser', { ...ref('Name'), minLength: 0 }),
               parameter('lone', { allOf: [ref('Name')] }),
               parameter('annotated', { allOf: [ref('Name'), { description: 'Annotated.' }] }),
               parameter('maybe', { oneOf: [ref('Name'), { type: 'null' }] }),
@@ -1513,6 +1514,8 @@ describe('#512', () => {
       { name: 'bare', type: string, constraints: { minLength: 1 }, ...named },
       { name: 'alias', type: string, constraints: { minLength: 1 }, ...named },
       { name: 'beside', type: string, constraints: { minLength: 1, maxLength: 3 }, ...named },
+      // A looser keyword beside the `$ref` does not loosen it: the stricter bound wins, as on a field (review round 3).
+      { name: 'looser', type: string, constraints: { minLength: 1 }, ...named },
       // Under a wrapper the limits alone; the text is the wrapper's own.
       { name: 'lone', type: string, constraints: { minLength: 1 }, ...none },
       { name: 'annotated', type: string, constraints: { minLength: 1 }, ...none, description: 'Annotated.' },

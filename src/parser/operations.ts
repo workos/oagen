@@ -3729,7 +3729,17 @@ export function extractParams(
         : refTarget
           ? extractConstraints(refTarget)
           : undefined;
-      const constraints = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
+      // For an array or primitive component the two conjoin as a field's do
+      // (`combineConstraints`), the stricter bound winning: the wire enforces
+      // the component's limit whatever is written beside the `$ref`, and no
+      // model is left to carry it, so `{ $ref: Limit, minimum: 1 }` beside
+      // `Limit`'s `minimum: 5` keeps `5` (Greptile, review round 3). A `$ref`
+      // to a model or enum keeps the override, as before.
+      const constraints = reference
+        ? combineConstraints(inherited, own)
+        : own && inherited
+          ? { ...inherited, ...own }
+          : (own ?? inherited);
       // The schema's link, else the fallbacks' — the same chain `description`
       // and `deprecated` follow, with an unusable entry at one level falling
       // through to the next as an empty description does. A Parameter Object
