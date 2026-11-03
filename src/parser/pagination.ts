@@ -425,13 +425,14 @@ export function endOfIterationProblem(
  * two objects that each declare `has_more`, or `meta` an `allOf` of that
  * `oneOf` and a `trace_id` member, every member applying whichever variant
  * is sent). `undefined` when the object does not declare the segment and no
- * union it has declares it in every variant. A variant's own unions are not
- * walked: one that is itself such a union declares no properties of its own
- * (`objectProperties`), so it lacks every segment. The walk goes one
- * segment at a time over every schema reached so far, each counted once —
- * by its `$ref`, else by the schema itself — so a component several
- * variants reach is walked on once, however many variants reach it and
- * however long the path.
+ * union it has declares it in every variant (and, for a union an `allOf`
+ * flattens, in one written inline, as its model does). A variant's own
+ * unions are not walked: one that is itself such a union declares no
+ * properties of its own (`objectProperties`), so it lacks every segment.
+ * The walk goes one segment at a time over every schema reached so far,
+ * each counted once — by its `$ref`, else by the schema itself — so a
+ * component several variants reach is walked on once, however many
+ * variants reach it and however long the path.
  */
 function fieldsAtPath(
   schema: SchemaObject,
@@ -456,7 +457,25 @@ function fieldsAtPath(
  * that name, else that property in each non-null variant of the first
  * `oneOf`/`anyOf` `node` is composed of — `node` itself or an `allOf`
  * member, however deep, as `collectObjectProperties` walks them — whose
- * every such variant declares it. `undefined` when there is none.
+ * every such variant declares it. A `node` that is a union is typed as its
+ * variants' models, a `$ref` variant's component among them; one that is an
+ * `allOf`, or reaches a component composed with one (its own model, even
+ * of a lone member), is one model its unions are flattened into, which
+ * leaves a `$ref` under a variant to its component (`mergeAllOfMembers`
+ * inline, `extractAllOfModel` for a component), so there the field counts
+ * only when a variant written inline declares it too, and is never one the
+ * model lacks (workos/oagen#527). An inline `allOf` is merged by
+ * `mergeAllOfMembers`, which reads no union a `$ref` member's component
+ * carries either — `{ allOf: [{ $ref: MetaUnion }, { properties: {
+ * trace_id } }] }` is a model of `trace_id` alone, whatever `MetaUnion`'s
+ * variants write inline — so there only a union written in `node` itself
+ * counts: the unions the walk meets without the component map, which
+ * follows no `$ref` (`collectObjectProperties(node)`), the same reading
+ * the variant check makes without it. Decided by the document's shape, not
+ * by object identity, so a schema object a `transformSpec` shares between
+ * an inline site and a component is read at each. The same `allOf` as a
+ * component is its own model, which does read such a union (#527 review).
+ * `undefined` when there is none.
  */
 function fieldsNamed(
   node: SchemaObject,
@@ -466,10 +485,24 @@ function fieldsNamed(
   const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
   if (own) return [own];
-  for (const union of unions) {
+  // `resolveBareSchema` reads through a component's lone `allOf` member,
+  // but the component's model is still its own `allOf` model.
+  const followed = new Set<string>();
+  const bare = resolveBareSchema(node, componentSchemas, followed);
+  const components = [...followed].map((ref) => resolveComponentSchemaRef({ $ref: ref }, componentSchemas));
+  const flattened = [bare, ...components].some((schema) => schema?.allOf !== undefined);
+  // `node` resolves to an `allOf` without following a `$ref`: the inline
+  // `allOf` `mergeAllOfMembers` flattens, which reads no union behind a
+  // `$ref` member — so only the unions written in `node` count, read
+  // without the component map. A component's `allOf` (`followed` names it)
+  // reads them all.
+  const inline = flattened && followed.size === 0;
+  for (const union of inline ? collectObjectProperties(node).unions : unions) {
     const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
     const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
-    if (fields.length > 0 && fields.every((field) => field !== undefined)) return fields;
+    // Without the component map, a variant's properties are those it writes inline.
+    const modeled = !flattened || variants.some((variant) => objectProperties(variant)[segment] !== undefined);
+    if (modeled && fields.length > 0 && fields.every((field) => field !== undefined)) return fields;
   }
   return undefined;
 }

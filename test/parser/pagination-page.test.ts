@@ -1169,19 +1169,55 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
       );
     const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
 
-    // The review's `meta`; the union as a `$ref` to an `anyOf`, beside a
-    // `null` variant, one `allOf` deeper, or the whole `meta` a component; a
-    // path one segment further; the same `allOf` one segment down
-    // (`meta.page.has_more`); and a second union that declares the field in
-    // every variant where the first does not.
+    // The review's `meta`; the union beside a `null` variant, one `allOf`
+    // deeper, or the whole `meta` a component; a path one segment further;
+    // the same `allOf` one segment down (`meta.page.has_more`); and a second
+    // union that declares the field in every variant where the first does not.
     expect(problem(beside({ oneOf: [after, numbered] }))).toBeUndefined();
-    expect(problem(beside({ $ref: '#/components/schemas/MetaUnion' }))).toBeUndefined();
     expect(problem(beside({ oneOf: [after, numbered, { type: 'null' }] }))).toBeUndefined();
     expect(problem({ allOf: [beside({ oneOf: [after, numbered] }), object({ x: boolean })] })).toBeUndefined();
     expect(problem({ $ref: '#/components/schemas/Meta' })).toBeUndefined();
     expect(problem(beside({ oneOf: [after, numbered] }), 'meta.page.last')).toBeUndefined();
     expect(problem(object({ page: beside({ oneOf: [after, numbered] }) }), 'meta.page.has_more')).toBeUndefined();
     expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [after, numbered] }] })).toBeUndefined();
+
+    // The union as a `$ref` member of the inline `allOf` (#527 review): the
+    // model that `allOf` is merged into reads no union behind a `$ref`
+    // member, however many of `MetaUnion`'s variants are written inline, so
+    // `Meta` would be `trace_id` alone — the override resolves to no field.
+    // Pinned as kept before the review; the same `allOf` as a component (the
+    // review's `Meta`) is its own model, which does read the union.
+    const referenced = beside({ $ref: '#/components/schemas/MetaUnion' });
+    expect(problem(referenced)).toBe(missing('meta.has_more'));
+    expect(problem({ allOf: [{ allOf: [{ $ref: '#/components/schemas/MetaUnion' }] }, trace] })).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem({ allOf: [{ oneOf: [{ $ref: '#/components/schemas/MetaUnion' }, { type: 'null' }] }, trace] })).toBe(
+      missing('meta.has_more'),
+    );
+    expect(problem(object({ page: referenced }), 'meta.page.has_more')).toBe(missing('meta.page.has_more'));
+    expect(
+      bodyEndOfIterationProblem(
+        { kind: 'hasMore', path: 'meta.has_more' },
+        object({ data: { type: 'array', items: { type: 'string' } }, meta: { $ref: '#/components/schemas/Meta2' } }),
+        { ...schemas, Meta2: referenced },
+      ),
+    ).toBeUndefined();
+    // Decided by shape, not object identity (Greptile): one union object a
+    // `transformSpec` shares between a component and the inline `allOf` is
+    // written inline there, so the model reads it and the override is kept —
+    // whichever of the two sites the walk meets it at first.
+    const shared: SchemaObject = { oneOf: [after, numbered] };
+    expect(
+      bodyEndOfIterationProblem(
+        { kind: 'hasMore', path: 'meta.has_more' },
+        object({
+          data: { type: 'array', items: { type: 'string' } },
+          meta: { allOf: [{ $ref: '#/components/schemas/Shared' }, shared, trace] },
+        }),
+        { ...schemas, Shared: { allOf: [trace, shared] } },
+      ),
+    ).toBeUndefined();
 
     // A field only some variants of each union declare resolves to no field,
     // one segment down too; one a variant types otherwise is not a boolean.
@@ -1195,6 +1231,74 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     expect(problem(beside({ oneOf: [after, object({ has_more: { type: 'string' } })] }))).toBe(
       'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
     );
+  });
+
+  describe('#527', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const boolean: SchemaObject = { type: 'boolean' };
+    const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+    const numbered = object({ has_more: boolean, next_page: { type: 'integer' } });
+    const trace = object({ trace_id: { type: 'string' } });
+    const refs = [ref('CursorMeta'), ref('PageMeta')];
+    const beside = (union: SchemaObject): SchemaObject => ({ allOf: [union, trace] });
+    const schemas: Record<string, SchemaObject> = {
+      CursorMeta: object({ has_more: boolean, next_after: { type: 'string' } }),
+      PageMeta: numbered,
+      Stringy: object({ has_more: { type: 'string' } }),
+      Trace: trace,
+      MetaUnion: { oneOf: refs },
+      Meta: beside({ anyOf: refs }),
+      LoneMeta: { allOf: [{ oneOf: refs }] },
+    };
+    const problem = (meta: SchemaObject, path = 'meta.has_more') =>
+      bodyEndOfIterationProblem(
+        { kind: 'hasMore', path },
+        object({ data: { type: 'array', items: { type: 'string' } }, meta }),
+        schemas,
+      );
+    const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
+
+    it('reads a union an allOf flattens as its model does, which leaves the $ref variants to their components', () => {
+      // The issue's `meta`, inline and as a component; then the variants
+      // beside `null`, each a lone `allOf` member, the union one `allOf`
+      // deeper or a `$ref` to a union component, a component of the union
+      // alone (its own `allOf` model), and the wrapper one segment down.
+      expect(problem(beside({ oneOf: refs }))).toBe(missing('meta.has_more'));
+      expect(problem(beside({ anyOf: refs }))).toBe(missing('meta.has_more'));
+      expect(problem(ref('Meta'))).toBe(missing('meta.has_more'));
+      expect(problem(beside({ oneOf: [...refs, { type: 'null' }] }))).toBe(missing('meta.has_more'));
+      expect(problem(beside({ oneOf: refs.map((r) => ({ allOf: [r] })) }))).toBe(missing('meta.has_more'));
+      expect(problem({ allOf: [{ allOf: [{ oneOf: refs }] }, trace] })).toBe(missing('meta.has_more'));
+      expect(problem(beside(ref('MetaUnion')))).toBe(missing('meta.has_more'));
+      expect(problem(ref('LoneMeta'))).toBe(missing('meta.has_more'));
+      expect(problem({ allOf: [ref('LoneMeta')] })).toBe(missing('meta.has_more'));
+      expect(problem(object({ page: beside({ oneOf: refs }) }), 'meta.page.has_more')).toBe(
+        missing('meta.page.has_more'),
+      );
+    });
+
+    it('keeps a union the object is typed as, and a flattened one a variant written inline declares the field in', () => {
+      // A union `meta` is typed as — written directly, as a lone inline
+      // `allOf` member, as a component or through a lone `$ref` member —
+      // dispatches to its variants' models; a flattened union gives its
+      // model the field once a variant written inline declares it, beside a
+      // `$ref` variant or over a `$ref` in the variant's own `allOf`.
+      expect(problem({ oneOf: refs })).toBeUndefined();
+      expect(problem({ allOf: [{ oneOf: refs }] })).toBeUndefined();
+      expect(problem(ref('MetaUnion'))).toBeUndefined();
+      expect(problem({ allOf: [ref('MetaUnion')] })).toBeUndefined();
+      expect(problem(beside({ oneOf: [ref('CursorMeta'), numbered] }))).toBeUndefined();
+      expect(
+        problem(beside({ anyOf: [{ allOf: [ref('CursorMeta'), object({ has_more: boolean })] }, numbered] })),
+      ).toBeUndefined();
+
+      // Every variant the wire may carry is still read: a `$ref` variant
+      // that types the field otherwise, or lacks it, rejects it.
+      expect(problem(beside({ oneOf: [ref('Stringy'), numbered] }))).toBe(
+        'endOfIteration path "meta.has_more" is not a boolean field, as kind "hasMore" requires',
+      );
+      expect(problem(beside({ oneOf: [ref('Trace'), numbered] }))).toBe(missing('meta.has_more'));
+    });
   });
 
   it('sets a null variant on the path aside however it is spelled (#394)', () => {
