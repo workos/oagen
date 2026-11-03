@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { parseSpec } from '../../src/parser/parse.js';
 import { resolveResponseRef } from '../../src/parser/response-refs.js';
 
 type Response = { description?: string; content?: Record<string, unknown> };
@@ -136,5 +140,160 @@ describe('resolveResponseRef on a ref it cannot resolve, under ignore (#444)', (
         'ignore',
       ),
     ).toBe(problem);
+  });
+});
+
+/**
+ * Covers issue #563: a response whose `$ref` is not a string ended the walk
+ * as `malformed` and was returned as written without a word, while the
+ * webhook reader warned about the same ref. It is now warned about as a ref
+ * nothing answers is, naming the value and the context, and still returned
+ * as written: no body, no headers, its sibling `description` kept under
+ * `'override'` and ignored under `'ignore'`.
+ */
+describe('#563', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns on a $ref that is not a string, naming the value and the context, and returns the response as written', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const malformed = { $ref: 42 };
+    expect(resolveResponseRef(malformed, { Problem: problem }, '404 response of getPet')).toBe(malformed);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      '[oagen] Warning: Malformed response $ref 42 in 404 response of getPet: a $ref must be a string — reading the response as written, without a body or headers',
+    );
+    // At a fallback key, and with no component responses at all.
+    expect(resolveResponseRef(malformed, undefined, 'default response of getPet')).toBe(malformed);
+    expect(warn).toHaveBeenLastCalledWith(
+      expect.stringContaining('Malformed response $ref 42 in default response of getPet: a $ref must be a string'),
+    );
+  });
+
+  it('names a $ref of any other type as String() renders it; a $ref holding undefined is no reference', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    resolveResponseRef({ $ref: null }, undefined, 'ctx');
+    resolveResponseRef({ $ref: true }, undefined, 'ctx');
+    resolveResponseRef({ $ref: { $ref: '#/components/responses/Problem' } }, undefined, 'ctx');
+    // An array of one string renders as that string: only the message's
+    // "must be a string" tells it from a ref nothing answers.
+    resolveResponseRef({ $ref: ['#/components/responses/Problem'] }, undefined, 'ctx');
+    expect(warn.mock.calls.map(([message]) => message)).toEqual([
+      expect.stringContaining('Malformed response $ref null in ctx: a $ref must be a string'),
+      expect.stringContaining('Malformed response $ref true in ctx: a $ref must be a string'),
+      expect.stringContaining('Malformed response $ref [object Object] in ctx: a $ref must be a string'),
+      expect.stringContaining('Malformed response $ref #/components/responses/Problem in ctx: a $ref must be a string'),
+    ]);
+    const unset = { $ref: undefined, description: 'Inline after all.' };
+    expect(resolveResponseRef(unset, undefined, 'ctx')).toBe(unset);
+    expect(warn).toHaveBeenCalledTimes(4);
+  });
+
+  it("warns on a malformed $ref at the end of a chain and returns the chain's last object", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const components = { Alias: { $ref: 42 }, Problem: problem };
+    expect(resolveResponseRef({ $ref: '#/components/responses/Alias' }, components, '404 response of getPet')).toBe(
+      components.Alias,
+    );
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('Malformed response $ref 42 in 404 response of getPet: a $ref must be a string'),
+    );
+  });
+
+  it("keeps the sibling description under 'override' and drops it under 'ignore', as beside a ref nothing answers", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const beside = { $ref: 42, description: 'Not found.' };
+    expect(resolveResponseRef(beside, undefined, 'ctx')).toBe(beside);
+    expect(resolveResponseRef(beside, undefined, 'ctx', 'ignore')).toEqual({ $ref: 42 });
+    // Through a chain the outermost description still wins under 'override',
+    // and none is read under 'ignore'.
+    const components = { Alias: { $ref: 42, description: 'inner' } };
+    const outer = { $ref: '#/components/responses/Alias', description: 'outer' };
+    expect(resolveResponseRef(outer, components, 'ctx')).toEqual({ $ref: 42, description: 'outer' });
+    expect(resolveResponseRef(outer, components, 'ctx', 'ignore')).toEqual({ $ref: 42 });
+    expect(warn).toHaveBeenCalledTimes(4);
+  });
+
+  it("reports nothing under onFailure 'silent'", () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const malformed = { $ref: 42 };
+    expect(resolveResponseRef(malformed, undefined, 'ctx', 'override', 'silent')).toBe(malformed);
+    expect(resolveResponseRef(malformed, undefined, 'ctx', 'ignore', 'silent')).toBe(malformed);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  describe('in a parsed document', () => {
+    /**
+     * The issue's repro: `getPet` returns `Pet` at 200 and `{ $ref: 42 }`
+     * under `key`, beside a webhook that returns the same ref at 200.
+     */
+    const document = (openapi: string, key: string): Record<string, unknown> => ({
+      openapi,
+      info: { title: 'Pets', version: '1.0.0' },
+      paths: {
+        '/pets/{petId}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: {
+              '200': {
+                description: 'A pet',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } },
+              },
+              [key]: { $ref: 42 },
+            },
+          },
+        },
+      },
+      webhooks: {
+        petAdopted: {
+          post: {
+            requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/Pet' } } } },
+            responses: { '200': { $ref: 42 } },
+          },
+        },
+      },
+      components: { schemas: { Pet: { type: 'object', properties: { name: { type: 'string' } } } } },
+    });
+
+    async function parseDocument(spec: Record<string, unknown>) {
+      const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-response-refs-'));
+      const file = path.join(dir, 'spec.json');
+      try {
+        await fs.writeFile(file, JSON.stringify(spec), 'utf-8');
+        return await parseSpec(file);
+      } finally {
+        await fs.rm(dir, { recursive: true });
+      }
+    }
+
+    const malformedWarning = (key: string) =>
+      `[oagen] Warning: Malformed response $ref 42 in ${key} response of getPet: a $ref must be a string — reading the response as written, without a body or headers`;
+    const webhookWarning =
+      '[oagen] Warning: Circular or malformed response $ref for status 200 in webhooks.petAdopted.post; keeping the status code only.';
+
+    for (const openapi of ['3.0.3', '3.1.0']) {
+      it(`warns about the operation's 404 as about the webhook's 200, keeping both, in an OAS ${openapi} document`, async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { services, webhooks } = await parseDocument(document(openapi, '404'));
+        const [op] = services.flatMap(({ operations }) => operations);
+        expect(op.errors.map(({ statusCode }) => statusCode)).toEqual([404]);
+        expect(op.defaultResponse).toBeUndefined();
+        expect(webhooks?.flatMap(({ responses }) => responses.map(({ statusCode }) => statusCode))).toEqual([200]);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([malformedWarning('404'), webhookWarning]);
+      });
+
+      it(`warns about the operation's default response, keeping it without a body, in an OAS ${openapi} document`, async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const { services, webhooks } = await parseDocument(document(openapi, 'default'));
+        const [op] = services.flatMap(({ operations }) => operations);
+        expect(op.errors).toEqual([]);
+        expect(op.defaultResponse).toEqual({});
+        expect(webhooks?.flatMap(({ responses }) => responses.map(({ statusCode }) => statusCode))).toEqual([200]);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([malformedWarning('default'), webhookWarning]);
+      });
+    }
   });
 });

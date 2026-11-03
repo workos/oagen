@@ -24,9 +24,12 @@ export type { ReferenceObject };
  * section, or one a bundler wrote to the first place it inlined a repeated
  * external ref, `#/paths/~1pets/get/responses/200`) is warned about and
  * returned as written: no body, no headers, its sibling `description` kept
- * under `'override'` and, as beside every ref, ignored under `'ignore'`. A
- * document that parsed before any response ref was resolved still parses.
- * Only a circular chain throws, since no reader could resolve it. Under
+ * under `'override'` and, as beside every ref, ignored under `'ignore'`. So
+ * is a `$ref` that is not a string (`{ $ref: 42 }`), direct or at the end of
+ * a chain, with a warning naming the value, as the webhook reader warns
+ * about the same ref (#563). A document that parsed before any response ref
+ * was resolved still parses. Only a circular chain throws, since no reader
+ * could resolve it. Under
  * `onFailure: 'silent'` neither failure is reported and the ref is returned
  * as written; that is for a reader that only pre-computes names, leaving the
  * report to the operation that declares the ref.
@@ -50,6 +53,14 @@ export function resolveResponseRef<T extends object>(
     if (followed.outcome === 'unresolved') {
       console.warn(
         `[oagen] Warning: Unresolved response $ref "${followed.ref}" in ${context}: no matching entry under components/responses — reading the response as written, without a body or headers`,
+      );
+    }
+    // A `$ref` that is not a string ends the walk as `malformed` and is read
+    // as written like a ref nothing answers; it is warned about the same
+    // way, naming the value, as the webhook reader warns about it (#563).
+    if (followed.outcome === 'malformed') {
+      console.warn(
+        `[oagen] Warning: Malformed response $ref ${followed.ref} in ${context}: a $ref must be a string — reading the response as written, without a body or headers`,
       );
     }
   }
