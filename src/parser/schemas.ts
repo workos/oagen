@@ -599,9 +599,11 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
  * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
  * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
  * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
- * variant — so extraction dispatches on the same shape the TypeRef was built
- * from. The unwrap keeps `contextName`/`parentModelName` semantics intact:
- * `schemaToTypeRef` passes both through each of these wrappers unchanged.
+ * variant (`nullableUnionBranch`: not one read as an enum, which the type
+ * builder decides first and builds from the union itself) — so extraction
+ * dispatches on the same shape the TypeRef was built from. The unwrap keeps
+ * `contextName`/`parentModelName` semantics intact: `schemaToTypeRef`
+ * passes both through each of these wrappers unchanged.
  *
  * `carry` is applied at each union level, to the branch with the wrapper
  * it collapses from, before the branch is unwrapped in turn — so a caller
@@ -645,15 +647,22 @@ export function unwrapNullableSchema(
  * a nullable union wrapper on the model side, shared by `unwrapNullableSchema`
  * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
  * under `allOf` (which `schemaToTypeRef` gives precedence), no `null`
- * variant, or more than one non-null variant. Exported for the response
- * path, which wraps an array it builds itself in `nullable` exactly when
- * `schemaToTypeRef` would (`nullableIf`).
+ * variant, more than one non-null variant, or a union of consts read as an
+ * enum (`inlineEnumSpelling`) — here, one string const beside `null` and an
+ * `enum:` list that makes it one. The type builder decides that enum before
+ * it collapses a nullable union, so such a union is no wrapper: the enum is
+ * built from the union itself, nullable or not, and the variant documents
+ * that one value, not the schema (workos/oagen#535: collapsed to the lone
+ * const, a request body's text reader gave the member's text to the body).
+ * Exported for the response path, which wraps an array it builds itself in
+ * `nullable` exactly when `schemaToTypeRef` would (`nullableIf`).
  */
 export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
   const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
   if (!variants) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
-  return nonNull.length === 1 && nonNull.length < variants.length ? nonNull[0] : undefined;
+  if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
+  return inlineEnumSpelling(schema)?.spelling === 'const-union' ? undefined : nonNull[0];
 }
 
 /**
@@ -734,8 +743,14 @@ function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
  * except under a single-member `oneOf`/`anyOf`, whose object variant's
  * model keeps the variant's own (workos/oagen#445). A `$ref` is never
  * followed, and a `$ref` member of an `allOf` is a reference rather than a
- * branch, so the wrapper's own text stands. Read for a request body's doc
- * text (`requestBodyDescriptionOf`).
+ * branch, so the wrapper's own text stands. A `oneOf`/`anyOf` of consts
+ * read as an enum is the schema that declares the members, so it is where
+ * the unwrap stops, nullable or not — `{ enum: ['draft', null], anyOf:
+ * [{ const: 'draft', description }, { type: 'null' }] }` is a nullable enum
+ * of `draft`, no wrapper around a lone const (`nullableUnionBranch`), and
+ * the variant's text is the member's alone (workos/oagen#535), as a
+ * single-member one's is (`loneUnionVariant`). Read for a request body's
+ * doc text (`requestBodyDescriptionOf`).
  */
 export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
   const bare = unwrapNullableSchema(schema, withWrapperDocs);
