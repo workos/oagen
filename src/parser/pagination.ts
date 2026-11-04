@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   TypeRef,
   Parameter,
@@ -8,9 +9,15 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { classifyInlineSchema, isNullSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import {
+  classifyInlineSchema,
+  isArraySchema,
+  isNullSchema,
+  resolveComponentSchemaRef,
+  unwrapNullableSchema,
+} from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
-import { combineDeclarations, readInlineAllOf } from './inline-models.js';
+import { combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -387,12 +394,13 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * `detectEndOfIteration` receives it — so an override and detection look at
  * one map: a field detection would read is one an override may name, and a
  * field it would not see is not there for an override either. `end.path` is
- * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
- * through `$ref`s, `allOf` members and nullable wrappers at every further
- * segment), and, where an object on the way does not declare the next
- * segment itself, through each non-null variant of a `oneOf`/`anyOf` that
- * object is or has among its `allOf` members (`fieldsAtPath`), so it lands
- * on one field per variant; each must fit `end.kind` by the test
+ * walked over that map as an explicit `dataPath` is (`fieldsAtPath`, the
+ * one walk `resolveDataPathArray` makes too: through `$ref`s, `allOf`
+ * members and nullable wrappers at every further segment, and, where an
+ * object on the way does not declare the next segment itself, through each
+ * non-null variant of a `oneOf`/`anyOf` that object is or has among its
+ * `allOf` members), so it lands on one field per variant; each must fit
+ * `end.kind` by the test
  * detection applies to a field it names (`endFieldFits`), under
  * `resolveBareSchema` as a detected one is. With no `properties` — an
  * operation whose primary response declares no body — the path resolves to
@@ -414,10 +422,12 @@ export function endOfIterationProblem(
 }
 
 /**
- * Every field `path` lands on below `schema`. Each segment is looked up
- * among the properties of the object the path has reached, as
- * `resolveSchemaPath` looks it up — through `$ref`s, `allOf` members and
- * nullable wrappers — and, when that object does not declare it but is a
+ * Every field `path` lands on below `schema` — the walk an explicit
+ * `endOfIteration` path (`endOfIterationProblem`) and an explicit `dataPath`
+ * (`resolveDataPathArray`) share. Each segment is looked up among the
+ * properties of the object the path has reached, as `resolveSchemaPath`
+ * looks it up — through `$ref`s, `allOf` members and nullable wrappers —
+ * and, when that object does not declare it but is a
  * `oneOf`/`anyOf` or has one among its `allOf` members (`fieldsNamed`), in
  * each non-null variant of that union instead: whichever variant the wire
  * carries, the field must be there, so the path goes on in every one and
@@ -443,9 +453,9 @@ function fieldsAtPath(
   for (const segment of path.split('.')) {
     const next = new Map<string | SchemaObject, SchemaObject>();
     for (const node of reached) {
-      const fields = fieldsNamed(node, segment, componentSchemas);
-      if (!fields) return undefined;
-      for (const field of fields) next.set(field.$ref ?? field, field);
+      const named = fieldsNamed(node, segment, componentSchemas);
+      if (!named) return undefined;
+      for (const field of named.fields) next.set(field.$ref ?? field, field);
     }
     reached = [...next.values()];
   }
@@ -457,7 +467,9 @@ function fieldsAtPath(
  * that name, else that property in each non-null variant of the first
  * `oneOf`/`anyOf` `node` is composed of — `node` itself or an `allOf`
  * member, however deep, as `collectObjectProperties` walks them — whose
- * every such variant declares it. A `node` that is a union is typed as its
+ * every such variant declares it, with that `union`, in the variants' order
+ * with the `null` ones left out, so a reader can say which variant a field
+ * came from (`resolveDataPathArray`). A `node` that is a union is typed as its
  * variants' models, a `$ref` variant's component among them; one that is an
  * `allOf`, or reaches a component composed with one (its own model, even
  * of a lone member), is one model its unions are flattened into, which
@@ -481,10 +493,10 @@ function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
-): SchemaObject[] | undefined {
+): { fields: SchemaObject[]; union?: SchemaObject } | undefined {
   const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
-  if (own) return [own];
+  if (own) return { fields: [own] };
   // `resolveBareSchema` reads through a component's lone `allOf` member,
   // but the component's model is still its own `allOf` model.
   const followed = new Set<string>();
@@ -502,7 +514,7 @@ function fieldsNamed(
     const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
     // Without the component map, a variant's properties are those it writes inline.
     const modeled = !flattened || variants.some((variant) => objectProperties(variant)[segment] !== undefined);
-    if (modeled && fields.length > 0 && fields.every((field) => field !== undefined)) return fields;
+    if (modeled && fields.length > 0 && fields.every((field) => field !== undefined)) return { fields, union };
   }
   return undefined;
 }
@@ -542,7 +554,7 @@ function isNumeric(schema: SchemaObject): boolean {
  * the reference instead of looping on it, as `resolveSchemaKeyword` and
  * `objectProperties` stop; so does a `$ref` with no component map or to no
  * component. Shared by the stop-field check and the document walk an
- * explicit `dataPath` makes (`resolveDataPathFromSchema`), so a stop field
+ * explicit `dataPath` makes (`resolveDataPathArray`), so a stop field
  * and a data array behind the same wrappers are read the same way.
  */
 export function resolveBareSchema(
@@ -588,8 +600,8 @@ function objectProperties(
  * (`extractListResponse`), a kept wrapper's stop field
  * (`bodyEndOfIteration`), a metadata companion's fields and each object
  * on the path to a nested array (`detectEndOfIteration`) and every
- * segment of a `dataPath` (`resolveSchemaPath`) are all read through it,
- * so they see one shape at every level.
+ * segment of a `dataPath` (`resolveSchemaPath`, `fieldsNamed`) are all read
+ * through it, so they see one shape at every level.
  *
  * Every node the walk meets — the body, then each `allOf` member, however
  * deep — is read through `resolveBareSchema`, the resolver the explicit
@@ -669,11 +681,16 @@ export function collectObjectProperties(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a dotted property path (the `dataPath` convention) against a
- * response schema: each segment is looked up among the object's properties —
- * through `$ref`s, `allOf` members and nullable wrappers — and the schema it
- * lands on is returned with a final `$ref` resolved. `undefined` when a
- * segment is missing.
+ * Resolve a dotted property path (the `dataPath` convention) to the one
+ * object it names in a response schema — the walk detection makes to each
+ * object on the way to a nested array (`detectEndOfIteration`): each
+ * segment is looked up among the object's own properties — through `$ref`s,
+ * `allOf` members and nullable wrappers — and the schema it lands on is
+ * returned with a final `$ref` resolved. `undefined` when a segment is
+ * missing, so also when an object on the way declares it only through the
+ * variants of a `oneOf`/`anyOf`: a union declares no companion a stop field
+ * is detected from. An explicit `dataPath` is walked through the variants
+ * instead (`resolveDataPathArray`, workos/oagen#556).
  */
 export function resolveSchemaPath(
   schema: SchemaObject,
@@ -690,26 +707,213 @@ export function resolveSchemaPath(
 }
 
 /**
+ * The array an explicit `dataPath` names in a response body, read from the
+ * document: the `items` schema of the array the path lands on, or the reason
+ * it lands on none — the text of the warning the override is rejected with
+ * (`dataPathProblem`), naming the problem alone.
+ *
+ * Each segment is looked up as an explicit `endOfIteration` path is
+ * (`fieldsAtPath`): among the properties of the object the path has reached,
+ * through `$ref`s, `allOf` members and nullable wrappers (what
+ * `resolveSchemaPath` reads), and, where that object does not declare the
+ * segment itself but is a `oneOf`/`anyOf` or has one among its `allOf`
+ * members (`fieldsNamed`), in each non-null variant of that union: whichever
+ * variant the wire carries, the array must be there, so `result.items` on
+ * `{ result: { oneOf: [A, B] } }` goes on in both `A` and `B`
+ * (workos/oagen#556). The path then lands on one field per variant, and
+ * the override is usable only when every one is an array — under a nullable
+ * wrapper too (`resolveBareSchema`) — and the arrays agree on their items:
+ * the same component (`$ref: Pet` in both) or the same inline shape
+ * (`schemaShapeKey`, which reads past descriptions and extensions), since
+ * the SDK iterates one item type whichever variant arrives. The first
+ * array's `items` stands for them all. A variant that lacks the segment,
+ * declares it as something other than an array, or types its items
+ * otherwise (`Pet` in one variant, `Cat` in another) makes the path
+ * unusable, and the reason says which variant lacks the field or how the
+ * variants type it. An array without `items` is no array an iterator can
+ * type, as it never was.
+ */
+export function resolveDataPathArray(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { items: SchemaObject } | { problem: string } {
+  const missing = `dataPath "${dataPath}" does not resolve to an array in the response`;
+  const segments = dataPath.split('.');
+  // The path to the first union the walk went on through (`''` for the body
+  // itself), which the reason names when the variants disagree.
+  let union: string | undefined;
+  // Every schema the path has reached so far, each with the variant it came
+  // through (`variant 2 of the oneOf at "result"`), none for the body itself
+  // or a field an object declares on its own.
+  let reached: Array<{ schema: SchemaObject; via?: string }> = [{ schema }];
+  for (const [depth, segment] of segments.entries()) {
+    const prefix = segments.slice(0, depth).join('.');
+    const next = new Map<string | SchemaObject, { schema: SchemaObject; via?: string }>();
+    for (const { schema: node, via } of reached) {
+      const named = fieldsNamed(node, segment, componentSchemas);
+      if (!named) {
+        const lacking =
+          variantLacking(node, segment, prefix, componentSchemas) ??
+          (via === undefined ? undefined : `${unionAt(prefix)} declares no "${segment}" in ${via}`);
+        return { problem: lacking ? `${missing}: ${lacking}` : missing };
+      }
+      if (named.union) union ??= prefix;
+      const labels = named.union ? variantLabels(named.union, prefix) : [via];
+      named.fields.forEach((field, index) => next.set(field.$ref ?? field, { schema: field, via: labels[index] }));
+    }
+    reached = [...next.values()];
+  }
+  const bare = reached.map(({ schema: field }) => resolveBareSchema(field, componentSchemas));
+  const arrays = bare.filter((field) => isArraySchema(field) && field.items !== undefined);
+  if (arrays.length < bare.length) {
+    if (union === undefined) return { problem: missing };
+    return { problem: `${missing}: the variants of ${unionAt(union)} type it as ${listed(bare.map(describeSchema))}` };
+  }
+  const items = arrays.map((array) => array.items as SchemaObject);
+  if (new Set(items.map(schemaShapeKey)).size > 1) {
+    return {
+      problem:
+        `dataPath "${dataPath}" does not resolve to one array in the response: ` +
+        `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeSchema))}`,
+    };
+  }
+  return { items: items[0] };
+}
+
+/**
+ * Why an explicit `dataPath` cannot be read from the body `schema`, or
+ * `undefined` when it can (`resolveDataPathArray`). With no `schema` — an
+ * operation whose primary response declares no body — the path resolves to
+ * nothing. The text is the reason alone, as `endOfIterationProblem`'s is;
+ * the caller names the override's source and the operation, and says what
+ * it does about it.
+ */
+export function dataPathProblem(
+  schema: SchemaObject | undefined,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  if (!schema) return `dataPath "${dataPath}" does not resolve to an array in the response`;
+  const resolved = resolveDataPathArray(schema, dataPath, componentSchemas);
+  return 'problem' in resolved ? resolved.problem : undefined;
+}
+
+/**
+ * Which variant of a union `node` is composed of lacks `segment`, when that
+ * is why `fieldsNamed` found no field of that name — `variant 2 of the oneOf
+ * at "result" declares no "items"` — for the warning a `dataPath` is
+ * rejected with. The unions are read in the order `fieldsNamed` reads them;
+ * the first with a non-null variant that declares no such property explains
+ * the miss. `undefined` when none does: no union at all, or one whose every
+ * variant declares the segment and which still does not count (the one an
+ * inline `allOf` flattens, workos/oagen#527), which the plain reason covers.
+ */
+function variantLacking(
+  node: SchemaObject,
+  segment: string,
+  prefix: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  for (const union of collectObjectProperties(node, componentSchemas).unions) {
+    const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+    const index = variants.findIndex((variant) => objectProperties(variant, componentSchemas)[segment] === undefined);
+    if (index !== -1) return `${variantLabels(union, prefix)[index]} declares no "${segment}"`;
+  }
+  return undefined;
+}
+
+/**
+ * A name for each non-null variant of `union`, the `oneOf`/`anyOf` at
+ * `prefix` (`''` for the body itself), counted as written with the `null`
+ * variants in place — `variant 3 of the oneOf at "result"` for the third
+ * one listed, whatever sits before it — in the order `fieldsNamed` lists
+ * the variants' fields, so the two line up.
+ */
+function variantLabels(union: SchemaObject, prefix: string): string[] {
+  const keyword = union.oneOf ? 'oneOf' : 'anyOf';
+  const at = prefix === '' ? `the response's ${keyword}` : `the ${keyword} at "${prefix}"`;
+  return (union.oneOf ?? union.anyOf ?? []).flatMap((variant, index) =>
+    isNullSchema(variant) ? [] : [`variant ${index + 1} of ${at}`],
+  );
+}
+
+/** The object whose variants a `dataPath` warning speaks of: the body itself, or the property at `path`. */
+function unionAt(path: string): string {
+  return path === '' ? 'the response' : `"${path}"`;
+}
+
+/** The distinct entries of `words`, as prose: `a`, `a and b`, `a, b and c`. */
+function listed(words: string[]): string {
+  const distinct = [...new Set(words)];
+  if (distinct.length < 2) return distinct.join('');
+  return `${distinct.slice(0, -1).join(', ')} and ${distinct[distinct.length - 1]}`;
+}
+
+/**
+ * A schema's type in a word, for a warning: a component's name for a `$ref`,
+ * `Pet[]` for an array of them (`array` without `items`), its `type` as
+ * written (`string`, `string | null`), else the composition keyword it is.
+ */
+function describeSchema(schema: SchemaObject): string {
+  if (schema.$ref) return schema.$ref.slice(schema.$ref.lastIndexOf('/') + 1);
+  if (isArraySchema(schema)) return schema.items ? `${describeSchema(schema.items)}[]` : 'array';
+  const { type } = schema;
+  if (type !== undefined) return Array.isArray(type) ? type.join(' | ') : type;
+  return schema.oneOf ? 'oneOf' : schema.anyOf ? 'anyOf' : schema.allOf ? 'allOf' : 'untyped';
+}
+
+/**
  * Resolve a dotted `dataPath` against the IR rather than the document: walk
  * from the response type through model fields, unwrapping nullables, and
  * return the element type of the array the path lands on. `models` is where
  * each model along the way is looked up by name, so the item type is exactly
  * the one the parser already assigned — the very `TypeRef` object the field
- * holds, which later renaming passes repoint in place. An empty `dataPath`
- * means `root` itself is the array. `undefined` when a segment is missing, a
- * model is unknown, or the path does not end on an array.
+ * holds, which later renaming passes repoint in place. A `union` on the way
+ * is walked through each of its variants, as the document walk goes on
+ * through each variant of a `oneOf`/`anyOf` (`resolveDataPathArray`,
+ * workos/oagen#556): every variant must be a model that declares the
+ * segment, and the arrays reached must agree on their items — the same
+ * `TypeRef` by value, `Pet` in `ListPetsResponseResult.items` and in
+ * `ListPetsResponseResultWithTotal.items` — the first of which is returned.
+ * An empty `dataPath` means `root` itself is the array. `undefined` when a
+ * segment is missing, a model is unknown, the path does not end on an array,
+ * or the variants disagree; the document walk then answers
+ * (`resolveDataPathFromSchema`).
  */
 export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
-  let current: TypeRef = root;
+  let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
-    const container = current.kind === 'nullable' ? current.inner : current;
-    if (container.kind !== 'model') return undefined;
-    const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
-    if (!field) return undefined;
-    current = field.type;
+    const next: TypeRef[] = [];
+    for (const type of reached) {
+      for (const container of containersOf(type)) {
+        if (container.kind !== 'model') return undefined;
+        const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
+        if (!field) return undefined;
+        next.push(field.type);
+      }
+    }
+    reached = next;
   }
-  const target = current.kind === 'nullable' ? current.inner : current;
-  return target.kind === 'array' ? target.items : undefined;
+  const items = reached.map((type) => {
+    const target = type.kind === 'nullable' ? type.inner : type;
+    return target.kind === 'array' ? target.items : undefined;
+  });
+  const [first, ...rest] = items;
+  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first)) ? first : undefined;
+}
+
+/**
+ * The types a `dataPath` segment is looked up in below `type`: the type
+ * under a nullable wrapper, or each variant of a union there, under its own
+ * wrapper. A variant that is itself a union is left as one, which declares
+ * no field: a variant's own unions are not walked, on the document side
+ * either (`fieldsNamed`).
+ */
+function containersOf(type: TypeRef): TypeRef[] {
+  const bare = type.kind === 'nullable' ? type.inner : type;
+  if (bare.kind !== 'union') return [bare];
+  return bare.variants.map((variant) => (variant.kind === 'nullable' ? variant.inner : variant));
 }
 
 // ---------------------------------------------------------------------------

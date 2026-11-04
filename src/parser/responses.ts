@@ -6,8 +6,7 @@ import {
   endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
-  resolveBareSchema,
-  resolveSchemaPath,
+  resolveDataPathArray,
   spellsOneOf,
 } from './pagination.js';
 import type { SchemaObject } from './schemas.js';
@@ -21,7 +20,6 @@ import {
   deprecatedEntry,
   foldSiblingProperties,
   isArrayComponentRef,
-  isArraySchema,
   isNullSchema,
   collapsedNullableBranch,
   typesAsUnknown,
@@ -524,17 +522,22 @@ function extractListResponse(
  * Element type of the array an explicit `dataPath` points at, read from the
  * response document when the IR cannot answer — a `$ref` wrapper whose path
  * runs through a model the parser has not materialized (an array
- * component's, say), or an envelope the parser did not recognize — and the
- * check `extractResponses` makes before classifying a body, to learn whether
- * the path reaches an array at all. `undefined` when it does not.
+ * component's, say), an envelope the parser did not recognize, or a
+ * `oneOf`/`anyOf` on the way whose variants' models type the same items
+ * under names of their own. `undefined` when the path reaches no array
+ * (`resolveDataPathArray`, the one walk; `dataPathProblem` says why, for
+ * the check `extractResponses` makes before classifying a body).
  *
  * The array may sit under a nullable wrapper of any form — `type: ['array',
  * 'null']`, OAS 3.0 `nullable: true`, `oneOf: [{ type: 'array' }, { type:
  * 'null' }]`, a nullable `$ref` to an array component — which
  * `resolveBareSchema` looks through exactly as the IR walk
  * (`resolveDataPathItemType`) looks through the `nullable` TypeRef those
- * forms become, so the two never disagree about whether the path lands on
- * an array; `isArraySchema` then decides, as every other site does.
+ * forms become, and the path goes on through each non-null variant of a
+ * union an object on the way is, as the IR walk goes through each variant
+ * of a `union` (workos/oagen#556), so the two never disagree about whether
+ * the path lands on an array; `isArraySchema` then decides, as every other
+ * site does, in every variant, whose arrays must agree on their items.
  *
  * The items are typed and materialized as every array response's are
  * (`typeInlineItems`): as a field named for the path (`result.items` →
@@ -549,11 +552,9 @@ export function resolveDataPathFromSchema(
   componentSchemas?: Record<string, SchemaObject>,
   settle?: ItemSettlement,
 ): { itemType: TypeRef; inlineModels: Model[] } | undefined {
-  const target = resolveSchemaPath(schema, dataPath, componentSchemas);
-  if (!target) return undefined;
-  const array = resolveBareSchema(target, componentSchemas);
-  if (!isArraySchema(array) || !array.items) return undefined;
-  return typeInlineItems(array.items, inlineItemNameForPath(contextName, dataPath), componentSchemas, settle);
+  const resolved = resolveDataPathArray(schema, dataPath, componentSchemas);
+  if ('problem' in resolved) return undefined;
+  return typeInlineItems(resolved.items, inlineItemNameForPath(contextName, dataPath), componentSchemas, settle);
 }
 
 /**
