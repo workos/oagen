@@ -3760,22 +3760,25 @@ export function extractParams(
       // `schema`, so a parameter declared either way is typed by one rule.
       const { schema, media, contentType, contentTypes } = parameterTyping(p);
       const refTarget = resolveComponentSchemaRef(schema, componentSchemas);
-      // A `$ref` to an array or primitive component, bare or under a wrapper
-      // the type builder reads through, is read as a field reads one
-      // (`componentReference`, #512 review): the component's limits, and its
-      // aliases', through every entry the reference passes; its text, flags,
-      // default and examples too for a bare `$ref` — through the aliases,
-      // nearest first — while under a wrapper those are the parameter's own,
-      // read from the wrapper and the members beside the `$ref`. Any other
-      // `$ref` falls back to the one component it names, as before. Any
-      // other schema reads the `allOf` members that declare no type and so
-      // only annotate or limit it (`annotatingAllOfMembers`; #555: `allOf:
-      // [{ type: 'string' }, { description }]` lost the text), as a field
-      // reads them.
+      // A `$ref` to an array or primitive component, or to an alias of an
+      // enum component (#560), bare or under a wrapper the type builder
+      // reads through, is read as a field reads one (`componentReference`,
+      // #512 review): the component's limits, and its aliases', through
+      // every entry the reference passes; its text, flags, default and
+      // examples too for a bare `$ref` — through the aliases, nearest first,
+      // then the enum an alias resolves to, as a bare `$ref` to that enum
+      // reads it — while under a wrapper those are the parameter's own, read
+      // from the wrapper and the members beside the `$ref`. Any other `$ref`
+      // falls back to the one component it names, as before. Any other
+      // schema reads the `allOf` members that declare no type and so only
+      // annotate or limit it (`annotatingAllOfMembers`; #555: `allOf: [{
+      // type: 'string' }, { description }]` lost the text), as a field reads
+      // them.
       const reference = schema ? componentReference(schema, componentSchemas) : undefined;
+      const aliased = reference?.bare && reference.enumComponent ? [reference.enumComponent] : [];
       const fallbacks: SchemaObject[] = reference
         ? reference.bare
-          ? reference.entries
+          ? [...reference.entries, ...aliased]
           : reference.own.slice(1)
         : refTarget
           ? [refTarget]
@@ -3824,12 +3827,17 @@ export function extractParams(
       // the component's limit whatever is written beside the `$ref`, and no
       // model is left to carry it, so `{ $ref: Limit, minimum: 1 }` beside
       // `Limit`'s `minimum: 5` keeps `5` (Greptile, review round 3). A `$ref`
-      // to a model or enum keeps the override, as before.
-      const constraints = reference
+      // to a model or enum keeps the override, as before — through an alias
+      // of the enum too (#560): the alias's own limits conjoin, since no node
+      // carries them, and the enum's sit underneath as they sit under a bare
+      // `$ref` to it.
+      const conjoined = reference
         ? combineConstraints(inherited, own)
         : own && inherited
           ? { ...inherited, ...own }
           : (own ?? inherited);
+      const underneath = aliased.length > 0 ? extractConstraints(aliased[0]) : undefined;
+      const constraints = conjoined && underneath ? { ...underneath, ...conjoined } : (conjoined ?? underneath);
       // The schema's link, else the fallbacks' — the same chain `description`
       // and `deprecated` follow, with an unusable entry at one level falling
       // through to the next as an empty description does. A Parameter Object
