@@ -8,6 +8,7 @@ import { loadConfig } from '../../src/cli/config-loader.js';
 import { applyConfig } from '../../src/cli/plugin-loader.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import type { OagenConfig } from '../../src/cli/config-loader.js';
+import type { ApiSurface } from '../../src/compat/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(__dirname, '../../src/cli/index.ts');
@@ -672,5 +673,336 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     expect(result.stdout).toContain(
       'GetToyError404 — Interface "GetToyError404" is no longer defined in the OpenAPI spec',
     );
+  });
+});
+
+describe('the settings generate reads from config reach compat-extract and verify (#567)', () => {
+  // `generate` parses with the config's `operationHints` and
+  // `operationIdTransform`, and hands the engine its `mountRules`,
+  // `operationHints` and the language's `emitterOptions`. `compat-extract`
+  // and `verify` have to parse the same way, and `verify`'s overlay retry
+  // has to regenerate the same way, or they read models and operation names
+  // the generated SDK does not have and the retry writes services and
+  // methods `generate` does not.
+  const dir = resolve(os.tmpdir(), `oagen-generate-settings-config-${process.pid}`);
+  const config = resolve(dir, 'oagen.config.mjs');
+  const retryConfig = resolve(dir, 'retry.config.mjs');
+  const listSpec = resolve(dir, 'list.json');
+  const petsSpec = resolve(dir, 'pets.json');
+  const petsControllerSpec = resolve(dir, 'pets-controller.json');
+  const sdk = resolve(dir, 'sdk');
+  const sdkSurface = resolve(sdk, 'surface.json');
+  const baseline = resolve(dir, 'baseline.json');
+  const runner = resolve(dir, 'smoke-runner.mjs');
+  const snapshot = resolve(dir, '.oagen-compat-snapshot.json');
+
+  const pet = { type: 'object', required: ['name'], properties: { name: { type: 'string' } } };
+  const ok = (schema: unknown) => ({ '200': { description: 'ok', content: { 'application/json': { schema } } } });
+  const doc = (paths: Record<string, unknown>, tags?: string[]) => ({
+    openapi: '3.1.0',
+    info: { title: 'pets', version: '1' },
+    ...(tags && { tags: tags.map((name) => ({ name })) }),
+    paths,
+    components: { schemas: { Pet: pet } },
+  });
+  // GET /pets with an `after` query parameter and a list envelope is detected
+  // as cursor pagination, so the envelope is the iterator's and `Pet` the only
+  // model. Under the hint it is a plain operation, and generation writes
+  // `ListPetsResponse` and `ListPetsResponseListMetadata` beside `Pet`.
+  const listDoc = doc({
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: ok({
+          type: 'object',
+          required: ['data', 'list_metadata'],
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+            list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+          },
+        }),
+      },
+    },
+  });
+  // GET /pets and GET /pets/{id} tagged Pets, with ids the config's transform
+  // strips to `list` and `get` (`prefix` empty: written so in the document).
+  const petsDoc = (prefix: string) =>
+    doc(
+      {
+        '/pets': {
+          get: {
+            operationId: `${prefix}list`,
+            tags: ['Pets'],
+            responses: ok({ type: 'array', items: { $ref: '#/components/schemas/Pet' } }),
+          },
+        },
+        '/pets/{id}': {
+          get: {
+            operationId: `${prefix}get`,
+            tags: ['Pets'],
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: ok({ $ref: '#/components/schemas/Pet' }),
+          },
+        },
+      },
+      ['Pets'],
+    );
+
+  // The SDK surfaces as an extractor reads them.
+  const iface = (name: string, fields: Record<string, string>) => ({
+    name,
+    fields: Object.fromEntries(Object.entries(fields).map(([n, type]) => [n, { name: n, type, optional: false }])),
+    extends: [],
+  });
+  const surface = (parts: Partial<ApiSurface>): ApiSurface => ({
+    language: 'pets',
+    extractedFrom: sdk,
+    extractedAt: '2026-01-01T00:00:00.000Z',
+    classes: {},
+    interfaces: {},
+    typeAliases: {},
+    enums: {},
+    exports: {},
+    ...parts,
+  });
+  const listSurface = surface({
+    interfaces: {
+      ListPetsResponse: iface('ListPetsResponse', { data: 'Pet[]', list_metadata: 'ListPetsResponseListMetadata' }),
+      ListPetsResponseListMetadata: iface('ListPetsResponseListMetadata', { after: 'string' }),
+      Pet: iface('Pet', { name: 'string' }),
+    },
+  });
+  const petsSurface = surface({
+    classes: {
+      Pets: {
+        name: 'Pets',
+        methods: {
+          get: [{ name: 'get', params: [], returnType: 'Pet', async: true }],
+          list: [{ name: 'list', params: [], returnType: 'Pet[]', async: true }],
+        },
+        properties: {},
+        constructorParams: [],
+      },
+    },
+    interfaces: { Pet: iface('Pet', { name: 'string' }) },
+  });
+
+  // Every config registers this extractor, which reads an SDK's surface from
+  // its surface.json.
+  const extractors = `extractors: [{
+    language: 'pets',
+    hints: { derivedModelNames: () => [] },
+    extract: async (sdkPath) => JSON.parse(readFileSync(join(sdkPath, 'surface.json'), 'utf8')),
+  }]`;
+  const prelude = `import { readFileSync } from 'node:fs';\nimport { join } from 'node:path';\n`;
+
+  beforeEach(() => {
+    mkdirSync(sdk, { recursive: true });
+    writeFileSync(
+      config,
+      `${prelude}export default {
+        ${extractors},
+        operationHints: { 'GET /pets': { pagination: { strategy: 'none' } } },
+        operationIdTransform: (id) => (id.startsWith('PetsController_') ? id.slice('PetsController_'.length) : id),
+      };\n`,
+    );
+    // The retry config also registers an emitter whose one file is the SDK's
+    // surface as the engine resolved it: one class per mount target holding
+    // its method names, one interface per model, and the options it was
+    // handed.
+    writeFileSync(
+      retryConfig,
+      `${prelude}const surfaceOf = (spec, ctx) => {
+        const classes = {};
+        for (const r of ctx.resolvedOperations) {
+          classes[r.mountOn] ??= { name: r.mountOn, methods: {}, properties: {}, constructorParams: [] };
+          classes[r.mountOn].methods[r.methodName] = [{ name: r.methodName, params: [], returnType: 'unknown', async: true }];
+        }
+        const interfaces = Object.fromEntries(
+          spec.models.map((m) => [
+            m.name,
+            {
+              name: m.name,
+              fields: Object.fromEntries(m.fields.map((f) => [f.name, { name: f.name, type: 'string', optional: !f.required }])),
+              extends: [],
+            },
+          ]),
+        );
+        return {
+          language: 'pets',
+          extractedFrom: 'sdk',
+          extractedAt: '2026-01-01T00:00:00.000Z',
+          classes,
+          interfaces,
+          typeAliases: {},
+          enums: {},
+          exports: {},
+          emitterOptions: ctx.emitterOptions ?? null,
+        };
+      };
+      export default {
+        ${extractors},
+        emitters: [{
+          language: 'pets',
+          generateModels: () => [],
+          generateEnums: () => [],
+          generateResources: () => [],
+          generateClient: (spec, ctx) => [
+            { path: 'surface.json', content: JSON.stringify(surfaceOf(spec, ctx), null, 2) + '\\n', headerPlacement: 'skip' },
+          ],
+          generateErrors: () => [],
+          generateTypeSignatures: () => [],
+          generateTests: () => [],
+          fileHeader: () => '',
+        }],
+        mountRules: { Pets: 'Animals' },
+        operationHints: { 'GET /pets': { name: 'list_all' } },
+        emitterOptions: { pets: { flavor: 'retry' } },
+      };\n`,
+    );
+    writeFileSync(listSpec, JSON.stringify(listDoc));
+    writeFileSync(petsSpec, JSON.stringify(petsDoc('')));
+    writeFileSync(petsControllerSpec, JSON.stringify(petsDoc('PetsController_')));
+    writeFileSync(runner, '');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const verifyArgs = (spec: string) => [
+    'verify',
+    '--spec',
+    spec,
+    '--lang',
+    'pets',
+    '--output',
+    sdk,
+    '--api-surface',
+    baseline,
+    '--raw-results',
+    resolve(dir, 'smoke-results-raw.json'),
+    '--smoke-runner',
+    runner,
+  ];
+  const readSurface = () => JSON.parse(readFileSync(sdkSurface, 'utf8')) as ApiSurface & { emitterOptions: unknown };
+  const shapeOf = (s: ReturnType<typeof readSurface>) => ({
+    classes: Object.fromEntries(
+      Object.entries(s.classes).map(([name, cls]) => [name, Object.keys(cls.methods).sort()]),
+    ),
+    interfaces: Object.keys(s.interfaces).sort(),
+    emitterOptions: s.emitterOptions,
+  });
+
+  it('compat-extract: names the models the pagination hint makes generation write', async () => {
+    writeFileSync(sdkSurface, JSON.stringify(listSurface));
+    const result = await run([
+      '--config',
+      config,
+      'compat-extract',
+      '--sdk-path',
+      sdk,
+      '--lang',
+      'pets',
+      '--output',
+      dir,
+      '--spec',
+      listSpec,
+    ]);
+    expect(result.code).toBe(0);
+    // Parsed without the hint, only `Pet` and `Pet.name` were named.
+    const symbols = JSON.parse(readFileSync(snapshot, 'utf8')).symbols as Array<{ schemaName?: string }>;
+    expect(symbols.map((s) => s.schemaName).sort()).toEqual([
+      'ListPetsResponse',
+      'ListPetsResponse.data',
+      'ListPetsResponse.list_metadata',
+      'ListPetsResponseListMetadata',
+      'ListPetsResponseListMetadata.after',
+      'Pet',
+      'Pet.name',
+    ]);
+  });
+
+  it('verify: scopes compat to the models the pagination hint makes generation write', async () => {
+    // The SDK lost the two envelope models. Parsed without the hint, verify
+    // scoped them out (1/3 in scope) and passed.
+    writeFileSync(baseline, JSON.stringify(listSurface));
+    writeFileSync(sdkSurface, JSON.stringify(surface({ interfaces: { Pet: listSurface.interfaces.Pet } })));
+    const result = await run(['--config', config, ...verifyArgs(listSpec), '--max-retries', '0']);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('(scoped to spec: 3/3 baseline symbols in scope)');
+    expect(result.stdout).toContain(
+      '[symbol_removed] breaking: ListPetsResponse — Symbol "ListPetsResponse" was removed',
+    );
+    expect(result.stdout).toContain('[symbol_removed] breaking: ListPetsResponseListMetadata.after — ');
+    expect(result.stderr).toContain('Compat violations found');
+  });
+
+  it('compat-extract: matches the methods operationIdTransform names', async () => {
+    // Parsed without the transform, `Pets.get` and `Pets.list` matched no
+    // operation and got neither `operationId` nor `route`.
+    writeFileSync(sdkSurface, JSON.stringify(petsSurface));
+    const result = await run([
+      '--config',
+      config,
+      'compat-extract',
+      '--sdk-path',
+      sdk,
+      '--lang',
+      'pets',
+      '--output',
+      dir,
+      '--spec',
+      petsControllerSpec,
+    ]);
+    expect(result.code).toBe(0);
+    const symbols = JSON.parse(readFileSync(snapshot, 'utf8')).symbols as Array<{
+      kind: string;
+      fqName: string;
+      operationId?: string;
+      route?: unknown;
+    }>;
+    expect(
+      symbols
+        .filter((s) => s.kind === 'callable')
+        .map(({ fqName, operationId, route }) => ({ fqName, operationId, route })),
+    ).toEqual([
+      { fqName: 'Pets.get', operationId: 'get', route: { method: 'get', path: '/pets/{id}' } },
+      { fqName: 'Pets.list', operationId: 'list', route: { method: 'get', path: '/pets' } },
+    ]);
+  });
+
+  it('verify: the overlay retry regenerates with the mount rules, hints and emitter options generate used', async () => {
+    const generated = await run([
+      '--config',
+      retryConfig,
+      'generate',
+      '--spec',
+      petsSpec,
+      '--lang',
+      'pets',
+      '--output',
+      sdk,
+    ]);
+    expect(generated.code).toBe(0);
+    const written = readSurface();
+    const expected = {
+      classes: { Animals: ['get_pet', 'list_all'] },
+      interfaces: ['Pet'],
+      emitterOptions: { flavor: 'retry' },
+    };
+    expect(shapeOf(written)).toEqual(expected);
+
+    // The SDK lost `Pet`; the retry patches the overlay and regenerates into
+    // it. Regenerated without the settings, it wrote a `Pets` class with
+    // `get_pet` and `list_pets` beside `Animals` and dropped the options.
+    writeFileSync(baseline, JSON.stringify(written));
+    writeFileSync(sdkSurface, JSON.stringify({ ...written, interfaces: {} }));
+    const result = await run(['--config', retryConfig, ...verifyArgs(petsSpec)]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('Retry 1/3: patching 2 violation(s)...');
+    expect(result.stdout).toContain('Compat: converged after 1 retry iteration(s)');
+    expect(shapeOf(readSurface())).toEqual(expected);
   });
 });

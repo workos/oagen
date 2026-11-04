@@ -1,6 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { CommandError } from '../errors.js';
 import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
+import { expandDocUrls } from '../utils/expand-doc-urls.js';
+import type { ApiSpec } from '../ir/types.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatConfig, CompatFailLevel } from '../compat/config.js';
 import { severityMeetsThreshold } from '../compat/config.js';
@@ -51,6 +54,15 @@ export async function verifyCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
+  // What `generate` reads beyond the parse. The spec is expanded with `docUrl`
+  // as `generate` expands it; the rest goes to the overlay retry's
+  // regeneration (#567).
+  docUrl?: string;
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
+  modelHints?: Record<string, string>;
+  emitterOptions?: Record<string, unknown>;
   namespace?: string;
   compatConfig?: CompatConfig;
   compatReport?: string;
@@ -74,12 +86,35 @@ export async function verifyCommand(opts: {
     transformSpec,
     fieldHints,
     collapseErrorBodies,
+    docUrl,
+    operationHints,
+    mountRules,
+    operationNaming,
+    modelHints,
+    emitterOptions,
     compatConfig,
     compatReport,
     compatExplain,
   } = opts;
   const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
+
+  // Parse as `generate` parses, and expand doc URLs as it does, so every IR
+  // verify reads — the compat scope, the retry's regeneration input and both
+  // staleness inputs — is the IR the SDK in `--output` was generated from
+  // (#567). Without `operationHints`, the `ListPetsResponse` a pagination
+  // hint makes generation write is scoped out of compat and never found stale.
+  const parseAsGenerate = async (path: string): Promise<ApiSpec> => {
+    const ir = await parseSpec(path, {
+      operationIdTransform,
+      schemaNameTransform,
+      transformSpec,
+      fieldHints,
+      operationHints,
+      collapseErrorBodies,
+    });
+    return docUrl ? expandDocUrls(ir, docUrl) : ir;
+  };
 
   // Resolve compat options: CLI flags take precedence over config
   const effectiveFailOn: CompatFailLevel =
@@ -100,13 +135,7 @@ export async function verifyCommand(opts: {
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
     let parsedSpec;
     if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseSpec(spec, {
-        operationIdTransform,
-        schemaNameTransform,
-        transformSpec,
-        fieldHints,
-        collapseErrorBodies,
-      });
+      parsedSpec = await parseAsGenerate(spec);
     } else if (effectiveScope === 'spec-only') {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
@@ -120,6 +149,11 @@ export async function verifyCommand(opts: {
             lang,
             maxRetries,
             namespace: opts.namespace,
+            operationHints,
+            mountRules,
+            operationNaming,
+            modelHints,
+            emitterOptions,
             onRetry: (attemptNumber, retryLimit, patchableCount) => {
               console.log(`\nRetry ${attemptNumber}/${retryLimit}: patching ${patchableCount} violation(s)...`);
             },
@@ -213,20 +247,8 @@ export async function verifyCommand(opts: {
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
-    const oldParsedSpec = await parseSpec(oldSpec, {
-      operationIdTransform,
-      schemaNameTransform,
-      transformSpec,
-      fieldHints,
-      collapseErrorBodies,
-    });
-    const newParsedSpec = await parseSpec(spec, {
-      operationIdTransform,
-      schemaNameTransform,
-      transformSpec,
-      fieldHints,
-      collapseErrorBodies,
-    });
+    const oldParsedSpec = await parseAsGenerate(oldSpec);
+    const newParsedSpec = await parseAsGenerate(spec);
     const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {

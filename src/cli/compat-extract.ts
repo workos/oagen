@@ -9,6 +9,7 @@ import type { Manifest } from '../engine/manifest.js';
 import type { CompatSnapshot } from '../compat/ir.js';
 import type { ApiSurface, ApiClass } from '../compat/types.js';
 import type { ApiSpec } from '../ir/types.js';
+import type { OperationHint } from '../ir/operation-hints.js';
 import type { SchemaNameTransform } from '../parser/schemas.js';
 
 const SNAPSHOT_FILENAME = '.oagen-compat-snapshot.json';
@@ -127,9 +128,11 @@ export async function compatExtractCommand(opts: {
   lang: string;
   output: string;
   spec?: string;
+  operationIdTransform?: (id: string) => string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   fieldHints?: Record<string, Record<string, string>>;
+  operationHints?: Record<string, OperationHint>;
   collapseErrorBodies?: boolean;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
@@ -155,10 +158,16 @@ export async function compatExtractCommand(opts: {
     const specContent = readFileSync(opts.spec, 'utf-8');
     snapshot.source.specSha = createHash('sha256').update(specContent).digest('hex');
 
+    // Parse as `generate` parses, the transform and the hints included, so the
+    // operation names and models matched below are the ones the SDK has: a
+    // method named by `operationIdTransform`, the `ListPetsResponse` a
+    // pagination hint makes generation write (#567).
     const parsedSpec = await parseSpec(opts.spec, {
+      operationIdTransform: opts.operationIdTransform,
       schemaNameTransform: opts.schemaNameTransform,
       transformSpec: opts.transformSpec,
       fieldHints: opts.fieldHints,
+      operationHints: opts.operationHints,
       collapseErrorBodies: opts.collapseErrorBodies,
     });
     enrichWithSpecContext(snapshot, parsedSpec);

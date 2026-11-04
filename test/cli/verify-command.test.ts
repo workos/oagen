@@ -51,6 +51,7 @@ vi.mock('../../src/engine/registry.js', () => ({
 }));
 
 import { verifyCommand } from '../../src/cli/verify.js';
+import type { ApiSpec } from '../../src/ir/types.js';
 
 /**
  * Minimal ApiSurface with one class and one interface.
@@ -757,5 +758,191 @@ describe('verifyCommand', () => {
 
     // generate should NOT be called — no spec means shouldRetry is false
     expect(mockGenerate).not.toHaveBeenCalled();
+  });
+});
+
+describe('#567', () => {
+  // `verify` has to parse every spec it reads as `generate` parses it, and
+  // its overlay retry has to regenerate with the settings `generate` hands
+  // the engine, or it reads models the SDK does not have and rewrites the
+  // SDK into another one.
+  let tmpDir: string;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  const pet = { type: 'object', required: ['name'], properties: { name: { type: 'string' } } };
+  const ok = (schema: unknown) => ({ '200': { description: 'ok', content: { 'application/json': { schema } } } });
+  const doc = (paths: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'pets', version: '1' },
+    paths,
+    components: { schemas: { Pet: pet } },
+  });
+  // GET /pets with an `after` query parameter and a list envelope is detected
+  // as cursor pagination, so the envelope is the iterator's and `Pet` the only
+  // model; under `pagination: { strategy: 'none' }` it is a plain operation
+  // and generation writes `ListPetsResponse` and `ListPetsResponseListMetadata`
+  // beside `Pet`.
+  const listDoc = doc({
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: ok({
+          type: 'object',
+          required: ['data', 'list_metadata'],
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+            list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+          },
+        }),
+      },
+    },
+  });
+  const noPagination = { 'GET /pets': { pagination: { strategy: 'none' as const } } };
+  const iface = (name: string, fields: Record<string, string>) => ({
+    name,
+    fields: Object.fromEntries(Object.entries(fields).map(([n, type]) => [n, { name: n, type, optional: false }])),
+    extends: [],
+  });
+  const petInterfaces = {
+    ListPetsResponse: iface('ListPetsResponse', { data: 'Pet[]', list_metadata: 'ListPetsResponseListMetadata' }),
+    ListPetsResponseListMetadata: iface('ListPetsResponseListMetadata', { after: 'string' }),
+    Pet: iface('Pet', { name: 'string' }),
+  };
+  const write = (name: string, content: unknown) => {
+    const file = resolve(tmpDir, name);
+    writeFileSync(file, JSON.stringify(content));
+    return file;
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpDir = resolve(os.tmpdir(), `oagen-verify-567-${process.pid}`);
+    mkdirSync(tmpDir, { recursive: true });
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const dummyOverlay = {
+      methodByOperation: new Map(),
+      httpKeyByMethod: new Map(),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+      modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
+    };
+    mockBuildOverlayLookup.mockReturnValue(dummyOverlay);
+    mockPatchOverlay.mockReturnValue(dummyOverlay);
+    mockGenerate.mockResolvedValue([]);
+    mockGetEmitter.mockReturnValue({ language: 'test-lang' });
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('parses the compat scope with operationHints, as generate does', async () => {
+    // The SDK lost the two envelope models the hint makes generation write.
+    const spec = write('list.json', listDoc);
+    const apiSurface = write('baseline.json', makeSurface({ classes: {}, interfaces: petInterfaces }));
+    mockExtract.mockResolvedValue(makeSurface({ classes: {}, interfaces: { Pet: petInterfaces.Pet } }));
+    const opts = {
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 0,
+    };
+
+    // Parsed without the hint, the removed models are not in scope: verify passes.
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 1/3 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith('Compat: passed');
+
+    await expect(verifyCommand({ ...opts, operationHints: noPagination })).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 3/3 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: ListPetsResponse — Symbol "ListPetsResponse" was removed',
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: ListPetsResponseListMetadata.after — Symbol "ListPetsResponseListMetadata.after" was removed',
+    );
+  });
+
+  it('parses both staleness inputs with operationHints, as generate does', async () => {
+    // The new spec dropped GET /pets, so the SDK's two envelope models are
+    // stale. They are found only when the old spec is parsed with the hint
+    // that made generation write them; the new spec, parsed either way,
+    // names `Pet` alone.
+    const oldSpec = write('old.json', listDoc);
+    const spec = write('new.json', doc({}));
+    const apiSurface = write('baseline.json', makeSurface({ classes: {}, interfaces: petInterfaces }));
+    mockExtract.mockResolvedValue(makeSurface({ classes: {}, interfaces: petInterfaces }));
+    const opts = { spec, oldSpec, lang: 'test-lang', output: tmpDir, apiSurface, rawResults: write('raw.json', []) };
+
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('No stale symbols detected.');
+
+    await verifyCommand({ ...opts, operationHints: noPagination });
+    expect(consoleSpy).toHaveBeenCalledWith('Found 2 stale symbol(s):');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: ListPetsResponse — Interface "ListPetsResponse" is no longer defined in the OpenAPI spec',
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: ListPetsResponseListMetadata — Interface "ListPetsResponseListMetadata" is no longer defined in the OpenAPI spec',
+    );
+  });
+
+  it('regenerates with the settings generate hands the engine, from the IR generate reads', async () => {
+    // The retry's one regeneration gets every engine setting, and an IR whose
+    // doc links `docUrl` has expanded, as `generate` expands them.
+    const spec = write('users.json', {
+      openapi: '3.1.0',
+      info: { title: 'users', version: '1' },
+      paths: {
+        '/users': {
+          get: {
+            operationId: 'listUsers',
+            description: 'Lists every [User](/reference/users/user).',
+            responses: ok({ type: 'array', items: { $ref: '#/components/schemas/User' } }),
+          },
+        },
+      },
+      components: {
+        schemas: { User: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
+      },
+    });
+    const apiSurface = write('baseline.json', makeSurface());
+    mockExtract
+      .mockResolvedValueOnce({ ...makeSurface(), interfaces: {} }) // attempt 0: violation
+      .mockResolvedValue(makeSurface()); // attempt 1: converged
+    const settings = {
+      operationHints: { 'GET /users': { name: 'list_all' } },
+      mountRules: { Users: 'People' },
+      operationNaming: 'operationId' as const,
+      modelHints: { User: 'Users' },
+      emitterOptions: { flavor: 'retry' },
+    };
+
+    await verifyCommand({
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 3,
+      docUrl: 'https://docs.example.com',
+      ...settings,
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('converged after 1 retry'));
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    const [ir, , options] = mockGenerate.mock.calls[0] as [ApiSpec, unknown, Record<string, unknown>];
+    expect(options).toMatchObject(settings);
+    expect(ir.services[0].operations[0].description).toBe(
+      'Lists every [User](https://docs.example.com/reference/users/user).',
+    );
   });
 });
