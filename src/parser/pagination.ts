@@ -17,7 +17,7 @@ import {
   unwrapNullableSchema,
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
-import { combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
+import { allOfTypingMember, combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -570,12 +570,20 @@ export function resolveBareSchema(
   }
   const bare = unwrapNullableSchema(schema);
   if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
-  const lone =
-    bare.allOf?.length === 1 &&
-    classifyInlineSchema(bare) === 'allOf' &&
-    readInlineAllOf(bare.allOf, bare, componentSchemas) !== 'merged'
-      ? bare.allOf[0]
+  const reading =
+    bare.allOf && classifyInlineSchema(bare) === 'allOf'
+      ? readInlineAllOf(bare.allOf, bare, componentSchemas)
       : undefined;
+  // The member the type builder types the `allOf` as: the one unwrapped —
+  // a lone member, or the one typing member beside members that only
+  // annotate or limit it (`allOfTypingMember`; #555) — or the `$ref` member
+  // of a plain reference, whatever is written beside it.
+  const lone =
+    reading === 'unwrapped'
+      ? (allOfTypingMember(bare.allOf ?? []) ?? bare.allOf?.[0])
+      : reading === 'reference'
+        ? bare.allOf?.find((member) => member.$ref !== undefined)
+        : undefined;
   return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
 }
 

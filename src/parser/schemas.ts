@@ -715,8 +715,9 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
 
 /**
  * The member `schemaToTypeRef` types an `allOf` as (`readInlineAllOf`): a
- * lone member with nothing added to it (`'unwrapped'`), read as the schema
- * itself with the wrapper's limits, flag and documentation
+ * lone member with nothing added to it, or the one typing member beside
+ * members that only annotate or limit it (`'unwrapped'`; #555), read as
+ * the schema itself with the wrapper's limits, flag and documentation
  * (`unwrappedAllOfMember`), or the first `$ref` member of a plain reference
  * (`'reference'`). `undefined` for any other schema: no `allOf` that types
  * it (`classifyInlineSchema`), or one merged into a model. Read on a schema
@@ -726,7 +727,7 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
 function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
   if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
   const reading = readInlineAllOf(schema.allOf, schema);
-  if (reading === 'unwrapped') return unwrappedAllOfMember(schema, schema.allOf[0]);
+  if (reading === 'unwrapped') return unwrappedAllOfMember(schema);
   return reading === 'reference' ? schema.allOf.find((member) => member.$ref !== undefined) : undefined;
 }
 
@@ -749,17 +750,22 @@ function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
  * [{ const: 'draft', description }, { type: 'null' }] }` is a nullable enum
  * of `draft`, no wrapper around a lone const (`nullableUnionBranch`), and
  * the variant's text is the member's alone (workos/oagen#535), as a
- * single-member one's is (`loneUnionVariant`). Read for a request body's
- * doc text (`requestBodyDescriptionOf`).
+ * single-member one's is (`loneUnionVariant`). An `allOf` member that
+ * declares no type — `allOf: [{ $ref: Pet }, { description }]`, `allOf:
+ * [{ type: 'string' }, { description }]` — is part of the wrapper, not a
+ * branch (`annotatingAllOfMembers`), so its text is the wrapper's own,
+ * after the wrapper's: carried onto the one typing member that is
+ * unwrapped, and standing beside a `$ref` member or a merge as the
+ * schema's where the schema has none (`allOfWrapperLayer`; #555). Read for
+ * a request body's doc text (`requestBodyDescriptionOf`).
  */
 export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
   const bare = unwrapNullableSchema(schema, withWrapperDocs);
   const variant = loneUnionVariant(bare);
   if (variant) return unwrapCollapsedWrappers(withWrapperDocs(variant, bare));
-  if (!bare.allOf || classifyInlineSchema(bare) !== 'allOf' || readInlineAllOf(bare.allOf, bare) !== 'unwrapped') {
-    return bare;
-  }
-  return unwrapCollapsedWrappers(unwrappedAllOfMember(bare, bare.allOf[0]));
+  if (!bare.allOf || classifyInlineSchema(bare) !== 'allOf') return bare;
+  if (readInlineAllOf(bare.allOf, bare) !== 'unwrapped') return allOfWrapperLayer(bare);
+  return unwrapCollapsedWrappers(unwrappedAllOfMember(bare));
 }
 
 /**
@@ -2332,17 +2338,22 @@ const TYPING_KEYWORDS: readonly string[] = [
  * model), a member declaring properties inline (a merged model —
  * `declaresInlineProperties`: its own `properties`, or those of a nested
  * `allOf` member or of a `oneOf`/`anyOf` variant, which `mergeAllOfMembers`
- * reads into the model), or a lone member that types on its own
- * (unwrapped). An `allOf` whose members only conjoin limits or
+ * reads into the model), or exactly one member that types on its own
+ * (`allOfTypingMember`, unwrapped) — alone, or beside members that declare
+ * no type and only annotate or limit it: `allOf: [{ type: 'string', enum:
+ * [...] }, { description }]` is the enum, as `allOf: [{ type: 'string',
+ * enum: [...] }]` is (#555: it was not an `allOf` here, and the schema
+ * was `unknown`). An `allOf` whose members only conjoin limits or
  * documentation — `allOf: [{ minProperties: 1 }, { maxProperties: 3 }]`
- * beside the schema's own `properties` — does not: the schema is then typed
- * from its own keywords, and `extractConstraints` still conjoins the
- * members' limits onto the field and the model it builds.
+ * beside the schema's own `properties` — does not, nor one of several
+ * typing members none of which declares properties — two primitives: the
+ * schema is then typed from its own keywords, and `extractConstraints`
+ * still conjoins the members' limits onto the field and the model it
+ * builds.
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
   if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
-  const only = members.length === 1 ? members[0] : undefined;
-  return only !== undefined && TYPING_KEYWORDS.some((key) => (only as Record<string, unknown>)[key] !== undefined);
+  return allOfTypingMember(members) !== undefined;
 }
 
 /**
@@ -2689,12 +2700,14 @@ export function variantMemberSchemas(variant: SchemaObject, variantName: string)
 /**
  * The `$ref` a field's schema is typed as, read through the wrappers
  * `schemaToTypeRef` reads through — a nullable wrapper of any spelling
- * (`unwrapNullableSchema`) and an `allOf` read as its lone member or as a
- * plain reference (`allOfReadAsMember`), however they nest — with every
- * schema on the way that documents or limits the field, nearest first: the
- * field's own, each wrapper it unwraps to, the members written beside the
- * `$ref` in an `allOf` (`{ allOf: [{ $ref: PetId }, { description }] }`,
- * the usual OAS 3.0 way to document a reference) and the `$ref` schema
+ * (`unwrapNullableSchema`) and an `allOf` read as its one typing member or
+ * as a plain reference (`allOfReadAsMember`), however they nest — with
+ * every schema on the way that documents or limits the field, nearest
+ * first: the field's own, each wrapper it unwraps to, the members written
+ * beside the `$ref` in an `allOf` (`{ allOf: [{ $ref: PetId }, {
+ * description }] }`, the usual OAS 3.0 way to document a reference) or
+ * beside the member it unwraps to (`{ allOf: [{ oneOf: [{ $ref: PetId },
+ * { type: 'null' }] }, { description }] }`; #555) and the `$ref` schema
  * itself, with whatever is written beside it. A bare `$ref` is itself, with
  * the field's schema as its one level. `undefined` when the schema is typed
  * as no reference: an inline schema, or an `allOf` merged into a model.
@@ -2716,8 +2729,14 @@ function wrappedReference(schema: SchemaObject): { reference: SchemaObject; leve
     if (bare !== current) levels.push(bare);
     const member = allOfReadAsMember(bare);
     if (member === undefined) return undefined;
-    // A plain reference: the other members annotate or limit the field.
-    if (member.$ref !== undefined) levels.push(...(bare.allOf ?? []).filter((other) => other !== member));
+    // The other members annotate or limit the field: those beside a plain
+    // reference's `$ref`, and those that declare no type beside the one
+    // member unwrapped (`annotatingAllOfMembers`), which is read as a copy.
+    levels.push(
+      ...(member.$ref !== undefined ? (bare.allOf ?? []) : annotatingAllOfMembers(bare)).filter(
+        (other) => other !== member,
+      ),
+    );
     current = member;
   }
 }
@@ -2800,7 +2819,13 @@ export function buildFieldFromSchema(
   const refTarget = reference ? reference.entries[0] : resolveComponentSchemaRef(fieldSchema, componentSchemas);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  const own = reference?.own ?? [fieldSchema];
+  // The field's own levels: its schema and, under it, each `allOf` member
+  // that declares no type and so only annotates or limits the field
+  // (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind }, { description
+  // }]` and `allOf: [{ type: 'string' }, { deprecated: true }]` read neither
+  // the text nor the flag) — nearest first, as `wrappedReference` orders
+  // them for a reference to an array or primitive component.
+  const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
   const limitLevels = [...own, ...aliases];
   const { example, examples } = resolveExamples(
@@ -3746,7 +3771,7 @@ function componentEntries(
   const reading = readInlineAllOf(bare.allOf, bare, schemas);
   if (reading === 'reference') return aliasOf(bare.allOf.find((member) => member.$ref)?.$ref);
   if (reading !== 'unwrapped') return undefined;
-  const entries = componentEntries(unwrappedAllOfMember(bare, bare.allOf[0]), schemas, declares, seen);
+  const entries = componentEntries(unwrappedAllOfMember(bare), schemas, declares, seen);
   return entries && [schema, ...entries.slice(1)];
 }
 
@@ -5166,13 +5191,15 @@ export function schemaToTypeRef(
       // `allOfTypesSchema` admits, so one is found here.
       if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
     } else {
-      // A single member, unwrapped. The wrapper is the schema the document
-      // wrote, so its documentation rides onto the member — an inline enum
-      // lifted from it carries the wrapper's `description` and link
-      // (`withWrapperDocs`), and a model built from it the wrapper's link
-      // (`unwrappedAllOfMember`).
+      // A single member, or the one member that types the schema beside
+      // members that only annotate or limit it (`allOfTypingMember`; #555),
+      // unwrapped. The wrapper is the schema the document wrote, and those
+      // members are part of it (`allOfWrapperLayer`), so its documentation
+      // rides onto the member — an inline enum lifted from it carries the
+      // wrapper's `description` and link (`withWrapperDocs`), and a model
+      // built from it the wrapper's link (`unwrappedAllOfMember`).
       return schemaToTypeRef(
-        withWrapperDocs(schema.allOf[0], schema),
+        withWrapperDocs(allOfTypingMember(schema.allOf) ?? schema.allOf[0], allOfWrapperLayer(schema)),
         contextName,
         parentModelName,
         siblingProperties,
@@ -5547,9 +5574,10 @@ function describesNothing(schema: SchemaObject): boolean {
  * (`classifyInlineSchema`: no composition, union, `const`, `enum`, array,
  * object or map) with no primitive `type` — `{}`, `{ nullable: true }`, a
  * `type` no rule knows, `type: 'array'` without `items`, a bare
- * `additionalProperties` without `type: 'object'` — or a lone `allOf`
- * member read as the schema itself (`readInlineAllOf`: `'unwrapped'`)
- * that is such a schema. Warns about nothing.
+ * `additionalProperties` without `type: 'object'` — or an `allOf` member
+ * read as the schema itself (`readInlineAllOf`: `'unwrapped'` — a lone
+ * member, or the one typing member beside annotating ones:
+ * `allOfTypingMember`) that is such a schema. Warns about nothing.
  */
 export function typesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) return false;
@@ -5561,7 +5589,10 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
   const folded = foldSiblingProperties(schema);
   const kind = classifyInlineSchema(folded);
   if (kind === 'allOf' && folded.allOf) {
-    return readInlineAllOf(folded.allOf, folded) === 'unwrapped' && typesAsUnknown(folded.allOf[0]);
+    return (
+      readInlineAllOf(folded.allOf, folded) === 'unwrapped' &&
+      typesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0])
+    );
   }
   if (kind !== 'other') return false;
   const typeStr = Array.isArray(folded.type) ? folded.type[0] : folded.type;
@@ -5569,6 +5600,9 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 }
 
 import {
+  allOfTypingMember,
+  allOfWrapperLayer,
+  annotatingAllOfMembers,
   buildInlineModel,
   collectProperties,
   declarationKeywords,

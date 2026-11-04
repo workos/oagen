@@ -138,7 +138,13 @@ export function mintedInlineNameEntries(
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
     const reading = readInlineAllOf(s.allOf, s);
     if (reading === 'unwrapped') {
-      return mintedInlineNameEntries(contextName, s.allOf[0]!, parentModelName, reserved, deep);
+      return mintedInlineNameEntries(
+        contextName,
+        allOfTypingMember(s.allOf) ?? s.allOf[0]!,
+        parentModelName,
+        reserved,
+        deep,
+      );
     }
     if (reading !== 'merged') return [];
     // The merged model's own properties, as `materializeMergedAllOf` re-enters
@@ -1978,7 +1984,7 @@ export function extractInlineModelsFromProperties(
         // Re-enter with the member as the field (same siblings), carrying the
         // wrapper's limits, flag and link (`unwrappedAllOfMember`).
         extractInlineModelsFromProperties(
-          { properties: { [fieldName]: unwrappedAllOfMember(fieldSchema, fieldSchema.allOf[0]!) } },
+          { properties: { [fieldName]: unwrappedAllOfMember(fieldSchema) } },
           results,
           parentName,
           componentSchemas,
@@ -2263,7 +2269,19 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     only, so `{ allOf: [{ properties: { name } }], required: [name] }`
  *     left `name` optional). Beside a member that declares none — an
  *     array, a primitive, an enum — `required` constrains nothing, and the
- *     member is the schema.
+ *     member is the schema. Members beside it that declare no type of
+ *     their own (`declaresType`: a `description`, a `deprecated`, a
+ *     `maxLength`, an `x-*` key) add nothing to it either — they annotate
+ *     or limit the schema, as the wrapper's own keywords do — so the one
+ *     member that declares a type is the schema when every other member
+ *     declares none (`allOfTypingMember`): `allOf: [{ type: 'string',
+ *     enum: ['cat', 'dog'] }, { description: 'The kind of pet.' }]` is
+ *     that enum, documented by the second member, exactly as `{ allOf:
+ *     [{ type: 'string', enum: [...] }], description }` is
+ *     (workos/oagen#555: it was `unknown`, the description lost with it).
+ *     Two members that each declare a type, neither of them properties —
+ *     two primitives, say — are read as neither, and `allOfTypesSchema`
+ *     leaves such a schema to its own keywords.
  *   - `'reference'`: a single `$ref` member with nothing beside it that adds
  *     to the component — a `description`, limits — is that component, and
  *     nothing is minted. A second `$ref` member, or a `required` list
@@ -2305,7 +2323,73 @@ export function readInlineAllOf(
     const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
     return addsRequired ? 'merged' : 'unwrapped';
   }
-  return members.some(declaresInlineProperties) ? 'merged' : 'reference';
+  if (members.some(declaresInlineProperties)) return 'merged';
+  // One member types the schema and the others only annotate or limit it
+  // (#555): read as that member, as a lone member is. Several typing
+  // members, or none, are no reading at all.
+  return allOfTypingMember(members) !== undefined ? 'unwrapped' : 'reference';
+}
+
+/**
+ * The one member of an `allOf` that declares a type of its own
+ * (`declaresType`) when exactly one does, the others annotating or
+ * limiting it — a `description`, `deprecated`, `readOnly`, an `example`, a
+ * `maxLength`, an `x-*` key — which `readInlineAllOf` reads as the schema
+ * (`'unwrapped'`, and `allOfTypesSchema` admits as an `allOf` that types
+ * it). `undefined` when no member declares a type, or more than one does:
+ * two inline objects merge, a `$ref` beside an inline object augments it,
+ * and two primitives are read as neither (#555).
+ */
+export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObject | undefined {
+  const typing = members.filter(declaresType);
+  return typing.length === 1 ? typing[0] : undefined;
+}
+
+/**
+ * The members of `schema`'s `allOf` that declare no type of their own
+ * (`declaresType`), in document order — each annotating or limiting the
+ * schema rather than typing it, so what they write is the schema's own, as
+ * a wrapper's keywords are: their limits conjoin (`extractConstraints`),
+ * and their `description`, link, examples, flags, `default` and `x-*` keys
+ * are the schema's wherever it declares none itself (`allOfWrapperLayer`,
+ * `buildFieldFromSchema`, `extractParams`). Whatever the other members —
+ * one typing member unwrapped (`allOfTypingMember`), a `$ref` read as the
+ * reference, a merge — a member that declares no type documents the field
+ * the schema is written on, never a model or component (#555: `allOf:
+ * [{ $ref: Kind }, { description }]` was typed `Kind` with no description
+ * on the field, and `{ deprecated: true }` or `{ readOnly: true }` beside
+ * the `$ref` was dropped). Empty for a schema with no `allOf`.
+ */
+export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
+  return (schema.allOf ?? []).filter((member) => !declaresType(member));
+}
+
+/**
+ * `wrapper` as the layer the member its `allOf` is read as sits under: its
+ * own keywords, with the documentation and `deprecated` of each annotating
+ * member (`annotatingAllOfMembers`) folded in. The layers compose
+ * outermost-first by the one wrapper rule (`withWrapperDocs`): the
+ * wrapper's own `description`, link, examples and `x-*` keys win, then the
+ * first annotating member's that declares one, then the next — so
+ * `{ allOf: [{ type: 'string' }, { description: 'A' }, { description:
+ * 'B' }] }` is documented `A`, and `{ allOf: [...], description: 'own' }`
+ * `own`. `deprecated` is `true` when the wrapper or any annotating member
+ * says so, as `Field.deprecated` reads the levels of a field. The wrapper
+ * itself when it has no annotating member. Read wherever a wrapper's
+ * documentation lands on what it unwraps to (`unwrappedAllOfMember`, the
+ * type builder's unwrapped branch) and wherever a wrapper's own text is
+ * read as the schema's (`unwrapCollapsedWrappers`).
+ */
+export function allOfWrapperLayer(wrapper: SchemaObject): SchemaObject {
+  const annotating = annotatingAllOfMembers(wrapper);
+  if (annotating.length === 0) return wrapper;
+  // Innermost first: the last member's documentation, each earlier member's
+  // over it, then the wrapper's own over all — `withWrapperDocs` carries
+  // only what the outer layer declares, so a blank `description` on the
+  // wrapper leaves a member's text standing.
+  const docs = annotating.reduceRight<SchemaObject>((inner, member) => withWrapperDocs(inner, member), {});
+  const deprecated = wrapper.deprecated === true || annotating.some((member) => member.deprecated === true);
+  return { ...wrapper, ...withWrapperDocs(docs, wrapper), ...(deprecated && { deprecated: true }) };
 }
 
 /**
@@ -2330,24 +2414,32 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
 }
 
 /**
- * The lone member of an `allOf`, read as the schema itself. The wrapper's own
- * keywords, conjoined with the member's, are the schema's limits (see
- * `extractConstraints`), so they ride along with the member and the model
- * built from it carries the same constraints; its `deprecated` is the
- * wrapper's alone, as `Field.deprecated` reads it, and its documentation —
- * text, link, examples, extensions — is the wrapper's wherever the wrapper
- * has any, by the one wrapper rule `schemaToTypeRef` applies to the member
- * it types (`withWrapperDocs`), so the model built from the member and an
- * inline enum lifted from it are documented by the wrapper alike. Nested
- * under a nullable wrapper, the outer wrapper's documentation has already
- * landed on this one (`unwrapNullableField`), so the layers compose
- * outermost-first.
+ * The member of an `allOf` read as `'unwrapped'` (`readInlineAllOf`), read
+ * as the schema itself: the lone member, or the one member that declares a
+ * type among members that only annotate or limit it (`allOfTypingMember`;
+ * #555). The wrapper's own keywords, conjoined with every member's, are the
+ * schema's limits (see `extractConstraints`), so they ride along with the
+ * member and the model built from it carries the same constraints; its
+ * `deprecated` is the wrapper layer's alone — the wrapper's own, or an
+ * annotating member's — as `Field.deprecated` reads it, and its
+ * documentation — text, link, examples, extensions — is that layer's
+ * wherever the layer has any (`allOfWrapperLayer`), by the one wrapper rule
+ * `schemaToTypeRef` applies to the member it types (`withWrapperDocs`), so
+ * the model built from the member and an inline enum lifted from it are
+ * documented by the wrapper alike. Nested under a nullable wrapper, the
+ * outer wrapper's documentation has already landed on this one
+ * (`unwrapNullableField`), so the layers compose outermost-first. Read on
+ * a schema `readInlineAllOf` reads as `'unwrapped'`; the first member
+ * stands in where no member declares a type, a shape no site unwraps.
  */
-export function unwrappedAllOfMember(wrapper: SchemaObject, member: SchemaObject): SchemaObject {
-  // The wrapper's documentation layer — text, link, examples, extensions —
+export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
+  const members = wrapper.allOf ?? [];
+  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  // The wrapper layer's documentation — text, link, examples, extensions —
   // rides onto the member by the one wrapper rule (`withWrapperDocs`), the
   // wrapper's winning, as the type builder gives the same wrapper on a field.
-  return withWrapperDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, wrapper), wrapper);
+  const layer = allOfWrapperLayer(wrapper);
+  return withWrapperDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, layer), layer);
 }
 
 /**

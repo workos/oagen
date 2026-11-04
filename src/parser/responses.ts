@@ -868,7 +868,7 @@ function directResourceReading(
   if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
     const reading = readInlineAllOf(schema.allOf, schema, componentSchemas);
     if (reading === 'reference') return { kind: 'reference' };
-    if (reading === 'unwrapped') return { kind: 'unwrapped', member: unwrappedAllOfMember(schema, schema.allOf[0]!) };
+    if (reading === 'unwrapped') return { kind: 'unwrapped', member: unwrappedAllOfMember(schema) };
     return { kind: 'merged' };
   }
   const array = arraySchemaOf(schema);

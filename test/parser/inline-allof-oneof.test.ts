@@ -5,14 +5,26 @@ import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
-import { extractSchemas, schemaToTypeRef, type SchemaObject } from '../../src/parser/schemas.js';
 import {
+  classifyInlineSchema,
+  extractSchemas,
+  schemaToTypeRef,
+  typesAsUnknown,
+  unwrapCollapsedWrappers,
+  type SchemaObject,
+} from '../../src/parser/schemas.js';
+import { resolveBareSchema } from '../../src/parser/pagination.js';
+import {
+  allOfTypingMember,
+  allOfWrapperLayer,
+  annotatingAllOfMembers,
   declaresInlineProperties,
   extractInlineModelsFromProperties,
   isInlineAllOfMember,
   mergeAllOfMembers,
   mintedInlineNameEntries,
   readInlineAllOf,
+  unwrappedAllOfMember,
 } from '../../src/parser/inline-models.js';
 import {
   collectModelRefs,
@@ -20,6 +32,7 @@ import {
   collectResponseHeaders,
   collectWebhookTypeRefs,
   type ApiSpec,
+  type Field,
   type Model,
   type Operation,
   type TypeRef,
@@ -2277,5 +2290,456 @@ describe('merge round 1: a schema read through a $ref and again as an inline mem
       components,
     );
     expect(merged.properties.map((p) => p.name)).toEqual(['depth', 'note']);
+  });
+});
+
+/**
+ * workos/oagen#555: a property written as `allOf: [{ type: 'string', enum:
+ * [...] }, { description }]` — one member that types it beside one that
+ * only documents it — was `unknown` with a warning, and the member's text
+ * was lost with it: `allOfTypesSchema` let an `allOf` type the schema only
+ * through a `$ref` member, a member with properties, or a lone member. A
+ * member that declares no type (`declaresType`) is now part of the wrapper
+ * (`annotatingAllOfMembers`): the one typing member is unwrapped as a lone
+ * member is (`allOfTypingMember`, `readInlineAllOf`: `'unwrapped'`), the
+ * annotating members' documentation and `deprecated` ride onto it as the
+ * wrapper's own do (`allOfWrapperLayer`), their limits conjoin as they
+ * already did (`extractConstraints`), and a field, parameter or header
+ * reads its text, flags, default, examples and `x-*` keys from them
+ * whatever the other members — beside a `$ref` too (the review: `allOf:
+ * [{ $ref: Kind }, { deprecated: true }]` dropped the flag).
+ */
+describe('an allOf of one typing member beside members that only annotate or limit it (workos/oagen#555)', () => {
+  const kindEnum: SchemaObject = { type: 'string', enum: ['cat', 'dog'] };
+  const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+  const components: Record<string, SchemaObject> = {
+    Kind: kindEnum,
+    PetId: { type: 'string', maxLength: 36, pattern: '^pet_' },
+    Owner: { type: 'object', properties: { name: { type: 'string' } } },
+  };
+  const int = { kind: 'primitive', type: 'integer' };
+  const petKind = { kind: 'enum', name: 'PetKind', values: ['cat', 'dog'] };
+
+  /** `GET /pets/{petId}` returning `Pet`, whose properties are `properties`, all required. */
+  const petDoc = (openapi: string, properties: Record<string, SchemaObject>): Record<string, unknown> => ({
+    openapi,
+    info,
+    paths: {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+          responses: { '200': jsonResponse(ref('Pet')) },
+        },
+      },
+    },
+    components: {
+      schemas: { ...components, Pet: { type: 'object', required: Object.keys(properties), properties } },
+    },
+  });
+  const fieldOf = (ir: ApiSpec, name: string): Field => modelsByName(ir)['Pet']!.fields.find((f) => f.name === name)!;
+  /** The issue's projection of a field: its type and whatever it documents. */
+  const shown = (field: Field): Record<string, unknown> => {
+    const { constraints, deprecated, description, readOnly, type } = field;
+    return {
+      type,
+      ...(constraints !== undefined && { constraints }),
+      ...(deprecated !== undefined && { deprecated }),
+      ...(description !== undefined && { description }),
+      ...(readOnly !== undefined && { readOnly }),
+    };
+  };
+  const enumOf = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name);
+
+  it.each(['3.1.0', '3.0.3'])("types the issue's Pet as the lone-member spelling does (OAS %s)", async (openapi) => {
+    const annotated = petDoc(openapi, {
+      kind: { allOf: [kindEnum, { description: 'The kind of pet.' }] },
+      name: { allOf: [{ type: 'string' }, { description: 'The name of the pet.' }] },
+      size: { allOf: [{ type: 'string', enum: ['large', 'small'] }], description: 'The size of the pet.' },
+    });
+    const ir = await parseWithoutWarnings(annotated);
+    expect(shown(fieldOf(ir, 'kind'))).toEqual({ type: petKind, description: 'The kind of pet.' });
+    expect(shown(fieldOf(ir, 'name'))).toEqual({ type: str, description: 'The name of the pet.' });
+    expect(shown(fieldOf(ir, 'size'))).toEqual({
+      type: { kind: 'enum', name: 'PetSize', values: ['large', 'small'] },
+      description: 'The size of the pet.',
+    });
+    // The inline enum lifted from the typing member is documented by the
+    // annotating member, as `PetSize` is by its wrapper.
+    expect(enumOf(ir, 'PetKind')).toMatchObject({ description: 'The kind of pet.' });
+    expect(enumOf(ir, 'PetKind')?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+    expect(enumOf(ir, 'PetSize')).toMatchObject({ description: 'The size of the pet.' });
+    expectSound(ir, ['Kind', 'Owner', 'Pet']);
+
+    // `oagen diff` between the two spellings reports nothing.
+    const lone = await parseWithoutWarnings(
+      petDoc(openapi, {
+        kind: { allOf: [kindEnum], description: 'The kind of pet.' },
+        name: { allOf: [{ type: 'string' }], description: 'The name of the pet.' },
+        size: { allOf: [{ type: 'string', enum: ['large', 'small'] }], description: 'The size of the pet.' },
+      }),
+    );
+    expect(diffSpecs(lone, ir).changes).toEqual([]);
+  });
+
+  it.each(['3.1.0', '3.0.3'])('documents and flags a field from a member beside a $ref (OAS %s)', async (openapi) => {
+    const ir = await parseWithoutWarnings(
+      petDoc(openapi, {
+        ref: { allOf: [ref('Kind'), { description: 'A referenced kind.' }] },
+        kind: { allOf: [ref('Kind'), { deprecated: true }] },
+        size: { allOf: [ref('Kind'), { readOnly: true }] },
+        tag: { allOf: [ref('Kind')], deprecated: true, readOnly: true },
+        owner: { allOf: [ref('Owner'), { description: 'The owner.', deprecated: true }] },
+        pid: { allOf: [ref('PetId'), { description: 'A described id.' }] },
+      }),
+    );
+    const kind = { kind: 'enum', name: 'Kind' };
+    expect(shown(fieldOf(ir, 'ref'))).toEqual({ type: kind, description: 'A referenced kind.' });
+    expect(shown(fieldOf(ir, 'kind'))).toEqual({ type: kind, deprecated: true });
+    expect(shown(fieldOf(ir, 'size'))).toEqual({ type: kind, readOnly: true });
+    expect(shown(fieldOf(ir, 'tag'))).toEqual({ type: kind, deprecated: true, readOnly: true });
+    expect(shown(fieldOf(ir, 'owner'))).toEqual({ type: model('Owner'), description: 'The owner.', deprecated: true });
+    // A primitive component's limits conjoin through the reference, as before.
+    expect(shown(fieldOf(ir, 'pid'))).toEqual({
+      type: str,
+      constraints: { maxLength: 36, pattern: '^pet_' },
+      description: 'A described id.',
+    });
+    // The component keeps its own documentation and flag: the member documents the field.
+    expect(enumOf(ir, 'Kind')?.description).toBeUndefined();
+    expect(modelsByName(ir)['Owner']?.description).toBeUndefined();
+    expect(modelsByName(ir)['Owner']?.deprecated).toBeUndefined();
+    expectSound(ir, ['Kind', 'Owner', 'Pet']);
+  });
+
+  it('reads a nullable wrapper as the typing member, with the limits of the component it wraps (the review)', async () => {
+    const ir = await parseWithoutWarnings(
+      petDoc('3.1.0', {
+        id: { allOf: [{ oneOf: [ref('PetId'), { type: 'null' }] }, { description: 'The pet.' }] },
+        typed: { allOf: [{ type: ['string', 'null'], enum: ['a', 'b', null] }, { description: 'Nullable enum.' }] },
+      }),
+    );
+    expect(shown(fieldOf(ir, 'id'))).toEqual({
+      type: { kind: 'nullable', inner: str },
+      constraints: { maxLength: 36, pattern: '^pet_' },
+      description: 'The pet.',
+    });
+    expect(shown(fieldOf(ir, 'typed'))).toEqual({
+      type: { kind: 'nullable', inner: { kind: 'enum', name: 'PetTyped', values: ['a', 'b'] } },
+      description: 'Nullable enum.',
+    });
+    expect(enumOf(ir, 'PetTyped')).toMatchObject({ description: 'Nullable enum.' });
+
+    // OAS 3.0: `nullable: true` on the typing member; and a wrapper written
+    // `{ oneOf: [{ $ref }], nullable: true }` reads exactly as it does on its own.
+    const wrapper30: SchemaObject = { oneOf: [ref('PetId')], nullable: true };
+    const ir30 = await parseWithoutWarnings(
+      petDoc('3.0.3', {
+        typed: { allOf: [{ type: 'string', nullable: true, enum: ['a', 'b'] }, { description: 'Nullable enum.' }] },
+        bare: wrapper30,
+        id: { allOf: [wrapper30, { description: 'The pet.' }] },
+      }),
+    );
+    expect(shown(fieldOf(ir30, 'typed'))).toEqual({
+      type: { kind: 'nullable', inner: { kind: 'enum', name: 'PetTyped', values: ['a', 'b'] } },
+      description: 'Nullable enum.',
+    });
+    expect(shown(fieldOf(ir30, 'id'))).toEqual({ ...shown(fieldOf(ir30, 'bare')), description: 'The pet.' });
+  });
+
+  it("conjoins a member that only limits, with the wrapper's own limits and the typing member's", async () => {
+    const ir = await parseWithoutWarnings(
+      petDoc('3.1.0', {
+        limited: { allOf: [{ type: 'string' }, { maxLength: 3 }] },
+        both: {
+          allOf: [
+            { type: 'string', maxLength: 5, minLength: 1 },
+            { maxLength: 3, pattern: '^a' },
+          ],
+          minLength: 2,
+        },
+        items: {
+          allOf: [
+            { type: 'array', items: { type: 'string' } },
+            { minItems: 1, description: 'Tags.' },
+          ],
+        },
+      }),
+    );
+    expect(shown(fieldOf(ir, 'limited'))).toEqual({ type: str, constraints: { maxLength: 3 } });
+    expect(shown(fieldOf(ir, 'both'))).toEqual({
+      type: str,
+      constraints: { minLength: 2, maxLength: 3, pattern: '^a' },
+    });
+    expect(shown(fieldOf(ir, 'items'))).toEqual({
+      type: { kind: 'array', items: str },
+      constraints: { minItems: 1 },
+      description: 'Tags.',
+    });
+  });
+
+  it("reads every annotation keyword from such members, the schema's own first, then the first member's", async () => {
+    const ir = await parseWithoutWarnings(
+      petDoc('3.1.0', {
+        count: {
+          allOf: [
+            { type: 'integer' },
+            {
+              title: 'Count',
+              deprecated: true,
+              readOnly: true,
+              default: 1,
+              example: 3,
+              externalDocs: { url: 'https://example.com/count' },
+              'x-internal': true,
+            },
+          ],
+        },
+        first: { allOf: [{ type: 'string', description: 'Member.' }, { description: 'A' }, { description: 'B' }] },
+        own: { allOf: [{ type: 'string' }, { description: 'A', 'x-k': 'member' }], description: 'Own.', 'x-k': 'own' },
+        blank: { allOf: [{ type: 'string' }, { description: '  ' }, { description: 'B' }], description: '' },
+        written: { allOf: [{ type: 'boolean' }, { writeOnly: true }] },
+      }),
+    );
+    expect(fieldOf(ir, 'count')).toMatchObject({
+      type: int,
+      deprecated: true,
+      readOnly: true,
+      default: 1,
+      example: 3,
+      externalDocs: { url: 'https://example.com/count' },
+      extensions: { 'x-internal': true },
+    });
+    expect(fieldOf(ir, 'count').description).toBeUndefined();
+    // The typing member's own text documents the enum or model built from
+    // it, never the field — as a lone member's does not — so the first
+    // annotating member's is the field's.
+    expect(shown(fieldOf(ir, 'first'))).toEqual({ type: str, description: 'A' });
+    expect(fieldOf(ir, 'own')).toMatchObject({ type: str, description: 'Own.', extensions: { 'x-k': 'own' } });
+    // A blank text on the schema itself is read as it is read today: it is
+    // the schema's own, and `description` is the first level that declares one.
+    expect(fieldOf(ir, 'blank').description).toBe('');
+    expect(fieldOf(ir, 'written')).toMatchObject({ type: { kind: 'primitive', type: 'boolean' }, writeOnly: true });
+  });
+
+  it('leaves every other allOf shape as it was', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(
+        petDoc('3.1.0', {
+          pair: {
+            allOf: [
+              { type: 'object', properties: { a: { type: 'string' } } },
+              { properties: { b: { type: 'integer' } } },
+            ],
+          },
+          aug: {
+            allOf: [
+              ref('Owner'),
+              { type: 'object', properties: { b: { type: 'integer' } } },
+              { description: 'Augmented.' },
+            ],
+          },
+          obj: { allOf: [{ type: 'object', properties: { a: { type: 'string' } } }, { description: 'An object.' }] },
+          two: { allOf: [{ type: 'string' }, { type: 'integer' }] },
+          own: { type: 'string', allOf: [{ minLength: 1 }, { description: 'Own type.' }] },
+          none: { allOf: [{ description: 'Only text.' }] },
+          mapped: {
+            allOf: [{ type: 'object', additionalProperties: { type: 'integer' } }, { description: 'Counts.' }],
+          },
+        }),
+      );
+      // Two inline objects merge; a `$ref` beside an inline object augments
+      // it — a member beside either that declares no type documents the field.
+      expect(shown(fieldOf(ir, 'pair'))).toEqual({ type: model('PetPair') });
+      expect(fieldsOf(modelsByName(ir)['PetPair'])).toEqual(['a?: string', 'b?: integer']);
+      expect(shown(fieldOf(ir, 'aug'))).toEqual({ type: model('PetAug'), description: 'Augmented.' });
+      expect(fieldsOf(modelsByName(ir)['PetAug'])).toEqual(['name?: string', 'b?: integer']);
+      expect(shown(fieldOf(ir, 'obj'))).toEqual({ type: model('PetObj'), description: 'An object.' });
+      expect(fieldsOf(modelsByName(ir)['PetObj'])).toEqual(['a?: string']);
+      // Two typing members, neither of them properties, are read as neither.
+      expect(shown(fieldOf(ir, 'two'))).toEqual({ type: { kind: 'primitive', type: 'unknown' } });
+      // An `allOf` of bare limits beside the schema's own `type` leaves it that type.
+      expect(shown(fieldOf(ir, 'own'))).toEqual({ type: str, constraints: { minLength: 1 }, description: 'Own type.' });
+      expect(shown(fieldOf(ir, 'none'))).toEqual({
+        type: { kind: 'primitive', type: 'unknown' },
+        description: 'Only text.',
+      });
+      expect(shown(fieldOf(ir, 'mapped'))).toEqual({ type: { kind: 'map', valueType: int }, description: 'Counts.' });
+      expect(warnSpy.mock.calls.map(([m]) => String(m))).toEqual([
+        '[oagen] Warning: Unknown schema shape treated as unknown (context: two)',
+        '[oagen] Warning: Unknown schema shape treated as unknown (context: none)',
+      ]);
+      expectSound(ir, ['Kind', 'Owner', 'Pet']);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('is one reading at every site: parameter, request body, response body, array items, map values, header', async () => {
+    const annotatedKind: SchemaObject = { allOf: [kindEnum, { description: 'The kind of pet.', deprecated: true }] };
+    const ir = await parseWithoutWarnings({
+      openapi: '3.1.0',
+      info,
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'kind', in: 'query', schema: annotatedKind }],
+            responses: {
+              '200': {
+                ...jsonResponse({ allOf: [{ type: 'string' }, { description: 'The names.' }] }),
+                headers: { 'X-Kind': { schema: { allOf: [ref('Kind'), { deprecated: true }] } } },
+              },
+            },
+          },
+          post: {
+            operationId: 'createPet',
+            requestBody: jsonBody({ allOf: [ref('Pet'), { description: 'The pet to add.' }] }),
+            responses: { '201': jsonResponse(ref('Pet')) },
+          },
+        },
+        '/pets/mode': {
+          put: {
+            operationId: 'setMode',
+            requestBody: jsonBody({ allOf: [{ type: 'string', enum: ['on', 'off'] }, { description: 'The mode.' }] }),
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          ...components,
+          Pet: {
+            type: 'object',
+            properties: {
+              tags: { type: 'array', items: { allOf: [kindEnum, { description: 'A tag.' }] } },
+              counts: {
+                type: 'object',
+                additionalProperties: { allOf: [{ type: 'integer' }, { description: 'A count.' }] },
+              },
+            },
+          },
+        },
+      },
+    });
+    const ops = opsOf(ir);
+    const kind = ops['listPets']!.queryParams.find((p) => p.name === 'kind')!;
+    expect(kind).toMatchObject({
+      type: { kind: 'enum', values: ['cat', 'dog'] },
+      description: 'The kind of pet.',
+      deprecated: true,
+    });
+    expect(ops['listPets']!.response).toEqual(str);
+    expect(collectResponseHeaders(ops['listPets']!).map((h) => [h.name, h.type, h.deprecated])).toEqual([
+      ['X-Kind', { kind: 'enum', name: 'Kind' }, true],
+    ]);
+    expect(ops['createPet']!.requestBody).toEqual(model('Pet'));
+    expect(ops['createPet']!.requestBodyDescription).toBe('The pet to add.');
+    expect(ops['setMode']!.requestBody).toMatchObject({ kind: 'enum', values: ['on', 'off'] });
+    expect(ops['setMode']!.requestBodyDescription).toBe('The mode.');
+    expect(shown(fieldOf(ir, 'tags'))).toEqual({
+      type: { kind: 'array', items: { kind: 'enum', name: 'PetTags', values: ['cat', 'dog'] } },
+    });
+    expect(enumOf(ir, 'PetTags')).toMatchObject({ description: 'A tag.' });
+    expect(shown(fieldOf(ir, 'counts'))).toEqual({ type: { kind: 'map', valueType: int } });
+    expectSound(ir, ['Kind', 'Owner', 'Pet']);
+  });
+
+  it('composes with the wrappers around and inside it, outermost first', async () => {
+    const ir = await parseWithoutWarnings(
+      petDoc('3.1.0', {
+        under: { oneOf: [{ allOf: [kindEnum, { description: 'Inner.' }] }, { type: 'null' }] },
+        nested: { allOf: [{ allOf: [kindEnum, { description: 'Inner.' }] }, { deprecated: true }] },
+        outer: { allOf: [{ allOf: [kindEnum, { description: 'Inner.' }] }, { description: 'Outer.' }] },
+      }),
+    );
+    // The wrapper that is the field's schema documents the field; an inner
+    // layer's text reaches the enum lifted from the member, as a lone
+    // member's wrapper's does.
+    expect(shown(fieldOf(ir, 'under'))).toEqual({
+      type: { kind: 'nullable', inner: { ...petKind, name: 'PetUnder' } },
+    });
+    expect(enumOf(ir, 'PetUnder')).toMatchObject({ description: 'Inner.' });
+    expect(shown(fieldOf(ir, 'nested'))).toEqual({ type: { ...petKind, name: 'PetNested' }, deprecated: true });
+    expect(enumOf(ir, 'PetNested')).toMatchObject({ description: 'Inner.' });
+    expect(shown(fieldOf(ir, 'outer'))).toEqual({ type: { ...petKind, name: 'PetOuter' }, description: 'Outer.' });
+    expect(enumOf(ir, 'PetOuter')).toMatchObject({ description: 'Outer.' });
+  });
+
+  it('is decided once, by the readers every site shares', () => {
+    const text: SchemaObject = { description: 'd' };
+    expect(readInlineAllOf([{ type: 'string' }, text])).toBe('unwrapped');
+    expect(readInlineAllOf([text, { maxLength: 3 }, kindEnum, { deprecated: true }])).toBe('unwrapped');
+    expect(readInlineAllOf([{ oneOf: [ref('PetId'), { type: 'null' }] }, text])).toBe('unwrapped');
+    expect(readInlineAllOf([ref('Kind'), text])).toBe('reference');
+    expect(readInlineAllOf([{ type: 'string' }, { type: 'integer' }])).toBe('reference');
+    expect(readInlineAllOf([{ type: 'object', properties: {} }, text])).toBe('merged');
+
+    expect(allOfTypingMember([text, kindEnum, { maxLength: 3 }])).toBe(kindEnum);
+    expect(allOfTypingMember([{ type: 'string' }, { type: 'integer' }])).toBeUndefined();
+    expect(allOfTypingMember([text, { minLength: 1 }])).toBeUndefined();
+    expect(annotatingAllOfMembers({ allOf: [ref('Kind'), text, { title: 'T' }] })).toEqual([text, { title: 'T' }]);
+    expect(annotatingAllOfMembers({ allOf: [{ type: 'string' }, { type: 'integer' }] })).toEqual([]);
+    expect(annotatingAllOfMembers({ type: 'string' })).toEqual([]);
+
+    expect(classifyInlineSchema({ allOf: [{ type: 'string' }, text] })).toBe('allOf');
+    expect(classifyInlineSchema({ allOf: [{ type: 'string' }, { type: 'integer' }] })).toBe('other');
+    expect(classifyInlineSchema({ type: 'string', allOf: [{ minLength: 1 }, text] })).toBe('other');
+    expect(typesAsUnknown({ allOf: [{ type: 'string' }, text] })).toBe(false);
+    expect(typesAsUnknown({ allOf: [{}, text] })).toBe(true);
+    expect(typesAsUnknown({ allOf: [{ type: 'string' }, { type: 'integer' }] })).toBe(true);
+
+    // The wrapper layer: the wrapper's own documentation over the first
+    // annotating member's over the next; `deprecated` from any of them.
+    const layered: SchemaObject = {
+      allOf: [
+        { description: 'A', example: 1 },
+        { type: 'string' },
+        { description: 'B', 'x-k': 'b', example: 2, deprecated: true },
+      ],
+      description: '',
+      minLength: 1,
+    };
+    expect(allOfWrapperLayer(layered)).toEqual({
+      ...layered,
+      description: 'A',
+      example: 1,
+      'x-k': 'b',
+      deprecated: true,
+    });
+    expect(allOfWrapperLayer({ ...layered, description: 'own' }).description).toBe('own');
+    expect(allOfWrapperLayer({ type: 'string' })).toEqual({ type: 'string' });
+    expect(
+      unwrappedAllOfMember({
+        allOf: [{ description: 'A' }, { type: 'string', maxLength: 5 }, { maxLength: 3, deprecated: true }],
+        minLength: 1,
+      }),
+    ).toEqual({
+      type: 'string',
+      maxLength: 3,
+      minLength: 1,
+      description: 'A',
+      deprecated: true,
+    });
+
+    // The type builder and the request body's text reader read the same layer.
+    expect(schemaToTypeRef({ allOf: [kindEnum, text] }, 'kind', 'Pet')).toMatchObject(petKind);
+    expect(schemaToTypeRef({ allOf: [ref('Kind'), text] }, 'kind', 'Pet')).toEqual(
+      schemaToTypeRef(ref('Kind'), 'kind', 'Pet'),
+    );
+    expect(unwrapCollapsedWrappers({ allOf: [ref('Kind'), text] }).description).toBe('d');
+    expect(unwrapCollapsedWrappers({ allOf: [{ type: 'string', description: 'member' }, text] }).description).toBe('d');
+    expect(
+      unwrapCollapsedWrappers({ allOf: [{ type: 'string', description: 'member' }, text], description: 'own' })
+        .description,
+    ).toBe('own');
+    expect(mintedInlineNameEntries('kind', { allOf: [kindEnum, text] }, 'Pet').map((e) => e.name)).toEqual(['PetKind']);
+
+    // A stop field or data path behind the same wrapper is read the same way.
+    expect(resolveBareSchema({ allOf: [{ type: 'boolean' }, text] })).toEqual({ type: 'boolean' });
+    expect(resolveBareSchema({ allOf: [ref('Flag'), text] }, { Flag: { type: 'boolean' } })).toEqual({
+      type: 'boolean',
+    });
   });
 });
