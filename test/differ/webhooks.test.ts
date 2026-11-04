@@ -366,7 +366,7 @@ describe('parseSpec to diffSpecs — a required flag on a body the parser reads 
     expect(webhooks?.[0]).toMatchObject({ requestBodyRequired: true, requestBodyContentTypes: ['application/xml'] });
   });
 
-  it('reports nothing when such a body appears, disappears or flips its flag, as on an operation', async () => {
+  it('reports nothing when such a body appears or disappears, and a flip of its flag as on a payload (#528)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     const none = await parseDocument(document());
     for (const [label, body] of Object.entries(bodies)) {
@@ -376,11 +376,29 @@ describe('parseSpec to diffSpecs — a required flag on a body the parser reads 
       for (const [oldSpec, newSpec] of [
         [required, none],
         [none, required],
-        [required, optional],
-        [optional, required],
       ]) {
         // Neither the webhook nor the operation declaring the same body is modified: `oagen diff` exits 0.
         expect(diffSpecs(oldSpec, newSpec).changes, label).toEqual([]);
+      }
+      // Since #528 the flag is compared on a body carried in `requestBodyContents` alone, so the
+      // flip is reported on the webhook and on the operation declaring the same body — unless the
+      // body declares no media type (`content: {}`), on which neither keeps a flag: still nothing.
+      const flips = [
+        [optional, required, 'optional → required', 'breaking', 'additive'],
+        [required, optional, 'required → optional', 'additive', 'breaking'],
+      ] as const;
+      for (const [oldSpec, newSpec, flip, operationClassification, webhookClassification] of flips) {
+        const reported = diffSpecs(oldSpec, newSpec).changes.map(
+          (c) => `${c.kind} ${c.classification}${'details' in c && c.details ? ` [${c.details}]` : ''}`,
+        );
+        expect(reported, `${label}: ${flip}`).toEqual(
+          label === 'content: {}'
+            ? []
+            : [
+                `operation-modified ${operationClassification}`,
+                `webhook-modified ${webhookClassification} [body ${flip}]`,
+              ],
+        );
       }
     }
   });
@@ -436,5 +454,150 @@ describe('buildDirectionIndex — webhooks', () => {
         classification: 'additive',
       },
     ]);
+  });
+});
+
+describe('#528 — a required flag on a payload carried in requestBodyContents alone', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * The issue's `petAdopted`: a `{ name }` payload under one media type, `required` as given,
+   * accepting `200`. OpenAPI 3.1.0 only — 3.0.3 has no `webhooks`.
+   */
+  const document = (mediaType: string, required: boolean) => ({
+    openapi: '3.1.0',
+    info: { title: 'Pets', version: '1' },
+    webhooks: {
+      petAdopted: {
+        post: {
+          requestBody: {
+            required,
+            content: { [mediaType]: { schema: { type: 'object', properties: { name: { type: 'string' } } } } },
+          },
+          responses: { '200': { description: 'ok' } },
+        },
+      },
+    },
+  });
+
+  async function parseDocument(doc: unknown): Promise<ApiSpec> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-528-'));
+    try {
+      writeFileSync(join(dir, 'spec.json'), JSON.stringify(doc));
+      return await parseSpec(join(dir, 'spec.json'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const modified = (details: string, classification: 'additive' | 'breaking') => ({
+    kind: 'webhook-modified',
+    name: 'petAdopted',
+    httpMethod: 'post',
+    paramChanges: [],
+    requestBodyChanged: true,
+    responsesChanged: false,
+    deprecatedChanged: false,
+    securityChanged: false,
+    tagsChanged: false,
+    details,
+    classification,
+  });
+
+  /** The issue's three pairs: JSON is read as `requestBody`, the other two are carried in `requestBodyContents` alone. */
+  const mediaTypes = [
+    ['json', 'application/json', true],
+    ['xml', 'application/xml', false],
+    ['range', 'application/*+json', false],
+  ] as const;
+
+  for (const [name, mediaType, readAsPayload] of mediaTypes) {
+    it(`reports ${name} optional → required as additive and required → optional as breaking, from the receiver's side`, async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const optional = await parseDocument(document(mediaType, false));
+      const required = await parseDocument(document(mediaType, true));
+      // The flag is only ever `true` on a webhook; the media type is what says both sides carry the payload.
+      expect(optional.webhooks?.[0]).not.toHaveProperty('requestBodyRequired');
+      expect(optional.webhooks?.[0]).toMatchObject({ requestBodyContentTypes: [mediaType] });
+      expect(required.webhooks?.[0]).toMatchObject({ requestBodyRequired: true, requestBodyContentTypes: [mediaType] });
+      expect(required.webhooks?.[0]?.requestBody !== undefined).toBe(readAsPayload);
+
+      const tightened = diffSpecs(optional, required);
+      expect(tightened.changes).toEqual([modified('body optional → required', 'additive')]);
+      // One additive change: `oagen diff` exits 1.
+      expect(tightened.summary).toMatchObject({ modified: 1, breaking: 0, additive: 1 });
+
+      const relaxed = diffSpecs(required, optional);
+      expect(relaxed.changes).toEqual([modified('body required → optional', 'breaking')]);
+      // One breaking change: `oagen diff` exits 2.
+      expect(relaxed.summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+
+      // An unchanged flag is no change: `oagen diff` exits 0.
+      expect(diffSpecs(required, required).changes).toEqual([]);
+      expect(diffSpecs(optional, optional).changes).toEqual([]);
+    });
+  }
+
+  it('compares the flag when one spec carries the payload in its contents alone and the other reads it as requestBody', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const xmlOptional = await parseDocument(document('application/xml', false));
+    const xmlRequired = await parseDocument(document('application/xml', true));
+    const jsonOptional = await parseDocument(document('application/json', false));
+    const jsonRequired = await parseDocument(document('application/json', true));
+    // The inline JSON payload is a `PetAdoptedPayload` model, reported as `model-added` / `model-removed`
+    // beside the webhook; only the webhook change is read here.
+    const webhookChanges = (before: ApiSpec, after: ApiSpec) =>
+      diffSpecs(before, after).changes.filter((c) => c.kind === 'webhook-modified');
+    // The flip is said beside what such a pair already reported: the payload appearing (or
+    // disappearing) and the media type swap — carried as `requestBodyContentTypeChange` too —
+    // breaking either way from the receiver's side.
+    expect(webhookChanges(xmlOptional, jsonRequired)).toEqual([
+      expect.objectContaining(
+        modified(
+          'payload added; body optional → required; payload media type application/json added; payload media type application/xml removed',
+          'breaking',
+        ),
+      ),
+    ]);
+    expect(webhookChanges(jsonRequired, xmlOptional)).toEqual([
+      expect.objectContaining(
+        modified(
+          'payload removed; body required → optional; payload media type application/xml added; payload media type application/json removed',
+          'breaking',
+        ),
+      ),
+    ]);
+    // The same flag on both sides is no flip, whichever way each side is read.
+    expect(webhookChanges(xmlRequired, jsonRequired)[0]).toMatchObject({
+      details: 'payload added; payload media type application/json added; payload media type application/xml removed',
+    });
+    expect(webhookChanges(jsonOptional, xmlOptional)[0]).toMatchObject({
+      details: 'payload removed; payload media type application/xml added; payload media type application/json removed',
+    });
+  });
+
+  it('compares the flag on a hand-built webhook by the media types it declares, a payload read from them or not', () => {
+    /** `petAdopted` as the parser builds it for a payload under `application/xml` alone. */
+    const carried = (over: Partial<Webhook> = {}): Webhook =>
+      webhook({
+        requestBody: undefined,
+        requestBodyContentTypes: ['application/xml'],
+        requestBodyContents: [{ contentType: 'application/xml', type: { kind: 'model', name: 'AdoptionEvent' } }],
+        ...over,
+      });
+    expect(diffSpecs(spec([carried()]), spec([carried({ requestBodyRequired: true })])).changes).toEqual([
+      modified('body optional → required', 'additive'),
+    ]);
+    expect(diffSpecs(spec([carried({ requestBodyRequired: true })]), spec([carried()])).changes).toEqual([
+      modified('body required → optional', 'breaking'),
+    ]);
+    expect(diffSpecs(spec([carried()]), spec([carried()])).changes).toEqual([]);
+    // Such a payload appearing or disappearing is still not a flip: its flag goes with it, and
+    // there is no `requestBody` for `payload added` / `payload removed` to report.
+    const none = webhook({ requestBody: undefined });
+    expect(diffSpecs(spec([none]), spec([carried({ requestBodyRequired: true })])).changes).toEqual([]);
+    expect(diffSpecs(spec([carried({ requestBodyRequired: true })]), spec([none])).changes).toEqual([]);
   });
 });

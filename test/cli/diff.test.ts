@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { resolve, dirname } from 'node:path';
+import { resolve, dirname, join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -84,4 +86,66 @@ describe('diffCommand', () => {
     expect(err).toBeDefined();
     expect(err.exitCode).toBe(1);
   });
+});
+
+describe('diffCommand — a required flag on a body carried in requestBodyContents alone (#528)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oagen-528-'));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    // The parser warns that it reads no media type of the xml and range bodies.
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The issue's `createPet`: a `{ name }` body under one media type, `required` as given, responding `204`. */
+  function write(name: string, openapi: string, mediaType: string, required: boolean): string {
+    const path = join(dir, name);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        openapi,
+        info: { title: 'Pets', version: '1' },
+        paths: {
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: {
+                required,
+                content: { [mediaType]: { schema: { type: 'object', properties: { name: { type: 'string' } } } } },
+              },
+              responses: { '204': { description: 'no content' } },
+            },
+          },
+        },
+      }),
+    );
+    return path;
+  }
+
+  async function exitCodeOf(oldPath: string, newPath: string): Promise<number> {
+    const err: any = await diffCommand({ old: oldPath, new: newPath }).catch((e) => e);
+    return err.exitCode;
+  }
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    it(`exits 2 for optional → required and 1 for required → optional, as for application/json (OpenAPI ${openapi})`, async () => {
+      for (const [name, mediaType] of [
+        ['json', 'application/json'],
+        ['xml', 'application/xml'],
+        ['range', 'application/*+json'],
+      ]) {
+        const optional = write(`${name}-optional.json`, openapi, mediaType, false);
+        const required = write(`${name}-required.json`, openapi, mediaType, true);
+        expect(await exitCodeOf(optional, required), `${name} optional → required`).toBe(2);
+        expect(await exitCodeOf(required, optional), `${name} required → optional`).toBe(1);
+        expect(await exitCodeOf(required, required), `${name} unchanged`).toBe(0);
+      }
+    });
+  }
 });
