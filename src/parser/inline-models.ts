@@ -397,7 +397,7 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
   'extensions',
   'fields',
 ]);
-/** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readName`. */
+/** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readModelName`. */
 const MODEL_STRUCTURE_KEYS: ReadonlySet<string> = new Set(['variants', 'compositionKind', 'discriminator']);
 /** Model properties outside `modelPropertiesKey`: the identity, the fields and the union structure, each read on its own. */
 const MODEL_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...MODEL_IDENTITY_KEYS, ...MODEL_STRUCTURE_KEYS]);
@@ -446,7 +446,7 @@ export function shapeFingerprint(model: Model): string {
  * A model's shape beside its fields: its limits, type parameters,
  * `deprecated` (unless `omit` leaves it out, as `modelAdmits` does), variants
  * (through `readShape`) and dispatch rules, the mapping's targets read under
- * `options.readName` as the variants are.
+ * `options.readModelName` as the variants are.
  */
 function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
   return `${modelPropertiesKey(model)}${modelStructureKey(model, options)}`;
@@ -455,7 +455,7 @@ function modelShapeKey(model: Model, options: ShapeReadOptions = {}): string {
 /**
  * A model's union structure as one string — its composition keyword, its
  * variants (through `readShape`) and its dispatch rules, the mapping's
- * targets read under `options.readName` as the variants are. What
+ * targets read under `options.readModelName` as the variants are. What
  * `modelAdmits` compares beside the fields and the model's properties
  * (`modelPropertiesAdmit`); the list-envelope pass compares the same parts
  * by structure on its own.
@@ -464,7 +464,7 @@ function modelStructureKey(model: Model, options: ShapeReadOptions = {}): string
   const structure: Record<string, unknown> = {};
   if (model.compositionKind) structure.compositionKind = model.compositionKind;
   if (model.variants) structure.variants = model.variants.map((variant) => readShape(variant, options));
-  if (model.discriminator) structure.discriminator = readDiscriminator(model.discriminator, options.readName);
+  if (model.discriminator) structure.discriminator = readDiscriminator(model.discriminator, options.readModelName);
   return stableStringify(structure);
 }
 
@@ -507,28 +507,37 @@ const FIELD_PROPERTY_KEYS_OMITTED: ReadonlySet<string> = new Set([...FIELD_DOC_K
 
 /**
  * How `modelAdmits`, `fieldAdmits` and `typeShapeKey` read a shape before
- * they compare it.
+ * they compare it. A pass about to rename models hands the name its
+ * renaming gives each one, so two shapes compare as that renaming leaves
+ * them. Each reader covers the names of one kind and no other: the `…Json`
+ * fold (`collapseJsonSuffixModels`) renames a model and an inline enum by
+ * one rule but reads each among the names of its own kind (#534), so it
+ * hands the two apart, and a reference of a kind no reader is given for is
+ * read as it is.
  */
 export interface ShapeReadOptions {
   /**
-   * The name every model reference, and every inline enum reference, is
-   * read under on both sides before the shapes are compared — in a field's
-   * type, a union's variants and a discriminator's mapping targets alike.
-   * Absent, a reference is read under the name it carries, so a nested
-   * inline model that was renamed keeps a parent from being admitted by one
-   * whose child was not. A pass about to rename models hands the name its
-   * renaming gives each one, so two shapes compare as that renaming leaves
-   * them: the `…Json` fold (`collapseJsonSuffixModels`) reads `<Name>Json…`
-   * as `<Name>…`, so a child it will rename counts as its namesake, while a
-   * reference it will not rename is still read as it is. An inline enum
-   * reference — one carrying its `values`, named by the extractor after the
-   * model and field it sits in — is read the same way, so `PetJsonStatus`
-   * with the members of `PetStatus` counts as `PetStatus`, and with other
-   * members does not, since the members are compared with the name. A
-   * component enum reference carries no values and is never renamed by any
-   * pass, so it is always read as it is.
+   * The name every model reference is read under on both sides before the
+   * shapes are compared — in a field's type, a union's variants and a
+   * discriminator's mapping targets alike. Absent, a reference is read
+   * under the name it carries, so a nested inline model that was renamed
+   * keeps a parent from being admitted by one whose child was not. The
+   * `…Json` fold reads `<Name>Json…` as `<Name>…`, so a child it will
+   * rename counts as its namesake, while a reference it will not rename is
+   * still read as it is.
    */
-  readonly readName?: (name: string) => string;
+  readonly readModelName?: (name: string) => string;
+  /**
+   * The name every inline enum reference — one carrying its `values`,
+   * named by the extractor after the model and field it sits in — is read
+   * under, the same way: `PetJsonStatus` with the members of `PetStatus`
+   * counts as `PetStatus`, and with other members does not, since the
+   * members are compared with the name. Absent, an inline enum reference
+   * is read under the name it carries, whatever `readModelName` would make
+   * of it. A component enum reference carries no values and is never
+   * renamed by any pass, so it is always read as it is.
+   */
+  readonly readEnumName?: (name: string) => string;
 }
 
 /**
@@ -546,7 +555,7 @@ export interface ShapeReadOptions {
  * adds to a model — must be identical (`modelPropertiesAdmit`), their union
  * structure — variants and dispatch rules — must agree
  * (`modelStructureKey`), and a model reference is compared by name — the
- * name it carries, or the one `options.readName` reads it under: a nested
+ * name it carries, or the one `options.readModelName` reads it under: a nested
  * inline model keeps its name, so a parent whose child was renamed is not
  * admitted by one whose child was not. The models' own `deprecated` is read
  * apart from the shape (`flagAdmits`, through `modelPropertiesAdmit`): a
@@ -660,7 +669,8 @@ export function deprecatedFoldWarning(name: string, looser: readonly string[]): 
  * Whether `owner` admits `candidate` as the field of its name: the rule
  * `modelAdmits` applies to each field, on its own. The two agree in
  * everything but their documentation — type (through `fieldTypeAdmits`,
- * model and inline enum references read under `options.readName`), limits, default, access
+ * model references read under `options.readModelName` and inline enum
+ * references under `options.readEnumName`), limits, default, access
  * flags, their own `deprecated` (`fieldFlagAgrees`: in either direction,
  * since the owner's fields are what every site reads after a fold) — except
  * that `owner` may be optional where `candidate` is required, and
@@ -730,32 +740,33 @@ function fieldTypeAdmits(owner: TypeRef, candidate: TypeRef, options: ShapeReadO
 /**
  * A type's shape as the admit predicates read it — every inline enum with
  * its per-value deprecation (`shapeWithEnumFlags`), every model reference
- * and inline enum reference under `options.readName` — stable-stringified,
- * so two types compare by string equality. The `…Json` fold compares a
- * base union's variants with the `…Json` model's through this, both read
- * under the fold.
+ * under `options.readModelName` and every inline enum reference under
+ * `options.readEnumName` — stable-stringified, so two types compare by
+ * string equality. The `…Json` fold compares a base union's variants with
+ * the `…Json` model's through this, both read under the fold.
  */
 export function typeShapeKey(ref: TypeRef, options: ShapeReadOptions = {}): string {
   return stableStringify(readShape(ref, options));
 }
 
 /**
- * `shapeWithEnumFlags(ref)`, with every model reference and every inline
- * enum reference (one carrying its `values`) renamed by `options.readName`
- * on a copy — the flags are read first, since the copy has no identity in
- * the enum side table.
+ * `shapeWithEnumFlags(ref)`, with every model reference renamed by
+ * `options.readModelName` and every inline enum reference (one carrying its
+ * `values`) by `options.readEnumName`, each only when given, on a copy —
+ * the flags are read first, since the copy has no identity in the enum
+ * side table.
  */
 function readShape(ref: TypeRef, options: ShapeReadOptions): unknown {
   const shape = shapeWithEnumFlags(ref);
-  const { readName } = options;
-  if (!readName) return shape;
+  const { readModelName, readEnumName } = options;
+  if (!readModelName && !readEnumName) return shape;
   const read = structuredClone(shape) as TypeRef;
   walkTypeRef(read, {
     model: (r) => {
-      (r as { name: string }).name = readName(r.name);
+      if (readModelName) (r as { name: string }).name = readModelName(r.name);
     },
     enum: (r) => {
-      if (r.values) r.name = readName(r.name);
+      if (r.values && readEnumName) r.name = readEnumName(r.name);
     },
   });
   return read;

@@ -1140,3 +1140,165 @@ describe('`<Name>Json` fold — reach, enum names and extensions (issue #426)', 
     ]);
   });
 });
+
+describe('`<Name>Json` fold — names read per kind (issue #534)', () => {
+  /** The issue's document under `openapi`: `getPet` returning `Pet` and `getPetJson` returning `PetJson`. */
+  const doc = (openapi: string, schemas: Record<string, unknown>) => ({ ...petsDoc(schemas), openapi });
+  const ball = { type: 'string', enum: ['ball', 'rope'] };
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  /** The type of `field` on the model `name`, as `kind name`. */
+  const fieldType = (spec: ApiSpec, name: string, field: string): string | undefined => {
+    const type = spec.models.find((m) => m.name === name)?.fields.find((f) => f.name === field)?.type;
+    return type && ('name' in type ? `${type.kind} ${type.name}` : type.kind);
+  };
+  const merged = '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)';
+
+  it.each(['3.0.3', '3.1.0'])(
+    'folds a `…Json` model whose renamed child model lands on the name a renamed inline enum leaves (OAS %s)',
+    async (openapi) => {
+      // The issue's `model.json`: `PetJson.mode` is the inline enum `PetJsonMode` and
+      // `PetJson.json_mode` the object `PetJsonJsonMode`. Read in one set, the model followed the
+      // enum from `PetJsonMode` on to `PetMode`, met the enum there, and the fold was refused with
+      // `enum "PetMode" owns the name` — an enum the document never declares. Each kind follows
+      // only names of its own kind: the model stops on `PetJsonMode`, which no model holds, and
+      // the enum reads on to `PetMode`.
+      const spellings = {
+        'inline.json': obj({ q: str }),
+        'ref.json': ref('PetJsonJsonMode'),
+      };
+      for (const [file, jsonMode] of Object.entries(spellings)) {
+        const { spec, warnings } = await parseWithWarnings(
+          `${openapi}-${file}`,
+          doc(openapi, {
+            Pet: obj({ name: str }),
+            PetJson: obj({ name: str, mode: ball, json_mode: jsonMode }),
+            ...(file === 'ref.json' ? { PetJsonJsonMode: obj({ q: str }) } : {}),
+          }),
+        );
+        expect(warnings, file).toEqual([
+          merged,
+          '[oagen] Renamed child "PetJsonJsonMode" → "PetJsonMode"',
+          '[oagen] Folded enum "PetJsonMode" into "PetMode"',
+        ]);
+        expect(describeModels(spec), file).toEqual(['Pet {name,mode,json_mode}', 'PetJsonMode {q}']);
+        expect(fieldType(spec, 'Pet', 'mode'), file).toBe('enum PetMode');
+        expect(fieldType(spec, 'Pet', 'json_mode'), file).toBe('model PetJsonMode');
+        expect(
+          spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value)}]`),
+          file,
+        ).toEqual(['PetMode [ball,rope]']);
+        expect(describeResponses(spec), file).toEqual(['getPet: Pet', 'getPetJson: Pet']);
+        expect(unresolvedReferences(spec), file).toEqual([]);
+      }
+    },
+  );
+
+  it.each(['3.0.3', '3.1.0'])(
+    'folds a `…Json` model whose renamed inline enum lands on the name a renamed child model leaves (OAS %s)',
+    async (openapi) => {
+      // The issue's `enum.json`, the mirror: `json_mode` is the inline enum `PetJsonJsonMode` and
+      // `mode` a `$ref` to the component `PetJsonMode`. The enum stops on `PetJsonMode`, which no
+      // inline enum holds, and the model reads on to `PetMode`.
+      const { spec, warnings } = await parseWithWarnings(
+        `${openapi}-enum.json`,
+        doc(openapi, {
+          Pet: obj({ name: str }),
+          PetJson: obj({ name: str, json_mode: ball, mode: ref('PetJsonMode') }),
+          PetJsonMode: obj({ q: str }),
+        }),
+      );
+      expect(warnings).toEqual([
+        merged,
+        '[oagen] Renamed child "PetJsonMode" → "PetMode"',
+        '[oagen] Folded enum "PetJsonJsonMode" into "PetJsonMode"',
+      ]);
+      expect(describeModels(spec)).toEqual(['Pet {name,json_mode,mode}', 'PetMode {q}']);
+      expect(fieldType(spec, 'Pet', 'json_mode')).toBe('enum PetJsonMode');
+      expect(fieldType(spec, 'Pet', 'mode')).toBe('model PetMode');
+      expect(spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value)}]`)).toEqual(['PetJsonMode [ball,rope]']);
+      expect(describeResponses(spec)).toEqual(['getPet: Pet', 'getPetJson: Pet']);
+      expect(unresolvedReferences(spec)).toEqual([]);
+    },
+  );
+
+  it.each(['3.0.3', '3.1.0'])(
+    'still refuses a fold that would rename a child model onto a name an enum the document declares holds (OAS %s)',
+    async (openapi) => {
+      // The genuine collision: a component enum `PetMode` beside the mirror document, whose model
+      // `PetJsonMode` would be renamed `PetMode`. The enum keeps its name and both models stay.
+      const { spec, warnings } = await parseWithWarnings(
+        `${openapi}-collision.json`,
+        doc(openapi, {
+          Pet: obj({ name: str }),
+          PetJson: obj({ name: str, json_mode: ball, mode: ref('PetJsonMode') }),
+          PetJsonMode: obj({ q: str }),
+          PetMode: ball,
+        }),
+      );
+      expect(warnings).toEqual([
+        '[oagen] Warning: Json-suffix model "PetJson" is not merged into "Pet": "PetJsonMode" would be renamed "PetMode", and enum "PetMode" owns the name — keeping both',
+      ]);
+      expect(describeModels(spec)).toEqual(['Pet {name}', 'PetJson {name,json_mode,mode}', 'PetJsonMode {q}']);
+      expect(fieldType(spec, 'PetJson', 'json_mode')).toBe('enum PetJsonJsonMode');
+      expect(fieldType(spec, 'PetJson', 'mode')).toBe('model PetJsonMode');
+      expect(spec.enums.map((e) => e.name).sort()).toEqual(['PetJsonJsonMode', 'PetMode']);
+      expect(describeResponses(spec)).toEqual(['getPet: Pet', 'getPetJson: PetJson']);
+      expect(unresolvedReferences(spec)).toEqual([]);
+    },
+  );
+
+  it('reads a model name among the models’ and an inline enum name among the inline enums’, in the pass alone', () => {
+    // Without the component pass: the inline enum is still a reference the fold reads and
+    // renames, and the model lands on its old name without following it.
+    const enumRef = (name: string): TypeRef => ({ kind: 'enum', name, values: ['ball', 'rope'] });
+    const model = collapse([
+      { name: 'Pet', fields: [field('a')] },
+      {
+        name: 'PetJson',
+        fields: [field('a'), field('mode', enumRef('PetJsonMode')), field('jsonMode', modelRef('PetJsonJsonMode'))],
+      },
+      { name: 'PetJsonJsonMode', fields: [field('q')] },
+    ]);
+    expect(describeFolded(model.kept)).toEqual(['Pet {a,mode,jsonMode:PetJsonMode}', 'PetJsonMode {q}']);
+    expect(model.kept[0]?.fields[1]?.type).toEqual(enumRef('PetMode'));
+    expect(model.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonJsonMode" → "PetJsonMode"',
+    ]);
+
+    const inlineEnum = collapse([
+      { name: 'Pet', fields: [field('a')] },
+      {
+        name: 'PetJson',
+        fields: [field('a'), field('jsonMode', enumRef('PetJsonJsonMode')), field('mode', modelRef('PetJsonMode'))],
+      },
+      { name: 'PetJsonMode', fields: [field('q')] },
+    ]);
+    expect(describeFolded(inlineEnum.kept)).toEqual(['Pet {a,jsonMode,mode:PetMode}', 'PetMode {q}']);
+    expect(inlineEnum.kept[0]?.fields[1]?.type).toEqual(enumRef('PetJsonMode'));
+    expect(inlineEnum.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonMode" → "PetMode"',
+    ]);
+
+    // An inline enum another model carries under the name the child model lands on is a genuine
+    // collision, whichever kind vacated the name beside it.
+    const models = (): Model[] => [
+      { name: 'Pet', fields: [field('a')] },
+      {
+        name: 'PetJson',
+        fields: [field('a'), field('mode', enumRef('PetJsonMode')), field('jsonMode', modelRef('PetJsonJsonMode'))],
+      },
+      { name: 'PetJsonJsonMode', fields: [field('q')] },
+      { name: 'Owner', fields: [field('mode', enumRef('PetJsonMode'))] },
+    ];
+    const held = collapse(models());
+    expect(describeFolded(held.kept)).toEqual(['Pet {a,mode,jsonMode:PetJsonMode}', 'PetJsonMode {q}', 'Owner {mode}']);
+    // `Owner.mode` carries the name the fold renames, so it follows the enum to `PetMode` too.
+    expect(held.kept[2]?.fields[0]?.type).toEqual(enumRef('PetMode'));
+    expect(held.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonJsonMode" → "PetJsonMode"',
+    ]);
+  });
+});
