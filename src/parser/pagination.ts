@@ -473,22 +473,18 @@ function fieldsAtPath(
  * came from (`resolveDataPathArray`). A `node` that is a union is typed as its
  * variants' models, a `$ref` variant's component among them; one that is an
  * `allOf`, or reaches a component composed with one (its own model, even
- * of a lone member), is one model its unions are flattened into, which
- * leaves a `$ref` under a variant to its component (`mergeAllOfMembers`
- * inline, `extractAllOfModel` for a component), so there the field counts
- * only when a variant written inline declares it too, and is never one the
- * model lacks (workos/oagen#527). An inline `allOf` is merged by
- * `mergeAllOfMembers`, which reads no union a `$ref` member's component
- * carries either — `{ allOf: [{ $ref: MetaUnion }, { properties: {
- * trace_id } }] }` is a model of `trace_id` alone, whatever `MetaUnion`'s
- * variants write inline — so there only a union written in `node` itself
- * counts: the unions the walk meets without the component map, which
- * follows no `$ref` (`collectObjectProperties(node)`), the same reading
- * the variant check makes without it. Decided by the document's shape, not
- * by object identity, so a schema object a `transformSpec` shares between
- * an inline site and a component is read at each. The same `allOf` as a
- * component is its own model, which does read such a union (#527 review).
- * `undefined` when there is none.
+ * of a lone member), is one model its unions are flattened into or
+ * dispatched by — a `$ref` variant's component read into the flattened
+ * model as an inline variant is, and a union a `$ref` member's component
+ * carries read as that component's model reads it, inline exactly as for a
+ * component (`mergeAllOfMembers`, `extractAllOfModel`; #398, #429) — so a
+ * field every variant declares is one the model has, or one the model
+ * dispatches to a variant that has it, wherever the union sits and however
+ * its variants are written (workos/oagen#527: the flattened model left a
+ * `$ref` variant's fields to its component and read no union behind a
+ * `$ref` member, so the field was rejected there as one the model lacked).
+ * Every union the walk meets counts, its variants read through the
+ * component map. `undefined` when there is none.
  */
 function fieldsNamed(
   node: SchemaObject,
@@ -498,24 +494,10 @@ function fieldsNamed(
   const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
   if (own) return { fields: [own] };
-  // `resolveBareSchema` reads through a component's lone `allOf` member,
-  // but the component's model is still its own `allOf` model.
-  const followed = new Set<string>();
-  const bare = resolveBareSchema(node, componentSchemas, followed);
-  const components = [...followed].map((ref) => resolveComponentSchemaRef({ $ref: ref }, componentSchemas));
-  const flattened = [bare, ...components].some((schema) => schema?.allOf !== undefined);
-  // `node` resolves to an `allOf` without following a `$ref`: the inline
-  // `allOf` `mergeAllOfMembers` flattens, which reads no union behind a
-  // `$ref` member — so only the unions written in `node` count, read
-  // without the component map. A component's `allOf` (`followed` names it)
-  // reads them all.
-  const inline = flattened && followed.size === 0;
-  for (const union of inline ? collectObjectProperties(node).unions : unions) {
+  for (const union of unions) {
     const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
     const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
-    // Without the component map, a variant's properties are those it writes inline.
-    const modeled = !flattened || variants.some((variant) => objectProperties(variant)[segment] !== undefined);
-    if (modeled && fields.length > 0 && fields.every((field) => field !== undefined)) return { fields, union };
+    if (fields.length > 0 && fields.every((field) => field !== undefined)) return { fields, union };
   }
   return undefined;
 }

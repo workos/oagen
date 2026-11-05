@@ -7,9 +7,12 @@ import {
   classifyInlineSchema,
   componentPropertyLedger,
   componentSchemaOf,
+  componentUnionDispatches,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
+  unionAxesOf,
+  wrapperDiscriminatorOf,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -1567,12 +1570,15 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
  * member it wraps (`nullableUnionBranch`, the definition the model walks
  * resolve a member by, so a nullable `$ref` member's component is followed
  * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
- * those of every other inline `oneOf`/`anyOf` variant, whose fields the
- * model extractors flatten in — in the order first declared, each name with
- * the declaration `declareProperty`'s precedence picks: the first
- * always-applying one, else the first variant's. This is the sibling set
- * `elementContextName` decides from; the TypeRef builder and every extractor
- * derive it through this one function so they agree.
+ * those of every other `oneOf`/`anyOf` variant, a `$ref` variant's
+ * component followed when `schemas` is given, whose fields the model
+ * extractors flatten in (`declareVariant`) — in the order first declared,
+ * each name with the declaration `declareProperty`'s precedence picks: the
+ * first always-applying one, else the union of the variants' declarations
+ * (`unionOfDeclarations`, as `declaredComponentProperty` and the merge
+ * type such a field). This is the sibling set `elementContextName` decides
+ * from; the TypeRef builder and every extractor derive it through this one
+ * function so they agree.
  */
 export function collectProperties(
   schema: SchemaObject,
@@ -1593,11 +1599,15 @@ export function collectProperties(
     for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
     const branch = nullableUnionBranch(s);
     if (branch) visit(branch, followRef, onBranch);
-    else for (const variant of [...(s.oneOf ?? []), ...(s.anyOf ?? [])]) visit(variant, false, true);
+    // A variant's `$ref` is followed as the merges follow it (`declareVariant`).
+    else for (const axis of unionAxesOf(s)) for (const variant of axis) visit(variant, true, true);
   };
   visit(schema, false, false);
   return new Map(
-    [...ledger.values()].map((entry) => [entry.name, entry.unconditional?.schema ?? entry.conditional[0]!]),
+    [...ledger.values()].map((entry) => [
+      entry.name,
+      entry.unconditional?.schema ?? unionOfDeclarations(entry.conditional),
+    ]),
   );
 }
 
@@ -2302,14 +2312,29 @@ export interface MergedAllOf {
  */
 export function declaresInlineProperties(schema: SchemaObject): boolean {
   const seen = new Set<SchemaObject>();
-  const declares = (s: SchemaObject): boolean => {
+  // `onBranch`: under a variant of a union of two or more non-null
+  // variants, where a `$ref` declares what its component declares — the
+  // merge flattens the component's properties in (`declareVariant`), so
+  // `allOf: [{ $ref: Pet }, { oneOf: [{ $ref: Owner }, { $ref: Shelter }]
+  // }]` is the merged model, not a bare reference to `Pet` with the union
+  // dropped (#398). A nullable wrapper is no union, nor is a union of one
+  // variant: each is read as its one variant, as the type builder reads it
+  // (`nullableUnionBranch`, `loneUnionVariant`), so `{ oneOf: [{ $ref: PetId
+  // }], nullable: true }` beside a `description` stays the reference (#555).
+  const declares = (s: SchemaObject, onBranch: boolean): boolean => {
     if (seen.has(s)) return false;
     seen.add(s);
-    if (s.$ref) return false;
+    if (s.$ref) return onBranch;
     if (s.properties) return true;
-    return (s.allOf ?? []).some(declares) || (s.oneOf ?? s.anyOf ?? []).some(declares);
+    if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
+    const branch = nullableUnionBranch(s);
+    if (branch) return declares(branch, onBranch);
+    return unionAxesOf(s).some((axis) => {
+      const variants = axis.filter((variant) => !isNullSchema(variant));
+      return variants.some((variant) => declares(variant, onBranch || variants.length > 1));
+    });
   };
-  return declares(schema);
+  return declares(schema, false);
 }
 
 /**
@@ -2751,6 +2776,50 @@ export function declareProperty(
 }
 
 /**
+ * Declare into `ledger`, as branch-only (`declareProperty`), every
+ * property a `oneOf`/`anyOf` variant declares: its own `properties`, those
+ * of its `allOf` members, those of the one variant of a nullable wrapper
+ * it carries (`nullableUnionBranch`), those of every variant of the unions
+ * nested in it (`unionAxesOf`, both keywords), and — through a `$ref`, the
+ * variant itself or one met anywhere under it — those the component it
+ * names declares, read the same way (its own properties, its `allOf`
+ * chain, a union of its own). A variant's `required` is not read: its
+ * properties are present only on that branch. The one branch reader the
+ * component reader (`readComponentAllOfMember`) and the inline merge
+ * (`mergeAllOfMembers`) flatten a variant with, so a flattened union
+ * declares the same properties as a component and inline (#398: the
+ * component reader read a variant's own `properties` and its `allOf`
+ * wrappers' only, so `{ oneOf: [{ oneOf: [{ a }, { b }] }, { c }] }` gave
+ * `c` alone and a `$ref` variant gave nothing, while the inline merge read
+ * nested unions but followed no `$ref`). A schema in `seen` was read under
+ * a variant already and declares nothing more, which ends a component that
+ * names itself under a variant.
+ */
+export function declareVariant(
+  ledger: Map<string, PropertyDeclarations>,
+  variant: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject>,
+): void {
+  if (seen.has(variant)) return;
+  seen.add(variant);
+  if (variant.$ref) {
+    const target = schemaRefTarget(variant.$ref, componentSchemas);
+    if (target) declareVariant(ledger, target, componentSchemas, seen);
+    return;
+  }
+  for (const [key, value] of Object.entries(variant.properties ?? {})) {
+    if (value) declareProperty(ledger, key, value, null, true);
+  }
+  for (const sub of variant.allOf ?? []) declareVariant(ledger, sub, componentSchemas, seen);
+  const branch = nullableUnionBranch(variant);
+  if (branch) declareVariant(ledger, branch, componentSchemas, seen);
+  else
+    for (const axis of unionAxesOf(variant))
+      for (const nested of axis) declareVariant(ledger, nested, componentSchemas, seen);
+}
+
+/**
  * Merge an inline `allOf` into one object shape, remembering where each
  * property comes from. Every site that types an inline `allOf` reads it
  * through this one function — a model field (of a component or of any
@@ -2776,21 +2845,33 @@ export function declareProperty(
  * and builds no model, so a reference met inside one starts its own origin
  * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
- * `allOf` members and, for a `oneOf`/`anyOf` it carries, those of every
- * variant that declares properties inline — read through the variant's own
- * `allOf` members and nested unions the same way — tagged as the merged
- * model's own (workos/oagen#283: a variant's fields were dropped, so an
- * inline `allOf: [base, { oneOf: [{ a }, { b }] }]` lost `a` and `b` while
- * the same schema as a component kept them).
+ * `allOf` members and, for each `oneOf`/`anyOf` it carries (`unionAxesOf`:
+ * a member writing both carries two; #398 read only the `oneOf`), those of
+ * every variant — read through the variant's own `allOf` members, its
+ * nested unions and the component a `$ref` variant names, by the one
+ * branch reader the component reader flattens a variant with
+ * (`declareVariant`) — tagged as the merged model's own (workos/oagen#283:
+ * a variant's fields were dropped, so an inline `allOf: [base, { oneOf:
+ * [{ a }, { b }] }]` lost `a` and `b` while the same schema as a component
+ * kept them). A union written beside the `allOf` is one more member, the
+ * last (`foldSiblingProperties`), so `{ allOf: [base], oneOf: [...] }` is
+ * read as `allOf: [base, { oneOf: [...] }]` is.
  *
  * `required` is collected from the wrapper and from every member that always
  * applies; a variant's `required` is not read, since its properties are
  * present only on that branch, so they are optional on the merged model,
- * exactly as `extractAllOfModel` flattens a component's variants. Two
- * boundaries are not crossed: a `$ref` under a variant — the variant itself,
- * or a member of the variant's own `allOf` — is not followed (its component
- * keeps its own fields), and a union a `$ref` member's component carries is
- * not read (the component's own model dispatches or flattens it).
+ * exactly as `extractAllOfModel` flattens a component's variants. A union a
+ * `$ref` member's component carries is read as that component's own model
+ * reads it (#429): flattened into the merge when the model flattens it, so
+ * `Dog: { allOf: [{ $ref: Pet }] }` with `Pet: { properties: { id }, oneOf:
+ * [{ ownerId }, { shelterId }] }` carries `ownerId` and `shelterId` inline
+ * as `Dog`'s and `Pet`'s models do; left to the component when its model
+ * dispatches it (`componentUnionDispatches`: the variants pin a property
+ * to distinct consts, or the document declares a `discriminator` on the
+ * union or on the `allOf` wrapper around it, `wrapperDiscriminatorOf`), so
+ * the merge carries the base fields the dispatcher model carries and no
+ * variant's. An inline member's union is always flattened: an inline
+ * `allOf` never dispatches.
  *
  * A property keeps the always-applying declaration `declareProperty` settles
  * on — the first that declares a type, a typeless one before or after it
@@ -2815,17 +2896,18 @@ export function declareProperty(
  *
  * A schema reached twice is read once in each capacity it is reached in —
  * as an inline member (the merged model's own, unions included), through a
- * `$ref` member (inherited, unions left to the component) or under a
- * variant (`required` unread, `$ref`s not followed) — and only an inline
+ * `$ref` member (inherited, a union its component dispatches left to the
+ * component) or under a variant (`required` unread) — and only an inline
  * reading stands for the others: a schema shared between a variant and a
  * member (a YAML anchor, an object a `transformSpec` hook reuses, a `$ref`
  * written twice) still contributes its `required` and is still followed
  * when the member is reached, and a component's own object reused as an
- * inline member still has its union read after the `$ref` reading left it
- * to the component (`done`). The walk reads property lists only — it never
- * descends into a property — so it is finite for any component graph: a
- * schema already read in the same capacity is not read again, which is what
- * stops a component that extends itself. `required` lists each name once.
+ * inline member still has a dispatched union flattened after the `$ref`
+ * reading left it to the component (`done`). The walk reads property lists
+ * only — it never descends into a property — so it is finite for any
+ * component graph: a schema already read in the same capacity is not read
+ * again, which is what stops a component that extends itself. `required`
+ * lists each name once.
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
@@ -2836,30 +2918,35 @@ export function mergeAllOfMembers(
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
   // The schemas read so far, by capacity: `inline` (an always-applying
-  // member read as the merged model's own, unions included), `inherited`
-  // (reached through a `$ref` member, its unions left to its component) and
-  // `conditional` (under a variant, `required` unread and `$ref`s not
-  // followed). An inline reading is complete, so it stands for every
-  // capacity; an inherited or conditional reading is not, so the same schema
-  // reached again in another capacity is read once more for what that
-  // capacity contributes — a component's own object reused as an inline
-  // member (an object a `transformSpec` hook shares) still has its union
-  // read, a variant's object reused as a member still has its `required`
-  // read. A schema already read in the same capacity is not read again,
-  // which is what stops a component that extends itself.
+  // member read as the merged model's own, every union flattened),
+  // `inherited` (reached through a `$ref` member, a union its component
+  // dispatches left to the component) and `conditional` (under a variant,
+  // `required` unread; `declareVariant`). An inline reading is complete, so
+  // it stands for every capacity; an inherited or conditional reading is
+  // not, so the same schema reached again in another capacity is read once
+  // more for what that capacity contributes — a component's own object
+  // reused as an inline member (an object a `transformSpec` hook shares)
+  // still has a dispatched union flattened, a variant's object reused as a
+  // member still has its `required` read. A schema already read in the same
+  // capacity is not read again, which is what stops a component that
+  // extends itself.
   const done = {
     inline: new Set<SchemaObject>(),
     inherited: new Set<SchemaObject>(),
     conditional: new Set<SchemaObject>(),
   };
-  // `onBranch`: inside a `oneOf`/`anyOf` variant, whose properties are
-  // optional and whose `$ref`s are not followed.
-  const visit = (s: SchemaObject, origin: MergedProperty['origin'], onBranch: boolean): void => {
-    const capacity = onBranch ? 'conditional' : origin === null ? 'inline' : 'inherited';
+  // `wrapperDiscriminator`: the `discriminator` the `allOf` wrapper `s` sits
+  // in writes for a union among its members (`wrapperDiscriminatorOf`), by
+  // which an inherited union dispatches as its component's model does.
+  const visit = (
+    s: SchemaObject,
+    origin: MergedProperty['origin'],
+    wrapperDiscriminator?: SchemaObject['discriminator'],
+  ): void => {
+    const capacity = origin === null ? 'inline' : 'inherited';
     if (done.inline.has(s) || done[capacity].has(s)) return;
     done[capacity].add(s);
     if (s.$ref) {
-      if (onBranch) return;
       const key = componentKeyOf(s.$ref);
       const target = schemaRefTarget(s.$ref, componentSchemas);
       const refs = target ? resolvedRefs : unresolvedRefs;
@@ -2881,14 +2968,14 @@ export function mergeAllOfMembers(
       // under the origin at hand.
       const owner =
         origin?.schema.allOf || key === undefined ? origin : { name: resolveSchemaName(key), schema: target };
-      visit(target, owner, onBranch);
+      visit(target, owner);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value) declareProperty(declared, key, value, origin, onBranch);
+      if (value) declareProperty(declared, key, value, origin, false);
     }
-    if (s.required && !onBranch) for (const r of s.required) if (!required.includes(r)) required.push(r);
-    for (const sub of s.allOf ?? []) visit(sub, origin, onBranch);
+    if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
+    for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s));
     // A nullable union wrapper — one non-null variant beside `null`, decided
     // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
     // collapses by, which `readComponentAllOfMember` reads a component's
@@ -2900,13 +2987,21 @@ export function mergeAllOfMembers(
     // always-applying — wherever the member sits, a `$ref` member's
     // component included (workos/oagen#308: read as a branch, `Base`'s
     // `has_more` ended the iteration but was missing from the model). Any
-    // other inline union is flattened; one a `$ref` member's component
-    // carries belongs to that component's model.
+    // other union is flattened, each variant read as the component reader
+    // reads it (`declareVariant`) — unless a `$ref` member's component
+    // dispatches it, in which case it belongs to that component's model
+    // (`componentUnionDispatches`; #429).
     const branch = nullableUnionBranch(s);
-    if (branch) visit(branch, origin, onBranch);
-    else if (origin === null) for (const variant of s.oneOf ?? s.anyOf ?? []) visit(variant, origin, true);
+    if (branch) visit(branch, origin);
+    else {
+      for (const variants of unionAxesOf(s)) {
+        const explicit = s.discriminator ?? wrapperDiscriminator;
+        if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
+        for (const variant of variants) declareVariant(declared, variant, componentSchemas, done.conditional);
+      }
+    }
   };
-  visit(schema, null, false);
+  visit(schema, null);
   const properties: MergedProperty[] = [...declared.values()].map(({ name, unconditional, conditional }) =>
     unconditional
       ? { name, schema: unconditional.schema, origin: unconditional.origin }
@@ -3045,7 +3140,8 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * documentation, flags and limits ignored), else a `oneOf` of the distinct
  * shapes, each the first declaration of its shape, in order, deprecated only
  * when every declaration of that shape is (`shapeVariant`). See
- * `mergeAllOfMembers`.
+ * `mergeAllOfMembers`; a component's flattened union types such a property
+ * the same way (`declaredComponentProperty`; #398).
  *
  * A field reads its flags, documentation and limits from its own schema
  * (`buildFieldFromSchema`, `extractConstraints`), never from a union's
@@ -3073,7 +3169,7 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * a union of string consts would otherwise lose when it collapses to an
  * enum — and off the declarations.
  */
-function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
+export function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
   // The extensions and the keywords are decided first, across every
   // declaration as written, apart from the shape dedupe below: a declaration
