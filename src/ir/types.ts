@@ -1037,13 +1037,18 @@ export interface TypeParam {
  * declares (`{ kind: 'array' }`, under `nullable` when the component admits
  * null), and what its items reference is extracted under `<Component>Item…`.
  * A primitive component — a `string`, `integer`, `number` or `boolean`
- * schema, nullable in any spelling, or an alias of one — becomes no
- * model either: a `$ref` to it resolves to the primitive it declares
- * (`{ kind: 'primitive' }` with its `format`, under `nullable` when the
- * component admits null). What either component and its aliases declare
- * beside the items or the type — text, link, flags, limits, `default`,
- * `x-*` keys — is read by a field that names it with a bare `$ref`
- * (`Field`). The inline schemas the parser materializes — request bodies,
+ * schema, a `const` of any value, a type list of such primitives
+ * (`['string', 'integer']`) or a schema that declares no type at all (`{
+ * description: 'Any value.' }`, `{}`), nullable in any spelling, or an
+ * alias of one — becomes no model either: a `$ref` to it resolves to what
+ * it declares, as the same schema written inline is typed — the primitive
+ * (`{ kind: 'primitive' }` with its `format`), the literal (`{ kind:
+ * 'literal' }`), the union of primitives (`{ kind: 'union' }`) or `unknown`
+ * (`{ kind: 'primitive', type: 'unknown' }`), under `nullable` when the
+ * component admits null (#512, #569). What either component and its
+ * aliases declare beside the items or the type — text, link, flags,
+ * limits, `default`, `x-*` keys — is read by a field that names it with a
+ * bare `$ref` (`Field`). The inline schemas the parser materializes — request bodies,
  * responses, union variants, nested objects, array items, map values — are
  * models too.
  */

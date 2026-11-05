@@ -2105,3 +2105,485 @@ describe('#560', () => {
     ]);
   });
 });
+
+describe('#569', () => {
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const string = { kind: 'primitive', type: 'string' } as const;
+  const integer = { kind: 'primitive', type: 'integer' } as const;
+  const unknown = { kind: 'primitive', type: 'unknown' } as const;
+  const cat = { kind: 'literal', value: 'cat' } as const;
+  const stringOrInteger = { kind: 'union', variants: [string, integer] } as const;
+  const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
+
+  /** Parse a document of `schemas`, `paths` and `webhooks` from a file, as a spec is read. */
+  async function parse(
+    schemas: Record<string, unknown>,
+    paths: Record<string, unknown> = {},
+    openapi = '3.1.0',
+    webhooks?: Record<string, unknown>,
+  ): Promise<ApiSpec> {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-569-'));
+    try {
+      const file = join(dir, 'spec.json');
+      const doc = {
+        openapi,
+        info: { title: 'Pets', version: '1' },
+        paths,
+        ...(webhooks ? { webhooks } : {}),
+        components: { schemas },
+      };
+      await writeFile(file, JSON.stringify(doc));
+      return await parseSpec(file);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const names = (spec: ApiSpec) => ({ enums: spec.enums.map((e) => e.name), models: spec.models.map((m) => m.name) });
+  const fieldsOf = (spec: ApiSpec, model: string): Field[] => spec.models.find((m) => m.name === model)?.fields ?? [];
+  const typed = ({ name, type, constraints }: Pick<Field, 'name' | 'type' | 'constraints'>) => ({
+    name,
+    type,
+    constraints,
+  });
+  const documented = ({ name, type, constraints, description }: Field) => ({ name, type, constraints, description });
+
+  it('types a $ref to a const, multi-type or untyped component as the same schema written inline (the issue’s repro)', async () => {
+    const spec = await parse(
+      {
+        Anything: { description: 'Any value.' },
+        Kind: { type: 'string', const: 'cat' },
+        Tag: { type: ['string', 'integer'], maxLength: 20 },
+        Pet: {
+          type: 'object',
+          required: ['anything', 'anythingInline', 'kind', 'kindInline', 'tag', 'tagInline'],
+          properties: {
+            anything: ref('Anything'),
+            anythingInline: { description: 'Any value.' },
+            kind: ref('Kind'),
+            kindInline: { type: 'string', const: 'cat' },
+            tag: ref('Tag'),
+            tagInline: { type: ['string', 'integer'], maxLength: 20 },
+          },
+        },
+      },
+      {
+        '/pets/{petId}': {
+          get: {
+            operationId: 'getPet',
+            parameters: [{ name: 'petId', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Pet') } } } },
+          },
+        },
+      },
+    );
+
+    // No empty `Anything`, `Kind` or `Tag` model, and `Tag`'s `maxLength` on the field, not on a model.
+    expect(names(spec)).toEqual({ enums: [], models: ['Pet'] });
+    expect(fieldsOf(spec, 'Pet').map(documented)).toEqual([
+      { name: 'anything', type: unknown, constraints: undefined, description: 'Any value.' },
+      { name: 'anythingInline', type: unknown, constraints: undefined, description: 'Any value.' },
+      { name: 'kind', type: cat, constraints: undefined, description: undefined },
+      { name: 'kindInline', type: cat, constraints: undefined, description: undefined },
+      { name: 'tag', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
+      { name: 'tagInline', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
+    ]);
+  });
+
+  it('keeps the component’s nullability in every OAS 3.1 spelling, and types a const of any value as the literal', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          kind_list: ref('KindList'),
+          tag_list: ref('TagList'),
+          tag_one_of: ref('TagOneOf'),
+          any_one_of: ref('AnyOneOf'),
+          seven: ref('Seven'),
+          yes: ref('Yes'),
+          nothing: ref('Nothing'),
+          empty: ref('Empty'),
+          format_only: ref('FormatOnly'),
+        },
+      },
+      KindList: { type: ['string', 'null'], const: 'cat', description: 'A kind.' },
+      TagList: { type: ['string', 'integer', 'null'], maxLength: 20, minimum: 1 },
+      TagOneOf: { oneOf: [{ type: ['string', 'integer'], maxLength: 20 }, { type: 'null' }], description: 'A tag.' },
+      // The component's own text rides onto the field; a `null` variant's
+      // sibling branch is no level of the component, as it is not for a
+      // primitive under the same wrapper (#512) nor for the same schema inline.
+      AnyOneOf: { anyOf: [{ type: 'null' }, { description: 'Any.' }], description: 'Maybe any.' },
+      Seven: { type: 'integer', const: 7 },
+      Yes: { const: true },
+      Nothing: { const: null },
+      Empty: {},
+      FormatOnly: { format: 'uuid', description: 'Just a format.' },
+    });
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
+    expect(fieldsOf(spec, 'Holder').map(documented)).toEqual([
+      { name: 'kind_list', type: nullable(cat), constraints: undefined, description: 'A kind.' },
+      {
+        name: 'tag_list',
+        type: nullable(stringOrInteger),
+        constraints: { minimum: 1, maxLength: 20 },
+        description: undefined,
+      },
+      { name: 'tag_one_of', type: nullable(stringOrInteger), constraints: { maxLength: 20 }, description: 'A tag.' },
+      { name: 'any_one_of', type: nullable(unknown), constraints: undefined, description: 'Maybe any.' },
+      { name: 'seven', type: { kind: 'literal', value: 7 }, constraints: undefined, description: undefined },
+      { name: 'yes', type: { kind: 'literal', value: true }, constraints: undefined, description: undefined },
+      { name: 'nothing', type: nullable(unknown), constraints: undefined, description: undefined },
+      { name: 'empty', type: unknown, constraints: undefined, description: undefined },
+      { name: 'format_only', type: unknown, constraints: undefined, description: 'Just a format.' },
+    ]);
+  });
+
+  // Type lists and `const` are OAS 3.1 keywords; an untyped component is
+  // the one shape a 3.0 document writes, with or without a `nullable: true`
+  // that declares nothing beside no `type`, as it declares nothing inline.
+  it.each(['3.0.3', '3.1.0'])(
+    'carries an untyped component’s docs, flags, default, examples and keys onto a field that names it (OAS %s)',
+    async (openapi) => {
+      const spec = await parse(
+        {
+          Holder: {
+            type: 'object',
+            properties: {
+              anything: ref('Anything'),
+              own: { ...ref('Anything'), description: 'Own.', deprecated: false },
+              maybe: ref('MaybeAnything'),
+            },
+          },
+          Anything: {
+            description: 'Any value.',
+            externalDocs: { url: 'https://example.com/any' },
+            deprecated: true,
+            readOnly: true,
+            default: 'd',
+            example: 1,
+            examples: [1, 2],
+            'x-kind': 'any',
+          },
+          MaybeAnything: { nullable: true, description: 'Maybe any value.' },
+        },
+        {},
+        openapi,
+      );
+
+      expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
+      const [anything, own, maybe] = fieldsOf(spec, 'Holder');
+      expect(anything).toEqual({
+        name: 'anything',
+        type: unknown,
+        required: false,
+        description: 'Any value.',
+        externalDocs: { url: 'https://example.com/any' },
+        readOnly: true,
+        writeOnly: undefined,
+        deprecated: true,
+        default: 'd',
+        example: 1,
+        examples: [1, 2],
+        extensions: { 'x-kind': 'any' },
+      });
+      // The field's own text wins; the component fills in the rest.
+      expect(own).toMatchObject({ type: unknown, description: 'Own.', deprecated: true, default: 'd' });
+      expect(maybe).toMatchObject({ type: unknown, description: 'Maybe any value.' });
+    },
+  );
+
+  it('reads through an alias of a const or multi-type component, the nearer entry’s text first, as through a primitive’s', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          kind_alias: ref('KindAlias'),
+          kind_doc: ref('KindDoc'),
+          kind_maybe: ref('KindMaybe'),
+          kind_lone: ref('KindLone'),
+          kind_alias_alias: ref('KindAliasAlias'),
+          tag_alias: ref('TagAlias'),
+          tag_doc: ref('TagDoc'),
+          tag_maybe: ref('TagMaybe'),
+          any_doc: ref('AnyDoc'),
+        },
+      },
+      Kind: { type: 'string', const: 'cat', description: 'A kind.', default: 'cat', 'x-kind': 'k' },
+      KindAlias: ref('Kind'),
+      KindDoc: { allOf: [ref('Kind'), { description: 'The kind of pet.', deprecated: true }] },
+      KindMaybe: { oneOf: [ref('Kind'), { type: 'null' }] },
+      KindLone: { allOf: [ref('Kind')] },
+      KindAliasAlias: ref('KindDoc'),
+      Tag: { type: ['string', 'integer'], maxLength: 20, description: 'A tag.' },
+      TagAlias: ref('Tag'),
+      TagDoc: { allOf: [ref('Tag'), { description: 'Documented tag.', maxLength: 10 }] },
+      TagMaybe: { anyOf: [{ type: 'null' }, ref('Tag')] },
+      Anything: { description: 'Any value.' },
+      AnyDoc: { allOf: [ref('Anything'), { description: 'Documented.' }] },
+    });
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
+    const own = ({ name, type, constraints, description, default: fallback, deprecated, extensions }: Field) => ({
+      name,
+      type,
+      constraints,
+      description,
+      default: fallback,
+      deprecated,
+      extensions,
+    });
+    const kind = { description: 'A kind.', default: 'cat', deprecated: undefined, extensions: { 'x-kind': 'k' } };
+    const kindDoc = { ...kind, description: 'The kind of pet.', deprecated: true };
+    const tag = { description: 'A tag.', default: undefined, deprecated: undefined, extensions: undefined };
+    expect(fieldsOf(spec, 'Holder').map(own)).toEqual([
+      { name: 'kind_alias', type: cat, constraints: undefined, ...kind },
+      { name: 'kind_doc', type: cat, constraints: undefined, ...kindDoc },
+      { name: 'kind_maybe', type: nullable(cat), constraints: undefined, ...kind },
+      { name: 'kind_lone', type: cat, constraints: undefined, ...kind },
+      { name: 'kind_alias_alias', type: cat, constraints: undefined, ...kindDoc },
+      { name: 'tag_alias', type: stringOrInteger, constraints: { maxLength: 20 }, ...tag },
+      // The alias's stricter limit wins, as a field's own would.
+      {
+        name: 'tag_doc',
+        type: stringOrInteger,
+        constraints: { maxLength: 10 },
+        ...tag,
+        description: 'Documented tag.',
+      },
+      { name: 'tag_maybe', type: nullable(stringOrInteger), constraints: { maxLength: 20 }, ...tag },
+      { name: 'any_doc', type: unknown, constraints: undefined, ...tag, description: 'Documented.' },
+    ]);
+  });
+
+  it('conjoins the component’s limits under a wrapper around the $ref, the field documenting itself', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          own: { ...ref('Kind'), description: 'Own.' },
+          wrapped: { allOf: [ref('Tag'), { description: 'Wrapped.', maxLength: 5 }] },
+          lone: { allOf: [ref('Tag')] },
+          maybe: { oneOf: [ref('Kind'), { type: 'null' }] },
+          any_maybe: { anyOf: [ref('Anything'), { type: 'null' }], description: 'Maybe.' },
+        },
+      },
+      Kind: { type: 'string', const: 'cat', description: 'A kind.' },
+      Tag: { type: ['string', 'integer'], maxLength: 20, description: 'A tag.' },
+      Anything: { description: 'Any value.' },
+    });
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
+    expect(fieldsOf(spec, 'Holder').map(documented)).toEqual([
+      { name: 'own', type: cat, constraints: undefined, description: 'Own.' },
+      { name: 'wrapped', type: stringOrInteger, constraints: { maxLength: 5 }, description: 'Wrapped.' },
+      { name: 'lone', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
+      { name: 'maybe', type: nullable(cat), constraints: undefined, description: undefined },
+      { name: 'any_maybe', type: nullable(unknown), constraints: undefined, description: 'Maybe.' },
+    ]);
+  });
+
+  it('types the reference the same way at every other site', async () => {
+    const parameter = (name: string, schema: unknown, extra: Record<string, unknown> = {}) => ({
+      name,
+      in: 'query',
+      schema,
+      ...extra,
+    });
+    const spec = await parse(
+      {
+        Pet: {
+          type: 'object',
+          properties: {
+            tags: { type: 'array', items: ref('Tag') },
+            labels: { type: 'object', additionalProperties: ref('Anything') },
+            all: ref('Tags'),
+            kinds: ref('Kinds'),
+          },
+        },
+        Tags: { type: 'array', items: ref('Tag') },
+        Kinds: { type: 'array', items: ref('Kind'), minItems: 1 },
+        TagOrPet: { oneOf: [ref('Tag'), ref('Pet')] },
+        AnyOrPet: { oneOf: [ref('Anything'), ref('Pet')] },
+        KindOrAny: { oneOf: [ref('Kind'), ref('Anything')] },
+        Tag: { type: ['string', 'integer'], maxLength: 10, description: 'A tag.' },
+        Kind: { type: 'string', const: 'cat' },
+        Anything: { description: 'Any value.', default: 1 },
+      },
+      {
+        '/tags': {
+          post: {
+            operationId: 'createTag',
+            parameters: [
+              parameter('tag', ref('Tag')),
+              parameter('kind', ref('Kind'), { description: 'Own.' }),
+              parameter('any', ref('Anything')),
+              parameter('anyWrapped', { allOf: [ref('Anything'), { description: 'Wrapped.' }] }),
+              parameter('tagMaybe', { oneOf: [ref('Tag'), { type: 'null' }] }),
+            ],
+            requestBody: { content: { 'application/json': { schema: ref('Kind') } } },
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('TagOrPet') } } } },
+          },
+        },
+        '/any': {
+          post: {
+            operationId: 'createAny',
+            requestBody: { content: { 'application/json': { schema: ref('Anything') } } },
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Anything') } } } },
+          },
+          get: {
+            operationId: 'getAny',
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Tag') } } } },
+          },
+        },
+      },
+      '3.1.0',
+      {
+        anyHappened: {
+          post: {
+            operationId: 'anyHappened',
+            requestBody: { content: { 'application/json': { schema: ref('Anything') } } },
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    );
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Pet', 'TagOrPet', 'AnyOrPet', 'KindOrAny'] });
+    expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
+      { name: 'tags', type: { kind: 'array', items: stringOrInteger }, constraints: undefined },
+      { name: 'labels', type: { kind: 'map', valueType: unknown }, constraints: undefined },
+      { name: 'all', type: { kind: 'array', items: stringOrInteger }, constraints: undefined },
+      { name: 'kinds', type: { kind: 'array', items: cat }, constraints: { minItems: 1 } },
+    ]);
+    // A named union's variant that names such a component is the literal,
+    // union or unknown, and names no model for a discriminator.
+    const union = (name: string) => spec.models.find((m) => m.name === name);
+    expect(union('TagOrPet')).toMatchObject({ variants: [stringOrInteger, { kind: 'model', name: 'Pet' }] });
+    expect(union('AnyOrPet')).toMatchObject({ variants: [unknown, { kind: 'model', name: 'Pet' }] });
+    expect(union('KindOrAny')).toMatchObject({ variants: [cat, unknown] });
+    expect(union('AnyOrPet')?.discriminator).toBeUndefined();
+    const [createTag, getAny, createAny] = spec.services.flatMap((service) => service.operations);
+    const param = ({ name, type, constraints, description, default: fallback }: Parameter) => ({
+      name,
+      type,
+      constraints,
+      description,
+      default: fallback,
+    });
+    expect(createTag.queryParams.map(param)).toEqual([
+      { name: 'tag', type: stringOrInteger, constraints: { maxLength: 10 }, description: 'A tag.', default: undefined },
+      { name: 'kind', type: cat, constraints: undefined, description: 'Own.', default: undefined },
+      { name: 'any', type: unknown, constraints: undefined, description: 'Any value.', default: 1 },
+      { name: 'anyWrapped', type: unknown, constraints: undefined, description: 'Wrapped.', default: undefined },
+      {
+        name: 'tagMaybe',
+        type: nullable(stringOrInteger),
+        constraints: { maxLength: 10 },
+        description: undefined,
+        default: undefined,
+      },
+    ]);
+    expect(createTag.requestBody).toEqual(cat);
+    expect(createTag.response).toEqual({ kind: 'model', name: 'TagOrPet' });
+    expect(getAny.response).toEqual(stringOrInteger);
+    expect(createAny.requestBody).toEqual(unknown);
+    expect(createAny.response).toEqual(unknown);
+    expect(spec.webhooks?.map((webhook) => webhook.requestBody)).toEqual([unknown]);
+  });
+
+  // The primary response is the lowest 2xx whose body is typed, decided
+  // before any body is typed (`bodyTypesAsUnknown`): a `$ref` to an untyped
+  // component is `unknown` to that pick as the same schema inline is, so it
+  // never claims the pick from a typed body.
+  it('passes the primary-response pick over a body that is a $ref to an untyped component', async () => {
+    const pick = (first: unknown) => ({
+      responses: {
+        '200': { description: 'Any', content: { 'application/json': { schema: first } } },
+        '201': { description: 'Pet', content: { 'application/json': { schema: ref('Pet') } } },
+      },
+    });
+    const spec = await parse(
+      {
+        Pet: { type: 'object', properties: { id: { type: 'string' } } },
+        Anything: { description: 'Any value.' },
+        AnyAlias: ref('Anything'),
+        Kind: { type: 'string', const: 'cat' },
+      },
+      {
+        '/bare': { get: { operationId: 'bare', ...pick(ref('Anything')) } },
+        '/alias': { get: { operationId: 'alias', ...pick(ref('AnyAlias')) } },
+        '/wrapped': { get: { operationId: 'wrapped', ...pick({ allOf: [ref('Anything')] }) } },
+        '/annotated': {
+          get: { operationId: 'annotated', ...pick({ allOf: [ref('Anything'), { description: 'Any.' }] }) },
+        },
+        '/maybe': { get: { operationId: 'maybe', ...pick({ oneOf: [ref('Anything'), { type: 'null' }] }) } },
+        '/kind': { get: { operationId: 'kind', ...pick(ref('Kind')) } },
+      },
+    );
+
+    const responses = Object.fromEntries(
+      spec.services.flatMap((service) => service.operations).map((op) => [op.name, op.response]),
+    );
+    expect(responses).toEqual({
+      bare: { kind: 'model', name: 'Pet' },
+      alias: { kind: 'model', name: 'Pet' },
+      wrapped: { kind: 'model', name: 'Pet' },
+      annotated: { kind: 'model', name: 'Pet' },
+      // `nullable<unknown>` and a literal are typed, so the 200 keeps the pick.
+      maybe: nullable(unknown),
+      kind: cat,
+    });
+  });
+
+  it('leaves a component that declares a type no rule reads as the fieldless model it always became', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          array_without_items: ref('ArrayWithoutItems'),
+          object_or_string: ref('ObjectOrString'),
+          array_or_string: ref('ArrayOrString'),
+          null_only: ref('NullOnly'),
+          null_list: ref('NullList'),
+          map_without_type: ref('MapWithoutType'),
+          unread_type: ref('UnreadType'),
+          one_const: ref('OneConst'),
+        },
+      },
+      ArrayWithoutItems: { type: 'array' },
+      ObjectOrString: { type: ['object', 'string'] },
+      ArrayOrString: { type: ['array', 'string'], items: { type: 'string' } },
+      NullOnly: { type: 'null' },
+      NullList: { type: ['null'] },
+      MapWithoutType: { additionalProperties: { type: 'string' } },
+      UnreadType: { type: 'file' },
+      // A `oneOf` of string consts, one beside a `null` variant included, is an enum component, not a literal.
+      OneConst: { oneOf: [{ const: 'cat' }, { type: 'null' }] },
+    });
+
+    expect(names(spec)).toEqual({
+      enums: ['OneConst'],
+      models: [
+        'Holder',
+        'ArrayWithoutItems',
+        'ObjectOrString',
+        'ArrayOrString',
+        'NullOnly',
+        'NullList',
+        'MapWithoutType',
+        'UnreadType',
+      ],
+    });
+    expect(fieldsOf(spec, 'Holder').map(({ name, type }) => ({ name, type }))).toEqual([
+      { name: 'array_without_items', type: { kind: 'model', name: 'ArrayWithoutItems' } },
+      { name: 'object_or_string', type: { kind: 'model', name: 'ObjectOrString' } },
+      { name: 'array_or_string', type: { kind: 'model', name: 'ArrayOrString' } },
+      { name: 'null_only', type: { kind: 'model', name: 'NullOnly' } },
+      { name: 'null_list', type: { kind: 'model', name: 'NullList' } },
+      { name: 'map_without_type', type: { kind: 'model', name: 'MapWithoutType' } },
+      { name: 'unread_type', type: { kind: 'model', name: 'UnreadType' } },
+      { name: 'one_const', type: nullable({ kind: 'enum', name: 'OneConst' }) },
+    ]);
+  });
+});

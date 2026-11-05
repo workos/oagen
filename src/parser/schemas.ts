@@ -169,12 +169,15 @@ let activeArrayComponentPlans: Map<string, ArrayComponentPlan> = new Map();
 
 /**
  * Every primitive component of the document being extracted
- * (`isPrimitiveComponentEntry`), by its `components/schemas` key as written,
- * for the reason an array component is keyed so. Such a component becomes no
- * `Model`: a `$ref` to it resolves to the primitive it declares
- * (`schemaToTypeRef`). Decided in `extractSchemas` before any TypeRef is built
- * and dropped with the other per-document state, so outside an extraction a
- * `$ref` to such a key is a plain model reference.
+ * (`isPrimitiveComponentEntry`: a primitive, a `const`, a type list of
+ * primitives or a schema that declares no type, or an alias of one), by its
+ * `components/schemas` key as written, for the reason an array component is
+ * keyed so. Such a component becomes no `Model`: a `$ref` to it resolves to
+ * what it declares — the primitive, the literal, the union of primitives or
+ * `unknown` (`schemaToTypeRef`; #512, #569). Decided in `extractSchemas`
+ * before any TypeRef is built and dropped with the other per-document
+ * state, so outside an extraction a `$ref` to such a key is a plain model
+ * reference.
  */
 let activePrimitiveComponentKeys: ReadonlySet<string> = new Set();
 
@@ -1157,8 +1160,8 @@ export function extractSchemas(
   activeNullableUnionSchemaNames = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
-  // to one is the primitive wherever it is typed, an array component's items
-  // included.
+  // to one is the primitive, literal, union of primitives or `unknown` it
+  // declares wherever it is typed, an array component's items included.
   activePrimitiveComponentKeys = new Set(
     Object.entries(schemas)
       .filter(([, schema]) => !isEnumComponentSchema(schema) && isPrimitiveComponentEntry(schema, schemas))
@@ -1306,7 +1309,8 @@ export function extractSchemas(
       // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
       for (const inlineModel of extractArrayComponentModels(name, schemas)) keepLarger(inlineModel);
     } else if (activePrimitiveComponentKeys.has(name)) {
-      // No model of its own either: a `$ref` to it is the primitive it declares.
+      // No model of its own either: a `$ref` to it is the primitive,
+      // literal, union of primitives or `unknown` it declares (#512, #569).
     } else if (activeEnumAliasKeys.has(name)) {
       // Nor an alias of an enum component (#560): a `$ref` to it is the
       // enum it names, which keeps its own `Enum`.
@@ -3734,20 +3738,52 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
 
 /**
  * True for a `components/schemas` entry the parser reads as a primitive
- * component: a schema `schemaToTypeRef` types as a string, integer, number
- * or boolean — that `type`, and no keyword beside it that types the schema
- * otherwise (`classifyInlineSchema` reads it as `other`, so an `enum:` list,
- * a `const` or a composition is read as it is everywhere else) — once a
- * nullable wrapper is removed as it is from an array component
- * (`unwrapNullableComponent`): an OAS 3.1 type list naming `null`, OAS 3.0
- * `nullable: true`, or a `oneOf`/`anyOf` whose one variant beside a `null`
- * one is such a primitive.
+ * component: a schema `schemaToTypeRef` types from its own keywords alone,
+ * with no model, enum, array or map — once a nullable wrapper is removed as
+ * it is from an array component (`unwrapNullableComponent`: an OAS 3.1 type
+ * list naming `null`, OAS 3.0 `nullable: true`, or a `oneOf`/`anyOf` whose
+ * one variant beside a `null` one is such a schema). Four shapes: a
+ * primitive — `type: 'string'`, `'integer'`, `'number'` or `'boolean'`, and
+ * no keyword beside it that types the schema otherwise
+ * (`classifyInlineSchema` reads it as `other`, so an `enum:` list or a
+ * composition is read as it is everywhere else); a literal — a `const` of
+ * any value, which `classifyInlineSchema` reads before anything but a `$ref`
+ * or a composition (`Kind: { type: 'string', const: 'cat' }`); a union of
+ * primitives — a type list of several such types, `null` among them or not
+ * (`Tag: { type: ['string', 'integer'] }`, `isPrimitiveTypeList`); and
+ * `unknown` — a schema that declares no type at all (`declaresType`:
+ * `Anything: { description: 'Any value.' }`, `{}`, `{ format: 'uuid' }`).
+ * The last three became fieldless models before #569, while the same
+ * schema inline was the literal, the union or `unknown`. A type list naming
+ * `object` or `array`, a `type` no rule knows, `type: 'null'` alone in
+ * either spelling, and `type: 'array'` without `items` are none of these:
+ * each keeps the fieldless model it always became.
  */
 function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
   const bare = unwrapNullableComponent(schema);
-  return (
-    typeof bare.type === 'string' && Object.hasOwn(PRIMITIVE_TYPES, bare.type) && classifyInlineSchema(bare) === 'other'
-  );
+  switch (classifyInlineSchema(bare)) {
+    case 'const':
+      return true;
+    case 'other':
+      return bare.type === undefined ? !declaresType(bare) : isPrimitiveTypeList(bare.type);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Whether a `type` keyword names nothing but primitives: one primitive
+ * (`'string'`), or a list of primitives with or without `null`
+ * (`['string', 'integer']`, `['string', 'integer', 'null']`), at least one
+ * primitive among them — the lists `schemaToTypeRef` types as a primitive,
+ * a union of primitives, or either under `nullable` (#569). A list of
+ * `null` alone names no primitive, and a list naming `object` or `array`
+ * types a map, a model or an array beside the primitives.
+ */
+function isPrimitiveTypeList(type: string | string[]): boolean {
+  const types = Array.isArray(type) ? type : [type];
+  const nonNull = types.filter((t) => t !== 'null');
+  return nonNull.length > 0 && nonNull.every((t) => Object.hasOwn(PRIMITIVE_TYPES, t));
 }
 
 /**
@@ -3782,9 +3818,10 @@ export function isArrayComponentEntry(schema: SchemaObject, schemas: Record<stri
 
 /**
  * Whether a `components/schemas` entry is read as a primitive component: a
- * primitive schema itself (`isPrimitiveComponentSchema`), or an alias of one,
- * read through the nullable wrappers, `$ref`s and `allOf`s an array
- * component's alias is read through (`componentEntries`).
+ * primitive, `const`, primitive-type-list or typeless schema itself
+ * (`isPrimitiveComponentSchema`), or an alias of one, read through the
+ * nullable wrappers, `$ref`s and `allOf`s an array component's alias is
+ * read through (`componentEntries`).
  */
 function isPrimitiveComponentEntry(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
   return componentEntries(schema, schemas, isPrimitiveComponentSchema) !== undefined;
@@ -4202,6 +4239,43 @@ export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
 function isPrimitiveComponentRef(schema: SchemaObject): boolean {
   const segments = schema.$ref?.split('/');
   return segments !== undefined && activePrimitiveComponentKeys.has(segments[segments.length - 1]);
+}
+
+/**
+ * Whether `schemaToTypeRef` types `schema` as the bare `unknown` primitive
+ * through a `$ref` — decided without typing it, as `typesAsUnknown` decides
+ * an inline schema, and for the same reader: the one that must know before
+ * a body is typed (`bodyTypesAsUnknown`, choosing the primary response).
+ * `typesAsUnknown` holds for no `$ref`, since a `$ref` to a model, enum,
+ * named union, array component or primitive component with a type is never
+ * unknown; but a `$ref` to a primitive component that declares no type
+ * (`Anything: { description: 'Any value.' }`; #569), or to an alias of one,
+ * is typed as that schema written inline, so it is `unknown` exactly when
+ * the component is — read as the reference is typed: a nullable wrapper on
+ * the way makes it `nullable<unknown>`, not bare unknown; an `allOf` read as
+ * the reference takes its `$ref` member's answer, one read as its lone
+ * typing member that member's; an alias of an alias resolves in turn. So
+ * for a `$ref`: whether it names a primitive component (by key, as
+ * `schemaToTypeRef` resolves it; false outside an extraction) whose schema
+ * answers so here. For any other schema: `typesAsUnknown`, then — for an
+ * `allOf` that predicate leaves because the member it is read as is a
+ * `$ref` (`readInlineAllOf`) — that member's answer here.
+ */
+export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
+  if (schema.$ref) {
+    const component = isPrimitiveComponentRef(schema) ? componentSchemaOf(schema.$ref) : undefined;
+    return component !== undefined && referenceTypesAsUnknown(component);
+  }
+  if (typesAsUnknown(schema)) return true;
+  if (Array.isArray(schema.type) || (schema.nullable && schema.type)) return false;
+  const folded = foldSiblingProperties(schema);
+  if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
+  const reading = readInlineAllOf(folded.allOf, folded);
+  if (reading === 'reference') {
+    const member = folded.allOf.find((candidate) => candidate.$ref);
+    return member !== undefined && referenceTypesAsUnknown(member);
+  }
+  return reading === 'unwrapped' && referenceTypesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0]);
 }
 
 /**
@@ -5182,9 +5256,15 @@ export function schemaToTypeRef(
     // the array whatever another key resolving to `Note` is.
     const arrayAlias = arrayComponentTypeRef(rawName);
     if (arrayAlias) return arrayAlias;
-    // A primitive component is no model either: the reference is the
-    // primitive it declares, `format` and nullability included, typed as the
-    // same schema written inline (an alias resolving in turn).
+    // A primitive component is no model either: the reference is what it
+    // declares, typed as the same schema written inline (an alias resolving
+    // in turn) — the primitive, `format` and nullability included (#512);
+    // the literal of its `const`, the union of its type list, or `unknown`
+    // for a schema that declares no type (#569: `Kind: { type: 'string',
+    // const: 'cat' }`, `Tag: { type: ['string', 'integer'] }` and `Anything:
+    // { description }` were fieldless models, and a `$ref` to each typed as
+    // that model while the same schema inline was `'cat'`, `string |
+    // integer` and `unknown`).
     const primitive = activePrimitiveComponentKeys.has(rawName) ? componentSchemaOf(schema.$ref) : undefined;
     if (primitive) return schemaToTypeRef(primitive);
     // An alias of an enum component is no model either (#560): the
@@ -5711,6 +5791,7 @@ import {
   declarationKeywords,
   declareProperty,
   declaresInlineProperties,
+  declaresType,
   elementContextName,
   extractInlineModelsFromProperties,
   extractInlineModelsFromSchemas,
