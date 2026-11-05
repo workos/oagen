@@ -502,13 +502,22 @@ describe('parseSpec — pagination envelope fields', () => {
         [{ allOf: [{ type: ['array', 'null'], items: pet }] }, { type: ['array', 'null'], items: pet }],
         [{ oneOf: [{ allOf: [array] }, { type: 'null' }] }, nullableArray],
         [{ allOf: [{ $ref: '#/components/schemas/Pets' }] }, { $ref: '#/components/schemas/Pets' }],
-        [{ allOf: [{ $ref: '#/components/schemas/Pets' }, { maxItems: 10 }] }, { $ref: '#/components/schemas/Pets' }],
       ];
       for (const [data, plain] of cases) {
         const ir = await parseList(envelope(data));
         expect(ir.services[0].operations[0].pagination?.dataPath, JSON.stringify(data)).toBe('data');
         expect(ir, JSON.stringify(data)).toEqual(await parseList(envelope(plain)));
       }
+      // A limit beside the `$ref` is the array's (#545); everything else reads as the bare `$ref` does.
+      const limited = await parseList(envelope({ allOf: [{ $ref: '#/components/schemas/Pets' }, { maxItems: 10 }] }));
+      const bare = await parseList(envelope({ $ref: '#/components/schemas/Pets' }));
+      const [op] = limited.services.flatMap((s) => s.operations);
+      expect(op.pagination?.dataPath).toBe('data');
+      expect(op.response).toEqual({ ...pets, constraints: { maxItems: 10 } });
+      expect(op.responseContents?.map((content) => content.type)).toEqual([op.response]);
+      const withoutLimits = (value: unknown): unknown =>
+        JSON.parse(JSON.stringify(value, (key, entry: unknown) => (key === 'constraints' ? undefined : entry)));
+      expect(withoutLimits(limited)).toEqual(withoutLimits(bare));
     });
 
     it('merges with a second allOf declaration of data as the arrays the two wrap, null kept', async () => {
@@ -527,7 +536,8 @@ describe('parseSpec — pagination envelope fields', () => {
         });
         const [op] = ir.services.flatMap((s) => s.operations);
         expect(op.pagination?.dataPath).toBe('data');
-        expect(op.response).toEqual({ kind: 'nullable', inner: pets });
+        // The second declaration's limit is the array's (#545).
+        expect(op.response).toEqual({ kind: 'nullable', inner: { ...pets, constraints: { minItems: 1 } } });
       }
     });
 

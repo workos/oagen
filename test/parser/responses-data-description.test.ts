@@ -100,7 +100,12 @@ describe('classifyAndExtractResponse — list envelope data description', () => 
 
     expect(result.dataPath).toBe('data');
     expect(result.dataDescription).toBe('The connections on this page.');
-    expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'Connection' } });
+    // The later branch's limit is the array's (#545).
+    expect(result.response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'Connection' },
+      constraints: { minItems: 1 },
+    });
   });
 
   it('lets a later allOf branch restate the description, as allOf merging does elsewhere', () => {

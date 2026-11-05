@@ -736,7 +736,8 @@ describe('a null variant written as `{ const: null }` or `{ enum: [null] }` (#39
     const expected = extractSchemas(components({ type: 'null' }));
     const thing = expected.models.find((m) => m.name === 'Thing')!;
     expect(Object.fromEntries(thing.fields.map((f) => [f.name, f.type]))).toEqual({
-      name: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } },
+      // The branch's limit is the inner type's too (#545).
+      name: { kind: 'nullable', inner: { kind: 'primitive', type: 'string', constraints: { maxLength: 8 } } },
       status: { kind: 'nullable', inner: { kind: 'enum', name: 'Status' } },
       inline_status: { kind: 'nullable', inner: { kind: 'enum', name: 'ThingInlineStatus', values: ['on', 'off'] } },
       pet: { kind: 'nullable', inner: { kind: 'model', name: 'Pet' } },
@@ -1233,14 +1234,20 @@ describe('#512', () => {
 
     // No empty `Age`, `PetId` or `Vaccinated` model.
     expect(spec.models.map((m) => m.name)).toEqual(['Pet']);
+    // The component's limits are the type's too (#545).
+    const petId = { ...string, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } };
     expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
-      { name: 'age', type: { kind: 'primitive', type: 'integer' }, constraints: { minimum: 0 } },
-      { name: 'id', type: string, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
+      {
+        name: 'age',
+        type: { kind: 'primitive', type: 'integer', constraints: { minimum: 0 } },
+        constraints: { minimum: 0 },
+      },
+      { name: 'id', type: petId, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
       { name: 'vaccinated', type: { kind: 'primitive', type: 'boolean' }, constraints: undefined },
     ]);
     const [getPet] = spec.services.flatMap((service) => service.operations);
     expect(getPet.pathParams.map(typed)).toEqual([
-      { name: 'petId', type: string, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
+      { name: 'petId', type: petId, constraints: { pattern: '^pet_[0-9A-Z]{26}$' } },
     ]);
     expect(getPet.response).toEqual({ kind: 'model', name: 'Pet' });
   });
@@ -1307,8 +1314,13 @@ describe('#512', () => {
     );
 
     for (const parsed of [spec, spec30]) expect(parsed.models.map((m) => m.name)).toEqual(['Holder']);
+    // The component's limits are the inner type's too (#545).
     expect(fieldsOf(spec, 'Holder').map(typed)).toEqual([
-      { name: 'list', type: { kind: 'nullable', inner: string }, constraints: { maxLength: 3 } },
+      {
+        name: 'list',
+        type: { kind: 'nullable', inner: { ...string, constraints: { maxLength: 3 } } },
+        constraints: { maxLength: 3 },
+      },
       {
         name: 'one_of',
         type: { kind: 'nullable', inner: { kind: 'primitive', type: 'string', format: 'date' } },
@@ -1316,7 +1328,7 @@ describe('#512', () => {
       },
       {
         name: 'any_of',
-        type: { kind: 'nullable', inner: { kind: 'primitive', type: 'integer' } },
+        type: { kind: 'nullable', inner: { kind: 'primitive', type: 'integer', constraints: { minimum: 1 } } },
         constraints: { minimum: 1 },
       },
     ]);
@@ -1342,12 +1354,19 @@ describe('#512', () => {
     });
 
     expect(spec.models.map((m) => m.name)).toEqual(['Holder']);
+    // The limits read through the aliases are the type's too (#545).
+    const name = { ...string, constraints: { minLength: 1 } };
     expect(fieldsOf(spec, 'Holder').map(({ description, ...field }) => ({ ...typed(field), description }))).toEqual([
-      { name: 'alias', type: string, constraints: { minLength: 1 }, description: 'A name.' },
-      { name: 'nickname', type: string, constraints: { minLength: 1, maxLength: 20 }, description: 'A nickname.' },
+      { name: 'alias', type: name, constraints: { minLength: 1 }, description: 'A name.' },
+      {
+        name: 'nickname',
+        type: { ...string, constraints: { minLength: 1, maxLength: 20 } },
+        constraints: { minLength: 1, maxLength: 20 },
+        description: 'A nickname.',
+      },
       {
         name: 'maybe',
-        type: { kind: 'nullable', inner: string },
+        type: { kind: 'nullable', inner: name },
         constraints: { minLength: 1 },
         description: 'A name.',
       },
@@ -1410,51 +1429,59 @@ describe('#512', () => {
         extensions,
       });
       const none = { description: undefined, default: undefined, deprecated: undefined, extensions: undefined };
+      // The limits conjoined at the site are the type's too, under its wrapper (#545).
+      const petId = { ...uuid, constraints: { pattern: '^pet_' } };
+      const tags = { kind: 'array', items: string, constraints: { minItems: 1 } };
       expect(fieldsOf(spec, 'Pet').map(own)).toEqual([
-        { name: 'id', type: uuid, constraints: { pattern: '^pet_' }, ...none, description: 'The pet.' },
-        { name: 'lone', type: uuid, constraints: { pattern: '^pet_' }, ...none },
+        { name: 'id', type: petId, constraints: { pattern: '^pet_' }, ...none, description: 'The pet.' },
+        { name: 'lone', type: petId, constraints: { pattern: '^pet_' }, ...none },
         {
           name: 'beside',
-          type: uuid,
+          type: { ...uuid, constraints: { pattern: '^pet_', maxLength: 40, minLength: 5 } },
           constraints: { pattern: '^pet_', maxLength: 40, minLength: 5 },
           ...none,
           description: 'Beside.',
         },
         {
           name: 'flagged',
-          type: uuid,
+          type: petId,
           constraints: { pattern: '^pet_' },
           ...none,
           deprecated: true,
           default: 'pet_1',
           extensions: { 'x-kind': 'legacy' },
         },
-        { name: 'maybe', type: { kind: 'nullable', inner: uuid }, constraints: { pattern: '^pet_' }, ...none },
+        { name: 'maybe', type: { kind: 'nullable', inner: petId }, constraints: { pattern: '^pet_' }, ...none },
         {
           name: 'any',
-          type: { kind: 'nullable', inner: uuid },
+          type: { kind: 'nullable', inner: petId },
           constraints: { pattern: '^pet_' },
           ...none,
           description: 'Maybe a pet.',
         },
         {
           name: 'nested',
-          type: { kind: 'nullable', inner: uuid },
+          type: { kind: 'nullable', inner: petId },
           constraints: { pattern: '^pet_' },
           ...none,
           description: 'Nested.',
         },
-        { name: 'alias', type: uuid, constraints: { pattern: '^pet_', maxLength: 20 }, ...none },
+        {
+          name: 'alias',
+          type: { ...uuid, constraints: { pattern: '^pet_', maxLength: 20 } },
+          constraints: { pattern: '^pet_', maxLength: 20 },
+          ...none,
+        },
         {
           name: 'tags',
-          type: { kind: 'array', items: string },
+          type: tags,
           constraints: { minItems: 1 },
           ...none,
           description: 'The tags.',
         },
         {
           name: 'more',
-          type: { kind: 'nullable', inner: { kind: 'array', items: string } },
+          type: { kind: 'nullable', inner: tags },
           constraints: { minItems: 1 },
           ...none,
         },
@@ -1508,18 +1535,25 @@ describe('#512', () => {
     });
     const none = { description: undefined, default: undefined, deprecated: undefined };
     const named = { description: 'A name.', default: 'n', deprecated: true };
-    const tags = { kind: 'array', items: string } as const;
+    // The limits a parameter reads are its type's too (#545).
+    const name = { ...string, constraints: { minLength: 1 } };
+    const tags = { kind: 'array', items: string, constraints: { minItems: 1 } } as const;
     expect(listPets.queryParams.map(own)).toEqual([
       // A bare `$ref` reads the component's text, default and flag through every alias, and its limits.
-      { name: 'bare', type: string, constraints: { minLength: 1 }, ...named },
-      { name: 'alias', type: string, constraints: { minLength: 1 }, ...named },
-      { name: 'beside', type: string, constraints: { minLength: 1, maxLength: 3 }, ...named },
+      { name: 'bare', type: name, constraints: { minLength: 1 }, ...named },
+      { name: 'alias', type: name, constraints: { minLength: 1 }, ...named },
+      {
+        name: 'beside',
+        type: { ...string, constraints: { minLength: 1, maxLength: 3 } },
+        constraints: { minLength: 1, maxLength: 3 },
+        ...named,
+      },
       // A looser keyword beside the `$ref` does not loosen it: the stricter bound wins, as on a field (review round 3).
-      { name: 'looser', type: string, constraints: { minLength: 1 }, ...named },
+      { name: 'looser', type: name, constraints: { minLength: 1 }, ...named },
       // Under a wrapper the limits alone; the text is the wrapper's own.
-      { name: 'lone', type: string, constraints: { minLength: 1 }, ...none },
-      { name: 'annotated', type: string, constraints: { minLength: 1 }, ...none, description: 'Annotated.' },
-      { name: 'maybe', type: { kind: 'nullable', inner: string }, constraints: { minLength: 1 }, ...none },
+      { name: 'lone', type: name, constraints: { minLength: 1 }, ...none },
+      { name: 'annotated', type: name, constraints: { minLength: 1 }, ...none, description: 'Annotated.' },
+      { name: 'maybe', type: { kind: 'nullable', inner: name }, constraints: { minLength: 1 }, ...none },
       { name: 'tags', type: tags, constraints: { minItems: 1 }, ...none, description: 'Tags.' },
       { name: 'tags_lone', type: tags, constraints: { minItems: 1 }, ...none },
     ]);
@@ -1553,15 +1587,18 @@ describe('#512', () => {
     );
 
     expect(spec.models.map((m) => m.name)).toEqual(['Pet', 'TagOrPet']);
+    // The component's limit is the type's at every site — an array's items, a
+    // map's values and a named union's variant, where no field carries it (#545).
+    const tag = { ...string, constraints: { maxLength: 10 } };
     expect(fieldsOf(spec, 'Pet').map(({ name, type }) => ({ name, type }))).toEqual([
-      { name: 'tags', type: { kind: 'array', items: string } },
-      { name: 'labels', type: { kind: 'map', valueType: string } },
-      { name: 'all', type: { kind: 'array', items: string } },
+      { name: 'tags', type: { kind: 'array', items: tag } },
+      { name: 'labels', type: { kind: 'map', valueType: tag } },
+      { name: 'all', type: { kind: 'array', items: tag } },
     ]);
-    expect(spec.models.find((m) => m.name === 'TagOrPet')?.variants).toEqual([string, { kind: 'model', name: 'Pet' }]);
+    expect(spec.models.find((m) => m.name === 'TagOrPet')?.variants).toEqual([tag, { kind: 'model', name: 'Pet' }]);
     const [createTag] = spec.services.flatMap((service) => service.operations);
-    expect(createTag.queryParams.map(typed)).toEqual([{ name: 'tag', type: string, constraints: { maxLength: 10 } }]);
-    expect(createTag.requestBody).toEqual(string);
+    expect(createTag.queryParams.map(typed)).toEqual([{ name: 'tag', type: tag, constraints: { maxLength: 10 } }]);
+    expect(createTag.requestBody).toEqual(tag);
     expect(createTag.response).toEqual({ kind: 'model', name: 'TagOrPet' });
   });
 });
@@ -2085,10 +2122,15 @@ describe('#560', () => {
     });
 
     expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
+    // The limits read through the alias are the type's too (#545).
     expect(fieldsOf(spec, 'Holder').map(own)).toEqual([
       {
         name: 'tags',
-        type: { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+        type: {
+          kind: 'array',
+          items: { kind: 'primitive', type: 'string' },
+          constraints: { minItems: 1, maxItems: 5 },
+        },
         ...none,
         description: 'The tags.',
         deprecated: true,
@@ -2096,7 +2138,7 @@ describe('#560', () => {
       },
       {
         name: 'name',
-        type: { kind: 'primitive', type: 'string' },
+        type: { kind: 'primitive', type: 'string', constraints: { minLength: 1 } },
         ...none,
         description: 'The name.',
         readOnly: true,
@@ -2113,6 +2155,8 @@ describe('#569', () => {
   const unknown = { kind: 'primitive', type: 'unknown' } as const;
   const cat = { kind: 'literal', value: 'cat' } as const;
   const stringOrInteger = { kind: 'union', variants: [string, integer] } as const;
+  /** `stringOrInteger` with the limits a type list's union carries, its variants none (#545). */
+  const limitedTag = (constraints: Record<string, unknown>) => ({ ...stringOrInteger, constraints });
   const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
 
   /** Parse a document of `schemas`, `paths` and `webhooks` from a file, as a spec is read. */
@@ -2185,8 +2229,13 @@ describe('#569', () => {
       { name: 'anythingInline', type: unknown, constraints: undefined, description: 'Any value.' },
       { name: 'kind', type: cat, constraints: undefined, description: undefined },
       { name: 'kindInline', type: cat, constraints: undefined, description: undefined },
-      { name: 'tag', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
-      { name: 'tagInline', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
+      { name: 'tag', type: limitedTag({ maxLength: 20 }), constraints: { maxLength: 20 }, description: undefined },
+      {
+        name: 'tagInline',
+        type: limitedTag({ maxLength: 20 }),
+        constraints: { maxLength: 20 },
+        description: undefined,
+      },
     ]);
   });
 
@@ -2225,11 +2274,16 @@ describe('#569', () => {
       { name: 'kind_list', type: nullable(cat), constraints: undefined, description: 'A kind.' },
       {
         name: 'tag_list',
-        type: nullable(stringOrInteger),
+        type: nullable(limitedTag({ minimum: 1, maxLength: 20 })),
         constraints: { minimum: 1, maxLength: 20 },
         description: undefined,
       },
-      { name: 'tag_one_of', type: nullable(stringOrInteger), constraints: { maxLength: 20 }, description: 'A tag.' },
+      {
+        name: 'tag_one_of',
+        type: nullable(limitedTag({ maxLength: 20 })),
+        constraints: { maxLength: 20 },
+        description: 'A tag.',
+      },
       { name: 'any_one_of', type: nullable(unknown), constraints: undefined, description: 'Maybe any.' },
       { name: 'seven', type: { kind: 'literal', value: 7 }, constraints: undefined, description: undefined },
       { name: 'yes', type: { kind: 'literal', value: true }, constraints: undefined, description: undefined },
@@ -2342,16 +2396,16 @@ describe('#569', () => {
       { name: 'kind_maybe', type: nullable(cat), constraints: undefined, ...kind },
       { name: 'kind_lone', type: cat, constraints: undefined, ...kind },
       { name: 'kind_alias_alias', type: cat, constraints: undefined, ...kindDoc },
-      { name: 'tag_alias', type: stringOrInteger, constraints: { maxLength: 20 }, ...tag },
-      // The alias's stricter limit wins, as a field's own would.
+      { name: 'tag_alias', type: limitedTag({ maxLength: 20 }), constraints: { maxLength: 20 }, ...tag },
+      // The alias's stricter limit wins, as a field's own would — on the type too (#545).
       {
         name: 'tag_doc',
-        type: stringOrInteger,
+        type: limitedTag({ maxLength: 10 }),
         constraints: { maxLength: 10 },
         ...tag,
         description: 'Documented tag.',
       },
-      { name: 'tag_maybe', type: nullable(stringOrInteger), constraints: { maxLength: 20 }, ...tag },
+      { name: 'tag_maybe', type: nullable(limitedTag({ maxLength: 20 })), constraints: { maxLength: 20 }, ...tag },
       { name: 'any_doc', type: unknown, constraints: undefined, ...tag, description: 'Documented.' },
     ]);
   });
@@ -2376,8 +2430,8 @@ describe('#569', () => {
     expect(names(spec)).toEqual({ enums: [], models: ['Holder'] });
     expect(fieldsOf(spec, 'Holder').map(documented)).toEqual([
       { name: 'own', type: cat, constraints: undefined, description: 'Own.' },
-      { name: 'wrapped', type: stringOrInteger, constraints: { maxLength: 5 }, description: 'Wrapped.' },
-      { name: 'lone', type: stringOrInteger, constraints: { maxLength: 20 }, description: undefined },
+      { name: 'wrapped', type: limitedTag({ maxLength: 5 }), constraints: { maxLength: 5 }, description: 'Wrapped.' },
+      { name: 'lone', type: limitedTag({ maxLength: 20 }), constraints: { maxLength: 20 }, description: undefined },
       { name: 'maybe', type: nullable(cat), constraints: undefined, description: undefined },
       { name: 'any_maybe', type: nullable(unknown), constraints: undefined, description: 'Maybe.' },
     ]);
@@ -2450,11 +2504,18 @@ describe('#569', () => {
     );
 
     expect(names(spec)).toEqual({ enums: [], models: ['Pet', 'TagOrPet', 'AnyOrPet', 'KindOrAny'] });
+    // The component's limit is its type's at every site, an array's items
+    // included, and an array component's are its array's (#545).
+    const tag = limitedTag({ maxLength: 10 });
     expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
-      { name: 'tags', type: { kind: 'array', items: stringOrInteger }, constraints: undefined },
+      { name: 'tags', type: { kind: 'array', items: tag }, constraints: undefined },
       { name: 'labels', type: { kind: 'map', valueType: unknown }, constraints: undefined },
-      { name: 'all', type: { kind: 'array', items: stringOrInteger }, constraints: undefined },
-      { name: 'kinds', type: { kind: 'array', items: cat }, constraints: { minItems: 1 } },
+      { name: 'all', type: { kind: 'array', items: tag }, constraints: undefined },
+      {
+        name: 'kinds',
+        type: { kind: 'array', items: cat, constraints: { minItems: 1 } },
+        constraints: { minItems: 1 },
+      },
     ]);
     // A named union's variant that names such a component is the literal,
     // union or unknown, and names no model for a discriminator.
@@ -2472,13 +2533,13 @@ describe('#569', () => {
       default: fallback,
     });
     expect(createTag.queryParams.map(param)).toEqual([
-      { name: 'tag', type: stringOrInteger, constraints: { maxLength: 10 }, description: 'A tag.', default: undefined },
+      { name: 'tag', type: tag, constraints: { maxLength: 10 }, description: 'A tag.', default: undefined },
       { name: 'kind', type: cat, constraints: undefined, description: 'Own.', default: undefined },
       { name: 'any', type: unknown, constraints: undefined, description: 'Any value.', default: 1 },
       { name: 'anyWrapped', type: unknown, constraints: undefined, description: 'Wrapped.', default: undefined },
       {
         name: 'tagMaybe',
-        type: nullable(stringOrInteger),
+        type: nullable(tag),
         constraints: { maxLength: 10 },
         description: undefined,
         default: undefined,
@@ -2486,7 +2547,7 @@ describe('#569', () => {
     ]);
     expect(createTag.requestBody).toEqual(cat);
     expect(createTag.response).toEqual({ kind: 'model', name: 'TagOrPet' });
-    expect(getAny.response).toEqual(stringOrInteger);
+    expect(getAny.response).toEqual(tag);
     expect(createAny.requestBody).toEqual(unknown);
     expect(createAny.response).toEqual(unknown);
     expect(spec.webhooks?.map((webhook) => webhook.requestBody)).toEqual([unknown]);

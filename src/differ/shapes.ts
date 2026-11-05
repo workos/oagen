@@ -1,4 +1,5 @@
 import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
+import { typeRefConstraints } from '../ir/types.js';
 import { typeRefsEqual } from './models.js';
 
 /** The named types of one document, so a body's model or enum ref can be read through to its shape. */
@@ -56,8 +57,12 @@ const ENUM_VALUE_DOC_KEYS: ReadonlySet<string> = new Set(['description']);
  * nested models and enums are read through too — plus the model's own
  * limits, type parameters, deprecation, variants (pairwise, in order) and
  * discriminator (property and mapped shapes); an enum ref is read through to
- * its values (name, value, deprecation). Documentation (descriptions, links,
- * examples) does not count. Without `shapes`, or for a name either document
+ * its values (name, value, deprecation). The limits a type carries
+ * (`constraints` on a primitive, literal, array, map or union; #545) are
+ * shape as a field's are, at every level: two arrays whose items differ in
+ * `pattern` alone, or two unions whose variants do, are two shapes
+ * (`sameLimits`). Documentation (descriptions, links, examples) does not
+ * count. Without `shapes`, or for a name either document
  * lacks, the two refs are different shapes. So are two names both documents
  * declare, however alike: neither was renamed, so a body moved from `Note` to
  * an identical `NoteCopy` is typed by another model, and no `model-removed`
@@ -80,6 +85,7 @@ export function sameShape(a: TypeRef, b: TypeRef, shapes?: DocumentShapes): bool
 }
 
 function sameShapeWithin(a: TypeRef, b: TypeRef, shapes: DocumentShapes | undefined, seen: Set<string>): boolean {
+  if (!sameLimits(a, b)) return false;
   if (typeRefsEqual(a, b)) return true;
   if (!shapes || a.kind !== b.kind) return false;
   switch (a.kind) {
@@ -141,6 +147,35 @@ function sameModelShape(oldModel: Model, newModel: Model, shapes: DocumentShapes
     return false;
   }
   return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, seen);
+}
+
+/**
+ * Whether `a` and `b` carry the same limits at every level — on the type
+ * itself and, in lockstep, on an array's items, a map's values, a nullable
+ * wrapper's inner type and a union's variants pairwise (#545). Read by
+ * `sameShapeWithin` before the types are compared by name, since
+ * `typeRefsEqual` passes over limits as it passes over a field's. A model
+ * or enum reference carries none (the model's own are compared with the
+ * model); two types of different kinds are left to the shape comparison.
+ */
+function sameLimits(a: TypeRef, b: TypeRef): boolean {
+  if (stableStringify(typeRefConstraints(a)) !== stableStringify(typeRefConstraints(b))) return false;
+  switch (a.kind) {
+    case 'array':
+      return b.kind !== 'array' || sameLimits(a.items, b.items);
+    case 'map':
+      return b.kind !== 'map' || sameLimits(a.valueType, b.valueType);
+    case 'nullable':
+      return b.kind !== 'nullable' || sameLimits(a.inner, b.inner);
+    case 'union':
+      return (
+        b.kind !== 'union' ||
+        a.variants.length !== b.variants.length ||
+        a.variants.every((variant, i) => sameLimits(variant, b.variants[i]))
+      );
+    default:
+      return true;
+  }
 }
 
 function sameVariants(a: TypeRef[], b: TypeRef[], shapes: DocumentShapes, seen: Set<string>): boolean {

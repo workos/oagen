@@ -924,7 +924,8 @@ describe('every reference site', () => {
     expect(ops.getPets.pathParams.map((p) => [p.name, p.type])).toEqual([['ids', pets]]);
     expect(fieldType(spec, 'Owner', 'pets')).toEqual(pets);
     expect(fieldType(spec, 'Owner', 'viaAllOf')).toEqual(pets);
-    expect(fieldType(spec, 'Owner', 'viaAllOfWithLimits')).toEqual(pets);
+    // The limit beside the `$ref` is the array's (#545).
+    expect(fieldType(spec, 'Owner', 'viaAllOfWithLimits')).toEqual({ ...pets, constraints: { minItems: 1 } });
     expect(spec.models.find((m) => m.name === 'Choice')?.variants).toEqual([pets, model('Pet')]);
     const hook = spec.webhooks?.find((w) => w.name === 'petsAdopted');
     expect(hook?.requestBody).toEqual(pets);
@@ -1321,7 +1322,10 @@ describe('a component written as a nullable `oneOf`/`anyOf` (#399)', () => {
         },
       ),
     );
-    expect(fieldType(spec, 'Owner', 'pets')).toEqual(nullable(array(model('MaybePetsItem'))));
+    // The component's limit is the array's, under its nullable wrapper (#545).
+    expect(fieldType(spec, 'Owner', 'pets')).toEqual(
+      nullable({ kind: 'array', items: model('MaybePetsItem'), constraints: { maxItems: 3 } }),
+    );
     expect(spec.models.find((m) => m.name === 'Holder')?.fields).toMatchObject([
       {
         name: 'maybe',
@@ -1471,7 +1475,9 @@ describe('an alias of an array component (MichaelDeBoey)', () => {
         { '/pets': getOp('listPets', ref('Chain')) },
       ),
     );
-    for (const name of ['a', 'b', 'c', 'd']) expect(fieldType(spec, 'Holder', name)).toEqual(array(model('PetsItem')));
+    for (const name of ['a', 'c', 'd']) expect(fieldType(spec, 'Holder', name)).toEqual(array(model('PetsItem')));
+    // The alias's limit is the array's (#545).
+    expect(fieldType(spec, 'Holder', 'b')).toEqual({ ...array(model('PetsItem')), constraints: { maxItems: 10 } });
     expect(opsOf(spec).listPets.response).toEqual(array(model('PetsItem')));
     expect(spec.models.map((m) => m.name).sort()).toEqual(['Holder', 'PetsItem']);
     expect(warnings()).toEqual([]);

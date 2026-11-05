@@ -87,6 +87,10 @@ A missing kind means an entire category of types won't generate correctly.
 
 - `format` — Format hints like `date-time`, `uuid`, `email`, `uri`, `int64`. Determines whether to use language-specific types (e.g., `DateTime` in Ruby, `OffsetDateTime` in Kotlin).
 
+#### TypeRef (`primitive`, `literal`, `array`, `map`, `union`)
+
+- `constraints` — The validation keywords of the schema the type was built from (`pattern`, `minLength`, `minimum`, `minItems`, `uniqueItems`, `minProperties`, …), equal to the field's or parameter's where one carries them and the only place they are for an array's `items`, a union's variants and a map's values (#545). A `model`, `enum` or `nullable` reference carries none (a nullable's `inner` does); a type list's union carries them and its variants none. Type a variant or an item from them (a `pattern: '^pet_'` string as `` `pet_${string}` ``), document its form, or validate it before sending
+
 #### ErrorResponse
 
 - `type` — Structured error type for typed exception/error classes: a component model for a `$ref` body, a model `generateModels` emits for an inline object body (by default the shared shape-named models `ErrorBody`, `ErrorBodyWithCode`, … and the enum `ErrorBodyCode`; a per-operation `<Op>Error<code>` only under `collapseErrorBodies: false`), or a `<Op>Error<code>` enum `generateEnums` emits for a body that is itself an inline enum
@@ -303,6 +307,7 @@ For each gap, provide a specific, actionable suggestion for what the emitter sho
 | `Field.examples`                   | Document every example value (e.g. one `@example` tag each)                                                                                                  |
 | `Field.constraints`                | Document limits ("at most 100 characters") or validate before serializing                                                                                    |
 | `Parameter.constraints`            | Document limits on method arguments or validate before sending                                                                                               |
+| `TypeRef.constraints`              | Type an array's items or a union's variant from its limits (a `pattern` string as a template-literal type), document their form, or validate them            |
 
 Include the specific file and approximate location where each fix should be applied.
 

@@ -273,7 +273,12 @@ describe('classifyAndExtractResponse — list envelope companion fields', () => 
       'ListUsersResponse',
     );
 
-    expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'User' } });
+    // The later branch's limit is the array's (#545).
+    expect(result.response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'User' },
+      constraints: { minItems: 1 },
+    });
     expect(result.itemType).toEqual({ kind: 'model', name: 'User' });
     expect(result.envelopeFields).toEqual([
       { name: 'list_metadata', type: { kind: 'model', name: 'ListMetadata' }, required: false },

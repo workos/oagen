@@ -69,6 +69,7 @@ import {
   unwrapCollapsedWrappers,
   unwrapNullableField,
   warnOnUncarriedProperties,
+  withSchemaConstraints,
   withWrapperDocs,
 } from './schemas.js';
 import {
@@ -4600,18 +4601,23 @@ function typePickedRequestBody(
     // The mapping's targets are read as a field's or a response's inline
     // union reads them (`inlineMappingTargets`), so the same union carries the
     // same discriminator at every site.
-    const union: TypeRef = {
-      kind: 'union',
-      variants,
-      ...(schema.discriminator
-        ? {
-            discriminator: {
-              property: schema.discriminator.propertyName,
-              mapping: inlineMappingTargets(schema.discriminator.mapping),
-            },
-          }
-        : {}),
-    };
+    // The union carries the body's own limits, as `schemaToTypeRef` would
+    // have it carry them (#545); each variant carries its own.
+    const union: TypeRef = withSchemaConstraints(
+      {
+        kind: 'union',
+        variants,
+        ...(schema.discriminator
+          ? {
+              discriminator: {
+                property: schema.discriminator.propertyName,
+                mapping: inlineMappingTargets(schema.discriminator.mapping),
+              },
+            }
+          : {}),
+      },
+      schema,
+    );
     return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 

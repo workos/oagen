@@ -2868,22 +2868,14 @@ export function mergeAllOfMembers(
 }
 
 /**
- * The keywords a field reads from its own schema — the flags and
- * documentation `buildFieldFromSchema` reads and the validation keywords
- * `extractConstraints` reads — which `unionOfDeclarations` lifts onto a
- * combined declaration when every declaration agrees on them, and which
- * therefore make no shape of their own there, at a declaration's top level
- * or inside its array items and map values (`withoutLiftedKeywords`).
+ * The validation keywords `extractConstraints` reads: the limits a field
+ * reads from its own schema, and the ones an array's items or a map's
+ * values carry on their type (#545). Lifted by `unionOfDeclarations` at a
+ * declaration's top level with the rest of `LIFTED_DECLARATION_KEYWORDS`,
+ * and inside its array items and map values on their own
+ * (`withAgreedNestedLimits`).
  */
-const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
-  'readOnly',
-  'writeOnly',
-  'deprecated',
-  'description',
-  'default',
-  'example',
-  'examples',
-  'externalDocs',
+const LIFTED_LIMIT_KEYWORDS: readonly string[] = [
   'minimum',
   'maximum',
   'exclusiveMinimum',
@@ -2901,14 +2893,36 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'uniqueItems',
   'dependentRequired',
 ];
+
+/**
+ * The keywords a field reads from its own schema — the flags and
+ * documentation `buildFieldFromSchema` reads and the validation keywords
+ * `extractConstraints` reads (`LIFTED_LIMIT_KEYWORDS`) — which
+ * `unionOfDeclarations` lifts onto a combined declaration when every
+ * declaration agrees on them, and which therefore make no shape of their
+ * own there, at a declaration's top level or inside its array items and
+ * map values (`withoutLiftedKeywords`).
+ */
+const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+  'readOnly',
+  'writeOnly',
+  'deprecated',
+  'description',
+  'default',
+  'example',
+  'examples',
+  'externalDocs',
+  ...LIFTED_LIMIT_KEYWORDS,
+];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
 
 /**
  * The keywords under which a declaration nests the one schema its array
- * items or map values are typed from, where the IR carries none of
- * `LIFTED_DECLARATION_KEYWORDS` (`ArrayType`, `MapType`): the lifted
- * keywords written there make no shape either (`withoutLiftedKeywords`),
- * and `deprecated` there follows the shape's agreement (`shapeVariant`).
+ * items or map values are typed from (`ArrayType.items`,
+ * `MapType.valueType`): the lifted keywords written there make no shape
+ * either (`withoutLiftedKeywords`), `deprecated` there follows the shape's
+ * agreement (`shapeVariant`), and so do the limits, which the items' or
+ * values' type carries (`withAgreedNestedLimits`; #545).
  */
 const NESTED_DECLARATION_KEYWORDS = ['items', 'additionalProperties'] as const;
 
@@ -2916,13 +2930,13 @@ const NESTED_DECLARATION_KEYWORDS = ['items', 'additionalProperties'] as const;
  * `schema` as `unionOfDeclarations` compares it: without
  * `LIFTED_DECLARATION_KEYWORDS` at its top level, and without them inside
  * its `items` and `additionalProperties` schemas, recursively
- * (`NESTED_DECLARATION_KEYWORDS`), since the IR carries none of them for
- * an array's items or a map's values: `{ type: array, items: { type:
- * string } }` beside `{ type: array, items: { type: string, readOnly:
- * true } }`, or with `maxLength: 5` on the items, is one `string[]`
- * (workos/oagen#397 review: it was `(string[] | string[])`, and two maps
- * `(map | map)`). Inside `properties` they stay: a field reads them, so two
- * objects whose `t` differs in `readOnly` are two shapes.
+ * (`NESTED_DECLARATION_KEYWORDS`), since none of them shapes an array's
+ * items or a map's values: `{ type: array, items: { type: string } }`
+ * beside `{ type: array, items: { type: string, readOnly: true } }`, or
+ * with `maxLength: 5` on the items, is one `string[]` (workos/oagen#397
+ * review: it was `(string[] | string[])`, and two maps `(map | map)`).
+ * Inside `properties` they stay: a field reads them, so two objects whose
+ * `t` differs in `readOnly` are two shapes.
  */
 function withoutLiftedKeywords(schema: SchemaObject): SchemaObject {
   const stripped = omitKeys(schema, LIFTED_DECLARATION_KEYWORD_SET);
@@ -3021,17 +3035,50 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
   }
   const shapes = [...groups.values()].map(shapeVariant);
   // One shape: the first declaration, carrying the agreed keywords and
-  // extensions in place of its own.
+  // extensions in place of its own — inside its items and values too, for
+  // the limits their types carry.
   if (shapes.length === 1) {
     const first = shapes[0]!;
     const disputed = new Set(
       LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
     );
-    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
+    return withAgreedExtensions(
+      withAgreedNestedLimits(disputed.size > 0 ? omitKeys(first, disputed) : first, declarations),
+      extensions,
+    );
   }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
   return { ...agreed, ...extensions, oneOf: variants };
+}
+
+/**
+ * `shape`, the one declaration a single shape is typed from, with the
+ * limits inside its array items and map values (`NESTED_DECLARATION_KEYWORDS`,
+ * recursively) read by the same agreement as its own: a limit the items or
+ * values of every declaration write the same way stays, one any declaration
+ * leaves unset or writes otherwise is dropped (`agreedDeclarationKeys`).
+ * The items' or values' type carries those limits (#545), and the value
+ * takes one branch, so a `maxLength: 5` one declaration's items write and
+ * another's leave out is no limit of the field's items; before, nothing in
+ * the IR read them there. Every other lifted keyword written inside the
+ * items or values — `readOnly`, `description`, `default`, … — stays the
+ * first declaration's, as it did, since a field reads none of them there.
+ */
+function withAgreedNestedLimits(shape: SchemaObject, declarations: readonly SchemaObject[]): SchemaObject {
+  let out = shape;
+  for (const keyword of NESTED_DECLARATION_KEYWORDS) {
+    const nested = shape[keyword];
+    if (!isRecord(nested)) continue;
+    const nestedDeclarations = declarations.map((declaration) => declaration[keyword]).filter(isRecord);
+    const agreed = agreedDeclarationKeys(nestedDeclarations, LIFTED_LIMIT_KEYWORDS);
+    const disputed = new Set(
+      LIFTED_LIMIT_KEYWORDS.filter((key) => Object.hasOwn(nested, key) && !Object.hasOwn(agreed, key)),
+    );
+    const settled = withAgreedNestedLimits(disputed.size > 0 ? omitKeys(nested, disputed) : nested, nestedDeclarations);
+    if (settled !== nested) out = { ...out, [keyword]: settled };
+  }
+  return out;
 }
 
 /**

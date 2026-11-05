@@ -809,10 +809,35 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * conjoined with those of its inline `allOf` members (a single-member
  * `allOf` is unwrapped by the parser, so its limit is the value's own; a
  * `$ref` member contributes the keywords written beside the reference while
- * the referenced model keeps its own). Limits nested inside array `items` or
- * map values are not carried. A nullable wrapper — `oneOf`/`anyOf` with a
- * single non-null, non-`$ref` branch — conjoins that branch's keywords with
- * its own; limits on a general multi-variant union are not carried.
+ * the referenced model keeps its own). A nullable wrapper — `oneOf`/`anyOf`
+ * with a single non-null, non-`$ref` branch — conjoins that branch's
+ * keywords with its own.
+ *
+ * The types carry them too (#545). Every `TypeRef` the parser builds from a
+ * schema it types in place — a `primitive`, `literal`, `array`, `map` or
+ * `union` — carries that schema's keywords as `constraints`, read exactly
+ * as a field's are: the schema's own conjoined with its `allOf` members'
+ * and, through a nullable wrapper, the wrapper's with its branch's (so
+ * `nullable` itself carries none; its `inner` does), and for a `$ref` to
+ * an array or primitive component the component's and each alias's
+ * conjoined with any written beside the reference, as `Field.constraints`
+ * conjoins them. A `model` or `enum` reference carries none: the model it
+ * names carries its own (`Model.constraints`), and what is written around
+ * such a `$ref` is the field's or parameter's alone. So a field's or
+ * parameter's `constraints` equal those of its type (under its nullable
+ * wrapper) whenever the type can carry them — the field keeps its own copy
+ * so an emitter can read a value's limits without descending into its type
+ * — and the type carries them where no field could: an array's `items`, a
+ * union's variants, a map's values, a response header's or a body's type.
+ * `{ type: 'array', items: { type: 'string', pattern: '^tag_' } }` has
+ * `{ pattern: '^tag_' }` on its `items`; `anyOf: [{ type: 'string',
+ * pattern: '^pet_' }, { type: 'string' }]` has it on its first variant and
+ * none on the second, so an emitter can type the two apart
+ * (`` `pet_${string}` | (string & {}) ``). A union built from a type list
+ * (`type: ['string', 'integer']`) carries the schema's keywords itself and
+ * its variants none: each variant is the same schema read as one of its
+ * types, so the limits are read from the union for whichever type the
+ * value takes.
  */
 export interface Constraints {
   /** Inclusive lower bound (`minimum`). */
@@ -952,7 +977,9 @@ export interface Parameter {
    * can be read on its own without chasing the target (a primitive or an
    * array component becomes no model, nor does an alias of an enum
    * component, whose own limits conjoin above the enum's; #560). Absent
-   * when neither declares any.
+   * when neither declares any. Equal to the limits `type` carries (under
+   * its nullable wrapper) whenever it can carry them — a `$ref` to a model
+   * or enum keeps the parameter's own here alone (see `Constraints`).
    */
   constraints?: Constraints;
 }
@@ -964,11 +991,30 @@ export interface PrimitiveType {
   kind: 'primitive';
   type: 'string' | 'integer' | 'number' | 'boolean' | 'unknown';
   format?: string;
+  /**
+   * The validation keywords of the schema this primitive was built from —
+   * `pattern`, `minLength`, `minimum`, … — read as a field's are and
+   * present only when it declares any (see `Constraints`; #545): a field's
+   * own string, an array's items, a union's variant, a map's values and a
+   * `$ref` to a primitive component (the component's own) alike, so
+   * `items: { type: 'string', pattern: '^tag_' }` is readable from `items`.
+   */
+  constraints?: Constraints;
 }
 
 export interface ArrayType {
   kind: 'array';
   items: TypeRef;
+  /**
+   * The validation keywords of the array schema itself — `minItems`,
+   * `maxItems`, `uniqueItems`, … — read as a field's are and present only
+   * when it declares any (see `Constraints`; #545). The items' own keywords
+   * are on `items`, so a nested array carries each level's where it sits:
+   * `{ type: 'array', minItems: 1, items: { type: 'array', uniqueItems:
+   * true, items: { type: 'string', pattern } } }` is `{ minItems: 1 }`
+   * here, `{ uniqueItems: true }` on `items` and `{ pattern }` on its items.
+   */
+  constraints?: Constraints;
 }
 
 export interface ModelRef {
@@ -985,6 +1031,8 @@ export interface EnumRef {
 export interface LiteralType {
   kind: 'literal';
   value: string | number | boolean | null;
+  /** The validation keywords written beside the `const` or single-member `enum`, read as a field's are and present only when it declares any (see `Constraints`; #545). */
+  constraints?: Constraints;
 }
 
 export interface UnionType {
@@ -1012,8 +1060,25 @@ export interface UnionType {
   /** Which OAS composition keyword produced this union. Emitters can use this to
    *  distinguish inheritance (allOf) from exclusive union (oneOf) from open union (anyOf). */
   compositionKind?: 'allOf' | 'oneOf' | 'anyOf';
+  /**
+   * The validation keywords of the union schema itself — written beside
+   * its `oneOf`/`anyOf`, or on a type list's schema — read as a field's are
+   * and present only when it declares any (see `Constraints`; #545). Each
+   * `oneOf`/`anyOf` variant carries its own, so `anyOf: [{ type: 'string',
+   * pattern: '^pet_' }, { type: 'string' }]` has `{ pattern: '^pet_' }` on
+   * its first variant and nothing here, while `{ anyOf: [...], maxLength:
+   * 10 }` has `{ maxLength: 10 }` here. A type list's variants carry none:
+   * `{ type: ['string', 'integer'], maxLength: 20, minimum: 1 }` has both
+   * here, to read for whichever type the value takes.
+   */
+  constraints?: Constraints;
 }
 
+/**
+ * A type that admits `null` beside `inner`. Carries no `constraints` of its
+ * own: a nullable wrapper's validation keywords are the value's, conjoined
+ * onto `inner` as a field's conjoin through the wrapper (see `Constraints`).
+ */
 export interface NullableType {
   kind: 'nullable';
   inner: TypeRef;
@@ -1023,6 +1088,13 @@ export interface MapType {
   kind: 'map';
   valueType: TypeRef;
   keyType?: TypeRef;
+  /**
+   * The validation keywords of the map's object schema itself —
+   * `minProperties`, `maxProperties`, `dependentRequired` — read as a
+   * field's are and present only when it declares any (see `Constraints`;
+   * #545). The values' own keywords are on `valueType`.
+   */
+  constraints?: Constraints;
 }
 
 /**
@@ -1257,6 +1329,11 @@ export interface Field {
    * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
    * that `pattern`, as `{ allOf: [{ $ref: PetId }] }` and `oneOf: [{ $ref:
    * PetId }, { type: 'null' }]` do. Absent when no level declares any.
+   * Equal to the limits `type` carries (under its nullable wrapper)
+   * whenever it can carry them — a `$ref` to a model, named union or enum
+   * keeps the field's own here alone — while the limits of an array's
+   * items, a union's variants or a map's values are on those types only
+   * (see `Constraints`; #545).
    */
   constraints?: Constraints;
   /**
@@ -1383,6 +1460,29 @@ export function assertNever(x: never): never {
   );
   err.name = 'InternalError';
   throw err;
+}
+
+/**
+ * The validation keywords `ref` carries (see `Constraints`; #545): its
+ * `constraints` for a `primitive`, `literal`, `array`, `map` or `union`,
+ * `undefined` for a `model` or `enum` reference, which carries none, and
+ * for a `nullable` wrapper, whose `inner` carries the value's. The one
+ * read for every kind, so a reader need not know which kinds carry them.
+ */
+export function typeRefConstraints(ref: TypeRef): Constraints | undefined {
+  switch (ref.kind) {
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union':
+      return ref.constraints;
+    case 'model':
+    case 'enum':
+    case 'nullable':
+      return undefined;
+  }
+  return assertNever(ref);
 }
 
 /**

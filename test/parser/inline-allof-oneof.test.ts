@@ -1247,7 +1247,8 @@ describe('declarations that differ only in a keyword the field reads by agreemen
     );
     expect(kindOf(ir)).toEqual({
       name: 'kind',
-      type: str,
+      // The agreed limit is the type's too (#545).
+      type: { ...str, constraints: { maxLength: 3 } },
       required: false,
       description: 'The kind',
       readOnly: true,
@@ -2399,9 +2400,9 @@ describe('an allOf of one typing member beside members that only annotate or lim
     expect(shown(fieldOf(ir, 'size'))).toEqual({ type: kind, readOnly: true });
     expect(shown(fieldOf(ir, 'tag'))).toEqual({ type: kind, deprecated: true, readOnly: true });
     expect(shown(fieldOf(ir, 'owner'))).toEqual({ type: model('Owner'), description: 'The owner.', deprecated: true });
-    // A primitive component's limits conjoin through the reference, as before.
+    // A primitive component's limits conjoin through the reference, as before, on the type too (#545).
     expect(shown(fieldOf(ir, 'pid'))).toEqual({
-      type: str,
+      type: { ...str, constraints: { maxLength: 36, pattern: '^pet_' } },
       constraints: { maxLength: 36, pattern: '^pet_' },
       description: 'A described id.',
     });
@@ -2420,7 +2421,8 @@ describe('an allOf of one typing member beside members that only annotate or lim
       }),
     );
     expect(shown(fieldOf(ir, 'id'))).toEqual({
-      type: { kind: 'nullable', inner: str },
+      // The limits are the inner type's too (#545).
+      type: { kind: 'nullable', inner: { ...str, constraints: { maxLength: 36, pattern: '^pet_' } } },
       constraints: { maxLength: 36, pattern: '^pet_' },
       description: 'The pet.',
     });
@@ -2466,13 +2468,17 @@ describe('an allOf of one typing member beside members that only annotate or lim
         },
       }),
     );
-    expect(shown(fieldOf(ir, 'limited'))).toEqual({ type: str, constraints: { maxLength: 3 } });
+    // The conjoined limits are the type's too (#545).
+    expect(shown(fieldOf(ir, 'limited'))).toEqual({
+      type: { ...str, constraints: { maxLength: 3 } },
+      constraints: { maxLength: 3 },
+    });
     expect(shown(fieldOf(ir, 'both'))).toEqual({
-      type: str,
+      type: { ...str, constraints: { minLength: 2, maxLength: 3, pattern: '^a' } },
       constraints: { minLength: 2, maxLength: 3, pattern: '^a' },
     });
     expect(shown(fieldOf(ir, 'items'))).toEqual({
-      type: { kind: 'array', items: str },
+      type: { kind: 'array', items: str, constraints: { minItems: 1 } },
       constraints: { minItems: 1 },
       description: 'Tags.',
     });
@@ -2560,7 +2566,11 @@ describe('an allOf of one typing member beside members that only annotate or lim
       // Two typing members, neither of them properties, are read as neither.
       expect(shown(fieldOf(ir, 'two'))).toEqual({ type: { kind: 'primitive', type: 'unknown' } });
       // An `allOf` of bare limits beside the schema's own `type` leaves it that type.
-      expect(shown(fieldOf(ir, 'own'))).toEqual({ type: str, constraints: { minLength: 1 }, description: 'Own type.' });
+      expect(shown(fieldOf(ir, 'own'))).toEqual({
+        type: { ...str, constraints: { minLength: 1 } },
+        constraints: { minLength: 1 },
+        description: 'Own type.',
+      });
       expect(shown(fieldOf(ir, 'none'))).toEqual({
         type: { kind: 'primitive', type: 'unknown' },
         description: 'Only text.',

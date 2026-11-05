@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { diffModels, typeRefsEqual } from '../../src/differ/models.js';
-import type { Model } from '../../src/ir/types.js';
+import type { Model, TypeRef } from '../../src/ir/types.js';
 
 const userModel: Model = {
   name: 'User',
@@ -548,5 +548,26 @@ describe('diffModels edge cases', () => {
     const m: Model = { name: 'Empty', fields: [] };
     const changes = diffModels([m], [m]);
     expect(changes).toHaveLength(0);
+  });
+});
+
+describe('#545', () => {
+  const string: TypeRef = { kind: 'primitive', type: 'string' };
+  const tagged: TypeRef = { kind: 'primitive', type: 'string', constraints: { pattern: '^tag_' } };
+  const tags = (items: TypeRef, constraints?: Record<string, unknown>): Model => ({
+    name: 'Pet',
+    fields: [
+      { name: 'tags', type: { kind: 'array', items }, required: false, ...(constraints ? { constraints } : {}) },
+    ],
+  });
+
+  it('reads two types that differ only in the limits they carry as one type, as it reads two fields', () => {
+    // `typeRefsEqual` passes over a type's limits as `diffFields` passes over
+    // a field's: a limit tightened or loosened on an array's items, like one
+    // on the field itself, is no type change the differ reports today.
+    expect(typeRefsEqual({ kind: 'array', items: tagged }, { kind: 'array', items: string })).toBe(true);
+    expect(diffModels([tags(tagged)], [tags(string)])).toEqual([]);
+    expect(diffModels([tags(string)], [tags(tagged)])).toEqual([]);
+    expect(diffModels([tags(string, { minItems: 1 })], [tags(string)])).toEqual([]);
   });
 });

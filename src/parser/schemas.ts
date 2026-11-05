@@ -1,5 +1,5 @@
 import type { Model, ModelRef, Enum, EnumValue, Extensions, Field, TypeRef, Constraints } from '../ir/types.js';
-import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
+import { assertNever, walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
@@ -514,11 +514,13 @@ const NUMERIC_CONSTRAINT_KEYS = [
  * and is dropped too.
  *
  * Only the schema's own keywords are read: limits nested inside array `items`
- * or map values are not collected. The one exception is a nullable wrapper —
- * a `oneOf`/`anyOf` with a single non-null, non-`$ref` branch — that declares
- * none itself: it takes that branch's keywords, since the IR collapses it to
- * `nullable<T>`. Values of the wrong type (a string `maxLength`, say) are
- * ignored rather than carried.
+ * or map values are not collected here — they are the items' or values'
+ * own, carried on the type built for them (`schemaToTypeRef`; #545). The
+ * one exception is a nullable wrapper — a `oneOf`/`anyOf` with a single
+ * non-null, non-`$ref` branch — that declares none itself: it takes that
+ * branch's keywords, since the IR collapses it to `nullable<T>`. Values of
+ * the wrong type (a string `maxLength`, say) are ignored rather than
+ * carried.
  */
 export function extractConstraints(schema: SchemaObject): Constraints | undefined {
   // The schema's own keywords conjoined with its `allOf` members' (recursively;
@@ -604,6 +606,74 @@ export function isNullSchema(schema: SchemaObject): boolean {
 export function constraintsEntry(schema: SchemaObject): { constraints?: Constraints } {
   const constraints = extractConstraints(schema);
   return constraints ? { constraints } : {};
+}
+
+/**
+ * The limits a site that writes `schema` carries — what `Field.constraints`
+ * is for a field written as `schema`, and what the type built from it
+ * carries (`schemaToTypeRef`; #545): the keywords of the site's own levels
+ * — the schema and, under it, each `allOf` member that declares no type
+ * (`annotatingAllOfMembers`; #555), each read by `extractConstraints`, so a
+ * nullable wrapper's and its branch's conjoin — and, for a reference to an
+ * array or primitive component, or to an alias of an enum component, of
+ * every entry the reference passes (`componentReference`: the wrappers and
+ * the members beside the `$ref`, each alias, the component), conjoined
+ * from the component outward, as JSON Schema applies every level at once
+ * and the wire enforces the component's limit whatever is written beside
+ * the `$ref` (#512 review). A `$ref` to a model, named union or enum
+ * contributes none of the target's: that node carries its own.
+ * `undefined` when no level declares any.
+ */
+export function schemaConstraints(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): Constraints | undefined {
+  const reference = componentReference(schema, componentSchemas);
+  const own = reference?.own ?? [schema, ...annotatingAllOfMembers(schema)];
+  return [...own, ...(reference?.entries ?? [])].reduceRight<Constraints | undefined>(
+    (limits, level) => combineConstraints(limits, extractConstraints(level)),
+    undefined,
+  );
+}
+
+/**
+ * `ref` carrying `constraints` on the node that can (#545): the
+ * `primitive`, `literal`, `array`, `map` or `union` itself, or the `inner`
+ * of a `nullable` wrapper, whose keywords are the value's; in place of any
+ * it carried, since the limits of the site a type is built at account for
+ * every level the type was built through. A `model` or `enum` reference is
+ * returned as it is — the model carries its own, and what the site writes
+ * around the `$ref` stays the field's or parameter's — and so is `ref`
+ * when `constraints` is `undefined`, so a type stays as built.
+ */
+export function withTypeConstraints(ref: TypeRef, constraints: Constraints | undefined): TypeRef {
+  if (!constraints) return ref;
+  switch (ref.kind) {
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union':
+      ref.constraints = constraints;
+      return ref;
+    case 'nullable':
+      withTypeConstraints(ref.inner, constraints);
+      return ref;
+    case 'model':
+    case 'enum':
+      return ref;
+  }
+  return assertNever(ref);
+}
+
+/**
+ * `ref`, built for `schema` by hand where a site assembles a type instead of
+ * asking `schemaToTypeRef` for it (a list response's data array, a `oneOf`
+ * request body), carrying the limits that site has (`schemaConstraints`),
+ * as `schemaToTypeRef` would have it carry them (#545).
+ */
+export function withSchemaConstraints(ref: TypeRef, schema: SchemaObject): TypeRef {
+  return withTypeConstraints(ref, schemaConstraints(schema, documentComponentSchemas()));
 }
 
 /**
@@ -2924,7 +2994,6 @@ export function buildFieldFromSchema(
   // them for a reference to an array or primitive component.
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
-  const limitLevels = [...own, ...aliases];
   const { example, examples } = resolveExamples(
     [...own, ...(bare ? [...aliases, ...(refTarget ? [refTarget] : [])] : [])].map((level) => ({
       example: level.example,
@@ -2932,13 +3001,12 @@ export function buildFieldFromSchema(
     })),
   );
   const externalDocs = levels.map((level) => readExternalDocs(level.externalDocs)).find(Boolean);
-  // Limits conjoin, as JSON Schema applies every level at once; an `x-*` key
-  // the nearer level declares wins, as a collapsed wrapper's does
-  // (`withWrapperDocs`). Both start from the component, so its keys come first.
-  const constraints = limitLevels.reduceRight<Constraints | undefined>(
-    (limits, level) => combineConstraints(limits, extractConstraints(level)),
-    undefined,
-  );
+  // Limits conjoin, as JSON Schema applies every level at once
+  // (`schemaConstraints`: the same reading the field's type carries, #545);
+  // an `x-*` key the nearer level declares wins, as a collapsed wrapper's
+  // does (`withWrapperDocs`). Both start from the component, so its keys
+  // come first.
+  const constraints = schemaConstraints(fieldSchema, componentSchemas);
   const extensions = levels.reduceRight<Extensions | undefined>((keys, level) => {
     const own = extensionsOf(level, SCHEMA_CONSUMED_EXTENSIONS);
     return own ? { ...keys, ...own } : keys;
@@ -3178,12 +3246,14 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
   const keys = variantMemberKeys(variant, modelName);
+  // The variant's limits are the union's, as a type list's are
+  // (`schemaToTypeRef`; #545), so the other members are built without them.
   const members = typeList
     .filter((t) => t !== 'null')
     .map((t) =>
       t === 'object'
         ? modelRef
-        : schemaToTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, modelName),
+        : buildTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, modelName),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return nullable ? asNullable(ref) : ref;
@@ -5304,6 +5374,23 @@ export function componentTypeRef(key: string): TypeRef {
   return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
 }
 
+/**
+ * The type `schema` is read as (`buildTypeRef`), carrying the limits of the
+ * site that writes it (#545): every `primitive`, `literal`, `array`, `map`
+ * or `union` the parser builds from a schema carries that schema's
+ * validation keywords as `constraints`, read as a field's are
+ * (`schemaConstraints`) — a field's own schema, an array's items, a union's
+ * variant, a map's values, a parameter's or header's schema, a body, a
+ * primitive or array component a `$ref` resolves to — under a nullable
+ * wrapper onto its `inner` (`withTypeConstraints`). A `model` or `enum`
+ * reference carries none. The builder re-enters here for every nested
+ * schema, so each node carries its own site's limits; where it re-enters
+ * for a wrapper's branch or an `allOf`'s member — the same site, read one
+ * level down — the outer level's reading replaces the branch's, which it
+ * accounts for (a wrapper's keywords conjoin with its branch's, a `$ref`
+ * site's with its component's, in the one order `Field.constraints` reads
+ * them). So a field's `constraints` and its type's are one reading.
+ */
 export function schemaToTypeRef(
   schema: SchemaObject,
   contextName?: string,
@@ -5312,6 +5399,20 @@ export function schemaToTypeRef(
   // The inline names an enclosing field's siblings mint, handed down to the
   // field's array items and map values so a union among them steps around a
   // sibling's model like a union at field level (`reservedNamesFor`).
+  reservedNames?: ReadonlySet<string>,
+): TypeRef {
+  return withTypeConstraints(
+    buildTypeRef(schema, contextName, parentModelName, siblingProperties, reservedNames),
+    schemaConstraints(schema, documentComponentSchemas()),
+  );
+}
+
+/** `schemaToTypeRef` without the site's limits: the shape of the type, every nested schema typed through `schemaToTypeRef` itself. */
+function buildTypeRef(
+  schema: SchemaObject,
+  contextName?: string,
+  parentModelName?: string,
+  siblingProperties?: ReadonlyMap<string, SchemaObject>,
   reservedNames?: ReadonlySet<string>,
 ): TypeRef {
   // Handle $ref → ModelRef or EnumRef.
@@ -5353,10 +5454,15 @@ export function schemaToTypeRef(
         ),
       );
     }
-    // Multiple non-null types → union
+    // Multiple non-null types → union. The schema's limits are the union's
+    // (`schemaToTypeRef` attaches them to it), not each variant's: a
+    // variant is the same schema read as one of its types, so the limits
+    // are read from the union, once, for whichever type the value takes
+    // (#545). The variants are built without them (`buildTypeRef`); what
+    // they nest — items, values — carries its own.
     if (nonNullTypes.length > 1) {
       const variants = nonNullTypes.map((t: string) =>
-        schemaToTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties, reservedNames),
+        buildTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties, reservedNames),
       );
       const ref: TypeRef = { kind: 'union', variants };
       if (schema.type.includes('null')) {
@@ -5589,7 +5695,10 @@ export function schemaToTypeRef(
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
+        // The variant's own limits ride on what it is typed as, where that
+        // can carry them: the union of a multi-type variant (#545); a model
+        // reference carries none, the model its own.
+        variants.push(withSchemaConstraints(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName), v));
       } else {
         // A union of one variant stays a union, but it is the schema the
         // document wrote for its variant: the variant is typed with the

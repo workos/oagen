@@ -126,6 +126,27 @@ Every type in the IR is a `TypeRef`, discriminated on the `kind` field:
 | `literal`   | `LiteralType`   | `{ kind: "literal", value: "active" }`                               |
 | `map`       | `MapType`       | `{ kind: "map", valueType: { kind: "primitive", type: "string" } }`  |
 
+### Type constraints
+
+Every `TypeRef` the parser builds from a schema it types in place — a `primitive`, `literal`, `array`, `map` or `union` — carries that schema's validation keywords as an optional `constraints?: Constraints` (#545), read exactly as a field's are (see Constraints below): the schema's own keywords conjoined with its `allOf` members' and, through a nullable wrapper, the wrapper's with its branch's — so `nullable` carries none of its own and its `inner` does — and, for a `$ref` to an array or primitive component, the component's and each alias's conjoined with whatever is written beside the reference, as `Field.constraints` conjoins them. A `model` or `enum` reference carries none: the model it names carries its own (`Model.constraints`), and what is written around such a `$ref` stays the field's or parameter's. The key is absent when the schema declares no validation keyword.
+
+So a field's or parameter's `constraints` equal those of its type (under its nullable wrapper) whenever the type can carry them — the field keeps its own copy so an emitter can read a value's limits without descending into its type — and the type carries them where no field could: an array's `items`, a union's variants, a map's values, a response header's type, a request or response body. For the `petId` and `tagIds` of #545:
+
+```yaml
+petId:
+  { anyOf: [{ type: string, pattern: "^pet_[0-9A-Z]{26}$" }, { type: string }] }
+tagIds: { type: array, items: { type: string, pattern: "^tag_[0-9A-Z]{26}$" } }
+```
+
+```typescript
+petId.type; // { kind: "union", compositionKind: "anyOf", variants: [{ kind: "primitive", type: "string", constraints: { pattern: "^pet_[0-9A-Z]{26}$" } }, { kind: "primitive", type: "string" }] }
+tagIds.type; // { kind: "array", items: { kind: "primitive", type: "string", constraints: { pattern: "^tag_[0-9A-Z]{26}$" } } }
+```
+
+so an emitter can type `petId` as `` `pet_${string}` | (string & {}) `` and `tagIds` as ``Array<`tag_${string}`>``, document each variant's form, or check an item before sending it. A nested array carries each level's keywords where it sits: `{ type: array, minItems: 1, items: { type: array, uniqueItems: true, items: { type: string, pattern } } }` is `{ minItems: 1 }` on the array, `{ uniqueItems: true }` on its `items` and `{ pattern }` on their items. A `oneOf`/`anyOf` union carries what is written beside the keyword (`{ anyOf: [...], maxLength: 10 }` is `{ maxLength: 10 }` on the union), each variant its own. A union built from a type list (`{ type: [string, integer], maxLength: 20, minimum: 1 }`) carries the schema's keywords itself and its variants none: each variant is the same schema read as one of its types, so the limits are read from the union for whichever type the value takes. A property several variants of a merged `allOf` declare keeps on its items and values only the limits every declaration writes the same way, as the field itself keeps only the agreed keywords (`{ items: { type: string, pattern } }` beside `{ items: { type: string } }` is a plain `string[]`).
+
+For `oagen diff`, a type's limits are shape as a field's are: two arrays whose items differ in `pattern` alone are two shapes when a renamed body is compared (`sameShape`), while a limit tightened or loosened on a type is no type change, as one on a field is no field change today.
+
 ### Primitive Formats
 
 The `format` field on `PrimitiveType` carries additional type information:
@@ -148,6 +169,7 @@ The `format` field on `PrimitiveType` carries additional type information:
 interface LiteralType {
   kind: "literal";
   value: string | number | boolean | null;
+  constraints?: Constraints; // What is written beside the const or single-member enum; see Type constraints
 }
 ```
 
@@ -160,6 +182,7 @@ interface MapType {
   kind: "map";
   valueType: TypeRef;
   keyType?: TypeRef; // Defaults to string when absent
+  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired; the values' own are on valueType (see Type constraints)
 }
 ```
 
@@ -181,6 +204,7 @@ interface UnionType {
   variants: TypeRef[];
   discriminator?: { property: string; mapping: Record<string, string> };
   compositionKind?: "allOf" | "oneOf" | "anyOf";
+  constraints?: Constraints; // Written beside the oneOf/anyOf, or a type list's; each oneOf/anyOf variant carries its own, a type list's none (see Type constraints)
 }
 ```
 
@@ -471,7 +495,7 @@ interface Parameter {
   explode?: boolean;
   contentType?: string; // The `content` key the value is serialized under, as written; only for a `content` parameter whose map is read
   contentTypes?: string[]; // Every `content` key, in document order and as written, read or not; only for a `content` parameter
-  constraints?: Constraints; // Validation keywords; see Constraints below
+  constraints?: Constraints; // Validation keywords; see Constraints below. Equal to the type's (under its nullable wrapper) wherever the type can carry them (see Type constraints)
 }
 ```
 
@@ -487,7 +511,7 @@ A parameter's schema is its `schema` or, when it declares a `content` map in its
 
 `ResponseHeader.externalDocs` is the header schema's `externalDocs` — the Header Object's `schema`, or the schema of the `content` entry read in its place (see Response Headers below), after a `$ref` into `components/headers` is resolved — when it declares a usable one. A header reads only its own schema, never the component a `$ref` in it names, as its `deprecated` reads only the Header Object and that schema (see Deprecation below) and its `description` only the Header Object: a `$ref` sibling's link is the header's, and a bare `$ref` gives none (the referenced model carries its own). A `description` written beside a `$ref` into `components/headers` is the Header Object's own in an OAS 3.1 document and ignored in a 3.0 one (see Reference Objects below).
 
-A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the target (a primitive or an array component becomes no model, nor does an alias of an enum component, whose own limits conjoin above the enum's; see Enum). The key is absent when neither declares any.
+A parameter's `constraints` come from its own schema. When that schema is a `$ref`, the target's keywords are merged underneath the parameter's own — `{ $ref: Limit, minimum: 5 }` against `Limit: { type: integer, minimum: 1, maximum: 100 }` gives `{ minimum: 5, maximum: 100 }` — the per-value way `default` and `example` fall back, so a parameter can be read on its own without chasing the target (a primitive or an array component becomes no model, nor does an alias of an enum component, whose own limits conjoin above the enum's; see Enum). The key is absent when neither declares any. The parameter's type carries the same limits wherever it can (see Type constraints), and the limits of an array parameter's items or a union parameter's variants are on those types alone.
 
 ### Path Item references
 
@@ -703,7 +727,7 @@ interface Model {
   variants?: TypeRef[]; // A named union's members, one per non-null oneOf/anyOf variant (see Named unions)
   compositionKind?: "oneOf" | "anyOf"; // Which keyword produced `variants`; present exactly when `variants` is
   discriminator?: { property: string; mapping: Record<string, string> }; // Dispatch property and value → IR model name
-  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired
+  constraints?: Constraints; // The object schema's own minProperties / maxProperties / dependentRequired; a model reference carries none (see Type constraints)
   extensions?: Extensions; // The x-* keys of the schema the model was built from, less x-enum-descriptions / x-enumDescriptions (see Extensions)
 }
 
@@ -719,7 +743,7 @@ interface Field {
   default?: unknown;
   example?: unknown; // The schema's `example`, else `examples[0]`
   examples?: unknown[]; // The JSON Schema `examples` list; only when non-empty
-  constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref to a model yields none, one to an array or primitive component conjoins the component's, one to an alias of an enum component the alias's (see Array components and Enum)
+  constraints?: Constraints; // Validation keywords on the field's schema, siblings of a $ref included; a bare $ref to a model yields none, one to an array or primitive component conjoins the component's, one to an alias of an enum component the alias's (see Array components and Enum). Equal to the type's wherever the type can carry them; an array's items' and a union's variants' are on those types alone (see Type constraints)
   extensions?: Extensions; // The field schema's own x-* keys, read like constraints (see Extensions)
 }
 ```
@@ -786,7 +810,7 @@ OpenAPI 3.1 deprecates a schema's `example` in favour of the JSON Schema `exampl
 
 ### Constraints
 
-JSON Schema's validation keywords are carried on `Field`, `Parameter` and `Model` so an emitter can document a value's limits ("at most 100"), check a value before sending it, or keep a generated example within range. `type`, `enum`, `const` and `required` already have their own place in the IR and are not repeated here.
+JSON Schema's validation keywords are carried on `Field`, `Parameter` and `Model`, and on every `primitive`, `literal`, `array`, `map` and `union` type the parser builds from a schema (see Type constraints), so an emitter can document a value's limits ("at most 100"), check a value before sending it, or keep a generated example within range. `type`, `enum`, `const` and `required` already have their own place in the IR and are not repeated here.
 
 ```typescript
 interface Constraints {
@@ -826,7 +850,7 @@ Every member is optional and present only when the document declares it. A schem
 
 A 3.1 document's numeric form passes through unchanged, including the legal-but-unusual case of an inclusive and an exclusive bound on the same side.
 
-**Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not carried. The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits on a general multi-variant union are not carried. Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` to a model, named union or enum adds none of the target's, because its limits belong to the referenced node, while one to an array or primitive component, which has no model, conjoins the component's limits with the field's own (see Array components and Primitive components), and one to an alias of an enum component conjoins the alias's own, the enum's staying on the enum (see Enum). A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
+**Scope.** The keywords declared on the field, parameter or model schema are collected, conjoined with those of its inline `allOf` members: the parser unwraps a single-member `allOf`, so `{ allOf: [{ type: string, maxLength: 3 }] }` is a string field carrying `{ maxLength: 3 }`, and a `$ref` member contributes the keywords written beside the reference while the referenced model keeps its own. Limits nested inside array `items` or map values (e.g. `items: { maxLength: 10 }`) are not the field's: they are carried on the items' or values' type (see Type constraints). The one exception is a nullable wrapper — a `oneOf`/`anyOf` with exactly one non-null, non-`$ref` branch, which the IR collapses to `nullable<T>` — whose branch keywords are conjoined with the wrapper's own (and its `allOf` members'), so `anyOf: [{ type: string, maxLength: 8 }, { type: "null" }]` gives `{ maxLength: 8 }` and `{ allOf: [{ maxLength: 30 }], anyOf: [{ type: string, minLength: 20 }, { type: "null" }] }` gives `{ maxLength: 30, minLength: 20 }`, and an inline model built from that branch carries the same conjoined keywords, so `minProperties` written beside `anyOf: [{ type: object, … }, { type: "null" }]` reaches both the field and its model. Limits written beside a general multi-variant union are the field's and the union type's; each variant's own are on that variant's type (see Type constraints). Keywords written beside a `$ref` (OpenAPI 3.1 allows them) are the field's own and are kept; a bare `$ref` to a model, named union or enum adds none of the target's, because its limits belong to the referenced node, while one to an array or primitive component, which has no model, conjoins the component's limits with the field's own (see Array components and Primitive components), and one to an alias of an enum component conjoins the alias's own, the enum's staying on the enum (see Enum). A `Model` carries whatever its own schema declares — for an object schema that is `minProperties`, `maxProperties` and `dependentRequired`; for an `allOf` model — a component, or an inline response, request body or field the parser rebuilds from `allOf` members — it is the wrapper's keywords conjoined with its members' (the stricter bound wins; a `$ref` member contributes the keywords written beside the reference, while the referenced model keeps its own). A variant model of a discriminated `allOf` + `oneOf` union conjoins the shared keywords — the outer wrapper's, the base members' and any written beside the `oneOf` — with the variant's own the way `allOf` does — an instance must satisfy both, so the larger `min*` and the smaller `max*` win and `dependentRequired` maps are unioned per property.
 
 ### Deprecation
 
