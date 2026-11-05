@@ -9,6 +9,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
+import { componentKeyOf } from './schema-refs.js';
 import {
   classifyInlineSchema,
   isArraySchema,
@@ -859,12 +860,14 @@ function listed(words: string[]): string {
 }
 
 /**
- * A schema's type in a word, for a warning: a component's name for a `$ref`,
- * `Pet[]` for an array of them (`array` without `items`), its `type` as
- * written (`string`, `string | null`), else the composition keyword it is.
+ * A schema's type in a word, for a warning: a component's name for a `$ref`
+ * to one, the `$ref` as written for any other (a pointer deeper into a
+ * component; #539), `Pet[]` for an array of them (`array` without `items`),
+ * its `type` as written (`string`, `string | null`), else the composition
+ * keyword it is.
  */
 function describeSchema(schema: SchemaObject): string {
-  if (schema.$ref) return schema.$ref.slice(schema.$ref.lastIndexOf('/') + 1);
+  if (schema.$ref) return componentKeyOf(schema.$ref) ?? schema.$ref;
   if (isArraySchema(schema)) return schema.items ? `${describeSchema(schema.items)}[]` : 'array';
   const { type } = schema;
   if (type !== undefined) return Array.isArray(type) ? type.join(' | ') : type;

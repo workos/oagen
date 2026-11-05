@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,7 +9,7 @@ import {
   clearSchemaNameTransform,
 } from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
-import { parseSpec } from '../../src/parser/parse.js';
+import { parseSpec, type OpenApiDocument } from '../../src/parser/parse.js';
 import type { ApiSpec, Field, Parameter, TypeRef } from '../../src/ir/types.js';
 
 describe('extractSchemas – backend suffix handling', () => {
@@ -2957,5 +2957,399 @@ describe('#568', () => {
         expect(unresolvedMappingTargets(spec)).toEqual([]);
       },
     );
+  });
+});
+
+describe('#539', () => {
+  const ref = (path: string) => ({ $ref: `#/components/schemas/${path}` });
+  const model = (name: string) => ({ kind: 'model', name }) as const;
+  const string = { kind: 'primitive', type: 'string' } as const;
+  const unknown = { kind: 'primitive', type: 'unknown' } as const;
+  const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
+  /** A GET whose JSON 200 body is `schema`. */
+  const getOp = (operationId: string, schema: unknown) => ({
+    get: {
+      operationId,
+      parameters: [idParam],
+      responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+    },
+  });
+  /** The issue's `Pet`: `owner` an inline object that requires `name`. */
+  const Pet = {
+    type: 'object',
+    properties: {
+      id: { type: 'string' },
+      owner: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+    },
+  };
+  /** The issue's paths: `getPet` returning `Pet`, `getPetOwner` returning a pointer into it. */
+  const pointerPaths = {
+    '/pets/{id}': getOp('getPet', ref('Pet')),
+    '/pets/{id}/owner': getOp('getPetOwner', ref('Pet/properties/owner')),
+  };
+
+  /**
+   * Parse a document of `schemas`, `paths` and `webhooks` from a file, as a
+   * spec is read; `transformSpec` edits the bundled document, the one way a
+   * pointer the bundler rejects (dangling, self-referencing) reaches the parser.
+   */
+  async function parse(
+    schemas: Record<string, unknown>,
+    paths: Record<string, unknown> = {},
+    openapi = '3.1.0',
+    options: { webhooks?: Record<string, unknown>; transformSpec?: (doc: OpenApiDocument) => OpenApiDocument } = {},
+  ): Promise<ApiSpec> {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-539-'));
+    try {
+      const file = join(dir, 'spec.json');
+      const doc = {
+        openapi,
+        info: { title: 'Pets', version: '1' },
+        paths,
+        ...(options.webhooks ? { webhooks: options.webhooks } : {}),
+        components: { schemas, responses: { Problem: { description: 'A problem.' } } },
+      };
+      await writeFile(file, JSON.stringify(doc));
+      return await parseSpec(file, options.transformSpec ? { transformSpec: options.transformSpec } : undefined);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const operation = (spec: ApiSpec, name: string) =>
+    spec.services.flatMap((s) => s.operations).find((o) => o.name === name);
+  const responseOf = (spec: ApiSpec, name: string): TypeRef | undefined => operation(spec, name)?.response;
+  const fieldOf = (spec: ApiSpec, modelName: string, field: string): Field | undefined =>
+    spec.models.find((m) => m.name === modelName)?.fields.find((f) => f.name === field);
+  const modelNames = (spec: ApiSpec): string[] => spec.models.map((m) => m.name).sort();
+
+  let warnings: string[] = [];
+  let spy: ReturnType<typeof vi.spyOn> | undefined;
+  const captureWarnings = (): void => {
+    warnings = [];
+    spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '));
+    });
+  };
+  afterEach(() => {
+    spy?.mockRestore();
+    spy = undefined;
+  });
+
+  describe.each(['3.1.0', '3.0.3'])('OpenAPI %s', (openapi) => {
+    it('types a pointer into a component as the schema it lands on is typed where it stands (pointer.json)', async () => {
+      captureWarnings();
+      const spec = await parse({ Pet }, pointerPaths, openapi);
+      // `PetOwner`, the model `Pet.owner` is built as — not a dangling `Owner`, not a copy.
+      expect(responseOf(spec, 'getPetOwner')).toEqual(model('PetOwner'));
+      expect(responseOf(spec, 'getPet')).toEqual(model('Pet'));
+      expect(modelNames(spec)).toEqual(['Pet', 'PetOwner']);
+      expect(fieldOf(spec, 'Pet', 'owner')?.type).toEqual(model('PetOwner'));
+      expect(
+        spec.models
+          .find((m) => m.name === 'PetOwner')
+          ?.fields.map(({ name, required, type }) => ({ name, required, type })),
+      ).toEqual([{ name: 'name', required: true, type: string }]);
+      expect(warnings).toEqual([]);
+    });
+
+    it('never types the site as an unrelated component the pointer does not name (pointer-owner.json)', async () => {
+      captureWarnings();
+      const spec = await parse(
+        { Pet, Owner: { type: 'object', properties: { email: { type: 'string' } } } },
+        pointerPaths,
+        openapi,
+      );
+      expect(responseOf(spec, 'getPetOwner')).toEqual(model('PetOwner'));
+      expect(modelNames(spec)).toEqual(['Owner', 'Pet', 'PetOwner']);
+      expect(fieldOf(spec, 'Owner', 'email')?.type).toEqual(string);
+      expect(warnings).toEqual([]);
+    });
+
+    it('types a pointer to a string property as string and Pets/items as the array component’s items', async () => {
+      captureWarnings();
+      const spec = await parse(
+        {
+          Pet,
+          Owner: { type: 'object', properties: { email: { type: 'string' } } },
+          Pets: { type: 'array', items: { type: 'object', properties: { nick: { type: 'string' } } } },
+          Widgets: { type: 'array', items: ref('Owner') },
+        },
+        {
+          '/a/{id}': getOp('getPetId', ref('Pet/properties/id')),
+          '/b/{id}': getOp('getPetsItem', ref('Pets/items')),
+          '/c/{id}': getOp('getWidgetsItem', ref('Widgets/items')),
+        },
+        openapi,
+      );
+      expect(responseOf(spec, 'getPetId')).toEqual(string);
+      expect(responseOf(spec, 'getPetsItem')).toEqual(model('PetsItem'));
+      expect(responseOf(spec, 'getWidgetsItem')).toEqual(model('Owner'));
+      // No `Id` or `Item` model, which the last token used to name.
+      expect(modelNames(spec)).toEqual(['Owner', 'Pet', 'PetOwner', 'PetsItem']);
+      expect(warnings).toEqual([]);
+    });
+
+    it('resolves the pointer at every site: body, field, array items, map values, parameter, nullable wrapper, webhook payload', async () => {
+      captureWarnings();
+      const nullable = (schema: Record<string, unknown>) =>
+        openapi === '3.1.0' ? { oneOf: [schema, { type: 'null' }] } : { ...schema, nullable: true };
+      const webhook = {
+        'pet.adopted': {
+          post: {
+            requestBody: { content: { 'application/json': { schema: ref('Pet/properties/owner') } } },
+            responses: { '200': { description: 'ok' } },
+          },
+        },
+      };
+      const spec = await parse(
+        {
+          Pet,
+          Kennel: {
+            type: 'object',
+            properties: {
+              primary: ref('Pet/properties/owner'),
+              residents: { type: 'array', items: ref('Pet/properties/owner') },
+              by_name: { type: 'object', additionalProperties: ref('Pet/properties/owner') },
+              maybe: nullable(ref('Pet/properties/owner')),
+            },
+          },
+        },
+        {
+          '/owner/{id}': {
+            put: {
+              operationId: 'setPetOwner',
+              parameters: [idParam, { name: 'pet_id', in: 'query', schema: ref('Pet/properties/id') }],
+              requestBody: { content: { 'application/json': { schema: ref('Pet/properties/owner') } } },
+              responses: {
+                '200': {
+                  description: 'OK',
+                  content: { 'application/json': { schema: { type: 'array', items: ref('Pet/properties/owner') } } },
+                },
+              },
+            },
+          },
+          '/maybe/{id}': getOp('getMaybeOwner', nullable(ref('Pet/properties/owner'))),
+        },
+        openapi,
+        openapi === '3.1.0' ? { webhooks: webhook } : {},
+      );
+      const setPetOwner = operation(spec, 'setPetOwner');
+      expect(setPetOwner?.requestBody).toEqual(model('PetOwner'));
+      expect(setPetOwner?.response).toEqual({ kind: 'array', items: model('PetOwner') });
+      expect(setPetOwner?.queryParams.map(({ name, type }) => ({ name, type }))).toEqual([
+        { name: 'pet_id', type: string },
+      ]);
+      expect(fieldOf(spec, 'Kennel', 'primary')?.type).toEqual(model('PetOwner'));
+      expect(fieldOf(spec, 'Kennel', 'residents')?.type).toEqual({ kind: 'array', items: model('PetOwner') });
+      expect(fieldOf(spec, 'Kennel', 'by_name')?.type).toEqual({ kind: 'map', valueType: model('PetOwner') });
+      // An OAS 3.0 `nullable: true` beside a `$ref` is a sibling the version ignores, as beside any `$ref`.
+      const maybe = openapi === '3.1.0' ? { kind: 'nullable', inner: model('PetOwner') } : model('PetOwner');
+      expect(fieldOf(spec, 'Kennel', 'maybe')?.type).toEqual(maybe);
+      expect(responseOf(spec, 'getMaybeOwner')).toEqual(maybe);
+      if (openapi === '3.1.0') expect(spec.webhooks?.[0]?.requestBody).toEqual(model('PetOwner'));
+      // One `PetOwner`, built once for `Pet.owner`; no copy per site.
+      expect(modelNames(spec)).toEqual(['Kennel', 'Pet', 'PetOwner']);
+      expect(warnings).toEqual([]);
+    });
+
+    it('follows a pointer through nested properties, items, map values, union variants, allOf members and a $ref', async () => {
+      captureWarnings();
+      const spec = await parse(
+        {
+          Pet: {
+            type: 'object',
+            properties: {
+              owner: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string' },
+                  address: { type: 'object', properties: { city: { type: 'string' } } },
+                },
+              },
+              tags: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' } } } },
+              labels: {
+                type: 'object',
+                additionalProperties: { type: 'object', properties: { color: { type: 'string' } } },
+              },
+              kind: { type: 'string', enum: ['cat', 'dog'] },
+              friend: ref('Owner'),
+              choice: { oneOf: [ref('Cat'), ref('Dog')] },
+              mate: ref('Pet/properties/owner'),
+            },
+          },
+          Owner: { type: 'object', properties: { email: { type: 'string' } } },
+          Cat: { type: 'object', properties: { kind: { type: 'string', const: 'cat' }, lives: { type: 'integer' } } },
+          Dog: { type: 'object', properties: { kind: { type: 'string', const: 'dog' }, barks: { type: 'boolean' } } },
+          Shape: { oneOf: [ref('Cat'), ref('Dog'), { type: 'null' }] },
+          Base: {
+            allOf: [
+              ref('Owner'),
+              { type: 'object', properties: { extra: { type: 'object', properties: { deep: { type: 'string' } } } } },
+            ],
+          },
+        },
+        {
+          '/a/{id}': getOp('getOwnerName', ref('Pet/properties/owner/properties/name')),
+          '/b/{id}': getOp('getOwnerAddress', ref('Pet/properties/owner/properties/address')),
+          '/c/{id}': getOp('getTag', ref('Pet/properties/tags/items')),
+          '/d/{id}': getOp('getLabel', ref('Pet/properties/labels/additionalProperties')),
+          '/e/{id}': getOp('getKind', ref('Pet/properties/kind')),
+          '/f/{id}': getOp('getFriend', ref('Pet/properties/friend')),
+          '/g/{id}': getOp('getChoice', ref('Pet/properties/choice/oneOf/1')),
+          '/h/{id}': getOp('getShapeDog', ref('Shape/oneOf/1')),
+          '/i/{id}': getOp('getBaseOwner', ref('Base/allOf/0')),
+          '/j/{id}': getOp('getBaseExtra', ref('Base/allOf/1/properties/extra')),
+          '/k/{id}': getOp('getMate', ref('Pet/properties/mate')),
+        },
+        openapi,
+      );
+      expect(responseOf(spec, 'getOwnerName')).toEqual(string);
+      expect(responseOf(spec, 'getOwnerAddress')).toEqual(model('PetOwnerAddress'));
+      // The field's own items and values, as `Pet.tags` and `Pet.labels` are typed.
+      expect(fieldOf(spec, 'Pet', 'tags')?.type).toEqual({ kind: 'array', items: model('PetTags') });
+      expect(responseOf(spec, 'getTag')).toEqual(model('PetTags'));
+      expect(fieldOf(spec, 'Pet', 'labels')?.type).toEqual({ kind: 'map', valueType: model('PetLabel') });
+      expect(responseOf(spec, 'getLabel')).toEqual(model('PetLabel'));
+      expect(responseOf(spec, 'getKind')).toEqual({ kind: 'enum', name: 'PetKind', values: ['cat', 'dog'] });
+      // A pointer that lands on a `$ref` is what that `$ref` is; one that lands on a pointer, what that pointer is.
+      expect(responseOf(spec, 'getFriend')).toEqual(model('Owner'));
+      expect(responseOf(spec, 'getMate')).toEqual(model('PetOwner'));
+      expect(responseOf(spec, 'getChoice')).toEqual(model('Dog'));
+      expect(responseOf(spec, 'getShapeDog')).toEqual(model('Dog'));
+      expect(responseOf(spec, 'getBaseOwner')).toEqual(model('Owner'));
+      expect(responseOf(spec, 'getBaseExtra')).toEqual(model('BaseExtra'));
+      expect(warnings).toEqual([]);
+    });
+
+    it('unescapes ~1 and ~0 in a component key and in a property name (RFC 6901 §4)', async () => {
+      captureWarnings();
+      const spec = await parse(
+        {
+          'a/b': { type: 'integer' },
+          'c~d': { type: 'object', properties: { 'x/y': { type: 'string' }, 'p~q': { type: 'boolean' } } },
+        },
+        {
+          '/a/{id}': getOp('getSlashKey', { $ref: '#/components/schemas/a~1b' }),
+          '/b/{id}': getOp('getSlashProperty', { $ref: '#/components/schemas/c~0d/properties/x~1y' }),
+          '/c/{id}': getOp('getTildeProperty', { $ref: '#/components/schemas/c~0d/properties/p~0q' }),
+        },
+        openapi,
+      );
+      expect(responseOf(spec, 'getSlashKey')).toEqual({ kind: 'primitive', type: 'integer' });
+      expect(responseOf(spec, 'getSlashProperty')).toEqual(string);
+      expect(responseOf(spec, 'getTildeProperty')).toEqual({ kind: 'primitive', type: 'boolean' });
+      expect(warnings).toEqual([]);
+    });
+
+    it('warns once per site and types unknown for a pointer that leads nowhere, never a model it does not name', async () => {
+      captureWarnings();
+      const spec = await parse(
+        {
+          Pet: { ...Pet, properties: { ...Pet.properties, friend: ref('Owner') } },
+          Owner: { type: 'object', properties: { email: { type: 'string' } } },
+          Kind: { type: 'string', enum: ['a', 'b'] },
+          Shape: { oneOf: [ref('Owner'), { type: 'null' }] },
+          Kennel: { type: 'object', properties: { name: { type: 'string' } } },
+        },
+        {
+          '/a/{id}': getOp('getType', ref('Pet/properties/id/type')),
+          '/b/{id}': getOp('getEnumMember', ref('Kind/enum/0')),
+          '/c/{id}': getOp('getNullVariant', ref('Shape/oneOf/1')),
+          '/d/{id}': getOp('getThroughRef', ref('Pet/properties/friend/properties/email')),
+          '/e/{id}': getOp('getOtherSection', { $ref: '#/components/responses/Problem' }),
+        },
+        openapi,
+        {
+          // The bundler rejects a dangling or self-referencing pointer, so these are written after bundling.
+          transformSpec: (doc) => {
+            const paths = doc.paths as Record<string, unknown>;
+            paths['/f/{id}'] = getOp('getNope', ref('Pet/properties/nope'));
+            paths['/g/{id}'] = getOp('getNoComponent', ref('Nope/properties/x'));
+            const kennel = (doc.components as { schemas: Record<string, { properties: Record<string, unknown> }> })
+              .schemas.Kennel;
+            kennel.properties.self = ref('Kennel/properties/self');
+            kennel.properties.loop = ref('Kennel/properties/loop2');
+            kennel.properties.loop2 = ref('Kennel/properties/loop');
+            return doc;
+          },
+        },
+      );
+      for (const name of [
+        'getType',
+        'getEnumMember',
+        'getNullVariant',
+        'getThroughRef',
+        'getOtherSection',
+        'getNope',
+        'getNoComponent',
+      ]) {
+        expect(responseOf(spec, name), name).toEqual(unknown);
+      }
+      for (const field of ['self', 'loop', 'loop2'])
+        expect(fieldOf(spec, 'Kennel', field)?.type, field).toEqual(unknown);
+      // No `Type`, `0`, `Email`, `Problem`, `Nope` or `X` model is referenced or declared.
+      expect(modelNames(spec)).toEqual(['Kennel', 'Owner', 'Pet', 'PetOwner', 'Shape']);
+      expect(warnings.filter((w) => w.includes('Unresolved model reference'))).toEqual([]);
+      expect(warnings.sort()).toEqual(
+        [
+          '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Kennel/properties/loop2" in Kennel.loop — typing the site as unknown',
+          '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Kennel/properties/self" in Kennel.self — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/responses/Problem" in E.getOtherSection.response: only a $ref into components/schemas is followed — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Kind/enum/0" in B.getEnumMember.response: no schema at that pointer — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Nope/properties/x" in G.getNoComponent.response: no component schema "Nope" — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/friend/properties/email" in D.getThroughRef.response: no schema at that pointer — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/id/type" in A.getType.response: no schema at that pointer — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/nope" in F.getNope.response: no schema at that pointer — typing the site as unknown',
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Shape/oneOf/1" in C.getNullVariant.response: "oneOf/1" is the null variant, which the IR carries as nullability — typing the site as unknown',
+        ].sort(),
+      );
+    });
+
+    it('control: a plain component $ref keeps its typing at every site', async () => {
+      captureWarnings();
+      const spec = await parse(
+        {
+          Pet,
+          Owner: { type: 'object', properties: { email: { type: 'string' } } },
+          Kind: { type: 'string', enum: ['a', 'b'] },
+          Pets: { type: 'array', items: ref('Pet') },
+          Kennel: { type: 'object', properties: { owner: ref('Owner'), kind: ref('Kind'), pets: ref('Pets') } },
+        },
+        {
+          '/a/{id}': getOp('getOwner', ref('Owner')),
+          '/b/{id}': getOp('getKind', ref('Kind')),
+          '/c/{id}': getOp('getPets', ref('Pets')),
+        },
+        openapi,
+      );
+      expect(responseOf(spec, 'getOwner')).toEqual(model('Owner'));
+      expect(responseOf(spec, 'getKind')).toEqual({ kind: 'enum', name: 'Kind' });
+      expect(responseOf(spec, 'getPets')).toEqual({ kind: 'array', items: model('Pet') });
+      expect(fieldOf(spec, 'Kennel', 'owner')?.type).toEqual(model('Owner'));
+      expect(fieldOf(spec, 'Kennel', 'kind')?.type).toEqual({ kind: 'enum', name: 'Kind' });
+      expect(fieldOf(spec, 'Kennel', 'pets')?.type).toEqual({ kind: 'array', items: model('Pet') });
+      expect(warnings).toEqual([]);
+    });
+  });
+
+  it('names a named union’s pointer variant by nothing: no implicit discriminator is derived from it', async () => {
+    captureWarnings();
+    const spec = await parse(
+      {
+        Cat: { type: 'object', properties: { kind: { type: 'string', const: 'cat' } } },
+        Pet: {
+          type: 'object',
+          properties: { dog: { type: 'object', properties: { kind: { type: 'string', const: 'dog' } } } },
+        },
+        Animal: { oneOf: [ref('Cat'), ref('Pet/properties/dog')] },
+      },
+      { '/a/{id}': getOp('getAnimal', ref('Animal')) },
+    );
+    const animal = spec.models.find((m) => m.name === 'Animal');
+    expect(animal?.variants).toEqual([model('Cat'), model('PetDog')]);
+    expect(animal?.discriminator).toBeUndefined();
+    expect(modelNames(spec)).toEqual(['Animal', 'Cat', 'Pet', 'PetDog']);
+    expect(warnings).toEqual([]);
   });
 });

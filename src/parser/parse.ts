@@ -30,6 +30,7 @@ import {
 } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
+import { resolveSchemaPointers } from './schema-pointers.js';
 import { collapseErrorBodies } from './collapse-error-bodies.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServers, type RawServerObject } from './servers.js';
@@ -269,6 +270,18 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
+  // The references a schema `$ref` that names no component left pending —
+  // a pointer deeper into a component, `#/components/schemas/Pet/properties/
+  // owner` (#539) — are settled now that every model is built and before
+  // any merge pass renames one, while the transform is still active so the
+  // component a pointer enters is typed as every `$ref` to it is. Each
+  // settled reference joins the site of the model it names
+  // (`attachSharedRefs` below), so a rename of that model reaches it.
+  const settledPointerRefs = resolveSchemaPointers(
+    { models: [...models, ...fieldInlineModels, ...inlineModels, ...webhookInlineModels], services, webhooks },
+    spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+  );
+
   // Resolved while the transform is still active so the names match the
   // models'; lets the merge tell a clash with a component schema from one
   // between two inline models.
@@ -331,8 +344,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   );
   // An operation's array items that share a component field's model
   // (`typeInlineItems`) join that field's site, so a rename of the field's
-  // model reaches the array too (`attachSharedRefs`).
-  attachSharedRefs(naming.bundles, componentNames);
+  // model reaches the array too (`attachSharedRefs`); so does a reference a
+  // pointer into a component settled to that model (`settledPointerRefs`).
+  attachSharedRefs(naming.bundles, componentNames, settledPointerRefs);
   const fieldMergedModels = mergeFieldInlineModels(responseNormalizedModels, fieldInlineModels, componentNames, naming);
   // The lifted enums the fold renamed away, each with a reference that now
   // carries the new name.

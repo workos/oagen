@@ -3,6 +3,7 @@ import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
+import { componentKeyOf, pendingSchemaRef, schemaRefTarget } from './schema-refs.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -42,14 +43,18 @@ let activeComponentSchemaKeys: Set<string> = new Set();
  */
 let activeComponentSchemas: Record<string, SchemaObject> | undefined;
 
-/** The component schema a `$ref` names, from `componentSchemas` when given, else from the document being read. */
+/**
+ * The schema a `$ref` points at, from `componentSchemas` when given, else
+ * from the document being read: the component it names by key, or the
+ * schema a pointer deeper into one lands on (`schemaRefTarget`; #539), so a
+ * reader that follows a `$ref` to read what it declares follows
+ * `#/components/schemas/Pet/properties/owner` to `Pet`'s `owner` schema.
+ */
 export function componentSchemaOf(
   ref: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject | undefined {
-  const key = ref.split('/').pop() ?? '';
-  const map = componentSchemas ?? activeComponentSchemas;
-  return map && Object.hasOwn(map, key) ? map[key] : undefined;
+  return schemaRefTarget(ref, componentSchemas ?? activeComponentSchemas);
 }
 
 /** The document's `components/schemas` while they are read (`activeComponentSchemas`), for a reader that merges an `allOf` as the extractors do. */
@@ -1055,10 +1060,12 @@ export function resolveExamples(levels: ExampleSource[]): ExampleSource {
 }
 
 /**
- * If a schema is a `$ref` to `#/components/schemas/X`, return the referenced
- * component schema. Used to surface schema-level metadata (default, example,
- * examples, deprecated, description) that would otherwise be invisible at the
- * field or parameter level.
+ * If a schema is a `$ref` into `components/schemas`, return the schema it
+ * points at — the component `#/components/schemas/X` names, or the schema a
+ * pointer deeper into one lands on (`schemaRefTarget`; #539). Used to
+ * surface schema-level metadata (default, example, examples, deprecated,
+ * description) that would otherwise be invisible at the field or parameter
+ * level.
  *
  * Refs are not pre-resolved by the bundler (`dereference: false` in refs.ts),
  * so without this, a param like `schema: { $ref: '.../PaginationOrder' }`
@@ -1070,11 +1077,7 @@ export function resolveComponentSchemaRef(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): SchemaObject | undefined {
   if (!schema || !componentSchemas) return undefined;
-  const ref = (schema as { $ref?: string }).$ref;
-  if (!ref) return undefined;
-  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
-  if (!match) return undefined;
-  return componentSchemas[match[1]];
+  return schemaRefTarget((schema as { $ref?: unknown }).$ref, componentSchemas);
 }
 
 export interface ExtractedSchemas {
@@ -3055,7 +3058,10 @@ function getConstPropertyValue(schema: SchemaObject, property: string): string |
 
 function resolveVariantModelName(schema: SchemaObject): string | null {
   if (schema.$ref) {
-    return resolveSchemaName(schema.$ref.replace(/^#\/components\/schemas\//, ''));
+    // A `$ref` names a model by the component it names; a pointer deeper
+    // into one names a schema, not a model, and so names nothing here (#539).
+    const key = componentKeyOf(schema.$ref);
+    return key === undefined ? null : resolveSchemaName(key);
   }
   const title = typeof schema['title'] === 'string' ? (schema['title'] as string) : null;
   if (title) return resolveSchemaName(title);
@@ -3878,12 +3884,6 @@ function componentEntries(
   return entries && [schema, ...entries.slice(1)];
 }
 
-/** The `components/schemas` key a `$ref` names, or `undefined` for a `$ref` into another section of the document. */
-function componentKeyOf(ref: string): string | undefined {
-  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
-  return match?.[1];
-}
-
 /**
  * The plan for an array component (`ArrayComponentPlan`): the synthetic
  * property its schema is typed and extracted as, under the component's
@@ -4217,8 +4217,8 @@ export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
   if (!schema) return false;
   const bare = unwrapNullableSchema(schema);
   if (!bare.$ref) return isArrayComponentRef(allOfReadAsMember(bare));
-  const segments = bare.$ref.split('/');
-  return activeArrayComponentPlans.has(segments[segments.length - 1]);
+  const key = componentKeyOf(bare.$ref);
+  return key !== undefined && activeArrayComponentPlans.has(key);
 }
 
 /**
@@ -4227,8 +4227,8 @@ export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
  * extraction, as `isArrayComponentRef` is.
  */
 function isPrimitiveComponentRef(schema: SchemaObject): boolean {
-  const segments = schema.$ref?.split('/');
-  return segments !== undefined && activePrimitiveComponentKeys.has(segments[segments.length - 1]);
+  const key = componentKeyOf(schema.$ref);
+  return key !== undefined && activePrimitiveComponentKeys.has(key);
 }
 
 /**
@@ -4276,8 +4276,8 @@ export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
  * `isArrayComponentRef` is.
  */
 function isEnumAliasRef(schema: SchemaObject): boolean {
-  const segments = schema.$ref?.split('/');
-  return segments !== undefined && activeEnumAliasKeys.has(segments[segments.length - 1]);
+  const key = componentKeyOf(schema.$ref);
+  return key !== undefined && activeEnumAliasKeys.has(key);
 }
 
 /**
@@ -4287,10 +4287,12 @@ function isEnumAliasRef(schema: SchemaObject): boolean {
  * component it points at), differing only in how the spec's own targets are
  * spelled:
  *   1. An explicit `discriminator:` with a `mapping:` — the spec's own, each
- *      target reduced to the IR model name it refers to (the last `$ref`
- *      segment through `resolveSchemaName`, so `schemaNameTransform` applies,
- *      as it does to every mapping value `Model.discriminator` carries). An
- *      entry naming a schema outside the variant list is kept as written.
+ *      target reduced to the IR model name it refers to (the component the
+ *      `$ref` names, or a bare schema name, through `resolveSchemaName`, so
+ *      `schemaNameTransform` applies, as it does to every mapping value
+ *      `Model.discriminator` carries; `mappingTargetModelName`). An entry
+ *      naming a schema outside the variant list, or no component (a pointer
+ *      deeper into one; #539), is kept as written.
  *   2. An explicit `discriminator:` without `mapping:` — each variant's const
  *      on the property paired with its model name (`unionConstMapping`); `{}`
  *      when any variant pins none or is unnamed, as it is inline.
@@ -4308,13 +4310,25 @@ function namedUnionDiscriminator(
     const explicit = Object.entries(schema.discriminator.mapping ?? {});
     const mapping: Record<string, string> =
       explicit.length > 0
-        ? Object.fromEntries(
-            explicit.map(([value, target]) => [value, resolveSchemaName(target.split('/').pop() ?? '')]),
-          )
+        ? Object.fromEntries(explicit.map(([value, target]) => [value, mappingTargetModelName(target)]))
         : (unionConstMapping(members, property) ?? {});
     return { property, mapping };
   }
   return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members) : undefined;
+}
+
+/**
+ * The IR model name a named union's explicit mapping target refers to: a
+ * `$ref` to a component by the component it names, a bare schema name
+ * (`Cat`, which OpenAPI allows in place of the `$ref`) as that name, each
+ * through `resolveSchemaName` so `schemaNameTransform` applies. A target
+ * that names no component — a pointer deeper into one (#539), a `$ref` into
+ * another section — is kept as written, as an entry naming a schema outside
+ * the variant list is.
+ */
+function mappingTargetModelName(target: string): string {
+  const key = componentKeyOf(target) ?? (target.startsWith('#') || target.includes('/') ? undefined : target);
+  return key === undefined ? target : resolveSchemaName(key);
 }
 
 /**
@@ -4723,10 +4737,8 @@ function followMemberRefs(
   let resolved = member;
   const chain = new Set<SchemaObject>();
   while (resolved.$ref) {
-    const segments = resolved.$ref.split('/');
-    const refName = segments[segments.length - 1];
-    if (!schemas || !refName || !Object.hasOwn(schemas, refName)) break;
-    const target = schemas[refName]!;
+    const target = schemaRefTarget(resolved.$ref, schemas);
+    if (!target) break;
     if (seen.has(target) || chain.has(target)) return undefined;
     chain.add(target);
     resolved = target;
@@ -5234,6 +5246,64 @@ export function markComponentModelRef(ref: ModelRef): void {
   componentModelRefs.add(ref);
 }
 
+/**
+ * The type a `$ref` to the `components/schemas` entry under `key` resolves
+ * to, as every site that names the component with a bare `$ref` is typed:
+ * a top-level component schema needs to preserve whether the target is a
+ * model or an enum, because emitters route imports differently for the two
+ * kinds (e.g. com.example.models.X vs com.example.types.X). The set of enum
+ * names is precomputed by extractSchemas() in a first pass so it's
+ * available even when called recursively for nested $refs. Read by
+ * `schemaToTypeRef` for the `$ref` itself and by `resolveSchemaPointers`
+ * for the component a pointer enters (#539).
+ */
+export function componentTypeRef(key: string): TypeRef {
+  const component =
+    activeComponentSchemas && Object.hasOwn(activeComponentSchemas, key) ? activeComponentSchemas[key] : undefined;
+  // An array component is no model: the reference is the array it
+  // declares, its items typed under the component's name exactly as the
+  // component pass materializes them (`arrayComponentTypeRef`). Looked up
+  // by the key the `$ref` names, before any name-based test: `Notes` is
+  // the array whatever another key resolving to `Note` is.
+  const arrayAlias = arrayComponentTypeRef(key);
+  if (arrayAlias) return arrayAlias;
+  // A primitive component is no model either: the reference is what it
+  // declares, typed as the same schema written inline (an alias resolving
+  // in turn) — the primitive, `format` and nullability included (#512);
+  // the literal of its `const`, the union of its type list, or `unknown`
+  // for a schema that declares no type (#569: `Kind: { type: 'string',
+  // const: 'cat' }`, `Tag: { type: ['string', 'integer'] }` and `Anything:
+  // { description }` were fieldless models, and a `$ref` to each typed as
+  // that model while the same schema inline was `'cat'`, `string |
+  // integer` and `unknown`).
+  const primitive = activePrimitiveComponentKeys.has(key) ? component : undefined;
+  if (primitive) return schemaToTypeRef(primitive);
+  // An alias of an enum component is no model either (#560): the
+  // reference is the enum it names, read through the alias as the same
+  // schema written inline is — `PetKind: { allOf: [{ $ref: Kind }, {
+  // description }] }` is `Kind`, a nullable wrapper around the `$ref` is
+  // `nullable<Kind>`, an alias of an alias resolves in turn — so `{ $ref:
+  // PetKind }` on a field is typed as `{ allOf: [{ $ref: Kind }, {
+  // description }] }` there is.
+  const alias = activeEnumAliasKeys.has(key) ? component : undefined;
+  if (alias) return schemaToTypeRef(alias);
+  const resolved = resolveSchemaName(key);
+  if (activeEnumSchemaNames.has(resolved)) {
+    const enumRef: TypeRef = { kind: 'enum', name: resolved };
+    // Carry the component's own nullability through the reference so
+    // `field: { $ref: NullableEnum }` has the same shape as the inline
+    // `oneOf: [{ $ref }, { type: 'null' }]` form.
+    return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
+  }
+  // Likewise a named union with a `null` variant: the variant is not a
+  // member of the model, so the reference carries the nullability. The
+  // model reference itself is recorded as a component's (`componentModelRefs`)
+  // whether or not it is wrapped.
+  const modelRef: ModelRef = { kind: 'model', name: resolved };
+  componentModelRefs.add(modelRef);
+  return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
+}
+
 export function schemaToTypeRef(
   schema: SchemaObject,
   contextName?: string,
@@ -5245,56 +5315,21 @@ export function schemaToTypeRef(
   reservedNames?: ReadonlySet<string>,
 ): TypeRef {
   // Handle $ref → ModelRef or EnumRef.
-  // A `$ref` to a top-level component schema needs to preserve whether the
-  // target is a model or an enum, because emitters route imports differently
-  // for the two kinds (e.g. com.example.models.X vs com.example.types.X). The
-  // set of enum names is precomputed by extractSchemas() in a first pass so
-  // it's available even when called recursively for nested $refs.
+  // A `$ref` that names a component — exactly `#/components/schemas/<key>`
+  // — is typed by that key (`componentTypeRef`). One that names no
+  // component is typed as the schema it points at is typed where it stands,
+  // which no reader knows until every model is built, so it is a reference
+  // settled in place once they are (`resolveSchemaPointers`; #539): a
+  // pointer deeper into a component (`#/components/schemas/Pet/properties/
+  // owner`, `PetOwner`, the model `Pet.owner` is built as; `Pets/items`,
+  // the array component's items; `Pet/properties/id`, `string`), or a
+  // `$ref` into another section, which that pass reports and types
+  // `unknown`. Before, the last token was taken for a component's key, so
+  // `Pet/properties/owner` named a model `Owner` that nothing declared, or
+  // an unrelated component `Owner`, without a word.
   if (schema.$ref) {
-    const segments = schema.$ref.split('/');
-    const rawName = segments[segments.length - 1];
-    // An array component is no model: the reference is the array it
-    // declares, its items typed under the component's name exactly as the
-    // component pass materializes them (`arrayComponentTypeRef`). Looked up
-    // by the key the `$ref` names, before any name-based test: `Notes` is
-    // the array whatever another key resolving to `Note` is.
-    const arrayAlias = arrayComponentTypeRef(rawName);
-    if (arrayAlias) return arrayAlias;
-    // A primitive component is no model either: the reference is what it
-    // declares, typed as the same schema written inline (an alias resolving
-    // in turn) — the primitive, `format` and nullability included (#512);
-    // the literal of its `const`, the union of its type list, or `unknown`
-    // for a schema that declares no type (#569: `Kind: { type: 'string',
-    // const: 'cat' }`, `Tag: { type: ['string', 'integer'] }` and `Anything:
-    // { description }` were fieldless models, and a `$ref` to each typed as
-    // that model while the same schema inline was `'cat'`, `string |
-    // integer` and `unknown`).
-    const primitive = activePrimitiveComponentKeys.has(rawName) ? componentSchemaOf(schema.$ref) : undefined;
-    if (primitive) return schemaToTypeRef(primitive);
-    // An alias of an enum component is no model either (#560): the
-    // reference is the enum it names, read through the alias as the same
-    // schema written inline is — `PetKind: { allOf: [{ $ref: Kind }, {
-    // description }] }` is `Kind`, a nullable wrapper around the `$ref` is
-    // `nullable<Kind>`, an alias of an alias resolves in turn — so `{ $ref:
-    // PetKind }` on a field is typed as `{ allOf: [{ $ref: Kind }, {
-    // description }] }` there is.
-    const alias = activeEnumAliasKeys.has(rawName) ? componentSchemaOf(schema.$ref) : undefined;
-    if (alias) return schemaToTypeRef(alias);
-    const resolved = resolveSchemaName(rawName);
-    if (activeEnumSchemaNames.has(resolved)) {
-      const enumRef: TypeRef = { kind: 'enum', name: resolved };
-      // Carry the component's own nullability through the reference so
-      // `field: { $ref: NullableEnum }` has the same shape as the inline
-      // `oneOf: [{ $ref }, { type: 'null' }]` form.
-      return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
-    }
-    // Likewise a named union with a `null` variant: the variant is not a
-    // member of the model, so the reference carries the nullability. The
-    // model reference itself is recorded as a component's (`componentModelRefs`)
-    // whether or not it is wrapped.
-    const modelRef: ModelRef = { kind: 'model', name: resolved };
-    componentModelRefs.add(modelRef);
-    return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
+    const key = componentKeyOf(schema.$ref);
+    return key === undefined ? pendingSchemaRef(String(schema.$ref)) : componentTypeRef(key);
   }
 
   // Handle OAS 3.1 nullable type arrays: type: [string, null]
