@@ -1176,8 +1176,11 @@ export function extractSchemas(
   activeComponentSchemas = schemas;
   // A new document: the references an `allOf` merge inherits from a
   // component's property (`inheritedModelRefsOf`) are recorded per document,
-  // and so are the unions whose uncarried `properties` were reported.
+  // and so are the unions whose uncarried `properties` were reported; the
+  // declarations the merges combine (`combineDeclarations`) depend on these
+  // components, so they are combined afresh too.
   resetInheritedModelRefs();
+  resetCombinedDeclarations();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -1449,6 +1452,7 @@ export function clearSchemaNameTransform(): void {
   activePrimitiveComponentKeys = new Set();
   activeEnumAliasKeys = new Set();
   activeDispatcherVariantPlans = new Map();
+  resetCombinedDeclarations();
   markContestedTitles(undefined);
 }
 
@@ -5510,6 +5514,12 @@ function buildTypeRef(
   if (inlineKind === 'allOf' && schema.allOf) {
     const reading = readInlineAllOf(schema.allOf, schema);
     if (reading === 'merged') {
+      // A merge the extractor is building a model for on the path to this
+      // one — the conjunction a component that extends itself through a
+      // field its inline member redeclares owns in every merge — is that
+      // model: the re-entry under this name would build nothing (#566).
+      const building = materializingMergedAllOfName(schema);
+      if (building !== undefined) return { kind: 'model', name: building };
       const baseName = toPascalCase(contextName ?? 'UnknownModel');
       return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
     }
@@ -5937,6 +5947,7 @@ import {
   isContestedTitle,
   mapValueSchema,
   markContestedTitles,
+  materializingMergedAllOfName,
   readInlineAllOf,
   unwrappedAllOfMember,
   agreedExtensions,
@@ -5950,6 +5961,7 @@ import {
   qualifyInlineModelName,
   recordLiftedFieldModel,
   reservedInlineNames,
+  resetCombinedDeclarations,
   resetInheritedModelRefs,
   schemaShapeKey,
 } from './inline-models.js';

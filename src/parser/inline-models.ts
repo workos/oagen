@@ -113,6 +113,16 @@ export interface MintedInlineName {
 }
 
 /**
+ * The merged `allOf` schemas a deep walk (`mintedInlineNameEntries`) is
+ * inside, re-entering their own properties as `materializeMergedAllOf`
+ * does. One reached again is the same conjunction built once more
+ * (`combinedDeclarations`), for which the extractor builds nothing
+ * (workos/oagen#566), so the walk mints nothing for it either. Empty
+ * between walks.
+ */
+const mintingMergedAllOf = new Set<SchemaObject>();
+
+/**
  * `mintedInlineNames`, also telling for each name whether it is context-free.
  * `reserved` are the names the schema's unions must step around
  * (`nameInlineVariantEntries`), as `schemaToTypeRef` receives them for the
@@ -121,8 +131,10 @@ export interface MintedInlineName {
  * passes a variant's own set so the names it records are the ones taken.
  * `deep` follows each inline model's name with everything its own
  * properties mint under it (`mintedChildNameEntries`), so the names are the
- * whole tree the extractor builds: `nonObjectVariantContexts` reads them so,
- * and the sibling readers read the top level only.
+ * whole tree the extractor builds — a merge the walk is already inside
+ * minting nothing more (`mintingMergedAllOf`), as the extractor builds
+ * nothing for it: `nonObjectVariantContexts` reads them so, and the sibling
+ * readers read the top level only.
  */
 export function mintedInlineNameEntries(
   contextName: string,
@@ -160,12 +172,20 @@ export function mintedInlineNameEntries(
       );
     }
     if (reading !== 'merged') return [];
+    if (!deep) return modelName();
     // The merged model's own properties, as `materializeMergedAllOf` re-enters
     // them: a `$ref` member's stay its component's, unless an inline member
-    // declares the property too and the two conjoin.
-    const merged = deep ? mergeAllOfMembers(s, documentComponentSchemas()).properties : [];
-    const own = merged.filter((p) => p.origin === null);
-    return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
+    // declares the property too and the two conjoin. A merge already on the
+    // path of this walk mints nothing more, as the extractor types it as the
+    // model it is building and builds nothing for the re-entry (#566).
+    if (mintingMergedAllOf.has(s)) return [];
+    mintingMergedAllOf.add(s);
+    try {
+      const own = mergeAllOfMembers(s, documentComponentSchemas()).properties.filter((p) => p.origin === null);
+      return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
+    } finally {
+      mintingMergedAllOf.delete(s);
+    }
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
   if (variants) {
@@ -1259,7 +1279,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
  * `allOf` merged into one model, which is read as that model
  * (`mergedAllOfProperties`); without it every schema is read as written.
  * The merges build one object per pair of declarations they combine
- * (`titleWalkCombinations`), so the guards stop at a conjunction already
+ * (`combinedDeclarations`), so the guards stop at a conjunction already
  * read, however often a merge builds it again: `Note.reply`, a `$ref` to
  * `Note` beside an inline object, which every merge of `Note` conjoins
  * (workos/oagen#531: each merge built a new object that no guard had seen,
@@ -1275,8 +1295,8 @@ function markContestedTitlesUnderRoot(
   // The properties of a merged `allOf`'s model, each read once: a property
   // starts a group of its own, so a second read finds the same claims, and a
   // chain of components each merging the next would be read once per path.
-  // A conjunction the merges build is one object within the root
-  // (`titleWalkCombinations`), so it is read once too.
+  // A conjunction the merges build is one object within the document
+  // (`combinedDeclarations`), so it is read once too.
   const mergedRead = new WeakSet<SchemaObject>();
   // `claims` is the group's claim set (see `markContestedTitles`): the titles
   // already claimed for the union this schema is reached from without
@@ -1352,12 +1372,7 @@ function markContestedTitlesUnderRoot(
     }
     ancestors.delete(schema);
   };
-  titleWalkCombinations = new WeakMap();
-  try {
-    for (const root of roots) walk(root);
-  } finally {
-    titleWalkCombinations = null;
-  }
+  for (const root of roots) walk(root);
   for (const { shapes, variants } of byTitle.values()) {
     if (shapes.size > 1) for (const variant of variants) contestedTitledVariants.add(variant);
   }
@@ -2546,12 +2561,24 @@ export function declaresType(schema: SchemaObject): boolean {
 }
 
 /**
- * The declarations `combineDeclarations` builds while one root's titles are
- * walked (`markContestedTitlesUnderRoot`), by the two each is built from, so
- * the walk meets one object for a combination however often the merges it
- * reads build it again; `null` outside the walk.
+ * The declarations `combineDeclarations` builds for the document being read,
+ * by the two each is built from, so every reader that merges the same two
+ * declarations again meets one object for the combination, however often
+ * the merges build it: a root's title walk (`markContestedTitlesUnderRoot`;
+ * workos/oagen#531) and the extraction of a merged `allOf` whose merge
+ * reaches its own conjunction (`materializeMergedAllOf`; workos/oagen#566)
+ * each end at a conjunction they have already read because it is the same
+ * object. Keyed by the declarations themselves, which the document owns;
+ * what a pair combines into depends on the document's components
+ * (`composesObject`), so the memo is reset with them
+ * (`resetCombinedDeclarations`).
  */
-let titleWalkCombinations: WeakMap<SchemaObject, WeakMap<SchemaObject, SchemaObject>> | null = null;
+let combinedDeclarations = new WeakMap<SchemaObject, WeakMap<SchemaObject, SchemaObject>>();
+
+/** Forget every combined declaration: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+export function resetCombinedDeclarations(): void {
+  combinedDeclarations = new WeakMap();
+}
 
 /**
  * The always-applying declaration of one property once a second arrives, in
@@ -2598,15 +2625,16 @@ let titleWalkCombinations: WeakMap<SchemaObject, WeakMap<SchemaObject, SchemaObj
  * `dataPath` through the other was rejected), while a `$ref` to an array,
  * an enum, a primitive or a union component is no object to conjoin. Any
  * other pair keeps the first as written. Returns `held` itself when `next`
- * adds nothing to it, so a lone declaration keeps its identity. While a
- * root's titles are walked, the same two declarations combine into the same
- * object (`titleWalkCombinations`); elsewhere each call builds its own.
+ * adds nothing to it, so a lone declaration keeps its identity. The same two
+ * declarations combine into the same object throughout the document
+ * (`combinedDeclarations`), so a reader that guards by identity meets a
+ * conjunction once, however often the merges build it (workos/oagen#551
+ * memoized the title walk alone; workos/oagen#566: the extractor still got
+ * a new object from every merge, and re-entered it without end).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
-  const memo = titleWalkCombinations;
-  if (!memo) return combineAfresh(held, next);
-  let byNext = memo.get(held);
-  if (!byNext) memo.set(held, (byNext = new WeakMap()));
+  let byNext = combinedDeclarations.get(held);
+  if (!byNext) combinedDeclarations.set(held, (byNext = new WeakMap()));
   let combined = byNext.get(next);
   if (!combined) byNext.set(next, (combined = combineAfresh(held, next)));
   return combined;
@@ -3189,9 +3217,21 @@ function withoutNull(schema: SchemaObject): SchemaObject {
  * `NodeChild` that exists instead of being re-extracted without end. Only
  * the merged model's own properties — the inline members' and the variants'
  * — are re-entered, under `name`, with the full merged property set as
- * siblings. Shared by the field extractor and `extractInlineModelDeep`, so a
- * field nested under a discriminated component variant is built exactly as
- * the same field anywhere else.
+ * siblings. An own property that is itself a merge on the path to this one
+ * is not built again: a component that extends itself through a field its
+ * inline member redeclares (`Note.reply: allOf: [{ $ref: Note }, {
+ * properties: { quoted, reply: { properties: { depth } } } }]`) conjoins
+ * `Note.reply` with the inline `reply` into one object every merge of
+ * `Note` owns (`combinedDeclarations`), so `NoteReply { id, reply, quoted }`
+ * re-enters it as `NoteReplyReply { id, reply, quoted, depth }`, whose own
+ * `reply` is that same conjunction — typed as the `NoteReplyReply` being
+ * built for it (`materializingMergedAllOfName`), and left there (the
+ * typeless `reply: { description }` and the array `replies` forms, and two
+ * components that do this to each other, end the same way; workos/oagen#566:
+ * each merge built a new conjunction that was re-entered under a longer name
+ * without end). Shared by the field extractor and `extractInlineModelDeep`,
+ * so a field nested under a discriminated component variant is built exactly
+ * as the same field anywhere else.
  */
 export function materializeMergedAllOf(
   name: string,
@@ -3199,14 +3239,56 @@ export function materializeMergedAllOf(
   results: Model[],
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): void {
-  const merged = mergeAllOfMembers(schema, componentSchemas);
-  results.push(buildMergedModel(name, merged, componentSchemas));
-  // Properties are matched by own name throughout the merge (a `Map` there,
-  // `Object.fromEntries` here), so a property named `constructor`,
-  // `toString` or `__proto__` is kept and re-entered like any other.
-  const own = Object.fromEntries(merged.properties.filter((p) => p.origin === null).map((p) => [p.name, p.schema]));
-  const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
-  extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
+  // Already being built on this path: the reference that named this
+  // re-entry resolves to the model under construction (see above).
+  if (materializingMergedAllOf.has(schema)) return;
+  materializingMergedAllOf.set(schema, name);
+  try {
+    const merged = mergeAllOfMembers(schema, componentSchemas);
+    results.push(buildMergedModel(name, merged, componentSchemas));
+    // Properties are matched by own name throughout the merge (a `Map` there,
+    // `Object.fromEntries` here), so a property named `constructor`,
+    // `toString` or `__proto__` is kept and re-entered like any other.
+    const own = Object.fromEntries(merged.properties.filter((p) => p.origin === null).map((p) => [p.name, p.schema]));
+    const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
+    extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
+  } finally {
+    materializingMergedAllOf.delete(schema);
+  }
+}
+
+/**
+ * The merged `allOf` schemas `materializeMergedAllOf` is building models
+ * for, by the name each is built under: the path of merges the extraction
+ * is inside, from a component's field or a body down to the own property
+ * being re-entered. A merge that reaches one of them again is the one
+ * conjunction built once more (`combinedDeclarations`), so the field is
+ * typed as the model on the path (`materializingMergedAllOfName`, read by
+ * `schemaToTypeRef`) and the re-entry builds nothing (workos/oagen#566).
+ * Empty between extractions.
+ */
+let materializingMergedAllOf = new Map<SchemaObject, string>();
+
+/** The name `materializeMergedAllOf` is building the model for `schema` under, on the path the extraction is inside; `undefined` off it. */
+export function materializingMergedAllOfName(schema: SchemaObject): string | undefined {
+  return materializingMergedAllOf.get(schema);
+}
+
+/**
+ * `build()` with no merge in progress as far as `schemaToTypeRef` sees
+ * (`materializingMergedAllOfName`): how an inherited property is typed, so
+ * it carries exactly the TypeRef its component's model carries — typed
+ * outside any merge — whatever merge of the same declaration is being built
+ * on the path, as `recordInheritedModelRefs` requires of the copy.
+ */
+function typedOutsideMerges<T>(build: () => T): T {
+  const inside = materializingMergedAllOf;
+  materializingMergedAllOf = new Map();
+  try {
+    return build();
+  } finally {
+    materializingMergedAllOf = inside;
+  }
 }
 
 /**
@@ -3245,16 +3327,17 @@ function buildMergedModel(name: string, merged: MergedAllOf, componentSchemas?: 
     if (p.origin === null) {
       return buildFieldFromSchema(p.name, p.schema, name, requiredSet, componentSchemas, mergedSiblings);
     }
-    let siblings = componentSiblings.get(p.origin.name);
-    if (!siblings) {
-      siblings = collectProperties(p.origin.schema, componentSchemas);
-      componentSiblings.set(p.origin.name, siblings);
-    }
-    const field = buildFieldFromSchema(p.name, p.schema, p.origin.name, requiredSet, componentSchemas, siblings);
-    // The field is a copy of the component's own: whatever inline model its
+    const origin = p.origin;
+    const siblings = componentSiblings.get(origin.name) ?? collectProperties(origin.schema, componentSchemas);
+    componentSiblings.set(origin.name, siblings);
+    // The field is a copy of the component's own, typed as the component's
+    // model typed it (`typedOutsideMerges`): whatever inline model its
     // references name is the one the component's field references, so they
     // are recorded under that field and follow its model wherever it goes.
-    recordInheritedModelRefs(field.type, p.origin.name, p.name);
+    const field = typedOutsideMerges(() =>
+      buildFieldFromSchema(p.name, p.schema, origin.name, requiredSet, componentSchemas, siblings),
+    );
+    recordInheritedModelRefs(field.type, origin.name, p.name);
     return field;
   });
   return {
