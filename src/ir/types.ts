@@ -990,6 +990,24 @@ export interface LiteralType {
 export interface UnionType {
   kind: 'union';
   variants: TypeRef[];
+  /**
+   * When set, the union is discriminated on `property`, and `mapping` names
+   * the variant each value selects. Resolved from the same sources, in the
+   * same order, as a named union's (`Model.discriminator`), from the same
+   * reading of the variants (#568): the spec's own `discriminator.mapping`,
+   * each target as the document spelled it with a leading
+   * `#/components/schemas/` stripped — an inline union's values are not IR
+   * model names, unlike a named union's; else, under the keyword, each
+   * variant's const on the property paired with the model it is referenced
+   * by, `{}` when any variant pins none or is unnamed; else, for a `oneOf`
+   * without the keyword, the first property the first variant pins whose
+   * values tell every variant apart. A `$ref` variant is named by its
+   * component and its const read from it, a variant wrapping one model
+   * `$ref` through that reference, an inline object variant by the model
+   * extracted for it, so `oneOf: [{ $ref: Cat }, { $ref: Dog }]` carries
+   * `{ cat: "Cat", dog: "Dog" }` on a field as it does as a component.
+   * A request body's union carries only the spec's own mapping.
+   */
   discriminator?: { property: string; mapping: Record<string, string> };
   /** Which OAS composition keyword produced this union. Emitters can use this to
    *  distinguish inheritance (allOf) from exclusive union (oneOf) from open union (anyOf). */

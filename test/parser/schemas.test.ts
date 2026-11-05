@@ -10,7 +10,7 @@ import {
 } from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Field, Parameter } from '../../src/ir/types.js';
+import type { ApiSpec, Field, Parameter, TypeRef } from '../../src/ir/types.js';
 
 describe('extractSchemas – backend suffix handling', () => {
   it('preserves Dto suffix in schema names', () => {
@@ -2585,5 +2585,377 @@ describe('#569', () => {
       { name: 'unread_type', type: { kind: 'model', name: 'UnreadType' } },
       { name: 'one_const', type: nullable({ kind: 'enum', name: 'OneConst' }) },
     ]);
+  });
+});
+
+describe('#568', () => {
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const model = (name: string) => ({ kind: 'model', name }) as const;
+  const keyword = { discriminator: { propertyName: 'kind' } };
+  const idParam = { name: 'id', in: 'path', required: true, schema: { type: 'string' } };
+  /** A GET whose JSON 200 body is `schema`. */
+  const getOp = (operationId: string, schema: unknown) => ({
+    get: {
+      operationId,
+      parameters: [idParam],
+      responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+    },
+  });
+  /** A webhook whose JSON payload is `schema`. */
+  const webhook = (schema: unknown) => ({
+    'pet.adopted': {
+      post: {
+        requestBody: { content: { 'application/json': { schema } } },
+        responses: { '200': { description: 'ok' } },
+      },
+    },
+  });
+
+  /** Parse a document of `schemas`, `paths` and `webhooks` from a file, as a spec is read. */
+  async function parse(
+    schemas: Record<string, unknown>,
+    paths: Record<string, unknown> = {},
+    openapi = '3.1.0',
+    webhooks?: Record<string, unknown>,
+  ): Promise<ApiSpec> {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-568-'));
+    try {
+      const file = join(dir, 'spec.json');
+      const doc = {
+        openapi,
+        info: { title: 'Pets', version: '1' },
+        paths,
+        ...(webhooks ? { webhooks } : {}),
+        components: { schemas },
+      };
+      await writeFile(file, JSON.stringify(doc));
+      return await parseSpec(file);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const fieldType = (spec: ApiSpec, modelName: string, field: string): TypeRef | undefined =>
+    spec.models.find((m) => m.name === modelName)?.fields.find((f) => f.name === field)?.type;
+  const responseOf = (spec: ApiSpec, operation: string): TypeRef | undefined =>
+    spec.services.flatMap((s) => s.operations).find((o) => o.name === operation)?.response;
+  const discriminatorOf = (spec: ApiSpec, name: string) => spec.models.find((m) => m.name === name)?.discriminator;
+
+  /** The models every discriminator mapping under `type` names. */
+  function mappingTargets(type: TypeRef | undefined, out: string[] = []): string[] {
+    if (!type) return out;
+    if (type.kind === 'union') {
+      out.push(...Object.values(type.discriminator?.mapping ?? {}));
+      for (const variant of type.variants) mappingTargets(variant, out);
+    } else if (type.kind === 'nullable') mappingTargets(type.inner, out);
+    else if (type.kind === 'array') mappingTargets(type.items, out);
+    else if (type.kind === 'map') mappingTargets(type.valueType, out);
+    return out;
+  }
+  /** Every model a mapping names — on a field, a named union, a response, a webhook payload — must exist, or an emitter dispatches to nothing. */
+  const unresolvedMappingTargets = (spec: ApiSpec): string[] => {
+    const known = new Set(spec.models.map((m) => m.name));
+    const targets: string[] = [];
+    for (const m of spec.models) {
+      targets.push(...Object.values(m.discriminator?.mapping ?? {}));
+      for (const f of m.fields) mappingTargets(f.type, targets);
+      for (const v of m.variants ?? []) mappingTargets(v, targets);
+    }
+    for (const s of spec.services) for (const op of s.operations) mappingTargets(op.response, targets);
+    for (const w of spec.webhooks ?? []) mappingTargets(w.requestBody, targets);
+    return targets.filter((t) => !known.has(t));
+  };
+
+  describe.each(['3.1.0', '3.0.3'])('OAS %s', (openapi) => {
+    /** `kind` pinned to `value`: a `const` in 3.1, a one-value `enum:` in 3.0. */
+    const pin = (value: string) =>
+      openapi === '3.1.0' ? { type: 'string', const: value } : { type: 'string', enum: [value] };
+    const animal = (value: string, extra: Record<string, unknown> = {}, more: Record<string, unknown> = {}) => ({
+      type: 'object',
+      required: ['kind'],
+      properties: { kind: pin(value), ...extra },
+      ...more,
+    });
+    const animals = {
+      Bird: animal('bird', { wingspan: { type: 'number' } }),
+      Cat: animal('cat', { livesLeft: { type: 'integer' } }),
+      Dog: animal('dog', { barks: { type: 'boolean' } }),
+      Song: { type: 'string', enum: ['chirp', 'tweet'] },
+    };
+    const union = (variants: unknown[], discriminated: boolean) => ({
+      oneOf: variants,
+      ...(discriminated ? keyword : {}),
+    });
+    const pet = (discriminated: boolean) => union([ref('Cat'), ref('Dog')], discriminated);
+    const anyPet = (discriminated: boolean) =>
+      union([ref('Cat'), ref('Dog'), { oneOf: [ref('Bird'), ref('Song')] }], discriminated);
+    const petDiscriminator = { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } };
+    const anyPetDiscriminator = { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog', bird: 'Bird' } };
+    const petUnion = {
+      kind: 'union',
+      variants: [model('Cat'), model('Dog')],
+      compositionKind: 'oneOf',
+      discriminator: petDiscriminator,
+    };
+    const anyPetUnion = {
+      kind: 'union',
+      variants: [
+        model('Cat'),
+        model('Dog'),
+        { kind: 'union', variants: [model('Bird'), { kind: 'enum', name: 'Song' }], compositionKind: 'oneOf' },
+      ],
+      compositionKind: 'oneOf',
+      discriminator: anyPetDiscriminator,
+    };
+
+    it.each([true, false])(
+      'the issue’s repro: an inline union of $ref variants, one wrapping a model $ref beside an enum $ref, carries the mapping the same union carries as a component, on a field and a 200 body (keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          {
+            ...animals,
+            Pet: pet(discriminated),
+            AnyPet: anyPet(discriminated),
+            Owner: {
+              type: 'object',
+              properties: {
+                pet: pet(discriminated),
+                anyPet: anyPet(discriminated),
+                named: ref('Pet'),
+                anyNamed: ref('AnyPet'),
+              },
+            },
+          },
+          {
+            '/owners/{id}': getOp('getOwner', ref('Owner')),
+            '/pets/{id}': getOp('getPet', pet(discriminated)),
+            '/any-pets/{id}': getOp('getAnyPet', anyPet(discriminated)),
+          },
+          openapi,
+        );
+        expect(discriminatorOf(spec, 'Pet')).toEqual(petDiscriminator);
+        expect(discriminatorOf(spec, 'AnyPet')).toEqual(anyPetDiscriminator);
+        expect(fieldType(spec, 'Owner', 'pet')).toEqual(petUnion);
+        expect(fieldType(spec, 'Owner', 'anyPet')).toEqual(anyPetUnion);
+        expect(fieldType(spec, 'Owner', 'named')).toEqual(model('Pet'));
+        expect(fieldType(spec, 'Owner', 'anyNamed')).toEqual(model('AnyPet'));
+        expect(responseOf(spec, 'getPet')).toEqual(petUnion);
+        expect(responseOf(spec, 'getAnyPet')).toEqual(anyPetUnion);
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it.each([true, false])(
+      'reads a $ref variant’s const through its component’s allOf wrappers, as a named union does (keyword: %s)',
+      async (discriminated) => {
+        const merged = (value: string) => ({
+          allOf: [ref('Animal'), { type: 'object', required: ['kind'], properties: { kind: pin(value) } }],
+        });
+        const spec = await parse(
+          {
+            Animal: { type: 'object', properties: { name: { type: 'string' } } },
+            Lion: merged('lion'),
+            Tiger: merged('tiger'),
+            Cat: union([ref('Lion'), ref('Tiger')], discriminated),
+            Owner: { type: 'object', properties: { cat: union([ref('Lion'), ref('Tiger')], discriminated) } },
+          },
+          {},
+          openapi,
+        );
+        const discriminator = { property: 'kind', mapping: { lion: 'Lion', tiger: 'Tiger' } };
+        expect(discriminatorOf(spec, 'Cat')).toEqual(discriminator);
+        expect(fieldType(spec, 'Owner', 'cat')).toEqual({
+          kind: 'union',
+          variants: [model('Lion'), model('Tiger')],
+          compositionKind: 'oneOf',
+          discriminator,
+        });
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it.each([
+      ['a nullable wrapper', { anyOf: [ref('Bird'), { type: 'null' }] }, { kind: 'nullable', inner: model('Bird') }],
+      [
+        'a multi-type wrapper',
+        { oneOf: [ref('Bird'), { type: 'string' }] },
+        { kind: 'union', variants: [model('Bird'), { kind: 'primitive', type: 'string' }], compositionKind: 'oneOf' },
+      ],
+      ['an allOf read as its reference', { allOf: [ref('Bird')], description: 'A bird' }, model('Bird')],
+    ])(
+      'reads the const of a variant under %s from the one model it wraps, keyword or not, as a named union does (#427)',
+      async (_, third, variant) => {
+        for (const discriminated of [true, false]) {
+          const spec = await parse(
+            {
+              ...animals,
+              Owner: { type: 'object', properties: { pet: union([ref('Cat'), ref('Dog'), third], discriminated) } },
+            },
+            {},
+            openapi,
+          );
+          expect(fieldType(spec, 'Owner', 'pet'), `keyword: ${discriminated}`).toEqual({
+            kind: 'union',
+            variants: [model('Cat'), model('Dog'), variant],
+            compositionKind: 'oneOf',
+            discriminator: anyPetDiscriminator,
+          });
+          expect(unresolvedMappingTargets(spec)).toEqual([]);
+        }
+      },
+    );
+
+    it.each([true, false])(
+      'maps a $ref variant and an inline object variant alike, by the component and by the model extracted for the variant (keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          {
+            ...animals,
+            Owner: {
+              type: 'object',
+              properties: {
+                pet: union([ref('Cat'), animal('dog', { barks: { type: 'boolean' } })], discriminated),
+                pal: union(
+                  [ref('Cat'), animal('doggo', { barks: { type: 'boolean' } }, { title: 'Doggo' })],
+                  discriminated,
+                ),
+              },
+            },
+          },
+          {},
+          openapi,
+        );
+        expect(fieldType(spec, 'Owner', 'pet')).toEqual({
+          kind: 'union',
+          variants: [model('Cat'), model('OwnerPet')],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'OwnerPet' } },
+        });
+        // Without the keyword the union is title-mapped — the `$ref` variant's
+        // const is read from `Cat` — so the titled variant keeps its title, as
+        // it does beside titled variants; under the keyword titles name nothing.
+        const doggo = discriminated ? 'OwnerPal' : 'Doggo';
+        expect(fieldType(spec, 'Owner', 'pal')).toEqual({
+          kind: 'union',
+          variants: [model('Cat'), model(doggo)],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { cat: 'Cat', doggo } },
+        });
+        expect(spec.models.map((m) => m.name)).toEqual(['Bird', 'Cat', 'Dog', 'Owner', 'OwnerPet', doggo]);
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it.each([true, false])(
+      'keeps an inline-only union as it was: the field’s name and a const prefix, mapped by their consts (keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          { Owner: { type: 'object', properties: { pet: union([animal('cat'), animal('dog')], discriminated) } } },
+          {},
+          openapi,
+        );
+        expect(fieldType(spec, 'Owner', 'pet')).toEqual({
+          kind: 'union',
+          variants: [model('OwnerPet'), model('DogOwnerPet')],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { cat: 'OwnerPet', dog: 'DogOwnerPet' } },
+        });
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it.each([true, false])(
+      'passes over a constant every variant shares to find the property that tells them apart, as a named union does (keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          {
+            Owner: {
+              type: 'object',
+              properties: {
+                shape: union(
+                  [
+                    animal('a', { version: pin('v1') }, { title: 'A' }),
+                    animal('b', { version: pin('v1') }, { title: 'B' }),
+                  ],
+                  discriminated,
+                ),
+              },
+            },
+          },
+          {},
+          openapi,
+        );
+        // Under the keyword the titles name nothing and the variants take the
+        // field's name and a const prefix; without it the union is title-mapped.
+        const [a, b] = discriminated ? ['OwnerShape', 'BOwnerShape'] : ['A', 'B'];
+        expect(fieldType(spec, 'Owner', 'shape')).toEqual({
+          kind: 'union',
+          variants: [model(a), model(b)],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { a, b } },
+        });
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it('maps nothing when a $ref variant’s component pins no const, and when two variants pin one value: `{}` under the keyword, no discriminator without it', async () => {
+      const spec = await parse(
+        {
+          ...animals,
+          Plain: { type: 'object', properties: { name: { type: 'string' } } },
+          Owner: {
+            type: 'object',
+            properties: {
+              unpinned: union([ref('Cat'), ref('Plain')], true),
+              unpinnedImplicit: union([ref('Cat'), ref('Plain')], false),
+              dup: union([animal('x', {}, { title: 'C' }), animal('x', {}, { title: 'D' })], true),
+              dupImplicit: union([animal('x', {}, { title: 'C' }), animal('x', {}, { title: 'D' })], false),
+            },
+          },
+        },
+        {},
+        openapi,
+      );
+      const plain = (discriminator?: { property: string; mapping: Record<string, string> }) => ({
+        kind: 'union',
+        variants: [model('Cat'), model('Plain')],
+        compositionKind: 'oneOf',
+        ...(discriminator ? { discriminator } : {}),
+      });
+      expect(fieldType(spec, 'Owner', 'unpinned')).toEqual(plain({ property: 'kind', mapping: {} }));
+      expect(fieldType(spec, 'Owner', 'unpinnedImplicit')).toEqual(plain());
+      // The values tell nothing apart, so no mapping is derived. Under the
+      // keyword the titles name nothing and prefix the field's name; without
+      // it every variant is titled and pins `kind`, so the union stays
+      // title-mapped for naming and keeps the titles, while the discriminator
+      // itself needs values that tell the variants apart.
+      expect(fieldType(spec, 'Owner', 'dup')).toEqual({
+        kind: 'union',
+        variants: [model('COwnerDup'), model('DOwnerDup')],
+        compositionKind: 'oneOf',
+        discriminator: { property: 'kind', mapping: {} },
+      });
+      expect(fieldType(spec, 'Owner', 'dupImplicit')).toEqual({
+        kind: 'union',
+        variants: [model('C'), model('D')],
+        compositionKind: 'oneOf',
+      });
+      expect(unresolvedMappingTargets(spec)).toEqual([]);
+    });
+
+    it.each([true, false])(
+      'carries the mapping on an array’s items and on a webhook payload too (keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          { ...animals, Owner: { type: 'object', properties: { pets: { type: 'array', items: pet(discriminated) } } } },
+          {},
+          openapi,
+          webhook(pet(discriminated)),
+        );
+        expect(fieldType(spec, 'Owner', 'pets')).toEqual({ kind: 'array', items: petUnion });
+        expect(spec.webhooks?.[0]?.requestBody).toEqual(petUnion);
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
   });
 });
