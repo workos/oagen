@@ -5886,3 +5886,145 @@ describe('sentOnlyComponentNames: the components every site the parser reads onl
     expect(sentOnlyComponentNames({ paths: { '/pets': create(json(ref('Pet'))) } })).toEqual(new Set());
   });
 });
+
+describe('#540', () => {
+  // A site the parser ignores counted as receiving a component: the walk read
+  // every response header, while `extractResponseHeaders` skips one named
+  // `Content-Type` (OAS 3.x: it SHALL be ignored) and, of two keys that differ
+  // in case alone, the earlier declaration (#295). A component only `createPet`
+  // sends lost its sent-only standing for a header nothing types, and its field
+  // object was typed as the looser component, so a caller could leave out the
+  // `name` the document requires (#400).
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const json = (schema: unknown) => ({ content: { 'application/json': { schema } } });
+  const schemas = {
+    Pet: {
+      type: 'object',
+      properties: { owner: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } },
+    },
+    PetOwner: { type: 'object', properties: { name: { type: 'string' } } },
+  };
+  const createPet = (responses: Record<string, unknown>) => ({
+    post: { operationId: 'createPet', requestBody: json(ref('Pet')), responses },
+  });
+  const doc = (
+    openapi: string,
+    responses: Record<string, unknown>,
+    components: Record<string, unknown> = {},
+    extra: Record<string, unknown> = {},
+  ) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: { '/pets': createPet(responses) },
+    components: { schemas, ...components },
+    ...extra,
+  });
+  /** A `204` carrying `headers`. */
+  const withHeaders = (headers: Record<string, unknown>) => ({ '204': { description: 'ok', headers } });
+  const sorted = (names: Set<string>) => [...names].sort();
+  /** Each model's fields as `name?: Type`, the way the issue prints them. */
+  const shapes = (models: Model[]): Record<string, string[]> =>
+    Object.fromEntries(
+      models.map(({ name, fields }) => [
+        name,
+        fields.map(
+          ({ name, required, type }) =>
+            `${name}${required ? '' : '?'}: ${type.kind === 'model' ? type.name : type.kind === 'primitive' ? type.type : type.kind}`,
+        ),
+      ]),
+    );
+
+  describe.each(['3.1.0', '3.0.3'])('OAS %s', (openapi) => {
+    it('skips a `Content-Type` response header by its key, whatever its case or how it is written, as `extractResponseHeaders` does', () => {
+      const components = {
+        headers: { Pet: { schema: ref('Pet') } },
+        responses: { Created: { description: 'ok', headers: { 'Content-Type': { schema: ref('Pet') } } } },
+      };
+      const cases: Array<[string, Record<string, unknown>]> = [
+        ['written inline', withHeaders({ 'Content-Type': { schema: ref('Pet') } })],
+        ['lower-cased', withHeaders({ 'content-type': { schema: ref('Pet') } })],
+        ['upper-cased', withHeaders({ 'CONTENT-TYPE': { schema: ref('Pet') } })],
+        ['typed by a content map', withHeaders({ 'Content-Type': json(ref('Pet')) })],
+        ['a $ref into components/headers', withHeaders({ 'Content-Type': { $ref: '#/components/headers/Pet' } })],
+        ['on a response reached through components/responses', { '204': { $ref: '#/components/responses/Created' } }],
+        [
+          'on the default response',
+          { default: { description: 'ok', headers: { 'Content-Type': { schema: ref('Pet') } } } },
+        ],
+        ['on a range response', { '2XX': { description: 'ok', headers: { 'Content-Type': { schema: ref('Pet') } } } }],
+      ];
+      for (const [label, responses] of cases) {
+        expect(sorted(sentOnlyComponentNames(doc(openapi, responses, components))), label).toEqual(['Pet']);
+      }
+    });
+
+    it('reads every other response header as received, `Accept` and `Authorization` included, and a `$ref`’d header by its key, not the component’s', () => {
+      const components = { headers: { ContentType: { schema: ref('Pet') } } };
+      const cases: Array<[string, Record<string, unknown>]> = [
+        ['an X-Rate-Limit header', withHeaders({ 'X-Rate-Limit': { schema: ref('Pet') } })],
+        ['an Accept header, which only the parameter rule ignores', withHeaders({ Accept: { schema: ref('Pet') } })],
+        ['an Authorization header, likewise', withHeaders({ Authorization: { schema: ref('Pet') } })],
+        [
+          'an X-Pet header whose $ref names ContentType',
+          withHeaders({ 'X-Pet': { $ref: '#/components/headers/ContentType' } }),
+        ],
+      ];
+      for (const [label, responses] of cases) {
+        expect(sorted(sentOnlyComponentNames(doc(openapi, responses, components))), label).toEqual([]);
+      }
+    });
+
+    it('reads the later of two header keys that differ in case alone, the one the reader keeps (#295)', () => {
+      const string = { schema: { type: 'string' } };
+      const pet = { schema: ref('Pet') };
+      expect(sorted(sentOnlyComponentNames(doc(openapi, withHeaders({ 'X-Pet': pet, 'x-pet': string }))))).toEqual([
+        'Pet',
+      ]);
+      expect(sorted(sentOnlyComponentNames(doc(openapi, withHeaders({ 'x-pet': string, 'X-Pet': pet }))))).toEqual([]);
+      // Both spellings of `Content-Type` are the ignored header.
+      expect(
+        sorted(sentOnlyComponentNames(doc(openapi, withHeaders({ 'content-type': pet, 'Content-Type': pet })))),
+      ).toEqual(['Pet']);
+    });
+
+    it('types `Pet.owner` as `PetOwner2`, requiring `name`, beside a `Content-Type` header of `$ref: Pet` as it does without one (the issue’s repro)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const sent = doc(openapi, { '204': { description: 'ok' } });
+        const pathParam = doc(
+          openapi,
+          { '204': { description: 'ok' } },
+          {},
+          {
+            webhooks: {
+              petAdopted: {
+                post: {
+                  parameters: [{ name: 'pet', in: 'path', required: true, schema: ref('Pet') }],
+                  requestBody: json({ type: 'object', properties: { id: { type: 'string' } } }),
+                  responses: { '200': { description: 'ok' } },
+                },
+              },
+            },
+          },
+        );
+        const contentType = doc(openapi, withHeaders({ 'Content-Type': { schema: ref('Pet') } }));
+        const expected = { Pet: ['owner?: PetOwner2'], PetOwner: ['name?: string'], PetOwner2: ['name: string'] };
+        for (const [label, spec] of [
+          ['sent', sent],
+          ['path-param', pathParam],
+          ['content-type', contentType],
+        ] as const) {
+          expect(shapes((await parseTempSpec(spec)).models), label).toMatchObject(expected);
+        }
+        // The control: a header the reader keeps receives `Pet`, whose `owner` then shares the looser `PetOwner`.
+        const rateLimit = doc(openapi, withHeaders({ 'X-Rate-Limit': { schema: ref('Pet') } }));
+        expect(shapes((await parseTempSpec(rateLimit)).models)).toEqual({
+          Pet: ['owner?: PetOwner'],
+          PetOwner: ['name?: string'],
+        });
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+});

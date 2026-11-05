@@ -44,8 +44,14 @@ import {
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
-import { isIgnoredHeaderParameter, parameterTyping, type ParameterObject, type SchemaOrContent } from './operations.js';
-import { parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
+import {
+  isIgnoredHeaderParameter,
+  isIgnoredResponseHeader,
+  parameterTyping,
+  type ParameterObject,
+  type SchemaOrContent,
+} from './operations.js';
+import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
  * Qualify an inline model name with the parent schema name.
@@ -1040,19 +1046,24 @@ type SiteDirection = 'sent' | 'received';
  * `components/requestBodies` and `components/parameters`; what it receives
  * is every response it declares — a body at any status code, `default` or
  * range, and a header, inline or through `components/responses` and
- * `components/headers`. A parameter or header is read by the one schema
- * that types it (`parameterTyping`): its `schema`, else the schema of the
- * `content` entry `selectParameterContent` picks, so one the parser types
- * as a string — a `content` map none of whose media types is read, or a
- * map beside a `schema`, which wins — reaches nothing. A parameter the
- * readers never type reaches nothing either: an `Accept`, `Content-Type` or
- * `Authorization` header, which OpenAPI says to ignore
- * (`isIgnoredHeaderParameter`, #414), on an operation or a webhook, and a
- * webhook's `path` parameter, which `extractWebhooks` drops. A webhook's
- * payload and the parameters it keeps are received, merged the same way
- * (`extractWebhooks`); its
- * responses type no body (`extractWebhookResponses`), and `callbacks` are
- * never read. A Path Item and every Reference Object are followed as the
+ * `components/headers`, the `headers` map read as `extractResponseHeaders`
+ * reads it: of two keys that differ in case alone, the later declaration
+ * (#295), and never one keyed `Content-Type`, whatever its case, which
+ * OpenAPI says to ignore (`isIgnoredResponseHeader`, #540) — so a
+ * `Content-Type` header of `$ref: Pet` on `createPet`'s `204` leaves `Pet`
+ * only sent, as the response without it does. A parameter or header is
+ * read by the one schema that types it (`parameterTyping`): its `schema`,
+ * else the schema of the `content` entry `selectParameterContent` picks, so
+ * one the parser types as a string — a `content` map none of whose media
+ * types is read, or a map beside a `schema`, which wins — reaches nothing.
+ * A parameter the readers never type reaches nothing either: an `Accept`,
+ * `Content-Type` or `Authorization` header, which OpenAPI says to ignore
+ * (`isIgnoredHeaderParameter`, #414), on an operation or a webhook, a
+ * webhook's `path` parameter, which `extractWebhooks` drops, and a
+ * `Content-Type` response header (above). A webhook's payload and the
+ * parameters it keeps are received, merged the same way (`extractWebhooks`);
+ * its responses type no body (`extractWebhookResponses`), and `callbacks`
+ * are never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
  * of `paths` or a Responses Object stepped over and every `webhooks` key
  * read as a webhook. A schema
@@ -1192,7 +1203,17 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
           content(response['content'], 'received');
           const headers = response['headers'];
           if (!isRecord(headers)) continue;
-          for (const header of Object.values(headers)) {
+          // Read as `extractResponseHeaders` reads the map: header names are
+          // case-insensitive, so of two keys that differ in case alone the
+          // later declaration is the header (#295), and a `Content-Type`
+          // header, which OpenAPI says to ignore, is skipped by its key,
+          // whatever its `$ref` leads to (`isIgnoredResponseHeader`). Nothing
+          // types the dropped declaration or the ignored header, so neither
+          // reaches a component (#540).
+          const declared = new Map<string, unknown>();
+          for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
+          for (const [name, header] of declared) {
+            if (isIgnoredResponseHeader(name)) continue;
             const resolved = follow(header, 'headers');
             if (resolved) typed(resolved, 'received');
           }
