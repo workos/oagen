@@ -791,3 +791,85 @@ describe('past two taken names an error-site enum numbers under `Body`, as the o
     },
   );
 });
+
+// The fold's naming rule (#506, #515, #516) reads a body's required fields;
+// under `collapseErrorBodies: false` nothing of it applies, and a body keeps
+// `<Op>Error<code>` whatever it requires, declares optionally or nests.
+
+describe('#506', () => {
+  it('keeps `<Op>Error<code>` for a body with an optional property beside a required one', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getNote({
+          '404': { description: 'nf', content: json({ ...obj({ message: str, hint: str }), required: ['message'] }) },
+        }),
+      ),
+    );
+    expect(modelNames(ir)).toEqual(['GetNoteError404', 'Note']);
+    expect(fieldsOf(ir, 'GetNoteError404')).toEqual(['message', 'hint']);
+    expectSound(ir);
+  });
+});
+
+describe('#515', () => {
+  it('keeps one model per operation for bodies that differ only in requiredness, nullability or a type, with no `Optional` family', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getNote({ '404': { description: 'nf', content: json(obj({ message: str })) } }),
+        '/notes/{id}/draft': {
+          get: {
+            operationId: 'getDraft',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+            responses: {
+              '200': ok,
+              '404': { description: 'nf', content: json({ ...obj({ message: str }), required: ['message'] }) },
+              '410': {
+                description: 'gone',
+                content: json({ ...obj({ message: { type: ['string', 'null'] } }), required: ['message'] }),
+              },
+              '422': {
+                description: 'invalid',
+                content: json({ ...obj({ code: { type: 'integer' }, message: str }), required: ['code', 'message'] }),
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'GetDraftError404',
+      'GetDraftError410',
+      'GetDraftError422',
+      'GetNoteError404',
+      'Note',
+    ]);
+    expectSound(ir);
+  });
+});
+
+describe('#516', () => {
+  it('keeps `<Op>Error<code>` and its nested item their names whatever the item declares optionally', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(
+        getNote({
+          '422': {
+            description: 'invalid',
+            content: json({
+              ...obj({
+                message: str,
+                errors: {
+                  type: 'array',
+                  items: { ...obj({ code: str, field: str, hint: str }), required: ['code', 'field'] },
+                },
+              }),
+              required: ['message', 'errors'],
+            }),
+          },
+        }),
+      ),
+    );
+    expect(modelNames(ir)).toEqual(['GetNoteError422', 'GetNoteError422Error', 'Note']);
+    expect(fieldsOf(ir, 'GetNoteError422Error')).toEqual(['code', 'field', 'hint']);
+    expectSound(ir);
+  });
+});

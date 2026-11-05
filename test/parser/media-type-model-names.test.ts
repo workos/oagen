@@ -401,11 +401,11 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     );
 
     expect(await namesOf(after)).toEqual({
-      'application/yaml; charset=utf-8': 'ErrorBodyWithTitle { title }',
-      'application/yaml; version=2': 'ErrorBodyWithSummary { summary }',
+      'application/yaml; charset=utf-8': 'OptionalErrorBodyWithTitleWithoutMessage { title }',
+      'application/yaml; version=2': 'OptionalErrorBodyWithSummaryWithoutMessage { summary }',
     });
     expect(await diff(before, after)).toEqual([
-      'additive model-added ErrorBodyWithSummary',
+      'additive model-added OptionalErrorBodyWithSummaryWithoutMessage',
       'additive operation-modified listNotes',
     ]);
   });
@@ -419,12 +419,12 @@ describe('a model name stays put under edits `oagen diff` reads as no change or 
     const after = listNotes(keys('iso-8859-1'), '4XX');
 
     expect(await namesOf(before)).toEqual({
-      'application/yaml': 'ErrorBodyWithTitle { title }',
-      'application/yaml; charset=utf-8': 'ErrorBodyWithSummary { summary }',
+      'application/yaml': 'OptionalErrorBodyWithTitleWithoutMessage { title }',
+      'application/yaml; charset=utf-8': 'OptionalErrorBodyWithSummaryWithoutMessage { summary }',
     });
     expect(await namesOf(after)).toEqual({
-      'application/yaml': 'ErrorBodyWithTitle { title }',
-      'application/yaml; charset=iso-8859-1': 'ErrorBodyWithSummary { summary }',
+      'application/yaml': 'OptionalErrorBodyWithTitleWithoutMessage { title }',
+      'application/yaml; charset=iso-8859-1': 'OptionalErrorBodyWithSummaryWithoutMessage { summary }',
     });
     expect(await diff(before, after)).toEqual([]);
   });

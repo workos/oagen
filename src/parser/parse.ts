@@ -85,8 +85,16 @@ export interface ParseOptions {
   /**
    * Fold the models materialized for inline error bodies onto shared models
    * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
-   * see `collapseErrorBodies`). On by default; `false` keeps one model per
-   * operation and status code (`<Op>Error<code>`).
+   * see `collapseErrorBodies`). A body's shape, and so its name, is its
+   * required fields — their names, domain names and types — so an optional
+   * field added to a body or to a nested item moves no model (#506, #516),
+   * and two shapes never ask for one name (#515): `{ message: string | null }`
+   * is `ErrorBodyWithNullableMessage`, `{ code: integer, message }` is
+   * `ErrorBodyWithCodeInteger`, a `{ message }` hinted `message → detail`
+   * is `ErrorBodyWithMessageAsDetail`, and a body that requires no field is
+   * named from every field under `Optional` (`OptionalErrorBody` for
+   * `{ message? }`). On by default; `false` keeps one model per operation
+   * and status code (`<Op>Error<code>`).
    */
   collapseErrorBodies?: boolean;
   /**

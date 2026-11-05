@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
@@ -67,10 +68,10 @@ async function parse(spec: Doc, options?: Parameters<typeof parseSpec>[1]): Prom
   }
 }
 
-async function parseWithoutWarnings(spec: Doc): Promise<ApiSpec> {
+async function parseWithoutWarnings(spec: Doc, options?: Parameters<typeof parseSpec>[1]): Promise<ApiSpec> {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    const ir = await parse(spec);
+    const ir = await parse(spec, options);
     expect(warn.mock.calls).toEqual([]);
     return ir;
   } finally {
@@ -79,10 +80,14 @@ async function parseWithoutWarnings(spec: Doc): Promise<ApiSpec> {
 }
 
 /** Parse, expecting exactly one `console.warn` per pattern, in order. */
-async function parseWithWarnings(spec: Doc, patterns: readonly RegExp[]): Promise<ApiSpec> {
+async function parseWithWarnings(
+  spec: Doc,
+  patterns: readonly RegExp[],
+  options?: Parameters<typeof parseSpec>[1],
+): Promise<ApiSpec> {
   const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   try {
-    const ir = await parse(spec);
+    const ir = await parse(spec, options);
     const messages = warn.mock.calls.map((call) => String(call[0]));
     expect(messages).toHaveLength(patterns.length);
     patterns.forEach((pattern, i) => expect(messages[i]).toMatch(pattern));
@@ -312,8 +317,9 @@ describe('a shape every member pins to one value', () => {
         }),
       }),
     );
-    expect(modelNames(ir)).toEqual(['Note', 'RateLimitExceededErrorBodyWithRetryAfter']);
-    expect(fieldSummary(ir, 'RateLimitExceededErrorBodyWithRetryAfter')).toEqual([
+    // `retry_after` is an integer, which its token says (#515).
+    expect(modelNames(ir)).toEqual(['Note', 'RateLimitExceededErrorBodyWithRetryAfterInteger']);
+    expect(fieldSummary(ir, 'RateLimitExceededErrorBodyWithRetryAfterInteger')).toEqual([
       'code: "rate_limit_exceeded"',
       'message: string',
       'retry_after: integer',
@@ -548,19 +554,22 @@ describe('the shared name', () => {
     expectSound(ir);
   });
 
-  it('is never numbered for a shape that differs only in which fields are required: the later one stays as it is', async () => {
-    const ir = await parseWithWarnings(
+  it('is never numbered for a shape that differs only in which fields are required: each is named from the fields it requires', async () => {
+    // Before #515 the two shapes asked for one name, `TakenErrorBody`, and
+    // the later one stayed as it was. A name now reads the required fields
+    // only: `{ code?: 'taken', message }` requires `message` alone, so it is
+    // `ErrorBody`, with `code?` carried as the optional literal it is.
+    const ir = await parseWithoutWarnings(
       doc({
         ...getOp('pets', { '409': { description: 'dup', content: json(codedBody('taken')) } }),
         ...getOp('notes', {
           '409': { description: 'dup', content: json({ ...codedBody('taken'), required: ['message'] }) },
         }),
       }),
-      [
-        /The shared error body \{ code\?, message \} would be named "TakenErrorBody", which the shared error body "TakenErrorBody" \{ code, message \} already holds — keeping model "GetNotesError409" as it is/,
-      ],
     );
-    expect(modelNames(ir)).toEqual(['GetNotesError409', 'Note', 'TakenErrorBody']);
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'Note', 'TakenErrorBody']);
+    expect(fieldSummary(ir, 'TakenErrorBody')).toEqual(['code: "taken"', 'message: string']);
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual(['code?: "taken"', 'message: string']);
     expectSound(ir);
   });
 
@@ -694,20 +703,24 @@ describe('what the review asked to pin (workos/oagen#497)', () => {
       ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
       ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
     });
-    const carried = await parse(spec, {
+    // A hint applied before the fold is part of the shape, which the name
+    // reads (#515): `message` as `detail` is `ErrorBodyWithMessageAsDetail`.
+    const carried = await parseWithoutWarnings(spec, {
       fieldHints: { GetPetsError404: { message: 'detail' }, GetNotesError404: { message: 'detail' } },
     });
-    expect(carried.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBe('detail');
+    expect(modelNames(carried)).toEqual(['ErrorBodyWithMessageAsDetail', 'Note']);
+    expect(carried.models.find((m) => m.name === 'ErrorBodyWithMessageAsDetail')?.fields[0].domainName).toBe('detail');
 
-    const keyedByShared = await parse(spec, { fieldHints: { ErrorBody: { message: 'detail' } } });
+    const keyedByShared = await parseWithoutWarnings(spec, { fieldHints: { ErrorBody: { message: 'detail' } } });
+    expect(modelNames(keyedByShared)).toEqual(['ErrorBody', 'Note']);
     expect(keyedByShared.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBe('detail');
 
-    // A hint on one body only keeps that body apart: the domain name is part
-    // of the key, and the shape it leaves with the same name stays as it is.
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const split = await parse(spec, { fieldHints: { GetPetsError404: { message: 'detail' } } });
-    expect(modelNames(split)).toEqual(['ErrorBody', 'GetNotesError404', 'Note']);
-    expect(warn).toHaveBeenCalledTimes(1);
+    // A hint on one body only keeps that body apart under a name of its own:
+    // the unhinted shape keeps `ErrorBody`, and nothing is left as it was.
+    const split = await parseWithoutWarnings(spec, { fieldHints: { GetPetsError404: { message: 'detail' } } });
+    expect(modelNames(split)).toEqual(['ErrorBody', 'ErrorBodyWithMessageAsDetail', 'Note']);
+    expect(errorType(split, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBodyWithMessageAsDetail' });
+    expect(errorType(split, 'getNotes', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
   });
 });
 
@@ -803,5 +816,475 @@ describe('what the human review asked to pin (workos/oagen#497, review 570413372
     );
     expect(modelNames(ir)).toEqual(['ErrorBodyWithCode', 'Note']);
     expect(fieldSummary(ir, 'ErrorBodyWithCode')).toEqual(['code: "4001"', 'message: string']);
+  });
+});
+
+// A shared body's key and name read its required fields only — a body that
+// requires none, every field under `Optional` — so an optional field added
+// to a body (#506) or to a nested item (#516) moves no model, and two
+// shapes never ask for one name (#515): what tells them apart is in the
+// name, and the warning for what no name can spell prints it.
+
+/** `oagen diff` from `before` to `after`, one line per change, and the exit code the CLI would give. */
+async function diffDocs(before: Doc, after: Doc): Promise<{ changes: string[]; exit: number }> {
+  const changes = diffSpecs(await parseWithoutWarnings(before), await parseWithoutWarnings(after)).changes.map(
+    (change) => {
+      const { classification, kind, name, operationName } = change as typeof change & {
+        name?: string;
+        operationName?: string;
+      };
+      return `${classification} ${kind} ${name ?? operationName}`;
+    },
+  );
+  const exit = changes.some((change) => change.startsWith('breaking')) ? 2 : changes.length > 0 ? 1 : 0;
+  return { changes, exit };
+}
+
+const nullableStr = (version: '3.0.3' | '3.1.0'): Doc =>
+  version === '3.0.3' ? { type: 'string', nullable: true } : { type: ['string', 'null'] };
+
+describe('#506', () => {
+  const before = doc(getOp('pets', { '404': { description: 'No such pet', content: json(messageBody()) } }));
+  const after = doc(
+    getOp('pets', {
+      '404': { description: 'No such pet', content: json(obj({ message: str, hint: str }, ['message'])) },
+    }),
+  );
+
+  it.each(['3.0.3', '3.1.0'] as const)(
+    'keeps `ErrorBody` when an optional property is added, which `oagen diff` reads as additive, under OAS %s',
+    async (version) => {
+      const old = await parseWithoutWarnings({ ...before, openapi: version });
+      const updated = await parseWithoutWarnings({ ...after, openapi: version });
+      expect(modelNames(old)).toEqual(['ErrorBody', 'Note']);
+      expect(modelNames(updated)).toEqual(['ErrorBody', 'Note']);
+      expect(fieldSummary(updated, 'ErrorBody')).toEqual(['message: string', 'hint?: string']);
+      expect(errorType(updated, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+      const { changes, exit } = await diffDocs({ ...before, openapi: version }, { ...after, openapi: version });
+      expect(changes).toEqual(['additive model-modified ErrorBody']);
+      expect(exit).toBe(1);
+      expectSound(updated);
+    },
+  );
+
+  it('folds a body with and a body without the optional property onto one model that carries it, optional', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
+        ...getOp('notes', {
+          '404': { description: 'nf', content: json(obj({ message: str, hint: str }, ['message'])) },
+        }),
+        ...getOp('tags', {
+          '404': { description: 'nf', content: json(obj({ message: str, reason: str }, ['message'])) },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'Note']);
+    // The first member's fields, then what each later member adds.
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual(['message: string', 'hint?: string', 'reason?: string']);
+    for (const name of ['getPets', 'getNotes', 'getTags']) {
+      expect(errorType(ir, name, 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+    }
+    expectSound(ir);
+  });
+
+  it('types an optional property the bodies type differently as the union of the types, sorted, with `null` hoisted', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': { description: 'nf', content: json(obj({ message: str, hint: str }, ['message'])) },
+        }),
+        ...getOp('notes', {
+          '404': { description: 'nf', content: json(obj({ message: str, hint: { type: 'integer' } }, ['message'])) },
+        }),
+        ...getOp('tags', {
+          '404': {
+            description: 'nf',
+            content: json(obj({ message: str, hint: { type: ['integer', 'null'] } }, ['message'])),
+          },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual(['message: string', 'hint?: integer | string | null']);
+    expectSound(ir);
+  });
+
+  it('keeps an optional property pinned to one value as that literal when the other bodies lack it', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': {
+            description: 'nf',
+            content: json(obj({ message: str, code: { type: 'string', const: 'not_found' } }, ['message'])),
+          },
+        }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual(['message: string', 'code?: "not_found"']);
+  });
+
+  it("keeps a field's flag, default and limits, and a model's, only when every body wrote the same ones", async () => {
+    const limited = { ...str, maxLength: 10, deprecated: true, default: 'none' };
+    const differing = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': { description: 'nf', content: json({ ...obj({ message: limited }), minProperties: 1 }) },
+        }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+      }),
+    );
+    expect(modelNames(differing)).toEqual(['ErrorBody', 'Note']);
+    const shared = differing.models.find((m) => m.name === 'ErrorBody')!;
+    expect(shared.fields[0]).toEqual({ name: 'message', type: { kind: 'primitive', type: 'string' }, required: true });
+    expect(shared.constraints).toBeUndefined();
+    const agreeing = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': { description: 'nf', content: json({ ...obj({ message: limited }), minProperties: 1 }) },
+        }),
+        ...getOp('notes', {
+          '404': { description: 'nf', content: json({ ...obj({ message: limited }), minProperties: 1 }) },
+        }),
+      }),
+    );
+    const kept = agreeing.models.find((m) => m.name === 'ErrorBody')!;
+    expect(kept.fields[0]).toEqual({
+      name: 'message',
+      type: { kind: 'primitive', type: 'string', constraints: { maxLength: 10 } },
+      required: true,
+      deprecated: true,
+      default: 'none',
+      constraints: { maxLength: 10 },
+    });
+    expect(kept.constraints).toEqual({ minProperties: 1 });
+  });
+
+  it('folds onto a component of the name only when it declares every optional property the bodies have', async () => {
+    const bodies = {
+      ...getOp('pets', { '404': { description: 'nf', content: json(messageBody()) } }),
+      ...getOp('notes', { '404': { description: 'nf', content: json(obj({ message: str, hint: str }, ['message'])) } }),
+    };
+    const declared = await parseWithoutWarnings(
+      doc(bodies, { ErrorBody: obj({ message: str, hint: str }, ['message']) }),
+    );
+    expect(modelNames(declared)).toEqual(['ErrorBody', 'Note']);
+    expect(errorType(declared, 'getNotes', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+    expectSound(declared, ['Note', 'ErrorBody']);
+    // A component without `hint` would lose it: the bodies stay as they are.
+    const lacking = await parseWithWarnings(doc(bodies, { ErrorBody: obj({ message: str }) }), [
+      /The shared error body \{ message: string, hint\?: string \} would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+    ]);
+    expect(modelNames(lacking)).toEqual(['ErrorBody', 'GetNotesError404', 'GetPetsError404', 'Note']);
+    expectSound(lacking, ['Note', 'ErrorBody']);
+  });
+});
+
+describe('#515', () => {
+  const required = messageBody();
+  const optional = obj({ message: str }, []);
+  const stringCode = obj({ code: str, message: str });
+  const integerCode = obj({ code: { type: 'integer' }, message: str });
+
+  it.each(['3.0.3', '3.1.0'] as const)(
+    'names a shape from its required fields, so adding an operation with a shape that differs only in requiredness, nullability or a type renames nothing, under OAS %s',
+    async (version) => {
+      const nullable = obj({ message: nullableStr(version) });
+      for (const [existing, added, kept, taken] of [
+        [optional, required, 'OptionalErrorBody', 'ErrorBody'],
+        [nullable, required, 'ErrorBodyWithNullableMessage', 'ErrorBody'],
+        [stringCode, integerCode, 'ErrorBodyWithCode', 'ErrorBodyWithCodeInteger'],
+      ] as const) {
+        const before = {
+          ...doc({
+            ...getOp('pets', { '404': { description: 'nf', content: json(existing) } }),
+            ...getOp('users', { '404': { description: 'nf', content: json(existing) } }),
+          }),
+          openapi: version,
+        };
+        const after = {
+          ...doc({
+            ...getOp('pets', { '404': { description: 'nf', content: json(existing) } }),
+            ...getOp('users', { '404': { description: 'nf', content: json(existing) } }),
+            ...getOp('notes', { '404': { description: 'nf', content: json(added) } }),
+          }),
+          openapi: version,
+        };
+        const old = await parseWithoutWarnings(before);
+        expect(modelNames(old)).toEqual([kept, 'Note'].sort());
+        const updated = await parseWithoutWarnings(after);
+        expect(modelNames(updated)).toEqual([kept, 'Note', taken].sort());
+        expect(errorType(updated, 'getPets', 404)).toEqual({ kind: 'model', name: kept });
+        expect(errorType(updated, 'getUsers', 404)).toEqual({ kind: 'model', name: kept });
+        expect(errorType(updated, 'getNotes', 404)).toEqual({ kind: 'model', name: taken });
+        const { changes, exit } = await diffDocs(before, after);
+        expect(changes).toEqual([`additive model-added ${taken}`, 'additive service-added Notes']);
+        expect(exit).toBe(1);
+        expectSound(updated);
+      }
+    },
+  );
+
+  it("names a hinted body apart under a name of its own, `ErrorBodyWithMessageAsDetail`, whichever body the hint is on (the issue's comment)", async () => {
+    const spec = doc({
+      ...getOp('pets', { '404': { description: 'nf', content: json(required) } }),
+      ...getOp('notes', { '404': { description: 'nf', content: json(required) } }),
+    });
+    for (const [hinted, plain] of [
+      ['getPets', 'getNotes'],
+      ['getNotes', 'getPets'],
+    ] as const) {
+      const hint = hinted === 'getPets' ? 'GetPetsError404' : 'GetNotesError404';
+      const ir = await parseWithoutWarnings(spec, { fieldHints: { [hint]: { message: 'detail' } } });
+      expect(modelNames(ir)).toEqual(['ErrorBody', 'ErrorBodyWithMessageAsDetail', 'Note']);
+      expect(errorType(ir, hinted, 404)).toEqual({ kind: 'model', name: 'ErrorBodyWithMessageAsDetail' });
+      expect(errorType(ir, plain, 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+      expect(ir.models.find((m) => m.name === 'ErrorBodyWithMessageAsDetail')?.fields[0].domainName).toBe('detail');
+      expect(ir.models.find((m) => m.name === 'ErrorBody')?.fields[0].domainName).toBeUndefined();
+      expectSound(ir);
+    }
+  });
+
+  it('names a body with no required `message` apart, ending in `WithoutMessage`, in the field-named and the value-named family', async () => {
+    const fieldNamed = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '404': { description: 'nf', content: json(obj({ code: str })) } }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(stringCode) } }),
+        ...getOp('toys', { '404': { description: 'nf', content: json(obj({ code: str, message: str }, ['code'])) } }),
+      }),
+    );
+    expect(modelNames(fieldNamed)).toEqual(['ErrorBodyWithCode', 'ErrorBodyWithCodeWithoutMessage', 'Note']);
+    // `{ code, message? }` requires `code` alone: one shape with `{ code }`.
+    expect(errorType(fieldNamed, 'getToys', 404)).toEqual({ kind: 'model', name: 'ErrorBodyWithCodeWithoutMessage' });
+    expect(fieldSummary(fieldNamed, 'ErrorBodyWithCodeWithoutMessage')).toEqual(['code: string', 'message?: string']);
+    expectSound(fieldNamed);
+    const valueNamed = await parseWithoutWarnings(
+      doc({
+        ...getOp('tags', {
+          '404': { description: 'nf', content: json(obj({ code: { type: 'string', const: 'gone' } })) },
+        }),
+        ...getOp('users', { '404': { description: 'nf', content: json(codedBody('gone')) } }),
+      }),
+    );
+    expect(modelNames(valueNamed)).toEqual(['GoneErrorBody', 'GoneErrorBodyWithoutMessage', 'Note']);
+    expect(fieldSummary(valueNamed, 'GoneErrorBodyWithoutMessage')).toEqual(['code: "gone"']);
+    expectSound(valueNamed);
+  });
+
+  it('spells `message` in the OAuth family, whose implied field is `error_description`', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '400': { description: 'bad', content: json(obj({ error: str, error_description: str })) } }),
+        ...getOp('notes', {
+          '400': { description: 'bad', content: json(obj({ error: str, error_description: str, message: str })) },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['Note', 'OAuthErrorBody', 'OAuthErrorBodyWithMessage']);
+  });
+
+  it('names a body that requires no field from every field it has, under `Optional`, so adding a field to it renames it', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', { '404': { description: 'nf', content: json(optional) } }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(obj({ code: str, message: str }, [])) } }),
+        ...getOp('tags', { '404': { description: 'nf', content: json(obj({ code: str }, [])) } }),
+        ...getOp('users', { '404': { description: 'nf', content: json(obj({}, [])) } }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'ErrorBodyEmpty',
+      'Note',
+      'OptionalErrorBody',
+      'OptionalErrorBodyWithCode',
+      'OptionalErrorBodyWithCodeWithoutMessage',
+    ]);
+    expect(fieldSummary(ir, 'OptionalErrorBodyWithCode')).toEqual(['code?: string', 'message?: string']);
+    const { changes } = await diffDocs(
+      doc(getOp('pets', { '404': { description: 'nf', content: json(optional) } })),
+      doc(getOp('pets', { '404': { description: 'nf', content: json(obj({ message: str, hint: str }, [])) } })),
+    );
+    expect(changes).toEqual([
+      'additive model-added OptionalErrorBodyWithHint',
+      'breaking model-removed OptionalErrorBody',
+      'breaking operation-modified getPets',
+    ]);
+    expectSound(ir);
+  });
+
+  it('qualifies a field by its scalar type, format, nullability and array items, so shapes with the same field names read apart', async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '400': {
+            description: 'bad',
+            content: json(
+              obj({
+                message: str,
+                at: { type: 'string', format: 'date-time' },
+                codes: { type: 'array', items: { type: 'integer' } },
+                count: { type: 'integer', format: 'int64' },
+                ok: { type: 'boolean' },
+                status: { const: 404 },
+                tags: { type: 'array', items: { type: ['string', 'null'] } },
+              }),
+            ),
+          },
+        }),
+        ...getOp('notes', {
+          '400': { description: 'bad', content: json(obj({ message: str, codes: { type: 'array', items: str } })) },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'ErrorBodyWithAtDateTimeCodesIntegerListCountInt64OkBooleanStatusNumberTagsNullableList',
+      'ErrorBodyWithCodesList',
+      'Note',
+    ]);
+  });
+
+  it('prints requiredness, nullability, domain names and types in the warning for what no name can spell', async () => {
+    // Two bodies that reference different components under one field name
+    // are two shapes with one name: the one whose shape sorts first keeps
+    // it, and the warning says what differs.
+    const ir = await parseWithWarnings(
+      doc(
+        {
+          ...getOp('pets', {
+            '404': {
+              description: 'nf',
+              content: json(
+                obj({ message: str, detail: { $ref: '#/components/schemas/Note' }, hint: str }, ['message', 'detail']),
+              ),
+            },
+          }),
+          ...getOp('notes', {
+            '404': {
+              description: 'nf',
+              content: json(
+                obj({ message: str, detail: { $ref: '#/components/schemas/Tag' }, extra: nullableStr('3.1.0') }, [
+                  'message',
+                  'detail',
+                ]),
+              ),
+            },
+          }),
+        },
+        { Tag: obj({ label: str }) },
+      ),
+      [
+        /The shared error body \{ message: string, detail: Tag, extra\? as more: string \| null \} would be named "ErrorBodyWithDetail", which the shared error body "ErrorBodyWithDetail" \{ message: string, detail: Note, hint\?: string \} already holds — keeping model "GetNotesError404" as it is/,
+      ],
+      { fieldHints: { GetNotesError404: { extra: 'more' } } },
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithDetail', 'GetNotesError404', 'Note', 'Tag']);
+    expectSound(ir, ['Note', 'Tag']);
+  });
+});
+
+describe('#516', () => {
+  const items = (properties: Record<string, unknown>, required?: string[]): Doc =>
+    obj({ message: str, errors: { type: 'array', items: obj(properties, required) } });
+  const before = doc(
+    getOp('pets', { '422': { description: 'invalid', content: json(items({ code: str, field: str })) } }),
+  );
+  const after = doc(
+    getOp('pets', {
+      '422': { description: 'invalid', content: json(items({ code: str, field: str, hint: str }, ['code', 'field'])) },
+    }),
+  );
+
+  it.each(['3.0.3', '3.1.0'] as const)(
+    'keeps the item and its parent their names when an optional property is added to the item, which `oagen diff` reads as additive, under OAS %s',
+    async (version) => {
+      const old = await parseWithoutWarnings({ ...before, openapi: version });
+      const updated = await parseWithoutWarnings({ ...after, openapi: version });
+      const names = ['ErrorBodyWithCodeFieldError', 'ErrorBodyWithCodeFieldErrors', 'Note'];
+      expect(modelNames(old)).toEqual(names);
+      expect(modelNames(updated)).toEqual(names);
+      expect(fieldSummary(updated, 'ErrorBodyWithCodeFieldError')).toEqual([
+        'code: string',
+        'field: string',
+        'hint?: string',
+      ]);
+      const { changes, exit } = await diffDocs({ ...before, openapi: version }, { ...after, openapi: version });
+      expect(changes).toEqual(['additive model-modified ErrorBodyWithCodeFieldError']);
+      expect(exit).toBe(1);
+      expectSound(updated);
+    },
+  );
+
+  it("reads the item's required fields into the parent's name as full tokens, recursively", async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '422': {
+            description: 'invalid',
+            content: json(
+              items({
+                code: str,
+                tags: { type: 'array', items: { type: 'integer' } },
+                detail: obj({ reason: str, more: str }, ['reason']),
+              }),
+            ),
+          },
+        }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual([
+      'ErrorBodyWithCodeReasonDetailTagsIntegerListError',
+      'ErrorBodyWithCodeReasonDetailTagsIntegerListErrorDetail',
+      'ErrorBodyWithCodeReasonDetailTagsIntegerListErrors',
+      'Note',
+    ]);
+    expectSound(ir);
+  });
+
+  it("names an item under an optional field from the parent, the field and the item's own fields, so two items under one field never ask for one name", async () => {
+    const ir = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': { description: 'nf', content: json(obj({ message: str, detail: obj({ reason: str }) }, ['message'])) },
+        }),
+        ...getOp('notes', {
+          '404': { description: 'nf', content: json(obj({ message: str, detail: obj({ cause: str }) }, ['message'])) },
+        }),
+        ...getOp('tags', { '404': { description: 'nf', content: json(messageBody()) } }),
+      }),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBody', 'ErrorBodyDetailWithCause', 'ErrorBodyDetailWithReason', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBody')).toEqual([
+      'message: string',
+      'detail?: ErrorBodyDetailWithCause | ErrorBodyDetailWithReason',
+    ]);
+    for (const name of ['getPets', 'getNotes', 'getTags']) {
+      expect(errorType(ir, name, 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+    }
+    expectSound(ir);
+  });
+
+  it('names an item that requires no field from every field it has, as its parent reads it, so adding one renames both', async () => {
+    const ir = await parseWithoutWarnings(
+      doc(getOp('pets', { '422': { description: 'invalid', content: json(items({ code: str, field: str }, [])) } })),
+    );
+    expect(modelNames(ir)).toEqual(['ErrorBodyWithCodeFieldError', 'ErrorBodyWithCodeFieldErrors', 'Note']);
+    expect(fieldSummary(ir, 'ErrorBodyWithCodeFieldError')).toEqual(['code?: string', 'field?: string']);
+    const { changes } = await diffDocs(
+      doc(getOp('pets', { '422': { description: 'invalid', content: json(items({ code: str, field: str }, [])) } })),
+      doc(
+        getOp('pets', {
+          '422': { description: 'invalid', content: json(items({ code: str, field: str, hint: str }, [])) },
+        }),
+      ),
+    );
+    expect(changes).toEqual([
+      'additive model-added ErrorBodyWithCodeFieldHintError',
+      'additive model-added ErrorBodyWithCodeFieldHintErrors',
+      'breaking model-removed ErrorBodyWithCodeFieldError',
+      'breaking model-removed ErrorBodyWithCodeFieldErrors',
+      'breaking operation-modified getPets',
+    ]);
   });
 });
