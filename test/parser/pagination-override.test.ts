@@ -2781,6 +2781,21 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expect(warn).not.toHaveBeenCalled();
         expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: path, itemType: pet });
       });
+
+      it('reads a component once however many routes through nested unions reach it (Greptile)', async () => {
+        // Twenty components, each an `anyOf` of two references to the next,
+        // ending on one object with `items`: every link doubles the routes.
+        const chain: Record<string, unknown> = { End: object({ items: petArray, has_more: boolean }) };
+        for (let link = 20; link >= 1; link--) {
+          const next = { $ref: `#/components/schemas/${link === 20 ? 'End' : `Link${link + 1}`}` };
+          chain[`Link${link}`] = { anyOf: [next, { ...next }] };
+        }
+        const started = performance.now();
+        const op = onlyOperation(await parse(wrap({ $ref: '#/components/schemas/Link1' }), dataPath, chain));
+        expect(performance.now() - started).toBeLessThan(2000);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: 'result.items', itemType: pet });
+      });
     });
   });
 
