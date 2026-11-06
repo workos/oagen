@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
+import { schemesInUse } from '../../src/differ/auth.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Callback, Model, Operation, Parameter, Webhook } from '../../src/ir/types.js';
+import type { ApiSpec, AuthScheme, Callback, Model, Operation, Parameter, Webhook } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 /**
@@ -57,12 +58,13 @@ function webhook(overrides: Partial<Webhook> = {}): Webhook {
   return { name: 'petReturned', httpMethod: 'post', headerParams: [], queryParams: [], responses: [], ...overrides };
 }
 
-/** A spec with one `Pets.createPet` operation, the given webhooks, and the models. */
+/** A spec with one `Pets.createPet` operation, the given webhooks, the models, and the document default and scheme definitions. */
 function spec(
   operations: Operation[],
   webhooks: Webhook[] | undefined = undefined,
   models: Model[] = [adoptionEvent],
   security?: ApiSpec['security'],
+  auth?: AuthScheme[],
 ): ApiSpec {
   return {
     name: 'Test',
@@ -72,10 +74,15 @@ function spec(
     ...(webhooks ? { webhooks } : {}),
     models,
     enums: [],
+    ...(auth ? { auth } : {}),
     ...(security ? { security } : {}),
     sdk: defaultSdkBehavior(),
   };
 }
+
+/** The `sig` scheme — an API key in the `X-Sig` header — and the requirement naming it. */
+const sig: AuthScheme = { kind: 'apiKey', schemeName: 'sig', in: 'header', name: 'X-Sig' };
+const signed = [[{ schemeName: 'sig', scopes: [] }]];
 
 const onOperation = { serviceName: 'Pets', operationName: 'createPet' };
 const onWebhook = { webhookName: 'petReturned', webhookMethod: 'post' };
@@ -414,6 +421,80 @@ describe('#382', () => {
       // A top-level callback carries no `parents` key at all.
       expect(diffSpecs(spec([operation()]), stripped).changes[0]).not.toHaveProperty('parents');
     });
+
+    it("counts a scheme only a callback's requirement names as in use, nested callbacks and inherited defaults included (Greptile)", () => {
+      // The operation overrides the default with nothing; only the callback names `sig`.
+      const direct = spec([operation({ security: [], callbacks: [callback({ security: signed })] })]);
+      expect(schemesInUse(direct)).toEqual(new Set(['sig']));
+      const nested = spec([
+        operation({
+          security: [],
+          callbacks: [callback({ security: [], callbacks: [callback({ name: 'confirmed', security: signed })] })],
+        }),
+      ]);
+      expect(schemesInUse(nested)).toEqual(new Set(['sig']));
+      const onHook = spec([], [webhook({ security: [], callbacks: [callback({ security: signed })] })]);
+      expect(schemesInUse(onHook)).toEqual(new Set(['sig']));
+      // A callback that declares no list inherits the document default, as a webhook does.
+      const inherited = spec(
+        [operation({ security: [], callbacks: [callback()] })],
+        undefined,
+        [adoptionEvent],
+        signed,
+      );
+      expect(schemesInUse(inherited)).toEqual(new Set(['sig']));
+      // Nothing names it: not in use.
+      const unused = spec(
+        [operation({ security: [], callbacks: [callback({ security: [] })] })],
+        undefined,
+        [adoptionEvent],
+        signed,
+      );
+      expect(schemesInUse(unused)).toEqual(new Set());
+    });
+
+    it('reports a scheme only a callback names as breaking when its header is renamed or its definition removed (Greptile)', () => {
+      const secured = (auth: AuthScheme[] | undefined) =>
+        spec(
+          [operation({ security: [], callbacks: [callback({ security: signed })] })],
+          undefined,
+          [adoptionEvent],
+          undefined,
+          auth,
+        );
+      const renamed: AuthScheme = { ...sig, name: 'X-Signature' };
+
+      // The handler reads `X-Sig`; the sender now sets `X-Signature`.
+      const respelled = diffSpecs(secured([sig]), secured([renamed]));
+      expect(respelled.changes).toEqual([
+        {
+          kind: 'security-scheme-modified',
+          schemeName: 'sig',
+          oldScheme: sig,
+          newScheme: renamed,
+          details: 'apiKey in header "X-Sig" → in header "X-Signature"',
+          classification: 'breaking',
+        },
+      ]);
+      expect(respelled.behaviorChanges).toEqual([
+        {
+          kind: 'security-scheme-changed',
+          schemeName: 'sig',
+          oldScheme: sig,
+          newScheme: renamed,
+          classification: 'breaking',
+        },
+      ]);
+      // One breaking change: `oagen diff` exits 2. The callback's own list is unchanged, so no `callback-modified`.
+      expect(respelled.summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+
+      // The definition is gone while the callback still names it.
+      const dropped = diffSpecs(secured([sig]), secured(undefined));
+      expect(dropped.changes).toEqual([
+        { kind: 'security-scheme-removed', schemeName: 'sig', scheme: sig, classification: 'breaking' },
+      ]);
+      expect(dropped.summary).toMatchObject({ removed: 1, breaking: 1 });
+    });
   });
 
   describe.each(['3.0.3', '3.1.0'])('through parseSpec, OpenAPI %s', (openapi) => {
@@ -566,5 +647,123 @@ describe('#382', () => {
       expect(flipped.summary).toMatchObject({ modified: 1, additive: 1, breaking: 0, behaviorChanges: 1 });
       expect(diffSpecs(deprecated, live).changes[0]).toMatchObject({ oldDeprecated: true, newDeprecated: false });
     });
+
+    it.each([
+      { site: 'a callback', nested: false },
+      { site: 'a nested callback', nested: true },
+    ])(
+      'reports a scheme only $site names as breaking when its header is renamed or its definition removed (Greptile)',
+      async ({ nested }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const requirement = [{ sig: [] }];
+        const secured = (scheme: Record<string, unknown> | undefined) => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                // The operation overrides the default with nothing; only the callback names `sig`.
+                security: [],
+                responses: { '200': { description: 'OK' } },
+                callbacks: {
+                  petAdopted: nested
+                    ? posting({ security: [], callbacks: { confirmed: posting({ security: requirement }) } })
+                    : posting({ security: requirement }),
+                },
+              },
+            },
+          },
+          ...(scheme ? { components: { securitySchemes: { sig: scheme } } } : {}),
+        });
+        const xSig = { type: 'apiKey', in: 'header', name: 'X-Sig' };
+        const before = await parseDocument(secured(xSig));
+        const parsed: AuthScheme = { kind: 'apiKey', schemeName: 'sig', in: 'header', name: 'X-Sig' };
+        expect(before.auth).toEqual([parsed]);
+
+        const respelled = diffSpecs(before, await parseDocument(secured({ ...xSig, name: 'X-Signature' })));
+        expect(respelled.changes).toEqual([
+          {
+            kind: 'security-scheme-modified',
+            schemeName: 'sig',
+            oldScheme: parsed,
+            newScheme: { ...parsed, name: 'X-Signature' },
+            details: 'apiKey in header "X-Sig" → in header "X-Signature"',
+            classification: 'breaking',
+          },
+        ]);
+        // Exit 2; the callback's own list is unchanged, so nothing else is reported.
+        expect(respelled.summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+
+        const dropped = diffSpecs(before, await parseDocument(secured(undefined)));
+        expect(dropped.changes).toEqual([
+          { kind: 'security-scheme-removed', schemeName: 'sig', scheme: parsed, classification: 'breaking' },
+        ]);
+        expect(dropped.summary).toMatchObject({ removed: 1, breaking: 1 });
+      },
+    );
+
+    it.each([
+      { order: 'direct reference first', nestedFirst: false },
+      { order: 'nested reference first', nestedFirst: true },
+    ])(
+      'reports only the callback added when a nested-only component callback gains a direct reference, $order (Greptile)',
+      async ({ nestedFirst }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ok = { '200': { description: 'OK' } };
+        const shared = (direct: boolean) => {
+          const createPet = {
+            post: {
+              operationId: 'createPet',
+              responses: ok,
+              ...(direct ? { callbacks: { adopted: { $ref: '#/components/callbacks/notifyAdoption' } } } : {}),
+            },
+          };
+          const updatePet = {
+            post: {
+              operationId: 'updatePet',
+              responses: ok,
+              callbacks: {
+                petUpdated: posting({ callbacks: { confirmed: { $ref: '#/components/callbacks/notifyAdoption' } } }),
+              },
+            },
+          };
+          return {
+            openapi,
+            info: { title: 'repro', version: '1' },
+            paths: nestedFirst
+              ? { '/owners': updatePet, '/pets': createPet }
+              : { '/pets': createPet, '/owners': updatePet },
+            components: { callbacks: { notifyAdoption: posting({ operationId: 'notifyAdoption' }) } },
+          };
+        };
+        const nestedOnly = await parseDocument(shared(false));
+        const both = await parseDocument(shared(true));
+        // One payload model on each side: the nested site and the direct
+        // site read one callback operation, so they share one minting.
+        expect(nestedOnly.models.map((m) => m.name).sort()).toEqual([
+          'NotifyAdoptionPayload',
+          'UpdatePetPetUpdatedPayload',
+        ]);
+        expect(both.models.map((m) => m.name).sort()).toEqual(['NotifyAdoptionPayload', 'UpdatePetPetUpdatedPayload']);
+
+        // Adding the direct reference renames nothing: one additive change, exit 1.
+        const added = diffSpecs(nestedOnly, both);
+        expect(added.changes).toEqual([
+          {
+            kind: 'callback-added',
+            name: 'adopted',
+            expression: '{$request.body#/callbackUrl}',
+            httpMethod: 'post',
+            ...onOperation,
+            classification: 'additive',
+          },
+        ]);
+        expect(added.summary).toMatchObject({ added: 1, modified: 0, removed: 0, breaking: 0, additive: 1 });
+        // And taking it away is the one breaking removal, exit 2.
+        const removed = diffSpecs(both, nestedOnly);
+        expect(removed.changes.map((c) => [c.kind, c.classification])).toEqual([['callback-removed', 'breaking']]);
+      },
+    );
   });
 });

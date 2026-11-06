@@ -1324,8 +1324,9 @@ export interface SecuritySchemeAdded {
  * `components.securitySchemes` and the new does not (#384). Breaking when
  * some request read it: the scheme is in use in the old document — named
  * by the effective requirement list, `node.security ?? spec.security ??
- * []`, of one of its operations or webhooks, so the document default counts
- * only through a node that inherits it — or in the new document, which
+ * []`, of one of its operations, webhooks or callbacks (#382), so the
+ * document default counts only through a node that inherits it — or in the
+ * new document, which
  * then requires what it does not define. Additive when nothing read it on
  * either side, as a change to a server variable no template references is
  * (#342): dropping a definition no request carries moves nothing on the
@@ -1349,7 +1350,8 @@ export interface SecuritySchemeRemoved {
  * out, so a changed `authorizationUrl`, `tokenUrl` or `refreshUrl`, a flow
  * added or removed, or a flow's other keys changing all count — and the
  * scheme is in use in the new document (named by the effective requirement
- * list of one of its operations or webhooks, as for a removed scheme): an
+ * list of one of its operations, webhooks or callbacks, as for a removed
+ * scheme): an
  * SDK built for the old definition sends `X-Key` to a server that now reads
  * `X-Api-Key`, and a webhook handler built for it checks a header the
  * sender no longer carries. Additive when nothing in the new document uses

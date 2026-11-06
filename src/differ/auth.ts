@@ -1,6 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { foldParameterName } from '../ir/parameter-key.js';
-import type { ApiSpec, AuthScheme } from '../ir/types.js';
+import type { ApiSpec, AuthScheme, Callback, SecurityRequirementSet } from '../ir/types.js';
 import type { SecuritySchemeChange } from './types.js';
 
 /**
@@ -40,12 +40,12 @@ import type { SecuritySchemeChange } from './types.js';
  * query or cookie name is case-sensitive and compared as written.
  *
  * A scheme is in use in a document when the effective requirement list of
- * at least one of its operations or webhooks — `node.security ??
+ * at least one of its operations, webhooks or callbacks — `node.security ??
  * spec.security ?? []`, the resolution `securityShift` uses — names it, so
  * the document default counts only through a node that inherits it
  * (`schemesInUse`). Both sides of the wire are treated alike: a scheme a
- * webhook's requirement names is read by the handler, and a changed header
- * name breaks the handler as it breaks a caller.
+ * webhook's or a callback's requirement names is read by the handler, and a
+ * changed header name breaks the handler as it breaks a caller.
  *
  * The changes are listed added (new document order), removed (old document
  * order), modified (new document order), as `diffEnums` lists an enum's.
@@ -104,19 +104,23 @@ export function diffAuthSchemes(oldSpec: ApiSpec, newSpec: ApiSpec): SecuritySch
 /**
  * The names of every scheme some request in `spec` carries: those named by
  * the effective requirement list — `node.security ?? spec.security ?? []`
- * — of at least one operation or webhook. The document default counts only
+ * — of at least one operation, webhook or callback, the callbacks of each
+ * operation and webhook visited recursively (a callback is a request the
+ * handler reads, as a webhook is; #382). The document default counts only
  * through a node that inherits it, so a default every operation overrides
  * puts nothing in use, and a scheme no requirement names is read by no
  * request. Exported for tests.
  */
 export function schemesInUse(spec: ApiSpec): Set<string> {
   const used = new Set<string>();
-  const nodes = [...spec.services.flatMap((service) => service.operations), ...(spec.webhooks ?? [])];
-  for (const node of nodes) {
+  const visit = (node: { security?: SecurityRequirementSet[]; callbacks?: Callback[] }): void => {
     for (const alternative of node.security ?? spec.security ?? []) {
       for (const requirement of alternative) used.add(requirement.schemeName);
     }
-  }
+    for (const callback of node.callbacks ?? []) visit(callback);
+  };
+  for (const service of spec.services) for (const op of service.operations) visit(op);
+  for (const webhook of spec.webhooks ?? []) visit(webhook);
   return used;
 }
 
