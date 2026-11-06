@@ -143,6 +143,7 @@ import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { warnOnIgnoredCallbacks } from './callbacks.js';
 import { resolvePathItemRef } from './path-item-refs.js';
+import { componentKeyOf } from './schema-refs.js';
 import { followReference, siblingDocsMode, type SiblingDocs } from './reference-objects.js';
 
 export interface PathItem {
@@ -4062,22 +4063,23 @@ function collectVariantFieldSchemas(
   if (ref) {
     if (seen.has(ref)) return out;
     seen.add(ref);
-    const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
-    const target = match && componentSchemas ? componentSchemas[match[1]] : undefined;
+    const target = resolveComponentSchemaRef(schema, componentSchemas);
     // Descending into a component makes it the owner of everything below, so
     // inline members get the same synthesized names the model emitter gives
     // them (`CreateUser` + `password_hash_type` -> CreateUserPasswordHashType).
-    const nextOwner = match ? resolveSchemaName(match[1]) : owner;
+    // A pointer deeper into a component names a schema and no model (#539),
+    // so what it lands on stays under the owner at hand.
+    const key = componentKeyOf(ref);
+    const nextOwner = key !== undefined ? resolveSchemaName(key) : owner;
     return collectVariantFieldSchemas(target, componentSchemas, nextOwner, out, seen);
   }
 
   // A `oneOf` branch is the group-variant carrier: its properties are the
   // members. Record them, then keep descending — branches nest in real specs.
   for (const variant of schema.oneOf ?? []) {
-    const variantRef = (variant as { $ref?: string }).$ref;
-    const refMatch = variantRef ? /^#\/components\/schemas\/(.+)$/.exec(variantRef) : null;
-    const resolved = resolveSchemaRefObject(variant, componentSchemas) ?? variant;
-    const variantOwner = refMatch ? resolveSchemaName(refMatch[1]) : owner;
+    const variantKey = componentKeyOf((variant as { $ref?: string }).$ref);
+    const resolved = resolveComponentSchemaRef(variant, componentSchemas) ?? variant;
+    const variantOwner = variantKey !== undefined ? resolveSchemaName(variantKey) : owner;
     for (const [name, fieldSchema] of Object.entries(resolved.properties ?? {})) {
       if (fieldSchema) out.set(name, { schema: fieldSchema, owner: variantOwner });
     }
@@ -4094,19 +4096,6 @@ function collectVariantFieldSchemas(
 interface VariantFieldSchema {
   schema: SchemaObject;
   owner: string | undefined;
-}
-
-/** Resolve `{ $ref: '#/components/schemas/X' }` to its component, else undefined. */
-function resolveSchemaRefObject(
-  schema: SchemaObject | undefined,
-  componentSchemas: Record<string, SchemaObject> | undefined,
-): SchemaObject | undefined {
-  if (!schema || !componentSchemas) return undefined;
-  const ref = (schema as { $ref?: string }).$ref;
-  if (!ref) return undefined;
-  const match = /^#\/components\/schemas\/(.+)$/.exec(ref);
-  if (!match) return undefined;
-  return componentSchemas[match[1]];
 }
 
 export type RequestBodyEncoding = 'json' | 'form-data' | 'form-urlencoded' | 'binary' | 'text';
@@ -4311,7 +4300,7 @@ function collectBodyPropertyNames(
     // sibling branches and must count for each of them.
     if (seen.has(ref)) return new Set();
     return collectBodyPropertyNames(
-      resolveSchemaRefObject(schema, componentSchemas),
+      resolveComponentSchemaRef(schema, componentSchemas),
       componentSchemas,
       new Set([...seen, ref]),
     );
@@ -5221,14 +5210,24 @@ function resolveDeferredInlineTypes(
  * once the components' field bundles exist (`parseSpec`) — there a field's
  * bundle stands for the object the component pass minted for the field
  * (`fieldInlineModelBundles`), so a header or fallback body that shared that
- * object joins the field's site and follows its rename.
+ * object joins the field's site and follows its rename. `sharedRoots` are
+ * references that belong to no site and name whatever model they were
+ * settled to — a pointer into a component typed as the field it lands on
+ * (`resolveSchemaPointers`; #539) — each given to the site of that model
+ * the same way.
  */
-export function attachSharedRefs(bundles: readonly InlineModelBundle[], componentNames: ReadonlySet<string>): void {
+export function attachSharedRefs(
+  bundles: readonly InlineModelBundle[],
+  componentNames: ReadonlySet<string>,
+  sharedRoots: readonly TypeRef[] = [],
+): void {
   const siteOf = new Map<string, InlineModelBundle>();
   for (const bundle of bundles) {
     for (const model of bundle.models) if (!siteOf.has(model.name)) siteOf.set(model.name, bundle);
   }
-  for (const bundle of bundles) {
+  const sites: readonly Pick<InlineModelBundle, 'roots' | 'models'>[] =
+    sharedRoots.length > 0 ? [...bundles, { roots: [...sharedRoots], models: [] }] : bundles;
+  for (const bundle of sites) {
     const own = new Set(bundle.models.map((model) => model.name));
     const refs = [...bundle.roots, ...bundle.models.flatMap((model) => collectModelTypeRefs(model))];
     for (const ref of refs) {

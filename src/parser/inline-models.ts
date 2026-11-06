@@ -1,4 +1,14 @@
-import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type {
+  Constraints,
+  EnumRef,
+  Extensions,
+  ExternalDocs,
+  Model,
+  ModelRef,
+  Field,
+  TypeRef,
+  UnionType,
+} from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -37,6 +47,14 @@ import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from 
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
+import {
+  carryDeferredMappingEntries,
+  componentKeyOf,
+  isPendingSchemaRef,
+  markPendingSchemaRef,
+  schemaRefTarget,
+  schemaRefTokens,
+} from './schema-refs.js';
 import { isIgnoredHeaderParameter, parameterTyping, type ParameterObject, type SchemaOrContent } from './operations.js';
 import { parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
@@ -1046,8 +1064,9 @@ type SiteDirection = 'sent' | 'received';
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
- * read as the parser reads one (the component its last segment names,
- * `componentSchemaOf`), so a component another one reaches is reached by
+ * read as the parser reads one (the component it names, or the one a
+ * pointer deeper into a component enters and the schema it lands on there;
+ * `schemaRefTarget`, #539), so a component another one reaches is reached by
  * every site that reaches that one. A component no site reaches is no site:
  * one that names `Pet` leaves `Pet` as only sent as it was, and is itself
  * not among the result, since the document does not say which way it goes.
@@ -1089,11 +1108,13 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
     if (!isRecord(value) || entered[direction].has(value)) return;
     entered[direction].add(value);
     const reach = (ref: unknown): void => {
-      if (typeof ref !== 'string') return;
-      const key = ref.split('/').pop() ?? '';
-      if (!Object.hasOwn(schemas, key)) return;
+      const tokens = schemaRefTokens(ref);
+      const key = tokens?.[0];
+      if (key === undefined || !Object.hasOwn(schemas, key)) return;
       reached.set(key, (reached.get(key) ?? new Set<SiteDirection>()).add(direction));
-      schema(schemas[key], direction);
+      // A pointer deeper into the component (#539) reaches the component
+      // and, from there, what the schema it lands on names.
+      schema(schemaRefTarget(ref, schemas as Record<string, SchemaObject>) ?? schemas[key], direction);
     };
     reach(value['$ref']);
     const mapping = isRecord(value['discriminator']) ? value['discriminator']['mapping'] : undefined;
@@ -1521,7 +1542,7 @@ export function collectProperties(
     if (!s || seen.has(s)) return;
     seen.add(s);
     if (s.$ref) {
-      if (followRef && schemas) visit(schemas[s.$ref.split('/').pop() ?? ''], true, onBranch);
+      if (followRef && schemas) visit(schemaRefTarget(s.$ref, schemas), true, onBranch);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {
@@ -1798,6 +1819,7 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
     case 'model': {
       const copy: ModelRef = { ...ref };
       if (isComponentModelRef(ref)) markComponentModelRef(copy);
+      if (isPendingSchemaRef(ref)) markPendingSchemaRef(copy);
       const key = inheritedModelRefs.get(ref);
       if (key !== undefined) recordInheritedRef(copy, key);
       return copy;
@@ -1817,19 +1839,52 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
         valueType: cloneTypeRef(ref.valueType),
         ...(ref.keyType ? { keyType: cloneTypeRef(ref.keyType) } : {}),
       };
-    case 'union':
-      return {
+    case 'union': {
+      const copy: UnionType = {
         ...ref,
         variants: ref.variants.map(cloneTypeRef),
         ...(ref.discriminator
           ? { discriminator: { ...ref.discriminator, mapping: { ...ref.discriminator.mapping } } }
           : {}),
       };
+      // A mapping entry deferred to a pointer variant (#539) follows the
+      // variant's copy, so the copy's mapping is settled with its own variants.
+      if (ref.discriminator && copy.discriminator) {
+        carryDeferredMappingEntries(
+          { variants: ref.variants, mapping: ref.discriminator.mapping },
+          { variants: copy.variants, mapping: copy.discriminator.mapping },
+        );
+      }
+      return copy;
+    }
     case 'literal':
     case 'primitive':
       return { ...ref };
     default:
       return assertNeverRef(ref);
+  }
+}
+
+/**
+ * Make `target` the type `source` is, in place — for a reference settled
+ * where it is held (`resolveSchemaPointers`; #539): a field, a body, a
+ * parameter, an array's items keep the object they hold, so the type is
+ * written into it. The copy is made as `cloneTypeRef` makes one, so every
+ * mark rides along: the nested nodes are the copy's own, and a mark on the
+ * copy's root — the component mark, an inherited record, an inline enum's
+ * members and link — is set on `target`, which takes the root's place.
+ */
+export function replaceTypeRef(target: TypeRef, source: TypeRef): void {
+  const copy = cloneTypeRef(source);
+  const slot = target as unknown as Record<string, unknown>;
+  for (const key of Object.keys(slot)) delete slot[key];
+  Object.assign(slot, copy);
+  if (copy.kind === 'model') {
+    if (isComponentModelRef(copy)) markComponentModelRef(target as ModelRef);
+    const key = inheritedModelRefs.get(copy);
+    if (key !== undefined) recordInheritedRef(target as ModelRef, key);
+  } else if (copy.kind === 'enum') {
+    copyInlineEnumMeta(copy, target as EnumRef);
   }
 }
 
@@ -2876,8 +2931,8 @@ export function mergeAllOfMembers(
     done[capacity].add(s);
     if (s.$ref) {
       if (onBranch) return;
-      const rawName = s.$ref.split('/').pop() ?? '';
-      const target = componentSchemas?.[rawName];
+      const key = componentKeyOf(s.$ref);
+      const target = schemaRefTarget(s.$ref, componentSchemas);
       const refs = target ? resolvedRefs : unresolvedRefs;
       if (!refs.includes(s.$ref)) refs.push(s.$ref);
       if (!target) return;
@@ -2892,7 +2947,11 @@ export function mergeAllOfMembers(
       // model for the fields, so the reference starts its own origin, as a
       // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
       // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
-      const owner = origin?.schema.allOf ? origin : { name: resolveSchemaName(rawName), schema: target };
+      // A pointer deeper into a component (#539) names a schema and no
+      // model of its own, so it declares as a member written inline does:
+      // under the origin at hand.
+      const owner =
+        origin?.schema.allOf || key === undefined ? origin : { name: resolveSchemaName(key), schema: target };
       visit(target, owner, onBranch);
       return;
     }

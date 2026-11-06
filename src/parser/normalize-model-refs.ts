@@ -27,11 +27,21 @@ export function validateModelRefs(spec: ApiSpec): void {
 
   for (const service of spec.services) {
     for (const op of service.operations) {
-      for (const p of [...op.pathParams, ...op.queryParams, ...(op.bodyOwnedQueryParams ?? []), ...op.headerParams]) {
+      for (const p of [
+        ...op.pathParams,
+        ...op.queryParams,
+        ...(op.bodyOwnedQueryParams ?? []),
+        ...op.headerParams,
+        ...(op.cookieParams ?? []),
+      ]) {
         walkRef(p.type, `${service.name}.${op.name}.${p.name}`);
       }
       if (op.requestBody) walkRef(op.requestBody, `${service.name}.${op.name}.requestBody`);
       walkRef(op.response, `${service.name}.${op.name}.response`);
+      // Every other success entry's own type: the primary's is `response`.
+      for (const entry of op.successResponses ?? []) {
+        walkRef(entry.type, `${service.name}.${op.name}.successResponses.${entry.statusCode}`);
+      }
       if (op.pagination) walkRef(op.pagination.itemType, `${service.name}.${op.name}.pagination.itemType`);
       for (const field of op.pagination?.envelopeFields ?? []) {
         walkRef(field.type, `${service.name}.${op.name}.pagination.${field.name}`);
@@ -47,6 +57,16 @@ export function validateModelRefs(spec: ApiSpec): void {
       }
       for (const { type, source } of collectRequestBodyTypes(op)) {
         walkRef(type, `${service.name}.${op.name}.${source}`);
+      }
+      // A body group's members are typed afresh from the body's variant
+      // schemas, so they are references of their own; a query group's are
+      // the operation's parameters, walked above.
+      for (const group of op.parameterGroups ?? []) {
+        for (const variant of group.variants) {
+          for (const p of variant.parameters) {
+            walkRef(p.type, `${service.name}.${op.name}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
+          }
+        }
       }
     }
   }
