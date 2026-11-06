@@ -1,8 +1,10 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
 import { CommandError } from '../errors.js';
+import type { ApiSpec } from '../ir/types.js';
 import type { SmokeCheckResult } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -23,15 +25,58 @@ function runPackagedScript(scriptRelPath: string, args: string[]): void {
   execFileSync(bin, fullArgs, { stdio: 'inherit', env: process.env });
 }
 
+/**
+ * Run the smoke step: the spec-only baseline when no raw baseline exists,
+ * then the runner (and its diff) against the baseline.
+ *
+ * The smoke scripts run as subprocesses and take `--spec`, which a script
+ * parses bare — without the config's settings, which cannot cross a process
+ * boundary. `parsedSpec` is what `--spec` parses to with those settings, as
+ * `generate` parses it; it is written to a file for the scripts' lifetime
+ * and handed to both as `--ir <path>` beside `--spec`, so the baseline lists
+ * the operations `generate` reads (`Pets.list` under an `operationIdTransform`
+ * that strips `PetsController_`, no `Pets.get` under a `transformSpec` that
+ * drops `/pets/{id}`) and a runner that reads the file plans the same ones
+ * (#567). Without `parsedSpec`, each script parses `--spec` as before.
+ */
 export function runSmokeCheck(opts: {
   spec?: string;
+  /** What `--spec` parses to with the config's settings (see above). */
+  parsedSpec?: ApiSpec;
   lang: string;
   output: string;
   rawResults?: string;
   smokeConfig?: string;
   smokeRunner?: string;
 }): SmokeCheckResult {
-  const { spec, lang, output, rawResults, smokeConfig, smokeRunner } = opts;
+  const { spec, parsedSpec, lang, output, rawResults, smokeConfig, smokeRunner } = opts;
+
+  const irDir = parsedSpec ? mkdtempSync(path.join(tmpdir(), 'oagen-verify-')) : undefined;
+  const irArgs: string[] = [];
+  if (irDir) {
+    const irPath = path.join(irDir, 'spec-ir.json');
+    writeFileSync(irPath, JSON.stringify(parsedSpec));
+    irArgs.push('--ir', irPath);
+  }
+
+  try {
+    return runSmokeScripts({ spec, lang, output, rawResults, smokeConfig, smokeRunner, irArgs });
+  } finally {
+    if (irDir) rmSync(irDir, { recursive: true, force: true });
+  }
+}
+
+function runSmokeScripts(opts: {
+  spec?: string;
+  lang: string;
+  output: string;
+  rawResults?: string;
+  smokeConfig?: string;
+  smokeRunner?: string;
+  /** `--ir <path>` when the IR `--spec` parses to was handed over; else empty. */
+  irArgs: string[];
+}): SmokeCheckResult {
+  const { spec, lang, output, rawResults, smokeConfig, smokeRunner, irArgs } = opts;
 
   let baselinePath = rawResults ?? 'smoke-results-raw.json';
   let generatedBaseline = false;
@@ -46,7 +91,7 @@ export function runSmokeCheck(opts: {
     }
 
     try {
-      runPackagedScript('smoke/baseline.ts', ['--spec', spec]);
+      runPackagedScript('smoke/baseline.ts', ['--spec', spec, ...irArgs]);
     } catch {
       throw new CommandError('Baseline generation failed', '', 1);
     }
@@ -55,7 +100,7 @@ export function runSmokeCheck(opts: {
   }
 
   const smokeArgs = ['--lang', lang, '--sdk-path', output, '--raw-results', baselinePath];
-  if (spec) smokeArgs.push('--spec', spec);
+  if (spec) smokeArgs.push('--spec', spec, ...irArgs);
   if (smokeConfig) smokeArgs.push('--smoke-config', smokeConfig);
 
   try {

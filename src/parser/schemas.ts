@@ -3,7 +3,16 @@ import { assertNever, walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
-import { componentKeyOf, pendingSchemaRef, schemaRefTarget } from './schema-refs.js';
+import {
+  componentKeyOf,
+  deferMappingEntry,
+  isPendingSchemaRef,
+  isPendingVariant,
+  pendingSchemaRef,
+  recordPendingSiteLimits,
+  schemaRefTarget,
+} from './schema-refs.js';
+import { pointerTypesAsUnknown } from './schema-pointers.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -195,8 +204,12 @@ let activePrimitiveComponentKeys: ReadonlySet<string> = new Set();
  * reason an array component is keyed so. Such an entry becomes no `Model`
  * and no `Enum` of its own: a `$ref` to it resolves to the enum it names,
  * read through the alias as the same schema written inline is
- * (`schemaToTypeRef`; #560). Decided in `extractSchemas` before any TypeRef
- * is built and dropped with the other per-document state.
+ * (`schemaToTypeRef`; #560). A component that declares its enum inside the
+ * `allOf` itself (`Kind: { allOf: [{ type: 'string', enum }], description
+ * }`) names no enum component and is none: it is the enum `Kind`
+ * (`isEnumComponentSchema`; #588 review). Decided in `extractSchemas`
+ * before any TypeRef is built and dropped with the other per-document
+ * state.
  */
 let activeEnumAliasKeys: ReadonlySet<string> = new Set();
 
@@ -261,14 +274,69 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
  * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
  * schema (`constUnionEnumMembers`) with no `allOf` and no `properties` of
  * its own — the OAS 3.1 spelling that documents and deprecates values one
- * by one. Both become an `Enum` (`extractEnum`), and a `$ref` to either
- * resolves to an `EnumRef`; the same `oneOf` written inline collapses to an
- * inline enum (`schemaToTypeRef`), so the two spellings have one shape
- * wherever they appear. A `oneOf` with any other variant — a `$ref`, an
- * object, a number const — is a named union, as before.
+ * by one — or it declares either inside an `allOf` the type builder reads
+ * as its one typing member (`enumComponentDeclaration`: `Kind: { allOf: [{
+ * type: 'string', enum: ['cat', 'dog'] }], description }`, a lone member or
+ * one beside members that only annotate or limit it, however nested). All
+ * become an `Enum` (`extractEnum`), and a `$ref` to any resolves to an
+ * `EnumRef`; the same schemas written inline collapse to an inline enum
+ * (`schemaToTypeRef`), so the spellings have one shape wherever they
+ * appear. A `oneOf` with any other variant — a `$ref`, an object, a number
+ * const — is a named union, as before. The `allOf` spelling names no enum
+ * component, so it is no alias of one (`isEnumComponentEntry`; #588
+ * review: it was read as an alias, and its enum lifted as `UnknownEnum`).
  */
 function isEnumComponentSchema(schema: SchemaObject): boolean {
-  return Boolean(schema.enum) || isConstUnionEnumSchema(schema);
+  return enumComponentDeclaration(schema) !== undefined;
+}
+
+/**
+ * The schema an enum component declares its members on, read as the
+ * component's own, or `undefined` for a component that is no enum
+ * (`isEnumComponentSchema`): the component itself when it declares an
+ * `enum:` list or is a `oneOf`/`anyOf` of string consts
+ * (`isConstUnionEnumSchema`), or — for a component written as an `allOf`
+ * that `readInlineAllOf` reads as its one typing member (`'unwrapped'`: a
+ * lone member, or one beside members that declare no type and only
+ * annotate or limit it, #555) — that member read as the schema itself
+ * (`unwrappedAllOfMember`), in turn, with the wrapper layer's own
+ * declarations on it by the one wrapper rule a field written so follows:
+ * its `description`, `externalDocs`, `example`, `examples` and `x-*` keys
+ * over the member's (`withWrapperDocs`, the wrapper's own winning, then
+ * the first annotating member's, the member's standing where the layer has
+ * none), its `deprecated` in place of the member's
+ * (`withWrapperDeprecation`), its `default` the same way, and its limits
+ * conjoined with the member's (`extractConstraints`). So `Kind: { allOf:
+ * [{ type: 'string', enum: ['cat', 'dog'] }], description: 'The kind of
+ * pet.' }` is read as `Kind: { type: 'string', enum: ['cat', 'dog'],
+ * description: 'The kind of pet.' }` is — the enum `Kind`, its text, flag
+ * and default on the `Enum`, its limits read by a parameter that names it
+ * — and the member's own nullability (a `null` member, a type list naming
+ * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, while
+ * `nullable: true` beside the `allOf` declares nothing, as beside any
+ * schema without a `type`. A component with `properties` beside the
+ * `allOf` is a model, as it is everywhere. Read wherever an enum component
+ * is read as a whole: `extractEnum`, the nullability pass of
+ * `extractSchemas`, and what a bare `$ref` to it hands a field or
+ * parameter (`buildFieldFromSchema`, `extractParams`, through an alias
+ * `componentReference`). #588 review: such a component was an alias of
+ * nothing — `componentEntries` read the lone member as the entry's own
+ * declaration, `isEnumComponentEntry` accepted it, and `schemaToTypeRef`
+ * lifted the inline enum under no name as `UnknownEnum`, the wrapper's
+ * `deprecated` and limits lost; before #560 it was an empty model.
+ */
+export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
+  if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return schema;
+  if (!schema.allOf || Object.keys(schema.properties ?? {}).length > 0) return undefined;
+  if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {
+    return undefined;
+  }
+  const declaration = enumComponentDeclaration(unwrappedAllOfMember(schema));
+  if (declaration === undefined) return undefined;
+  // The wrapper layer's `default` — the wrapper's own, then the first
+  // annotating member's — over the member's, as its text is.
+  const layer = [schema, ...annotatingAllOfMembers(schema)].find((level) => level.default !== undefined);
+  return layer === undefined ? declaration : { ...declaration, default: layer.default };
 }
 
 /** The `oneOf`/`anyOf`-of-string-consts half of `isEnumComponentSchema`. */
@@ -611,17 +679,29 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
 /**
  * The limits a site that writes `schema` carries — what `Field.constraints`
  * is for a field written as `schema`, and what the type built from it
- * carries (`schemaToTypeRef`; #545): the keywords of the site's own levels
- * — the schema and, under it, each `allOf` member that declares no type
- * (`annotatingAllOfMembers`; #555), each read by `extractConstraints`, so a
- * nullable wrapper's and its branch's conjoin — and, for a reference to an
- * array or primitive component, or to an alias of an enum component, of
- * every entry the reference passes (`componentReference`: the wrappers and
- * the members beside the `$ref`, each alias, the component), conjoined
- * from the component outward, as JSON Schema applies every level at once
- * and the wire enforces the component's limit whatever is written beside
- * the `$ref` (#512 review). A `$ref` to a model, named union or enum
- * contributes none of the target's: that node carries its own.
+ * carries (`schemaToTypeRef`; #545): the keywords of the site's own level
+ * — the schema, read by `extractConstraints`, which conjoins its `allOf`
+ * members' with its own in document order and a nullable wrapper's with
+ * its branch's; the `allOf` members that only annotate it
+ * (`annotatingAllOfMembers`; #555) are no level of their own here, since
+ * folded first a member's `pattern` or `multipleOf` would win over the
+ * schema's own, which `combineConstraints` keeps (#587 review: `{ type:
+ * 'string', pattern: '^a', allOf: [{ pattern: 'b$' }] }` carries `^a`) —
+ * and, for a reference to an array or primitive component, or to an alias
+ * of an enum component, of every entry the reference passes
+ * (`componentReference`: the wrappers and the members beside the `$ref`
+ * among `own`, then each alias and the component, each read once with its
+ * annotating members' limits — `limitEntries`; #588 review: as levels of
+ * their own, a member's `pattern` or `multipleOf` won over the alias's
+ * own), conjoined from the component outward, as JSON Schema applies every
+ * level at once and the wire enforces the component's limit whatever is
+ * written beside the `$ref` (#512 review). A `$ref` to a model, named union or enum
+ * contributes none of the target's: that node carries its own. A JSON
+ * Pointer `$ref` deeper into a component (#539) contributes none here
+ * either, since what it lands on is typed after the fact: once
+ * `resolveSchemaPointers` settles that type, the pointed schema's limits
+ * are conjoined with this reading on the type and on the field or
+ * parameter alike, where the type can carry them (#545 review).
  * `undefined` when no level declares any.
  */
 export function schemaConstraints(
@@ -629,8 +709,7 @@ export function schemaConstraints(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
   const reference = componentReference(schema, componentSchemas);
-  const own = reference?.own ?? [schema, ...annotatingAllOfMembers(schema)];
-  return [...own, ...(reference?.entries ?? [])].reduceRight<Constraints | undefined>(
+  return [...(reference?.own ?? [schema]), ...(reference?.limitEntries ?? [])].reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
@@ -644,7 +723,11 @@ export function schemaConstraints(
  * every level the type was built through. A `model` or `enum` reference is
  * returned as it is — the model carries its own, and what the site writes
  * around the `$ref` stays the field's or parameter's — and so is `ref`
- * when `constraints` is `undefined`, so a type stays as built.
+ * when `constraints` is `undefined`, so a type stays as built. A reference
+ * `resolveSchemaPointers` has yet to settle, for a JSON Pointer `$ref`
+ * deeper into a component (#539), records them for that pass
+ * (`recordPendingSiteLimits`), which conjoins them with the pointed
+ * schema's on the type it settles the site into (#545 review).
  */
 export function withTypeConstraints(ref: TypeRef, constraints: Constraints | undefined): TypeRef {
   if (!constraints) return ref;
@@ -660,6 +743,8 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
       withTypeConstraints(ref.inner, constraints);
       return ref;
     case 'model':
+      if (isPendingSchemaRef(ref)) recordPendingSiteLimits(ref, constraints);
+      return ref;
     case 'enum':
       return ref;
   }
@@ -816,7 +901,7 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * whose nullable wrappers are removed and sibling `properties` folded in
  * (`unwrapNullableSchema`), as `schemaToTypeRef` reads it.
  */
-function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
+export function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
   if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
   const reading = readInlineAllOf(schema.allOf, schema);
   if (reading === 'unwrapped') return unwrappedAllOfMember(schema);
@@ -1249,9 +1334,14 @@ export function extractSchemas(
   );
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
-    if (isEnumComponentSchema(schema)) {
+    // An enum component is read on the schema it declares its members on
+    // (`enumComponentDeclaration`): through an `allOf` wrapper, the
+    // member's own nullability is the enum's, and the wrapper's OAS 3.0
+    // `nullable: true` declares nothing.
+    const declaration = enumComponentDeclaration(schema);
+    if (declaration) {
       activeEnumSchemaNames.add(resolved);
-      if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
+      if (isNullableEnumSchema(declaration)) activeNullableEnumSchemaNames.add(resolved);
     } else if (
       isNamedUnionSchema(schema) &&
       isNullableUnionSchema(schema) &&
@@ -2113,7 +2203,7 @@ export function titleMappedVariantNames(
   // Read before the variants are named, so an inline object variant is
   // named by its title alone — the name `nameInlineVariantEntries` keeps.
   const members = unionMembers(union, NO_INLINE_NAMES, schemas);
-  if (titleMappedDiscriminatorProperty(members) === null) return names;
+  if (titleMappedDiscriminatorProperty(members, schemas) === null) return names;
   for (const { raw, name } of members) {
     if (isInlineObjectSchema(raw) && name !== null) names.set(raw, name);
   }
@@ -2125,8 +2215,9 @@ export function titleMappedVariantNames(
  * inline object by its title before naming, a `$ref` by its component, a
  * wrapper by the one model it wraps (`unionMembers`) — the first property
  * the first member pins that every member pins too, a `$ref` variant's
- * read from its component (#568); null when a member is unnamed or no
- * property is shared. The naming side's test (`titleMappedVariantNames`):
+ * read from its component, through a `$ref` member of its `allOf` or a
+ * `$ref` on the property (`getEffectiveConstPropertyValue`; #568); null
+ * when a member is unnamed or no property is shared. The naming side's test (`titleMappedVariantNames`):
  * the titles are kept whether or not the values are distinct — a title
  * given twice within one union falls back through `emitted`
  * (`nameInlineVariantEntries`) — while the discriminator itself needs
@@ -2134,12 +2225,15 @@ export function titleMappedVariantNames(
  * union of two variants pinning one value keeps its titles and carries no
  * discriminator.
  */
-function titleMappedDiscriminatorProperty(members: readonly UnionMember[]): string | null {
+function titleMappedDiscriminatorProperty(
+  members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
+): string | null {
   if (members.length < 2 || members.some((m) => m.name === null)) return null;
   const first = members[0];
   if (!first) return null;
-  for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    if (members.every((m) => getEffectiveConstPropertyValue(m.resolved, property) !== null)) return property;
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    if (members.every((m) => getEffectiveConstPropertyValue(m.resolved, property, schemas) !== null)) return property;
   }
   return null;
 }
@@ -2903,7 +2997,12 @@ function aliasEntryLevels(entry: SchemaObject): SchemaObject[] {
  * passes on its way to the declaration — the entry it names, each alias in
  * turn, the array or primitive component itself (`componentEntries`,
  * nearest first), each through the levels it declares the reference on
- * (`aliasEntryLevels`) — under its own. An enum component is no entry: the
+ * (`aliasEntryLevels`) for its documentation, and once, as one schema, for
+ * its limits (`limitEntries`: `extractConstraints` conjoins an entry's
+ * annotating members' limits with its own, the entry's `pattern` or
+ * `multipleOf` standing where a member's conflicts, as it reads a field's
+ * schema; #588 review: folded as levels, a member's `pattern: 'b$'` won
+ * over the alias's own `'^a'`) — under its own. An enum component is no entry: the
  * `Enum` carries what it declares, as it does for a bare `$ref` to it, so
  * the site reads the aliases alone and the enum's `example` as that `$ref`
  * reads it (`enumComponent`). A bare `$ref` reads all of it: text, flags,
@@ -2923,9 +3022,11 @@ function aliasEntryLevels(entry: SchemaObject): SchemaObject[] {
 export interface ComponentReference {
   /** The schemas on the way to the `$ref`, nearest first: the site's own and, under a wrapper, each wrapper, the members beside the `$ref` and the `$ref` schema with whatever is written beside it (`wrappedReference`). */
   own: SchemaObject[];
-  /** The levels of every entry the reference passes on its way to the array or primitive, nearest first (`componentEntries`, each entry with its annotating `allOf` members, `aliasEntryLevels`); for an alias of an enum, the aliases' alone. */
+  /** The levels of every entry the reference passes on its way to the array or primitive, nearest first (`componentEntries`, each entry with its annotating `allOf` members, `aliasEntryLevels`), which the site documents itself from; for an alias of an enum, the aliases' alone. */
   entries: SchemaObject[];
-  /** The enum component an alias chain ends at (#560), read for its `example`/`examples` as a bare `$ref` to it is, and by a parameter for the fallbacks it reads from any component a bare `$ref` names; absent for an array or primitive component, whose own declarations are among `entries`. */
+  /** The entries themselves, nearest first, each once: what the site conjoins limits from, an entry's annotating members' read with its own by `extractConstraints` (#588 review: as levels of `entries`, a member's `pattern` or `multipleOf` won over the entry's own, which `combineConstraints` keeps); for an alias of an enum, the aliases alone. */
+  limitEntries: SchemaObject[];
+  /** The enum component an alias chain ends at (#560), on the schema it declares its members on (`enumComponentDeclaration`), read for its `example`/`examples` as a bare `$ref` to it is, and by a parameter for the fallbacks it reads from any component a bare `$ref` names; absent for an array or primitive component, whose own declarations are among `entries`. */
   enumComponent?: SchemaObject;
   /** Whether the schema is the bare `$ref`, which reads the entries' documentation as well as their limits. */
   bare: boolean;
@@ -2948,10 +3049,15 @@ export function componentReference(
   const target = declares && resolveComponentSchemaRef(reference, componentSchemas);
   if (!declares || !target) return undefined;
   const entries = componentEntries(target, componentSchemas, declares) ?? [target];
-  const enumComponent = declares === isEnumComponentSchema ? entries[entries.length - 1] : undefined;
+  // The enum an alias chain ends at, read on the schema it declares its
+  // members on (`enumComponentDeclaration`), as a bare `$ref` to it reads it.
+  const last = entries[entries.length - 1];
+  const enumComponent = declares === isEnumComponentSchema ? (enumComponentDeclaration(last) ?? last) : undefined;
+  const aliases = enumComponent ? entries.slice(0, -1) : entries;
   return {
     own: wrapped.levels,
-    entries: (enumComponent ? entries.slice(0, -1) : entries).flatMap(aliasEntryLevels),
+    entries: aliases.flatMap(aliasEntryLevels),
+    limitEntries: aliases,
     ...(enumComponent ? { enumComponent } : {}),
     bare: schema.$ref !== undefined,
   };
@@ -2981,17 +3087,21 @@ export function buildFieldFromSchema(
   // entry's limits, and a bare `$ref`'s documentation too. A `$ref` to a
   // model, named union or enum leaves all of it on that node but the
   // `example` and `examples` a field takes from any component a bare `$ref`
-  // names — the enum an alias resolves to included (#560).
+  // names — the enum an alias resolves to included (#560). An enum
+  // component is read on the schema it declares its members on
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
   const reference = componentReference(fieldSchema, componentSchemas);
-  const refTarget = reference ? reference.enumComponent : resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  // The field's own levels: its schema and, under it, each `allOf` member
-  // that declares no type and so only annotates or limits the field
-  // (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind }, { description
-  // }]` and `allOf: [{ type: 'string' }, { deprecated: true }]` read neither
-  // the text nor the flag) — nearest first, as `wrappedReference` orders
-  // them for a reference to an array or primitive component.
+  // The levels the field documents itself from: its schema and, under it,
+  // each `allOf` member that declares no type and so only annotates or
+  // limits the field (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind
+  // }, { description }]` and `allOf: [{ type: 'string' }, { deprecated: true
+  // }]` read neither the text nor the flag) — nearest first, as
+  // `wrappedReference` orders them for a reference to an array or primitive
+  // component.
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
   const { example, examples } = resolveExamples(
@@ -3116,10 +3226,14 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  */
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
   const prop = schema.properties?.[property];
-  if (!prop) return null;
-  if (typeof prop.const === 'string') return prop.const;
-  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string') {
-    return prop.enum[0];
+  return prop ? pinnedStringValue(prop) : null;
+}
+
+/** The one string a schema pins as written — a string `const`, or an `enum:` of exactly one string; null otherwise. */
+function pinnedStringValue(schema: SchemaObject): string | null {
+  if (typeof schema.const === 'string') return schema.const;
+  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
+    return schema.enum[0];
   }
   return null;
 }
@@ -3156,7 +3270,11 @@ function mapVariantToDiscriminatorEntry(
  * target with a leading `#/components/schemas/` stripped and otherwise as the
  * document spelled it (`cat_dto` stays `cat_dto`; a target in another section
  * stays whole) — unlike a named union's, whose targets are resolved to IR
- * model names (`namedUnionDiscriminator`). The one reader for every site
+ * model names (`namedUnionDiscriminator`) — except an entry whose target is
+ * a pointer variant's schema, which the bundler has rewritten to the
+ * component it hoisted that schema into and which is settled with the
+ * variant to the model it settles to (`deferPointerMappingEntries`; #539):
+ * the hoisted key (`dog`) names no variant, cleaned or not. The one reader for every site
  * that builds an inline union, a field or a response (`schemaToTypeRef`) and
  * a request body (`typePickedRequestBody`) alike, so the same union reads the
  * same wherever it is written and the differ can tell a key a new variant
@@ -3260,15 +3378,22 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
+  // The schema the component declares its members on: itself, or — for a
+  // component written as an `allOf` read as its one typing member — that
+  // member with the wrapper layer's text, link, flag, default, examples
+  // and keys on it (`enumComponentDeclaration`), so `{ allOf: [{ type:
+  // 'string', enum }], description }` is read as `{ type: 'string', enum,
+  // description }` is.
+  const declaration = enumComponentDeclaration(schema) ?? schema;
   // The members of either spelling (`enumMembersOf`), each with its own
   // `description` and `deprecated`. A `null` member or `type: 'null'`
   // variant marks the schema as nullable (OAS 3.1); it is not a value.
   // Nullability is carried on the `$ref` side via
   // `activeNullableEnumSchemaNames`, so it is dropped here instead of
   // emitting a bogus `NULL = "null"` member.
-  const values: EnumValue[] = (enumMembersOf(schema) ?? []).map(toEnumValue);
+  const values: EnumValue[] = (enumMembersOf(declaration) ?? []).map(toEnumValue);
 
-  const rawDefault = schema.default;
+  const rawDefault = declaration.default;
   const def =
     rawDefault !== undefined && values.some((v) => v.value === rawDefault)
       ? (rawDefault as string | number)
@@ -3279,12 +3404,12 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
   // (`collectInlineEnumFromRef`). Present only when it has content.
   return {
     name,
-    ...descriptionEntry(schema.description),
+    ...descriptionEntry(declaration.description),
     values,
     default: def,
-    ...externalDocsEntry(schema.externalDocs),
-    ...deprecatedEntry(schema),
-    ...schemaExtensionsEntry(schema),
+    ...externalDocsEntry(declaration.externalDocs),
+    ...deprecatedEntry(declaration),
+    ...schemaExtensionsEntry(declaration),
   };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
@@ -3355,7 +3480,10 @@ interface UnionMember {
   /**
    * The component schema a `$ref` variant points at (as `extractAllOfModel`
    * resolves its members), or the one a wrapper variant wraps
-   * (`wrappedVariantReference`); `raw` otherwise.
+   * (`wrappedVariantReference`); `raw` otherwise. Its consts are read
+   * through its `allOf` members, a `$ref` member or a `$ref` on the
+   * property followed to the component it names
+   * (`getEffectiveConstPropertyValue`).
    */
   resolved: SchemaObject;
   /**
@@ -3469,7 +3597,7 @@ function buildNamedUnionPlan(
     memberProperties.set(key, raw);
     memberContexts.set(raw, key);
   });
-  const discriminator = namedUnionDiscriminator(schema, compositionKind, members);
+  const discriminator = namedUnionDiscriminator(schema, compositionKind, members, schemas);
   return {
     compositionKind,
     members,
@@ -3516,6 +3644,10 @@ function namedUnionEntry(
     if (raw.$ref) return schemaToTypeRef(raw);
     return schemaToTypeRef(raw, memberContexts.get(raw), name, memberProperties);
   });
+  // An explicit entry naming a pointer variant is settled with the variant (#539).
+  const written = schema.discriminator?.mapping;
+  if (discriminator && written)
+    deferPointerMappingEntries(written, plan.members, variants, discriminator.mapping, schemas);
 
   return { variants, compositionKind: plan.compositionKind, ...(discriminator ? { discriminator } : {}) };
 }
@@ -3525,7 +3657,9 @@ function namedUnionEntry(
  * written inline as a field's, a body's or an item's — each with the schema
  * its const values and properties are read from (a `$ref` resolved against
  * the components, so a discriminator pinned inside the referenced schema is
- * seen) and the model name it is referenced by. A variant that wraps one
+ * seen — in its own `properties`, under a `$ref` member of its `allOf`, or
+ * as a `$ref` on the property to a const component) and the model name it
+ * is referenced by. A variant that wraps one
  * reference to a model (`wrappedVariantReference`) is read as that reference,
  * so its const reaches a derived mapping as a bare `$ref` variant's does (#427).
  * The one reader both derivations share, so a union carries the same
@@ -3817,13 +3951,21 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
  * or a composition (`Kind: { type: 'string', const: 'cat' }`); a union of
  * primitives — a type list of several such types, `null` among them or not
  * (`Tag: { type: ['string', 'integer'] }`, `isPrimitiveTypeList`); and
- * `unknown` — a schema that declares no type at all (`declaresType`:
- * `Anything: { description: 'Any value.' }`, `{}`, `{ format: 'uuid' }`).
- * The last three became fieldless models before #569, while the same
- * schema inline was the literal, the union or `unknown`. A type list naming
- * `object` or `array`, a `type` no rule knows, `type: 'null'` alone in
- * either spelling, and `type: 'array'` without `items` are none of these:
- * each keeps the fieldless model it always became.
+ * `unknown` — a schema that declares no type at all (`declaresNoType`:
+ * `Anything: { description: 'Any value.' }`, `{}`, `{ format: 'uuid' }`,
+ * and the same written inside an `allOf` whose members each declare none,
+ * `Metadata: { allOf: [{ description: 'Free-form metadata.' }] }`, `{
+ * allOf: [{}] }`, `{ allOf: [{ description }, { maxLength: 3 }] }`, which
+ * `classifyInlineSchema` reads as `other` since no member types it). The
+ * last three became fieldless models before #569, while the same schema
+ * inline was the literal, the union or `unknown`; so did the lone-`allOf`
+ * spelling of an untyped schema until the #569 review, while the lone-`allOf`
+ * spelling of a `const`, a type list or a primitive was read through
+ * (`componentEntries`). A type list naming `object` or `array`, a `type` no
+ * rule knows, `type: 'null'` alone in either spelling, `type: 'array'`
+ * without `items`, and an `allOf` of several typing members
+ * (`allOfTypesSchema` reads it as none of them) are none of these: each
+ * keeps the fieldless model it always became.
  */
 function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
   const bare = unwrapNullableComponent(schema);
@@ -3831,10 +3973,30 @@ function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
     case 'const':
       return true;
     case 'other':
-      return bare.type === undefined ? !declaresType(bare) : isPrimitiveTypeList(bare.type);
+      return bare.type === undefined ? declaresNoType(bare) : isPrimitiveTypeList(bare.type);
     default:
       return false;
   }
+}
+
+/**
+ * Whether a schema declares no type at all, so that `schemaToTypeRef` types
+ * it as `unknown` from its own keywords: none of the keywords `declaresType`
+ * reads (`{ description: 'Any value.' }`, `{}`), or an `allOf` alone among
+ * them whose members each declare none (`{ allOf: [{ description:
+ * 'Free-form metadata.' }] }`, `{ allOf: [{}] }`, `{ allOf: [{ description:
+ * 'a' }, { maxLength: 3 }] }`; #569 review) — members that only annotate
+ * or limit the schema (`annotatingAllOfMembers`), which `allOfTypesSchema`
+ * leaves to the schema's own keywords, so `classifyInlineSchema` reads the
+ * schema as `other` and `typesAsUnknown` holds. An `allOf` with a member
+ * that declares a type is not read here: one typing member is the schema
+ * (`readInlineAllOf`), and several are a shape no site reads as unknown
+ * on purpose.
+ */
+function declaresNoType(schema: SchemaObject): boolean {
+  if (!declaresType(schema)) return true;
+  if (schema.allOf === undefined || declaresType({ ...schema, allOf: undefined })) return false;
+  return schema.allOf.every((member) => !declaresType(member));
 }
 
 /**
@@ -3905,6 +4067,17 @@ function isPrimitiveComponentEntry(schema: SchemaObject, schemas: Record<string,
  * of its own: a `$ref` to it is the enum it names (`schemaToTypeRef`),
  * exactly as the same schema written inline is typed (#560: it was an
  * empty model, and the field typed as that model instead of the enum).
+ * An alias is only a chain that ends at a `$ref` to an enum component: a
+ * component that declares its enum inside the `allOf` itself, with no
+ * `$ref` — `Kind: { allOf: [{ type: 'string', enum: ['cat', 'dog'] }],
+ * description }`, alone or beside annotating members — is the enum
+ * component itself (`isEnumComponentSchema`, which reads the lone member
+ * as the component's own declaration, `enumComponentDeclaration`), so it
+ * is true here as any enum component is, and `extractSchemas` keeps it out
+ * of the aliases (`activeEnumAliasKeys`) by that test (#588 review:
+ * `componentEntries` read the lone member as the entry's own declaration,
+ * `isEnumComponentSchema` did not, and the entry was an alias of nothing —
+ * its model skipped and its enum lifted as `UnknownEnum`).
  */
 function isEnumComponentEntry(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
   return componentEntries(schema, schemas, isEnumComponentSchema) !== undefined;
@@ -4315,19 +4488,44 @@ function isPrimitiveComponentRef(schema: SchemaObject): boolean {
  * the way makes it `nullable<unknown>`, not bare unknown; an `allOf` read as
  * the reference takes its `$ref` member's answer, one read as its lone
  * typing member that member's; an alias of an alias resolves in turn. So
- * for a `$ref`: whether it names a primitive component (by key, as
- * `schemaToTypeRef` resolves it; false outside an extraction) whose schema
- * answers so here. For any other schema: `typesAsUnknown`, then — for an
- * `allOf` that predicate leaves because the member it is read as is a
- * `$ref` (`readInlineAllOf`) — that member's answer here.
+ * for a `$ref` to a component: whether it names a primitive component (by
+ * key, as `schemaToTypeRef` resolves it; false outside an extraction) whose
+ * schema answers so here. For a `$ref` that names no component — a pointer
+ * deeper into one, or a `$ref` into another section (#539) — the site is
+ * settled once every model is built, to the type of the schema the pointer
+ * lands on where it stands, or to `unknown` when it leads nowhere; what it
+ * settles to is read ahead from the document (`pointerTypesAsUnknown`,
+ * false outside an extraction likewise), so a `200` body pointing at an
+ * untyped schema (`Pet/properties/anything`, `anything: {}`) loses to a
+ * typed `201` as the same schema written inline would, and never selects
+ * the operation's primary response only to settle to `unknown`. For any
+ * other schema: `typesAsUnknown`, then — for an `allOf` that predicate
+ * leaves because the member it is read as is a `$ref` (`readInlineAllOf`)
+ * — that member's answer here. A type list is read
+ * as `typesAsUnknown` reads it: one naming a single type without
+ * `null` is that type, so the `allOf` beside it is still followed (`Alias:
+ * { type: ['string'], allOf: [{ $ref: Anything }] }` is the reference, and
+ * `unknown`, as `schemaToTypeRef` types it; #569 review: the list stopped
+ * the walk, and a `200` naming `Alias` beside a `201` naming `Pet` kept
+ * the pick and exposed `unknown`); an empty list, one naming `null` beside
+ * a type, or one of several types is `nullable<unknown>`, nullable or a
+ * union, never the bare unknown, as `nullable: true` beside a `type` is.
  */
 export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) {
+    if (componentKeyOf(schema.$ref) === undefined) {
+      const schemas = documentComponentSchemas();
+      return schemas !== undefined && pointerTypesAsUnknown(String(schema.$ref), schemas);
+    }
     const component = isPrimitiveComponentRef(schema) ? componentSchemaOf(schema.$ref) : undefined;
     return component !== undefined && referenceTypesAsUnknown(component);
   }
   if (typesAsUnknown(schema)) return true;
-  if (Array.isArray(schema.type) || (schema.nullable && schema.type)) return false;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
+  }
+  if (schema.nullable && schema.type) return false;
   const folded = foldSiblingProperties(schema);
   if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
   const reading = readInlineAllOf(folded.allOf, folded);
@@ -4361,8 +4559,11 @@ function isEnumAliasRef(schema: SchemaObject): boolean {
  *      `$ref` names, or a bare schema name, through `resolveSchemaName`, so
  *      `schemaNameTransform` applies, as it does to every mapping value
  *      `Model.discriminator` carries; `mappingTargetModelName`). An entry
- *      naming a schema outside the variant list, or no component (a pointer
- *      deeper into one; #539), is kept as written.
+ *      naming a schema outside the variant list is kept as written. An
+ *      entry whose target is a pointer variant's schema is settled with
+ *      the variant, to the model it settles to (`deferPointerMappingEntries`;
+ *      #539): the bundler hoists such a target into a component of its
+ *      own, so read by key it would name the hoisted copy.
  *   2. An explicit `discriminator:` without `mapping:` — each variant's const
  *      on the property paired with its model name (`unionConstMapping`); `{}`
  *      when any variant pins none or is unnamed, as it is inline.
@@ -4374,6 +4575,7 @@ function namedUnionDiscriminator(
   schema: SchemaObject,
   compositionKind: 'oneOf' | 'anyOf',
   members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
 ): { property: string; mapping: Record<string, string> } | undefined {
   if (schema.discriminator) {
     const property = schema.discriminator.propertyName;
@@ -4381,10 +4583,10 @@ function namedUnionDiscriminator(
     const mapping: Record<string, string> =
       explicit.length > 0
         ? Object.fromEntries(explicit.map(([value, target]) => [value, mappingTargetModelName(target)]))
-        : (unionConstMapping(members, property) ?? {});
+        : (unionConstMapping(members, property, schemas) ?? {});
     return { property, mapping };
   }
-  return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members) : undefined;
+  return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members, schemas) : undefined;
 }
 
 /**
@@ -4392,13 +4594,52 @@ function namedUnionDiscriminator(
  * `$ref` to a component by the component it names, a bare schema name
  * (`Cat`, which OpenAPI allows in place of the `$ref`) as that name, each
  * through `resolveSchemaName` so `schemaNameTransform` applies. A target
- * that names no component — a pointer deeper into one (#539), a `$ref` into
- * another section — is kept as written, as an entry naming a schema outside
- * the variant list is.
+ * that names no component — a `$ref` into another section, or a pointer
+ * deeper into a component written through `transformSpec` (#539; the
+ * bundler rewrites one in the document to the component it hoists the
+ * schema into, see `deferPointerMappingEntries`) — is kept as written, as
+ * an entry naming a schema outside the variant list is.
  */
 function mappingTargetModelName(target: string): string {
   const key = componentKeyOf(target) ?? (target.startsWith('#') || target.includes('/') ? undefined : target);
   return key === undefined ? target : resolveSchemaName(key);
+}
+
+/**
+ * Defer every entry of a union's explicit `mapping:` whose target is a
+ * pointer variant's schema to the variant's settle (`deferMappingEntry`;
+ * #539 review), for a named union and an inline one alike. A target that
+ * is a pointer deeper into a component (`#/components/schemas/Zoo/
+ * properties/dog`) never reaches the parser as written: the bundler hoists
+ * the schema it points at into a component of its own, named by the
+ * pointer's last token (`dog`, the very object `Zoo.dog` is), and rewrites
+ * the target to `#/components/schemas/dog`, while a variant written as the
+ * pointer stays as written and is settled later to the model `Zoo.dog` is
+ * built as (`ZooDog`). Read by key, the target names the model built for
+ * the hoisted copy (`Dog`), a model outside the union; so each target's
+ * schema (`schemaRefTarget`) is matched by identity against the members',
+ * and an entry whose schema is an unnamed member's — a pointer variant,
+ * pending until settled — is written as the model the variant settles to
+ * once it is (`settleDeferredMappingEntries`). `written` is the document's
+ * mapping, `mapping` the one the IR carries; `variants[i]` is built from
+ * `members[i]`.
+ */
+function deferPointerMappingEntries(
+  written: Record<string, unknown>,
+  members: readonly UnionMember[],
+  variants: readonly TypeRef[],
+  mapping: Record<string, string>,
+  schemas: Record<string, SchemaObject> | undefined,
+): void {
+  for (const [value, target] of Object.entries(written)) {
+    const schema = schemaRefTarget(target, schemas);
+    if (schema === undefined) continue;
+    const index = members.findIndex((member, position) => {
+      const variant = variants[position];
+      return member.name === null && member.resolved === schema && variant !== undefined && isPendingVariant(variant);
+    });
+    if (index >= 0) deferMappingEntry(mapping, value, variants[index]!);
+  }
 }
 
 /**
@@ -4414,12 +4655,13 @@ function mappingTargetModelName(target: string): string {
  */
 function implicitUnionDiscriminator(
   members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
 ): { property: string; mapping: Record<string, string> } | undefined {
   if (members.length < 2 || members.some((m) => m.name === null)) return undefined;
   const first = members[0];
   if (!first) return undefined;
-  for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    const mapping = unionConstMapping(members, property);
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    const mapping = unionConstMapping(members, property, schemas);
     if (mapping) return { property, mapping };
   }
   return undefined;
@@ -4428,17 +4670,23 @@ function implicitUnionDiscriminator(
 /**
  * `property`'s const value on every member paired with the member's model
  * name, or null when any member is unnamed, pins no string const on the
- * property (through its `allOf` wrappers, like an allOf+oneOf variant), or
- * repeats another member's value. Collected in a Map, so a value spelled like
+ * property (through its `allOf` wrappers, a `$ref` member or a `$ref` on
+ * the property followed to the component it names —
+ * `getEffectiveConstPropertyValue`; #568 review), or repeats another
+ * member's value. Collected in a Map, so a value spelled like
  * an inherited property (`constructor`, `toString`) is neither mistaken for a
  * duplicate nor lost; the result has every value as an own key.
  */
-function unionConstMapping(members: readonly UnionMember[], property: string): Record<string, string> | null {
+function unionConstMapping(
+  members: readonly UnionMember[],
+  property: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): Record<string, string> | null {
   if (members.length === 0) return null;
   const mapping = new Map<string, string>();
   for (const member of members) {
     if (member.name === null) return null;
-    const value = getEffectiveConstPropertyValue(member.resolved, property);
+    const value = getEffectiveConstPropertyValue(member.resolved, property, schemas);
     if (value === null || mapping.has(value)) return null;
     mapping.set(value, member.name);
   }
@@ -4677,22 +4925,28 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     buildFieldFromSchema(entry.name, declaredComponentProperty(entry), name, requiredSet, schemas, siblings),
   );
 
+  // The text, link, flag and extensions are the wrapper layer's: the
+  // component's own, with an annotating member's — one that declares no
+  // type — where it declares none (`allOfWrapperLayer`), as the merged
+  // model's are (`mergeAllOfMembers`; #555 review: `Owner: { allOf: [{ $ref:
+  // Base }, { properties: { name } }, { description: 'An owner.',
+  // deprecated: true }] }` was a model with neither, while the same keys
+  // beside the `allOf` were its own, and `oagen diff` between the two
+  // reported `deprecatedChanged`). A typing member's stay on that member —
+  // a `$ref` member's flag on the referenced model, as `Field.deprecated`
+  // leaves it there on an allOf field.
+  const layer = allOfWrapperLayer(schema);
   return {
     name,
-    description: schema.description,
-    ...externalDocsEntry(schema.externalDocs),
+    description: layer.description,
+    ...externalDocsEntry(layer.externalDocs),
     fields,
     ...(discriminator ? { discriminator } : {}),
-    // Deprecation is the wrapper's own: a member's flag is not read — a `$ref`
-    // member's stays on the referenced model — as `Field.deprecated` ignores
-    // it on an allOf field.
-    ...deprecatedEntry(schema),
+    ...deprecatedEntry(layer),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
     // members keep theirs on the referenced model.
     ...constraintsEntry(schema),
-    // The wrapper's own extensions, as its flag and link: a member's stay on
-    // that member, a `$ref` member's on its component.
-    ...schemaExtensionsEntry(schema),
+    ...schemaExtensionsEntry(layer),
   };
 }
 
@@ -4705,16 +4959,36 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * so a oneOf variant of the form `{ allOf: [{ properties: { … } }, { oneOf: […] }] }`
  * still surfaces its top-level `properties` (in particular its discriminator
  * `const`) instead of being treated as having none.
+ *
+ * A `$ref` member of an `allOf` is followed to the component it names when
+ * the document's components are handed in (`schemas`), through a chain of
+ * aliases (`followMemberRefs`), so a union member's const that its base
+ * component pins is seen (#568 review): `Cat: { allOf: [{ $ref: CatBase },
+ * { properties: { lives } }] }` pins what `CatBase` pins, and `Puppy: {
+ * allOf: [{ $ref: Dog }] }` what `Dog` pins, as the models built for them
+ * carry `kind`. A component reached again on one walk is read once, so a
+ * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
+ * Without the map a `$ref` member declares nothing, as the allOf+oneOf
+ * readers read a variant's inline members only.
  */
-function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObject> {
+function getEffectiveProperties(
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): Record<string, SchemaObject> {
   // Collected in a `Map` and returned through `Object.fromEntries`, so a
   // property named `__proto__` is an own entry rather than the prototype.
   const props = new Map<string, SchemaObject>();
+  const seen = new Set<SchemaObject>();
   const visit = (s: SchemaObject): void => {
+    if (seen.has(s)) return;
+    seen.add(s);
     for (const [k, v] of Object.entries(s.properties ?? {})) {
       if (!props.has(k) && v) props.set(k, v);
     }
-    for (const sub of s.allOf ?? []) visit(sub);
+    for (const sub of s.allOf ?? []) {
+      const member = followMemberRefs(sub, schemas, seen);
+      if (member) visit(member);
+    }
     // Do NOT walk into oneOf / anyOf — those are alternatives, not
     // simultaneously-present properties.
   };
@@ -4722,16 +4996,29 @@ function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObje
   return Object.fromEntries(props);
 }
 
-function getEffectiveConstPropertyValue(schema: SchemaObject, property: string): string | null {
+/**
+ * The string const `schema` pins `property` to: in its own `properties`
+ * (`getConstPropertyValue`), else through its `allOf` wrappers
+ * (`getEffectiveProperties`, a `$ref` member followed to its component when
+ * `schemas` is handed in). The declaration found may itself be a `$ref` to
+ * a component pinning one value — `kind: { $ref: HamsterKind }` with
+ * `HamsterKind: { const: 'hamster' }`, or `{ enum: ['hamster'] }` in OAS
+ * 3.0 — or to an alias chain ending in one; it is followed with the map
+ * (#568 review), a chain that repeats pinning nothing. Null when the
+ * property is undeclared or pins no one string (an enum of several values,
+ * a plain `type: string`).
+ */
+function getEffectiveConstPropertyValue(
+  schema: SchemaObject,
+  property: string,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
   const direct = getConstPropertyValue(schema, property);
   if (direct !== null) return direct;
-  const effective = getEffectiveProperties(schema)[property];
+  const effective = getEffectiveProperties(schema, schemas)[property];
   if (!effective) return null;
-  if (typeof effective.const === 'string') return effective.const;
-  if (Array.isArray(effective.enum) && effective.enum.length === 1 && typeof effective.enum[0] === 'string') {
-    return effective.enum[0];
-  }
-  return null;
+  const declaration = followMemberRefs(effective, schemas, new Set());
+  return declaration ? pinnedStringValue(declaration) : null;
 }
 
 /**
@@ -5389,7 +5676,11 @@ export function componentTypeRef(key: string): TypeRef {
  * level down — the outer level's reading replaces the branch's, which it
  * accounts for (a wrapper's keywords conjoin with its branch's, a `$ref`
  * site's with its component's, in the one order `Field.constraints` reads
- * them). So a field's `constraints` and its type's are one reading.
+ * them). So a field's `constraints` and its type's are one reading — for a
+ * JSON Pointer `$ref` deeper into a component (#539) once
+ * `resolveSchemaPointers` settles the site, which conjoins the pointed
+ * schema's limits with the site's on the type and the field or parameter
+ * alike (#545 review).
  */
 export function schemaToTypeRef(
   schema: SchemaObject,
@@ -5520,14 +5811,15 @@ function buildTypeRef(
       if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
     } else {
       // A single member, or the one member that types the schema beside
-      // members that only annotate or limit it (`allOfTypingMember`; #555),
-      // unwrapped. The wrapper is the schema the document wrote, and those
-      // members are part of it (`allOfWrapperLayer`), so its documentation
-      // rides onto the member — an inline enum lifted from it carries the
-      // wrapper's `description` and link (`withWrapperDocs`), and a model
-      // built from it the wrapper's link (`unwrappedAllOfMember`).
+      // members that only annotate or limit it, its items documented by a
+      // member's `items` that declare no type (`annotatedTypingMember`;
+      // #555), unwrapped. The wrapper is the schema the document wrote, and
+      // those members are part of it (`allOfWrapperLayer`), so its
+      // documentation rides onto the member — an inline enum lifted from it
+      // carries the wrapper's `description` and link (`withWrapperDocs`),
+      // and a model built from it the wrapper's link (`unwrappedAllOfMember`).
       return schemaToTypeRef(
-        withWrapperDocs(allOfTypingMember(schema.allOf) ?? schema.allOf[0], allOfWrapperLayer(schema)),
+        withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
         contextName,
         parentModelName,
         siblingProperties,
@@ -5625,10 +5917,11 @@ function buildTypeRef(
     // enum) through that reference (#568). Without a context name nothing is
     // extracted for an inline object variant (`nonObjectVariantContexts`),
     // so it is named by its title alone, as before naming.
+    const componentSchemas = documentComponentSchemas();
     const members = unionMembers(
       schema,
       contextName === undefined ? NO_INLINE_NAMES : inlineVariantNames,
-      documentComponentSchemas(),
+      componentSchemas,
     );
 
     // Resolve the discriminator. Three sources, in order — the ones a named
@@ -5655,10 +5948,11 @@ function buildTypeRef(
     if (schema.discriminator) {
       const property = schema.discriminator.propertyName;
       const explicit = inlineMappingTargets(schema.discriminator.mapping);
-      const mapping = Object.keys(explicit).length > 0 ? explicit : (unionConstMapping(members, property) ?? {});
+      const mapping =
+        Object.keys(explicit).length > 0 ? explicit : (unionConstMapping(members, property, componentSchemas) ?? {});
       resolvedDiscriminator = { property, mapping };
     } else if (compositionKind === 'oneOf') {
-      resolvedDiscriminator = implicitUnionDiscriminator(members);
+      resolvedDiscriminator = implicitUnionDiscriminator(members, componentSchemas);
     }
 
     // Build variants. An inline object variant is referenced by the name its
@@ -5715,6 +6009,14 @@ function buildTypeRef(
             : schemaToTypeRef(typed, contextName, parentModelName),
         );
       }
+    }
+    // An explicit entry naming a pointer variant is settled with the variant
+    // (`deferPointerMappingEntries`; #539): its target reaches the parser
+    // as the component the bundler hoisted the pointed schema into, whose
+    // stripped key names no variant.
+    const written = schema.discriminator?.mapping;
+    if (resolvedDiscriminator && written) {
+      deferPointerMappingEntries(written, members, variants, resolvedDiscriminator.mapping, documentComponentSchemas());
     }
     const union: TypeRef = {
       kind: 'union',
@@ -5910,10 +6212,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
   const folded = foldSiblingProperties(schema);
   const kind = classifyInlineSchema(folded);
   if (kind === 'allOf' && folded.allOf) {
-    return (
-      readInlineAllOf(folded.allOf, folded) === 'unwrapped' &&
-      typesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0])
-    );
+    return readInlineAllOf(folded.allOf, folded) === 'unwrapped' && typesAsUnknown(annotatedTypingMember(folded));
   }
   if (kind !== 'other') return false;
   const typeStr = Array.isArray(folded.type) ? folded.type[0] : folded.type;
@@ -5923,6 +6222,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 import {
   allOfTypingMember,
   allOfWrapperLayer,
+  annotatedTypingMember,
   annotatingAllOfMembers,
   buildInlineModel,
   collectProperties,

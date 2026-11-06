@@ -90,6 +90,20 @@ const parseSettings = {
 };
 
 /**
+ * The settings the engine resolves operations with (`resolveOperations`),
+ * from the loaded config: the hints, mount rules and naming that decide
+ * which class and method `generate` writes each operation as. `generate`
+ * hands them to the engine, `resolve` prints what they resolve to, and
+ * `compat-extract` matches the SDK's callables against the names they
+ * resolve to (#567).
+ */
+const resolutionSettings = {
+  operationHints: configOperationHints,
+  mountRules: configMountRules,
+  operationNaming: configOperationNaming,
+};
+
+/**
  * The settings `generate` reads beyond the parse, from the loaded config: the
  * doc URL base it expands the IR with, the hints the engine resolves
  * operations and places models with, and the language's emitter options.
@@ -98,9 +112,7 @@ const parseSettings = {
  */
 const generationSettings = (lang: string) => ({
   docUrl: configDocUrl,
-  operationHints: configOperationHints,
-  mountRules: configMountRules,
-  operationNaming: configOperationNaming,
+  ...resolutionSettings,
   modelHints: configModelHints,
   emitterOptions: configEmitterOptions?.[lang],
 });
@@ -175,7 +187,7 @@ program
   .option('--spec <path>', 'Path to OpenAPI spec — enriches symbols with operationId, route, and specSha')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
-    compatExtractCommand({ ...opts, ...parseSettings }).catch(handleError);
+    compatExtractCommand({ ...opts, ...parseSettings, ...resolutionSettings }).catch(handleError);
   });
 
 program
@@ -251,13 +263,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    resolveCommand({
-      ...opts,
-      ...parseSettings,
-      docUrl: configDocUrl,
-      mountRules: configMountRules,
-      operationNaming: configOperationNaming,
-    }).catch(handleError);
+    resolveCommand({ ...opts, ...parseSettings, docUrl: configDocUrl, ...resolutionSettings }).catch(handleError);
   });
 
 program
