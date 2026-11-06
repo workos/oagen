@@ -599,7 +599,10 @@ export interface ShapeReadOptions {
  * field, parameter or envelope field that wrote the candidate's schema, not
  * on a second model of the same shape — and a deprecated `owner` admits only
  * a deprecated one, so no live reference comes to resolve to a deprecated
- * model by folding. An identical shape is admitted.
+ * model by folding. An identical shape is admitted. A component schema is
+ * asked first whether it admits any copy at all (`ownerFlagAdmits`, by
+ * `modelShares`): a deprecated one admits none, so a deprecated component
+ * reaches this only in the `…Json` fold (#441).
  *
  * The one rule by which an inline model folds onto a model the document
  * declares — a component schema, or a model a component's field minted — in
@@ -614,8 +617,8 @@ export interface ShapeReadOptions {
  * shape only, since typed as a looser component a caller could leave out
  * what the operation requires. The list-envelope pass compares its
  * companions by a structural rule of its own, since a companion's nested
- * models are named per operation; it reads the flag by `flagAdmits` as
- * well.
+ * models are named per operation; beside a declared model it reads that
+ * model's flag by `ownerFlagAdmits` as well.
  */
 export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOptions = {}): boolean {
   if (!modelPropertiesAdmit(owner, candidate)) return false;
@@ -629,34 +632,88 @@ export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOp
 }
 
 /**
- * Whether `owner`'s own `deprecated` admits `candidate`'s: a live `owner`
- * admits a candidate of either flag, and a deprecated `owner` only a
- * deprecated one. The flag is not part of the shape a fold compares: a
- * deprecated inline schema identical to a live model it is named like shares
- * that model, its flag carried by the site that wrote the schema (a
- * `Field`, a `Parameter`, an envelope field) rather than by a second model
- * of the same shape, while a live site never resolves to a deprecated model
- * through a fold. Read by `modelAdmits` and `modelShares`, and by the
- * list-envelope pass for a companion beside a component.
+ * Whether `owner`'s own `deprecated` admits `candidate`'s, as `modelAdmits`
+ * reads the flag between any two models: a live `owner` admits a candidate
+ * of either flag, and a deprecated `owner` only a deprecated one, so no live
+ * reference comes to resolve to a deprecated model through a fold. The flag
+ * is not part of the shape a fold compares: a deprecated inline schema
+ * identical to a live model it is named like shares that model, its flag
+ * carried by the site that wrote the schema (a `Field`, a `Parameter`, an
+ * envelope field) rather than by a second model of the same shape. Read by
+ * `modelPropertiesAdmit`, so by `modelAdmits`, and by `ownerFlagAdmits` for
+ * a model a component's field minted; for a component schema the
+ * deprecated-owner arm decides only in the `…Json` fold's child collapse
+ * (`collapseJsonSuffixModels`), since a component is asked
+ * `ownerFlagAdmits` first (`modelShares`, the list-envelope pass): a
+ * deprecated component admits no copy of either flag (#441), so a copy's
+ * name follows the component's flag and never its own — `ownerFlagAdmits`
+ * says what that costs when the component is the one deprecated.
  */
 export function flagAdmits(owner: Model, candidate: Model): boolean {
   return !owner.deprecated || !!candidate.deprecated;
 }
 
 /**
- * Whether `owner`, a model the document declares — a component schema, or a
- * model a component's field minted — shares its name with `candidate`, an
- * inline model: when it admits the shape (`modelAdmits`), or, for a shape
- * the SDK sends (`sent`: a request body, a parameter, a field object of a
- * component only those reach), when the two are identical but for the
- * model's own `deprecated` (`shapeFingerprint`), which is read as
- * `modelAdmits` reads it (`flagAdmits`). The one question the merge passes
+ * Whether `owner`, a model the document declares, admits `candidate`, an
+ * inline copy, on the models' own `deprecated` — the one flag rule a
+ * declared owner is read by (`modelShares`, which the merge passes and the
+ * shape registry ask, and the list-envelope pass for a companion beside
+ * one). A component schema admits a copy of either flag while live (a
+ * deprecated copy's flag is carried by the field, parameter or envelope
+ * field that wrote its schema, see `flagAdmits`) and none, live or
+ * deprecated, while deprecated: a live copy never resolves to a deprecated
+ * model (#260, #312), and a deprecated copy keeps the qualified name its
+ * live self had, so flipping the copy's `deprecated` changes the flag on
+ * that model and nothing else — `getLegacyWidget`'s inline copy of a
+ * deprecated `Widget` is `GetLegacyWidgetWidget` live and
+ * `GetLegacyWidgetWidget (deprecated)` deprecated, the flip `oagen diff`
+ * reports as additive in either direction, where folding the deprecated
+ * copy onto `Widget` swapped the operation's type and was reported as
+ * breaking (#441). So a copy's name never depends on its own flag, only on
+ * the component's, and the component's flip is the one that retypes:
+ * deprecating `Widget` together with its identical copy, or alone while
+ * the copy stays deprecated, moves the copy from `Widget` to
+ * `GetLegacyWidgetWidget` — `model-added` beside a breaking
+ * `responseChanged`, exit 2 — as deprecating `Widget` alone has always done
+ * to a live copy. No rule keeps both flips additive without a live site
+ * resolving to a deprecated model: under a deprecated `Widget` the live
+ * copy must leave it, and a deprecated copy can match only one of its two
+ * neighbours, its live self or its fold under a live `Widget`; the copy's
+ * own flip, the edit made on the copy's side, is the one kept additive. The
+ * other trade-off: a copy deprecated from the start beside a deprecated
+ * component is a second deprecated model of the shape, on a surface
+ * nothing live reaches. A model a component's field minted
+ * (`fieldMinted`: a nested object, array items, a union variant the schema
+ * pass or the field extractor lifted) is read as `flagAdmits` reads it — a
+ * deprecated one admits a deprecated copy and no live one — since the
+ * object the schema pass lifted from a field is the owner the field
+ * extractor's own copy of that field folds onto when the fields are settled
+ * (`settleFieldInlineModels`), and a deprecated field model yields its name
+ * to a live copy rather than hold it (`settleSharedNames`). The `…Json` fold
+ * asks neither: the model a `<Name>Json…` child collapses onto holds a
+ * folded name, and is no declared owner measured against an inline copy.
+ */
+export function ownerFlagAdmits(owner: Model, candidate: Model, fieldMinted = false): boolean {
+  if (fieldMinted) return flagAdmits(owner, candidate);
+  return !owner.deprecated;
+}
+
+/**
+ * Whether `owner`, a model the document declares — a component schema, or,
+ * with `fieldMinted`, a model a component's field minted — shares its name
+ * with `candidate`, an inline model: when its flag admits the candidate's
+ * (`ownerFlagAdmits`: a deprecated component never shares, #441) and it
+ * admits the shape (`modelAdmits`), or, for a shape the SDK sends (`sent`: a
+ * request body, a parameter, a field object of a component only those
+ * reach), when the two are identical but for the model's own `deprecated`
+ * (`shapeFingerprint`). The one question the merge passes
  * (`settleSharedNames`) and the shape registry (`ownerShares`) ask of a
  * declared model.
  */
-export function modelShares(owner: Model, candidate: Model, sent = false): boolean {
+export function modelShares(owner: Model, candidate: Model, sent = false, fieldMinted = false): boolean {
+  if (!ownerFlagAdmits(owner, candidate, fieldMinted)) return false;
   if (!sent) return modelAdmits(owner, candidate);
-  return flagAdmits(owner, candidate) && shapeFingerprint(owner) === shapeFingerprint(candidate);
+  return shapeFingerprint(owner) === shapeFingerprint(candidate);
 }
 
 /**

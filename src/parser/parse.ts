@@ -230,12 +230,22 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     models,
     sentOnlyComponentNames(transformed),
   );
+  // The component schemas' names, resolved while the transform is still
+  // active so they match the models': they let every merge pass tell a
+  // clash with a component schema from one between two inline models, and
+  // tell a component — which admits no copy while deprecated (#441) — from
+  // the object the schema pass lifted from one of its fields, which still
+  // admits the field extractor's own deprecated copy of that field.
+  const componentNames = new Set(
+    Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
+  );
   const fieldInlineModels = settleFieldInlineModels(models, extractedFieldModels, {
     bundles: fieldInlineModelBundlesBySite,
     reserved: reservedTypeNames(models, enums, [], extractedFieldModels, []),
     enums: enumNames,
     minted: mintedNames,
     mintedFor,
+    components: componentNames,
   });
 
   const { services, inlineModels, inlineModelBundles, componentSites } = extractOperations(
@@ -304,12 +314,6 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
   );
 
-  // Resolved while the transform is still active so the names match the
-  // models'; lets the merge tell a clash with a component schema from one
-  // between two inline models.
-  const componentNames = new Set(
-    Object.keys(spec.components?.schemas ?? {}).map((schemaName) => resolveSchemaName(schemaName)),
-  );
   clearSchemaNameTransform();
 
   // Every name in play — component models and enums, every inline model of
@@ -353,6 +357,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     enums: reserved.enums,
     minted: mintedNames,
     mintedFor,
+    components: componentNames,
   };
   // The components' field models, settled above, own their names here as
   // the components do (`declared`), so a nested object of a response named

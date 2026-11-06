@@ -16,6 +16,7 @@ import {
   modelPropertiesAdmit,
   modelPropertiesKey,
   modelShares,
+  ownerFlagAdmits,
   shapeFingerprint,
 } from '../../src/parser/inline-models.js';
 import {
@@ -1042,11 +1043,16 @@ describe('the reverse direction is unchanged (issue #260): a live copy never fol
     expect(flagAdmits(deprecated, live)).toBe(false);
   });
 
-  it('`modelShares` reads the flag by `flagAdmits` for a received shape and a sent one alike', () => {
+  it('`modelShares` reads the flag by `ownerFlagAdmits` for a received shape and a sent one alike', () => {
     for (const sent of [false, true]) {
       expect(modelShares(live, deprecated, sent), `sent: ${sent}`).toBe(true);
       expect(modelShares(deprecated, live, sent), `sent: ${sent}`).toBe(false);
-      expect(modelShares(deprecated, deprecated, sent), `sent: ${sent}`).toBe(true);
+      // Issue #441: a deprecated component shares its name with no copy,
+      // deprecated or not; a model a component's field minted still shares
+      // it with a deprecated one.
+      expect(modelShares(deprecated, deprecated, sent), `sent: ${sent}`).toBe(false);
+      expect(modelShares(deprecated, deprecated, sent, true), `sent: ${sent}, field-minted`).toBe(true);
+      expect(modelShares(deprecated, live, sent, true), `sent: ${sent}, field-minted`).toBe(false);
     }
     // A sent shape is shared on an identical shape only; a received one when admitted.
     const required = model({ deprecated: true, fields: [{ name: 'a', type: string, required: true }] });
@@ -1238,5 +1244,1048 @@ describe('a deprecated copy beside a looser live component (issue #400’s comme
     expect(deprecatedFoldWarning('M', looserFields(owner, copy))).toBe(
       looserFold('M', 'does not require "a", "b" and allows null in "b", "c"'),
     );
+  });
+});
+
+describe('#441: a deprecated component admits no inline copy, so deprecating the copy is a flag flip', () => {
+  const widget = obj({ object: { type: 'string', const: 'widget' }, name: str });
+  const title = obj({ title: str });
+  const owner = obj({ name: str });
+  const refused = (name: string, to: string): string =>
+    `[oagen] Renamed inline model "${name}" → "${to}": "${name}" is deprecated and admits no copy`;
+  const liveWhile = (name: string, to: string): string =>
+    `[oagen] Renamed inline model "${name}" → "${to}": it is live while "${name}" is deprecated`;
+  /** The diff's `deprecated-changed` entries, one `node name: direction` each, with every other behavior change by kind. */
+  const flips = (oldSpec: ApiSpec, newSpec: ApiSpec): string[] =>
+    diffSpecs(oldSpec, newSpec).behaviorChanges.map((b) => {
+      if (b.kind !== 'deprecated-changed') return b.kind;
+      const node = b as unknown as Record<string, unknown>;
+      const name = node.modelName ?? node.operationName ?? node.enumName ?? node.name;
+      const nested = node.fieldName ?? node.paramName ?? node.headerName ?? node.valueName;
+      return `${b.node} ${name}${nested ? `.${nested}` : ''}: ${b.oldDeprecated ? 'deprecated → live' : 'live → deprecated'}`;
+    });
+  /** The models the diff adds or removes, and the breaking count, in both directions: a flag flip changes neither. */
+  const movedModels = (a: ApiSpec, b: ApiSpec) =>
+    [describeDiff(a, b), describeDiff(b, a)].map(({ breaking, changes }) => ({
+      breaking,
+      models: changes.filter((c) => c.startsWith('model-added') || c.startsWith('model-removed')),
+    }));
+
+  describe.each(['3.0.3', '3.1.0'])('the issue’s repro and the body and field sites, on OpenAPI %s', (openapi) => {
+    const extra = { openapi };
+    const flip = `model-modified GetLegacyWidgetWidget deprecatedChanged: additive`;
+
+    it('response: the copy keeps `GetLegacyWidgetWidget` under either flag, and the diff is the model’s flip alone, in either order and direction', async () => {
+      const schemas = { Widget: { ...widget, deprecated: true } };
+      const paths = (deprecated: boolean): Array<[string, unknown]> => [
+        ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+        ['/legacy-widget', getOp('getLegacyWidget', deprecate(widget, deprecated))],
+      ];
+      const before = await parseBothOrders(`441-response-old-${openapi}`, schemas, paths(false), extra);
+      const after = await parseBothOrders(`441-response-new-${openapi}`, schemas, paths(true), extra);
+      for (const [i, { order, spec, warnings }] of after.entries()) {
+        const { spec: old, warnings: oldWarnings } = before[i]!;
+        expect(describeModels(old), order).toEqual([
+          'Widget (deprecated) {object: literal, name: string}',
+          'GetLegacyWidgetWidget {object: literal, name: string}',
+        ]);
+        expect(oldWarnings, order).toEqual([liveWhile('Widget', 'GetLegacyWidgetWidget')]);
+        expect(describeModels(spec), order).toEqual([
+          'Widget (deprecated) {object: literal, name: string}',
+          'GetLegacyWidgetWidget (deprecated) {object: literal, name: string}',
+        ]);
+        expect(warnings, order).toEqual([refused('Widget', 'GetLegacyWidgetWidget')]);
+        for (const s of [old, spec]) {
+          expect(opsOf(s).getWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+          expect(opsOf(s).getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+        }
+        // `getWidget` `$ref`s the deprecated component, and the legacy
+        // response wrote `deprecated: true` itself: both are the document's own.
+        expectSound(old, ['Widget'], ['getWidget.response → Widget']);
+        expectSound(
+          spec,
+          ['Widget'],
+          ['getWidget.response → Widget', 'getLegacyWidget.response → GetLegacyWidgetWidget'],
+        );
+        expect(describeDiff(old, spec), order).toEqual({ breaking: 0, changes: [flip] });
+        expect(describeDiff(spec, old), order).toEqual({ breaking: 0, changes: [flip] });
+        expect(diffSpecs(old, spec).behaviorChanges, order).toEqual([
+          {
+            kind: 'deprecated-changed',
+            node: 'model',
+            modelName: 'GetLegacyWidgetWidget',
+            oldDeprecated: false,
+            newDeprecated: true,
+            classification: 'additive',
+          },
+        ]);
+        expect(flips(spec, old), order).toEqual(['model GetLegacyWidgetWidget: deprecated → live']);
+      }
+    });
+
+    it('body: the `createNote` body keeps `CreateNoteRequest2` under either flag beside the deprecated `CreateNoteRequest`', async () => {
+      const schemas = { CreateNoteRequest: { ...title, deprecated: true } };
+      const putNote = {
+        put: {
+          operationId: 'putNote',
+          requestBody: {
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateNoteRequest' } } },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      };
+      const paths = (deprecated: boolean): Array<[string, unknown]> => [
+        ['/legacy-notes', postOp('createNote', deprecate(title, deprecated))],
+        ['/notes', putNote],
+      ];
+      const before = await parseBothOrders(`441-body-old-${openapi}`, schemas, paths(false), extra);
+      const after = await parseBothOrders(`441-body-new-${openapi}`, schemas, paths(true), extra);
+      for (const [i, { order, spec, warnings }] of after.entries()) {
+        const { spec: old, warnings: oldWarnings } = before[i]!;
+        expect(describeModels(old), order).toEqual([
+          'CreateNoteRequest (deprecated) {title: string}',
+          'CreateNoteRequest2 {title: string}',
+        ]);
+        expect(oldWarnings, order).toEqual([liveWhile('CreateNoteRequest', 'CreateNoteRequest2')]);
+        expect(describeModels(spec), order).toEqual([
+          'CreateNoteRequest (deprecated) {title: string}',
+          'CreateNoteRequest2 (deprecated) {title: string}',
+        ]);
+        expect(warnings, order).toEqual([refused('CreateNoteRequest', 'CreateNoteRequest2')]);
+        for (const s of [old, spec]) {
+          expect(opsOf(s).createNote?.requestBody, order).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+          expect(opsOf(s).putNote?.requestBody, order).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+        }
+        expectSound(old, ['CreateNoteRequest'], ['putNote.requestBody → CreateNoteRequest']);
+        expectSound(
+          spec,
+          ['CreateNoteRequest'],
+          ['putNote.requestBody → CreateNoteRequest', 'createNote.requestBody → CreateNoteRequest2'],
+        );
+        const change = 'model-modified CreateNoteRequest2 deprecatedChanged: additive';
+        expect(describeDiff(old, spec), order).toEqual({ breaking: 0, changes: [change] });
+        expect(describeDiff(spec, old), order).toEqual({ breaking: 0, changes: [change] });
+        expect(flips(old, spec), order).toEqual(['model CreateNoteRequest2: live → deprecated']);
+      }
+    });
+
+    it('field: `Pet.owner` keeps `PetOwner2` under either flag beside the deprecated `PetOwner`, the field keeping its own flag', async () => {
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          { Pet: obj({ owner: deprecate(owner, deprecated) }), PetOwner: { ...owner, deprecated: true } },
+          { '/pets/{id}': getOp('getPet', { $ref: '#/components/schemas/Pet' }) },
+          extra,
+        );
+      const before = await parse(`441-field-old-${openapi}`, doc(false));
+      const after = await parse(`441-field-new-${openapi}`, doc(true));
+      expect(describeModels(before.spec)).toEqual([
+        'Pet {owner: PetOwner2}',
+        'PetOwner (deprecated) {name: string}',
+        'PetOwner2 {name: string}',
+      ]);
+      expect(before.warnings).toEqual([liveWhile('PetOwner', 'PetOwner2')]);
+      expect(describeModels(after.spec)).toEqual([
+        'Pet {owner (deprecated): PetOwner2}',
+        'PetOwner (deprecated) {name: string}',
+        'PetOwner2 (deprecated) {name: string}',
+      ]);
+      expect(after.warnings).toEqual([refused('PetOwner', 'PetOwner2')]);
+      expectSound(before.spec, ['Pet', 'PetOwner']);
+      expectSound(after.spec, ['Pet', 'PetOwner']);
+      const changes = [
+        'model-modified Pet: additive',
+        'field-deprecated-changed owner: additive',
+        'model-modified PetOwner2 deprecatedChanged: additive',
+      ];
+      expect(describeDiff(before.spec, after.spec)).toEqual({ breaking: 0, changes });
+      expect(describeDiff(after.spec, before.spec)).toEqual({ breaking: 0, changes });
+      expect(flips(before.spec, after.spec)).toEqual([
+        'field Pet.owner: live → deprecated',
+        'model PetOwner2: live → deprecated',
+      ]);
+    });
+  });
+
+  it('a copy deprecated from the start is a second deprecated model beside the component, and two such copies share it', async () => {
+    const schemas = { Widget: { ...widget, deprecated: true } };
+    for (const { order, spec, warnings } of await parseBothOrders('441-both', schemas, [
+      ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+      ['/legacy-widget', getOp('getLegacyWidget', { ...widget, deprecated: true })],
+    ])) {
+      expect(describeModels(spec), order).toEqual([
+        'Widget (deprecated) {object: literal, name: string}',
+        'GetLegacyWidgetWidget (deprecated) {object: literal, name: string}',
+      ]);
+      expect(warnings, order).toEqual([refused('Widget', 'GetLegacyWidgetWidget')]);
+      expectSound(
+        spec,
+        ['Widget'],
+        ['getWidget.response → Widget', 'getLegacyWidget.response → GetLegacyWidgetWidget'],
+      );
+    }
+    // Two operations each carrying a deprecated identical copy share one
+    // model under the first site's qualified name, as identical copies do
+    // whatever moves them off a component's name.
+    for (const { order, spec, warnings } of await parseBothOrders('441-two', schemas, [
+      ['/legacy-widget', getOp('getLegacyWidget', { ...widget, deprecated: true })],
+      ['/old-widget', getOp('getOldWidget', { ...widget, deprecated: true })],
+      ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+    ])) {
+      const first = order === 'as-written' ? 'GetLegacyWidgetWidget' : 'GetOldWidgetWidget';
+      expect(describeModels(spec), order).toEqual([
+        'Widget (deprecated) {object: literal, name: string}',
+        `${first} (deprecated) {object: literal, name: string}`,
+      ]);
+      expect(opsOf(spec).getLegacyWidget?.response, order).toEqual({ kind: 'model', name: first });
+      expect(opsOf(spec).getOldWidget?.response, order).toEqual({ kind: 'model', name: first });
+      expect(warnings, order).toEqual([`${refused('Widget', first)} (shared by 2 sites)`]);
+      expectSound(
+        spec,
+        ['Widget'],
+        ['getWidget.response → Widget', `getLegacyWidget.response → ${first}`, `getOldWidget.response → ${first}`],
+      );
+    }
+  });
+
+  it('a live component still takes a deprecated copy, with the fold warning (issue #312, unchanged)', async () => {
+    for (const { order, spec, warnings } of await parseBothOrders('441-live-component', { Widget: widget }, [
+      ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+      ['/legacy-widget', getOp('getLegacyWidget', { ...widget, deprecated: true })],
+    ])) {
+      expect(describeModels(spec), order).toEqual(['Widget {object: literal, name: string}']);
+      expect(opsOf(spec).getLegacyWidget?.response, order).toEqual({ kind: 'model', name: 'Widget' });
+      expect(warnings, order).toEqual([folded('Widget')]);
+      expectSound(spec, ['Widget']);
+    }
+  });
+
+  describe('every other site an inline copy of a deprecated component can sit at: the copy’s name is the same under either flag', () => {
+    /** The one model the diff modifies for its flag, and nothing else: the copy's qualified model, the same on both sides. */
+    const onlyFlip = (before: ApiSpec, after: ApiSpec, name: string, ...also: string[]): void => {
+      expect(movedModels(before, after)).toEqual([
+        { breaking: 0, models: [] },
+        { breaking: 0, models: [] },
+      ]);
+      const flip = `model-modified ${name} deprecatedChanged: additive`;
+      expect(describeDiff(before, after).changes).toEqual(expect.arrayContaining([flip, ...also]));
+      expect(describeDiff(after, before).changes).toEqual(expect.arrayContaining([flip, ...also]));
+      expect(before.models.find((m) => m.name === name)?.deprecated).toBeUndefined();
+      expect(after.models.find((m) => m.name === name)?.deprecated).toBe(true);
+    };
+
+    it('a response header’s object and a parameter’s object (the shape registry), each keeping its own flag', async () => {
+      const meta = obj({ etag: str });
+      const filter = obj({ q: str });
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          { AccountXMeta: { ...meta, deprecated: true }, AccountFilter: { ...filter, deprecated: true } },
+          {
+            '/account': {
+              get: {
+                operationId: 'getAccount',
+                tags: ['Account'],
+                parameters: [
+                  { name: 'filter', in: 'query', style: 'deepObject', schema: deprecate(filter, deprecated) },
+                ],
+                responses: {
+                  '200': {
+                    description: 'ok',
+                    headers: { 'X-Meta': { schema: deprecate(meta, deprecated) } },
+                    content: { 'application/json': { schema: str } },
+                  },
+                },
+              },
+            },
+          },
+        );
+      const { spec: before, warnings: beforeWarnings } = await parse('441-registry-old', doc(false));
+      const { spec: after, warnings: afterWarnings } = await parse('441-registry-new', doc(true));
+      const headerOf = (spec: ApiSpec) => collectResponseHeaders(opsOf(spec).getAccount!)[0];
+      const paramOf = (spec: ApiSpec) => opsOf(spec).getAccount?.queryParams[0];
+      const headerModel = 'AccountGetAccountXMeta';
+      const paramModel = 'AccountGetAccountFilter';
+      for (const spec of [before, after]) {
+        expect(refName(headerOf(spec)?.type)).toBe(headerModel);
+        expect(refName(paramOf(spec)?.type)).toBe(paramModel);
+      }
+      expect(headerOf(after)?.deprecated).toBe(true);
+      expect(paramOf(after)?.deprecated).toBe(true);
+      expect(beforeWarnings).toEqual([]);
+      expect(afterWarnings).toEqual([]);
+      expectSound(before, ['AccountXMeta', 'AccountFilter']);
+      // The header and the parameter carry the flag themselves, so neither
+      // is a live site reaching a deprecated model.
+      expectSound(after, ['AccountXMeta', 'AccountFilter']);
+      onlyFlip(before, after, headerModel, `model-modified ${paramModel} deprecatedChanged: additive`);
+    });
+
+    it('an error body, a secondary request body and the items of an array response (the shape registry)', async () => {
+      const message = obj({ message: str });
+      const rows = obj({ rows: str });
+      const item = obj({ id: str });
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          {
+            ListUsersError404: { ...message, deprecated: true },
+            CreateNoteTextCsvRequest: { ...rows, deprecated: true },
+            ListUsersItem: { ...item, deprecated: true },
+          },
+          {
+            '/users': {
+              get: {
+                operationId: 'listUsers',
+                responses: {
+                  '200': {
+                    description: 'ok',
+                    content: { 'application/json': { schema: { type: 'array', items: deprecate(item, deprecated) } } },
+                  },
+                  '404': {
+                    description: 'nope',
+                    content: { 'application/json': { schema: deprecate(message, deprecated) } },
+                  },
+                },
+              },
+            },
+            '/notes': {
+              post: {
+                operationId: 'createNote',
+                requestBody: {
+                  content: {
+                    'application/json': { schema: obj({ title: str }) },
+                    'text/csv': { schema: deprecate(rows, deprecated) },
+                  },
+                },
+                responses: { '200': { description: 'ok' } },
+              },
+            },
+          },
+        );
+      const { spec: before, warnings: beforeWarnings } = await parse('441-bodies-old', doc(false));
+      const { spec: after, warnings: afterWarnings } = await parse('441-bodies-new', doc(true));
+      const named = (spec: ApiSpec) => {
+        const ops = opsOf(spec);
+        const items = ops.listUsers?.response;
+        return {
+          error: refName(ops.listUsers?.errors[0]?.type),
+          csv: refName(collectRequestBodyTypes(ops.createNote!)[0]?.type),
+          items: items?.kind === 'array' ? refName(items.items) : undefined,
+        };
+      };
+      const names = named(after);
+      expect(named(before)).toEqual(names);
+      expect(names.error).toBeDefined();
+      expect(names.error).not.toBe('ListUsersError404');
+      expect(names.csv).not.toBe('CreateNoteTextCsvRequest');
+      expect(names.items).not.toBe('ListUsersItem');
+      expect(beforeWarnings).toEqual([]);
+      expect(afterWarnings).toEqual([]);
+      const components = ['ListUsersError404', 'CreateNoteTextCsvRequest', 'ListUsersItem'];
+      expectSound(before, components);
+      expectSound(after, components, [
+        `listUsers.404 → ${names.error}`,
+        `createNote.requestBodyContents.text/csv → ${names.csv}`,
+        `listUsers.response → ${names.items}`,
+      ]);
+      onlyFlip(
+        before,
+        after,
+        names.error!,
+        `model-modified ${names.csv} deprecatedChanged: additive`,
+        `model-modified ${names.items} deprecatedChanged: additive`,
+      );
+    });
+
+    it('a webhook payload’s titled variant (the merge passes)', async () => {
+      const pet = obj({ object: { type: 'string', const: 'pet' }, name: str });
+      const toy = obj({ object: { type: 'string', const: 'toy' }, name: str });
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          { Pet: { ...pet, deprecated: true } },
+          {},
+          {
+            webhooks: {
+              petAdopted: {
+                post: {
+                  requestBody: {
+                    content: {
+                      'application/json': {
+                        schema: {
+                          oneOf: [
+                            { title: 'Pet', ...deprecate(pet, deprecated) },
+                            { title: 'Toy', ...toy },
+                          ],
+                        },
+                      },
+                    },
+                  },
+                  responses: { '200': { description: 'ok' } },
+                },
+              },
+            },
+          },
+        );
+      const { spec: before, warnings: beforeWarnings } = await parse('441-webhook-old', doc(false));
+      const { spec: after, warnings: afterWarnings } = await parse('441-webhook-new', doc(true));
+      const variants = (spec: ApiSpec) => {
+        const payload = spec.webhooks?.[0]?.requestBody;
+        return payload?.kind === 'union' ? payload.variants.map(refName) : [];
+      };
+      const [variant] = variants(after);
+      expect(variant).toBeDefined();
+      expect(variant).not.toBe('Pet');
+      expect(variants(before)).toEqual([variant, 'Toy']);
+      expect(variants(after)).toEqual([variant, 'Toy']);
+      expect(beforeWarnings).toEqual([liveWhile('Pet', variant!)]);
+      expect(afterWarnings).toEqual([refused('Pet', variant!)]);
+      expectSound(before, ['Pet']);
+      expectSound(after, ['Pet'], [`webhook petAdopted → ${variant}`]);
+      onlyFlip(before, after, variant!);
+    });
+
+    it('a component field’s array items and `oneOf` variant (the field pass)', async () => {
+      const ownerShape = obj({ name: str });
+      const circle = obj({ kind: { type: 'string', const: 'circle' }, r: str });
+      const square = obj({ kind: { type: 'string', const: 'square' }, s: str });
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          {
+            Pet: obj({ owners: { type: 'array', items: deprecate(ownerShape, deprecated) } }),
+            PetOwner: { ...ownerShape, deprecated: true },
+            Drawing: obj({
+              shape: {
+                oneOf: [
+                  { title: 'Circle', ...deprecate(circle, deprecated) },
+                  { title: 'Square', ...square },
+                ],
+              },
+            }),
+            Circle: { ...circle, deprecated: true },
+          },
+          {
+            '/pets/{id}': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+            '/drawings/{id}': getOp('getDrawing', { $ref: '#/components/schemas/Drawing' }),
+          },
+        );
+      const { spec: before, warnings: beforeWarnings } = await parse('441-field-sites-old', doc(false));
+      const { spec: after, warnings: afterWarnings } = await parse('441-field-sites-new', doc(true));
+      const named = (spec: ApiSpec) => {
+        const byName = Object.fromEntries(spec.models.map((m) => [m.name, m]));
+        const owners = byName.Pet?.fields[0]?.type;
+        const shape = byName.Drawing?.fields[0]?.type;
+        return {
+          items: owners?.kind === 'array' ? refName(owners.items) : undefined,
+          variants: shape?.kind === 'union' ? shape.variants.map(refName) : [],
+        };
+      };
+      const names = named(after);
+      expect(named(before)).toEqual(names);
+      expect(names.items).toBe('PetOwner2');
+      expect(names.variants).toEqual(['DrawingCircle', 'Square']);
+      expect(beforeWarnings).toEqual([liveWhile('PetOwner', 'PetOwner2'), liveWhile('Circle', 'DrawingCircle')]);
+      expect(afterWarnings).toEqual([refused('PetOwner', 'PetOwner2'), refused('Circle', 'DrawingCircle')]);
+      expectSound(before, ['Pet', 'PetOwner', 'Drawing', 'Circle']);
+      expectSound(
+        after,
+        ['Pet', 'PetOwner', 'Drawing', 'Circle'],
+        ['Pet.owners → PetOwner2', 'Drawing.shape → DrawingCircle'],
+      );
+      onlyFlip(before, after, 'PetOwner2', 'model-modified DrawingCircle deprecatedChanged: additive');
+    });
+
+    it('a list envelope’s companion (the envelope pass), the envelope field keeping its own flag', async () => {
+      const listMetadata = obj({ before: { type: ['string', 'null'] }, after: { type: ['string', 'null'] } });
+      const doc = (deprecated: boolean) =>
+        specDoc(
+          { User: obj({ id: str }), ListMetadata: { ...listMetadata, deprecated: true } },
+          {
+            '/legacy-users': {
+              get: {
+                operationId: 'listLegacyUsers',
+                parameters: [{ name: 'after', in: 'query', schema: str }],
+                responses: {
+                  '200': {
+                    description: 'ok',
+                    content: {
+                      'application/json': {
+                        schema: {
+                          allOf: [
+                            obj({
+                              object: { type: 'string', const: 'list' },
+                              list_metadata: deprecate(listMetadata, deprecated),
+                            }),
+                            obj({ data: { type: 'array', items: { $ref: '#/components/schemas/User' } } }),
+                          ],
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        );
+      const { spec: before, warnings: beforeWarnings } = await parse('441-companion-old', doc(false));
+      const { spec: after, warnings: afterWarnings } = await parse('441-companion-new', doc(true));
+      const metaOf = (spec: ApiSpec) =>
+        opsOf(spec).listLegacyUsers?.pagination?.envelopeFields?.find((f) => f.name === 'list_metadata');
+      expect(metaOf(before)?.type).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      expect(metaOf(after)?.type).toEqual({ kind: 'model', name: 'ListLegacyUsersListMetadata' });
+      expect(metaOf(before)?.deprecated).toBeUndefined();
+      expect(metaOf(after)?.deprecated).toBe(true);
+      expect(beforeWarnings).toEqual([]);
+      expect(afterWarnings).toEqual([]);
+      expectSound(before, ['User', 'ListMetadata']);
+      expectSound(after, ['User', 'ListMetadata']);
+      onlyFlip(before, after, 'ListLegacyUsersListMetadata');
+      expect(flips(before, after)).toEqual([
+        'model ListLegacyUsersListMetadata: live → deprecated',
+        'envelope-field listLegacyUsers.list_metadata: live → deprecated',
+      ]);
+    });
+  });
+
+  describe('a nested object inside the copy and the component, decided bottom-up', () => {
+    const meta = obj({ k: str });
+    const nested = (metaSchema: unknown, flag: boolean) =>
+      obj(
+        { object: { type: 'string', const: 'widget' }, name: str, meta: metaSchema },
+        flag ? { deprecated: true } : {},
+      );
+
+    it('a nested deprecated component admits no copy either: the nested copy keeps its qualified name, and its flip is additive', async () => {
+      const doc = (metaDeprecated: boolean) =>
+        specDoc(
+          {
+            Widget: { ...nested({ $ref: '#/components/schemas/WidgetMeta' }, true) },
+            WidgetMeta: { ...meta, deprecated: true },
+          },
+          {
+            '/widget': getOp('getWidget', { $ref: '#/components/schemas/Widget' }),
+            '/legacy-widget': getOp('getLegacyWidget', nested(deprecate(meta, metaDeprecated), false)),
+          },
+        );
+      const before = await parse('441-nested-component-old', doc(false));
+      const after = await parse('441-nested-component-new', doc(true));
+      expect(describeModels(before.spec)).toEqual([
+        'Widget (deprecated) {object: literal, name: string, meta: WidgetMeta}',
+        'WidgetMeta (deprecated) {k: string}',
+        'GetLegacyWidgetWidget {object: literal, name: string, meta: GetLegacyWidgetWidgetMeta}',
+        'GetLegacyWidgetWidgetMeta {k: string}',
+      ]);
+      // The nested schema's flag deprecates the nested model and the field
+      // that wrote it alike, as it does on a component's own field.
+      expect(describeModels(after.spec)).toEqual([
+        'Widget (deprecated) {object: literal, name: string, meta: WidgetMeta}',
+        'WidgetMeta (deprecated) {k: string}',
+        'GetLegacyWidgetWidget {object: literal, name: string, meta (deprecated): GetLegacyWidgetWidgetMeta}',
+        'GetLegacyWidgetWidgetMeta (deprecated) {k: string}',
+      ]);
+      // The nested copy is decided first; the parent, live beside the
+      // deprecated `Widget`, leaves the name by its flag either way.
+      expect(before.warnings).toEqual([
+        liveWhile('WidgetMeta', 'GetLegacyWidgetWidgetMeta'),
+        liveWhile('Widget', 'GetLegacyWidgetWidget'),
+      ]);
+      expect(after.warnings).toEqual([
+        refused('WidgetMeta', 'GetLegacyWidgetWidgetMeta'),
+        liveWhile('Widget', 'GetLegacyWidgetWidget'),
+      ]);
+      expectSound(before.spec, ['Widget', 'WidgetMeta'], ['getWidget.response → Widget']);
+      expectSound(after.spec, ['Widget', 'WidgetMeta'], ['getWidget.response → Widget']);
+      const changes = [
+        'model-modified GetLegacyWidgetWidget: additive',
+        'field-deprecated-changed meta: additive',
+        'model-modified GetLegacyWidgetWidgetMeta deprecatedChanged: additive',
+      ];
+      expect(describeDiff(before.spec, after.spec)).toEqual({ breaking: 0, changes });
+      expect(describeDiff(after.spec, before.spec)).toEqual({ breaking: 0, changes });
+    });
+
+    it('a model the component’s field minted keeps today’s rule: a deprecated nested copy folds onto it, a live one is qualified', async () => {
+      // `Widget.meta` is an inline object, so `WidgetMeta` is a model the
+      // component's field minted, not a component schema: it still admits a
+      // deprecated copy (the object the schema pass lifts from a field is
+      // what the field extractor's own copy folds onto) and takes no live
+      // one. The parent copy of the deprecated `Widget` is qualified either
+      // way; what the nested flip changes is the nested model, as before
+      // this issue.
+      const doc = (metaDeprecated: boolean) =>
+        specDoc(
+          { Widget: nested({ ...meta, deprecated: true }, true) },
+          {
+            '/widget': getOp('getWidget', { $ref: '#/components/schemas/Widget' }),
+            '/legacy-widget': getOp('getLegacyWidget', nested(deprecate(meta, metaDeprecated), false)),
+          },
+        );
+      const live = await parse('441-nested-field-live', doc(false));
+      const deprecated = await parse('441-nested-field-deprecated', doc(true));
+      expect(describeModels(deprecated.spec)).toEqual([
+        'Widget (deprecated) {object: literal, name: string, meta (deprecated): WidgetMeta}',
+        'WidgetMeta (deprecated) {k: string}',
+        'GetLegacyWidgetWidget {object: literal, name: string, meta (deprecated): WidgetMeta}',
+      ]);
+      expect(deprecated.warnings).toEqual([liveWhile('Widget', 'GetLegacyWidgetWidget')]);
+      expectSound(deprecated.spec, ['Widget'], ['getWidget.response → Widget']);
+      expect(describeModels(live.spec)).toEqual([
+        'Widget (deprecated) {object: literal, name: string, meta (deprecated): WidgetMeta}',
+        'WidgetMeta (deprecated) {k: string}',
+        'GetLegacyWidgetWidget {object: literal, name: string, meta: GetLegacyWidgetWidgetMeta}',
+        'GetLegacyWidgetWidgetMeta {k: string}',
+      ]);
+      expect(live.warnings).toEqual([
+        liveWhile('WidgetMeta', 'GetLegacyWidgetWidgetMeta'),
+        liveWhile('Widget', 'GetLegacyWidgetWidget'),
+      ]);
+      expectSound(live.spec, ['Widget'], ['getWidget.response → Widget']);
+    });
+  });
+
+  describe('copies sharing a qualified name beside a deprecated component keep sharing it when one is deprecated (#625 review)', () => {
+    const sharedBy = (warning: string, sites: number): string => `${warning} (shared by ${sites} sites)`;
+    /** Every pair of the documents, diffed in both directions: the changes each way. */
+    const pairs = (specs: Record<string, ApiSpec>): Record<string, ReturnType<typeof describeDiff>> => {
+      const out: Record<string, ReturnType<typeof describeDiff>> = {};
+      const labels = Object.keys(specs);
+      for (const a of labels)
+        for (const b of labels) if (a !== b) out[`${a}→${b}`] = describeDiff(specs[a]!, specs[b]!);
+      return out;
+    };
+    const unchanged = { breaking: 0, changes: [] };
+
+    describe.each(['3.0.3', '3.1.0'])(
+      'two identical responses beside a deprecated `Widget`, on OpenAPI %s',
+      (openapi) => {
+        const schemas = { Widget: { ...widget, deprecated: true } };
+        const paths = (legacy: boolean, old: boolean): Array<[string, unknown]> => [
+          ['/legacy-widget', getOp('getLegacyWidget', deprecate(widget, legacy))],
+          ['/old-widget', getOp('getOldWidget', deprecate(widget, old))],
+          ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+        ];
+
+        it('one `GetLegacyWidgetWidget` under every flag combination, live unless both copies are deprecated, named by the first site in either order', async () => {
+          const combos: Array<[string, boolean, boolean]> = [
+            ['live', false, false],
+            ['old', false, true],
+            ['legacy', true, false],
+            ['both', true, true],
+          ];
+          const byOrder: Record<string, Record<string, ApiSpec>> = {};
+          for (const [label, legacy, old] of combos) {
+            for (const { order, spec, warnings } of await parseBothOrders(
+              `441-shared-${label}-${openapi}`,
+              schemas,
+              paths(legacy, old),
+              { openapi },
+            )) {
+              const where = `${label}, ${order}`;
+              const first = order === 'as-written' ? 'GetLegacyWidgetWidget' : 'GetOldWidgetWidget';
+              const deprecated = legacy && old;
+              expect(describeModels(spec), where).toEqual([
+                'Widget (deprecated) {object: literal, name: string}',
+                `${first}${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`,
+              ]);
+              expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: first });
+              expect(opsOf(spec).getOldWidget?.response, where).toEqual({ kind: 'model', name: first });
+              // A mixed pair keeps the live definition: the deprecated copy
+              // folds onto it with the warning a deprecated copy folding
+              // onto its live twin gets, and the note names the live flag.
+              expect(warnings, where).toEqual(
+                deprecated
+                  ? [sharedBy(refused('Widget', first), 2)]
+                  : [...(legacy || old ? [folded('Widget')] : []), sharedBy(liveWhile('Widget', first), 2)],
+              );
+              expectSound(
+                spec,
+                ['Widget'],
+                deprecated
+                  ? [
+                      'getWidget.response → Widget',
+                      `getLegacyWidget.response → ${first}`,
+                      `getOldWidget.response → ${first}`,
+                    ]
+                  : ['getWidget.response → Widget'],
+              );
+              (byOrder[order] ??= {})[label] = spec;
+            }
+          }
+          // Flipping one copy's flag changes nothing a caller compiles
+          // against — the response has no node of its own to carry the flag,
+          // as between two inline twins — and flipping both is the model's
+          // flip alone, additive in either direction.
+          for (const [order, specs] of Object.entries(byOrder)) {
+            const first = order === 'as-written' ? 'GetLegacyWidgetWidget' : 'GetOldWidgetWidget';
+            const flip = { breaking: 0, changes: [`model-modified ${first} deprecatedChanged: additive`] };
+            expect(pairs(specs), order).toEqual({
+              'live→old': unchanged,
+              'live→legacy': unchanged,
+              'live→both': flip,
+              'old→live': unchanged,
+              'old→legacy': unchanged,
+              'old→both': flip,
+              'legacy→live': unchanged,
+              'legacy→old': unchanged,
+              'legacy→both': flip,
+              'both→live': flip,
+              'both→old': flip,
+              'both→legacy': flip,
+            });
+          }
+        });
+      },
+    );
+
+    it('three identical responses, the middle one deprecated, share one live model, and deprecating it changes nothing', async () => {
+      const schemas = { Widget: { ...widget, deprecated: true } };
+      const paths = (middle: boolean) => ({
+        '/widget': getOp('getWidget', { $ref: '#/components/schemas/Widget' }),
+        '/a-widget': getOp('getAWidget', widget),
+        '/b-widget': getOp('getBWidget', deprecate(widget, middle)),
+        '/c-widget': getOp('getCWidget', widget),
+      });
+      const live = await parse('441-three-live', specDoc(schemas, paths(false)));
+      const mixed = await parse('441-three-mixed', specDoc(schemas, paths(true)));
+      for (const { spec } of [live, mixed]) {
+        expect(describeModels(spec)).toEqual([
+          'Widget (deprecated) {object: literal, name: string}',
+          'GetAWidgetWidget {object: literal, name: string}',
+        ]);
+        for (const op of ['getAWidget', 'getBWidget', 'getCWidget']) {
+          expect(opsOf(spec)[op]?.response, op).toEqual({ kind: 'model', name: 'GetAWidgetWidget' });
+        }
+        expectSound(spec, ['Widget'], ['getWidget.response → Widget']);
+      }
+      expect(live.warnings).toEqual([sharedBy(liveWhile('Widget', 'GetAWidgetWidget'), 3)]);
+      expect(mixed.warnings).toEqual([folded('Widget'), sharedBy(liveWhile('Widget', 'GetAWidgetWidget'), 3)]);
+      expect(describeDiff(live.spec, mixed.spec)).toEqual(unchanged);
+      expect(describeDiff(mixed.spec, live.spec)).toEqual(unchanged);
+    });
+
+    it('body site: a body is named from its operation, so two bodies never share a model, and each flips on its own', async () => {
+      const putNote = {
+        put: {
+          operationId: 'putNote',
+          requestBody: {
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateNoteRequest' } } },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      };
+      const doc = (note: boolean, old: boolean) =>
+        specDoc(
+          { CreateNoteRequest: { ...title, deprecated: true } },
+          {
+            '/legacy-notes': postOp('createNote', deprecate(title, note)),
+            '/old-notes': postOp('createOldNote', deprecate(title, old)),
+            '/notes': putNote,
+          },
+        );
+      const live = await parse('441-bodies-live', doc(false, false));
+      const old = await parse('441-bodies-old', doc(false, true));
+      const both = await parse('441-bodies-both', doc(true, true));
+      for (const { spec } of [live, old, both]) {
+        expect(opsOf(spec).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+        expect(opsOf(spec).createOldNote?.requestBody).toEqual({ kind: 'model', name: 'CreateOldNoteRequest' });
+        expect(opsOf(spec).putNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+      }
+      expect(describeModels(old.spec)).toEqual([
+        'CreateNoteRequest (deprecated) {title: string}',
+        'CreateNoteRequest2 {title: string}',
+        'CreateOldNoteRequest (deprecated) {title: string}',
+      ]);
+      expect(describeDiff(live.spec, old.spec)).toEqual({
+        breaking: 0,
+        changes: ['model-modified CreateOldNoteRequest deprecatedChanged: additive'],
+      });
+      expect(describeDiff(old.spec, both.spec)).toEqual({
+        breaking: 0,
+        changes: ['model-modified CreateNoteRequest2 deprecatedChanged: additive'],
+      });
+      expect(describeDiff(both.spec, live.spec)).toEqual({
+        breaking: 0,
+        changes: [
+          'model-modified CreateNoteRequest2 deprecatedChanged: additive',
+          'model-modified CreateOldNoteRequest deprecatedChanged: additive',
+        ],
+      });
+    });
+
+    it('field site, across passes: `Pet.owner` and a `getOwner` response of the same `object: pet_owner` shape share one `PetOwner2`, live unless both are deprecated', async () => {
+      // The field's copy leaves the deprecated `PetOwner` when the fields
+      // are settled, before any operation is read; the response's copy
+      // joins the model it minted (`naming.mintedFor`), by shape, flag
+      // apart: a live response makes the model live, the field keeping its
+      // own flag, and a deprecated response folds onto the live model.
+      const petOwner = obj({ object: { type: 'string', const: 'pet_owner' }, name: str });
+      const schemas = (field: boolean) => ({
+        Pet: obj({ owner: deprecate(petOwner, field) }),
+        PetOwner: { ...petOwner, deprecated: true },
+      });
+      const paths = (response: boolean): Array<[string, unknown]> => [
+        ['/pets', getOp('getPet', { $ref: '#/components/schemas/Pet' })],
+        ['/owners', getOp('getOwner', deprecate(petOwner, response))],
+      ];
+      const combos: Array<[string, boolean, boolean]> = [
+        ['live', false, false],
+        ['response', false, true],
+        ['field', true, false],
+        ['both', true, true],
+      ];
+      const byOrder: Record<string, Record<string, ApiSpec>> = {};
+      for (const [label, field, response] of combos) {
+        for (const { order, spec, warnings } of await parseBothOrders(
+          `441-field-shared-${label}`,
+          schemas(field),
+          paths(response),
+        )) {
+          const where = `${label}, ${order}`;
+          const deprecated = field && response;
+          expect(describeModels(spec), where).toEqual([
+            `Pet {owner${field ? ' (deprecated)' : ''}: PetOwner2}`,
+            'PetOwner (deprecated) {object: literal, name: string}',
+            `PetOwner2${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`,
+          ]);
+          expect(opsOf(spec).getOwner?.response, where).toEqual({ kind: 'model', name: 'PetOwner2' });
+          const fieldNote = field ? refused('PetOwner', 'PetOwner2') : liveWhile('PetOwner', 'PetOwner2');
+          const responseNote = sharedBy(
+            deprecated || response ? refused('PetOwner', 'PetOwner2') : liveWhile('PetOwner', 'PetOwner2'),
+            2,
+          );
+          expect(warnings, where).toEqual([
+            fieldNote,
+            ...(field !== response ? [folded('PetOwner')] : []),
+            responseNote,
+          ]);
+          expectSound(spec, ['Pet', 'PetOwner'], deprecated ? ['getOwner.response → PetOwner2'] : []);
+          (byOrder[order] ??= {})[label] = spec;
+        }
+      }
+      const fieldFlip = ['model-modified Pet: additive', 'field-deprecated-changed owner: additive'];
+      const modelFlip = 'model-modified PetOwner2 deprecatedChanged: additive';
+      for (const [order, specs] of Object.entries(byOrder)) {
+        expect(pairs(specs), order).toEqual({
+          'live→response': unchanged,
+          'live→field': { breaking: 0, changes: fieldFlip },
+          'live→both': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'response→live': unchanged,
+          'response→field': { breaking: 0, changes: fieldFlip },
+          'response→both': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'field→live': { breaking: 0, changes: fieldFlip },
+          'field→response': { breaking: 0, changes: fieldFlip },
+          'field→both': { breaking: 0, changes: [modelFlip] },
+          'both→live': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'both→response': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'both→field': { breaking: 0, changes: [modelFlip] },
+        });
+      }
+    });
+  });
+
+  describe('the component’s own flip beside its copies retypes them: a copy’s name follows the component’s flag, never its own (#625 review, finding 1)', () => {
+    const pet = obj({ object: { type: 'string', const: 'pet' }, name: str });
+    const petModel = (name: string, deprecated = false): string =>
+      `${name}${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`;
+
+    describe.each(['3.0.3', '3.1.0'])('on OpenAPI %s', (openapi) => {
+      const extra = { openapi };
+
+      it('`Pet` and `getLegacyPet`’s identical copy deprecated together, or `Pet` alone while the copy stays deprecated: the copy moves to `GetLegacyPetPet`, exit 2 either way', async () => {
+        const doc = (component: boolean, copy: boolean) =>
+          specDoc(
+            { Pet: deprecate(pet, component) },
+            {
+              '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+              '/legacy-pets': getOp('getLegacyPet', deprecate(pet, copy)),
+            },
+            extra,
+          );
+        const liveLive = await parse(`441-together-ll-${openapi}`, doc(false, false));
+        const liveDep = await parse(`441-together-ld-${openapi}`, doc(false, true));
+        const depDep = await parse(`441-together-dd-${openapi}`, doc(true, true));
+        const depLive = await parse(`441-together-dl-${openapi}`, doc(true, false));
+        // A live `Pet` takes its copy under its own name, whatever the
+        // copy's flag; a deprecated `Pet` takes none.
+        for (const { spec, warnings } of [liveLive, liveDep]) {
+          expect(describeModels(spec)).toEqual([petModel('Pet')]);
+          expect(opsOf(spec).getLegacyPet?.response).toEqual({ kind: 'model', name: 'Pet' });
+          expect(warnings).toEqual(spec === liveDep.spec ? [folded('Pet')] : []);
+          expectSound(spec, ['Pet']);
+        }
+        expect(describeModels(depDep.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet', true)]);
+        expect(depDep.warnings).toEqual([refused('Pet', 'GetLegacyPetPet')]);
+        expectSound(depDep.spec, ['Pet'], ['getPet.response → Pet', 'getLegacyPet.response → GetLegacyPetPet']);
+        expect(describeModels(depLive.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet')]);
+        expect(depLive.warnings).toEqual([liveWhile('Pet', 'GetLegacyPetPet')]);
+        expectSound(depLive.spec, ['Pet'], ['getPet.response → Pet']);
+        for (const [label, after] of [
+          ['both deprecated together', depDep],
+          ['`Pet` alone, the copy already deprecated', depDep],
+          ['`Pet` alone, the copy live', depLive],
+        ] as const) {
+          const before = label.includes('already') ? liveDep : liveLive;
+          expect(describeDiff(before.spec, after.spec), label).toEqual({
+            breaking: 1,
+            changes: [
+              'model-added GetLegacyPetPet: additive',
+              'model-modified Pet deprecatedChanged: additive',
+              'operation-modified getLegacyPet responseChanged: breaking',
+            ],
+          });
+          expect(describeDiff(after.spec, before.spec), `${label}, back`).toEqual({
+            breaking: 2,
+            changes: [
+              'model-removed GetLegacyPetPet: breaking',
+              'model-modified Pet deprecatedChanged: additive',
+              'operation-modified getLegacyPet responseChanged: breaking',
+            ],
+          });
+        }
+      });
+
+      it('two copies move off `Pet` together, to one `GetLegacyPetPet`', async () => {
+        const doc = (all: boolean) =>
+          specDoc(
+            { Pet: deprecate(pet, all) },
+            {
+              '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+              '/legacy-pets': getOp('getLegacyPet', deprecate(pet, all)),
+              '/old-pets': getOp('getOldPet', deprecate(pet, all)),
+            },
+            extra,
+          );
+        const live = await parse(`441-together-two-live-${openapi}`, doc(false));
+        const dep = await parse(`441-together-two-dep-${openapi}`, doc(true));
+        expect(describeModels(live.spec)).toEqual([petModel('Pet')]);
+        expect(describeModels(dep.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet', true)]);
+        for (const op of ['getLegacyPet', 'getOldPet']) {
+          expect(opsOf(live.spec)[op]?.response, op).toEqual({ kind: 'model', name: 'Pet' });
+          expect(opsOf(dep.spec)[op]?.response, op).toEqual({ kind: 'model', name: 'GetLegacyPetPet' });
+        }
+        expect(dep.warnings).toEqual([`${refused('Pet', 'GetLegacyPetPet')} (shared by 2 sites)`]);
+        expectSound(
+          dep.spec,
+          ['Pet'],
+          ['getPet.response → Pet', 'getLegacyPet.response → GetLegacyPetPet', 'getOldPet.response → GetLegacyPetPet'],
+        );
+        expect(describeDiff(live.spec, dep.spec)).toEqual({
+          breaking: 2,
+          changes: [
+            'model-added GetLegacyPetPet: additive',
+            'model-modified Pet deprecatedChanged: additive',
+            'operation-modified getLegacyPet responseChanged: breaking',
+            'operation-modified getOldPet responseChanged: breaking',
+          ],
+        });
+        expect(describeDiff(dep.spec, live.spec)).toEqual({
+          breaking: 3,
+          changes: [
+            'model-removed GetLegacyPetPet: breaking',
+            'model-modified Pet deprecatedChanged: additive',
+            'operation-modified getLegacyPet responseChanged: breaking',
+            'operation-modified getOldPet responseChanged: breaking',
+          ],
+        });
+      });
+
+      it('a `Note.pet` field deprecated together with its `NotePet` component moves to `NotePet2`, a breaking field retype', async () => {
+        const doc = (all: boolean) =>
+          specDoc(
+            { Note: obj({ pet: deprecate(pet, all) }), NotePet: deprecate(pet, all) },
+            { '/notes': getOp('getNote', { $ref: '#/components/schemas/Note' }) },
+            extra,
+          );
+        const live = await parse(`441-together-field-live-${openapi}`, doc(false));
+        const dep = await parse(`441-together-field-dep-${openapi}`, doc(true));
+        expect(describeModels(live.spec)).toEqual(['Note {pet: NotePet}', petModel('NotePet')]);
+        expect(describeModels(dep.spec)).toEqual([
+          'Note {pet (deprecated): NotePet2}',
+          petModel('NotePet', true),
+          petModel('NotePet2', true),
+        ]);
+        expect(dep.warnings).toEqual([refused('NotePet', 'NotePet2')]);
+        expectSound(live.spec, ['Note', 'NotePet']);
+        expectSound(dep.spec, ['Note', 'NotePet']);
+        expect(describeDiff(live.spec, dep.spec)).toEqual({
+          breaking: 1,
+          changes: [
+            'model-added NotePet2: additive',
+            'model-modified Note: breaking',
+            'field-type-changed pet: breaking',
+            'field-deprecated-changed pet: additive',
+            'model-modified NotePet deprecatedChanged: additive',
+          ],
+        });
+        expect(describeDiff(dep.spec, live.spec)).toEqual({
+          breaking: 2,
+          changes: [
+            'model-removed NotePet2: breaking',
+            'model-modified Note: breaking',
+            'field-type-changed pet: breaking',
+            'field-deprecated-changed pet: additive',
+            'model-modified NotePet deprecatedChanged: additive',
+          ],
+        });
+      });
+    });
+  });
+
+  describe('the predicates', () => {
+    const string = { kind: 'primitive', type: 'string' } as const;
+    const model = (extra: Partial<Model> = {}): Model => ({
+      name: 'M',
+      fields: [{ name: 'a', type: string, required: false }],
+      ...extra,
+    });
+    const live = model();
+    const deprecated = model({ deprecated: true });
+
+    it('`ownerFlagAdmits`: a component admits either flag while live and none while deprecated; a field model reads `flagAdmits`', () => {
+      expect(ownerFlagAdmits(live, live)).toBe(true);
+      expect(ownerFlagAdmits(live, deprecated)).toBe(true);
+      expect(ownerFlagAdmits(deprecated, deprecated)).toBe(false);
+      expect(ownerFlagAdmits(deprecated, live)).toBe(false);
+      for (const [owner, candidate] of [
+        [live, live],
+        [live, deprecated],
+        [deprecated, deprecated],
+        [deprecated, live],
+      ] as const) {
+        expect(ownerFlagAdmits(owner, candidate, true)).toBe(flagAdmits(owner, candidate));
+      }
+    });
+
+    it('`flagAdmits` is unchanged: the `<Name>Json` fold still collapses a deprecated child onto a deprecated holder', () => {
+      expect(flagAdmits(deprecated, deprecated)).toBe(true);
+      const thing = (name: string): Model => ({
+        name,
+        deprecated: true,
+        fields: [{ name: 'x', type: string, required: false }],
+      });
+      const models: Model[] = [
+        { name: 'Pet', fields: [{ name: 'a', type: string, required: false }] },
+        {
+          name: 'PetJson',
+          fields: [
+            { name: 'a', type: string, required: false },
+            { name: 'thing', type: { kind: 'model', name: 'PetJsonThing' }, required: false },
+          ],
+        },
+        thing('PetJsonThing'),
+        thing('PetThing'),
+      ];
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const folded = collapseJsonSuffixModels(models, []);
+        expect(folded.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`).sort()).toEqual([
+          'Pet',
+          'PetThing (deprecated)',
+        ]);
+        expect(folded.find((m) => m.name === 'Pet')?.fields.map((f) => [f.name, refName(f.type)])).toEqual([
+          ['a', undefined],
+          ['thing', 'PetThing'],
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
   });
 });
