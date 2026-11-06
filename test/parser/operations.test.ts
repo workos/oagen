@@ -3724,6 +3724,89 @@ describe('#565', () => {
     const stripped = extractOperations({ '/pets': { get: { operationId: markers, responses } } });
     expect(stripped).toEqual(extractOperations({ '/pets': { get: { responses } } }));
   });
+
+  // Two ids that strip to one (`listPets[1]`, `listPets[1][2]`) took one name
+  // and one model stem, but `resolveReusedOperationIds` grouped by the id as
+  // written, so neither claimed the stem and both named their response
+  // `ListPetsResponse`: the merge kept the larger definition for both. Now they
+  // are one id reused, read exactly as `listPets` declared twice is.
+  const object = (properties: Record<string, SchemaObject>) => ({
+    content: { 'application/json': { schema: { type: 'object', properties } as SchemaObject } },
+  });
+  const pet = { '200': { description: 'OK', ...object({ id: { type: 'string' } }) } };
+  const note = { '200': { description: 'OK', ...object({ title: { type: 'string' }, body: { type: 'string' } }) } };
+  /** Pairs that strip to `listPets`, and `listPets` declared twice, which they are read as. */
+  const pairs = [
+    ['listPets[1]', 'listPets[1][2]'],
+    ['listPets[1]', 'listPets[2]'],
+    ['listPets[2] [3]', 'listPets[1] '],
+    ['listPets', 'listPets'],
+  ] as const;
+
+  it('reads two ids that strip to one as a reused operationId, in OAS 3.1 and 3.0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-565-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        for (const [pets, notes] of pairs) {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          try {
+            const specFile = join(dir, `${openapi}-${pairs.findIndex(([a]) => a === pets)}.json`);
+            const paths = {
+              '/pets': { get: { operationId: pets, responses: pet } },
+              '/notes': { get: { operationId: notes, responses: note } },
+            };
+            await writeFile(specFile, JSON.stringify({ openapi, info: { title: 'Pets', version: '1' }, paths }));
+            const spec = await parseSpec(specFile);
+            // In two services, both keep `listPets`; `/notes` sorts first and keeps
+            // the stem, so `/pets` names its response from its path — each its own
+            // fields, never one `ListPetsResponse` holding the larger shape for both.
+            const operations = spec.services.flatMap((service) => service.operations);
+            expect(operations.map((op) => [op.path, op.name, op.operationId, op.response])).toEqual([
+              ['/pets', 'listPets', pets, { kind: 'model', name: 'PetsGetResponse' }],
+              ['/notes', 'listPets', notes, { kind: 'model', name: 'ListPetsResponse' }],
+            ]);
+            expect(spec.models.map((model) => [model.name, model.fields.map((field) => field.name)])).toEqual([
+              ['PetsGetResponse', ['id']],
+              ['ListPetsResponse', ['title', 'body']],
+            ]);
+            expect(warn).not.toHaveBeenCalled();
+          } finally {
+            warn.mockRestore();
+          }
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the models of the one renamed within a service after its new name, as for a reused operationId', () => {
+    for (const [pets, all] of pairs) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { services, inlineModels } = extractOperations({
+          '/pets': { get: { operationId: pets, responses: pet } },
+          '/pets/all': { get: { operationId: all, responses: note } },
+        });
+        expect(services.map((service) => service.name)).toEqual(['Pets']);
+        expect(services[0].operations.map((op) => [op.path, op.name, op.operationId, op.response])).toEqual([
+          ['/pets', 'listPets', pets, { kind: 'model', name: 'ListPetsResponse' }],
+          ['/pets/all', 'listPets2', all, { kind: 'model', name: 'ListPets2Response' }],
+        ]);
+        expect(inlineModels.map((model) => [model.name, model.fields.map((field) => field.name)])).toEqual([
+          ['ListPetsResponse', ['id']],
+          ['ListPets2Response', ['title', 'body']],
+        ]);
+        // The reused-id warning only: no second `ListPetsResponse` definition to merge.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(
+          /both take the name "listPets" from their operationId; the latter is renamed "listPets2"/,
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
 });
 
 describe('#570', () => {
