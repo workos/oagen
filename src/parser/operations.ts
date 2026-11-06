@@ -86,6 +86,7 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
   collectProperties,
@@ -5689,6 +5690,15 @@ function deferParameterModels(
  * earlier one's position, with a warning — the way an operation-level
  * parameter replaces a path-level one, except that the document gave these
  * two no precedence (#295).
+ *
+ * A header's `deprecated` and `externalDocs` are read from the layer its
+ * schema documents itself with (`allOfWrapperLayer`): the schema's own
+ * keys, then each `allOf` member's that declares no type and so only
+ * annotates it — the first such member's winning among members — so a link
+ * or flag written in such a member is the header's exactly as the same key
+ * beside the `allOf` is, as a field, a parameter and the model built from
+ * the schema read it (#555, #605). The Header Object's own `deprecated`
+ * counts too; its `description` is the header's alone.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
@@ -5729,24 +5739,29 @@ function extractResponseHeaders(
     // warning — once, here, as the header is typed.
     const schema = parameterSchema(header);
     warnUnreadParameterContent(header, `Response header "${name}" (${statusCode}) in ${operationLabel}`);
+    // The layer the header documents itself from: the schema's own keys,
+    // with each `allOf` member's that declares no type and so only annotates
+    // it folded in — the schema's own winning, then the first member's that
+    // declares one (`allOfWrapperLayer`; #555) — the one reading a field, a
+    // parameter and the model built from the schema give such a member, so
+    // `allOf: [{ type: 'integer' }, { externalDocs }]` and `allOf: [{ type:
+    // 'integer' }], externalDocs` are one header (#605: the flag read the
+    // members but the link the schema's own keys alone, so a link written
+    // in a member was dropped). The typing member's own keys stay on that
+    // member, and a `$ref` member's on its component, as for a field.
+    const layer = schema && allOfWrapperLayer(schema);
     const entry: ResponseHeader = {
       name,
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      // The Header Object's flag or its schema's — the schema's own, or an
-      // `allOf` member's that declares no type and so only annotates it
-      // (`annotatingAllOfMembers`; #555) — so a deprecated schema that folds
-      // onto a live component leaves it on the header; the model or enum a
-      // bare `$ref` names keeps its own, as for a field.
-      deprecated:
-        header.deprecated === true ||
-        (schema !== undefined &&
-          [schema, ...annotatingAllOfMembers(schema)].some((level) => level.deprecated === true)) ||
-        undefined,
-      // The header schema's own link — a Header Object has none — read from
+      // The Header Object's flag or its schema layer's — so a deprecated
+      // schema that folds onto a live component leaves it on the header; the
+      // model or enum a bare `$ref` names keeps its own, as for a field.
+      deprecated: header.deprecated === true || layer?.deprecated === true || undefined,
+      // The header schema layer's link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
-      ...externalDocsEntry(schema?.externalDocs),
+      ...externalDocsEntry(layer?.externalDocs),
     };
     if (schema) {
       // Named from the lower-cased header name, as a header parameter's inline
