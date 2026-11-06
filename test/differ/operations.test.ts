@@ -1489,4 +1489,124 @@ describe('#528 — a required flag on a body carried in requestBodyContents alon
       expect(diffOperations('Pets', [carried(true)], [noBody])).toEqual([]);
     });
   });
+
+  describe('#528 review — the media types of such a body are compared, its encoding is not', () => {
+    /** `createPet`'s body under the given media types, `required` on both sides. */
+    const documentWith = (openapi: string, content: Record<string, unknown>) => ({
+      openapi,
+      info: { title: 'Pets', version: '1' },
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: { required: true, content },
+            responses: { '204': { description: 'no content' } },
+          },
+        },
+      },
+    });
+    const object = { type: 'object', properties: { name: { type: 'string' } } };
+    const operationChanges = (before: ApiSpec, after: ApiSpec) =>
+      diffSpecs(before, after).changes.filter((c) => c.kind === 'operation-modified');
+
+    for (const openapi of ['3.0.3', '3.1.0']) {
+      it(`reports the media types a body carried in requestBodyContents alone gained or lost, with no encoding (OpenAPI ${openapi})`, async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const xml = await parseDocument(documentWith(openapi, { 'application/xml': { schema: object } }));
+        const xmlCsv = await parseDocument(
+          documentWith(openapi, { 'application/xml': { schema: object }, 'text/csv': { schema: { type: 'string' } } }),
+        );
+        // Neither side is read as `requestBody`, and no encoding is read from such a body.
+        for (const spec of [xml, xmlCsv]) {
+          expect(createPet(spec).requestBody).toBeUndefined();
+          expect(createPet(spec).requestBodyEncoding).toBeUndefined();
+        }
+        expect(createPet(xmlCsv).requestBodyContentTypes).toEqual(['application/xml', 'text/csv']);
+
+        const gained = operationChanges(xml, xmlCsv);
+        expect(gained).toEqual([
+          expect.objectContaining({
+            requestBodyChanged: false,
+            requestBodyRequiredChanged: false,
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+            requestBodyContentTypeChange: expect.objectContaining({ added: ['text/csv'], removed: [] }),
+            classification: 'additive',
+          }),
+        ]);
+        expect(gained[0]).not.toHaveProperty('oldRequestBodyEncoding');
+        expect(gained[0]).not.toHaveProperty('newRequestBodyEncoding');
+        expect(operationChanges(xmlCsv, xml)).toEqual([
+          expect.objectContaining({
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+            requestBodyContentTypeChange: expect.objectContaining({ added: [], removed: ['text/csv'] }),
+            classification: 'breaking',
+          }),
+        ]);
+      });
+
+      it(`compares no encoding across the two readings, though the body read as requestBody carries one (OpenAPI ${openapi})`, async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const xml = await parseDocument(documentWith(openapi, { 'application/xml': { schema: object } }));
+        const json = await parseDocument(documentWith(openapi, { 'application/json': { schema: object } }));
+        const form = await parseDocument(
+          documentWith(openapi, { 'application/x-www-form-urlencoded': { schema: object } }),
+        );
+        expect(createPet(json).requestBodyEncoding).toBe('json');
+        for (const [before, after] of [
+          [xml, json],
+          [json, xml],
+        ]) {
+          const [change] = operationChanges(before, after);
+          expect(change).toMatchObject({
+            requestBodyChanged: true,
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+          });
+          expect(change).not.toHaveProperty('oldRequestBodyEncoding');
+          expect(change).not.toHaveProperty('newRequestBodyEncoding');
+        }
+        // While both read the body as `requestBody`, the encoding is compared as before.
+        expect(operationChanges(json, form)).toEqual([
+          expect.objectContaining({
+            requestBodyEncodingChanged: true,
+            oldRequestBodyEncoding: 'json',
+            newRequestBodyEncoding: 'form-urlencoded',
+          }),
+        ]);
+      });
+    }
+
+    it('compares no encoding on a hand-built body carried in requestBodyContents alone, even one that carries an encoding', () => {
+      const pet: TypeRef = { kind: 'model', name: 'Pet' };
+      const carried = (encoding: Operation['requestBodyEncoding'], ...contentTypes: string[]): Operation => ({
+        ...getUser,
+        httpMethod: 'post',
+        requestBodyRequired: true,
+        requestBodyContentTypes: contentTypes,
+        requestBodyContents: contentTypes.map((contentType) => ({ contentType, type: pet })),
+        ...(encoding ? { requestBodyEncoding: encoding } : {}),
+      });
+      // A hand-built IR may set `requestBodyEncoding` beside a body with no `requestBody`; the parser never does.
+      expect(
+        diffOperations('Pets', [carried('text', 'application/xml')], [carried('binary', 'application/xml')]),
+      ).toEqual([]);
+      expect(
+        diffOperations(
+          'Pets',
+          [carried(undefined, 'application/xml')],
+          [carried(undefined, 'application/xml', 'text/csv')],
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          requestBodyChanged: false,
+          requestBodyEncodingChanged: false,
+          requestBodyContentTypesChanged: true,
+          requestBodyContentTypeChange: expect.objectContaining({ added: ['text/csv'] }),
+          classification: 'additive',
+        }),
+      ]);
+    });
+  });
 });
