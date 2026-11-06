@@ -1,6 +1,9 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { CommandError } from '../errors.js';
 import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
+import { expandDocUrls } from '../utils/expand-doc-urls.js';
+import type { ApiSpec } from '../ir/types.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatConfig, CompatFailLevel } from '../compat/config.js';
 import { severityMeetsThreshold } from '../compat/config.js';
@@ -51,6 +54,15 @@ export async function verifyCommand(opts: {
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   fieldHints?: Record<string, Record<string, string>>;
   collapseErrorBodies?: boolean;
+  // What `generate` reads beyond the parse. The spec is expanded with `docUrl`
+  // as `generate` expands it; the rest goes to the overlay retry's
+  // regeneration (#567).
+  docUrl?: string;
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
+  modelHints?: Record<string, string>;
+  emitterOptions?: Record<string, unknown>;
   namespace?: string;
   compatConfig?: CompatConfig;
   compatReport?: string;
@@ -74,12 +86,39 @@ export async function verifyCommand(opts: {
     transformSpec,
     fieldHints,
     collapseErrorBodies,
+    docUrl,
+    operationHints,
+    mountRules,
+    operationNaming,
+    modelHints,
+    emitterOptions,
     compatConfig,
     compatReport,
     compatExplain,
   } = opts;
   const maxRetries = opts.maxRetries ?? 3;
   const diagData: VerifyDiagnostics = {};
+
+  // Parse as `generate` parses, and expand doc URLs as it does, so every IR
+  // verify reads — the compat scope, the retry's regeneration input, both
+  // staleness inputs and the smoke step's baseline — is the IR the SDK in
+  // `--output` was generated from (#567). Without `operationHints`, the
+  // `ListPetsResponse` a pagination hint makes generation write is scoped out
+  // of compat and never found stale; without `operationIdTransform`, the
+  // spec-only baseline lists methods the SDK does not have.
+  const parseAsGenerate = async (path: string): Promise<ApiSpec> => {
+    const ir = await parseSpec(path, {
+      operationIdTransform,
+      schemaNameTransform,
+      transformSpec,
+      fieldHints,
+      operationHints,
+      collapseErrorBodies,
+    });
+    return docUrl ? expandDocUrls(ir, docUrl) : ir;
+  };
+  // `--spec`, parsed once for every step that reads it.
+  const parsedSpec = spec ? await parseAsGenerate(spec) : undefined;
 
   // Resolve compat options: CLI flags take precedence over config
   const effectiveFailOn: CompatFailLevel =
@@ -98,28 +137,25 @@ export async function verifyCommand(opts: {
     console.log(separator);
 
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
-    let parsedSpec;
-    if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseSpec(spec, {
-        operationIdTransform,
-        schemaNameTransform,
-        transformSpec,
-        fieldHints,
-        collapseErrorBodies,
-      });
-    } else if (effectiveScope === 'spec-only') {
+    if (effectiveScope === 'spec-only' && !parsedSpec) {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
+    const scopeSpec = effectiveScope === 'spec-only' ? parsedSpec : undefined;
 
     const compatFlow =
-      parsedSpec && maxRetries > 0
+      scopeSpec && maxRetries > 0
         ? await runOverlayRetryLoop({
             baseline,
-            parsedSpec,
+            parsedSpec: scopeSpec,
             outputDir: output,
             lang,
             maxRetries,
             namespace: opts.namespace,
+            operationHints,
+            mountRules,
+            operationNaming,
+            modelHints,
+            emitterOptions,
             onRetry: (attemptNumber, retryLimit, patchableCount) => {
               console.log(`\nRetry ${attemptNumber}/${retryLimit}: patching ${patchableCount} violation(s)...`);
             },
@@ -128,7 +164,7 @@ export async function verifyCommand(opts: {
             status: 'passed' as const,
             attempts: 0,
             patchedPerIteration: [],
-            compatResult: await runCompatCheck(baseline, output, lang, parsedSpec),
+            compatResult: await runCompatCheck(baseline, output, lang, scopeSpec),
           };
 
     const compatSummary = summarizeCompatCheck(compatFlow.compatResult);
@@ -146,7 +182,7 @@ export async function verifyCommand(opts: {
 
     if (diagnostics) {
       diagData.compatCheck = compatSummary;
-      if (parsedSpec && maxRetries > 0) {
+      if (scopeSpec && maxRetries > 0) {
         setRetryDiagnostics(
           diagData,
           compatFlow.attempts,
@@ -208,26 +244,13 @@ export async function verifyCommand(opts: {
     stepNum++;
   }
 
-  if (oldSpec && spec && apiSurface && baseline) {
+  if (oldSpec && parsedSpec && apiSurface && baseline) {
     console.log(`\n${separator}`);
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
-    const oldParsedSpec = await parseSpec(oldSpec, {
-      operationIdTransform,
-      schemaNameTransform,
-      transformSpec,
-      fieldHints,
-      collapseErrorBodies,
-    });
-    const newParsedSpec = await parseSpec(spec, {
-      operationIdTransform,
-      schemaNameTransform,
-      transformSpec,
-      fieldHints,
-      collapseErrorBodies,
-    });
-    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
+    const oldParsedSpec = await parseAsGenerate(oldSpec);
+    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, parsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {
       console.log(`Found ${stalenessResult.violations.length} stale symbol(s):`);
@@ -260,8 +283,12 @@ export async function verifyCommand(opts: {
   console.log(`Step ${stepNum}: Smoke test + diff`);
   console.log(separator);
 
+  // The smoke scripts get the IR `--spec` parses to (as `--ir`), so the
+  // spec-only baseline lists the operations `generate` reads rather than
+  // those of a bare parse (#567).
   const smokeResult = runSmokeCheck({
     spec,
+    parsedSpec,
     lang,
     output,
     rawResults,

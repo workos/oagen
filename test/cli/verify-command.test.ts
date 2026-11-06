@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolve, dirname } from 'node:path';
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -51,6 +51,8 @@ vi.mock('../../src/engine/registry.js', () => ({
 }));
 
 import { verifyCommand } from '../../src/cli/verify.js';
+import type { ApiSpec } from '../../src/ir/types.js';
+import type { OpenApiDocument } from '../../src/parser/parse.js';
 
 /**
  * Minimal ApiSurface with one class and one interface.
@@ -757,5 +759,279 @@ describe('verifyCommand', () => {
 
     // generate should NOT be called — no spec means shouldRetry is false
     expect(mockGenerate).not.toHaveBeenCalled();
+  });
+});
+
+describe('#567', () => {
+  // `verify` has to parse every spec it reads as `generate` parses it, and
+  // its overlay retry has to regenerate with the settings `generate` hands
+  // the engine, or it reads models the SDK does not have and rewrites the
+  // SDK into another one.
+  let tmpDir: string;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  const pet = { type: 'object', required: ['name'], properties: { name: { type: 'string' } } };
+  const ok = (schema: unknown) => ({ '200': { description: 'ok', content: { 'application/json': { schema } } } });
+  const doc = (paths: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'pets', version: '1' },
+    paths,
+    components: { schemas: { Pet: pet } },
+  });
+  // GET /pets with an `after` query parameter and a list envelope is detected
+  // as cursor pagination, so the envelope is the iterator's and `Pet` the only
+  // model; under `pagination: { strategy: 'none' }` it is a plain operation
+  // and generation writes `ListPetsResponse` and `ListPetsResponseListMetadata`
+  // beside `Pet`.
+  const listDoc = doc({
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+        responses: ok({
+          type: 'object',
+          required: ['data', 'list_metadata'],
+          properties: {
+            data: { type: 'array', items: { $ref: '#/components/schemas/Pet' } },
+            list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+          },
+        }),
+      },
+    },
+  });
+  const noPagination = { 'GET /pets': { pagination: { strategy: 'none' as const } } };
+  const iface = (name: string, fields: Record<string, string>) => ({
+    name,
+    fields: Object.fromEntries(Object.entries(fields).map(([n, type]) => [n, { name: n, type, optional: false }])),
+    extends: [],
+  });
+  const petInterfaces = {
+    ListPetsResponse: iface('ListPetsResponse', { data: 'Pet[]', list_metadata: 'ListPetsResponseListMetadata' }),
+    ListPetsResponseListMetadata: iface('ListPetsResponseListMetadata', { after: 'string' }),
+    Pet: iface('Pet', { name: 'string' }),
+  };
+  const write = (name: string, content: unknown) => {
+    const file = resolve(tmpDir, name);
+    writeFileSync(file, JSON.stringify(content));
+    return file;
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpDir = resolve(os.tmpdir(), `oagen-verify-567-${process.pid}`);
+    mkdirSync(tmpDir, { recursive: true });
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const dummyOverlay = {
+      methodByOperation: new Map(),
+      httpKeyByMethod: new Map(),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+      modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
+    };
+    mockBuildOverlayLookup.mockReturnValue(dummyOverlay);
+    mockPatchOverlay.mockReturnValue(dummyOverlay);
+    mockGenerate.mockResolvedValue([]);
+    mockGetEmitter.mockReturnValue({ language: 'test-lang' });
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('parses the compat scope with operationHints, as generate does', async () => {
+    // The SDK lost the two envelope models the hint makes generation write.
+    const spec = write('list.json', listDoc);
+    const apiSurface = write('baseline.json', makeSurface({ classes: {}, interfaces: petInterfaces }));
+    mockExtract.mockResolvedValue(makeSurface({ classes: {}, interfaces: { Pet: petInterfaces.Pet } }));
+    const opts = {
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 0,
+    };
+
+    // Parsed without the hint, the removed models are not in scope: verify passes.
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 1/3 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith('Compat: passed');
+
+    await expect(verifyCommand({ ...opts, operationHints: noPagination })).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 3/3 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: ListPetsResponse — Symbol "ListPetsResponse" was removed',
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: ListPetsResponseListMetadata.after — Symbol "ListPetsResponseListMetadata.after" was removed',
+    );
+  });
+
+  it('parses both staleness inputs with operationHints, as generate does', async () => {
+    // The new spec dropped GET /pets, so the SDK's two envelope models are
+    // stale. They are found only when the old spec is parsed with the hint
+    // that made generation write them; the new spec, parsed either way,
+    // names `Pet` alone.
+    const oldSpec = write('old.json', listDoc);
+    const spec = write('new.json', doc({}));
+    const apiSurface = write('baseline.json', makeSurface({ classes: {}, interfaces: petInterfaces }));
+    mockExtract.mockResolvedValue(makeSurface({ classes: {}, interfaces: petInterfaces }));
+    const opts = { spec, oldSpec, lang: 'test-lang', output: tmpDir, apiSurface, rawResults: write('raw.json', []) };
+
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('No stale symbols detected.');
+
+    await verifyCommand({ ...opts, operationHints: noPagination });
+    expect(consoleSpy).toHaveBeenCalledWith('Found 2 stale symbol(s):');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: ListPetsResponse — Interface "ListPetsResponse" is no longer defined in the OpenAPI spec',
+    );
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: ListPetsResponseListMetadata — Interface "ListPetsResponseListMetadata" is no longer defined in the OpenAPI spec',
+    );
+  });
+
+  it('regenerates with the settings generate hands the engine, from the IR generate reads', async () => {
+    // The retry's one regeneration gets every engine setting, and an IR whose
+    // doc links `docUrl` has expanded, as `generate` expands them.
+    const spec = write('users.json', {
+      openapi: '3.1.0',
+      info: { title: 'users', version: '1' },
+      paths: {
+        '/users': {
+          get: {
+            operationId: 'listUsers',
+            description: 'Lists every [User](/reference/users/user).',
+            responses: ok({ type: 'array', items: { $ref: '#/components/schemas/User' } }),
+          },
+        },
+      },
+      components: {
+        schemas: { User: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } } },
+      },
+    });
+    const apiSurface = write('baseline.json', makeSurface());
+    mockExtract
+      .mockResolvedValueOnce({ ...makeSurface(), interfaces: {} }) // attempt 0: violation
+      .mockResolvedValue(makeSurface()); // attempt 1: converged
+    const settings = {
+      operationHints: { 'GET /users': { name: 'list_all' } },
+      mountRules: { Users: 'People' },
+      operationNaming: 'operationId' as const,
+      modelHints: { User: 'Users' },
+      emitterOptions: { flavor: 'retry' },
+    };
+
+    await verifyCommand({
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 3,
+      docUrl: 'https://docs.example.com',
+      ...settings,
+    });
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('converged after 1 retry'));
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    const [ir, , options] = mockGenerate.mock.calls[0] as [ApiSpec, unknown, Record<string, unknown>];
+    expect(options).toMatchObject(settings);
+    expect(ir.services[0].operations[0].description).toBe(
+      'Lists every [User](https://docs.example.com/reference/users/user).',
+    );
+  });
+
+  it('hands the smoke baseline and the runner the IR it parsed, as generate parses it', async () => {
+    // The smoke scripts run as subprocesses and parse `--spec` bare, so the
+    // spec-only baseline listed `Pets.petsControllerList` and
+    // `Pets.petsControllerGet` under a transform that strips
+    // `PetsController_`, and `Pets.get` under a `transformSpec` that drops
+    // `/pets/{id}`, where `generate` reads `Pets.list` alone. Now both
+    // scripts get `--ir`: the IR `verify` parsed, in a file that lives while
+    // they run.
+    const spec = write(
+      'pets-controller.json',
+      doc({
+        '/pets': {
+          get: {
+            operationId: 'PetsController_list',
+            responses: ok({ type: 'array', items: { $ref: '#/components/schemas/Pet' } }),
+          },
+        },
+        '/pets/{id}': {
+          get: {
+            operationId: 'PetsController_get',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: ok({ $ref: '#/components/schemas/Pet' }),
+          },
+        },
+      }),
+    );
+    const runner = resolve(tmpDir, 'runner.mjs');
+    const calls: Array<{ args: string[]; irPath?: string; operations?: string[] }> = [];
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation((_bin: string, args: string[]) => {
+      const irPath = args.includes('--ir') ? args[args.indexOf('--ir') + 1] : undefined;
+      // Read it now: the file lives only while the smoke scripts run.
+      const ir = irPath ? (JSON.parse(readFileSync(irPath, 'utf-8')) as ApiSpec) : undefined;
+      const operations = ir?.services.flatMap((s) => s.operations.map((o) => `${s.name}.${o.name}`));
+      calls.push({ args, irPath, operations });
+      return '';
+    });
+    const smoke = async (settings: Partial<Parameters<typeof verifyCommand>[0]>) => {
+      calls.length = 0;
+      const origCwd = process.cwd();
+      process.chdir(tmpDir); // no raw baseline here, so the spec-only one is generated
+      try {
+        await verifyCommand({ spec, lang: 'test-lang', output: tmpDir, smokeRunner: runner, ...settings });
+      } finally {
+        process.chdir(origCwd);
+      }
+      return [...calls];
+    };
+    const strip = (id: string) => (id.startsWith('PetsController_') ? id.slice('PetsController_'.length) : id);
+    const dropGet = (d: OpenApiDocument) => {
+      delete (d.paths as Record<string, unknown>)['/pets/{id}'];
+      return d;
+    };
+
+    const bare = await smoke({});
+    expect(bare.map((c) => c.operations)).toEqual([
+      ['Pets.petsControllerList', 'Pets.petsControllerGet'],
+      ['Pets.petsControllerList', 'Pets.petsControllerGet'],
+    ]);
+
+    const parsed = await smoke({ operationIdTransform: strip, transformSpec: dropGet });
+    expect(parsed.map((c) => c.operations)).toEqual([['Pets.list'], ['Pets.list']]);
+    // One file, handed to the baseline and to the runner beside `--spec`, and
+    // gone once they ran.
+    const [baseline, run] = parsed;
+    expect(baseline.args.slice(1)).toEqual([
+      expect.stringMatching(/scripts\/smoke\/baseline\.ts$/),
+      '--spec',
+      spec,
+      '--ir',
+      baseline.irPath,
+    ]);
+    expect(run.args).toEqual([
+      runner,
+      '--lang',
+      'test-lang',
+      '--sdk-path',
+      tmpDir,
+      '--raw-results',
+      'smoke-results-spec-baseline.json',
+      '--spec',
+      spec,
+      '--ir',
+      baseline.irPath,
+    ]);
+    expect(existsSync(baseline.irPath!)).toBe(false);
   });
 });

@@ -232,4 +232,4 @@ Safe to ship. No action needed.
 
 ## Overlay Retry Loop
 
-The existing overlay retry loop (`--max-retries`) continues to work with the legacy compat system. It patches `public-api` and `export-structure` violations by correcting overlay mappings and regenerating. The classified compat report runs after the overlay loop has converged.
+The existing overlay retry loop (`--max-retries`) continues to work with the legacy compat system. It patches `public-api` and `export-structure` violations by correcting overlay mappings and regenerating with the settings `generate` reads from the config (`operationHints`, `mountRules`, `operationNaming`, `modelHints`, `emitterOptions`), so each retry rewrites the SDK `generate` wrote. The classified compat report runs after the overlay loop has converged.

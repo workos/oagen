@@ -8,7 +8,9 @@ import { readManifest } from '../engine/manifest.js';
 import type { Manifest } from '../engine/manifest.js';
 import type { CompatSnapshot } from '../compat/ir.js';
 import type { ApiSurface, ApiClass } from '../compat/types.js';
-import type { ApiSpec } from '../ir/types.js';
+import type { ApiSpec, Operation } from '../ir/types.js';
+import { resolveOperations } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import type { SchemaNameTransform } from '../parser/schemas.js';
 
 const SNAPSHOT_FILENAME = '.oagen-compat-snapshot.json';
@@ -127,10 +129,19 @@ export async function compatExtractCommand(opts: {
   lang: string;
   output: string;
   spec?: string;
+  operationIdTransform?: (id: string) => string;
   schemaNameTransform?: SchemaNameTransform;
   transformSpec?: (spec: OpenApiDocument) => OpenApiDocument;
   fieldHints?: Record<string, Record<string, string>>;
+  operationHints?: Record<string, OperationHint>;
   collapseErrorBodies?: boolean;
+  /**
+   * What the engine resolves operations with, beside `operationHints`: the
+   * class and method `generate` writes each operation as. Callables are
+   * matched by those names (see {@link operationLookup}) (#567).
+   */
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
 }): Promise<void> {
   const extractor = getExtractor(opts.lang);
   console.log(`Extracting ${opts.lang} compat snapshot from ${opts.sdkPath}...`);
@@ -155,13 +166,25 @@ export async function compatExtractCommand(opts: {
     const specContent = readFileSync(opts.spec, 'utf-8');
     snapshot.source.specSha = createHash('sha256').update(specContent).digest('hex');
 
+    // Parse as `generate` parses, the transform and the hints included, and
+    // resolve operations as the engine does, so the operation names and
+    // models matched below are the ones the SDK has: a method named by
+    // `operationIdTransform`, one remounted by `mountRules` or renamed by a
+    // `name` hint, the `ListPetsResponse` a pagination hint makes generation
+    // write (#567).
     const parsedSpec = await parseSpec(opts.spec, {
+      operationIdTransform: opts.operationIdTransform,
       schemaNameTransform: opts.schemaNameTransform,
       transformSpec: opts.transformSpec,
       fieldHints: opts.fieldHints,
+      operationHints: opts.operationHints,
       collapseErrorBodies: opts.collapseErrorBodies,
     });
-    enrichWithSpecContext(snapshot, parsedSpec);
+    enrichWithSpecContext(snapshot, parsedSpec, {
+      operationHints: opts.operationHints,
+      mountRules: opts.mountRules,
+      operationNaming: opts.operationNaming,
+    });
   }
 
   const outputPath = resolve(opts.output, SNAPSHOT_FILENAME);
@@ -169,29 +192,79 @@ export async function compatExtractCommand(opts: {
   console.log(`Extracted ${snapshot.symbols.length} symbols → ${outputPath}`);
 }
 
+/** The settings the engine resolves operations with (see `resolveOperations`). */
+interface OperationResolution {
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
+}
+
+/** The spec-level identity a callable is enriched with. */
+interface OperationIdentity {
+  operationId: string;
+  method: string;
+  path: string;
+}
+
+/**
+ * `Class.method` → operation identity, keyed by the names `generate` writes.
+ * A key is matched with underscores stripped and case folded (see
+ * `normalize`), so one key reads a method in any language's casing:
+ * `Pets.list_pets`, `Pets.listPets` and `Pets.ListPets` are one key.
+ *
+ * An SDK's callable is matched, in this order, to:
+ *
+ * 1. the mount target and the resolved method name, as `resolveOperations`
+ *    resolves them from the config's `operationHints`, `mountRules` and
+ *    `operationNaming` — `Pets.list_all` under
+ *    `operationHints: { 'GET /pets': { name: 'list_all' } }`, `Animals.get_pet`
+ *    under `mountRules: { Pets: 'Animals' }` — and each split wrapper's name
+ *    on that target (`Pets.create_cat` for a `split` hint on `POST /pets`);
+ * 2. the mount target and the IR's operation name, for an SDK whose methods
+ *    carry the operationIds on a remounted service: `Animals.get` under the
+ *    same rule, which path naming resolves to `get_pet`;
+ * 3. the IR's own `Service.operation` key — `Pets.get` — the one key every
+ *    match used before the engine's names reached this command (#567), so
+ *    a snapshot that matched before matches still.
+ *
+ * A later key never displaces an earlier one: the name `generate` writes
+ * wins over an IR name another operation happens to spell the same way.
+ */
+function operationLookup(spec: ApiSpec, resolution: OperationResolution): Map<string, OperationIdentity> {
+  const resolved = resolveOperations(
+    spec,
+    resolution.operationHints,
+    resolution.mountRules,
+    resolution.operationNaming,
+  );
+  const lookup = new Map<string, OperationIdentity>();
+  const add = (owner: string, method: string, op: Operation): void => {
+    const key = normalize(`${owner}.${method}`);
+    if (!lookup.has(key)) lookup.set(key, { operationId: op.name, method: op.httpMethod, path: op.path });
+  };
+  for (const r of resolved) {
+    add(r.mountOn, r.methodName, r.operation);
+    for (const wrapper of r.wrappers ?? []) add(r.mountOn, wrapper.name, r.operation);
+  }
+  for (const r of resolved) add(r.mountOn, r.operation.name, r.operation);
+  for (const r of resolved) add(r.service.name, r.operation.name, r.operation);
+  return lookup;
+}
+
 /**
  * Enrich snapshot symbols with spec-level identity.
  *
- * - Callable symbols get `operationId` and `route` from spec operations.
+ * - Callable symbols get `operationId` and `route` from spec operations,
+ *   matched by the class and method names `generate` writes (see
+ *   {@link operationLookup}).
  * - Property/field/constructor/service_accessor symbols get `schemaName`
  *   from spec models, enabling cross-language grouping in reports.
  *
  * The `schemaName` uses the spec-level identity (e.g. "GenerateLinkBody.admin_emails")
  * which is the same regardless of the language's naming conventions.
  */
-function enrichWithSpecContext(snapshot: CompatSnapshot, spec: ApiSpec): void {
-  // Build lookup: "ServiceName.methodName" → { operationId, method, path }
-  const opLookup = new Map<string, { operationId: string; method: string; path: string }>();
-  for (const service of spec.services) {
-    for (const op of service.operations) {
-      const key = `${service.name}.${op.name}`;
-      opLookup.set(key, {
-        operationId: op.name,
-        method: op.httpMethod,
-        path: op.path,
-      });
-    }
-  }
+function enrichWithSpecContext(snapshot: CompatSnapshot, spec: ApiSpec, resolution: OperationResolution): void {
+  const opLookup = operationLookup(spec, resolution);
 
   // Build model field lookup for schema-level identity.
   // Normalized class name → { specModelName, fields: Map<normalizedFieldName, specFieldName> }
@@ -208,7 +281,7 @@ function enrichWithSpecContext(snapshot: CompatSnapshot, spec: ApiSpec): void {
   for (const sym of snapshot.symbols) {
     // Enrich callables with operation identity
     if (sym.kind === 'callable') {
-      const match = opLookup.get(sym.fqName);
+      const match = opLookup.get(normalize(sym.fqName));
       if (match) {
         sym.operationId = match.operationId;
         sym.route = { method: match.method, path: match.path };

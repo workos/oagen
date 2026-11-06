@@ -4,6 +4,7 @@ import { buildOverlayLookup, patchOverlay, isPatchableChange } from '../compat/o
 import { getExtractor } from '../compat/extractor-registry.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { ApiSpec } from '../ir/types.js';
+import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
 import { getEmitter } from '../engine/registry.js';
 import { generate } from '../engine/orchestrator.js';
 import { runCompatCheck } from './run-compat-check.js';
@@ -65,6 +66,16 @@ export async function runOverlayRetryLoop(opts: {
   lang: string;
   maxRetries: number;
   namespace?: string;
+  // The settings `generate` hands the engine from the config. The retry
+  // regenerates with them so it rewrites the SDK `generate` wrote rather than
+  // another one: without `mountRules` and `operationHints` it wrote a `Pets`
+  // service with `list_pets` beside the `Animals` service with `list_all`
+  // that `generate` writes (#567).
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
+  modelHints?: Record<string, string>;
+  emitterOptions?: Record<string, unknown>;
   onRetry?: (attemptNumber: number, maxRetries: number, patchableCount: number) => void;
 }): Promise<OverlayRetryResult> {
   const { baseline, parsedSpec, outputDir, lang, maxRetries, namespace, onRetry } = opts;
@@ -135,6 +146,11 @@ export async function runOverlayRetryLoop(opts: {
       outputDir,
       overlayLookup: overlay,
       apiSurface: baseline,
+      operationHints: opts.operationHints,
+      mountRules: opts.mountRules,
+      operationNaming: opts.operationNaming,
+      modelHints: opts.modelHints,
+      emitterOptions: opts.emitterOptions,
     });
   }
 

@@ -44,7 +44,10 @@ language-appropriate.
 1. Generate SDK with compat overlay applied (hints from extractor)
 2. Diff generated output against baseline `<output>/sdk-{language}-surface.json` (hints from extractor)
 3. If violations found, `patchOverlay()` adjusts the overlay
-4. Regenerate with the patched overlay
+4. Regenerate with the patched overlay, with the config settings `generate` reads
+   (`operationHints`, `mountRules`, `operationNaming`, `modelHints`, `emitterOptions`,
+   and the IR `docUrl` expanded), so the retry rewrites the SDK `generate` wrote
+   rather than another one
 5. Repeat
 
 **Caps:**
@@ -63,8 +66,9 @@ verify runs a single pass.
 shape, async/sync mismatches). Those require changing emitter code — the loop
 exits 1 and the emitter-fixing loop takes over.
 
-**Code:** `src/cli/verify.ts` (retry loop + compat check) and `src/compat/overlay.ts`
-(`patchOverlay` — also available as a library export for custom loops)
+**Code:** `src/cli/verify.ts` (compat check), `src/verify/run-overlay-retry-loop.ts`
+(retry loop) and `src/compat/overlay.ts` (`patchOverlay` — also available as a
+library export for custom loops)
 
 ### Emitter-fixing loop (Phase 1 only)
 

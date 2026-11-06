@@ -75,6 +75,48 @@ try {
   handleError(err);
 }
 
+/**
+ * The settings `generate` parses a spec with, from the loaded config. Every
+ * command that parses a spec parses with all of them, so each reads the models
+ * and operation names the SDK `generate` writes has (#497, #546, #567).
+ */
+const parseSettings = {
+  operationIdTransform: configOperationIdTransform,
+  schemaNameTransform: configSchemaNameTransform,
+  transformSpec: configTransformSpec,
+  fieldHints: configFieldHints,
+  operationHints: configOperationHints,
+  collapseErrorBodies: configCollapseErrorBodies,
+};
+
+/**
+ * The settings the engine resolves operations with (`resolveOperations`),
+ * from the loaded config: the hints, mount rules and naming that decide
+ * which class and method `generate` writes each operation as. `generate`
+ * hands them to the engine, `resolve` prints what they resolve to, and
+ * `compat-extract` matches the SDK's callables against the names they
+ * resolve to (#567).
+ */
+const resolutionSettings = {
+  operationHints: configOperationHints,
+  mountRules: configMountRules,
+  operationNaming: configOperationNaming,
+};
+
+/**
+ * The settings `generate` reads beyond the parse, from the loaded config: the
+ * doc URL base it expands the IR with, the hints the engine resolves
+ * operations and places models with, and the language's emitter options.
+ * `verify`'s overlay retry regenerates the SDK in `--output` with the same
+ * ones, so it rewrites the SDK `generate` wrote rather than another one (#567).
+ */
+const generationSettings = (lang: string) => ({
+  docUrl: configDocUrl,
+  ...resolutionSettings,
+  modelHints: configModelHints,
+  emitterOptions: configEmitterOptions?.[lang],
+});
+
 const program = new Command()
   .name('oagen')
   .description('Framework for building OpenAPI SDK emitters')
@@ -91,15 +133,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    return parseCommand({
-      ...opts,
-      operationIdTransform: configOperationIdTransform,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
-      operationHints: configOperationHints,
-    });
+    return parseCommand({ ...opts, ...parseSettings });
   });
 
 program
@@ -121,20 +155,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    generateCommand({
-      ...opts,
-      operationIdTransform: configOperationIdTransform,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      docUrl: configDocUrl,
-      operationHints: configOperationHints,
-      mountRules: configMountRules,
-      operationNaming: configOperationNaming,
-      modelHints: configModelHints,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
-      emitterOptions: configEmitterOptions?.[opts.lang],
-    }).catch(handleError);
+    generateCommand({ ...opts, ...parseSettings, ...generationSettings(opts.lang) }).catch(handleError);
   });
 
 program
@@ -143,16 +164,7 @@ program
   .requiredOption('--old <path>', 'Path to old spec')
   .requiredOption('--new <path>', 'Path to new spec')
   .action((opts) => {
-    diffCommand({
-      ...opts,
-      operationIdTransform: configOperationIdTransform,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      docUrl: configDocUrl,
-      operationHints: configOperationHints,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
-    }).catch(handleError);
+    diffCommand({ ...opts, ...parseSettings, docUrl: configDocUrl }).catch(handleError);
   });
 
 program
@@ -175,13 +187,7 @@ program
   .option('--spec <path>', 'Path to OpenAPI spec — enriches symbols with operationId, route, and specSha')
   .action((opts) => {
     opts.spec ??= process.env.OPENAPI_SPEC_PATH;
-    compatExtractCommand({
-      ...opts,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
-    }).catch(handleError);
+    compatExtractCommand({ ...opts, ...parseSettings, ...resolutionSettings }).catch(handleError);
   });
 
 program
@@ -236,11 +242,8 @@ program
     verifyCommand({
       ...opts,
       maxRetries: parseInt(opts.maxRetries, 10),
-      operationIdTransform: configOperationIdTransform,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
+      ...parseSettings,
+      ...generationSettings(opts.lang),
       compatConfig: configCompat,
       compatReport: opts.compatReport,
       compatFailOn: opts.compatFailOn,
@@ -260,18 +263,7 @@ program
       console.error('error: --spec <path> or OPENAPI_SPEC_PATH env var is required');
       process.exit(1);
     }
-    resolveCommand({
-      ...opts,
-      operationIdTransform: configOperationIdTransform,
-      schemaNameTransform: configSchemaNameTransform,
-      transformSpec: configTransformSpec,
-      fieldHints: configFieldHints,
-      collapseErrorBodies: configCollapseErrorBodies,
-      docUrl: configDocUrl,
-      operationHints: configOperationHints,
-      mountRules: configMountRules,
-      operationNaming: configOperationNaming,
-    }).catch(handleError);
+    resolveCommand({ ...opts, ...parseSettings, docUrl: configDocUrl, ...resolutionSettings }).catch(handleError);
   });
 
 program
