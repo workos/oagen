@@ -602,6 +602,66 @@ describe('expandDocUrls – every collection that holds a documented node', () =
     expect('callbacks' in run({})).toBe(false);
   });
 
+  it("expands `See [adopted](/reference/adopted).` on a callback's summary, description and responses beside the operation's own link (Michael's finding 3)", () => {
+    const docs = 'https://docs.example.com';
+    const adopted = 'See [adopted](/reference/adopted).';
+    const expandedAdopted = `See [adopted](${docs}/reference/adopted).`;
+    const callback = (name: string, extra: Partial<Callback> = {}): Callback => ({
+      name,
+      expression: '{$request.body#/callbackUrl}',
+      httpMethod: 'post',
+      summary: adopted,
+      description: adopted,
+      headerParams: [],
+      queryParams: [],
+      responses: [{ statusCode: 204, description: adopted }],
+      ...extra,
+    });
+    const expectAdopted = (cb: Callback): void => {
+      expect(cb.summary).toBe(expandedAdopted);
+      expect(cb.description).toBe(expandedAdopted);
+      expect(cb.responses[0].description).toBe(expandedAdopted);
+    };
+    const nested = () => callback('petAdopted', { callbacks: [callback('confirmed')] });
+
+    const op = expandDocUrls(
+      minimalSpec({
+        services: [
+          {
+            name: 'Pets',
+            operations: [
+              operation({ name: 'createPet', description: 'See [pets](/reference/pets).', callbacks: [nested()] }),
+            ],
+          },
+        ],
+      }),
+      docs,
+    ).services[0].operations[0];
+    expect(op.description).toBe(`See [pets](${docs}/reference/pets).`);
+    expectAdopted(op.callbacks![0]);
+    expectAdopted(op.callbacks![0].callbacks![0]);
+
+    const [hook] = expandDocUrls(
+      minimalSpec({
+        webhooks: [
+          {
+            name: 'petReturned',
+            httpMethod: 'post',
+            description: 'See [pets](/reference/pets).',
+            headerParams: [],
+            queryParams: [],
+            responses: [],
+            callbacks: [nested()],
+          },
+        ],
+      }),
+      docs,
+    ).webhooks!;
+    expect(hook.description).toBe(`See [pets](${docs}/reference/pets).`);
+    expectAdopted(hook.callbacks![0]);
+    expectAdopted(hook.callbacks![0].callbacks![0]);
+  });
+
   it('expands requestBodyDescription on an operation and on a webhook, and leaves the key absent otherwise (issue #316)', () => {
     const op = run({ requestBodyDescription: text });
     expect(op.requestBodyDescription).toBe(expandedText);

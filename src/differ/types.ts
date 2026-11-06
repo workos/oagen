@@ -1291,8 +1291,9 @@ export interface DocumentSecurityChanged {
   /**
    * Read from each side that inherits the default in both documents, by the
    * rule the inheriting node would be read by (`classifySecurityChange`):
-   * the caller's when an operation does, the receiver's when a webhook
-   * does, each matched across the documents as its own change is; breaking
+   * the caller's when an operation does, the receiver's when a webhook or
+   * a callback does (#382), each matched across the documents as its own
+   * change is; breaking
    * if any such side breaks. A node that declares its own list on either
    * side is compared on its own (`securityChanged`), and one added or
    * removed is reported as such. When nothing inherits it in both

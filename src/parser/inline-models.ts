@@ -958,7 +958,7 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * nothing: the Paths Object's (an extension by the specification, which
  * `extractOperations` steps over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification; the parser reads no callbacks). Decided from the document's content
+ * the specification, which `extractCallbacks` steps over). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
  * document, before any union is named (`extractSchemas`), so the union
  * TypeRef and every extractor read the same decision. `undefined` clears
@@ -1162,8 +1162,13 @@ type SiteDirection = 'sent' | 'received';
  * webhook's `path` parameter, which `extractWebhooks` drops, and a
  * `Content-Type` response header (above). A webhook's payload and the
  * parameters it keeps are received, merged the same way (`extractWebhooks`);
- * its responses type no body (`extractWebhookResponses`), and `callbacks`
- * are never read. A Path Item and every Reference Object are followed as the
+ * its responses type no body (`extractWebhookResponses`). An operation's
+ * `callbacks` — a webhook's, and a callback operation's own, nested — are
+ * read as `extractCallbacks` reads them: each Callback Object (a
+ * `components/callbacks` `$ref` followed, a callback referring back to one
+ * it sits in read once) maps expressions to path items whose requests the
+ * SDK is sent, so their bodies and parameters are received and their
+ * responses type no body (#382). A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
  * of `paths` stepped over, a Responses Object's keys read as above and every
  * `webhooks` key read as a webhook. A schema
