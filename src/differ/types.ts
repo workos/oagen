@@ -589,14 +589,19 @@ export interface OperationModified {
    * `Operation.responseStatusCode` — the status code the primary success
    * response is read from — differs while both specs carry one: a lone
    * `201` that became a lone `200`, a `200` added beside a lone `201` (the
-   * `200` is now the primary), or a `201` that became the primary beside a
-   * `200` whose body is no longer typed. Additive on its own: the old code
+   * `200` is now the primary), a `201` that became the primary beside a
+   * `200` whose body is no longer typed, or a `200` beside a `202` that
+   * became a `201` beside the `202`. Additive on its own: the old code
    * may still be declared, as in the second case, and whether a bare status
    * move breaks callers is left to a separate issue — this flag only says
-   * the move happened, so a changelog can. Compared only while both sides
-   * carry a code, as `requestBodyRequired` is while both carry a body; an
-   * operation gaining or losing its only 2xx/3xx is not a move but
-   * `responseChanged`. Not mirrored into `behaviorChanges`.
+   * the move happened, so a changelog can. Only two lone primaries pair
+   * over the move, though: a primary replaced among several 2xx (the last
+   * case) no longer declares its old code, so its headers and media types
+   * are reported removed under that code, breaking, beside this flag, as
+   * they are for a `200` dropped beside a kept `202` (#408). Compared only
+   * while both sides carry a code, as `requestBodyRequired` is while both
+   * carry a body; an operation gaining or losing its only 2xx/3xx is not a
+   * move but `responseChanged`. Not mirrored into `behaviorChanges`.
    */
   responseStatusCodeChanged: boolean;
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
@@ -626,7 +631,9 @@ export interface OperationModified {
  * primary among them (a lone 2xx by `Operation.responseStatusCode`), and
  * every error — with `statusCode` set; two lone primaries of different
  * codes pair with each other, the move reported once as
- * `responseStatusCodeChanged`; a lone 2xx that carries no code (a hand-built
+ * `responseStatusCodeChanged`, though a primary replaced among several 2xx
+ * (`200` + `202` → `201` + `202`) pairs with nothing, its headers reported
+ * `header-removed` under its code (#408); a lone 2xx that carries no code (a hand-built
  * IR) pairs with the entry of the other spec that offers its media types,
  * else with that spec's primary, and is reported with `statusCode` unset,
  * though only one that carries media types or headers pairs as the old
@@ -695,7 +702,9 @@ export interface ResponseHeaderChange {
  * pairs with the entry of its code; a lone 2xx pairs by its
  * `Operation.responseStatusCode` and is reported with that code, and two
  * lone primaries of different codes pair with each other
- * (`responseStatusCodeChanged` reports the move); a primary that carries no
+ * (`responseStatusCodeChanged` reports the move), though a primary replaced
+ * among several 2xx (`200` + `202` → `201` + `202`) pairs with nothing, its
+ * media types `removed` under its code (#408); a primary that carries no
  * code (an operation declaring no 2xx/3xx, or a hand-built IR's lone 2xx) is
  * paired with the entry of the other spec that offers its media types, else
  * with that spec's primary, except the old spec's when it carries no media

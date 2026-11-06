@@ -755,10 +755,16 @@ function diffResponseContentTypes(
  * status code, a lone 2xx's `responseStatusCode` included — so a lone `201`
  * pairs with the other spec's `201` whether that spec declares it alone or
  * beside a `200` it added, and the added `200` pairs with nothing. When
- * neither primary has a counterpart by code and both carry one, the primary
- * moved (a lone `201` became a lone `200`): the two primaries pair, and
- * `responseStatusCodeChanged` reports the move once rather than every header
- * and media type as removed under one code and added under the other. Only
+ * neither primary has a counterpart by code, both carry one, and each is
+ * its side's only 2xx/3xx, the primary moved (a lone `201` became a lone
+ * `200`): the two primaries pair, and `responseStatusCodeChanged` reports
+ * the move once rather than every header and media type as removed under
+ * one code and added under the other. A primary replaced among several
+ * 2xx (`200` + `202` → `201` + `202`) is no move: the `200` is no longer
+ * declared, so the two primaries pair with nothing and the old `200`'s
+ * headers and media types are reported removed under its code, as they are
+ * for a `200` dropped beside a kept `202`; the new `201` is a 2xx the new
+ * spec adds, which is no header or media-type change (#408). Only
  * a primary that carries no code (keyed `primary`: an operation declaring no
  * 2xx/3xx at all, whose `response` is `unknown`, or a hand-built IR's lone
  * 2xx) falls back to shape: it pairs with the 2xx entry of the other side
@@ -789,7 +795,16 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
   // `200`): the new primary is a 2xx the new spec adds, paired with nothing.
   if (new Set(pairs.values()).has(oldPrimary)) return pairs;
   if (oldPrimary.statusCode !== undefined && newPrimary.statusCode !== undefined) {
-    pairs.set(newPrimary, oldPrimary);
+    // Two primaries that carry codes pair only when each is its side's only
+    // 2xx/3xx: a lone `200` that became a lone `201` moved. One replaced
+    // among several (`200` + `202` → `201` + `202`) did not — the `200` is no
+    // longer declared — so neither primary pairs, and `diffResponseHeaders`
+    // and `diffResponseContentTypes` report what the `200` declared as
+    // removed under its code, as for a `200` dropped beside a kept `202`
+    // (#408). Whether a lone move breaks callers is left to a separate issue.
+    if (isLoneSuccess(oldPrimary, oldEntries) && isLoneSuccess(newPrimary, newEntries)) {
+      pairs.set(newPrimary, oldPrimary);
+    }
   } else if (newPrimary.statusCode === undefined) {
     pairs.set(newPrimary, survivingEntry(newPrimary, oldEntries) ?? oldPrimary);
   } else if (oldPrimary.bodies.length > 0 || oldPrimary.headers.length > 0) {
@@ -798,6 +813,16 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
     pairs.set(survivingEntry(oldPrimary, newEntries) ?? newPrimary, oldPrimary);
   }
   return pairs;
+}
+
+/**
+ * Whether `primary` is its side's only 2xx/3xx: no other `success:` entry
+ * beside it. The condition under which two primaries of different codes
+ * are one response that moved rather than one dropped and another added
+ * (#408); `primary` carries a code here, so it is keyed `success:` itself.
+ */
+function isLoneSuccess(primary: ContentEntry, entries: ContentEntry[]): boolean {
+  return !entries.some((entry) => entry !== primary && entry.key.startsWith('success:'));
 }
 
 /**

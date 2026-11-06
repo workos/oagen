@@ -6,7 +6,14 @@ import { diffOperations } from '../../src/differ/operations.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
-import type { ApiSpec, Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
+import type {
+  ApiSpec,
+  Operation,
+  ResponseContent,
+  ResponseHeader,
+  SuccessResponse,
+  TypeRef,
+} from '../../src/ir/types.js';
 
 const listUsers: Operation = {
   name: 'listUsers',
@@ -1607,6 +1614,274 @@ describe('#528 — a required flag on a body carried in requestBodyContents alon
           classification: 'additive',
         }),
       ]);
+    });
+  });
+});
+
+describe('#408 — the primary replaced among several 2xx responses', () => {
+  /** The issue's `createPet`: each 2xx carries the same `{ id }` JSON body and a header of its own. */
+  const body = { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } };
+  const ok = { description: 'OK', content: body, headers: { 'X-Pet-Id': { schema: { type: 'string' } } } };
+  const accepted = {
+    description: 'Accepted',
+    content: body,
+    headers: { 'X-Queue-Id': { schema: { type: 'string' } } },
+  };
+  const document = (openapi: string, responses: Record<string, unknown>) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: { '/pets': { post: { operationId: 'createPet', responses } } },
+  });
+
+  async function parseDocument(doc: unknown): Promise<ApiSpec> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-408-'));
+    try {
+      writeFileSync(join(dir, 'spec.json'), JSON.stringify(doc));
+      return await parseSpec(join(dir, 'spec.json'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** The one `operation-modified` change of a diff, with its summary; a secondary body's model coming or going is reported beside it. */
+  const operationChange = (before: ApiSpec, after: ApiSpec) => {
+    const diff = diffSpecs(before, after);
+    const changes = diff.changes.filter((c) => c.kind === 'operation-modified');
+    expect(changes).toHaveLength(1);
+    return { change: changes[0]!, summary: diff.summary };
+  };
+  /** What a dropped 2xx of the issue's shape reports: its one media type and its header, each under `statusCode`, breaking. */
+  const removedAt = (statusCode: number, headerName: string) => ({
+    responseContentTypesChanged: true,
+    responseContentTypeChanges: [
+      {
+        statusCode,
+        added: [],
+        removed: ['application/json'],
+        retyped: [],
+        reparameterized: [],
+        classification: 'breaking',
+      },
+    ],
+    responseHeadersChanged: true,
+    responseHeaderChanges: [{ kind: 'header-removed', headerName, statusCode, classification: 'breaking' }],
+  });
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    describe(`OpenAPI ${openapi}`, () => {
+      it("reports the issue's 200 + 202 → 201 + 202 as the 200's body and header removed, breaking, beside the status move", async () => {
+        const before = await parseDocument(document(openapi, { '200': ok, '202': accepted }));
+        const after = await parseDocument(document(openapi, { '201': ok, '202': accepted }));
+        const { change, summary } = operationChange(before, after);
+        // Used to be `responseStatusCodeChanged` alone, additive (`oagen diff` exited 1): the two
+        // primaries paired by code though the old 200 was no longer declared.
+        expect(change).toMatchObject({
+          operationName: 'createPet',
+          responseChanged: false,
+          ...removedAt(200, 'X-Pet-Id'),
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 201,
+          classification: 'breaking',
+        });
+        // The new 201 is a 2xx the new spec adds and the kept 202 is unchanged: nothing else is reported.
+        expect(change.responseContentTypeChanges).toHaveLength(1);
+        expect(change.responseHeaderChanges).toHaveLength(1);
+        // One breaking change: `oagen diff` exits 2, as before #346.
+        expect(summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+      });
+
+      it('reports the reverse, 201 + 202 → 200 + 202, the same way under 201', async () => {
+        const before = await parseDocument(document(openapi, { '201': ok, '202': accepted }));
+        const after = await parseDocument(document(openapi, { '200': ok, '202': accepted }));
+        const { change, summary } = operationChange(before, after);
+        expect(change).toMatchObject({
+          ...removedAt(201, 'X-Pet-Id'),
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 201,
+          newResponseStatusCode: 200,
+          classification: 'breaking',
+        });
+        expect(change.responseContentTypeChanges).toHaveLength(1);
+        expect(change.responseHeaderChanges).toHaveLength(1);
+        expect(summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+      });
+
+      it('still reports the 200 dropped beside a kept 202 as removed under 200, breaking', async () => {
+        const before = await parseDocument(document(openapi, { '200': ok, '202': accepted }));
+        const after = await parseDocument(document(openapi, { '202': accepted }));
+        const { change, summary } = operationChange(before, after);
+        // As before this fix: the 202 is the new primary, paired with the old 202 by code.
+        expect(change).toMatchObject({
+          ...removedAt(200, 'X-Pet-Id'),
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 202,
+          classification: 'breaking',
+        });
+        expect(summary).toMatchObject({ modified: 1, additive: 0 });
+        // Adding a 201 beside the kept 202 no longer turns that breaking change into an additive one.
+        const replaced = await parseDocument(document(openapi, { '201': ok, '202': accepted }));
+        expect(operationChange(before, replaced).change).toMatchObject({
+          ...removedAt(200, 'X-Pet-Id'),
+          classification: 'breaking',
+        });
+      });
+
+      it('leaves a lone 200 that became a lone 201 as the status move alone, additive, as today', async () => {
+        const lone200 = await parseDocument(document(openapi, { '200': ok }));
+        const lone201 = await parseDocument(document(openapi, { '201': ok }));
+        const { change, summary } = operationChange(lone200, lone201);
+        // Whether a bare status move breaks callers is left to #407: the classification is unchanged here.
+        expect(change).toMatchObject({
+          responseChanged: false,
+          responseContentTypesChanged: false,
+          responseContentTypeChanges: [],
+          responseHeadersChanged: false,
+          responseHeaderChanges: [],
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 201,
+          classification: 'additive',
+        });
+        expect(summary).toMatchObject({ modified: 1, breaking: 0, additive: 1 });
+        expect(operationChange(lone201, lone200).change).toMatchObject({
+          responseHeaderChanges: [],
+          responseContentTypeChanges: [],
+          responseStatusCodeChanged: true,
+          classification: 'additive',
+        });
+      });
+
+      it('is no move either when only one side declares several 2xx: the old primary is reported removed', async () => {
+        const lone200 = await parseDocument(document(openapi, { '200': ok }));
+        const several = await parseDocument(document(openapi, { '201': ok, '202': accepted }));
+        // A lone 200 that became a 201 beside a new 202: the 200 is gone, the 201 and 202 are added.
+        expect(operationChange(lone200, several).change).toMatchObject({
+          ...removedAt(200, 'X-Pet-Id'),
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 201,
+          classification: 'breaking',
+        });
+        // A 201 beside a 202 that became a lone 200: both old codes are gone, each reported under its own.
+        const { change } = operationChange(several, lone200);
+        expect(change).toMatchObject({
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 201,
+          newResponseStatusCode: 200,
+          classification: 'breaking',
+        });
+        expect(change.responseContentTypeChanges).toMatchObject([
+          { statusCode: 201, removed: ['application/json'], classification: 'breaking' },
+          { statusCode: 202, removed: ['application/json'], classification: 'breaking' },
+        ]);
+        expect(change.responseHeaderChanges).toEqual([
+          { kind: 'header-removed', headerName: 'X-Pet-Id', statusCode: 201, classification: 'breaking' },
+          { kind: 'header-removed', headerName: 'X-Queue-Id', statusCode: 202, classification: 'breaking' },
+        ]);
+      });
+
+      it('reports nothing for an unchanged operation, nor for a 202 added beside a kept 200', async () => {
+        const before = await parseDocument(document(openapi, { '200': ok, '202': accepted }));
+        expect(diffSpecs(before, before).changes).toEqual([]);
+        // The 200 stays the primary and pairs by code; the 202 the new spec adds is no header or
+        // media-type change (#346), so the operation is not modified at all (its body's model is
+        // reported beside it as `model-added`).
+        const lone200 = await parseDocument(document(openapi, { '200': ok }));
+        expect(diffSpecs(lone200, before).changes.filter((c) => c.kind === 'operation-modified')).toEqual([]);
+      });
+    });
+  }
+
+  describe('diffOperations', () => {
+    const pet: TypeRef = { kind: 'model', name: 'Pet' };
+    const problem: TypeRef = { kind: 'model', name: 'Problem' };
+    const string: TypeRef = { kind: 'primitive', type: 'string' };
+    const unknown: TypeRef = { kind: 'primitive', type: 'unknown' };
+    const header = (name: string): ResponseHeader => ({ name, type: string, required: false });
+    const json: ResponseContent[] = [{ contentType: 'application/json', type: pet }];
+    /** A 2xx entry as the parser builds one: a `Pet` JSON body under `statusCode`, carrying one header. */
+    const entry = (statusCode: number, headerName: string): SuccessResponse => ({
+      statusCode,
+      type: pet,
+      contentTypes: ['application/json'],
+      contents: json,
+      headers: [header(headerName)],
+    });
+    /** `createPet` whose primary is `primary` — a `Pet` JSON body carrying `X-Pet-Id` — beside `others`. */
+    const createPet = (primary: number, others: SuccessResponse[] = [], over: Partial<Operation> = {}): Operation => ({
+      name: 'createPet',
+      httpMethod: 'post',
+      path: '/pets',
+      pathParams: [],
+      queryParams: [],
+      headerParams: [],
+      response: pet,
+      responseStatusCode: primary,
+      responseContentTypes: ['application/json'],
+      responseContents: json,
+      responseHeaders: [header('X-Pet-Id')],
+      successResponses: [entry(primary, 'X-Pet-Id'), ...others],
+      errors: [],
+      injectIdempotencyKey: false,
+      ...over,
+    });
+    const modified = (oldOp: Operation, newOp: Operation) => {
+      const changes = diffOperations('Pets', [oldOp], [newOp]);
+      expect(changes).toHaveLength(1);
+      const [change] = changes;
+      if (change?.kind !== 'operation-modified') throw new Error(`expected operation-modified, got ${change?.kind}`);
+      return change;
+    };
+
+    it('counts a 3xx beside the primary: 200 + 302 → 201 + 302 is the 200 removed, not a move', () => {
+      const redirect: SuccessResponse = { statusCode: 302, type: unknown, headers: [header('Location')] };
+      const change = modified(createPet(200, [redirect]), createPet(201, [redirect]));
+      expect(change.responseContentTypeChanges).toMatchObject([
+        { statusCode: 200, removed: ['application/json'], classification: 'breaking' },
+      ]);
+      expect(change.responseHeaderChanges).toEqual([
+        { kind: 'header-removed', headerName: 'X-Pet-Id', statusCode: 200, classification: 'breaking' },
+      ]);
+      expect(change).toMatchObject({
+        responseStatusCodeChanged: true,
+        oldResponseStatusCode: 200,
+        newResponseStatusCode: 201,
+        classification: 'breaking',
+      });
+    });
+
+    it('counts neither errors nor fallbacks: a lone 200 beside a 404 and a default that became a 201 still moved', () => {
+      const beside: Partial<Operation> = {
+        errors: [{ statusCode: 404, type: problem }],
+        defaultResponse: { type: problem },
+      };
+      const change = modified(createPet(200, [], beside), createPet(201, [], beside));
+      expect(change.responseContentTypeChanges).toEqual([]);
+      expect(change.responseHeaderChanges).toEqual([]);
+      expect(change).toMatchObject({
+        errorsChanged: false,
+        fallbackResponsesChanged: false,
+        responseStatusCodeChanged: true,
+        oldResponseStatusCode: 200,
+        newResponseStatusCode: 201,
+        classification: 'additive',
+      });
+    });
+
+    it('reports a primary of several that moved to a code both sides declare as before: it pairs by that code', () => {
+      // 200 + 202 → 202 + 203, the 202 now the primary: the old 200 is gone, the 203 is added.
+      const change = modified(createPet(200, [entry(202, 'X-Queue-Id')]), createPet(202, [entry(203, 'X-Later')]));
+      expect(change.responseContentTypeChanges).toMatchObject([
+        { statusCode: 200, removed: ['application/json'], classification: 'breaking' },
+      ]);
+      expect(change.responseHeaderChanges).toEqual([
+        { kind: 'header-added', headerName: 'X-Pet-Id', statusCode: 202, classification: 'additive' },
+        { kind: 'header-removed', headerName: 'X-Queue-Id', statusCode: 202, classification: 'breaking' },
+        { kind: 'header-removed', headerName: 'X-Pet-Id', statusCode: 200, classification: 'breaking' },
+      ]);
+      expect(change).toMatchObject({ responseStatusCodeChanged: true, classification: 'breaking' });
     });
   });
 });
