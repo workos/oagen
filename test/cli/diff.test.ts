@@ -149,3 +149,60 @@ describe('diffCommand — a required flag on a body carried in requestBodyConten
     });
   }
 });
+
+describe('diffCommand — a moved success status code (#407)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'oagen-407-'));
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The issue's `createPet` declaring `responses`: each 2xx an inline `{ id }` body, each 3xx a `Location` header. */
+  const body = { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } };
+  const location = { Location: { schema: { type: 'string' } } };
+  function write(name: string, openapi: string, responses: Record<string, unknown>): string {
+    const path = join(dir, name);
+    writeFileSync(
+      path,
+      JSON.stringify({
+        openapi,
+        info: { title: 'Pets', version: '1' },
+        paths: { '/pets': { post: { operationId: 'createPet', responses } } },
+      }),
+    );
+    return path;
+  }
+
+  async function exitCodeOf(oldPath: string, newPath: string): Promise<number> {
+    const err: any = await diffCommand({ old: oldPath, new: newPath }).catch((e) => e);
+    return err.exitCode;
+  }
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    it(`exits 2 for a lone code that moved and 1 for a 200 added beside a kept 201 (OpenAPI ${openapi})`, async () => {
+      const lone200 = write('lone200.json', openapi, { '200': { description: 'OK', content: body } });
+      const lone201 = write('lone201.json', openapi, { '201': { description: 'Created', content: body } });
+      const lone302 = write('lone302.json', openapi, { '302': { description: 'Found', headers: location } });
+      const lone301 = write('lone301.json', openapi, { '301': { description: 'Moved', headers: location } });
+      const both = write('both.json', openapi, {
+        '200': { description: 'OK', content: body },
+        '201': { description: 'Created', content: body },
+      });
+      // The issue's three diffs: the first two used to exit 1.
+      expect(await exitCodeOf(lone200, lone201), 'lone200 → lone201').toBe(2);
+      expect(await exitCodeOf(lone302, lone301), 'lone302 → lone301').toBe(2);
+      expect(await exitCodeOf(both, lone201), 'both → lone201').toBe(2);
+      // The other way round, and the one move that keeps the old code declared.
+      expect(await exitCodeOf(lone201, lone200), 'lone201 → lone200').toBe(2);
+      expect(await exitCodeOf(lone301, lone302), 'lone301 → lone302').toBe(2);
+      expect(await exitCodeOf(lone201, both), 'lone201 → both').toBe(1);
+      expect(await exitCodeOf(lone200, lone200), 'unchanged').toBe(0);
+    });
+  }
+});
