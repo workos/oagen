@@ -10,6 +10,7 @@ import {
 } from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 import { parseSpec, type OpenApiDocument } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import type { ApiSpec, Field, Parameter, TypeRef } from '../../src/ir/types.js';
 
 describe('extractSchemas – backend suffix handling', () => {
@@ -2146,6 +2147,277 @@ describe('#560', () => {
       },
     ]);
   });
+
+  // #588 review: a component that declares its enum inside a lone `allOf`
+  // member, with no `$ref`, names no enum component, so it is no alias — it
+  // is the enum itself, read as the plain spelling is.
+  const petPaths = (kindRef: string) => ({
+    '/pets': {
+      get: {
+        operationId: 'listPets',
+        parameters: [{ name: 'kind', in: 'query', schema: ref(kindRef) }],
+        responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Pet') } } } },
+      },
+    },
+  });
+  const catDog = [
+    { name: 'CAT', value: 'cat' },
+    { name: 'DOG', value: 'dog' },
+  ];
+  const largeSmall = [
+    { name: 'LARGE', value: 'large' },
+    { name: 'SMALL', value: 'small' },
+  ];
+
+  it.each(['3.1.0', '3.0.3'])(
+    'reads a component that declares its enum inside a lone allOf member as the enum itself, not as an alias (review, OAS %s)',
+    async (openapi) => {
+      const pet = { type: 'object', required: ['kind', 'size'], properties: { kind: ref('Kind'), size: ref('Size') } };
+      const plain = await parse(
+        {
+          Pet: pet,
+          Kind: { type: 'string', enum: ['cat', 'dog'], description: 'The kind of pet.' },
+          Size: { type: 'string', enum: ['large', 'small'], description: 'The size of the pet.' },
+        },
+        petPaths('Kind'),
+        openapi,
+      );
+      // The review's repro: the enum inside a lone member, the text beside the `allOf`.
+      const wrapped = await parse(
+        {
+          Pet: pet,
+          Kind: { allOf: [{ type: 'string', enum: ['cat', 'dog'] }], description: 'The kind of pet.' },
+          Size: { allOf: [{ type: 'string', enum: ['large', 'small'] }], description: 'The size of the pet.' },
+        },
+        petPaths('Kind'),
+        openapi,
+      );
+      // The text on an annotating member, and an alias in front of the component.
+      const annotated = await parse(
+        {
+          Pet: { ...pet, properties: { kind: ref('PetKind'), size: ref('Size') } },
+          PetKind: ref('Kind'),
+          Kind: { allOf: [{ type: 'string', enum: ['cat', 'dog'] }, { description: 'The kind of pet.' }] },
+          Size: { allOf: [{ type: 'string', enum: ['large', 'small'] }, { description: 'The size of the pet.' }] },
+        },
+        petPaths('PetKind'),
+        openapi,
+      );
+
+      for (const spec of [plain, wrapped, annotated]) {
+        // No alias and nothing lifted as `UnknownEnum`: `Kind` and `Size` are
+        // the enums, their text on them, and a field that names one carries
+        // nothing of its own, as for any enum component.
+        expect(names(spec)).toEqual({ enums: ['Kind', 'Size'], models: ['Pet'] });
+        expect(spec.enums).toEqual([
+          { name: 'Kind', description: 'The kind of pet.', values: catDog },
+          { name: 'Size', description: 'The size of the pet.', values: largeSmall },
+        ]);
+        expect(fieldsOf(spec, 'Pet').map(own)).toEqual([
+          { name: 'kind', type: kind, ...none },
+          { name: 'size', type: { kind: 'enum', name: 'Size' }, ...none },
+        ]);
+        // A parameter reads the component a bare `$ref` names, through an alias too.
+        const [listPets] = spec.services.flatMap((service) => service.operations);
+        expect(listPets.queryParams.map(({ name, type, description }) => ({ name, type, description }))).toEqual([
+          { name: 'kind', type: kind, description: 'The kind of pet.' },
+        ]);
+      }
+      // `oagen diff` from the plain spelling reports nothing, either way.
+      for (const spec of [wrapped, annotated]) {
+        expect(diffSpecs(plain, spec)).toMatchObject({ changes: [], behaviorChanges: [] });
+        expect(diffSpecs(spec, plain)).toMatchObject({ changes: [], behaviorChanges: [] });
+      }
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'])(
+    'reads the wrapper’s deprecated, default and limits as the enum’s, as the plain spelling declares them (review, OAS %s)',
+    async (openapi) => {
+      const document = (Kind: Record<string, unknown>) =>
+        parse(
+          {
+            Pet: { type: 'object', properties: { kind: ref('Kind'), alias: ref('PetKind') } },
+            PetKind: ref('Kind'),
+            Kind,
+          },
+          {
+            '/pets': {
+              get: {
+                operationId: 'listPets',
+                parameters: [
+                  { name: 'kind', in: 'query', schema: ref('Kind') },
+                  { name: 'alias', in: 'query', schema: ref('PetKind') },
+                ],
+                responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Pet') } } } },
+              },
+            },
+          },
+          openapi,
+        );
+      const keywords = { maxLength: 3, deprecated: true, default: 'cat' };
+      const plain = await document({ type: 'string', enum: ['cat', 'dog'], ...keywords });
+      const wrapped = await document({ allOf: [{ type: 'string', enum: ['cat', 'dog'] }], ...keywords });
+      const annotated = await document({ allOf: [{ type: 'string', enum: ['cat', 'dog'] }, keywords] });
+
+      for (const spec of [plain, wrapped, annotated]) {
+        expect(names(spec)).toEqual({ enums: ['Kind'], models: ['Pet'] });
+        // The flag and the default on the `Enum`; a field that names it,
+        // directly or through an alias, carries neither and no limit, as
+        // for any enum component — the `Enum` carries what it declares.
+        expect(spec.enums).toEqual([{ name: 'Kind', values: catDog, default: 'cat', deprecated: true }]);
+        expect(fieldsOf(spec, 'Pet').map(own)).toEqual([
+          { name: 'kind', type: kind, ...none },
+          { name: 'alias', type: kind, ...none },
+        ]);
+        // A parameter reads them from the component a bare `$ref` names,
+        // the enum an alias ends at included.
+        const [listPets] = spec.services.flatMap((service) => service.operations);
+        expect(
+          listPets.queryParams.map(({ name, type, deprecated, default: fallback, constraints }) => ({
+            name,
+            type,
+            deprecated,
+            default: fallback,
+            constraints,
+          })),
+        ).toEqual([
+          { name: 'kind', type: kind, deprecated: true, default: 'cat', constraints: { maxLength: 3 } },
+          { name: 'alias', type: kind, deprecated: true, default: 'cat', constraints: { maxLength: 3 } },
+        ]);
+      }
+      for (const spec of [wrapped, annotated]) {
+        expect(diffSpecs(plain, spec)).toMatchObject({ changes: [], behaviorChanges: [] });
+      }
+    },
+  );
+
+  it('reads every such spelling as the enum: nested wrappers, a oneOf of consts, the member’s own nullability, and OAS 3.0 nullable beside the allOf', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          nested: ref('Nested'),
+          const_union: ref('ConstUnion'),
+          null_member: ref('NullMember'),
+          null_list: ref('NullList'),
+          keyed: ref('Keyed'),
+        },
+      },
+      Nested: {
+        allOf: [{ allOf: [{ type: 'string', enum: ['a', 'b'], description: 'Inner.' }], description: 'Middle.' }],
+        description: 'Outer.',
+      },
+      ConstUnion: {
+        allOf: [{ oneOf: [{ const: 'x', description: 'The x.' }, { const: 'y' }] }, { description: 'Consts.' }],
+      },
+      NullMember: { allOf: [{ type: 'string', enum: ['cat', 'dog', null] }] },
+      NullList: { allOf: [{ type: ['string', 'null'], enum: ['cat', 'dog'] }] },
+      Keyed: {
+        allOf: [{ type: 'string', enum: ['k1', 'k2'], description: 'Member.', example: 'k1', 'x-member': 1 }],
+        externalDocs: { url: 'https://example.com/keyed' },
+        'x-wrapper': 2,
+      },
+    });
+    const spec30 = await parse(
+      {
+        Holder: { type: 'object', properties: { flagged: ref('Flagged'), unflagged: ref('Unflagged') } },
+        Flagged: { allOf: [{ type: 'string', enum: ['cat', 'dog'], nullable: true }] },
+        // OAS 3.0 gives `nullable` meaning beside a `type` only, so beside the
+        // `allOf` it declares nothing — on the component as on a field.
+        Unflagged: { allOf: [{ type: 'string', enum: ['cat', 'dog'] }], nullable: true },
+      },
+      {},
+      '3.0.3',
+    );
+
+    expect(names(spec)).toEqual({
+      enums: ['Nested', 'ConstUnion', 'NullMember', 'NullList', 'Keyed'],
+      models: ['Holder'],
+    });
+    expect(
+      spec.enums.map(({ name, description, values, externalDocs, extensions }) => ({
+        name,
+        description,
+        values: values.map(({ value, description }) => ({ value, description })),
+        externalDocs,
+        extensions,
+      })),
+    ).toEqual([
+      // Nested wrappers compose outermost-first: the outer text wins.
+      { name: 'Nested', description: 'Outer.', values: [{ value: 'a' }, { value: 'b' }] },
+      // A `oneOf` of consts as the member keeps each value's own text.
+      { name: 'ConstUnion', description: 'Consts.', values: [{ value: 'x', description: 'The x.' }, { value: 'y' }] },
+      { name: 'NullMember', values: [{ value: 'cat' }, { value: 'dog' }] },
+      { name: 'NullList', values: [{ value: 'cat' }, { value: 'dog' }] },
+      // The member's own text and keys stand where the wrapper has none; the wrapper's link and keys ride onto it.
+      {
+        name: 'Keyed',
+        description: 'Member.',
+        values: [{ value: 'k1' }, { value: 'k2' }],
+        externalDocs: { url: 'https://example.com/keyed' },
+        extensions: { 'x-member': 1, 'x-wrapper': 2 },
+      },
+    ]);
+    expect(fieldsOf(spec, 'Holder').map(({ name, type, example }) => ({ name, type, example }))).toEqual([
+      { name: 'nested', type: { kind: 'enum', name: 'Nested' } },
+      { name: 'const_union', type: { kind: 'enum', name: 'ConstUnion' } },
+      { name: 'null_member', type: { kind: 'nullable', inner: { kind: 'enum', name: 'NullMember' } } },
+      { name: 'null_list', type: { kind: 'nullable', inner: { kind: 'enum', name: 'NullList' } } },
+      // A bare `$ref` takes the component's `example`: the member's, read through the wrapper.
+      { name: 'keyed', type: { kind: 'enum', name: 'Keyed' }, example: 'k1' },
+    ]);
+    expect(names(spec30)).toEqual({ enums: ['Flagged', 'Unflagged'], models: ['Holder'] });
+    expect(fieldsOf(spec30, 'Holder').map(typed)).toEqual([
+      { name: 'flagged', type: { kind: 'nullable', inner: { kind: 'enum', name: 'Flagged' } } },
+      { name: 'unflagged', type: { kind: 'enum', name: 'Unflagged' } },
+    ]);
+  });
+
+  it.each(['3.1.0', '3.0.3'])(
+    'conjoins an alias’s limits once, its own pattern over its annotating member’s, on a field and a parameter (review, OAS %s)',
+    async (openapi) => {
+      const spec = await parse(
+        {
+          Holder: {
+            type: 'object',
+            properties: { name: ref('NameAlias'), kind: ref('KindAlias'), tags: ref('TagsAlias') },
+          },
+          Name: { type: 'string', minLength: 1 },
+          // The member is a level for documentation; its limits are read with the alias's own, which keeps `^a`.
+          NameAlias: { allOf: [ref('Name'), { pattern: 'b$', maxLength: 5, description: 'The name.' }], pattern: '^a' },
+          Kind: { type: 'string', enum: ['cat', 'dog'] },
+          KindAlias: { allOf: [ref('Kind'), { pattern: 'b$' }], pattern: '^a' },
+          Tags: { type: 'array', items: { type: 'string' } },
+          TagsAlias: { allOf: [ref('Tags'), { maxItems: 9 }], maxItems: 3 },
+        },
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [
+                { name: 'name', in: 'query', schema: ref('NameAlias') },
+                { name: 'kind', in: 'query', schema: ref('KindAlias') },
+                { name: 'tags', in: 'query', schema: ref('TagsAlias') },
+              ],
+              responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        openapi,
+      );
+      const limits = ({ name, description, constraints }: Field | Parameter) => ({ name, description, constraints });
+      const expected = [
+        { name: 'name', description: 'The name.', constraints: { minLength: 1, maxLength: 5, pattern: '^a' } },
+        { name: 'kind', constraints: { pattern: '^a' } },
+        { name: 'tags', constraints: { maxItems: 3 } },
+      ];
+
+      expect(fieldsOf(spec, 'Holder').map(limits)).toEqual(expected);
+      const [listPets] = spec.services.flatMap((service) => service.operations);
+      expect(listPets.queryParams.map(limits)).toEqual(expected);
+    },
+  );
 });
 
 describe('#569', () => {
@@ -2569,6 +2841,11 @@ describe('#569', () => {
         Pet: { type: 'object', properties: { id: { type: 'string' } } },
         Anything: { description: 'Any value.' },
         AnyAlias: ref('Anything'),
+        // A single-entry type list beside the `allOf` is that type, so the
+        // reference is still followed (#569 review: the list stopped the
+        // walk, and the 200 kept the pick as `unknown`).
+        ListedAlias: { type: ['string'], allOf: [ref('Anything')] },
+        ListedMaybe: { type: ['string', 'null'], allOf: [ref('Anything')] },
         Kind: { type: 'string', const: 'cat' },
       },
       {
@@ -2578,7 +2855,12 @@ describe('#569', () => {
         '/annotated': {
           get: { operationId: 'annotated', ...pick({ allOf: [ref('Anything'), { description: 'Any.' }] }) },
         },
+        '/listed': { get: { operationId: 'listed', ...pick(ref('ListedAlias')) } },
+        '/listedInline': {
+          get: { operationId: 'listedInline', ...pick({ type: ['string'], allOf: [ref('Anything')] }) },
+        },
         '/maybe': { get: { operationId: 'maybe', ...pick({ oneOf: [ref('Anything'), { type: 'null' }] }) } },
+        '/listedMaybe': { get: { operationId: 'listedMaybe', ...pick(ref('ListedMaybe')) } },
         '/kind': { get: { operationId: 'kind', ...pick(ref('Kind')) } },
       },
     );
@@ -2591,10 +2873,140 @@ describe('#569', () => {
       alias: { kind: 'model', name: 'Pet' },
       wrapped: { kind: 'model', name: 'Pet' },
       annotated: { kind: 'model', name: 'Pet' },
+      listed: { kind: 'model', name: 'Pet' },
+      listedInline: { kind: 'model', name: 'Pet' },
       // `nullable<unknown>` and a literal are typed, so the 200 keeps the pick.
       maybe: nullable(unknown),
+      listedMaybe: nullable(unknown),
       kind: cat,
     });
+  });
+
+  // An untyped schema written inside a lone `allOf` is `unknown` inline, and
+  // the lone-`allOf` spelling of a `const`, a type list or a primitive is
+  // read through as a primitive component; the untyped one stayed a
+  // fieldless model (#569 review), so `Metadata: { description }` and
+  // `Metadata: { allOf: [{ description }] }` diffed as a model added and a
+  // field's type changed.
+  it.each(['3.0.3', '3.1.0'])(
+    'types a $ref to an untyped schema inside a lone allOf as unknown, the members documenting and limiting the field (OAS %s)',
+    async (openapi) => {
+      const holder = (shape: (name: string) => unknown) => ({
+        Holder: {
+          type: 'object',
+          required: ['metadata', 'empty', 'limited', 'own', 'aliased'],
+          properties: {
+            metadata: shape('Metadata'),
+            empty: shape('Empty'),
+            limited: shape('Limited'),
+            own: shape('Own'),
+            aliased: shape('MetaAlias'),
+          },
+        },
+      });
+      const components = {
+        Metadata: { allOf: [{ description: 'Free-form metadata.' }] },
+        Empty: { allOf: [{}] },
+        Limited: { allOf: [{ description: 'a' }, { maxLength: 3 }] },
+        // The schema's own text wins over a member's, as a wrapper's does.
+        Own: { allOf: [{ description: 'Member.' }], description: 'Own.', deprecated: true, 'x-kind': 'own' },
+        MetaAlias: { allOf: [ref('Metadata')] },
+      };
+      const referenced = await parse({ ...holder(ref), ...components }, {}, openapi);
+      // The same shapes written on the fields; `Metadata` stays for the alias to name.
+      const inline = await parse(
+        { ...holder((name) => components[name as keyof typeof components]), Metadata: components.Metadata },
+        {},
+        openapi,
+      );
+
+      expect(names(referenced)).toEqual({ enums: [], models: ['Holder'] });
+      expect(names(inline)).toEqual({ enums: [], models: ['Holder'] });
+      const own = ({ name, type, constraints, description, deprecated, extensions }: Field) => ({
+        name,
+        type,
+        constraints,
+        description,
+        deprecated,
+        extensions,
+      });
+      const none = { constraints: undefined, deprecated: undefined, extensions: undefined };
+      const expected = [
+        { name: 'metadata', type: unknown, ...none, description: 'Free-form metadata.' },
+        { name: 'empty', type: unknown, ...none, description: undefined },
+        // The member's limit is the field's and its type's alike (#545), `unknown` or not.
+        {
+          name: 'limited',
+          type: { ...unknown, constraints: { maxLength: 3 } },
+          ...none,
+          constraints: { maxLength: 3 },
+          description: 'a',
+        },
+        { name: 'own', type: unknown, ...none, description: 'Own.', deprecated: true, extensions: { 'x-kind': 'own' } },
+      ];
+      expect(fieldsOf(referenced, 'Holder').map(own)).toEqual([
+        ...expected,
+        // The alias names no model either: a bare `$ref` to it reads through to `unknown` and the member's text.
+        { name: 'aliased', type: unknown, ...none, description: 'Free-form metadata.' },
+      ]);
+      // Each is the same schema written inline, so the field reads the same
+      // either way — except under the `allOf` around the `$ref`, where the
+      // field documents itself, as it does around a `$ref` to any primitive component.
+      expect(fieldsOf(inline, 'Holder').map(own)).toEqual([
+        ...expected,
+        { name: 'aliased', type: unknown, ...none, description: undefined },
+      ]);
+    },
+  );
+
+  it('types a $ref to an untyped lone allOf as a $ref to the untyped schema itself does (the review’s diff)', async () => {
+    const pet = (metadata: unknown) => ({
+      Pet: { type: 'object', required: ['metadata'], properties: { metadata: ref('Metadata') } },
+      Metadata: metadata,
+    });
+    const plain = await parse(pet({ description: 'Free-form metadata.' }));
+    const lone = await parse(pet({ allOf: [{ description: 'Free-form metadata.' }] }));
+
+    expect(lone.models).toEqual(plain.models);
+    expect(lone.enums).toEqual(plain.enums);
+    expect(fieldsOf(lone, 'Pet').map(documented)).toEqual([
+      { name: 'metadata', type: unknown, constraints: undefined, description: 'Free-form metadata.' },
+    ]);
+  });
+
+  it('leaves an allOf with a typing member to the readings it has: one member is the member, several are a fieldless model', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          typed: ref('Typed'),
+          two_typed: ref('TwoTyped'),
+          nested: ref('Nested'),
+        },
+      },
+      // One typing member beside an annotating one is that member (#555), a primitive component.
+      Typed: { allOf: [{ type: 'string', maxLength: 5 }, { description: 'Typed.' }] },
+      // Two typing members are read as neither (`allOfTypesSchema`): the model it always became.
+      TwoTyped: { allOf: [{ type: 'string' }, { type: 'integer' }] },
+      // A lone member that is itself a lone `allOf` is unwrapped level by
+      // level (`componentEntries`), as `schemaToTypeRef` unwraps it inline,
+      // to the untyped schema; the inner member's text stays the inner
+      // wrapper's, as it does inline.
+      Nested: { allOf: [{ allOf: [{ description: 'Deep.' }] }] },
+    });
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Holder', 'TwoTyped'] });
+    expect(fieldsOf(spec, 'Holder').map(documented)).toEqual([
+      // The component's limit rides on the primitive its `$ref` resolves to (#545).
+      {
+        name: 'typed',
+        type: { ...string, constraints: { maxLength: 5 } },
+        constraints: { maxLength: 5 },
+        description: 'Typed.',
+      },
+      { name: 'two_typed', type: { kind: 'model', name: 'TwoTyped' }, constraints: undefined, description: undefined },
+      { name: 'nested', type: unknown, constraints: undefined, description: undefined },
+    ]);
   });
 
   it('leaves a component that declares a type no rule reads as the fieldless model it always became', async () => {
@@ -2935,8 +3347,9 @@ describe('#568', () => {
               properties: {
                 shape: union(
                   [
-                    animal('a', { version: pin('v1') }, { title: 'A' }),
-                    animal('b', { version: pin('v1') }, { title: 'B' }),
+                    // `version` before `kind`, so the shared constant is met first and has to be passed over.
+                    animal('a', {}, { title: 'A', properties: { version: pin('v1'), kind: pin('a') } }),
+                    animal('b', {}, { title: 'B', properties: { version: pin('v1'), kind: pin('b') } }),
                   ],
                   discriminated,
                 ),
@@ -3018,6 +3431,183 @@ describe('#568', () => {
         expect(unresolvedMappingTargets(spec)).toEqual([]);
       },
     );
+
+    /** A `oneOf` of the named models, discriminated on `kind` with `mapping`. */
+    const unionOf = (variants: string[], mapping: Record<string, string>) => ({
+      kind: 'union',
+      variants: variants.map(model),
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping },
+    });
+    const literal = (value: string) => ({ kind: 'literal', value });
+
+    it.each([true, false])(
+      'reads a $ref variant’s const through a $ref member of its component’s allOf and through a $ref on the property to a const component, on a field and as a component (review; keyword: %s)',
+      async (discriminated) => {
+        const pet = union([ref('Cat'), ref('Dog')], discriminated);
+        const small = union([ref('Hamster'), ref('Dog')], discriminated);
+        const young = union([ref('Puppy'), ref('CatBase')], discriminated);
+        const spec = await parse(
+          {
+            HamsterKind: pin('hamster'),
+            Dog: animal('dog', { barks: { type: 'boolean' } }),
+            CatBase: animal('cat'),
+            // The const is pinned by a `$ref` member of the component's `allOf`.
+            Cat: { allOf: [ref('CatBase'), { type: 'object', properties: { lives: { type: 'integer' } } }] },
+            Puppy: { allOf: [ref('Dog')] },
+            // The const is pinned by the component the property's own `$ref` names.
+            Hamster: { type: 'object', required: ['kind'], properties: { kind: ref('HamsterKind') } },
+            Pet: pet,
+            Small: small,
+            Young: young,
+            Owner: {
+              type: 'object',
+              properties: {
+                pet,
+                small,
+                young,
+                // The review's control: an inline `allOf` read as its reference was mapped already.
+                wrapped: union([{ allOf: [ref('Dog')] }, ref('CatBase')], discriminated),
+              },
+            },
+          },
+          {},
+          openapi,
+        );
+        expect(fieldType(spec, 'Owner', 'pet')).toEqual(unionOf(['Cat', 'Dog'], { cat: 'Cat', dog: 'Dog' }));
+        expect(fieldType(spec, 'Owner', 'small')).toEqual(
+          unionOf(['Hamster', 'Dog'], { hamster: 'Hamster', dog: 'Dog' }),
+        );
+        expect(fieldType(spec, 'Owner', 'young')).toEqual(
+          unionOf(['Puppy', 'CatBase'], { dog: 'Puppy', cat: 'CatBase' }),
+        );
+        expect(fieldType(spec, 'Owner', 'wrapped')).toEqual(
+          unionOf(['Dog', 'CatBase'], { dog: 'Dog', cat: 'CatBase' }),
+        );
+        expect(discriminatorOf(spec, 'Pet')).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
+        expect(discriminatorOf(spec, 'Small')).toEqual({
+          property: 'kind',
+          mapping: { hamster: 'Hamster', dog: 'Dog' },
+        });
+        expect(discriminatorOf(spec, 'Young')).toEqual({ property: 'kind', mapping: { dog: 'Puppy', cat: 'CatBase' } });
+        // The mapping says what the models say: each pins `kind` to the value it is mapped under.
+        expect(fieldType(spec, 'Cat', 'kind')).toEqual(literal('cat'));
+        expect(fieldType(spec, 'Puppy', 'kind')).toEqual(literal('dog'));
+        // A `const` component is typed inline (#569); a one-value `enum:` component is an enum in OAS 3.0.
+        expect(fieldType(spec, 'Hamster', 'kind')).toEqual(
+          openapi === '3.1.0' ? literal('hamster') : { kind: 'enum', name: 'HamsterKind' },
+        );
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it.each([true, false])(
+      'follows a chain of $ref members and a property $ref aliasing a const component, and reads a component whose allOf comes back to itself once (review; keyword: %s)',
+      async (discriminated) => {
+        const spec = await parse(
+          {
+            HamsterKind: pin('hamster'),
+            KindAlias: ref('HamsterKind'),
+            Dog: animal('dog'),
+            CatBase: animal('cat'),
+            Cat: { allOf: [ref('CatBase'), { type: 'object', properties: { lives: { type: 'integer' } } }] },
+            // Two hops up to the const: Kitten → Cat → CatBase.
+            Kitten: { allOf: [ref('Cat')] },
+            // Two hops to the const component: kind → KindAlias → HamsterKind.
+            Hamster: { type: 'object', required: ['kind'], properties: { kind: ref('KindAlias') } },
+            // A component reached again on one walk is read once.
+            Loop: { allOf: [ref('Loop')], ...animal('loop') },
+            Loop2: { allOf: [ref('Loop3')], ...animal('two') },
+            Loop3: { allOf: [ref('Loop2')] },
+            Owner: {
+              type: 'object',
+              properties: {
+                chain: union([ref('Kitten'), ref('Hamster')], discriminated),
+                self: union([ref('Loop'), ref('Dog')], discriminated),
+                mutual: union([ref('Loop3'), ref('Dog')], discriminated),
+              },
+            },
+          },
+          {},
+          openapi,
+        );
+        expect(fieldType(spec, 'Owner', 'chain')).toEqual(
+          unionOf(['Kitten', 'Hamster'], { cat: 'Kitten', hamster: 'Hamster' }),
+        );
+        expect(fieldType(spec, 'Owner', 'self')).toEqual(unionOf(['Loop', 'Dog'], { loop: 'Loop', dog: 'Dog' }));
+        expect(fieldType(spec, 'Owner', 'mutual')).toEqual(unionOf(['Loop3', 'Dog'], { two: 'Loop3', dog: 'Dog' }));
+        expect(fieldType(spec, 'Kitten', 'kind')).toEqual(literal('cat'));
+        expect(fieldType(spec, 'Loop3', 'kind')).toEqual(literal('two'));
+        expect(unresolvedMappingTargets(spec)).toEqual([]);
+      },
+    );
+
+    it('pins nothing through a property $ref chain that repeats — the loader rejects one, the reader guards it: `{}` under the keyword, no discriminator without it (review)', () => {
+      try {
+        const { models } = extractSchemas({
+          K1: ref('K2'),
+          K2: ref('K1'),
+          Dog: animal('dog'),
+          Odd: { type: 'object', required: ['kind'], properties: { kind: ref('K1') } },
+          Pair: union([ref('Odd'), ref('Dog')], true),
+          PairImplicit: union([ref('Odd'), ref('Dog')], false),
+          Owner: {
+            type: 'object',
+            properties: {
+              pair: union([ref('Odd'), ref('Dog')], true),
+              implicit: union([ref('Odd'), ref('Dog')], false),
+            },
+          },
+        } as unknown as Record<string, SchemaObject>);
+        const modelOf = (name: string) => models.find((m) => m.name === name);
+        const fieldOf = (field: string) => modelOf('Owner')?.fields.find((f) => f.name === field)?.type;
+        expect(modelOf('Pair')?.discriminator).toEqual({ property: 'kind', mapping: {} });
+        expect(modelOf('PairImplicit')?.discriminator).toBeUndefined();
+        expect(fieldOf('pair')).toEqual(unionOf(['Odd', 'Dog'], {}));
+        expect(fieldOf('implicit')).toEqual({
+          kind: 'union',
+          variants: [model('Odd'), model('Dog')],
+          compositionKind: 'oneOf',
+        });
+      } finally {
+        clearSchemaNameTransform();
+      }
+    });
+
+    it('reads one mapping whether `kind` is pinned inline or through a $ref to a const component, so `oagen diff` between the two spellings reports nothing on the union (review)', async () => {
+      const document = (viaRef: boolean) => {
+        const kind = (value: string, component: string) => (viaRef ? ref(component) : pin(value));
+        const pet = union([ref('Cat'), ref('Dog')], true);
+        return {
+          CatKind: pin('cat'),
+          DogKind: pin('dog'),
+          Cat: {
+            type: 'object',
+            required: ['kind'],
+            properties: { kind: kind('cat', 'CatKind'), livesLeft: { type: 'integer' } },
+          },
+          Dog: {
+            type: 'object',
+            required: ['kind'],
+            properties: { kind: kind('dog', 'DogKind'), barks: { type: 'boolean' } },
+          },
+          Pet: pet,
+          Owner: { type: 'object', properties: { pet } },
+        };
+      };
+      const before = await parse(document(false), {}, openapi);
+      const after = await parse(document(true), {}, openapi);
+      expect(fieldType(before, 'Owner', 'pet')).toEqual(petUnion);
+      expect(fieldType(after, 'Owner', 'pet')).toEqual(petUnion);
+      expect(discriminatorOf(after, 'Pet')).toEqual(petDiscriminator);
+      const { changes } = diffSpecs(before, after);
+      // In OAS 3.0 a one-value `enum:` component is an enum, so `Cat.kind` and
+      // `Dog.kind` change type there; neither union does, in either version.
+      const touched = changes.map((c) => ('name' in c ? c.name : c.kind));
+      expect(touched).not.toContain('Owner');
+      expect(touched).not.toContain('Pet');
+      if (openapi === '3.1.0') expect(changes).toEqual([]);
+    });
   });
 });
 
@@ -3391,6 +3981,371 @@ describe('#539', () => {
       expect(fieldOf(spec, 'Kennel', 'kind')?.type).toEqual({ kind: 'enum', name: 'Kind' });
       expect(fieldOf(spec, 'Kennel', 'pets')?.type).toEqual({ kind: 'array', items: model('Pet') });
       expect(warnings).toEqual([]);
+    });
+
+    describe('review', () => {
+      const Made = { type: 'object', properties: { ok: { type: 'boolean' } } };
+
+      it('settles a pointer in a cookie parameter and in a secondary success body', async () => {
+        captureWarnings();
+        const spec = await parse(
+          { Pet, Made },
+          {
+            '/a/{id}': {
+              get: {
+                operationId: 'getA',
+                parameters: [idParam, { name: 'session', in: 'cookie', schema: ref('Pet/properties/id') }],
+                responses: {
+                  '200': { description: 'OK', content: { 'application/json': { schema: ref('Made') } } },
+                  '201': {
+                    description: 'Made',
+                    content: { 'application/json': { schema: ref('Pet/properties/owner') } },
+                  },
+                },
+              },
+            },
+          },
+          openapi,
+        );
+        const op = operation(spec, 'getA');
+        expect(op?.cookieParams?.map(({ name, type }) => ({ name, type }))).toEqual([
+          { name: 'session', type: string },
+        ]);
+        expect(op?.response).toEqual(model('Made'));
+        expect(op?.successResponses?.map(({ statusCode, type }) => ({ statusCode, type }))).toEqual([
+          { statusCode: 200, type: model('Made') },
+          { statusCode: 201, type: model('PetOwner') },
+        ]);
+        expect(modelNames(spec)).toEqual(['Made', 'Pet', 'PetOwner']);
+        expect(warnings).toEqual([]);
+      });
+
+      it('chooses the iterator’s item type from the settled response: a pointer to an array of strings yields strings', async () => {
+        captureWarnings();
+        const paged = (operationId: string, schema: unknown) => ({
+          get: {
+            operationId,
+            parameters: [{ name: 'cursor', in: 'query', schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+          },
+        });
+        const spec = await parse(
+          { Pet: { ...Pet, properties: { ...Pet.properties, tags: { type: 'array', items: { type: 'string' } } } } },
+          {
+            '/tags': paged('listTags', ref('Pet/properties/tags')),
+            '/owners': paged('listOwners', ref('Pet/properties/owner')),
+          },
+          openapi,
+        );
+        const tags = operation(spec, 'listTags');
+        expect(tags?.response).toEqual({ kind: 'array', items: string });
+        expect(tags?.pagination?.strategy).toBe('cursor');
+        expect(tags?.pagination?.itemType).toEqual(string);
+        // A pointer to an object yields the object, as a `$ref` to a component does.
+        const owners = operation(spec, 'listOwners');
+        expect(owners?.response).toEqual(model('PetOwner'));
+        expect(owners?.pagination?.itemType).toEqual(model('PetOwner'));
+        expect(warnings).toEqual([]);
+      });
+
+      it('picks the primary response knowing what a pointer settles to: an untyped 200 loses to a typed 201', async () => {
+        captureWarnings();
+        const twoCodes = (operationId: string, ok: unknown) => ({
+          get: {
+            operationId,
+            parameters: [idParam],
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: ok } } },
+              '201': { description: 'Made', content: { 'application/json': { schema: ref('Made') } } },
+            },
+          },
+        });
+        const spec = await parse(
+          { Pet: { ...Pet, properties: { ...Pet.properties, anything: {} } }, Made },
+          {
+            '/a/{id}': twoCodes('getAnything', ref('Pet/properties/anything')),
+            '/b/{id}': twoCodes('getId', ref('Pet/properties/id')),
+            '/c/{id}': twoCodes('getNope', ref('Pet/properties/id/type')),
+          },
+          openapi,
+        );
+        const anything = operation(spec, 'getAnything');
+        expect(anything?.response).toEqual(model('Made'));
+        expect(anything?.responseStatusCode).toBe(201);
+        expect(anything?.successResponses?.map(({ statusCode, type }) => ({ statusCode, type }))).toEqual([
+          { statusCode: 200, type: unknown },
+          { statusCode: 201, type: model('Made') },
+        ]);
+        // A pointer to a typed schema is typed, so the 200 wins as a `$ref` to a typed component does.
+        const id = operation(spec, 'getId');
+        expect(id?.response).toEqual(string);
+        expect(id?.responseStatusCode).toBe(200);
+        // One that leads nowhere settles to unknown, so it loses too, reported once at its site.
+        const nope = operation(spec, 'getNope');
+        expect(nope?.response).toEqual(model('Made'));
+        expect(nope?.responseStatusCode).toBe(201);
+        expect(warnings).toEqual([
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/id/type" in C.getNope.successResponses.200: no schema at that pointer — typing the site as unknown',
+        ]);
+      });
+
+      it('ends a chain of pointers that reaches itself through an array component’s items', async () => {
+        captureWarnings();
+        const spec = await parse({ Pet }, { '/a/{id}': getOp('getPet', ref('Pet')) }, openapi, {
+          // The bundler rejects a self-referencing pointer, so it is written after bundling.
+          transformSpec: (doc) => {
+            (doc.components as { schemas: Record<string, unknown> }).schemas.Loop = {
+              type: 'array',
+              items: ref('Loop/items'),
+            };
+            const paths = doc.paths as Record<string, unknown>;
+            paths['/loop/{id}'] = getOp('getLoop', ref('Loop'));
+            paths['/loop-item/{id}'] = getOp('getLoopItem', ref('Loop/items'));
+            return doc;
+          },
+        });
+        expect(responseOf(spec, 'getLoop')).toEqual({ kind: 'array', items: unknown });
+        expect(responseOf(spec, 'getLoopItem')).toEqual(unknown);
+        expect(modelNames(spec)).toEqual(['Pet', 'PetOwner']);
+        expect(warnings.sort()).toEqual(
+          [
+            '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Loop/items" in Loop.getLoop.response — typing the site as unknown',
+            '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Loop/items" in LoopItem.getLoopItem.response — typing the site as unknown',
+          ].sort(),
+        );
+      });
+
+      it('types a pointer to an allOf member as the member’s own type, and an inline member of a merge as unknown', async () => {
+        captureWarnings();
+        const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
+        const spec = await parse(
+          {
+            Owner: { type: 'object', required: ['email'], properties: { email: { type: 'string' } } },
+            Pet: { allOf: [ref('Owner'), nickname] },
+            Note: { type: 'object', properties: { author: { allOf: [ref('Owner'), nickname] } } },
+            Solo: {
+              allOf: [{ description: 'An annotation.' }, { type: 'object', properties: { only: { type: 'string' } } }],
+            },
+            Kind: { allOf: [{ type: 'string', enum: ['a', 'b'] }, { description: 'The kind.' }] },
+          },
+          {
+            '/a/{id}': getOp('getPetNickname', ref('Pet/allOf/1')),
+            '/b/{id}': getOp('getPetOwner', ref('Pet/allOf/0')),
+            '/c/{id}': getOp('getPetNicknameField', ref('Pet/allOf/1/properties/nickname')),
+            '/d/{id}': getOp('getNoteAuthorNickname', ref('Note/properties/author/allOf/1')),
+            '/e/{id}': getOp('getSoloMember', ref('Solo/allOf/1')),
+            '/f/{id}': getOp('getSoloAnnotation', ref('Solo/allOf/0')),
+            '/g/{id}': getOp('getKindMember', ref('Kind/allOf/0')),
+            '/h/{id}': getOp('getKind', ref('Kind')),
+          },
+          openapi,
+        );
+        // An inline member of a merge has no type of its own: never the merged model, which requires `Owner`'s `email`.
+        expect(responseOf(spec, 'getPetNickname')).toEqual(unknown);
+        expect(responseOf(spec, 'getNoteAuthorNickname')).toEqual(unknown);
+        // A `$ref` member is its reference; a pointer on through an inline member reads the merged model's field.
+        expect(responseOf(spec, 'getPetOwner')).toEqual(model('Owner'));
+        expect(responseOf(spec, 'getPetNicknameField')).toEqual(string);
+        // A member the merge reads as a property-declaring member is merged too; the one typing member beside
+        // annotating members is what the `allOf` is read as (#555), so the pointer is typed as the `allOf` is.
+        expect(responseOf(spec, 'getSoloMember')).toEqual(unknown);
+        expect(responseOf(spec, 'getSoloAnnotation')).toEqual(unknown);
+        expect(responseOf(spec, 'getKindMember')).toEqual(responseOf(spec, 'getKind'));
+        expect(responseOf(spec, 'getKindMember')).not.toEqual(unknown);
+        expect(modelNames(spec)).toEqual(['Note', 'NoteAuthor', 'Owner', 'Pet', 'Solo']);
+        const member = (pointer: string, site: string) =>
+          `[oagen] Warning: Unresolved schema $ref "#/components/schemas/${pointer}" in ${site}.response: "${pointer.slice(pointer.lastIndexOf('allOf/'))}" is an inline allOf member, which has no type of its own — typing the site as unknown`;
+        expect(warnings.sort()).toEqual(
+          [
+            member('Pet/allOf/1', 'A.getPetNickname'),
+            member('Note/properties/author/allOf/1', 'D.getNoteAuthorNickname'),
+            member('Solo/allOf/1', 'E.getSoloMember'),
+            member('Solo/allOf/0', 'F.getSoloAnnotation'),
+          ].sort(),
+        );
+      });
+
+      it('types a map pointer as the values only when that schema is the one the values are typed from, and a model’s additionalProperties as its catch-all field', async () => {
+        captureWarnings();
+        const Made = { type: 'object', properties: { ok: { type: 'boolean' } } };
+        const spec = await parse(
+          {
+            Made,
+            Box: { type: 'object', properties: { id: { type: 'string' } }, additionalProperties: { type: 'integer' } },
+            Maps: {
+              type: 'object',
+              properties: {
+                byPattern: {
+                  type: 'object',
+                  patternProperties: { '^s': { type: 'string' }, '^n': { type: 'integer' } },
+                },
+                both: {
+                  type: 'object',
+                  additionalProperties: { type: 'boolean' },
+                  patternProperties: { '^s': { type: 'string' } },
+                },
+                any: { type: 'object', additionalProperties: {}, patternProperties: { '^s': { type: 'string' } } },
+                boxed: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  additionalProperties: { type: 'integer' },
+                },
+                patterned: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  patternProperties: { '^s': { type: 'string' } },
+                },
+              },
+            },
+          },
+          {
+            '/a/{id}': getOp('getBoxValues', ref('Box/additionalProperties')),
+            '/b/{id}': getOp('getPatternS', ref('Maps/properties/byPattern/patternProperties/^s')),
+            '/c/{id}': getOp('getPatternN', ref('Maps/properties/byPattern/patternProperties/^n')),
+            '/d/{id}': getOp('getBothValues', ref('Maps/properties/both/additionalProperties')),
+            '/e/{id}': getOp('getBothPattern', ref('Maps/properties/both/patternProperties/^s')),
+            '/f/{id}': getOp('getAnyValues', ref('Maps/properties/any/additionalProperties')),
+            '/g/{id}': getOp('getAnyPattern', ref('Maps/properties/any/patternProperties/^s')),
+            '/h/{id}': getOp('getBoxedValues', ref('Maps/properties/boxed/additionalProperties')),
+            '/i/{id}': getOp('getPatternedValues', ref('Maps/properties/patterned/patternProperties/^s')),
+            '/j/{id}': {
+              get: {
+                operationId: 'getPatternNOrMade',
+                parameters: [idParam],
+                responses: {
+                  '200': {
+                    description: 'OK',
+                    content: { 'application/json': { schema: ref('Maps/properties/byPattern/patternProperties/^n') } },
+                  },
+                  '201': { description: 'Made', content: { 'application/json': { schema: ref('Made') } } },
+                },
+              },
+            },
+          },
+          openapi,
+        );
+        const integer = { kind: 'primitive', type: 'integer' } as const;
+        // A model with named properties carries its `additionalProperties` as a catch-all map field; its values are that field's.
+        expect(fieldOf(spec, 'Box', 'additionalProperties')?.type).toEqual({ kind: 'map', valueType: integer });
+        expect(responseOf(spec, 'getBoxValues')).toEqual(integer);
+        // A map's values are typed from one schema: the first pattern here, so the second names no type, never the first's.
+        expect(fieldOf(spec, 'Maps', 'byPattern')?.type).toEqual({ kind: 'map', valueType: string });
+        expect(responseOf(spec, 'getPatternS')).toEqual(string);
+        expect(responseOf(spec, 'getPatternN')).toEqual(unknown);
+        // A non-empty `additionalProperties` wins over every pattern.
+        expect(responseOf(spec, 'getBothValues')).toEqual({ kind: 'primitive', type: 'boolean' });
+        expect(responseOf(spec, 'getBothPattern')).toEqual(unknown);
+        // `additionalProperties: {}` types the values `unknown` on its own, so a pointer to it is `unknown` with no warning.
+        expect(fieldOf(spec, 'Maps', 'any')?.type).toEqual({ kind: 'map', valueType: unknown });
+        expect(responseOf(spec, 'getAnyValues')).toEqual(unknown);
+        expect(responseOf(spec, 'getAnyPattern')).toEqual(unknown);
+        // An inline object with named properties builds no catch-all field, and no model carries a pattern.
+        expect(responseOf(spec, 'getBoxedValues')).toEqual(unknown);
+        expect(responseOf(spec, 'getPatternedValues')).toEqual(unknown);
+        // The primary-response pick reads the same rule: the `^n` pointer settles to unknown, so the typed 201 wins.
+        expect(operation(spec, 'getPatternNOrMade')?.response).toEqual(model('Made'));
+        expect(operation(spec, 'getPatternNOrMade')?.responseStatusCode).toBe(201);
+        expect(modelNames(spec)).toEqual(['Box', 'Made', 'Maps', 'MapsBoxed', 'MapsPatterned']);
+        const other = (pointer: string, step: string, site: string) =>
+          `[oagen] Warning: Unresolved schema $ref "#/components/schemas/${pointer}" in ${site}: the values are typed from another schema than "${step}" — typing the site as unknown`;
+        expect(warnings.sort()).toEqual(
+          [
+            other('Maps/properties/byPattern/patternProperties/^n', 'patternProperties/^n', 'C.getPatternN.response'),
+            other('Maps/properties/both/patternProperties/^s', 'patternProperties/^s', 'E.getBothPattern.response'),
+            other('Maps/properties/any/patternProperties/^s', 'patternProperties/^s', 'G.getAnyPattern.response'),
+            '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Maps/properties/boxed/additionalProperties" in H.getBoxedValues.response: model "MapsBoxed" is no map to read "additionalProperties" from — typing the site as unknown',
+            '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Maps/properties/patterned/patternProperties/^s" in I.getPatternedValues.response: a schema with named properties types no "patternProperties/^s" values — typing the site as unknown',
+            other(
+              'Maps/properties/byPattern/patternProperties/^n',
+              'patternProperties/^n',
+              'J.getPatternNOrMade.successResponses.200',
+            ),
+          ].sort(),
+        );
+      });
+
+      it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
+        captureWarnings();
+        const spec = await parse(
+          {
+            Note: { type: 'object', properties: { 'due date': { type: 'string' } } },
+            'Pet Owner': { type: 'object', properties: { name: { type: 'string' } } },
+          },
+          {
+            '/a/{id}': getOp('getNoteDueDate', { $ref: '#/components/schemas/Note/properties/due%20date' }),
+            '/b/{id}': getOp('getPetOwner', { $ref: '#/components/schemas/Pet%20Owner' }),
+          },
+          openapi,
+        );
+        expect(responseOf(spec, 'getNoteDueDate')).toEqual(string);
+        expect(responseOf(spec, 'getPetOwner')).toEqual(model('PetOwner'));
+        // No dangling `Pet20Owner`.
+        expect(modelNames(spec)).toEqual(['Note', 'PetOwner']);
+        expect(warnings).toEqual([]);
+      });
+
+      describe('a discriminator mapping target the bundler hoisted from a pointer variant', () => {
+        const kind = (value: string) => ({ type: 'string', enum: [value] });
+        const union = {
+          oneOf: [ref('Cat'), ref('Zoo/properties/dog')],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: { cat: '#/components/schemas/Cat', dog: '#/components/schemas/Zoo/properties/dog' },
+          },
+        };
+        const schemas = {
+          Cat: { type: 'object', required: ['kind'], properties: { kind: kind('cat') } },
+          Zoo: {
+            type: 'object',
+            properties: { dog: { type: 'object', required: ['kind'], properties: { kind: kind('dog') } } },
+          },
+          Pet: union,
+          Home: { type: 'object', properties: { pet: union } },
+        };
+        const expectedUnion = (dog: string) => ({
+          kind: 'union',
+          variants: [model('Cat'), model(dog)],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { cat: 'Cat', dog } },
+        });
+
+        it('is settled with the variant, to the model the variant is settled to, as a component and inline', async () => {
+          captureWarnings();
+          const spec = await parse(schemas, { '/pets/{id}': getOp('getPet', ref('Pet')) }, openapi);
+          const pet = spec.models.find((m) => m.name === 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ZooDog')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog' } });
+          expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog'));
+          // The bundler keeps the hoisted copy as a component `dog`, so a model `Dog` is built for it; nothing references it.
+          expect(modelNames(spec)).toEqual(['Cat', 'Dog', 'Home', 'Pet', 'Zoo', 'ZooDog']);
+          expect(warnings).toEqual([]);
+        });
+
+        it('follows a rename of the variant’s model after the settle', async () => {
+          captureWarnings();
+          const spec = await parse(
+            schemas,
+            {
+              '/pets/{id}': getOp('getPet', ref('Pet')),
+              // A `dog` query enum of the `zoo` service takes the name `ZooDog`, so `Zoo.dog`'s model steps to `ZooDog2`.
+              '/zoo': {
+                get: {
+                  operationId: 'listZoo',
+                  parameters: [{ name: 'dog', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } }],
+                  responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Zoo') } } } },
+                },
+              },
+            },
+            openapi,
+          );
+          expect(spec.enums.map((e) => e.name)).toContain('ZooDog');
+          expect(fieldOf(spec, 'Zoo', 'dog')?.type).toEqual(model('ZooDog2'));
+          const pet = spec.models.find((m) => m.name === 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ZooDog2')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog2' } });
+          expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog2'));
+        });
+      });
     });
   });
 

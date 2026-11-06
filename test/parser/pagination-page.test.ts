@@ -1452,6 +1452,138 @@ describe('an explicit dataPath through the variants of a union (#556)', () => {
       ).toBe(missing);
     });
 
+    it('compares the items as the type builder reads them: a $ref under a lone allOf member or a nullable wrapper is one Pet (#585 review)', () => {
+      // The OAS 3.0 way of describing a `$ref`, beside the plain one.
+      const described: SchemaObject = { allOf: [ref('Pet')], description: 'A pet' };
+      const agree = { oneOf: [withCursor, object({ items: array(described) })] };
+      expect(resolveDataPathArray(body(agree), 'result.items', components)).toEqual({ items: ref('Pet') });
+      expect(dataPathProblem(body(agree), 'result.items', components)).toBeUndefined();
+      // The first array's items stand for them all, as written.
+      const reversed = { oneOf: [object({ items: array(described) }), withCursor] };
+      expect(resolveDataPathArray(body(reversed), 'result.items', components)).toEqual({ items: described });
+      // An inline member read as the schema itself, and the two wrappers alternating.
+      const item = object({ id: { type: 'string' } });
+      const unwrapped = {
+        oneOf: [object({ items: array(item) }), object({ items: array({ allOf: [item], description: 'an item' }) })],
+      };
+      expect(resolveDataPathArray(body(unwrapped), 'result.items', components)).toEqual({ items: item });
+      const nullableMember: SchemaObject = { oneOf: [{ allOf: [ref('Pet')] }, { type: 'null' }] };
+      const nullable = {
+        oneOf: [
+          object({ items: array(nullableMember) }),
+          object({ items: array({ oneOf: [ref('Pet'), { type: 'null' }] }) }),
+          object({ items: array({ allOf: [{ oneOf: [ref('Pet'), { type: 'null' }] }] }) }),
+        ],
+      };
+      expect(resolveDataPathArray(body(nullable), 'result.items', components)).toEqual({ items: nullableMember });
+      // Items that admit null beside ones that do not are two types, named as the type builder reads them.
+      const mixed = { oneOf: [withCursor, object({ items: array({ oneOf: [ref('Pet'), { type: 'null' }] }) })] };
+      expect(dataPathProblem(body(mixed), 'result.items', components)).toBe(
+        'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Pet | null',
+      );
+      const cats = { oneOf: [withCursor, object({ items: array({ allOf: [ref('Cat')], description: 'a cat' }) })] };
+      expect(dataPathProblem(body(cats), 'result.items', components)).toBe(
+        'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Cat',
+      );
+      // A `$ref` is the reference it is: two components alike in shape are two types.
+      const dogs = { oneOf: [withCursor, object({ items: array({ allOf: [ref('Dog')] }) })] };
+      expect(dataPathProblem(body(dogs), 'result.items', { ...components, Dog: components.Pet! })).toBe(
+        'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Dog',
+      );
+    });
+
+    it('walks a variant that is itself a union, inline or a $ref to a union component, and names the nested variant that lacks the array (#585 review)', () => {
+      const nested = { anyOf: [{ oneOf: [withCursor, withTotal] }, withTotal] };
+      expect(resolveDataPathArray(body(nested), 'result.items', components)).toEqual({ items: ref('Pet') });
+      expect(dataPathProblem(body(nested), 'result.items', components)).toBeUndefined();
+      const viaRef = { anyOf: [ref('ResultUnion'), withTotal] };
+      expect(resolveDataPathArray(body(viaRef), 'result.items', components)).toEqual({ items: ref('Pet') });
+      // A null variant of the nested union set aside, three levels down, and the body itself.
+      const nullable = { anyOf: [{ oneOf: [withCursor, withTotal, { type: 'null' }] }, withTotal] };
+      expect(resolveDataPathArray(body(nullable), 'result.items', components)).toEqual({ items: ref('Pet') });
+      const three = { anyOf: [{ oneOf: [{ anyOf: [withCursor, withTotal] }, withTotal] }, withTotal] };
+      expect(resolveDataPathArray(body(three), 'result.items', components)).toEqual({ items: ref('Pet') });
+      expect(resolveDataPathArray(nested, 'items', components)).toEqual({ items: ref('Pet') });
+      // The steps down to the variant that lacks the array, innermost first.
+      const lacking = { anyOf: [{ oneOf: [withCursor, object({ total: integer })] }, withTotal] };
+      expect(dataPathProblem(body(lacking), 'result.items', components)).toBe(
+        `${missing}: variant 2 of the oneOf in variant 1 of the anyOf at "result" declares no "items"`,
+      );
+      expect(dataPathProblem(lacking, 'items', components)).toBe(
+        `dataPath "items" does not resolve to an array in the response: variant 2 of the oneOf in variant 1 of the response's anyOf declares no "items"`,
+      );
+      const lackingComponent: Record<string, SchemaObject> = {
+        ...components,
+        Lacking: { oneOf: [withCursor, { type: 'null' }, object({ total: integer })] },
+      };
+      expect(dataPathProblem(body({ anyOf: [ref('Lacking'), withTotal] }), 'result.items', lackingComponent)).toBe(
+        `${missing}: variant 3 of the oneOf in variant 1 of the anyOf at "result" declares no "items"`,
+      );
+      // An object a nested variant declares that lacks the next segment is named by its steps too.
+      const paged = (page: SchemaObject) => object({ page });
+      const deeper = {
+        anyOf: [{ oneOf: [paged(object({ items: array(ref('Pet')) })), paged(object({}))] }, paged(withTotal)],
+      };
+      expect(dataPathProblem(body(deeper), 'result.page.items', components)).toBe(
+        'dataPath "result.page.items" does not resolve to an array in the response: "result.page" declares no "items" in variant 2 of the oneOf in variant 1 of the anyOf at "result"',
+      );
+      // The leaves still have to agree on one array.
+      const cats = { anyOf: [{ oneOf: [withCursor, object({ items: array(ref('Cat')) })] }, withTotal] };
+      expect(dataPathProblem(body(cats), 'result.items', components)).toBe(
+        'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Cat',
+      );
+      // A union that reaches itself through a variant is read once: that variant declares nothing.
+      const loop: Record<string, SchemaObject> = { ...components, Loop: { oneOf: [ref('Loop'), withCursor] } };
+      expect(dataPathProblem(body(ref('Loop')), 'result.items', loop)).toBe(
+        `${missing}: variant 1 of the oneOf at "result" declares no "items"`,
+      );
+      expect(dataPathProblem(body({ anyOf: [ref('Loop'), withTotal] }), 'result.items', loop)).toBe(
+        `${missing}: variant 1 of the oneOf in variant 1 of the anyOf at "result" declares no "items"`,
+      );
+    });
+
+    it('walks an explicit endOfIteration through a variant that is itself a union the same way (#585 review)', () => {
+      const end = { kind: 'hasMore', path: 'result.has_more' } as const;
+      const nested = { anyOf: [{ oneOf: [withCursor, withTotal] }, withTotal] };
+      expect(endOfIterationProblem(end, { result: nested }, components)).toBeUndefined();
+      expect(
+        endOfIterationProblem(end, { result: { anyOf: [ref('ResultUnion'), withTotal] } }, components),
+      ).toBeUndefined();
+      const lacking = { anyOf: [{ oneOf: [withCursor, object({ total: integer })] }, withTotal] };
+      expect(endOfIterationProblem(end, { result: lacking }, components)).toBe(
+        'endOfIteration path "result.has_more" does not resolve to a field in the response',
+      );
+      const typed = {
+        anyOf: [{ oneOf: [withCursor, object({ has_more: integer, items: array(ref('Pet')) })] }, withTotal],
+      };
+      expect(endOfIterationProblem(end, { result: typed }, components)).toBe(
+        'endOfIteration path "result.has_more" is not a boolean field, as kind "hasMore" requires',
+      );
+    });
+
+    it('reads a node once per walk, so repeated references down a chain of unions do not multiply the work (Greptile)', () => {
+      // Twenty components, each an `anyOf` of two references to the next,
+      // ending on one object with `items`: every link doubles the routes.
+      const chain: Record<string, SchemaObject> = {
+        ...components,
+        End: object({ items: array(ref('Pet')), has_more: boolean }),
+      };
+      for (let link = 20; link >= 1; link--) {
+        const next = link === 20 ? 'End' : `Link${link + 1}`;
+        chain[`Link${link}`] = { anyOf: [ref(next), ref(next)] };
+      }
+      const started = performance.now();
+      expect(resolveDataPathArray(body(ref('Link1')), 'result.items', chain)).toEqual({ items: ref('Pet') });
+      const end = { kind: 'hasMore', path: 'result.has_more' } as const;
+      expect(endOfIterationProblem(end, { result: ref('Link1') }, chain)).toBeUndefined();
+      expect(performance.now() - started).toBeLessThan(1000);
+      // A leaf that lacks the array is still named, by the one route down to it.
+      const lacking = { ...chain, End: object({ total: integer }) };
+      expect(dataPathProblem(body(ref('Link1')), 'result.items', lacking)).toBe(
+        `${missing}: ${'variant 1 of the anyOf in '.repeat(19)}variant 1 of the anyOf at "result" declares no "items"`,
+      );
+    });
+
     it('types the items from the document through the union (resolveDataPathFromSchema)', () => {
       expect(
         resolveDataPathFromSchema(
@@ -1523,13 +1655,42 @@ describe('an explicit dataPath through the variants of a union (#556)', () => {
         'a variant without the field': union(named('WithCursor'), named('WithoutItems')),
         'a variant typing the items otherwise': union(named('WithCursor'), named('WithCats')),
         'a variant that is no model': union(named('WithCursor'), { kind: 'primitive', type: 'string' }),
-        'a variant that is itself a union': union(named('WithCursor'), union(named('WithCursor'), named('WithTotal'))),
+        'a variant of a nested union that lacks the field': union(
+          named('WithCursor'),
+          union(named('WithTotal'), named('WithoutItems')),
+        ),
         'an unknown variant model': union(named('WithCursor'), named('Nope')),
       };
       for (const [label, result] of Object.entries(cases)) {
         const [root, pool] = wrapped(result);
         expect(resolveDataPathItemType(root, 'result.items', pool), label).toBeUndefined();
       }
+    });
+
+    it('walks a variant that is itself a union through each of its own variants, as the document walk does (#585 review)', () => {
+      const nested = union(named('WithCursor'), union(named('WithCursor'), named('WithTotal')));
+      const [root, pool] = wrapped(nested);
+      expect(resolveDataPathItemType(root, 'result.items', pool)).toEqual(pet);
+      expect(resolveDataPathItemType(root, 'result.items', pool)).toBe((petArray as { items: TypeRef }).items);
+      const [wrappedNested, wrappedPool] = wrapped({
+        kind: 'nullable',
+        inner: union(named('WithTotal'), { kind: 'nullable', inner: union(named('WithCursor'), named('WithTotal')) }),
+      });
+      expect(resolveDataPathItemType(wrappedNested, 'result.items', wrappedPool)).toEqual(pet);
+    });
+
+    it('counts a type once per segment, so a union two models reach each other through is walked once however long the path (Greptile)', () => {
+      // `A.next` and `B.next` are both `A | B`: every `next` segment reaches
+      // the same two models, not twice as many as the segment before.
+      const next = union(named('A'), named('B'));
+      const pool: Model[] = [model('A', { items: petArray, next }), model('B', { items: petArray, next })];
+      const path = [...Array<string>(60).fill('next'), 'items'].join('.');
+      const started = performance.now();
+      expect(resolveDataPathItemType(named('A'), path, pool)).toBe((petArray as { items: TypeRef }).items);
+      expect(performance.now() - started).toBeLessThan(1000);
+      // The arrays reached at the end of the path still have to agree.
+      const cats = model('B', { items: { kind: 'array', items: { kind: 'model', name: 'Cat' } }, next });
+      expect(resolveDataPathItemType(named('A'), path, [pool[0]!, cats])).toBeUndefined();
     });
   });
 });

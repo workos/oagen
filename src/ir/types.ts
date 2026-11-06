@@ -821,7 +821,9 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * `nullable` itself carries none; its `inner` does), and for a `$ref` to
  * an array or primitive component the component's and each alias's
  * conjoined with any written beside the reference, as `Field.constraints`
- * conjoins them. A `model` or `enum` reference carries none: the model it
+ * conjoins them, and for a JSON Pointer `$ref` deeper into a component
+ * (#539) the limits the pointed schema's own type carries, conjoined the
+ * same way once the site is settled. A `model` or `enum` reference carries none: the model it
  * names carries its own (`Model.constraints`), and what is written around
  * such a `$ref` is the field's or parameter's alone. So a field's or
  * parameter's `constraints` equal those of its type (under its nullable
@@ -971,15 +973,24 @@ export interface Parameter {
    */
   contentTypes?: string[];
   /**
-   * Validation keywords from the parameter's schema. When that schema is a
-   * `$ref`, the target's keywords are merged underneath the parameter's own
-   * — the per-value fallback `default` and `example` use — so a parameter
-   * can be read on its own without chasing the target (a primitive or an
-   * array component becomes no model, nor does an alias of an enum
-   * component, whose own limits conjoin above the enum's; #560). Absent
-   * when neither declares any. Equal to the limits `type` carries (under
-   * its nullable wrapper) whenever it can carry them — a `$ref` to a model
-   * or enum keeps the parameter's own here alone (see `Constraints`).
+   * Validation keywords from the parameter's schema, read as a field's are
+   * (`schemaConstraints`; #545 review): the schema's own conjoined with its
+   * `allOf` members' and a nullable wrapper's with its branch's, level by
+   * level, so a keyword written beside an `allOf` member that writes it too
+   * reads as the field and the type read it (`pattern: '^a'` beside `allOf:
+   * [{ pattern: 'z$' }]` is `{ pattern: '^a' }` on all three, the schema's
+   * own winning as `combineConstraints` keeps it; #587 review); for a `$ref`
+   * to a primitive or array component, or to an alias of an enum component,
+   * every entry's conjoined from the component outward, since no model
+   * carries them (the alias's own above the enum's; #560). When the schema
+   * is a `$ref` to a model or enum, the target's keywords are merged
+   * underneath the parameter's own — the per-value fallback `default` and
+   * `example` use — so a parameter can be read on its own without chasing
+   * the target. Absent when neither declares any. Equal to the limits
+   * `type` carries (under its nullable wrapper) whenever it can carry them
+   * — a JSON Pointer `$ref` deeper into a component included, once the
+   * pointer is settled (see `Field.constraints`) — while a `$ref` to a
+   * model or enum keeps the parameter's own here alone (see `Constraints`).
    */
   constraints?: Constraints;
 }
@@ -1045,15 +1056,22 @@ export interface UnionType {
    * reading of the variants (#568): the spec's own `discriminator.mapping`,
    * each target as the document spelled it with a leading
    * `#/components/schemas/` stripped — an inline union's values are not IR
-   * model names, unlike a named union's; else, under the keyword, each
+   * model names, unlike a named union's — except an entry whose target is a
+   * pointer variant's schema, settled with the variant to the model's IR
+   * name as a named union's is (#539); else, under the keyword, each
    * variant's const on the property paired with the model it is referenced
    * by, `{}` when any variant pins none or is unnamed; else, for a `oneOf`
    * without the keyword, the first property the first variant pins whose
    * values tell every variant apart. A `$ref` variant is named by its
-   * component and its const read from it, a variant wrapping one model
-   * `$ref` through that reference, an inline object variant by the model
-   * extracted for it, so `oneOf: [{ $ref: Cat }, { $ref: Dog }]` carries
-   * `{ cat: "Cat", dog: "Dog" }` on a field as it does as a component.
+   * component and its const read from it — through the component's `allOf`
+   * members, a `$ref` member followed to the component it names, and
+   * through a `$ref` on the property to a component pinning one value
+   * (`Cat: { allOf: [{ $ref: CatBase }, …] }` pins what `CatBase` pins;
+   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — a
+   * variant wrapping one model `$ref` through that reference, an inline
+   * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
+   * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
+   * does as a component.
    * A request body's union carries only the spec's own mapping.
    */
   discriminator?: { property: string; mapping: Record<string, string> };
@@ -1129,9 +1147,11 @@ export interface TypeParam {
  * A primitive component — a `string`, `integer`, `number` or `boolean`
  * schema, a `const` of any value, a type list of such primitives
  * (`['string', 'integer']`) or a schema that declares no type at all (`{
- * description: 'Any value.' }`, `{}`), nullable in any spelling, or an
- * alias of one — becomes no model either: a `$ref` to it resolves to what
- * it declares, as the same schema written inline is typed — the primitive
+ * description: 'Any value.' }`, `{}`, and the same inside an `allOf` whose
+ * members each declare none: `{ allOf: [{ description }] }`), nullable in
+ * any spelling, or an alias of one — becomes no model either: a `$ref` to
+ * it resolves to what it declares, as the same schema written inline is
+ * typed — the primitive
  * (`{ kind: 'primitive' }` with its `format`), the literal (`{ kind:
  * 'literal' }`), the union of primitives (`{ kind: 'union' }`) or `unknown`
  * (`{ kind: 'primitive', type: 'unknown' }`), under `nullable` when the
@@ -1144,17 +1164,28 @@ export interface TypeParam {
  */
 export interface Model {
   name: string;
+  /**
+   * The schema's own `description`; for a model built from an `allOf` — a
+   * component's, or an inline merge — the wrapper layer's: the schema's
+   * own, else the first `allOf` member's that declares no type (`allOf:
+   * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
+   * }]`; #555 review). A typing member's text stays on that member, a
+   * `$ref` member's on its component.
+   */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one. */
+  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says
    * `deprecated: true` — a component, a discriminated-union variant, or an
    * inline request body, response or field object. Only that schema's own
-   * top-level keyword counts, read as `Field.deprecated` is: an `allOf`
-   * member's or a nullable branch's flag is not read (a `$ref` member's stays
-   * on the referenced model), and a folded `<Name>Json` model's flag does not
-   * deprecate the `<Name>` it collapses into. Absent otherwise. An inline
+   * top-level keyword counts, read as `Field.deprecated` is: a nullable
+   * branch's flag is not read, nor an `allOf` member's that declares a type
+   * (a `$ref` member's stays on the referenced model) — one that declares
+   * none, `{ deprecated: true }` beside the members, is part of the wrapper
+   * and deprecates the model (#555 review) — and a folded `<Name>Json`
+   * model's flag does not deprecate the `<Name>` it collapses into. Absent
+   * otherwise. An inline
    * schema that shares the name of a model the document declares has no
    * model of its own: a deprecated schema identical to a live component
    * keeps its flag on the `Field`, `Parameter`, `ResponseHeader` or envelope
@@ -1186,7 +1217,8 @@ export interface Model {
   /**
    * When set, this model is a discriminated union — over its `variants` (a
    * named `oneOf`/`anyOf` with a `discriminator:` keyword or a const-pinned
-   * property shared by every variant) or over allOf+oneOf variants (where
+   * property shared by every variant, a `$ref` variant's read from its
+   * component as `UnionType.discriminator` reads it) or over allOf+oneOf variants (where
    * `variants` is absent and the mapping alone names them). Emitters should
    * generate a dispatcher (factory) instead of a regular dataclass. The
    * `property` field is the discriminator key (e.g. "event"), and `mapping`
@@ -1328,12 +1360,19 @@ export interface Field {
    * enforces them either way and nothing else carries them: `{ allOf: [{
    * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
    * that `pattern`, as `{ allOf: [{ $ref: PetId }] }` and `oneOf: [{ $ref:
-   * PetId }, { type: 'null' }]` do. Absent when no level declares any.
-   * Equal to the limits `type` carries (under its nullable wrapper)
-   * whenever it can carry them — a `$ref` to a model, named union or enum
-   * keeps the field's own here alone — while the limits of an array's
-   * items, a union's variants or a map's values are on those types only
-   * (see `Constraints`; #545).
+   * PetId }, { type: 'null' }]` do. A JSON Pointer `$ref` deeper into a
+   * component (#539) conjoins the same way with the limits the schema it
+   * lands on carries on its own type, once the pointer is settled
+   * (`resolveSchemaPointers`; #545 review): `{ $ref: '#/components/schemas/
+   * Owner/properties/code', maxLength: 3 }` to `{ type: 'string', pattern:
+   * '^own_', maxLength: 8 }` is `{ maxLength: 3, pattern: '^own_' }`, and
+   * the bare pointer `{ maxLength: 8, pattern: '^own_' }`; a pointer to a
+   * property typed as a model or enum adds none, as a `$ref` to a model
+   * does. Absent when no level declares any. Equal to the limits `type`
+   * carries (under its nullable wrapper) whenever it can carry them — a
+   * `$ref` to a model, named union or enum keeps the field's own here
+   * alone — while the limits of an array's items, a union's variants or a
+   * map's values are on those types only (see `Constraints`; #545).
    */
   constraints?: Constraints;
   /**
@@ -1362,7 +1401,12 @@ export interface Enum {
   name: string;
   /**
    * The enum schema's own `description`: a component enum's, as
-   * `Model.description` is a component model's, or — for an enum lifted
+   * `Model.description` is a component model's — the wrapper layer's over
+   * the member's when the component declares its members inside an
+   * `allOf` read as its one typing member (`Kind: { allOf: [{ type:
+   * 'string', enum }], description }`), as its link, `deprecated`,
+   * `default` and keys are read (`enumComponentDeclaration`) — or — for an
+   * enum lifted
    * from an inline schema on a property, parameter, response header,
    * request or response body (primary, secondary-media-type, error or
    * fallback) or webhook parameter or payload, including array items,

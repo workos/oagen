@@ -1715,4 +1715,206 @@ describe('#545', () => {
       array(limited(string, { pattern: PET })),
     );
   });
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads a parameter’s limits as a field’s, so a keyword beside an `allOf` member that writes it too is one reading on the parameter, the field and the type (OAS %s)',
+    async (openapi) => {
+      // Michael's review of #545: the parameter read `extractConstraints` on
+      // its own while the field and the type read `schemaConstraints`, and
+      // the two disagreed on a keyword an annotating member writes too. All
+      // three read `schemaConstraints` now, and the schema's own keyword
+      // wins over the member's on each (#587 review: `combineConstraints`
+      // keeps the first `pattern` and `multipleOf`).
+      const name = { type: 'string', pattern: '^a', allOf: [{ pattern: 'z$' }] };
+      const step = { type: 'number', multipleOf: 2, allOf: [{ multipleOf: 3 }] };
+      const spec = await parse(
+        petsDoc(openapi, {
+          parameters: [
+            { name: 'name', in: 'query', schema: name },
+            { name: 'step', in: 'query', schema: step },
+          ],
+          fields: { name, step },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      for (const site of [params.name, fields.name]) {
+        expect(site.constraints).toEqual({ pattern: '^a' });
+        expect(site.type).toEqual(limited(string, { pattern: '^a' }));
+      }
+      for (const site of [params.step, fields.step]) {
+        expect(site.constraints).toEqual({ multipleOf: 2 });
+        expect(site.type).toEqual(limited({ kind: 'primitive', type: 'number' }, { multipleOf: 2 }));
+      }
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'conjoins what a JSON Pointer `$ref` lands on with the site’s own, on the field, the parameter and the type alike (OAS %s)',
+    async (openapi) => {
+      // Michael's review of #545: the type carried the pointed schema's
+      // limits, copied with the type the pointer names; the field read only
+      // what was written beside the `$ref`, and the parameter overrode.
+      const code = { $ref: '#/components/schemas/Owner/properties/code' };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: {
+              type: 'object',
+              properties: {
+                code: { type: 'string', pattern: OWN, maxLength: 8 },
+                address: { type: 'object', properties: { city: { type: 'string' } }, minProperties: 1 },
+              },
+            },
+            // A chain: `Alias.code` narrows the owner's code, and a site that points at it reads the chain's reading.
+            Alias: { type: 'object', properties: { code: { ...code, maxLength: 5 } } },
+          },
+          parameters: [
+            { name: 'ownerCode', in: 'query', schema: code },
+            { name: 'shortCode', in: 'query', schema: { ...code, maxLength: 3 } },
+          ],
+          fields: {
+            ownerCode: code,
+            shortCode: { ...code, maxLength: 3 },
+            longCode: { ...code, maxLength: 20 },
+            maybe: { oneOf: [{ ...code, maxLength: 3 }, { type: 'null' }] },
+            codes: { type: 'array', items: { ...code, maxLength: 3 } },
+            chained: { $ref: '#/components/schemas/Alias/properties/code', minLength: 2 },
+            address: { $ref: '#/components/schemas/Owner/properties/address', maxProperties: 5 },
+          },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => limited(string, { maxLength: 8, pattern: OWN, ...limits });
+      // The pointed schema's limits conjoin with what is written beside the
+      // `$ref`, the stricter bound winning, as `{ $ref: PetId, maxLength: 20 }`
+      // to a primitive component reads — on the field, the parameter and the type.
+      for (const site of [params.ownerCode, fields.ownerCode]) {
+        expect(site.constraints).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type).toEqual(owned({}));
+      }
+      for (const site of [params.shortCode, fields.shortCode]) {
+        expect(site.constraints).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type).toEqual(owned({ maxLength: 3 }));
+      }
+      expect(fields.longCode.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      expect(fields.longCode.type).toEqual(owned({}));
+      // Under a nullable wrapper, on an array's items — which no field carries — and through a chain of pointers.
+      expect(fields.maybe.constraints).toEqual({ maxLength: 3, pattern: OWN });
+      expect(fields.maybe.type).toEqual(nullable(owned({ maxLength: 3 })));
+      expect(fields.codes.constraints).toBeUndefined();
+      expect(fields.codes.type).toEqual(array(owned({ maxLength: 3 })));
+      expect(byName(fieldsOf(spec, 'Alias')).code.constraints).toEqual({ maxLength: 5, pattern: OWN });
+      expect(fields.chained.constraints).toEqual({ maxLength: 5, pattern: OWN, minLength: 2 });
+      expect(fields.chained.type).toEqual(owned({ maxLength: 5, minLength: 2 }));
+      // A pointer to a property typed as a model adds none: the model carries
+      // its own, and the site keeps what it wrote beside the `$ref`.
+      expect(fields.address.constraints).toEqual({ maxProperties: 5 });
+      expect(fields.address.type).toEqual({ kind: 'model', name: 'OwnerAddress' });
+      expect(spec.models.find((m) => m.name === 'OwnerAddress')?.constraints).toEqual({ minProperties: 1 });
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads the items’ agreement per shape when the declarations make several, whichever array comes first (OAS %s)',
+    async (openapi) => {
+      // `tags` declared three ways by the variants of a merged `allOf` body:
+      // two arrays of strings, one with a pattern on its items, and an
+      // integer (Greptile's review of #545: the integer made several shapes,
+      // the agreement was read for one shape only, and the first array's
+      // pattern was every item's).
+      const declared = (...declarations: unknown[]) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      allOf: [
+                        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                        { oneOf: declarations.map((tags) => ({ properties: { tags } })) },
+                      ],
+                    },
+                  },
+                },
+              },
+              responses: { '204': { description: 'done' } },
+            },
+          },
+        },
+      });
+      const tagsOf = (spec: ApiSpec) => byName(fieldsOf(spec, 'CreatePetRequest')).tags;
+      const tagged = { type: 'array', items: { type: 'string', pattern: TAG } };
+      const plain = { type: 'array', items: { type: 'string' } };
+      const maxed = { type: 'array', items: { type: 'string', pattern: TAG, maxLength: 30 } };
+      const int = { type: 'integer' };
+      const union = (variants: unknown[]) => ({ kind: 'union', variants, compositionKind: 'oneOf' });
+      // One declaration's items limit is not the shape's items', in any order and beside another shape.
+      for (const order of [
+        [tagged, plain, int],
+        [plain, tagged, int],
+        [tagged, int, plain],
+      ]) {
+        const tags = tagsOf(await parse(declared(...order)));
+        expect(tags.type).toEqual(union([array(string), integer]));
+        expect(tags.constraints).toBeUndefined();
+      }
+      // Agreed limits stay on the shape's items beside another shape, as they do alone.
+      expect(tagsOf(await parse(declared(tagged, maxed, int))).type).toEqual(
+        union([array(limited(string, { pattern: TAG })), integer]),
+      );
+      expect(tagsOf(await parse(declared(int, tagged, tagged))).type).toEqual(
+        union([integer, array(limited(string, { pattern: TAG }))]),
+      );
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'aligns a field’s and a parameter’s limits with a pointer to a schema that admits null, which settles into a nullable wrapper (OAS %s)',
+    async (openapi) => {
+      // Greptile's second review of #545: the settled reference was looked up
+      // after being unwrapped, so a pointer to `{ type: ['string', 'null'],
+      // maxLength: 8 }` put the limits on the field's inner type and none on
+      // the field; a parameter agreed only by its build-time fallback, which
+      // keeps a looser bound written beside the pointer.
+      const code = { $ref: '#/components/schemas/Owner/properties/code' };
+      const target =
+        openapi === '3.1.0'
+          ? { type: ['string', 'null'], pattern: OWN, maxLength: 8 }
+          : { type: 'string', nullable: true, pattern: OWN, maxLength: 8 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: { Owner: { type: 'object', properties: { code: target } } },
+          parameters: [
+            { name: 'ownerCode', in: 'query', schema: code },
+            { name: 'shortCode', in: 'query', schema: { ...code, maxLength: 3 } },
+            { name: 'longCode', in: 'query', schema: { ...code, maxLength: 20 } },
+          ],
+          fields: { ownerCode: code, shortCode: { ...code, maxLength: 3 }, longCode: { ...code, maxLength: 20 } },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits }));
+      for (const site of [params.ownerCode, fields.ownerCode, params.longCode, fields.longCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({}));
+      }
+      for (const site of [params.shortCode, fields.shortCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      expectOneReading(spec);
+    },
+  );
 });
