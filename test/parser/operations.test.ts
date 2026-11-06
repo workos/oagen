@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractOperations } from '../../src/parser/operations.js';
+import { extractOperations, operationIdModelBase } from '../../src/parser/operations.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { resolveOperations } from '../../src/ir/operation-hints.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -3673,5 +3673,55 @@ describe('#565', () => {
       expect(services[0].operations[0].name).toBe(name);
       expect(inlineModels.map((m) => m.name)).toEqual([model]);
     }
+  });
+
+  it('strips nothing but a marker, the whitespace after it included, whatever precedes it', () => {
+    for (const [operationId, normalized] of [
+      // Whitespace before the first marker is not after any marker, so it stays.
+      ['listPets [1]', 'listPets '],
+      // A marker behind punctuation, not whitespace, is not at the end.
+      ['listPets[1]-[2]', 'listPets[1]-'],
+      // One or more ASCII digits between the brackets, nothing else.
+      ['listPets[]', 'listPets[]'],
+      ['listPets[1 ]', 'listPets[1 ]'],
+      ['listPets[ 1]', 'listPets[ 1]'],
+      ['listPets[1]]', 'listPets[1]]'],
+      ['listPets[\u0661]', 'listPets[\u0661]'],
+      // Any whitespace after a marker: a no-break space, a line separator, a BOM.
+      ['listPets[1]\u00a0[2]', 'listPets'],
+      ['listPets[1]\u2028[2]\ufeff', 'listPets'],
+    ] as const) {
+      const seen: string[] = [];
+      const transform = (id: string) => {
+        seen.push(id);
+        return 'listPets';
+      };
+      extractOperations({ '/pets': { get: { operationId, responses } } }, transform);
+      expect(seen).toEqual([normalized]);
+    }
+  });
+
+  it('reads the markers of a long id once, from its end, however it ends', () => {
+    // A regex of the repeated group retried the match from every marker of an
+    // id ending in something else, quadratic in their number: sixteen thousand
+    // before an `X` took half a second. The backward scan reads them once.
+    const markers = '[1]'.repeat(20000);
+    const started = performance.now();
+    const named = operationIdModelBase(`${markers}X`);
+    const nameless = operationIdModelBase(markers);
+    const elapsed = performance.now() - started;
+    // Markers before a letter are not at the end, so each is kept and read as
+    // its digit, as `list[1]Pets` is `List1Pets`; markers alone strip to nothing.
+    expect(named).toBe(`${'1'.repeat(20000)}X`);
+    expect(nameless).toBe('');
+    expect(elapsed).toBeLessThan(50);
+
+    // Through the parser: the one is kept verbatim, the other read as no operationId.
+    const [kept] = extractOperations({ '/pets': { get: { operationId: `${markers}X`, responses } } }).services[0]
+      .operations;
+    expect(kept.operationId).toBe(`${markers}X`);
+    expect(kept.name).toBe(`${'1'.repeat(20000)}X`);
+    const stripped = extractOperations({ '/pets': { get: { operationId: markers, responses } } });
+    expect(stripped).toEqual(extractOperations({ '/pets': { get: { responses } } }));
   });
 });
