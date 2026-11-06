@@ -1024,6 +1024,69 @@ describe('#382', () => {
     );
 
     it.each([
+      { order: 'first callback first', firstFirst: true },
+      { order: 'second callback first', firstFirst: false },
+    ])(
+      'reports only the nested callback added when a directly referenced callback of one stem is nested inside the other, $order (Greptile)',
+      async ({ firstFirst }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ok = { '200': { description: 'OK' } };
+        const reference = { adopted: { $ref: '#/components/callbacks/Adopted' } };
+        // `createPet`'s `petAdopted` declares `operationId: notify_adoption`;
+        // `adoptPet`'s `adopted` references `Adopted`, whose operation declares
+        // `operationId: notifyAdoption`. Both stems are `NotifyAdoption`.
+        const document = (nested: boolean) => {
+          const pets = {
+            post: {
+              operationId: 'createPet',
+              responses: ok,
+              callbacks: {
+                petAdopted: posting({ operationId: 'notify_adoption', ...(nested ? { callbacks: reference } : {}) }),
+              },
+            },
+          };
+          const adoptions = { post: { operationId: 'adoptPet', responses: ok, callbacks: reference } };
+          return {
+            openapi,
+            info: { title: 'repro', version: '1' },
+            paths: firstFirst ? { '/pets': pets, '/adoptions': adoptions } : { '/adoptions': adoptions, '/pets': pets },
+            components: {
+              callbacks: {
+                Adopted: posting(
+                  { operationId: 'notifyAdoption' },
+                  { type: 'object', properties: { adopted: { type: 'boolean' } } },
+                ),
+              },
+            },
+          };
+        };
+        const direct = await parseDocument(document(false));
+        const both = await parseDocument(document(true));
+        // Both `NotifyAdoption` stems hash on each side: the same two models.
+        const names = (spec: ApiSpec) => spec.models.map((m) => m.name).sort();
+        expect(names(direct)).toEqual(names(both));
+        expect(names(direct).filter((name) => /^NotifyAdoption[0-9A-Fa-f]{6}Payload$/.test(name))).toHaveLength(2);
+
+        // The nested reference is the one additive `callback-added`, exit 1; nothing is renamed.
+        const added = diffSpecs(direct, both);
+        expect(added.changes).toHaveLength(1);
+        expect(added.changes[0]).toMatchObject({
+          kind: 'callback-added',
+          name: 'adopted',
+          expression: '{$request.body#/callbackUrl}',
+          httpMethod: 'post',
+          parents: [identity],
+          ...onOperation,
+          classification: 'additive',
+        });
+        expect(added.summary).toMatchObject({ added: 1, modified: 0, removed: 0, breaking: 0, additive: 1 });
+        expect(diffSpecs(both, direct).changes.map((c) => [c.kind, c.classification])).toEqual([
+          ['callback-removed', 'breaking'],
+        ]);
+      },
+    );
+
+    it.each([
       { order: 'parameter before callbacks', parametersFirst: true },
       { order: 'callbacks before parameter', parametersFirst: false },
     ])(

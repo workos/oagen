@@ -29,9 +29,10 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other — once, across every depth, as the `webhooks` map's are, a
- * descendant's names alone never moving an ancestor's stem; the minting then
- * proceeds ancestors first (see `extractCallbacks`) — so a collision hashes the
+ * each other — once, across every depth, as the `webhooks` map's are, only a
+ * name a descendant mints under a stem of its own never moving an ancestor's
+ * stem; the minting then proceeds ancestors first (see `extractCallbacks`) —
+ * so a collision hashes the
  * NEW stem as a webhook's is hashed — from the callback's identity: its
  * owner's identity (an operation's operationId, else `METHOD /path`; a
  * shared callback operation's operationId) with the key, expression and
@@ -115,10 +116,12 @@ interface PendingCallback {
  * depth, exactly as the `webhooks` map's are — a name a group would mint
  * that the document holds or another group also mints hashes the stem,
  * both of a colliding pair moving whichever depths reference them, so a
- * reference added at another depth renames nothing — with the one rule the
- * `webhooks` map never exercises, that a descendant's name never moves an
- * ancestor's stem, so a new nested callback never renames its parent's
- * parameter or payload model (it is the one that hashes); and the minting
+ * reference added at another depth renames nothing, and a group of one
+ * plain stem with another is its peer whether referenced directly, nested
+ * inside it, or both — with the one rule the `webhooks` map never
+ * exercises, that a name a descendant mints under a stem of its own never
+ * moves an ancestor's stem, so a new nested callback never renames its
+ * parent's parameter or payload model (it is the one that hashes); and the minting
  * proceeds ancestors first, in waves by each group's shallowest member's
  * depth — every group with a member at depth 0, then those at depth 1, and
  * so on — each wave stepping around at mint time any name still taken,
@@ -199,8 +202,9 @@ export function extractCallbacks(
   // Every callback of the document at once, as the `webhooks` map is read:
   // entries reading one operation object under one plain stem form one
   // group whatever their depths (`groupEntries`); the stems are settled
-  // once across every depth, as the `webhooks` map's are, a descendant's
-  // names never moving an ancestor's stem; the groups are minted in waves
+  // once across every depth, as the `webhooks` map's are, only a name a
+  // descendant mints under a stem of its own never moving an ancestor's
+  // stem; the groups are minted in waves
   // by their shallowest member's depth, each wave stepping around every
   // name decided before it, and each mints once.
   const batch = buildReceivedRequests(
