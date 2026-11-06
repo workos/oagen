@@ -224,3 +224,157 @@ components:
     }
   });
 });
+
+/**
+ * #384 review (MichaelDeBoey): an entry under `components.securitySchemes`
+ * may be a `$ref` to another entry — OAS 3.0.3 and 3.1.0 both allow it.
+ * The parser follows it, chains included, through `followReference`, and
+ * reads the scheme under the referencing key with the target's definition,
+ * so a requirement naming the referencing key joins to a scheme and the
+ * differ sees what every request carries.
+ */
+describe('parseSpec — a $ref under components.securitySchemes (#384)', () => {
+  let tmpDir: string;
+  let written = 0;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-parse-auth-ref-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  /** `GET /pets` under `security: [{ petKey: [] }]` with the given `components`. */
+  async function parseDocument(
+    openapi: string,
+    securitySchemes: Record<string, unknown>,
+    components: Record<string, unknown> = {},
+  ): Promise<ApiSpec> {
+    const file = path.join(tmpDir, `${written++}.json`);
+    await fs.writeFile(
+      file,
+      JSON.stringify({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        security: [{ petKey: [] }],
+        paths: { '/pets': { get: { operationId: 'listPets', responses: { '204': { description: 'ok' } } } } },
+        components: { securitySchemes, ...components },
+      }),
+    );
+    return parseSpec(file);
+  }
+
+  const versions = ['3.0.3', '3.1.0'];
+  const sharedKey = { type: 'apiKey', in: 'header', name: 'X-Key' };
+  const ref = (name: string) => ({ $ref: `#/components/securitySchemes/${name}` });
+
+  it.each(versions)(
+    'on OAS %s reads the scheme under the referencing key with the target’s definition, in document order',
+    async (openapi) => {
+      const ir = await parseDocument(openapi, { petKey: ref('sharedKey'), sharedKey });
+      expect(ir.auth).toEqual([
+        { kind: 'apiKey', schemeName: 'petKey', in: 'header', name: 'X-Key' },
+        { kind: 'apiKey', schemeName: 'sharedKey', in: 'header', name: 'X-Key' },
+      ]);
+      // The document's requirement joins to the referencing key.
+      expect(ir.security).toEqual([[{ schemeName: 'petKey', scopes: [] }]]);
+    },
+  );
+
+  it.each(versions)('on OAS %s follows a chain, and reads every kind through a ref', async (openapi) => {
+    const ir = await parseDocument(openapi, {
+      petKey: ref('alias'),
+      alias: ref('sharedKey'),
+      sharedKey,
+      token: ref('bearer'),
+      bearer: { type: 'http', scheme: 'bearer', description: 'A token.' },
+      oauth: ref('oauthShared'),
+      oauthShared: {
+        type: 'oauth2',
+        flows: { clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes: {} } },
+      },
+    });
+    expect(ir.auth?.map((a) => a.schemeName)).toEqual([
+      'petKey',
+      'alias',
+      'sharedKey',
+      'token',
+      'bearer',
+      'oauth',
+      'oauthShared',
+    ]);
+    expect(ir.auth?.[0]).toEqual({ kind: 'apiKey', schemeName: 'petKey', in: 'header', name: 'X-Key' });
+    expect(ir.auth?.[1]).toEqual({ kind: 'apiKey', schemeName: 'alias', in: 'header', name: 'X-Key' });
+    expect(ir.auth?.[3]).toEqual({ kind: 'bearer', schemeName: 'token', description: 'A token.' });
+    expect(ir.auth?.[5]).toEqual({
+      kind: 'oauth2',
+      schemeName: 'oauth',
+      flows: { clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes: {} } },
+    });
+  });
+
+  it('reads a description beside the $ref over the target’s on OAS 3.1.0, and ignores it on 3.0.3', async () => {
+    const schemes = {
+      petKey: { ...ref('sharedKey'), description: 'The pet key.' },
+      sharedKey: { ...sharedKey, description: 'The shared key.' },
+    };
+    const overriding = await parseDocument('3.1.0', schemes);
+    expect(overriding.auth?.[0]).toEqual({
+      kind: 'apiKey',
+      schemeName: 'petKey',
+      description: 'The pet key.',
+      in: 'header',
+      name: 'X-Key',
+    });
+    const ignoring = await parseDocument('3.0.3', schemes);
+    expect(ignoring.auth?.[0]).toEqual({
+      kind: 'apiKey',
+      schemeName: 'petKey',
+      description: 'The shared key.',
+      in: 'header',
+      name: 'X-Key',
+    });
+    // A blank sibling is no text and falls through to the target's.
+    const blank = await parseDocument('3.1.0', {
+      petKey: { ...ref('sharedKey'), description: '  ' },
+      sharedKey: { ...sharedKey, description: 'The shared key.' },
+    });
+    expect(blank.auth?.[0].description).toBe('The shared key.');
+  });
+
+  it.each(versions)(
+    'on OAS %s omits a ref the map does not answer with the unsupported-scheme warning, naming the ref',
+    async (openapi) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const ir = await parseDocument(
+          openapi,
+          {
+            // A pointer into another section: the bundle resolves it, the
+            // map does not answer it (the whole pointer is matched).
+            petKey: { $ref: '#/components/schemas/Pet' },
+            sharedKey,
+          },
+          { schemas: { Pet: { type: 'object' } } },
+        );
+        expect(ir.auth).toEqual([{ kind: 'apiKey', schemeName: 'sharedKey', in: 'header', name: 'X-Key' }]);
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          '[oagen] Warning: Unsupported security scheme "petKey" ($ref #/components/schemas/Pet unresolved) omitted from spec.auth',
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    },
+  );
+
+  it.each(versions)(
+    'on OAS %s fails the bundle on a ref that names no scheme at all, or a cycle of refs, as any dangling ref does',
+    async (openapi) => {
+      await expect(parseDocument(openapi, { petKey: ref('missing') })).rejects.toThrow(/Failed to parse spec/);
+      // The bundler follows a `$ref` whose target is itself a `$ref` and
+      // throws on the cycle before the parser sees the document.
+      await expect(parseDocument(openapi, { petKey: ref('alias'), alias: ref('petKey') })).rejects.toThrow(/circular/i);
+    },
+  );
+});
