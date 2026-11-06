@@ -2045,6 +2045,45 @@ describe('#407 — a moved success status code is breaking unless the old code i
         expect(exitCode(summary)).toBe(1);
       });
 
+      it('keeps the move additive when a 201 becomes the primary beside a 200 whose body is no longer typed: the 200 is still declared, its body is what breaks', async () => {
+        const both = await parseDocument(document(openapi, { '200': ok, '201': created }));
+        const bodiless = await parseDocument(document(openapi, { '200': { description: 'OK' }, '201': created }));
+        const schemaless = await parseDocument(
+          document(openapi, { '200': { description: 'OK', content: { 'application/json': {} } }, '201': created }),
+        );
+        expect([both, bodiless, schemaless].map((spec) => spec.services[0]?.operations[0]?.responseStatusCode)).toEqual(
+          [200, 201, 201],
+        );
+        // The 200 pairs by code and its body is reported under it, breaking; the flag is beside it.
+        const removed = operationChange(both, bodiless);
+        expect(removed.change).toMatchObject({
+          responseContentTypeChanges: [{ statusCode: 200, removed: ['application/json'], classification: 'breaking' }],
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 201,
+          classification: 'breaking',
+        });
+        expect(operationChange(both, schemaless).change).toMatchObject({
+          responseContentTypeChanges: [{ statusCode: 200, retyped: ['application/json'], classification: 'breaking' }],
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 200,
+          newResponseStatusCode: 201,
+          classification: 'breaking',
+        });
+        // The reverse edit, the 200 regaining its body beside the kept 201, is additive throughout: the
+        // 201 is still declared, so the move alone does not make it breaking (exit 1).
+        const regained = operationChange(bodiless, both);
+        expect(regained.change).toMatchObject({
+          responseContentTypeChanges: [{ statusCode: 200, added: ['application/json'], classification: 'additive' }],
+          responseStatusCodeChanged: true,
+          oldResponseStatusCode: 201,
+          newResponseStatusCode: 200,
+          classification: 'additive',
+        });
+        expect(regained.summary).toMatchObject({ breaking: 0 });
+        expect(exitCode(regained.summary)).toBe(1);
+      });
+
       it("reports #408's 200 + 202 → 201 + 202 as before, the 200 removed under its code, breaking", async () => {
         const before = await parseDocument(document(openapi, { '200': ok, '202': accepted }));
         const after = await parseDocument(document(openapi, { '201': created, '202': accepted }));
@@ -2130,6 +2169,19 @@ describe('#407 — a moved success status code is breaking unless the old code i
       });
       // The same with several on both sides: 200 + 201 → 201 + 200 declares the 200 still.
       expect(modified(createPet(200, [201]), createPet(201, [200]))).toMatchObject({
+        oldResponseStatusCode: 200,
+        newResponseStatusCode: 201,
+        classification: 'additive',
+      });
+      // A 201 that became the primary beside a 200 whose body is no longer typed: the 200 is still
+      // declared, so the move alone is additive; with nothing under the 200 to compare, it is all there is.
+      const untyped200: SuccessResponse = { statusCode: 200, type: unknown };
+      const regressed = modified(
+        createPet(200, [201]),
+        createPet(201, undefined, { successResponses: [entry(201), untyped200] }),
+      );
+      expect(flagsOf(regressed)).toEqual(['responseStatusCodeChanged']);
+      expect(regressed).toMatchObject({
         oldResponseStatusCode: 200,
         newResponseStatusCode: 201,
         classification: 'additive',
