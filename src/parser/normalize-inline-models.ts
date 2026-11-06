@@ -68,6 +68,16 @@ export interface InlineModelNaming {
   enums: ReadonlySet<string>;
   minted?: Set<string>;
   mintedFor?: Map<string, Map<Model, number>>;
+  /**
+   * The component schemas' names among the owners a pass settles copies
+   * against (`settleSharedNames`). A component admits no copy while
+   * deprecated (`ownerFlagAdmits`, #441); every other owner — a model a
+   * component's field minted, the object the schema pass lifted from a
+   * field or the field extractor's settled copy of it — still admits a
+   * deprecated copy and yields its name to a live one. Absent, every owner
+   * is a component but those standing in for one (`yielding`).
+   */
+  components?: ReadonlySet<string>;
 }
 
 /**
@@ -325,18 +335,20 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  *   looser, one naming what it no longer requires (`deprecatedFoldWarning`,
  *   `looserFields`) — when the owner shares its name with it
  *   (`ownerSharesWith`, the flag read apart from the shape by
- *   `flagAdmits`): the copy is dropped and its references resolve to the
- *   owner, the deprecated schema's own field, parameter or envelope field
- *   still carrying the flag (a request body or response has no flag of its
- *   own to carry it). An owner is never renamed and never takes a
+ *   `ownerFlagAdmits`): the copy is dropped and its references resolve to
+ *   the owner, the deprecated schema's own field, parameter or envelope
+ *   field still carrying the flag (a request body or response has no flag
+ *   of its own to carry it). An owner is never renamed and never takes a
  *   contender's flag; a deprecated owner shares its name with no live copy,
  *   whatever their shapes, so a live inline copy never folds onto a
- *   deprecated component;
+ *   deprecated component, and a deprecated component shares it with no
+ *   deprecated copy either (`InlineModelNaming.components`, #441), so a
+ *   deprecated copy keeps the qualified name its live self had (below);
  * - otherwise takes a name of its own (`renameInlineCopy`).
  *
  * A contender whose flag agrees with an owner's
  *
- * - folds onto the owner when the owner shares its name with it
+ * - folds onto a live owner when the owner shares its name with it
  *   (`ownerSharesWith`: `modelAdmits` — the same fields and types, the owner
  *   no stricter on requiredness or nullability, everything else identical —
  *   or an identical shape for a copy the SDK sends): the copy is dropped and
@@ -440,6 +452,14 @@ function settleSharedNames(
   }
   const bundleOf = bundlesByModel(naming);
   const flagOf = (deprecated: boolean): string => (deprecated ? 'deprecated' : 'live');
+  /**
+   * Whether `owner` is a model a component's field minted rather than a
+   * component schema (`InlineModelNaming.components`; without the names,
+   * one standing in for a component, `yielding`): it still admits a
+   * deprecated copy while deprecated (`ownerFlagAdmits`, #441).
+   */
+  const fieldMinted = (owner: Model): boolean =>
+    naming?.components ? !naming.components.has(owner.name) : !!yielding?.has(owner);
   // Every name the merge passes have minted so far (`renameInlineCopy`),
   // shared with the passes before and after this one through `naming`.
   const minted = naming ? (naming.minted ??= new Set<string>()) : new Set<string>();
@@ -595,25 +615,31 @@ function settleSharedNames(
 
     // Under an owner, every copy is measured against it first: one the
     // owner shares its name with (`ownerSharesWith`, the flag read by
-    // `flagAdmits`) is folded onto it — a deprecated copy onto a live owner
-    // with the warning two inline copies get, since the shared name keeps
-    // the live definition, naming what a looser owner no longer requires
-    // (`looserFields`); a deprecated owner shares with no live copy. The
+    // `ownerFlagAdmits`) is folded onto it — a deprecated copy onto a live
+    // owner with the warning two inline copies get, since the shared name
+    // keeps the live definition, naming what a looser owner no longer
+    // requires (`looserFields`); a deprecated owner shares with no live
+    // copy, and a deprecated component with no copy at all (#441). The
     // copies that agree with the name's flag and that the owner does not
-    // share leave the owner's name, one model per shape (`renameClusters`).
-    // A copy whose flag disagrees and that the owner does not share leaves
-    // the name the same way, below.
+    // share leave the owner's name, one model per shape (`renameClusters`),
+    // the note naming why: the shape, or — for a deprecated copy a
+    // deprecated component would share were it live (`refusedByFlag`) — the
+    // component's flag, so a deprecated copy of a deprecated `Widget` is
+    // `GetLegacyWidgetWidget` as its live self was. A copy whose flag
+    // disagrees and that the owner does not share leaves the name the same
+    // way, below.
     const clashing: Model[] = [];
+    const refused: Model[] = [];
     for (const copy of group) {
       if (!owner) continue;
       const bundle = naming && bundleOf.get(copy);
-      if (ownerSharesWith(owner, copy, bundle)) {
+      if (ownerSharesWith(owner, copy, bundle, fieldMinted(owner))) {
         if (!!copy.deprecated !== nameDeprecated) console.warn(deprecatedFoldWarning(name, looserFields(owner, copy)));
         foldOnto(copy, owner, bundleOf, folded);
         continue;
       }
       if (!!copy.deprecated !== nameDeprecated) continue;
-      clashing.push(copy);
+      (refusedByFlag(owner, copy, bundle, fieldMinted(owner)) ? refused : clashing).push(copy);
     }
     renameClusters(
       name,
@@ -623,6 +649,15 @@ function settleSharedNames(
       folded,
       `its shape differs from component schema "${name}"`,
       `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
+    );
+    renameClusters(
+      name,
+      refused,
+      naming,
+      bundleOf,
+      folded,
+      `"${name}" is deprecated and admits no copy`,
+      `[oagen] Warning: Inline model "${name}" is named like component schema "${name}", which is deprecated and admits no copy, and has no site to be renamed from — using the component schema`,
     );
 
     // The copies whose flag disagrees with the name's and that nothing takes
@@ -665,18 +700,43 @@ function settleSharedNames(
 }
 
 /**
- * Whether `owner`, a component, shares its name with `copy` (`modelShares`):
+ * Whether `owner`, a component — or, with `fieldMinted`, a model a
+ * component's field minted — shares its name with `copy` (`modelShares`):
  * when it admits the shape (`modelAdmits`) — or, for a copy the SDK sends
  * (`bundle.sent`: a request body, a parameter, a field object of a component
  * only those reach), only when the shapes are identical, since a caller
  * typed against a looser component could leave out what the operation
- * requires — the flag read apart from the shape either way (`flagAdmits`: a
- * live owner shares with a deprecated copy, a deprecated owner only with a
- * deprecated one). The same question `ownerShares` answers for the shape
- * registry.
+ * requires — the flag read apart from the shape either way
+ * (`ownerFlagAdmits`: a live owner shares with a copy of either flag, a
+ * deprecated component with none, a deprecated field model only with a
+ * deprecated copy, #441). The same question `ownerShares` answers for the
+ * shape registry.
  */
-function ownerSharesWith(owner: Model, copy: Model, bundle: InlineModelBundle | undefined): boolean {
-  return modelShares(owner, copy, !!bundle?.sent);
+function ownerSharesWith(
+  owner: Model,
+  copy: Model,
+  bundle: InlineModelBundle | undefined,
+  fieldMinted = false,
+): boolean {
+  return modelShares(owner, copy, !!bundle?.sent, fieldMinted);
+}
+
+/**
+ * Whether `owner`, a deprecated component, would share its name with `copy`
+ * (`ownerSharesWith`) were it live: what the component's flag alone refuses
+ * (`ownerFlagAdmits`, #441), told from a shape the component would not
+ * share either way, for the note the copy leaves the name with. False for a
+ * live owner, which shares or refuses on the shape alone, and for a model a
+ * component's field minted (`fieldMinted`), whose flag refuses no deprecated
+ * copy.
+ */
+function refusedByFlag(
+  owner: Model,
+  copy: Model,
+  bundle: InlineModelBundle | undefined,
+  fieldMinted: boolean,
+): boolean {
+  return !fieldMinted && !!owner.deprecated && ownerSharesWith({ ...owner, deprecated: undefined }, copy, bundle);
 }
 
 /**
@@ -1040,9 +1100,9 @@ export function mergeInlineResponseModels(
  * component admits it — a deprecated one beside a live component included,
  * the field keeping the flag; only an identical one when the SDK only sends
  * its component (`InlineModelBundle.sent`) — and is dropped, the field
- * resolving to the component; one the component does not admit, a live one
- * beside a deprecated component included, takes its qualified name now
- * (`PetOwner2`), its field and every `allOf` copy of it repointed
+ * resolving to the component; one the component does not admit, one of
+ * either flag beside a deprecated component included (#441), takes its
+ * qualified name now (`PetOwner2`), its field and every `allOf` copy of it repointed
  * (`settleSharedNames`). Settling the fields first means every
  * later comparison with a component — the shape registry's, the response
  * merge's — reads the component's children by their final names, so a body
@@ -1564,8 +1624,13 @@ export function collapseJsonSuffixModels(
     // lost: a variant of another shape is a different variant even when the
     // fold would give it the base's name. The flag is read as `modelAdmits`
     // reads it (`flagAdmits`): a deprecated child collapses onto a live
-    // holder, as a deprecated `<Name>Json` folds onto a live `<Name>`, and a
-    // live child never onto a deprecated one. A name an enum holds and no
+    // holder, as a deprecated `<Name>Json` folds onto a live `<Name>`, a
+    // live child never onto a deprecated one, and a deprecated child onto a
+    // deprecated holder, as a deprecated `<Name>Json` folds onto a
+    // deprecated `<Name>` — the holder is the model under a folded name,
+    // not a declared owner measured against an inline copy, so
+    // `ownerFlagAdmits` (#441) is not asked here and a deprecated pair of
+    // children never refuses the merge of two components. A name an enum holds and no
     // model keeps admits no child: a component enum, or an inline enum a
     // model, operation or webhook carries, read as the folds leave it
     // (`readEnumName`), which the collectors lift after the fold — a `toy`

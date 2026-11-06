@@ -13,7 +13,10 @@ import type {
   ExtensionsNode,
   SecurityChanged,
   SecurityNode,
+  SecuritySchemeChange,
+  SecuritySchemeChanged,
 } from './types.js';
+import { diffAuthSchemes } from './auth.js';
 import { deprecationDetails, deprecationFlip, extensionsShift, type ExtensionsShift } from './classify.js';
 import { buildDirectionIndex } from './direction.js';
 import { diffModels } from './models.js';
@@ -41,6 +44,9 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
     ...diffServers(oldSpec, newSpec),
     // Then what every request must carry, by the same reasoning.
     ...diffDocumentSecurity(oldSpec, newSpec),
+    // Then what carrying it puts on the wire: the scheme definitions the
+    // requirements name (#384).
+    ...diffAuthSchemes(oldSpec, newSpec),
     ...diffModels(oldSpec.models, newSpec.models, directions),
     ...diffEnums(oldSpec.enums, newSpec.enums),
     // The documents' servers travel along so an operation is judged by where
@@ -123,13 +129,15 @@ function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
 
 /**
  * One entry per flag or nested entry in `changes` that a type signature does
- * not show: a parameter default moving, every `deprecated` flip, and every
- * security change. Each change carries `oldDeprecated`/`newDeprecated` or
- * `oldSecurity`/`newSecurity` beside its flag, so this is a single pass over
+ * not show: a parameter default moving, every `deprecated` flip, every
+ * security change, and every security scheme change. Each change carries
+ * `oldDeprecated`/`newDeprecated`, `oldSecurity`/`newSecurity` or the
+ * scheme definitions beside its flag, so this is a single pass over
  * `changes` that never looks a node up in the IR; a security entry's own
  * classification is `classifySecurityChange` on the two carried lists, read
  * from the node's side, except for the document's, which is copied from the
- * change (it may have been read from both sides).
+ * change (it may have been read from both sides), and a security scheme
+ * entry's is copied from its change too (#384).
  */
 function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
   const out: BehaviorChange[] = [];
@@ -168,10 +176,29 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     side: SecuritySide,
   ): SecurityChanged =>
     shifted(node, change, classifySecurityChange(change.oldSecurity ?? [], change.newSecurity ?? [], side));
+  // A scheme definition change, each side present when that document
+  // declares the scheme; the classification is the change's own.
+  const redefined = (change: SecuritySchemeChange): SecuritySchemeChanged => ({
+    kind: 'security-scheme-changed',
+    schemeName: change.schemeName,
+    ...(change.kind === 'security-scheme-removed' ? { oldScheme: change.scheme } : {}),
+    ...(change.kind === 'security-scheme-modified' ? { oldScheme: change.oldScheme, newScheme: change.newScheme } : {}),
+    ...(change.kind === 'security-scheme-added' ? { newScheme: change.scheme } : {}),
+    classification: change.classification,
+  });
 
   for (const c of changes) {
     if (c.kind === 'security-changed') {
       out.push(shifted({ node: 'document' }, c, c.classification));
+      continue;
+    }
+
+    if (
+      c.kind === 'security-scheme-added' ||
+      c.kind === 'security-scheme-removed' ||
+      c.kind === 'security-scheme-modified'
+    ) {
+      out.push(redefined(c));
       continue;
     }
 

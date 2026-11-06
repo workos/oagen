@@ -536,7 +536,8 @@ export interface Operation {
    * guessing one from the HTTP method. The differ pairs a lone 2xx/3xx with
    * the other spec's entry of this code, so an entry added beside it is not
    * mistaken for it, and reports it moving while both specs carry one as
-   * `responseStatusCodeChanged`.
+   * `responseStatusCodeChanged`, breaking unless the new spec still declares
+   * the old code among its 2xx/3xx (#407).
    */
   responseStatusCode?: number;
   /**
@@ -1260,7 +1261,12 @@ export interface Model {
    * request body or response, an array's items, a `oneOf` variant, a webhook
    * payload variant, an error or secondary body — so deprecating only the
    * items of `Pet.owners` beside a live component of their shape leaves no
-   * trace in the IR, as it leaves none when two inline copies fold.
+   * trace in the IR, as it leaves none when two inline copies fold. An
+   * inline schema named like a deprecated component shares nothing with it,
+   * whatever its flag: it keeps a model of its own, qualified by its site
+   * (`GetLegacyWidgetWidget` beside a deprecated `Widget`), which carries
+   * the schema's flag, so deprecating the schema flips this flag on that
+   * model and renames nothing (#441).
    */
   deprecated?: boolean;
   fields: Field[];

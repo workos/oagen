@@ -4,10 +4,10 @@ import {
   deprecatedFoldWarning,
   fieldPropertiesAdmit,
   fieldPropertiesKey,
-  flagAdmits,
   looserFields,
   modelPropertiesAdmit,
   modelPropertiesKey,
+  ownerFlagAdmits,
   type InlineModelBundle,
 } from './inline-models.js';
 import { enumShapeKey, enumValueShapeKey, enumValuesOf } from './enum-members.js';
@@ -68,10 +68,13 @@ export interface EnvelopeCompanion {
  *   (`ListLegacyUsersListMetadata`). Only when every copy is deprecated does
  *   a deprecated shape take the bare name. Beside a component, the
  *   companion's own flag is read as every declared model reads it
- *   (`flagAdmits`): a live component admits a deprecated companion — the
- *   envelope field keeps the flag the schema wrote (`Field.deprecated`), so
- *   nothing is lost — with the warning the merge passes give such a copy,
- *   and a deprecated component only a deprecated one. A model nested in the
+ *   (`ownerFlagAdmits`): a live component admits a deprecated companion —
+ *   the envelope field keeps the flag the schema wrote (`Field.deprecated`),
+ *   so nothing is lost — with the warning the merge passes give such a copy,
+ *   and a deprecated component schema (`componentNames`) no companion of
+ *   either flag, so a companion's name beside one is the same whichever flag
+ *   it carries (#441); a deprecated model a component's field minted, standing
+ *   in for a component, admits only a deprecated one. A model nested in the
  *   companion still folds only onto a component of the same flag; the
  *   model's own properties beside the flag — its limits (`minProperties`,
  *   `dependentRequired`, …), type parameters, whatever else the IR adds —
@@ -110,11 +113,17 @@ export interface EnvelopeCompanion {
  * component is not recorded: nothing of it is emitted), so the caller can
  * tell which envelope fields a surviving companion's models serve
  * (`companionBundles`).
+ *
+ * `componentNames`, when given, names the component schemas among
+ * `componentModels`; the rest are models a component's field minted, which
+ * admit a deprecated companion while deprecated, where a component admits
+ * none (`ownerFlagAdmits`, #441). Absent, every model there is a component.
  */
 export function resolveEnvelopeCompanionNames(
   companions: EnvelopeCompanion[],
   componentModels?: Model[],
   foldedOnto?: Map<EnvelopeCompanion, EnvelopeCompanion>,
+  componentNames?: ReadonlySet<string>,
 ): Model[] {
   const byBareName = new Map<string, EnvelopeCompanion[]>();
   /** Copies folded onto another definition; their own models are not emitted. */
@@ -146,17 +155,20 @@ export function resolveEnvelopeCompanionNames(
     if (component) {
       const targetType: TypeRef = { kind: 'model', name: component.name };
       finalNames = [component.name];
+      const fieldMinted = componentNames !== undefined && !componentNames.has(bare);
       folds = (c) => {
         // Only a field that references exactly its own lifted model can be
         // repointed at the component; a union of variants has nowhere to go.
         const own = c.models[0]!;
         const refs = collectModelRefs(c.field.type);
         if (refs.length !== 1 || refs[0] !== own.name) return false;
-        // The companion's own flag is read by `flagAdmits`, apart from its
-        // shape: a deprecated companion is compared with a live component
-        // as if live, since its envelope field keeps the flag. Its nested
+        // The component's flag is read as every declared model reads it
+        // (`ownerFlagAdmits`, #441): a deprecated component schema admits no
+        // companion, a deprecated field model only a deprecated one. A live
+        // one is compared with a deprecated companion as if the companion
+        // were live, since its envelope field keeps the flag. Its nested
         // models are compared with theirs (`admits`), flag included.
-        if (!flagAdmits(component, own)) return false;
+        if (!ownerFlagAdmits(component, own, fieldMinted)) return false;
         const local = localMap(c);
         if (own.deprecated && !component.deprecated) local.set(own.name, { ...own, deprecated: undefined });
         return typeAdmits(targetType, componentMap, unwrap(c.field.type), local, new Set());
@@ -315,7 +327,7 @@ function admits(
     // absorb a deprecated copy (its flag would vanish), and a deprecated
     // target must not absorb a live one (a live operation would then
     // reference it). Beside a component the caller has already read the
-    // root flag by `flagAdmits` and stripped it from the copy.
+    // root flag by `ownerFlagAdmits` and stripped it from the copy.
     if (!!target.deprecated !== !!copy.deprecated) return false;
     // Every other property of the model itself — its limits
     // (`minProperties`, `dependentRequired`, …), type parameters, whatever

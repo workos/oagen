@@ -380,7 +380,12 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
     };
 
     expect(onto(live, undefined)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
-    expect(onto(deprecated, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
+    // Issue #441: a deprecated component admits no copy, deprecated or not,
+    // so the copy's name beside it is the same under either flag.
+    expect(onto(deprecated, true)).toEqual({
+      ref: { kind: 'model', name: 'ListAPagination' },
+      models: [['ListAPagination', true]],
+    });
     // Issue #312: the copy's own flag is not part of the shape beside a
     // component; the envelope field keeps it.
     expect(onto(live, true)).toEqual({ ref: { kind: 'model', name: 'Pagination' }, models: [] });
@@ -650,7 +655,8 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
       // checked below on every predicate — `modelPropertiesAdmit` and
       // `modelAdmits`, which every component fold reads, and the companion
       // pass, which reads `modelPropertiesAdmit` on its own. The flag is the
-      // one property read apart: a live owner admits a deprecated candidate.
+      // one property read apart: a live owner admits a deprecated candidate,
+      // and a deprecated component admits none (issue #441).
       const every: Required<
         Omit<
           Model,
@@ -689,7 +695,11 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
             ? folded
             : { ref: 'ListAPagination', models: [['ListAPagination', key === 'constraints' ? 1 : undefined]] },
         );
-        expect(onto({ [key]: every[key] }, { [key]: every[key] }, false), `${where}, both`).toEqual(folded);
+        // Issue #441: a deprecated component admits no copy, so the one
+        // property that keeps a copy apart when both carry it is the flag.
+        expect(onto({ [key]: every[key] }, { [key]: every[key] }, false), `${where}, both`).toEqual(
+          flag ? { ref: 'ListAPagination', models: [['ListAPagination', undefined]] } : folded,
+        );
       }
     });
 
@@ -793,5 +803,29 @@ describe('resolveEnvelopeCompanionNames – the warning a deprecated companion f
     expect(warningsFor({ cursor: 'required', kinds: ['a'], ids: 'non-null' })).toEqual([
       folded('loosens "cursor", "kind", "ids"'),
     ]);
+  });
+});
+
+describe('#441: beside a deprecated component a companion keeps its operation-qualified name under either flag', () => {
+  const next = () => [{ name: 'next', type: str, required: false }];
+  const deprecated: Model = { name: 'Pagination', deprecated: true, fields: next() };
+  const onto = (flag: boolean, componentNames?: ReadonlySet<string>) => {
+    const c = companion('ListA', 'Pagination', next());
+    if (flag) c.models[0].deprecated = true;
+    const models = resolveEnvelopeCompanionNames([c], [deprecated], undefined, componentNames);
+    return { ref: (c.field.type as { name: string }).name, models: models.map((m) => [m.name, m.deprecated]) };
+  };
+
+  it('a deprecated component schema admits no companion, so the companion’s name does not depend on its flag', () => {
+    const kept = (flag: boolean | undefined) => ({ ref: 'ListAPagination', models: [['ListAPagination', flag]] });
+    expect(onto(false)).toEqual(kept(undefined));
+    expect(onto(true)).toEqual(kept(true));
+    expect(onto(false, new Set(['Pagination']))).toEqual(kept(undefined));
+    expect(onto(true, new Set(['Pagination']))).toEqual(kept(true));
+  });
+
+  it('a deprecated model a component’s field minted, standing in for a component, still takes a deprecated companion and no live one', () => {
+    expect(onto(true, new Set())).toEqual({ ref: 'Pagination', models: [] });
+    expect(onto(false, new Set())).toEqual({ ref: 'ListAPagination', models: [['ListAPagination', undefined]] });
   });
 });

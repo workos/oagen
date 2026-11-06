@@ -332,8 +332,7 @@ describe('diffOperations — a lone 2xx pairs by its status code (Greptile round
     expect(change.responseHeaderChanges).toEqual([]);
     expect(change.responseContentTypeChanges).toEqual([]);
     // What is reported is the primary moving to the added 200, additive: the
-    // 201 is still declared, and whether a bare status move breaks callers is
-    // left to a separate issue.
+    // 201 is still declared among the new spec's 2xx (#407).
     expect(change).toMatchObject({
       responseHeadersChanged: false,
       responseStatusCodeChanged: true,
@@ -360,11 +359,12 @@ describe('diffOperations — a lone 2xx pairs by its status code (Greptile round
     const change = modified(lone201, lone200);
     expect(change.responseHeaderChanges).toEqual([]);
     expect(change.responseContentTypeChanges).toEqual([]);
+    // Breaking since #407: the lone 201 is no longer declared. Used to be additive.
     expect(change).toMatchObject({
       responseStatusCodeChanged: true,
       oldResponseStatusCode: 201,
       newResponseStatusCode: 200,
-      classification: 'additive',
+      classification: 'breaking',
     });
     // A header that changes along with the code is reported under the new code.
     const lone200More = listPets([header('Location', { required: true }), header('X-Total')], {

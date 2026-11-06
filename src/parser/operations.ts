@@ -707,11 +707,22 @@ export function extractOperations(
   // against a copy of it (`operationBodyModelNames`).
   const registry: ModelShapeRegistry = new Map();
   const registeredModels = [...(componentModels ?? []), ...(componentFieldModels ?? [])];
+  // The component schemas' names, as the models carry them: a component
+  // shares its name with no copy while deprecated, where a model a
+  // component's field minted — among `componentModels` when the schema pass
+  // lifted it, among `componentFieldModels` otherwise — still shares it
+  // with a deprecated one (`InlineModelOwner.fieldMinted`, #441).
+  const componentNames = new Set(Object.keys(componentSchemas ?? {}).map(resolveSchemaName));
   // Each seeded with the model itself: a declared model shares its name with
   // every shape it admits (`ownerShares`), an operation's with an identical
   // one only.
   for (const model of registeredModels) {
-    if (!registry.has(model.name)) registry.set(model.name, { fingerprint: modelFingerprint(model), model });
+    if (registry.has(model.name)) continue;
+    registry.set(model.name, {
+      fingerprint: modelFingerprint(model),
+      model,
+      ...(componentNames.has(model.name) ? {} : { fieldMinted: true }),
+    });
   }
   // Every enum name decided so far, held as names no model may take
   // (`reserveEnumNames`): the component enums', and every enum the component
@@ -873,7 +884,12 @@ export function extractOperations(
   // `list_metadata` becomes, instead of the later merge keeping whichever has
   // more fields under one name.
   const companionFolds = new Map<EnvelopeCompanion, EnvelopeCompanion>();
-  const companionModels = resolveEnvelopeCompanionNames(envelopeCompanions, componentModels, companionFolds);
+  const companionModels = resolveEnvelopeCompanionNames(
+    envelopeCompanions,
+    componentModels,
+    companionFolds,
+    componentNames,
+  );
   inlineModels.push(...companionModels);
   // Each companion that kept its models is a site of its own, owning its
   // envelope field and the envelope field of every operation whose copy
