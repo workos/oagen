@@ -30,11 +30,14 @@
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
  * each other, in rounds (see `extractCallbacks`), so a collision hashes the
- * NEW stem as a webhook's is hashed — from the callback's site label, the
- * owner's label with the key, expression and method, so the callbacks of
- * two owners whose stems coincide (`createPet` beside `create_pet`) under
- * one key never hash alike (`CreatePetPetAdopted2Fac84Payload` beside a
- * component `CreatePetPetAdoptedPayload`), the moved names checked again —
+ * NEW stem as a webhook's is hashed — from the callback's identity: its
+ * owner's identity (an operation's operationId, else `METHOD /path`; a
+ * shared callback operation's operationId) with the key, expression and
+ * method, so the callbacks of two owners whose stems coincide (`createPet`
+ * beside `create_pet`) under one key never hash alike
+ * (`CreatePetPetAdopted2Fac84Payload` beside a component
+ * `CreatePetPetAdoptedPayload`), while a group read at several sites hashes
+ * alike whichever site comes first; the moved names are checked again —
  * and never renames an existing model.
  *
  * **Cycles.** A `components/callbacks` entry, or a nested callback, can
@@ -83,6 +86,8 @@ interface PendingCallback {
   owner: Operation | Webhook | PendingCallback;
   /** The stem of `owner` when it is an operation or webhook; a parent callback's is read once it is built. */
   ownerStem: string | undefined;
+  /** The identity of `owner` when it is an operation or webhook (`DeclaredCallbacks.identity`); a parent callback's is its own. */
+  ownerIdentity: string | undefined;
   /** How many callbacks sit between the declaring operation or webhook and this one. */
   depth: number;
   /** The `Callback` built for this entry, once its round is built (see `extractCallbacks`). */
@@ -132,11 +137,20 @@ export function extractCallbacks(
   webhooks?: unknown,
 ): CallbackExtractionResult {
   const pending: PendingCallback[] = [];
-  for (const { owner, callbacks, label, stem } of declared) {
-    collectPendingCallbacks(callbacks, label, owner, stem, 0, new Set(), pending, components, siblingDocs, {
-      paths,
-      webhooks,
-    });
+  for (const { owner, callbacks, label, stem, identity } of declared) {
+    collectPendingCallbacks(
+      callbacks,
+      label,
+      owner,
+      stem,
+      identity ?? label,
+      0,
+      new Set(),
+      pending,
+      components,
+      siblingDocs,
+      { paths, webhooks },
+    );
   }
   const inlineModels: Model[] = [];
   const inlineModelBundles: InlineModelBundle[] = [];
@@ -146,6 +160,19 @@ export function extractCallbacks(
     pending.map(({ entry }) => entry),
     'callback',
   );
+  // Each entry's identity, once the operationIds are settled: the owner's
+  // — a parent callback's operationId when its stem is named from one, else
+  // the parent's own identity — with the key, expression and method, in
+  // the shape of the label. Parents precede their children in `pending`.
+  for (const candidate of pending) {
+    const { entry, owner } = candidate;
+    const parent = isPending(owner) ? (owner.entry.stemOperationId ?? owner.entry.identity!) : candidate.ownerIdentity!;
+    entry.identity = callbackContext(parent, {
+      name: entry.name,
+      expression: entry.expression!,
+      httpMethod: entry.method,
+    });
+  }
 
   const all = new Set(reservedNames);
   const enums = new Set(reservedEnumNames);
@@ -228,6 +255,7 @@ function collectPendingCallbacks(
   label: string,
   owner: PendingCallback['owner'],
   ownerStem: string | undefined,
+  ownerIdentity: string | undefined,
   depth: number,
   ancestors: ReadonlySet<object>,
   pending: PendingCallback[],
@@ -271,13 +299,14 @@ function collectPendingCallbacks(
         siblingDocs,
       );
       for (const entry of entries) {
-        const candidate: PendingCallback = { entry, owner, ownerStem, depth };
+        const candidate: PendingCallback = { entry, owner, ownerStem, ownerIdentity, depth };
         pending.push(candidate);
         // The callback operation's own callbacks nest under it.
         collectPendingCallbacks(
           entry.op.callbacks,
           entry.label,
           candidate,
+          undefined,
           undefined,
           depth + 1,
           onPath,

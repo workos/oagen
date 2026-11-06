@@ -146,6 +146,19 @@ export interface WebhookEntry {
    * Absent on a webhook, whose key stands alone.
    */
   parentStem?: string;
+  /**
+   * What a key-named callback's collision hash is taken from
+   * (`stemIdentity`): its owner's identity — an operation's operationId,
+   * else `METHOD /path`; a webhook's or a callback's operationId when its
+   * stem is named from one, else that node's own identity — followed by
+   * `.callbacks.<key>.<expression>.<method>`, the shape of `label`. The
+   * label itself names the site the entry was read at, which for a shared
+   * callback operation differs per site; the identity does not, so a group
+   * read at several sites hashes alike whichever site comes first (#382).
+   * Absent on a webhook, and on a callback read outside `extractCallbacks`,
+   * where the label stands in.
+   */
+  identity?: string;
 }
 
 /** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
@@ -253,7 +266,14 @@ export function extractWebhooks(
   // the webhook's label and the stem its own models took.
   const declaredCallbacks: DeclaredCallbacks[] = built
     .filter(({ entry }) => entry.op.callbacks !== undefined)
-    .map(({ entry, node, stem }) => ({ owner: node, callbacks: entry.op.callbacks, label: entry.label, stem }));
+    .map(({ entry, node, stem }) => ({
+      owner: node,
+      callbacks: entry.op.callbacks,
+      label: entry.label,
+      stem,
+      // Two keys sharing one path item with an operationId are one identity.
+      identity: entry.stemOperationId ?? entry.label,
+    }));
   return { webhooks: built.map(({ node }) => node), inlineModels, inlineModelBundles, declaredCallbacks };
 }
 
@@ -669,7 +689,7 @@ function resolveWebhookModelStems(
     for (const group of movable) {
       const length = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
       hashLength.set(group, length);
-      moved.set(group, plainStem(group.owner, webhookDisambiguator(stemIdentity(group.owner), length)));
+      moved.set(group, plainStem(group.owner, webhookDisambiguator(groupIdentity(group), length)));
     }
     // Minted again under the moved stems alone, then checked again: the
     // groups that did not move keep the names they minted.
@@ -688,13 +708,28 @@ const SHA1_HEX_LENGTH = 40;
 
 /**
  * What an entry's disambiguator is hashed from: its operationId when its
- * stem is named from one; else a webhook's key, and a callback's site label
- * — the owner's label, the key, the expression and the method — so two
- * owners declaring one callback key, or two expressions of one key that
+ * stem is named from one; else a webhook's key, and a callback's identity
+ * (`WebhookEntry.identity`, its label when none was set) — the owner's
+ * identity, the key, the expression and the method — so two owners
+ * declaring one callback key, or two expressions of one key that
  * PascalCase alike (`#/url` and `#/URL`), never hash alike (#382).
  */
 function stemIdentity(entry: WebhookEntry): string {
-  return entry.stemOperationId ?? (entry.kind === 'callback' ? entry.label : entry.name);
+  return entry.stemOperationId ?? (entry.kind === 'callback' ? (entry.identity ?? entry.label) : entry.name);
+}
+
+/**
+ * What a group's disambiguator is hashed from: the smallest of its members'
+ * identities (`stemIdentity`), so the hash never depends on which site the
+ * group was first read at. The members of an operationId-named group share
+ * one identity, as do the sites of a shared callback operation's own
+ * callbacks, whose owner's identity is that operationId; a group of
+ * key-named entries reading one object under one stem from owners whose
+ * identities differ takes the smallest, which a reorder of the owners
+ * cannot move (#382). A group of one is hashed from its own.
+ */
+function groupIdentity(group: WebhookGroup): string {
+  return group.entries.map(stemIdentity).sort()[0]!;
 }
 
 /**

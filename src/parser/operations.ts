@@ -236,6 +236,17 @@ export interface DeclaredCallbacks {
    * webhook's resolved stem (`resolveWebhookModelStems`).
    */
   stem: string;
+  /**
+   * The owner's stable identity, which a key-named callback's collision
+   * hash is taken from (`WebhookEntry.identity`): an operation's
+   * operationId — the one its models are named from — else `METHOD /path`;
+   * a webhook's operationId when its stem is named from one, else its
+   * label. Two owners whose stems coincide (`createPet`, `create_pet`) have
+   * two identities, while two `webhooks` keys sharing a path item with an
+   * operationId have one, so their callbacks hash alike whichever key comes
+   * first. Defaults to `label`.
+   */
+  identity?: string;
 }
 
 /**
@@ -3644,7 +3655,17 @@ function buildOperation(
     // The callbacks are read after every webhook is named, under this
     // operation's label and the stem its own models are named from.
     ...(op.callbacks !== undefined
-      ? { declaredCallbacks: { owner: operation, callbacks: op.callbacks, label: opLabel, stem: modelQualifier } }
+      ? {
+          declaredCallbacks: {
+            owner: operation,
+            callbacks: op.callbacks,
+            label: opLabel,
+            stem: modelQualifier,
+            // The operationId the models are named from (the reuse of its
+            // own may have renamed it), else the method and path.
+            identity: namingOp.operationId ?? `${method.toUpperCase()} ${path}`,
+          },
+        }
       : {}),
   };
 }

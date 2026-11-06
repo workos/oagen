@@ -474,6 +474,58 @@ describe('#382', () => {
           expectResolved(spec);
           expect(warnings()).toEqual([]);
         });
+
+        it('hashes the nested callback from the shared operation, not from whichever site comes first, when its name is taken (Greptile)', async () => {
+          // A component holds `OnNoteAddedNoteReadPayload`, so the nested
+          // payload is hashed; the hash must not depend on the path order.
+          const taken = {
+            components: {
+              ...components,
+              schemas: { OnNoteAddedNoteReadPayload: { type: 'object', properties: { other: { type: 'integer' } } } },
+            },
+          };
+          const first = await parseJson(
+            documentWith(openapi, { '/notes': createNote, '/notes/update': updateNote }, taken),
+          );
+          const reversed = await parseJson(
+            documentWith(openapi, { '/notes/update': updateNote, '/notes': createNote }, taken),
+          );
+          const hashed = (spec: ApiSpec) => operations(spec).map((op) => payloadNames(op)[1]!);
+
+          expect(hashed(first)).toHaveLength(2);
+          for (const name of hashed(first)) expect(name).toMatch(/^OnNoteAddedNoteRead[0-9A-Fa-f]{6}Payload$/);
+          expect(new Set(hashed(first)).size).toBe(1);
+          expect(new Set([...hashed(first), ...hashed(reversed)]).size).toBe(1);
+          expect(modelNames(first).sort()).toEqual(modelNames(reversed).sort());
+          // The component keeps its name and its field.
+          expect(first.models.find((m) => m.name === 'OnNoteAddedNoteReadPayload')!.fields.map((f) => f.name)).toEqual([
+            'other',
+          ]);
+          // The same for two webhooks keys sharing the path item, in either key order.
+          const hooks = (keys: Record<string, unknown>) =>
+            parseJson(
+              documentWith(
+                openapi,
+                {},
+                {
+                  webhooks: keys,
+                  components: { pathItems: { NoteAdded: noteAddedItem }, schemas: taken.components.schemas },
+                },
+              ),
+            );
+          const ab = await hooks({
+            a: { $ref: '#/components/pathItems/NoteAdded' },
+            b: { $ref: '#/components/pathItems/NoteAdded' },
+          });
+          const ba = await hooks({
+            b: { $ref: '#/components/pathItems/NoteAdded' },
+            a: { $ref: '#/components/pathItems/NoteAdded' },
+          });
+          const hookNames = (spec: ApiSpec) => spec.webhooks!.map((webhook) => payloadNames(webhook)[0]!);
+          expect(new Set([...hookNames(ab), ...hookNames(ba)]).size).toBe(1);
+          expect(hookNames(ab)[0]).toMatch(/^OnNoteAddedNoteRead[0-9A-Fa-f]{6}Payload$/);
+          expect(warnings()).toEqual([]);
+        });
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {

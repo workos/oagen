@@ -834,6 +834,56 @@ describe('#382', () => {
       },
     );
 
+    it('reports nothing when two operations referencing a shared callback whose nested payload is hashed are reordered (Greptile)', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const ok = { '200': { description: 'OK' } };
+      const reference = { noteAdded: { $ref: '#/components/callbacks/NoteAdded' } };
+      const createNote = { post: { operationId: 'createNote', responses: ok, callbacks: reference } };
+      const updateNote = { post: { operationId: 'updateNote', responses: ok, callbacks: reference } };
+      const document = (paths: Record<string, unknown>) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths,
+        components: {
+          // The nested payload's plain name is taken, so it is hashed.
+          schemas: { OnNoteAddedNoteReadPayload: { type: 'object', properties: { other: { type: 'integer' } } } },
+          callbacks: {
+            NoteAdded: {
+              '{$request.body#/callbackUrl}': {
+                post: {
+                  operationId: 'onNoteAdded',
+                  ...posting({}, { type: 'object', properties: { noteId: { type: 'string' } } })[
+                    '{$request.body#/callbackUrl}'
+                  ].post,
+                  callbacks: {
+                    noteRead: {
+                      '{$request.body#/readUrl}': posting(
+                        {},
+                        { type: 'object', properties: { read: { type: 'boolean' } } },
+                      )['{$request.body#/callbackUrl}'],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      const first = await parseDocument(document({ '/notes': createNote, '/notes/update': updateNote }));
+      const reversed = await parseDocument(document({ '/notes/update': updateNote, '/notes': createNote }));
+
+      // The hashed name is the shared operation's, whichever site comes first: an unchanged contract, exit 0.
+      expect(diffSpecs(first, reversed).changes).toEqual([]);
+      expect(diffSpecs(reversed, first).changes).toEqual([]);
+      const nestedPayload = (spec: ApiSpec) =>
+        spec.services.flatMap((s) => s.operations).map((op) => op.callbacks![0]!.callbacks![0]!.requestBody);
+      expect(nestedPayload(first)[0]).toMatchObject({
+        kind: 'model',
+        name: expect.stringMatching(/^OnNoteAddedNoteRead[0-9A-Fa-f]{6}Payload$/),
+      });
+      expect(nestedPayload(reversed)).toEqual(nestedPayload(first));
+    });
+
     it("reports a callback payload field made required as breaking and made optional as additive, as a webhook's (Michael's finding 4)", async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const payload = (required: boolean) => ({
