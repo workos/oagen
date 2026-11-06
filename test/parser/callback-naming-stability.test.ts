@@ -314,6 +314,23 @@ const rows: Row[] = [
     reorder: true,
   },
   {
+    name: 'a callback nested under the last of four whose variant titles collide across pairs',
+    base: (openapi) =>
+      document(openapi, {
+        '/pets': {
+          post: op('createPet', {
+            c: posting(titledUnion('CreatePetAShape', { width: { type: 'number' } }, 'Tag')),
+            d: posting(titledUnion('CreatePetAShape', { height: { type: 'number' } }, 'Label')),
+            a: posting(titledUnion('Shape', { sides: { type: 'integer' } }, 'Note')),
+            b: posting(titledUnion('Shape', { radius: { type: 'number' } }, 'Memo')),
+          }),
+        },
+      }),
+    edit: (doc) => {
+      callbackOpOf(postOf(doc, '/pets'), 'd').callbacks = { e: posting(flag('seen')) };
+    },
+  },
+  {
     name: 'two paths reordered',
     base: (openapi) =>
       document(

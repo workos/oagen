@@ -441,7 +441,7 @@ export function buildReceivedRequests(
   // The groups in minting order: by wave, then as the document declares them.
   const order = waves.flatMap((wave) => groups.filter((group) => waveOf.get(group) === wave));
   if (entries[0]?.kind === 'callback') {
-    separateMintedNames(order, stems, hashLength, mintedByGroup, reservedOf, components, siblingDocs);
+    separateMintedNames(order, stems, hashLength, mintedByGroup, reservedOf, reserved, components, siblingDocs);
   }
   const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
   const names = new Set(order.flatMap((group) => [...mintedByGroup.get(group)!.names]));
@@ -500,18 +500,26 @@ export function buildReceivedRequests(
  * an explicit `$ref` to a component of the name — a parameter's union over
  * `components/schemas` — and the mapping entry it owns stay untouched.
  * Every contested name of a round is decided together: each replacement
- * is chosen against the names the round leaves occupied — the reserved
- * names, every name still minted, less the contested names every minter
- * of which leaves this round, plus the replacements already chosen — in
- * identity order, never in the order the groups were declared, so a name
- * another group vacates is free to take whichever came first: under
- * `createPet`, `a` and `b` with differing variants titled `Shape` beside
- * `c` and `d` with differing variants titled `CreatePetAShape` give `a`
- * `CreatePetAShape`, the name `c` and `d` leave, in either order, never
- * `CreatePetAShape2` in one and `CreatePetAShape` in the other. The check
- * runs again until no name is contested. A contested inline enum name once
- * the hash is spent cannot be moved — nothing renames an enum reference —
- * and is warned about and left to the model merge, never merged silently.
+ * is chosen against the names the round leaves occupied — the names
+ * reserved before the batch, every name still minted once the round's
+ * vacations are taken out (never a wave's old snapshot, which holds names
+ * an earlier wave has since vacated — a nested callback under `d` must
+ * not keep `CreatePetAShape` occupied for `a`), plus the replacements
+ * already chosen — in identity order, never in the order the groups were
+ * declared, so a name another group vacates is free to take whichever came
+ * first: under `createPet`, `a` and `b` with differing variants titled
+ * `Shape` beside `c` and `d` with differing variants titled
+ * `CreatePetAShape` give `a` `CreatePetAShape`, the name `c` and `d`
+ * leave, in either order, never `CreatePetAShape2` in one and
+ * `CreatePetAShape` in the other. A group's renames of a round are applied
+ * as one map over the models captured before any rename, in two passes
+ * through names no real name spells, so a replacement never becomes a
+ * source: `Shape` renamed to `<S>Shape` beside a variant titled
+ * `<S>Shape` under a spent-hash stem `S` leaves two models, each union
+ * reference on its own. The check runs again until no name is
+ * contested. A contested inline enum name once the hash is spent cannot be
+ * moved — nothing renames an enum reference — and is warned about and left
+ * to the model merge, never merged silently.
  *
  * The `webhooks` map is not held to this: the one name the resolution
  * leaves two webhooks sharing is a title-mapped variant, which the model
@@ -526,6 +534,8 @@ function separateMintedNames(
   hashLength: Map<WebhookGroup, number>,
   mintedByGroup: Map<WebhookGroup, MintedWebhook>,
   reservedOf: Map<WebhookGroup, ReservedNames>,
+  /** The names reserved before the batch — what a replacement steps around beside the names still minted. */
+  reserved: ReservedNames,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
 ): void {
@@ -565,6 +575,8 @@ function separateMintedNames(
     }
     // The hash moves a stem on the group's identity alone: six more
     // characters, minted again, the new names the hash's and no one else's.
+    // A group hashing this round renames nothing this round: its names are
+    // minted afresh, and a titled one still contested is renamed next round.
     for (const group of hashing) {
       const next = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
       const hashed = plainStem(group.owner, webhookDisambiguator(groupIdentity(group), next));
@@ -573,10 +585,12 @@ function separateMintedNames(
       mintedByGroup.set(group, mintWebhook(group.owner, hashed, components, reservedOf.get(group)!, siblingDocs));
     }
     // A rename is chosen against the names this round leaves occupied —
-    // the reserved names, every name still minted, less the contested
-    // names every minter of which leaves this round, plus the replacements
-    // already chosen — in identity order, never declaration order, so a
-    // name another group vacates is free to take whichever came first.
+    // the names reserved before the batch, every name still minted once
+    // the round's vacations are taken out (never a wave's old snapshot,
+    // which holds names an earlier wave has since vacated), plus the
+    // replacements already chosen — in identity order, never declaration
+    // order, so a name another group vacates is free to take whichever
+    // came first.
     const vacated = new Set(
       contested
         .filter(([name, groups]) =>
@@ -584,32 +598,56 @@ function separateMintedNames(
         )
         .map(([name]) => name),
     );
-    const occupied = new Set<string>();
+    const occupied = new Set(reserved.all);
     for (const group of order) {
-      for (const name of reservedOf.get(group)!.all) occupied.add(name);
       for (const name of mintedByGroup.get(group)!.names) if (!vacated.has(name)) occupied.add(name);
     }
+    // The models to rename, captured before any rename, with each group's
+    // renames gathered into one map, so a replacement that spells another
+    // contested name of the group — `Shape` renamed to `<S>Shape` beside a
+    // variant titled `<S>Shape` under a spent-hash stem `S` — never
+    // becomes a source.
     const byIdentity = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
-    renaming.sort((a, b) => byIdentity(groupIdentity(a.group), groupIdentity(b.group)) || byIdentity(a.name, b.name));
-    for (const { group, name } of renaming) {
+    const pending = renaming
+      .filter(({ group }) => !hashing.has(group))
+      .sort((a, b) => byIdentity(groupIdentity(a.group), groupIdentity(b.group)) || byIdentity(a.name, b.name));
+    const renamesOf = new Map<WebhookGroup, Map<string, string>>();
+    const modelsOf = new Map<WebhookGroup, Array<{ model: Model; to: string }>>();
+    for (const { group, name } of pending) {
       const minted = mintedByGroup.get(group)!;
       const model = minted.inlineModels.find((m) => m.name === name)!;
-      // Renamed under the group's stem, every reference minted for it
-      // repointed — an explicit `$ref` to a component of the name, and the
-      // mapping entry it owns, stay.
       const stem = toPascalCase(stems.get(group)!);
       let to = `${stem}${name}`;
       for (let n = 2; occupied.has(to); n++) to = numberedName(`${stem}${name}`, n);
       occupied.add(to);
-      model.name = to;
-      const renames = new Map([[name, to]]);
-      const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref);
-      for (const other of minted.inlineModels) {
-        for (const ref of collectModelTypeRefs(other)) renameTypeRefModels(ref, renames, admit);
+      renamesOf.set(group, new Map([...(renamesOf.get(group) ?? []), [name, to]]));
+      modelsOf.set(group, [...(modelsOf.get(group) ?? []), { model, to }]);
+    }
+    // Each group renamed under its stem, every reference minted for it
+    // repointed — an explicit `$ref` to a component of the name, and the
+    // mapping entry it owns, stay — in two passes through names no real
+    // name spells, so a replacement that spells another source of the
+    // group is never followed on, however many times one reference object
+    // is reached (a payload's reference is its content entry's too).
+    const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref);
+    const staged = (name: string): string => `\u0000${name}`;
+    for (const [group, renames] of renamesOf) {
+      const minted = mintedByGroup.get(group)!;
+      for (const { model, to } of modelsOf.get(group)!) model.name = to;
+      const passes = [
+        new Map([...renames].map(([from]) => [from, staged(from)])),
+        new Map([...renames].map(([from, to]) => [staged(from), to])),
+      ];
+      for (const pass of passes) {
+        for (const other of minted.inlineModels) {
+          for (const ref of collectModelTypeRefs(other)) renameTypeRefModels(ref, pass, admit);
+        }
+        for (const ref of mintedShapeRefs(minted)) renameTypeRefModels(ref, pass, admit);
       }
-      for (const ref of mintedShapeRefs(minted)) renameTypeRefModels(ref, renames, admit);
-      minted.names.delete(name);
-      minted.names.add(to);
+      for (const [from, to] of renames) {
+        minted.names.delete(from);
+        minted.names.add(to);
+      }
     }
     // A name none of whose minters could move is left to the merge, once.
     for (const [name, groups] of stuck) {

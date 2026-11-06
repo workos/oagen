@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,6 +14,8 @@ import {
   collectWebhookTypeRefs,
 } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
+import { callbackContext } from '../../src/ir/types.js';
+import { numberedName, toPascalCase } from '../../src/utils/naming.js';
 import type { ApiSpec, Callback, Operation, Webhook } from '../../src/ir/types.js';
 
 /**
@@ -1026,6 +1029,115 @@ describe('#382', () => {
           expect(warnings()).toEqual([]);
         },
       );
+
+      it.each([
+        { order: 'a, b, c, d', abFirst: true },
+        { order: 'c, d, a, b', abFirst: false },
+      ])(
+        "steps around the names reserved before the batch and those still minted, never a later wave's old snapshot: $order with a callback nested under d (Greptile)",
+        async ({ abFirst }) => {
+          // As above, with a callback `e` nested under `d`: minted in a later
+          // wave, whose reserved snapshot still holds the `CreatePetAShape`
+          // `c` and `d` minted before. That snapshot must not keep the name
+          // occupied once `c` and `d` vacate it: `a` still takes it.
+          const titled = (title: string, value: string, own: Record<string, unknown>) => ({
+            title,
+            type: 'object',
+            properties: { kind: { type: 'string', const: value }, ...own },
+          });
+          const union = (title: string, own: Record<string, unknown>, other: string) => ({
+            oneOf: [titled(title, 'first', own), titled(other, 'second', { text: { type: 'string' } })],
+          });
+          const a = callbackPosting(union('Shape', { sides: { type: 'integer' } }, 'Note'));
+          const b = callbackPosting(union('Shape', { radius: { type: 'number' } }, 'Memo'));
+          const c = callbackPosting(union('CreatePetAShape', { width: { type: 'number' } }, 'Tag'));
+          const d = callbackPosting(union('CreatePetAShape', { height: { type: 'number' } }, 'Label'), {
+            callbacks: { e: callbackPosting({ type: 'object', properties: { seen: { type: 'boolean' } } }) },
+          });
+          const spec = await parseJson(
+            documentWith(openapi, {
+              '/pets': { post: opWith(abFirst ? { a, b, c, d } : { c, d, a, b }, 'createPet') },
+            }),
+          );
+
+          const first = (node: Callback) =>
+            (node.requestBody as { variants: Array<{ name: string }> }).variants[0]!.name;
+          const byKey = new Map(operations(spec)[0]!.callbacks!.map((node) => [node.name, first(node)]));
+          expect(byKey).toEqual(
+            new Map([
+              ['a', 'CreatePetAShape'],
+              ['b', 'CreatePetBShape'],
+              ['c', 'CreatePetCCreatePetAShape'],
+              ['d', 'CreatePetDCreatePetAShape'],
+            ]),
+          );
+          const nested = operations(spec)[0]!.callbacks!.find((node) => node.name === 'd')!.callbacks!;
+          expect(nested.map((node) => [node.name, (node.requestBody as { name: string }).name])).toEqual([
+            ['e', 'CreatePetDePayload'],
+          ]);
+          expect(modelNames(spec)).toContain('CreatePetDePayload');
+          expectResolved(spec);
+          expect(warnings()).toEqual([]);
+        },
+      );
+
+      it("renames a group's contested names as one map, so a replacement that spells another never merges two union references (Greptile)", async () => {
+        // `x`'s second variant is titled with `x`'s own stem carrying all forty
+        // characters of its identity's hash, so the resolution hashes `x`
+        // to exhaustion — the title embeds every prefix — and `x` keeps that
+        // stem, `S`. `y` carries differing variants of the same two titles.
+        // Under `updatePet`, whose stem sorts after `Shape`, `x`'s `Shape` is
+        // renamed first, to `<S>Shape` — the name `x` and `y` vacate — and
+        // its `<S>Shape` to `<S><S>Shape`: two models, each union reference
+        // on its own, never both on the second.
+        const identity = callbackContext('updatePet', {
+          name: 'x',
+          expression: '{$request.body#/callbackUrl}',
+          httpMethod: 'post',
+        });
+        const hash = createHash('sha1').update(identity).digest('hex');
+        const base = 'UpdatePetX';
+        // The stem as `plainStem` spells it, cased once more as every name
+        // minted under it is (`XC7` reads as one word, `Xc7`).
+        const S = toPascalCase(toPascalCase([base, numberedName(base, hash).slice(base.length)].join('_')));
+        const titled = (title: string, value: string, own: Record<string, unknown>) => ({
+          title,
+          type: 'object',
+          properties: { kind: { type: 'string', const: value }, ...own },
+        });
+        const union = (shape: Record<string, unknown>, long: Record<string, unknown>) => ({
+          oneOf: [titled('Shape', 'first', shape), titled(`${S}Shape`, 'second', long)],
+        });
+        const spec = await parseJson(
+          documentWith(openapi, {
+            '/pets': {
+              post: opWith(
+                {
+                  x: callbackPosting(union({ sides: { type: 'integer' } }, { width: { type: 'number' } })),
+                  y: callbackPosting(union({ radius: { type: 'number' } }, { height: { type: 'number' } })),
+                },
+                'updatePet',
+              ),
+            },
+          }),
+        );
+
+        const variants = (node: Callback) =>
+          (node.requestBody as { variants: Array<{ name: string }> }).variants.map((v) => v.name);
+        const [x, y] = operations(spec)[0]!.callbacks!;
+        expect(variants(x!)).toEqual([`${S}Shape`, `${S}${S}Shape`]);
+        expect(variants(y!)).toEqual(['UpdatePetYShape', `UpdatePetY${S}Shape`]);
+        const fieldsOf = (name: string) => spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
+        expect(fieldsOf(`${S}Shape`)).toEqual(['kind', 'sides']);
+        expect(fieldsOf(`${S}${S}Shape`)).toEqual(['kind', 'width']);
+        expect(fieldsOf('UpdatePetYShape')).toEqual(['kind', 'radius']);
+        expect(fieldsOf(`UpdatePetY${S}Shape`)).toEqual(['kind', 'height']);
+        expect(modelNames(spec).sort()).toEqual(
+          [`${S}Shape`, `${S}${S}Shape`, 'UpdatePetYShape', `UpdatePetY${S}Shape`].sort(),
+        );
+        expectResolved(spec);
+        expect(warnings()).toEqual([]);
+      });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {
         // `createPet` and `create_pet` both name their models from `CreatePet`;
