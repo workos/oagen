@@ -830,12 +830,10 @@ describe('#382', () => {
         );
       });
 
-      it('parts two callbacks whose title-mapped variants share a name, which no stem hash moves, under the later stem', async () => {
+      describe('two callbacks whose title-mapped variants share a name, which no stem hash moves', () => {
         // Both payloads are title-mapped unions — every variant titled and
         // pinning `kind` — carrying a variant titled `Shape`: a context-free
-        // name the stem resolution ignores, since no hash would move it, with
-        // different fields on each side. The catch-all after minting renames
-        // the later callback's under its stem; the earlier keeps `Shape`.
+        // name the stem resolution ignores, since no hash would move it.
         const titled = (title: string, own: Record<string, unknown>) => ({
           title,
           type: 'object',
@@ -844,31 +842,130 @@ describe('#382', () => {
         const shaped = (own: Record<string, unknown>, other: string) => ({
           oneOf: [titled('Shape', own), titled(other, { text: { type: 'string' } })],
         });
-        const spec = await parseJson(
-          documentWith(openapi, {
-            '/pets': {
-              post: opWith(
-                {
-                  petAdopted: callbackPosting(shaped({ sides: { type: 'integer' } }, 'Note')),
-                  petReturned: callbackPosting(shaped({ radius: { type: 'number' } }, 'Memo')),
-                },
-                'createPet',
-              ),
-            },
-          }),
-        );
-
-        const [adopted, returned] = operations(spec)[0]!.callbacks!;
         const variants = (node: Callback) =>
           (node.requestBody as { variants: Array<{ name: string }> }).variants.map((v) => v.name);
-        expect(variants(adopted!)).toEqual(['Shape', 'Note']);
-        expect(variants(returned!)).toEqual(['CreatePetPetReturnedShape', 'Memo']);
-        const fieldsOf = (name: string) => spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
-        expect(fieldsOf('Shape')).toEqual(['kind', 'sides']);
-        expect(fieldsOf('CreatePetPetReturnedShape')).toEqual(['kind', 'radius']);
-        expect(modelNames(spec).sort()).toEqual(['CreatePetPetReturnedShape', 'Memo', 'Note', 'Shape']);
-        expectResolved(spec);
-        expect(warnings()).toEqual([]);
+        const shapes = (spec: ApiSpec) =>
+          new Map(operations(spec)[0]!.callbacks!.map((node) => [node.name, variants(node)[0]!]));
+        const fieldsOf = (spec: ApiSpec, name: string) =>
+          spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
+        const document = (
+          returned: Record<string, unknown>,
+          adoptedFirst: boolean,
+          extra: Record<string, unknown> = {},
+          rest: Record<string, unknown> = {},
+        ) => {
+          const callbacks = {
+            petAdopted: callbackPosting(shaped({ sides: { type: 'integer' } }, 'Note')),
+            petReturned: callbackPosting(shaped(returned, 'Memo'), extra),
+          };
+          const { petAdopted, petReturned } = callbacks;
+          return documentWith(
+            openapi,
+            {
+              '/pets': {
+                post: opWith(adoptedFirst ? { petAdopted, petReturned } : { petReturned, petAdopted }, 'createPet'),
+              },
+            },
+            rest,
+          );
+        };
+
+        it.each([true, false])(
+          'parts two shapes under each stem, whichever is declared first (adoptedFirst %s)',
+          async (adoptedFirst) => {
+            const spec = await parseJson(document({ radius: { type: 'number' } }, adoptedFirst));
+            // Every group minting `Shape` moves, each under its own stem.
+            expect(shapes(spec)).toEqual(
+              new Map([
+                ['petAdopted', 'CreatePetPetAdoptedShape'],
+                ['petReturned', 'CreatePetPetReturnedShape'],
+              ]),
+            );
+            expect(fieldsOf(spec, 'CreatePetPetAdoptedShape')).toEqual(['kind', 'sides']);
+            expect(fieldsOf(spec, 'CreatePetPetReturnedShape')).toEqual(['kind', 'radius']);
+            expect(modelNames(spec).sort()).toEqual([
+              'CreatePetPetAdoptedShape',
+              'CreatePetPetReturnedShape',
+              'Memo',
+              'Note',
+            ]);
+            expectResolved(spec);
+            expect(warnings()).toEqual([]);
+          },
+        );
+
+        it.each([true, false])(
+          'shares one shape under the one name, as two webhooks do (adoptedFirst %s) (Greptile)',
+          async (adoptedFirst) => {
+            const spec = await parseJson(document({ sides: { type: 'integer' } }, adoptedFirst));
+            // Identical shapes are the merge's to share: one `Shape`, both unions referencing it.
+            expect(shapes(spec)).toEqual(
+              new Map([
+                ['petAdopted', 'Shape'],
+                ['petReturned', 'Shape'],
+              ]),
+            );
+            expect(fieldsOf(spec, 'Shape')).toEqual(['kind', 'sides']);
+            expect(modelNames(spec).sort()).toEqual(['Memo', 'Note', 'Shape']);
+            expectResolved(spec);
+            expect(warnings()).toEqual([]);
+          },
+        );
+
+        it("leaves a parameter's union over component schemas, and its mapping, on the components (Greptile)", async () => {
+          // `petReturned` takes a query parameter whose union references the
+          // component schemas `Shape` and `Other`, mapped by `kind`. The
+          // rename of the payload's inline `Shape` must not reach them.
+          const component = (value: string, own: Record<string, unknown>) => ({
+            type: 'object',
+            properties: { kind: { type: 'string', const: value }, ...own },
+          });
+          const figure = {
+            name: 'figure',
+            in: 'query',
+            schema: {
+              oneOf: [{ $ref: '#/components/schemas/Shape' }, { $ref: '#/components/schemas/Other' }],
+              discriminator: {
+                propertyName: 'kind',
+                mapping: { shape: '#/components/schemas/Shape', other: '#/components/schemas/Other' },
+              },
+            },
+          };
+          const spec = await parseJson(
+            document(
+              { radius: { type: 'number' } },
+              true,
+              { parameters: [figure] },
+              {
+                components: {
+                  schemas: {
+                    Shape: component('shape', { area: { type: 'number' } }),
+                    Other: component('other', { note: { type: 'string' } }),
+                  },
+                },
+              },
+            ),
+          );
+
+          const [adopted, returned] = operations(spec)[0]!.callbacks!;
+          expect(variants(adopted!)).toEqual(['CreatePetPetAdoptedShape', 'Note']);
+          expect(variants(returned!)).toEqual(['CreatePetPetReturnedShape', 'Memo']);
+          // The parameter's union and mapping still target the components.
+          const [param] = returned!.queryParams;
+          expect(param!.name).toBe('figure');
+          expect(param!.type).toMatchObject({
+            kind: 'union',
+            variants: [
+              { kind: 'model', name: 'Shape' },
+              { kind: 'model', name: 'Other' },
+            ],
+            discriminator: { property: 'kind', mapping: { shape: 'Shape', other: 'Other' } },
+          });
+          expect(fieldsOf(spec, 'Shape')).toEqual(['kind', 'area']);
+          expect(fieldsOf(spec, 'CreatePetPetReturnedShape')).toEqual(['kind', 'radius']);
+          expectResolved(spec);
+          expect(warnings()).toEqual([]);
+        });
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {

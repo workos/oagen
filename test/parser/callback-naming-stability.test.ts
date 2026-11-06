@@ -57,6 +57,15 @@ function callbackOpOf(operation: Record<string, unknown>, key: string): Record<s
 }
 
 const reference = (name: string) => ({ $ref: `#/components/callbacks/${name}` });
+/** A title-mapped union: every variant titled and pinning `kind`, the first titled `Shape` with `own` fields. */
+const shaped = (own: Record<string, unknown>, other: string) => {
+  const titled = (title: string, fields: Record<string, unknown>) => ({
+    title,
+    type: 'object',
+    properties: { kind: { type: 'string', const: title.toLowerCase() }, ...fields },
+  });
+  return { oneOf: [titled('Shape', own), titled(other, { text: { type: 'string' } })] };
+};
 const adopted = { Adopted: posting(flag('adopted'), { operationId: 'notifyAdoption' }) };
 const read = { Read: posting(flag('read')) };
 
@@ -248,6 +257,40 @@ const rows: Row[] = [
     },
     // The cycle guard stops each nested walk one level down, with a warning each.
     warnings: 2,
+  },
+  {
+    name: 'two callbacks with identical title-mapped variants reordered',
+    base: (openapi) =>
+      document(openapi, {
+        '/pets': {
+          post: op('createPet', {
+            petAdopted: posting(shaped({ sides: { type: 'integer' } }, 'Note')),
+            petReturned: posting(shaped({ sides: { type: 'integer' } }, 'Memo')),
+          }),
+        },
+      }),
+    edit: (doc) => {
+      const callbacks = postOf(doc, '/pets').callbacks as Record<string, unknown>;
+      postOf(doc, '/pets').callbacks = { petReturned: callbacks.petReturned, petAdopted: callbacks.petAdopted };
+    },
+    reorder: true,
+  },
+  {
+    name: 'two callbacks with differing title-mapped variants reordered',
+    base: (openapi) =>
+      document(openapi, {
+        '/pets': {
+          post: op('createPet', {
+            petAdopted: posting(shaped({ sides: { type: 'integer' } }, 'Note')),
+            petReturned: posting(shaped({ radius: { type: 'number' } }, 'Memo')),
+          }),
+        },
+      }),
+    edit: (doc) => {
+      const callbacks = postOf(doc, '/pets').callbacks as Record<string, unknown>;
+      postOf(doc, '/pets').callbacks = { petReturned: callbacks.petReturned, petAdopted: callbacks.petAdopted };
+    },
+    reorder: true,
   },
   {
     name: 'two paths reordered',
