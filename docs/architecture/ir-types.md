@@ -134,7 +134,7 @@ So a field's or parameter's `constraints` equal those of its type (under its nul
 
 ```yaml
 petId:
-{ anyOf: [{ type: string, pattern: "^pet_[0-9A-Z]{26}$" }, { type: string }] }
+  { anyOf: [{ type: string, pattern: "^pet_[0-9A-Z]{26}$" }, { type: string }] }
 tagIds: { type: array, items: { type: string, pattern: "^tag_[0-9A-Z]{26}$" } }
 ```
 
@@ -334,15 +334,15 @@ An `x-pagination` extension on the Operation Object, or the `pagination` entry o
 ```yaml
 # In the spec, for authors who can annotate it
 paths:
-/pets:
-get:
-x-pagination:
-strategy: page # cursor | offset | page | link-header | none
-param: page # must be a query parameter of the operation
-limitParam: limit
-pageStart: 1 # page strategy only; defaults to the param's default, else minimum, else 1
-dataPath: pets # resolved against the response; the array's element type becomes itemType
-endOfIteration: { kind: totalPages, path: pagination.totalPages } # a field of the response, of the kind's type
+  /pets:
+    get:
+      x-pagination:
+        strategy: page # cursor | offset | page | link-header | none
+        param: page # must be a query parameter of the operation
+        limitParam: limit
+        pageStart: 1 # page strategy only; defaults to the param's default, else minimum, else 1
+        dataPath: pets # resolved against the response; the array's element type becomes itemType
+        endOfIteration: { kind: totalPages, path: pagination.totalPages } # a field of the response, of the kind's type
 ```
 
 ```ts
@@ -588,13 +588,13 @@ A 2xx body that is itself an inline enum, or an array of one, mints no model: it
 
 ```yaml
 responses:
-"200":
-description: The pet
-content:
-application/json:
-schema: { type: string }
-"302":
-description: Moved
+  "200":
+    description: The pet
+    content:
+      application/json:
+        schema: { type: string }
+  "302":
+    description: Moved
 ```
 
 ```typescript
@@ -1032,9 +1032,9 @@ Rule keys may be exact service names or trailing-`*` prefix patterns. Precedence
 
 ```typescript
 {
-"UserManagement*": "UserManagement", // catch-all for the family
-"UserManagementOrganizationMembership*": "OrganizationMembership", // longer prefix wins
-"UserManagementDataProviders": "Pipes", // exact wins over wildcard
+  "UserManagement*": "UserManagement",                          // catch-all for the family
+  "UserManagementOrganizationMembership*": "OrganizationMembership", // longer prefix wins
+  "UserManagementDataProviders": "Pipes",                       // exact wins over wildcard
 }
 ```
 

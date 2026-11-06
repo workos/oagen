@@ -165,10 +165,10 @@ oagen compat-diff --baseline .oagen-compat-snapshot.json --candidate /tmp/candid
 
 # With machine-readable report and failure threshold
 oagen compat-diff \
---baseline .oagen-compat-snapshot.json \
---candidate /tmp/candidate.json \
---output compat-report.json \
---fail-on breaking
+  --baseline .oagen-compat-snapshot.json \
+  --candidate /tmp/candidate.json \
+  --output compat-report.json \
+  --fail-on breaking
 ```
 
 | Argument             | Required | Default    | Description                                        |
@@ -223,7 +223,7 @@ oagen verify --lang node --output ./sdk --spec openapi.yml
 
 # With compat check
 oagen verify --lang node --output ./sdk --spec openapi.yml \
---api-surface ./sdk/sdk-node-surface.json
+  --api-surface ./sdk/sdk-node-surface.json
 ```
 
 | Argument                | Required | Default                         | Description                                                                                                   |
