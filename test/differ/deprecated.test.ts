@@ -1385,6 +1385,64 @@ describe('#441: deprecating an inline copy of a deprecated component is a flag f
     },
   );
 
+  describe.each(['3.0.3', '3.1.0'])(
+    'the component’s own flip beside its copy retypes the copy, on OpenAPI %s (#625 review, finding 1)',
+    (openapi) => {
+      const together = (openapi: string, component: boolean, copy: boolean) => {
+        const base = doc(openapi, copy);
+        return { ...base, components: { schemas: { Widget: component ? { ...widget, deprecated: true } : widget } } };
+      };
+
+      it('deprecating `Widget` with its copy, or alone while the copy stays deprecated, is a retype: exit 2 in either direction', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          const files = {
+            liveLive: await writeSpec(`together-ll-${openapi}.json`, together(openapi, false, false)),
+            liveDep: await writeSpec(`together-ld-${openapi}.json`, together(openapi, false, true)),
+            depDep: await writeSpec(`together-dd-${openapi}.json`, together(openapi, true, true)),
+          };
+          const specs = Object.fromEntries(
+            await Promise.all(Object.entries(files).map(async ([label, file]) => [label, await parseSpec(file)])),
+          ) as Record<keyof typeof files, ApiSpec>;
+          // A live `Widget` takes the copy under its own name, whatever the
+          // copy's flag; the deprecated `Widget` takes none.
+          expect(specs.liveLive.models.map((m) => m.name)).toEqual(['Widget']);
+          expect(specs.liveDep.models.map((m) => m.name)).toEqual(['Widget']);
+          expect(specs.depDep.models.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`)).toEqual([
+            'Widget (deprecated)',
+            'GetLegacyWidgetWidget (deprecated)',
+          ]);
+          const exitCodeOf = async (from: string, to: string): Promise<number> => {
+            const error = (await diffCommand({ old: from, new: to }).catch((e: unknown) => e)) as { exitCode: number };
+            return error.exitCode;
+          };
+          for (const before of ['liveLive', 'liveDep'] as const) {
+            const forward = diffSpecs(specs[before], specs.depDep);
+            expect(
+              forward.changes.map((c) => `${c.kind}: ${c.classification}`),
+              `${before} → depDep`,
+            ).toEqual(['model-added: additive', 'model-modified: additive', 'operation-modified: breaking']);
+            expect(forward.summary.breaking, `${before} → depDep`).toBe(1);
+            expect(await exitCodeOf(files[before], files.depDep), `${before} → depDep`).toBe(2);
+            const back = diffSpecs(specs.depDep, specs[before]);
+            expect(
+              back.changes.map((c) => `${c.kind}: ${c.classification}`),
+              `depDep → ${before}`,
+            ).toEqual(['model-removed: breaking', 'model-modified: additive', 'operation-modified: breaking']);
+            expect(await exitCodeOf(files.depDep, files[before]), `depDep → ${before}`).toBe(2);
+          }
+          // Deprecating only the copy under a live `Widget` is no change at
+          // all: the copy folds onto `Widget` either way.
+          expect(diffSpecs(specs.liveLive, specs.liveDep).changes).toEqual([]);
+          expect(await exitCodeOf(files.liveLive, files.liveDep)).toBe(0);
+        } finally {
+          vi.restoreAllMocks();
+        }
+      });
+    },
+  );
+
   it('hand-built IR: the copy’s model flips beside the deprecated component, and the operation returning it is unchanged', () => {
     expect(diffModels([deprecatedWidget, legacy(false)], [deprecatedWidget, legacy(true)])).toEqual([flip(became)]);
     expect(diffModels([deprecatedWidget, legacy(true)], [deprecatedWidget, legacy(false)])).toEqual([flip(ceased)]);

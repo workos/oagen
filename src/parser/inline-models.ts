@@ -645,7 +645,9 @@ export function modelAdmits(owner: Model, candidate: Model, options: ShapeReadOp
  * deprecated-owner arm decides only in the `…Json` fold's child collapse
  * (`collapseJsonSuffixModels`), since a component is asked
  * `ownerFlagAdmits` first (`modelShares`, the list-envelope pass): a
- * deprecated component admits no copy of either flag (#441).
+ * deprecated component admits no copy of either flag (#441), so a copy's
+ * name follows the component's flag and never its own — `ownerFlagAdmits`
+ * says what that costs when the component is the one deprecated.
  */
 export function flagAdmits(owner: Model, candidate: Model): boolean {
   return !owner.deprecated || !!candidate.deprecated;
@@ -667,9 +669,20 @@ export function flagAdmits(owner: Model, candidate: Model): boolean {
  * `GetLegacyWidgetWidget (deprecated)` deprecated, the flip `oagen diff`
  * reports as additive in either direction, where folding the deprecated
  * copy onto `Widget` swapped the operation's type and was reported as
- * breaking (#441). The trade-off: a copy deprecated from the start beside a
- * deprecated component is a second deprecated model of the shape, on a
- * surface nothing live reaches. A model a component's field minted
+ * breaking (#441). So a copy's name never depends on its own flag, only on
+ * the component's, and the component's flip is the one that retypes:
+ * deprecating `Widget` together with its identical copy, or alone while
+ * the copy stays deprecated, moves the copy from `Widget` to
+ * `GetLegacyWidgetWidget` — `model-added` beside a breaking
+ * `responseChanged`, exit 2 — as deprecating `Widget` alone has always done
+ * to a live copy. No rule keeps both flips additive without a live site
+ * resolving to a deprecated model: under a deprecated `Widget` the live
+ * copy must leave it, and a deprecated copy can match only one of its two
+ * neighbours, its live self or its fold under a live `Widget`; the copy's
+ * own flip, the edit made on the copy's side, is the one kept additive. The
+ * other trade-off: a copy deprecated from the start beside a deprecated
+ * component is a second deprecated model of the shape, on a surface
+ * nothing live reaches. A model a component's field minted
  * (`fieldMinted`: a nested object, array items, a union variant the schema
  * pass or the field extractor lifted) is read as `flagAdmits` reads it — a
  * deprecated one admits a deprecated copy and no live one — since the

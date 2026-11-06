@@ -2080,6 +2080,154 @@ describe('#441: a deprecated component admits no inline copy, so deprecating the
     });
   });
 
+  describe('the component’s own flip beside its copies retypes them: a copy’s name follows the component’s flag, never its own (#625 review, finding 1)', () => {
+    const pet = obj({ object: { type: 'string', const: 'pet' }, name: str });
+    const petModel = (name: string, deprecated = false): string =>
+      `${name}${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`;
+
+    describe.each(['3.0.3', '3.1.0'])('on OpenAPI %s', (openapi) => {
+      const extra = { openapi };
+
+      it('`Pet` and `getLegacyPet`’s identical copy deprecated together, or `Pet` alone while the copy stays deprecated: the copy moves to `GetLegacyPetPet`, exit 2 either way', async () => {
+        const doc = (component: boolean, copy: boolean) =>
+          specDoc(
+            { Pet: deprecate(pet, component) },
+            {
+              '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+              '/legacy-pets': getOp('getLegacyPet', deprecate(pet, copy)),
+            },
+            extra,
+          );
+        const liveLive = await parse(`441-together-ll-${openapi}`, doc(false, false));
+        const liveDep = await parse(`441-together-ld-${openapi}`, doc(false, true));
+        const depDep = await parse(`441-together-dd-${openapi}`, doc(true, true));
+        const depLive = await parse(`441-together-dl-${openapi}`, doc(true, false));
+        // A live `Pet` takes its copy under its own name, whatever the
+        // copy's flag; a deprecated `Pet` takes none.
+        for (const { spec, warnings } of [liveLive, liveDep]) {
+          expect(describeModels(spec)).toEqual([petModel('Pet')]);
+          expect(opsOf(spec).getLegacyPet?.response).toEqual({ kind: 'model', name: 'Pet' });
+          expect(warnings).toEqual(spec === liveDep.spec ? [folded('Pet')] : []);
+          expectSound(spec, ['Pet']);
+        }
+        expect(describeModels(depDep.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet', true)]);
+        expect(depDep.warnings).toEqual([refused('Pet', 'GetLegacyPetPet')]);
+        expectSound(depDep.spec, ['Pet'], ['getPet.response → Pet', 'getLegacyPet.response → GetLegacyPetPet']);
+        expect(describeModels(depLive.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet')]);
+        expect(depLive.warnings).toEqual([liveWhile('Pet', 'GetLegacyPetPet')]);
+        expectSound(depLive.spec, ['Pet'], ['getPet.response → Pet']);
+        for (const [label, after] of [
+          ['both deprecated together', depDep],
+          ['`Pet` alone, the copy already deprecated', depDep],
+          ['`Pet` alone, the copy live', depLive],
+        ] as const) {
+          const before = label.includes('already') ? liveDep : liveLive;
+          expect(describeDiff(before.spec, after.spec), label).toEqual({
+            breaking: 1,
+            changes: [
+              'model-added GetLegacyPetPet: additive',
+              'model-modified Pet deprecatedChanged: additive',
+              'operation-modified getLegacyPet responseChanged: breaking',
+            ],
+          });
+          expect(describeDiff(after.spec, before.spec), `${label}, back`).toEqual({
+            breaking: 2,
+            changes: [
+              'model-removed GetLegacyPetPet: breaking',
+              'model-modified Pet deprecatedChanged: additive',
+              'operation-modified getLegacyPet responseChanged: breaking',
+            ],
+          });
+        }
+      });
+
+      it('two copies move off `Pet` together, to one `GetLegacyPetPet`', async () => {
+        const doc = (all: boolean) =>
+          specDoc(
+            { Pet: deprecate(pet, all) },
+            {
+              '/pets': getOp('getPet', { $ref: '#/components/schemas/Pet' }),
+              '/legacy-pets': getOp('getLegacyPet', deprecate(pet, all)),
+              '/old-pets': getOp('getOldPet', deprecate(pet, all)),
+            },
+            extra,
+          );
+        const live = await parse(`441-together-two-live-${openapi}`, doc(false));
+        const dep = await parse(`441-together-two-dep-${openapi}`, doc(true));
+        expect(describeModels(live.spec)).toEqual([petModel('Pet')]);
+        expect(describeModels(dep.spec)).toEqual([petModel('Pet', true), petModel('GetLegacyPetPet', true)]);
+        for (const op of ['getLegacyPet', 'getOldPet']) {
+          expect(opsOf(live.spec)[op]?.response, op).toEqual({ kind: 'model', name: 'Pet' });
+          expect(opsOf(dep.spec)[op]?.response, op).toEqual({ kind: 'model', name: 'GetLegacyPetPet' });
+        }
+        expect(dep.warnings).toEqual([`${refused('Pet', 'GetLegacyPetPet')} (shared by 2 sites)`]);
+        expectSound(
+          dep.spec,
+          ['Pet'],
+          ['getPet.response → Pet', 'getLegacyPet.response → GetLegacyPetPet', 'getOldPet.response → GetLegacyPetPet'],
+        );
+        expect(describeDiff(live.spec, dep.spec)).toEqual({
+          breaking: 2,
+          changes: [
+            'model-added GetLegacyPetPet: additive',
+            'model-modified Pet deprecatedChanged: additive',
+            'operation-modified getLegacyPet responseChanged: breaking',
+            'operation-modified getOldPet responseChanged: breaking',
+          ],
+        });
+        expect(describeDiff(dep.spec, live.spec)).toEqual({
+          breaking: 3,
+          changes: [
+            'model-removed GetLegacyPetPet: breaking',
+            'model-modified Pet deprecatedChanged: additive',
+            'operation-modified getLegacyPet responseChanged: breaking',
+            'operation-modified getOldPet responseChanged: breaking',
+          ],
+        });
+      });
+
+      it('a `Note.pet` field deprecated together with its `NotePet` component moves to `NotePet2`, a breaking field retype', async () => {
+        const doc = (all: boolean) =>
+          specDoc(
+            { Note: obj({ pet: deprecate(pet, all) }), NotePet: deprecate(pet, all) },
+            { '/notes': getOp('getNote', { $ref: '#/components/schemas/Note' }) },
+            extra,
+          );
+        const live = await parse(`441-together-field-live-${openapi}`, doc(false));
+        const dep = await parse(`441-together-field-dep-${openapi}`, doc(true));
+        expect(describeModels(live.spec)).toEqual(['Note {pet: NotePet}', petModel('NotePet')]);
+        expect(describeModels(dep.spec)).toEqual([
+          'Note {pet (deprecated): NotePet2}',
+          petModel('NotePet', true),
+          petModel('NotePet2', true),
+        ]);
+        expect(dep.warnings).toEqual([refused('NotePet', 'NotePet2')]);
+        expectSound(live.spec, ['Note', 'NotePet']);
+        expectSound(dep.spec, ['Note', 'NotePet']);
+        expect(describeDiff(live.spec, dep.spec)).toEqual({
+          breaking: 1,
+          changes: [
+            'model-added NotePet2: additive',
+            'model-modified Note: breaking',
+            'field-type-changed pet: breaking',
+            'field-deprecated-changed pet: additive',
+            'model-modified NotePet deprecatedChanged: additive',
+          ],
+        });
+        expect(describeDiff(dep.spec, live.spec)).toEqual({
+          breaking: 2,
+          changes: [
+            'model-removed NotePet2: breaking',
+            'model-modified Note: breaking',
+            'field-type-changed pet: breaking',
+            'field-deprecated-changed pet: additive',
+            'model-modified NotePet deprecatedChanged: additive',
+          ],
+        });
+      });
+    });
+  });
+
   describe('the predicates', () => {
     const string = { kind: 'primitive', type: 'string' } as const;
     const model = (extra: Partial<Model> = {}): Model => ({
