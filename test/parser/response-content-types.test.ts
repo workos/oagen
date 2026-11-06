@@ -266,16 +266,19 @@ describe('response content types', () => {
       `);
     });
 
-    it('shares one model for an identical inline shape on another status code and re-derives a different one by code', async () => {
+    it('names an inline shape on a later status code for that code, identical to the 200 or not (#538)', async () => {
+      // The 201's body is the 200's shape and the 202's another: each is
+      // named for its status code, so neither follows the 200's model.
       const spec = await parseSpec(FIXTURE, { collapseErrorBodies: false });
       const job = findOp(spec, 'startJob');
       const ndjson = (code: number) => job.successResponses!.find((r) => r.statusCode === code)!.contents![1].type;
       expect(ndjson(200)).toEqual({ kind: 'model', name: 'StartJobApplicationXNdjsonResponse' });
-      expect(ndjson(201)).toEqual({ kind: 'model', name: 'StartJobApplicationXNdjsonResponse' });
+      expect(ndjson(201)).toEqual({ kind: 'model', name: 'StartJobApplicationXNdjsonResponse201' });
       expect(ndjson(202)).toEqual({ kind: 'model', name: 'StartJobApplicationXNdjsonResponse202' });
       expect(fieldsOf(spec, 'StartJobApplicationXNdjsonResponse')).toEqual(['id', 'state']);
+      expect(fieldsOf(spec, 'StartJobApplicationXNdjsonResponse201')).toEqual(['id', 'state']);
       expect(fieldsOf(spec, 'StartJobApplicationXNdjsonResponse202')).toEqual(['id', 'state', 'eta']);
-      expect(spec.models.filter((m) => m.name.startsWith('StartJobApplicationXNdjson'))).toHaveLength(2);
+      expect(spec.models.filter((m) => m.name.startsWith('StartJobApplicationXNdjson'))).toHaveLength(3);
     });
 
     it('steps around a component schema that already owns the derived name with a different shape', async () => {
@@ -1496,7 +1499,9 @@ describe('response content types', () => {
       ]);
     });
 
-    it('shares one model for bodies whose shapes differ only in documentation', () => {
+    it('shares one model between later bodies whose shapes differ only in documentation', () => {
+      // The 201 is named for itself whatever the 200 declares (#538); the
+      // 202, differing from it only in a description, shares its model.
       const body = (description: string) => obj({ name: { type: 'string', description } });
       const { operation, inlineModels } = singleOperation({
         '/things': {
@@ -1505,15 +1510,20 @@ describe('response content types', () => {
             responses: {
               '200': { description: 'ok', content: vendor(body('The name.')) },
               '201': { description: 'ok', content: vendor(body('Its name.')) },
+              '202': { description: 'ok', content: vendor(body('A name.')) },
             },
           },
         },
       });
       expect(operation.successResponses!.map((r) => r.contents![1].type)).toEqual([
         { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
-        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse' },
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse201' },
+        { kind: 'model', name: 'ListThingsApplicationVndShapeJsonResponse201' },
       ]);
-      expect(inlineModels).toHaveLength(1);
+      expect(inlineModels.map((m) => m.name)).toEqual([
+        'ListThingsApplicationVndShapeJsonResponse',
+        'ListThingsApplicationVndShapeJsonResponse201',
+      ]);
     });
   });
 
@@ -1978,7 +1988,10 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
   });
   const PLAIN = 'CreatePetApplicationVndPetJsonResponse';
 
-  it('shares one model, under the name the 200 took, when a component owns the plain name (the issue repro)', async () => {
+  it('names the 201 body for itself beside the `…Response200` the 200 took when a component owns the plain name (the issue repro, #538)', async () => {
+    // The 200's body steps to `…Response200` past the component; the 201's,
+    // the same shape, is `…Response201` whatever the 200 took (#538; it
+    // shared `…Response200`).
     const warn = silence();
     const spec = await parseDocument(
       document(createPet({ '200': withVendor(obj({ name: str })), '201': withVendor(obj({ name: str }), 'created') }), {
@@ -1991,29 +2004,35 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       'CreatePetResponse { id }',
       'CreatePetResponse201 { id }',
       `${PLAIN}200 { name }`,
+      `${PLAIN}201 { name }`,
     ]);
     expect(successOf(findOp(spec, 'createPet'))).toEqual([
       `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}200`,
-      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}200`,
+      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}201`,
     ]);
     expectSound(spec, [PLAIN]);
     expect(warn).not.toHaveBeenCalled();
   });
 
-  it('shares the plain name when nothing owns it', async () => {
+  it('leaves the plain name to the 200 and names the 201 body for itself when nothing owns it (#538)', async () => {
     const spec = await parseDocument(
       document(createPet({ '200': withVendor(obj({ name: str })), '201': withVendor(obj({ name: str }), 'created') })),
     );
 
-    expect(modelsOf(spec)).toEqual(['CreatePetResponse { id }', 'CreatePetResponse201 { id }', `${PLAIN} { name }`]);
+    expect(modelsOf(spec)).toEqual([
+      'CreatePetResponse { id }',
+      'CreatePetResponse201 { id }',
+      `${PLAIN} { name }`,
+      `${PLAIN}201 { name }`,
+    ]);
     expect(successOf(findOp(spec, 'createPet'))).toEqual([
       `200: application/json → CreatePetResponse, application/vnd.pet+json → ${PLAIN}`,
-      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}`,
+      `201: application/json → CreatePetResponse201, application/vnd.pet+json → ${PLAIN}201`,
     ]);
     expectSound(spec, []);
   });
 
-  it('shares the nested models too, since they are named from the name the 200 took', async () => {
+  it('moves the nested models with the 201 body, named from its status code (#538)', async () => {
     const nested = obj({ owner: obj({ id: str }) });
     const spec = await parseDocument(
       document(createPet({ '200': withVendor(nested), '201': withVendor(nested, 'created') }), {
@@ -2027,15 +2046,19 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       'CreatePetResponse201 { id }',
       `${PLAIN}200 { owner }`,
       `${PLAIN}200Owner { id }`,
+      `${PLAIN}201 { owner }`,
+      `${PLAIN}201Owner { id }`,
     ]);
     expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
       `${PLAIN}200`,
-      `${PLAIN}200`,
+      `${PLAIN}201`,
     ]);
     expectSound(spec, [PLAIN]);
   });
 
-  it('gives a later different shape its own status code, which a later identical shape then shares', async () => {
+  it('gives each later shape its own status code, which a later identical shape then shares (#538)', async () => {
+    // The 201, the 200's shape, is still `…Response201`; the 203 is the
+    // 202's shape and shares `…Response202`.
     const spec = await parseDocument(
       document(
         createPet({
@@ -2053,11 +2076,12 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       'CreatePetResponse { id }',
       'CreatePetResponse201 { id }',
       `${PLAIN}200 { name }`,
+      `${PLAIN}201 { name }`,
       `${PLAIN}202 { name, eta }`,
     ]);
     expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
       `${PLAIN}200`,
-      `${PLAIN}200`,
+      `${PLAIN}201`,
       `${PLAIN}202`,
       `${PLAIN}202`,
     ]);
@@ -2087,12 +2111,14 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
     expectSound(spec, [PLAIN]);
   });
 
-  it('shares a body whose nested titled variant was renamed under its root, the 201 replaying the rename (Greptile)', async () => {
+  it('shares a body whose nested titled variant was renamed under its root, the 202 replaying the 201 rename (Greptile)', async () => {
     // A component `Circle` of another shape owns the title; the 200's body
     // renames its nested `Circle` to `…ResponseCircle` (no stem reaches a
-    // variant below the top level). The identical 201 body replays that
-    // rename before comparing, so it shares every model rather than
-    // settling on `…Response201` with a `…Response201Circle` of its own.
+    // variant below the top level), and the 201's, named for itself
+    // (#538), renames its own to `…Response201Circle`. The identical 202
+    // body replays the 201's rename before comparing, so it shares every
+    // model of the 201's rather than settling on `…Response202` with a
+    // `…Response202Circle` of its own.
     const warn = silence();
     const withShape = obj({ shape: shapes({ radius: str }) });
     const spec = await parseDocument(
@@ -2106,23 +2132,34 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       ),
     );
 
-    // One copy, not three: the 201 and the 202 both replay the rename and share.
+    // Two copies, not three: the 202 replays the 201's rename and shares.
     expect(modelsOf(spec).sort()).toEqual([
       'Circle { other }',
       `${PLAIN} { shape }`,
+      `${PLAIN}201 { shape }`,
+      `${PLAIN}201Circle { kind, radius }`,
       `${PLAIN}Circle { kind, radius }`,
       'CreatePetResponse { id }',
       'CreatePetResponse201 { id }',
       'Square { kind, side }',
     ]);
-    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN, PLAIN]);
-    expect(spec.models.find((m) => m.name === PLAIN)?.fields[0].type).toMatchObject({
-      kind: 'union',
-      variants: [
-        { kind: 'model', name: `${PLAIN}Circle` },
-        { kind: 'model', name: 'Square' },
-      ],
-    });
+    expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+      PLAIN,
+      `${PLAIN}201`,
+      `${PLAIN}201`,
+    ]);
+    for (const [root, circle] of [
+      [PLAIN, `${PLAIN}Circle`],
+      [`${PLAIN}201`, `${PLAIN}201Circle`],
+    ]) {
+      expect(spec.models.find((m) => m.name === root)?.fields[0].type, root).toMatchObject({
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: circle },
+          { kind: 'model', name: 'Square' },
+        ],
+      });
+    }
     expectSound(spec, ['Circle']);
     expect(warn).not.toHaveBeenCalled();
   });
@@ -2180,34 +2217,54 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       // `Circle` is an enum component: the inline titled `Circle` clashes with
       // the reserved enum name and is renamed under the root; the `$ref` beside
       // it is typed as an enum reference, which the rename never touches, so
-      // neither the 200's rename nor the 201's replay of it is blocked.
+      // neither the 200's rename, nor the 201's own under `…Response201`
+      // (#538), nor the 202's replay of the 201's is blocked.
       const warn = silence();
       const withRef = obj({ shape: shapes({ diameter: str }), kind_ref: { $ref: '#/components/schemas/Circle' } });
       const spec = await parseDocument(
-        document(createPet({ '200': withVendor(withRef), '201': withVendor(withRef, 'created') }), {
-          Circle: { type: 'string', enum: ['a', 'b'] },
-        }),
+        document(
+          createPet({
+            '200': withVendor(withRef),
+            '201': withVendor(withRef, 'created'),
+            '202': withVendor(withRef, 'accepted'),
+          }),
+          { Circle: { type: 'string', enum: ['a', 'b'] } },
+        ),
       );
 
       expect(spec.enums.map((e) => e.name)).toEqual(['Circle']);
       expect(modelsOf(spec).sort()).toEqual([
         `${PLAIN} { shape, kind_ref }`,
+        `${PLAIN}201 { shape, kind_ref }`,
+        `${PLAIN}201Circle { kind, diameter }`,
         `${PLAIN}Circle { kind, diameter }`,
         'CreatePetResponse { id }',
         'CreatePetResponse201 { id }',
         'Square { kind, side }',
       ]);
-      expect(spec.models.find((m) => m.name === PLAIN)?.fields.map((f) => f.type)).toMatchObject([
-        {
-          kind: 'union',
-          variants: [
-            { kind: 'model', name: `${PLAIN}Circle` },
-            { kind: 'model', name: 'Square' },
-          ],
-        },
-        { kind: 'enum', name: 'Circle' },
+      for (const [root, circle] of [
+        [PLAIN, `${PLAIN}Circle`],
+        [`${PLAIN}201`, `${PLAIN}201Circle`],
+      ]) {
+        expect(
+          spec.models.find((m) => m.name === root)?.fields.map((f) => f.type),
+          root,
+        ).toMatchObject([
+          {
+            kind: 'union',
+            variants: [
+              { kind: 'model', name: circle },
+              { kind: 'model', name: 'Square' },
+            ],
+          },
+          { kind: 'enum', name: 'Circle' },
+        ]);
+      }
+      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([
+        PLAIN,
+        `${PLAIN}201`,
+        `${PLAIN}201`,
       ]);
-      expect(successOf(findOp(spec, 'createPet')).map((line) => line.split(' → ').pop())).toEqual([PLAIN, PLAIN]);
       expectSound(spec, []);
       expect(warn).not.toHaveBeenCalled();
     });
@@ -2304,17 +2361,21 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
             .join(', ')}`,
       );
 
-    it('shares across status codes under a key respelled without parameters, since both derive one bare name', async () => {
+    it('shares across later status codes under a key respelled without parameters, since both derive one bare name', async () => {
       // `application/yaml; charset=utf-8` is the only YAML key of the 200, so
       // its parameters are not in the name; the 201's `application/yaml`
       // derives the same `…ApplicationYamlResponse`, which a component owns
-      // with another shape — the 201 tries the `…Response200` the 200 took.
+      // with another shape — the 200 steps to `…Response200` and the 201,
+      // named for itself (#538), to `…Response201`, which the 202's
+      // `application/yaml; charset=utf-8` — the same bare name again —
+      // shares.
       const warn = silence();
       const spec = await parseDocument(
         document(
           createPet({
             '200': withYaml({ 'application/yaml; charset=utf-8': { schema: obj({ name: str }) } }),
             '201': withYaml({ 'application/yaml': { schema: obj({ name: str }) } }, 'created'),
+            '202': withYaml({ 'application/yaml; charset=utf-8': { schema: obj({ name: str }) } }, 'accepted'),
           }),
           { [YAML]: obj({ other: str }) },
         ),
@@ -2325,10 +2386,12 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         'CreatePetResponse { id }',
         'CreatePetResponse201 { id }',
         `${YAML}200 { name }`,
+        `${YAML}201 { name }`,
       ]);
       expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
         `200: application/yaml; charset=utf-8 → ${YAML}200`,
-        `201: application/yaml → ${YAML}200`,
+        `201: application/yaml → ${YAML}201`,
+        `202: application/yaml; charset=utf-8 → ${YAML}201`,
       ]);
       expectSound(spec, [YAML]);
       expect(warn).not.toHaveBeenCalled();
@@ -2355,18 +2418,25 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
       expectSound(spec, []);
     });
 
-    it('never shares between two spellings told apart by their parameters, but shares each across status codes', async () => {
+    it('never shares between two spellings told apart by their parameters, but shares each across later status codes', async () => {
       // Side by side, `application/yaml` and `application/yaml; charset=utf-8`
       // derive two names, so their identical bodies are two models on the 200;
-      // the 201 declares the same two keys, and each shares the 200's model
-      // of its own name — two models in all, not four.
+      // the 201 declares the same two keys, each named for the 201 (#538),
+      // and the 202 the same two again, each sharing the 201's model of its
+      // own name — four models in all, not six.
       const warn = silence();
       const keys = () => ({
         'application/yaml': { schema: obj({ name: str }) },
         'application/yaml; charset=utf-8': { schema: obj({ name: str }) },
       });
       const spec = await parseDocument(
-        document(createPet({ '200': withYaml(keys()), '201': withYaml(keys(), 'created') })),
+        document(
+          createPet({
+            '200': withYaml(keys()),
+            '201': withYaml(keys(), 'created'),
+            '202': withYaml(keys(), 'accepted'),
+          }),
+        ),
       );
 
       expect(modelsOf(spec)).toEqual([
@@ -2374,10 +2444,13 @@ describe('identical inline bodies on two status codes (issue #280)', () => {
         'CreatePetResponse201 { id }',
         `${YAML} { name }`,
         `${YAML_CHARSET} { name }`,
+        `${YAML}201 { name }`,
+        `${YAML_CHARSET}201 { name }`,
       ]);
       expect(yamlEntries(findOp(spec, 'createPet'))).toEqual([
         `200: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
-        `201: application/yaml → ${YAML}, application/yaml; charset=utf-8 → ${YAML_CHARSET}`,
+        `201: application/yaml → ${YAML}201, application/yaml; charset=utf-8 → ${YAML_CHARSET}201`,
+        `202: application/yaml → ${YAML}201, application/yaml; charset=utf-8 → ${YAML_CHARSET}201`,
       ]);
       expectSound(spec, []);
       expect(warn).not.toHaveBeenCalled();

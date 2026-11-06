@@ -4972,6 +4972,17 @@ interface DeferredInlineType {
    * parameter's location (`query`); a request body has none.
    */
   statusCode?: number | string;
+  /**
+   * Set for the secondary body of a 2xx entry after the primary, the
+   * operation's own (workos/oagen#538): the body is named for its status
+   * code as the entry's primary body is (`stepSecondaryBody`), so it has no
+   * bare name — `name` is tried with `statusCode` first, then numbered
+   * under that (`deferredNamingStem`) — and its siblings are the earlier
+   * such bodies of the same name, never the primary status code's, whose
+   * model it never shares (`resolveDeferredInlineTypes`). A component response's secondary
+   * body is the component's wherever it is mounted and is never this.
+   */
+  later?: boolean;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
   /**
@@ -5057,12 +5068,17 @@ interface ResponseTypingContext {
  * the `text/csv` body's model to `ReplaceWidgetTextCsvRequest2`. The sites
  * that derive from one bare name
  * — one kind, parent and name: the same header on several status codes or
- * operations, one media type's body on several status codes, a component
- * response's header or secondary body from every operation that returns it;
- * or one component response's body, whether the site is an error or a
- * fallback entry (`componentSite`) — share a record of the stems they settled on and
- * the renames made under them, so a later one shares an identical shape
- * under whichever name the earlier took (`materializeInlineSchema`).
+ * operations, one media type's body on the later 2xx entries of an
+ * operation, or on its primary 2xx, 3xx and fallback entries (`later`,
+ * workos/oagen#538), a component response's header or secondary body from
+ * every operation that returns it; or one component response's body,
+ * whether the site is an error or a fallback entry (`componentSite`) —
+ * share a record of the stems they settled on and the renames made under
+ * them, so a later one shares an identical shape under whichever name the
+ * earlier took (`materializeInlineSchema`); the later 2xx bodies of a name
+ * keep a record apart from the primary's and step through a numbered run of
+ * their own (`deferredNamingStem`), so neither group shares the other's
+ * model or steps into its names.
  *
  * An enum keeps a name a model also derives, wherever the document declares
  * the two. One typed as an operation is built — one a parameter, a request
@@ -5092,17 +5108,26 @@ function resolveDeferredInlineTypes(
 ): { models: Model[]; bundles: InlineModelBundle[] } {
   const bundleOf = new Map<DeferredInlineType, InlineModelBundle>();
   const siblingsByBareName = new Map<string, SiblingSites>();
+  const sitesOf = (key: string): SiblingSites => {
+    let siblings = siblingsByBareName.get(key);
+    if (!siblings) siblingsByBareName.set(key, (siblings = createSiblingSites()));
+    return siblings;
+  };
   for (const item of namingOrder) {
     // A component response's site is one site wherever the component is
     // returned, so its record is keyed by the name the component gives it
     // alone (its body's, or a header's under the component's stem), not by
-    // whether the site is an error or a fallback entry.
+    // whether the site is an error or a fallback entry. The secondary bodies
+    // of an operation's later 2xx entries (`later`) are one group and the
+    // primary's another, so a later body shares an earlier later body's
+    // model, never the primary's, whichever the document declares first;
+    // the two groups' candidates never meet (`deferredNamingStem`), so
+    // neither needs to know the other's stems (workos/oagen#538).
     const bareName =
       item.componentSite !== undefined
         ? `component\u0000${item.parentName ?? ''}\u0000${item.name}`
         : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
-    let siblings = siblingsByBareName.get(bareName);
-    if (!siblings) siblingsByBareName.set(bareName, (siblings = createSiblingSites()));
+    const siblings = sitesOf(item.later ? `later\u0000${bareName}` : bareName);
     const models: Model[] = [];
     const type = materializeDeferredType(item, registry, models, siblings);
     // An enum this site typed — a body that is itself an enum, one nested in
@@ -5211,10 +5236,16 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  *             3. the other of those two
  *             4. operation and status code    `DocumentsCreateDocumentXMeta429`
  *             5. a numeric suffix             `DocumentsXMeta2`, `DocumentsXMeta3`, …
- *   content   (a success or fallback entry's secondary body)
+ *   content   (the primary 2xx's, a 3xx's or a fallback entry's secondary body)
  *             1. the bare name                `RenderPetCardTextHtmlResponse`
- *             2. the status code              `RenderPetCardTextHtmlResponse201`
+ *             2. the status code              `RenderPetCardTextHtmlResponse200`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
+ *   content   (a later 2xx's secondary body, `later`: named for its status
+ *             code as the entry's primary body is, then numbered under it —
+ *             a run of its own the primary's never meets, so no edit to the
+ *             primary's bodies renames it, workos/oagen#538)
+ *             1. the status code              `RenderPetCardTextHtmlResponse201`
+ *             2. a numeric suffix under it    `…Response201No2`, `…Response201No3`, …
  *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
  *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
  *   fallback  (a `default` or `1XX`–`3XX` body)
@@ -5234,10 +5265,27 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  * earlier sites of the same kind, parent and bare name settled on
  * (`siblings`, kept by `resolveDeferredInlineTypes`): the `X-Meta` header of
  * a 429 tries the `DocumentsXMeta200` its 200 took before `DocumentsXMeta429`,
- * and the `application/vnd.pet+json` body of a 201 tries the `…Response200`
- * its 200 took before `…Response201`, so an identical shape shares the
- * earlier site's model under whichever name that site settled on, and a
- * different shape steps past it to its own qualifier. A fallback body named
+ * so an identical shape shares the earlier site's model under whichever
+ * name that site settled on, and a different shape steps past it to its own
+ * qualifier. A later 2xx's secondary body has no bare name, so its siblings'
+ * stems come first: the `application/vnd.pet+json` body of a 202 tries the
+ * `…Response201` its 201 took before `…Response202`. Its siblings are the
+ * earlier later 2xx's bodies of its name, never the primary's, and its
+ * numbered run is its own (`…Response201No2`, never the `…Response2` the
+ * primary steps to), so a 201 body identical to the 200's is `…Response201`
+ * beside the 200's `…Response`, under whichever name either settled on and
+ * whichever the document declares first, and a 201 body that stepped to
+ * `…Response201No2` keeps it whatever the 200's bodies gain or lose. A body
+ * that is itself an inline enum mints no model and clashes on nothing, so
+ * it shares a sibling's stem only when that sibling is an enum of the same
+ * members (`SettledSite.enumValues`) and otherwise takes its own status
+ * code, as an object would: a 202 enum `[c, d]` beside a 201 enum `[a, b]`
+ * is `…Response202`, and a 202 enum `[a, b]` shares `…Response201`. A
+ * body that produces neither a model nor an enum — a primitive, an array of
+ * primitives, a `$ref` to a component — owns no name and records no
+ * settlement, so a 202 object beside a 201 `type: string` body is
+ * `…Response202`, not the free `…Response201`, and keeps it when the 201's
+ * body is removed (workos/oagen#538). A fallback body named
  * from the operation carries the response's label in its bare name and an
  * error body named from it its status code, so within an operation each has
  * a bare name of its own and no sibling to try. A component response's body
@@ -5276,6 +5324,7 @@ function materializeDeferredType(
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),
     siblings,
+    ...(item.later && { siblingsFirst: true }),
     parentName: item.parentName,
     componentSchemas: item.componentSchemas,
     registry,
@@ -5375,6 +5424,13 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
       };
     }
     case 'content':
+      // A later 2xx's secondary body has no bare name: it is named for its
+      // status code as its primary body is, then numbered under that
+      // (`…Response201No2`, behind `No` since the code ends in a digit,
+      // #533) — a run of its own, never the `…Response2`, `…Response3` the
+      // primary's bodies step through, so whichever of those the primary
+      // takes or gives up, the later body's name stands (workos/oagen#538).
+      if (item.later) return (index) => (index === 0 ? byStatus : numberedProperty(byStatus, index + 1));
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'request':
     case 'fallback':
@@ -6553,6 +6609,14 @@ interface ContentModelNaming {
    * clash.
    */
   component: string | undefined;
+  /**
+   * Whether the entry is a 2xx after the operation's primary, whose
+   * secondary bodies are named for its status code as its primary body is
+   * (`DeferredInlineType.later`, workos/oagen#538): `RenderPetCardTextHtmlResponse201`
+   * for the 201's `text/html` body beside the 200's
+   * `RenderPetCardTextHtmlResponse`. Never set for a component response.
+   */
+  later: boolean;
 }
 
 /**
@@ -6638,18 +6702,22 @@ function responseModelSite(
  * entry (a 4xx/5xx status code, a `4XX`/`5XX` range), `Response` otherwise
  * — except that a component response's bodies are `Response` at any key, as
  * its primary body is `<Component>Response` whether an operation mounts it
- * at 200, at 404 or in a `4XX` range.
+ * at 200, at 404 or in a `4XX` range; and, for the operation's own 2xx
+ * entry after the primary (`later`), that its bodies are named for its
+ * status code (workos/oagen#538), which a component's never are.
  */
 function contentModelNaming(
   site: ResponseModelSite,
   role: 'Response' | 'Error',
   statusCode: number | string,
+  later = false,
 ): ContentModelNaming {
   return {
     base: site.stem,
     role: site.component === undefined ? role : 'Response',
     statusCode,
     component: site.component,
+    later: site.component === undefined && later,
   };
 }
 
@@ -6740,6 +6808,7 @@ function typeSecondaryContent(
     componentSchemas: ctx.componentSchemas,
     targets: [target],
     ...(naming.component !== undefined && { componentSite: naming.component }),
+    ...(naming.later && { later: true }),
   });
   return target.type;
 }
@@ -7333,11 +7402,14 @@ function extractResponses(
         bodySchemas.set(code, bodySchema);
         bodyContexts.set(code, { context: contextName, component: componentModelName !== undefined });
       }
+      // A 2xx after the primary names its secondary bodies for its status
+      // code, as `stepSecondaryBody` names its primary body (#538); the
+      // primary's keep the bare `<Op><MediaType>Response`.
       const contents = extractResponseContents(
         resp.content,
         primaryContentType,
         extractedType,
-        contentModelNaming(site, 'Response', code),
+        contentModelNaming(site, 'Response', code, code !== primaryEntry?.code),
         ctx,
       );
       // The component's body wherever it is mounted, so an enum it is steps
@@ -7610,7 +7682,8 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * earlier status code settled on for a body of its shape (`bodyShapeKey`), so a
  * 202 identical to the 201 shares `CreatePetResponse201`; else to its status
  * code (`CreatePetResponse201`), then a number (`CreatePetResponse2`, `…3`, …),
- * the chain a secondary media-type body steps through (`deferredNamingStem`), a
+ * the chain the entry's secondary media-type bodies step through too
+ * (`deferredNamingStem`, `later`: `CreatePetApplicationYamlResponse201`), a
  * candidate being taken when no name it would give is kept, or owned in the
  * spec-wide registry by a component or another operation, under a shape the
  * owner does not share (`ownerShares`), nor is a component response's body,
