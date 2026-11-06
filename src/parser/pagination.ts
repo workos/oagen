@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import type {
   TypeRef,
   Parameter,
@@ -8,9 +9,17 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { classifyInlineSchema, isNullSchema, resolveComponentSchemaRef, unwrapNullableSchema } from './schemas.js';
+import {
+  allOfReadAsMember,
+  classifyInlineSchema,
+  declaresNull,
+  isArraySchema,
+  isNullSchema,
+  resolveComponentSchemaRef,
+  unwrapNullableSchema,
+} from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
-import { combineDeclarations, readInlineAllOf } from './inline-models.js';
+import { combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -387,12 +396,14 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * `detectEndOfIteration` receives it — so an override and detection look at
  * one map: a field detection would read is one an override may name, and a
  * field it would not see is not there for an override either. `end.path` is
- * walked over that map as an explicit `dataPath` is (`resolveSchemaPath`:
- * through `$ref`s, `allOf` members and nullable wrappers at every further
- * segment), and, where an object on the way does not declare the next
- * segment itself, through each non-null variant of a `oneOf`/`anyOf` that
- * object is or has among its `allOf` members (`fieldsAtPath`), so it lands
- * on one field per variant; each must fit `end.kind` by the test
+ * walked over that map as an explicit `dataPath` is (`fieldsAtPath`, the
+ * one walk `resolveDataPathArray` makes too: through `$ref`s, `allOf`
+ * members and nullable wrappers at every further segment, and, where an
+ * object on the way does not declare the next segment itself, through each
+ * non-null variant of a `oneOf`/`anyOf` that object is or has among its
+ * `allOf` members, a variant that is itself a union through each of its
+ * own in turn), so it lands on one field per variant; each must fit
+ * `end.kind` by the test
  * detection applies to a field it names (`endFieldFits`), under
  * `resolveBareSchema` as a detected one is. With no `properties` — an
  * operation whose primary response declares no body — the path resolves to
@@ -414,10 +425,12 @@ export function endOfIterationProblem(
 }
 
 /**
- * Every field `path` lands on below `schema`. Each segment is looked up
- * among the properties of the object the path has reached, as
- * `resolveSchemaPath` looks it up — through `$ref`s, `allOf` members and
- * nullable wrappers — and, when that object does not declare it but is a
+ * Every field `path` lands on below `schema` — the walk an explicit
+ * `endOfIteration` path (`endOfIterationProblem`) and an explicit `dataPath`
+ * (`resolveDataPathArray`) share. Each segment is looked up among the
+ * properties of the object the path has reached, as `resolveSchemaPath`
+ * looks it up — through `$ref`s, `allOf` members and nullable wrappers —
+ * and, when that object does not declare it but is a
  * `oneOf`/`anyOf` or has one among its `allOf` members (`fieldsNamed`), in
  * each non-null variant of that union instead: whichever variant the wire
  * carries, the field must be there, so the path goes on in every one and
@@ -426,13 +439,19 @@ export function endOfIterationProblem(
  * `oneOf` and a `trace_id` member, every member applying whichever variant
  * is sent). `undefined` when the object does not declare the segment and no
  * union it has declares it in every variant (and, for a union an `allOf`
- * flattens, in one written inline, as its model does). A variant's own
- * unions are not walked: one that is itself such a union declares no
- * properties of its own (`objectProperties`), so it lacks every segment.
+ * flattens, in one written inline, as its model does). A variant that is
+ * itself a union — written inline, or a `$ref` to a union component — is
+ * read by the same rule: the field must be in each of its non-null
+ * variants in turn, however deep the unions nest, since whichever leaf the
+ * wire carries the field must be there (`meta.has_more` with `meta` an
+ * `anyOf` of a `oneOf` of two objects and a third, every object declaring
+ * `has_more`; PR #585 review).
  * The walk goes one segment at a time over every schema reached so far,
  * each counted once — by its `$ref`, else by the schema itself — so a
  * component several variants reach is walked on once, however many
- * variants reach it and however long the path.
+ * variants reach it and however long the path; and within a segment a
+ * node is read once however many routes through nested unions reach it
+ * (`FieldLookup`).
  */
 function fieldsAtPath(
   schema: SchemaObject,
@@ -440,12 +459,13 @@ function fieldsAtPath(
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject[] | undefined {
   let reached = [schema];
+  const lookup = newFieldLookup();
   for (const segment of path.split('.')) {
     const next = new Map<string | SchemaObject, SchemaObject>();
     for (const node of reached) {
-      const fields = fieldsNamed(node, segment, componentSchemas);
-      if (!fields) return undefined;
-      for (const field of fields) next.set(field.$ref ?? field, field);
+      const named = fieldsNamed(node, segment, componentSchemas, lookup);
+      if (!named) return undefined;
+      for (const { schema: field } of named) next.set(field.$ref ?? field, field);
     }
     reached = [...next.values()];
   }
@@ -457,14 +477,41 @@ function fieldsAtPath(
  * that name, else that property in each non-null variant of the first
  * `oneOf`/`anyOf` `node` is composed of — `node` itself or an `allOf`
  * member, however deep, as `collectObjectProperties` walks them — whose
- * every such variant declares it. A `node` that is a union is typed as its
+ * every such variant declares it, in the variants' order with the `null`
+ * ones left out, each with the variant it came from (`via`: the variant's
+ * place as written and the union's keyword, `variantsOf`), so a reader can
+ * say which variant a field came from (`resolveDataPathArray`). A variant
+ * declares the segment as `node` does — as its own property, or in every
+ * non-null variant of a union it is or has — so a variant that is itself a
+ * union, written inline or a `$ref` to a union component (`PetPage: {
+ * oneOf: [A, B] }`), is walked by this same rule (`unionFields`) and yields
+ * one field per leaf, each `via` the steps down to it, outermost first
+ * (PR #585 review: such a variant was read as declaring no field, though
+ * each of its own variants declared it). A node met again below itself
+ * (`PetPage: { oneOf: [{ $ref: PetPage }, A] }`) is not read a second
+ * time: the walk ends where it repeats, as `collectObjectProperties` ends
+ * on a `$ref` it has followed, so such a variant declares nothing and the
+ * union does not count. A lookup once made is kept for the walk
+ * (`lookup`, one per path: the `(node, segment)` pairs read so far), so a
+ * node several routes reach — two references to one component in one
+ * union, or a chain of such unions, where the routes double at every link
+ * — is read once, and its fields are collapsed to one per distinct field
+ * as they are met (`unionFields`), with the first route that reached it
+ * (PR #585 review: twenty components each an `anyOf` of two references to
+ * the next built over a million fields, each copying its route). A lookup
+ * a cycle closed above — one that ended on a node still on the way down
+ * above this one — depends on where the walk came from, and is not kept;
+ * one the cycle closed on itself, or no cycle touched, is the same from
+ * wherever the walk reaches the node. A `node` that is a union is typed as its
  * variants' models, a `$ref` variant's component among them; one that is an
  * `allOf`, or reaches a component composed with one (its own model, even
  * of a lone member), is one model its unions are flattened into, which
  * leaves a `$ref` under a variant to its component (`mergeAllOfMembers`
  * inline, `extractAllOfModel` for a component), so there the field counts
- * only when a variant written inline declares it too, and is never one the
- * model lacks (workos/oagen#527). An inline `allOf` is merged by
+ * only when a variant written inline declares it too — itself, or in a
+ * variant of a union it writes inline, as the merge reads a branch
+ * (`declaresInline`) — and is never one the model lacks (workos/oagen#527).
+ * An inline `allOf` is merged by
  * `mergeAllOfMembers`, which reads no union a `$ref` member's component
  * carries either — `{ allOf: [{ $ref: MetaUnion }, { properties: {
  * trace_id } }] }` is a model of `trace_id` alone, whatever `MetaUnion`'s
@@ -481,10 +528,60 @@ function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
-): SchemaObject[] | undefined {
+  lookup: FieldLookup = newFieldLookup(),
+): NamedField[] | undefined {
+  const done = lookup.memo.get(node);
+  if (done?.has(segment)) return done.get(segment);
+  // Met again below itself: it declares nothing, and the walk ends where the document repeats.
+  const above = lookup.stack.indexOf(node);
+  if (above !== -1) {
+    lookup.closed = Math.min(lookup.closed, above);
+    return undefined;
+  }
+  const depth = lookup.stack.push(node) - 1;
+  const outer = lookup.closed;
+  lookup.closed = Infinity;
+  const fields = readFieldsNamed(node, segment, componentSchemas, lookup);
+  lookup.stack.pop();
+  // Kept unless a cycle closed above this node, which would make the reading depend on the way down.
+  if (lookup.closed >= depth) {
+    const entry = done ?? new Map<string, NamedField[] | undefined>();
+    entry.set(segment, fields);
+    lookup.memo.set(node, entry);
+  }
+  lookup.closed = Math.min(outer, lookup.closed);
+  return fields;
+}
+
+/**
+ * One walk's bookkeeping for `fieldsNamed`: the lookups completed so far,
+ * by node and segment (`memo`); the nodes on the way down (`stack`), so a
+ * node met again below itself ends the walk where the document repeats; and
+ * the shallowest of those a cycle closed on during the lookup in progress
+ * (`closed`, the node's place on the stack, `Infinity` when none), which
+ * decides whether that lookup is kept. One per path walked (`fieldsAtPath`,
+ * `resolveDataPathArray`).
+ */
+interface FieldLookup {
+  memo: Map<SchemaObject, Map<string, NamedField[] | undefined>>;
+  stack: SchemaObject[];
+  closed: number;
+}
+
+function newFieldLookup(): FieldLookup {
+  return { memo: new Map(), stack: [], closed: Infinity };
+}
+
+/** The reading `fieldsNamed` keeps: the rule itself, see there. */
+function readFieldsNamed(
+  node: SchemaObject,
+  segment: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  lookup: FieldLookup,
+): NamedField[] | undefined {
   const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
-  if (own) return [own];
+  if (own) return [{ schema: own }];
   // `resolveBareSchema` reads through a component's lone `allOf` member,
   // but the component's model is still its own `allOf` model.
   const followed = new Set<string>();
@@ -498,13 +595,86 @@ function fieldsNamed(
   // reads them all.
   const inline = flattened && followed.size === 0;
   for (const union of inline ? collectObjectProperties(node).unions : unions) {
-    const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
-    const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
+    const fields = unionFields(union, segment, componentSchemas, lookup);
     // Without the component map, a variant's properties are those it writes inline.
-    const modeled = !flattened || variants.some((variant) => objectProperties(variant)[segment] !== undefined);
-    if (modeled && fields.length > 0 && fields.every((field) => field !== undefined)) return fields;
+    const modeled = !flattened || variantsOf(union).some(({ variant }) => declaresInline(variant, segment));
+    if (fields && fields.length > 0 && modeled) return fields;
   }
   return undefined;
+}
+
+/** One step down into a `oneOf`/`anyOf`: the variant's place as written, `null` variants counted, and the union's keyword. */
+interface VariantStep {
+  index: number;
+  keyword: 'oneOf' | 'anyOf';
+}
+
+/** A field a path segment names (`fieldsNamed`), with the variants it was reached through, outermost first — none for an object's own property. */
+interface NamedField {
+  schema: SchemaObject;
+  via?: VariantStep[];
+}
+
+/**
+ * Each non-null variant of a `oneOf`/`anyOf` `union` with its step: its
+ * place among the variants as written, the `null` ones counted (the third
+ * listed is `index` 3 whatever sits before it, as `variantLabel` names it),
+ * and the union's keyword.
+ */
+function variantsOf(union: SchemaObject): Array<{ step: VariantStep; variant: SchemaObject }> {
+  const keyword = union.oneOf ? 'oneOf' : 'anyOf';
+  return (union.oneOf ?? union.anyOf ?? []).flatMap((variant, index) =>
+    isNullSchema(variant) ? [] : [{ step: { index: index + 1, keyword }, variant }],
+  );
+}
+
+/**
+ * The fields `segment` names in every non-null variant of `union`, by the
+ * rule `fieldsNamed` applies to any object — so a variant that is itself a
+ * union contributes one field per leaf — each `via` its own step and the
+ * steps below it; `undefined` when a variant declares none. Repeated
+ * fields are collapsed as they are met: one entry per distinct field — by
+ * its `$ref`, else the schema itself, as `fieldsAtPath` counts them — with
+ * the first route that reached it, so two references to one component
+ * yield its fields once, and a chain of such unions yields at each link
+ * as many fields as there are distinct ones below, not routes. `lookup`
+ * carries the walk's completed lookups and cycle guard (`fieldsNamed`).
+ */
+function unionFields(
+  union: SchemaObject,
+  segment: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  lookup: FieldLookup,
+): NamedField[] | undefined {
+  const fields = new Map<string | SchemaObject, NamedField>();
+  for (const { step, variant } of variantsOf(union)) {
+    const named = fieldsNamed(variant, segment, componentSchemas, lookup);
+    if (!named) return undefined;
+    for (const field of named) {
+      const key = field.schema.$ref ?? field.schema;
+      if (!fields.has(key)) fields.set(key, { schema: field.schema, via: [step, ...(field.via ?? [])] });
+    }
+  }
+  return [...fields.values()];
+}
+
+/**
+ * Whether a variant written inline declares `segment` where
+ * `mergeAllOfMembers` reads a branch of the inline `allOf` it belongs to
+ * (workos/oagen#527): among its own properties, read without the component
+ * map so a `$ref` contributes nothing, or in a variant of a `oneOf`/`anyOf`
+ * it writes inline, however deep, as the merge visits every inline union
+ * under a branch.
+ */
+function declaresInline(variant: SchemaObject, segment: string, walking: Set<SchemaObject> = new Set()): boolean {
+  if (walking.has(variant)) return false;
+  walking.add(variant);
+  const { properties, unions } = collectObjectProperties(variant);
+  const declared =
+    properties[segment] !== undefined ||
+    unions.some((union) => variantsOf(union).some(({ variant: inner }) => declaresInline(inner, segment, walking)));
+  walking.delete(variant);
+  return declared;
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -542,7 +712,7 @@ function isNumeric(schema: SchemaObject): boolean {
  * the reference instead of looping on it, as `resolveSchemaKeyword` and
  * `objectProperties` stop; so does a `$ref` with no component map or to no
  * component. Shared by the stop-field check and the document walk an
- * explicit `dataPath` makes (`resolveDataPathFromSchema`), so a stop field
+ * explicit `dataPath` makes (`resolveDataPathArray`), so a stop field
  * and a data array behind the same wrappers are read the same way.
  */
 export function resolveBareSchema(
@@ -588,8 +758,8 @@ function objectProperties(
  * (`extractListResponse`), a kept wrapper's stop field
  * (`bodyEndOfIteration`), a metadata companion's fields and each object
  * on the path to a nested array (`detectEndOfIteration`) and every
- * segment of a `dataPath` (`resolveSchemaPath`) are all read through it,
- * so they see one shape at every level.
+ * segment of a `dataPath` (`resolveSchemaPath`, `fieldsNamed`) are all read
+ * through it, so they see one shape at every level.
  *
  * Every node the walk meets — the body, then each `allOf` member, however
  * deep — is read through `resolveBareSchema`, the resolver the explicit
@@ -669,11 +839,16 @@ export function collectObjectProperties(
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve a dotted property path (the `dataPath` convention) against a
- * response schema: each segment is looked up among the object's properties —
- * through `$ref`s, `allOf` members and nullable wrappers — and the schema it
- * lands on is returned with a final `$ref` resolved. `undefined` when a
- * segment is missing.
+ * Resolve a dotted property path (the `dataPath` convention) to the one
+ * object it names in a response schema — the walk detection makes to each
+ * object on the way to a nested array (`detectEndOfIteration`): each
+ * segment is looked up among the object's own properties — through `$ref`s,
+ * `allOf` members and nullable wrappers — and the schema it lands on is
+ * returned with a final `$ref` resolved. `undefined` when a segment is
+ * missing, so also when an object on the way declares it only through the
+ * variants of a `oneOf`/`anyOf`: a union declares no companion a stop field
+ * is detected from. An explicit `dataPath` is walked through the variants
+ * instead (`resolveDataPathArray`, workos/oagen#556).
  */
 export function resolveSchemaPath(
   schema: SchemaObject,
@@ -690,26 +865,295 @@ export function resolveSchemaPath(
 }
 
 /**
+ * The array an explicit `dataPath` names in a response body, read from the
+ * document: the `items` schema of the array the path lands on, or the reason
+ * it lands on none — the text of the warning the override is rejected with
+ * (`dataPathProblem`), naming the problem alone.
+ *
+ * Each segment is looked up as an explicit `endOfIteration` path is
+ * (`fieldsAtPath`): among the properties of the object the path has reached,
+ * through `$ref`s, `allOf` members and nullable wrappers (what
+ * `resolveSchemaPath` reads), and, where that object does not declare the
+ * segment itself but is a `oneOf`/`anyOf` or has one among its `allOf`
+ * members (`fieldsNamed`), in each non-null variant of that union — and of
+ * a variant that is itself a union, inline or a `$ref` to a union
+ * component, in each of its own in turn, however deep: whichever
+ * variant the wire carries, the array must be there, so `result.items` on
+ * `{ result: { oneOf: [A, B] } }` goes on in both `A` and `B`
+ * (workos/oagen#556), and on `{ result: { anyOf: [{ oneOf: [A, B] }, B] } }`
+ * in all three (PR #585 review). The path then lands on one field per
+ * variant, and the override is usable only when every one is an array —
+ * under a nullable wrapper too (`resolveBareSchema`) — and the arrays agree
+ * on their items, each read as the type builder reads them (`itemsKey`:
+ * nullable wrappers and an `allOf` read as one member collapsed, however
+ * they alternate): the same component (`$ref: Pet` in both, one of them
+ * written `{ allOf: [{ $ref: Pet }], description }`, the OAS 3.0 way of
+ * describing a `$ref`) or the same inline shape (`schemaShapeKey`, which
+ * reads past descriptions and extensions), admitting `null` alike, since
+ * the SDK iterates one item type whichever variant arrives. The first
+ * array's `items` stands for them all, as written. A variant that lacks the
+ * segment, declares it as something other than an array, or types its items
+ * otherwise (`Pet` in one variant, `Cat` in another) makes the path
+ * unusable, and the reason says which variant lacks the field — the one of
+ * its own, below a variant that is itself a union — or how the variants
+ * type it. An array without `items` is no array an iterator can type, as
+ * it never was.
+ */
+export function resolveDataPathArray(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { items: SchemaObject } | { problem: string } {
+  const missing = `dataPath "${dataPath}" does not resolve to an array in the response`;
+  const segments = dataPath.split('.');
+  // The path to the first union the walk went on through (`''` for the body
+  // itself), which the reason names when the variants disagree.
+  let union: string | undefined;
+  // Every schema the path has reached so far, each with the variant it came
+  // through (`variant 2 of the oneOf at "result"`), none for the body itself
+  // or a field an object declares on its own.
+  let reached: Array<{ schema: SchemaObject; via?: string }> = [{ schema }];
+  const lookup = newFieldLookup();
+  for (const [depth, segment] of segments.entries()) {
+    const prefix = segments.slice(0, depth).join('.');
+    const next = new Map<string | SchemaObject, { schema: SchemaObject; via?: string }>();
+    for (const { schema: node, via } of reached) {
+      const named = fieldsNamed(node, segment, componentSchemas, lookup);
+      if (!named) {
+        const lacking = variantLacking(node, segment, componentSchemas, lookup);
+        const reason = lacking
+          ? `${variantLabel(lacking, prefix)} declares no "${segment}"`
+          : via === undefined
+            ? undefined
+            : `${unionAt(prefix)} declares no "${segment}" in ${via}`;
+        return { problem: reason ? `${missing}: ${reason}` : missing };
+      }
+      for (const field of named) {
+        if (field.via) union ??= prefix;
+        const label = field.via ? variantLabel(field.via, prefix) : via;
+        next.set(field.schema.$ref ?? field.schema, { schema: field.schema, via: label });
+      }
+    }
+    reached = [...next.values()];
+  }
+  const bare = reached.map(({ schema: field }) => resolveBareSchema(field, componentSchemas));
+  const arrays = bare.filter((field) => isArraySchema(field) && field.items !== undefined);
+  if (arrays.length < bare.length) {
+    if (union === undefined) return { problem: missing };
+    return { problem: `${missing}: the variants of ${unionAt(union)} type it as ${listed(bare.map(describeSchema))}` };
+  }
+  const items = arrays.map((array) => array.items as SchemaObject);
+  if (new Set(items.map(itemsKey)).size > 1) {
+    return {
+      problem:
+        `dataPath "${dataPath}" does not resolve to one array in the response: ` +
+        `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeItems))}`,
+    };
+  }
+  return { items: items[0] };
+}
+
+/**
+ * An array's `items` as the type builder reads them, for deciding whether
+ * two variants' arrays iterate one type: a nullable wrapper of any spelling
+ * (`unwrapNullableSchema`) and an `allOf` read as one member — a lone
+ * member with nothing added to it, or a plain reference
+ * (`allOfReadAsMember`) — collapsed, however the two alternate, as
+ * `arraySchemaOf` finds an array and `resolveBareSchema` reads a stop field
+ * (PR #585 review: `{ allOf: [{ $ref: Pet }], description: 'A pet' }` beside
+ * `{ $ref: Pet }` was rejected as `Pet and allOf`, though both variants'
+ * models type the field `Pet[]` and the OAS 3.1 sibling form `{ $ref: Pet,
+ * description }` was accepted). A `$ref` is kept as the reference it is, so
+ * two components alike in shape are still two types.
+ */
+function bareItems(items: SchemaObject): SchemaObject {
+  const bare = unwrapNullableSchema(items);
+  const member = allOfReadAsMember(bare);
+  return member ? bareItems(member) : bare;
+}
+
+/**
+ * What an array's `items` type, as one string two arrays share exactly when
+ * the SDK iterates one type: whether they admit `null` (`declaresNull`,
+ * through the same wrappers `bareItems` collapses), and the shape of what
+ * is left (`schemaShapeKey`, which reads past descriptions and extensions).
+ */
+function itemsKey(items: SchemaObject): string {
+  return `${declaresNull(items) ? 'null | ' : ''}${schemaShapeKey(bareItems(items))}`;
+}
+
+/** An array's `items` in a word, for a warning: what the type builder reads (`describeSchema`), `| null` when they admit null. */
+function describeItems(items: SchemaObject): string {
+  const bare = bareItems(items);
+  const word = describeSchema(bare);
+  return declaresNull(items) && !hasType(bare, 'null') ? `${word} | null` : word;
+}
+
+/**
+ * Why an explicit `dataPath` cannot be read from the body `schema`, or
+ * `undefined` when it can (`resolveDataPathArray`). With no `schema` — an
+ * operation whose primary response declares no body — the path resolves to
+ * nothing. The text is the reason alone, as `endOfIterationProblem`'s is;
+ * the caller names the override's source and the operation, and says what
+ * it does about it.
+ */
+export function dataPathProblem(
+  schema: SchemaObject | undefined,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): string | undefined {
+  if (!schema) return `dataPath "${dataPath}" does not resolve to an array in the response`;
+  const resolved = resolveDataPathArray(schema, dataPath, componentSchemas);
+  return 'problem' in resolved ? resolved.problem : undefined;
+}
+
+/**
+ * Which variant of a union `node` is composed of lacks `segment`, when that
+ * is why `fieldsNamed` found no field of that name — the steps down to it,
+ * which `variantLabel` renders (`variant 2 of the oneOf at "result"
+ * declares no "items"`) — for the warning a `dataPath` is rejected with.
+ * The unions are read in the order `fieldsNamed` reads them; the first with
+ * a non-null variant that declares no such property, by the rule
+ * `fieldsNamed` applies to a variant, explains the miss, and when that
+ * variant is itself a union the steps go on into it, to the variant of its
+ * own that lacks the field (`variant 2 of the oneOf in variant 1 of the
+ * anyOf at "result"`), so the warning never says a variant declares no
+ * field its own variants all declare (PR #585 review); a variant met again
+ * below itself declares nothing, so the steps end at the one it was met
+ * below (`variant 1 of the oneOf at "result"` for `Loop: { oneOf: [{ $ref:
+ * Loop }, A] }`). `undefined` when none does: no union at all, or one whose
+ * every variant declares the segment and which still does not count (the
+ * one an inline `allOf` flattens, workos/oagen#527), which the plain reason
+ * covers. `lookup` is the walk's, so the variants' fields are read once
+ * (`fieldsNamed`).
+ */
+function variantLacking(
+  node: SchemaObject,
+  segment: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  lookup: FieldLookup,
+  walking: Set<SchemaObject> = new Set(),
+): VariantStep[] | undefined {
+  for (const union of collectObjectProperties(node, componentSchemas).unions) {
+    for (const { step, variant } of variantsOf(union)) {
+      if (fieldsNamed(variant, segment, componentSchemas, lookup)) continue;
+      // Met again below itself: it declares nothing, and the step above names it.
+      if (walking.has(variant)) return undefined;
+      walking.add(variant);
+      const below = variantLacking(variant, segment, componentSchemas, lookup, walking);
+      walking.delete(variant);
+      return [step, ...(below ?? [])];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A name for the variant `via` leads to, for a `dataPath` warning: its
+ * place among the variants of the `oneOf`/`anyOf` at `prefix` (`''` for the
+ * body itself), counted as written with the `null` variants in place —
+ * `variant 3 of the oneOf at "result"` for the third one listed, whatever
+ * sits before it; `variant 2 of the response's oneOf` for the body — and,
+ * below a variant that is itself a union, each further step in turn:
+ * `variant 2 of the oneOf in variant 1 of the anyOf at "result"`.
+ */
+function variantLabel(via: readonly VariantStep[], prefix: string): string {
+  const [outer, ...inner] = via as [VariantStep, ...VariantStep[]];
+  const at = prefix === '' ? `the response's ${outer.keyword}` : `the ${outer.keyword} at "${prefix}"`;
+  return inner.reduce(
+    (label, step) => `variant ${step.index} of the ${step.keyword} in ${label}`,
+    `variant ${outer.index} of ${at}`,
+  );
+}
+
+/** The object whose variants a `dataPath` warning speaks of: the body itself, or the property at `path`. */
+function unionAt(path: string): string {
+  return path === '' ? 'the response' : `"${path}"`;
+}
+
+/** The distinct entries of `words`, as prose: `a`, `a and b`, `a, b and c`. */
+function listed(words: string[]): string {
+  const distinct = [...new Set(words)];
+  if (distinct.length < 2) return distinct.join('');
+  return `${distinct.slice(0, -1).join(', ')} and ${distinct[distinct.length - 1]}`;
+}
+
+/**
+ * A schema's type in a word, for a warning: a component's name for a `$ref`,
+ * `Pet[]` for an array of them (`array` without `items`), its `type` as
+ * written (`string`, `string | null`), else the composition keyword it is.
+ */
+function describeSchema(schema: SchemaObject): string {
+  if (schema.$ref) return schema.$ref.slice(schema.$ref.lastIndexOf('/') + 1);
+  if (isArraySchema(schema)) return schema.items ? `${describeSchema(schema.items)}[]` : 'array';
+  const { type } = schema;
+  if (type !== undefined) return Array.isArray(type) ? type.join(' | ') : type;
+  return schema.oneOf ? 'oneOf' : schema.anyOf ? 'anyOf' : schema.allOf ? 'allOf' : 'untyped';
+}
+
+/**
  * Resolve a dotted `dataPath` against the IR rather than the document: walk
  * from the response type through model fields, unwrapping nullables, and
  * return the element type of the array the path lands on. `models` is where
  * each model along the way is looked up by name, so the item type is exactly
  * the one the parser already assigned — the very `TypeRef` object the field
- * holds, which later renaming passes repoint in place. An empty `dataPath`
- * means `root` itself is the array. `undefined` when a segment is missing, a
- * model is unknown, or the path does not end on an array.
+ * holds, which later renaming passes repoint in place. A `union` on the way
+ * is walked through each of its variants, as the document walk goes on
+ * through each variant of a `oneOf`/`anyOf` (`resolveDataPathArray`,
+ * workos/oagen#556): every variant must be a model that declares the
+ * segment — a variant that is itself a union, each of its own in turn
+ * (`containersOf`) — and the arrays reached must agree on their items — the
+ * same `TypeRef` by value, `Pet` in `ListPetsResponseResult.items` and in
+ * `ListPetsResponseResultWithTotal.items` — the first of which is returned.
+ * The types reached are counted once per segment — a model or enum by its
+ * name, any other by its shape (`typeRefKey`) — as the document walk counts
+ * a schema once, so a union two models reach each other through (`A.next`
+ * and `B.next` both `A | B`) is read once per segment however long the
+ * path, not once per way of reaching it (PR #585 review: a `next.next.….
+ * items` path doubled the work at every segment). An empty `dataPath` means
+ * `root` itself is the array. `undefined` when a segment is missing, a model
+ * is unknown, the path does not end on an array, or the variants disagree;
+ * the document walk then answers (`resolveDataPathFromSchema`).
  */
 export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
-  let current: TypeRef = root;
+  let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
-    const container = current.kind === 'nullable' ? current.inner : current;
-    if (container.kind !== 'model') return undefined;
-    const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
-    if (!field) return undefined;
-    current = field.type;
+    const containers = new Map<string, TypeRef>();
+    for (const type of reached) {
+      for (const container of containersOf(type)) containers.set(typeRefKey(container), container);
+    }
+    const next = new Map<string, TypeRef>();
+    for (const container of containers.values()) {
+      if (container.kind !== 'model') return undefined;
+      const field = models.find((m) => m.name === container.name)?.fields.find((f) => f.name === segment);
+      if (!field) return undefined;
+      next.set(typeRefKey(field.type), field.type);
+    }
+    reached = [...next.values()];
   }
-  const target = current.kind === 'nullable' ? current.inner : current;
-  return target.kind === 'array' ? target.items : undefined;
+  const items = reached.map((type) => {
+    const target = type.kind === 'nullable' ? type.inner : type;
+    return target.kind === 'array' ? target.items : undefined;
+  });
+  const [first, ...rest] = items;
+  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first)) ? first : undefined;
+}
+
+/**
+ * The types a `dataPath` segment is looked up in below `type`: the type
+ * under a nullable wrapper, or each variant of a union there, under its own
+ * wrapper — and, for a variant that is itself a union, each of its variants
+ * in turn, however deep, as the document walk reads a nested union's
+ * variants (`fieldsNamed`).
+ */
+function containersOf(type: TypeRef): TypeRef[] {
+  const bare = type.kind === 'nullable' ? type.inner : type;
+  return bare.kind === 'union' ? bare.variants.flatMap(containersOf) : [bare];
+}
+
+/** A key two `TypeRef`s share exactly when they are one type to look a field up in: a model's or enum's name, else the TypeRef's shape. */
+function typeRefKey(type: TypeRef): string {
+  return type.kind === 'model' || type.kind === 'enum' ? `${type.kind}:${type.name}` : JSON.stringify(type);
 }
 
 // ---------------------------------------------------------------------------

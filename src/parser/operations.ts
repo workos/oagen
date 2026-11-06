@@ -105,6 +105,7 @@ import {
   resolvePaginationOverride,
   resolveOverrideParams,
   applyPaginationOverride,
+  dataPathProblem,
   resolveDataPathItemType,
 } from './pagination.js';
 import {
@@ -6241,9 +6242,11 @@ function bodyIsTyped(
  * Accept or reject the override against the primary response, once, before any
  * success body is classified — the one check for the fields that depend on
  * the response, in the order `buildOperation` reports them: a `dataPath`
- * must reach an array in that body (`resolveDataPathFromSchema`, the walk
- * that later types the items), then an `endOfIteration` must resolve in it
- * to a field of the fitting type (`bodyEndOfIterationProblem`). An override
+ * must reach an array in that body — in every variant of a union on the
+ * way, and the same array in each (`dataPathProblem`, the walk that later
+ * types the items, `resolveDataPathFromSchema`) — then an `endOfIteration`
+ * must resolve in it to a field of the fitting type
+ * (`bodyEndOfIterationProblem`). An override
  * that sets neither asks nothing of the response and is usable; its
  * parameters were checked before the response was read
  * (`resolveOverrideParams`). No primary response (no `responses`, no 2xx or
@@ -6254,19 +6257,11 @@ function bodyIsTyped(
 function decidePaginationOverride(
   pagination: PaginationExtractionOptions,
   primary: SuccessEntry | undefined,
-  contextName: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationOverrideDecision {
   if (pagination.dataPath !== undefined) {
-    const reaches =
-      primary?.pick.schema !== undefined &&
-      resolveDataPathFromSchema(primary.pick.schema, pagination.dataPath, contextName, componentSchemas) !== undefined;
-    if (!reaches) {
-      return {
-        usable: false,
-        problem: `dataPath "${pagination.dataPath}" does not resolve to an array in the response`,
-      };
-    }
+    const problem = dataPathProblem(primary?.pick.schema, pagination.dataPath, componentSchemas);
+    if (problem !== undefined) return { usable: false, problem };
   }
   if (pagination.endOfIteration !== undefined) {
     const problem = bodyEndOfIterationProblem(pagination.endOfIteration, primary?.pick.schema, componentSchemas);
@@ -7291,7 +7286,7 @@ function extractResponses(
     .filter(({ code }) => code < 400)
     .map(({ code, resp }) => ({ code, pick: code < 300 ? primaryBodySchema(resp) : {} }));
   const primaryEntry = primaryResponseEntry(successEntries, componentSchemas);
-  const overrideDecision = decidePaginationOverride(pagination, primaryEntry, operationBodyName, componentSchemas);
+  const overrideDecision = decidePaginationOverride(pagination, primaryEntry, componentSchemas);
   // The one reason the override cannot apply to the response, decided
   // before any body is read. It is reported from every exit below: an
   // operation without `responses` declares nothing an override could name
@@ -7371,7 +7366,7 @@ function extractResponses(
           pagination.disabled ||
           !overrideDecision.usable ||
           pagination.dataPath === undefined ||
-          !resolveDataPathFromSchema(bodySchema, pagination.dataPath, contextName, componentSchemas)
+          dataPathProblem(bodySchema, pagination.dataPath, componentSchemas) !== undefined
             ? undefined
             : pagination.dataPath;
         // When only the override can drive an iterator, a body it will not

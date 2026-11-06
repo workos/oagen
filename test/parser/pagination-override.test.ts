@@ -2467,6 +2467,338 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
     });
   });
 
+  describe('an explicit dataPath through a oneOf whose every variant declares the array (#556)', () => {
+    // The issue's operation: `GET /pets?cursor&limit` under `x-pagination:
+    // { strategy: 'cursor', dataPath: 'result.items' }`, returning `{ result }`
+    // with `result` a `oneOf` of two objects that each declare a boolean
+    // `has_more` and `items: Pet[]`, one beside `next_cursor` and one beside
+    // `total`. Whichever variant the wire carries, `items` is the same array.
+    const Pet = { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] };
+    const Cat = { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] };
+    const petArray = { type: 'array', items: { $ref: '#/components/schemas/Pet' } };
+    const catArray = { type: 'array', items: { $ref: '#/components/schemas/Cat' } };
+    const boolean = { type: 'boolean' };
+    const integer = { type: 'integer' };
+    const object = (properties: Record<string, unknown>, required?: string[]) => ({
+      type: 'object',
+      properties,
+      ...(required && { required }),
+    });
+    const withCursor = object({ has_more: boolean, items: petArray, next_cursor: { type: 'string' } }, [
+      'has_more',
+      'items',
+    ]);
+    const withTotal = object({ has_more: boolean, items: petArray, total: integer }, ['has_more', 'items']);
+    const issueResult = { oneOf: [withCursor, withTotal] };
+    const wrap = (result: unknown) => object({ result }, ['result']);
+    const dataPath = { strategy: 'cursor', dataPath: 'result.items' };
+    const pet = { kind: 'model', name: 'Pet' };
+    const wrapper = { kind: 'model', name: 'ListPetsResponse' };
+    const missing = 'dataPath "result.items" does not resolve to an array in the response';
+    /** The one warning a rejected override leaves. */
+    const rejected = (problem: string) => {
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        `[oagen] Warning: x-pagination on listPets: ${problem} — ignoring the override`,
+      );
+    };
+
+    describe.each(['3.1.0', '3.0.3'])('under OAS %s', (openapi) => {
+      const parse = (body: unknown, pagination: Record<string, unknown>, schemas: Record<string, unknown> = {}) =>
+        parseJson({
+          ...petsSpec(
+            {
+              parameters: [query('cursor', { type: 'string' }), query('limit')],
+              responses: jsonResponse(body),
+              'x-pagination': pagination,
+            },
+            { schemas: { Pet, Cat, ...schemas } },
+          ),
+          openapi,
+        });
+
+      it('accepts the path and iterates Pet, the array every variant declares (the issue)', async () => {
+        const ir = await parse(wrap(issueResult), dataPath);
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.response).toEqual(wrapper);
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: 'result.items', itemType: pet });
+        // The item type is the one each variant's model holds; detection reads
+        // nothing inside the union, so no stop field is found there.
+        for (const name of ['ListPetsResponseResult', 'ListPetsResponseResultWithTotal']) {
+          const items = ir.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'items');
+          expect(items?.type, name).toEqual({ kind: 'array', items: pet });
+        }
+        expect(op.pagination?.endOfIteration).toBeUndefined();
+      });
+
+      it('resolves as the control does, with result written as one of the two objects', async () => {
+        const op = onlyOperation(await parse(wrap(withCursor), dataPath));
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        expect(op.pagination?.endOfIteration).toEqual({ kind: 'hasMore', path: 'result.has_more' });
+      });
+
+      it('still applies the same path given as endOfIteration, beside the dataPath and alone', async () => {
+        const endOfIteration = { kind: 'hasMore', path: 'result.has_more' };
+        const both = onlyOperation(await parse(wrap(issueResult), { ...dataPath, endOfIteration }));
+        expect(warn).not.toHaveBeenCalled();
+        expect(both.pagination).toEqual({
+          strategy: 'cursor',
+          param: 'cursor',
+          dataPath: 'result.items',
+          itemType: pet,
+          endOfIteration,
+        });
+        const alone = onlyOperation(await parse(wrap(issueResult), { strategy: 'cursor', endOfIteration }));
+        expect(warn).not.toHaveBeenCalled();
+        expect(alone.pagination).toEqual({ strategy: 'cursor', param: 'cursor', itemType: wrapper, endOfIteration });
+      });
+
+      it('rejects the path when a variant lacks the array, naming the variant as written', async () => {
+        const op = onlyOperation(
+          await parse(wrap({ oneOf: [withCursor, object({ has_more: boolean, total: integer })] }), dataPath),
+        );
+        rejected(`${missing}: variant 2 of the oneOf at "result" declares no "items"`);
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', itemType: wrapper });
+        warn.mockClear();
+        // Under `anyOf` too, counted with a null variant in place where OAS 3.1 can spell one.
+        const spelled =
+          openapi === '3.1.0'
+            ? { anyOf: [withCursor, { type: 'null' }, object({ has_more: boolean })] }
+            : { anyOf: [withCursor, object({ has_more: boolean })] };
+        expect(onlyOperation(await parse(wrap(spelled), dataPath)).pagination?.dataPath).toBeUndefined();
+        rejected(`${missing}: variant ${openapi === '3.1.0' ? 3 : 2} of the anyOf at "result" declares no "items"`);
+      });
+
+      it('rejects the path when the variants do not agree on one array, naming the types', async () => {
+        const differ = onlyOperation(
+          await parse(wrap({ oneOf: [withCursor, object({ has_more: boolean, items: catArray })] }), dataPath),
+        );
+        rejected(
+          'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Cat',
+        );
+        expect(differ.pagination).toEqual({ strategy: 'cursor', param: 'cursor', itemType: wrapper });
+        warn.mockClear();
+        const other = onlyOperation(
+          await parse(
+            wrap({ oneOf: [withCursor, object({ has_more: boolean, items: { type: 'string' } })] }),
+            dataPath,
+          ),
+        );
+        rejected(`${missing}: the variants of "result" type it as Pet[] and string`);
+        expect(other.pagination).toEqual({ strategy: 'cursor', param: 'cursor', itemType: wrapper });
+      });
+
+      it('sets a null variant aside, as a nullable wrapper is, and reads the array under one in each variant', async () => {
+        const nullable =
+          openapi === '3.1.0'
+            ? { oneOf: [withCursor, withTotal, { type: 'null' }] }
+            : { oneOf: [withCursor, withTotal], nullable: true };
+        const op = onlyOperation(await parse(wrap(nullable), dataPath));
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        const nullableArrays =
+          openapi === '3.1.0'
+            ? {
+                oneOf: [
+                  object({ items: { type: ['array', 'null'], items: petArray.items } }),
+                  object({ items: { oneOf: [petArray, { type: 'null' }] } }),
+                ],
+              }
+            : {
+                oneOf: [
+                  object({ items: { ...petArray, nullable: true } }),
+                  object({ items: { ...petArray, nullable: true }, total: integer }),
+                ],
+              };
+        const arrays = onlyOperation(await parse(wrap(nullableArrays), dataPath));
+        expect(warn).not.toHaveBeenCalled();
+        expect(arrays.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+      });
+
+      it('walks $ref variants of an anyOf, and a oneOf that is one allOf member beside others', async () => {
+        const refs = {
+          anyOf: [{ $ref: '#/components/schemas/WithCursor' }, { $ref: '#/components/schemas/WithTotal' }],
+        };
+        const viaRefs = onlyOperation(
+          await parse(wrap(refs), dataPath, { WithCursor: withCursor, WithTotal: withTotal }),
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(viaRefs.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        // Every instance carries every member, so the array is there whichever variant is sent.
+        const composed = onlyOperation(
+          await parse(wrap({ allOf: [issueResult, object({ trace_id: { type: 'string' } })] }), dataPath),
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(composed.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+      });
+
+      it('walks the body itself when it is the union, and a union deeper on the path', async () => {
+        const root = onlyOperation(await parse(issueResult, { strategy: 'cursor', dataPath: 'items' }));
+        expect(warn).not.toHaveBeenCalled();
+        expect(root.response.kind).toBe('union');
+        expect(root.pagination).toMatchObject({ dataPath: 'items', itemType: pet });
+        expect(
+          onlyOperation(
+            await parse({ oneOf: [withCursor, object({ total: integer })] }, { strategy: 'cursor', dataPath: 'items' }),
+          ).pagination?.dataPath,
+        ).toBeUndefined();
+        rejected(
+          'dataPath "items" does not resolve to an array in the response: variant 2 of the response\'s oneOf declares no "items"',
+        );
+        warn.mockClear();
+        const paged = (page: unknown) => object({ page });
+        const deep = { strategy: 'cursor', dataPath: 'result.page.items' };
+        const deeper = onlyOperation(
+          await parse(
+            wrap({ oneOf: [paged(object({ items: petArray })), paged(object({ items: petArray, total: integer }))] }),
+            deep,
+          ),
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(deeper.pagination).toMatchObject({ dataPath: 'result.page.items', itemType: pet });
+        expect(
+          onlyOperation(
+            await parse(wrap({ oneOf: [paged(object({ items: petArray })), paged(object({ total: integer }))] }), deep),
+          ).pagination?.dataPath,
+        ).toBeUndefined();
+        rejected(
+          'dataPath "result.page.items" does not resolve to an array in the response: "result.page" declares no "items" in variant 2 of the oneOf at "result"',
+        );
+      });
+
+      it('types inline items the variants declare alike from the document, under the path-derived name', async () => {
+        // Each variant's model types its items under a name of its own, so the
+        // IR walk cannot answer; the document walk does, as for any array the
+        // parser has not materialized under that path.
+        const item = object({ id: { type: 'string' } });
+        const ir = await parse(
+          wrap({
+            oneOf: [
+              object({ items: { type: 'array', items: item }, next: { type: 'string' } }),
+              object({ items: { type: 'array', items: item }, total: integer }),
+            ],
+          }),
+          dataPath,
+        );
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toMatchObject({
+          dataPath: 'result.items',
+          itemType: { kind: 'model', name: 'ListPetsResultItem' },
+        });
+        expect(ir.models.find((m) => m.name === 'ListPetsResultItem')?.fields.map((f) => f.name)).toEqual(['id']);
+      });
+
+      it('compares the items as the type builder reads them: a $ref described through a lone allOf member is the same Pet (review)', async () => {
+        // The OAS 3.0 way of describing a `$ref`, beside the plain one.
+        const described = { allOf: [{ $ref: '#/components/schemas/Pet' }], description: 'A pet' };
+        const second = object({ has_more: boolean, items: { type: 'array', items: described }, total: integer }, [
+          'has_more',
+          'items',
+        ]);
+        const ir = await parse(wrap({ oneOf: [withCursor, second] }), dataPath);
+        const op = onlyOperation(ir);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: 'result.items', itemType: pet });
+        for (const name of ['ListPetsResponseResult', 'ListPetsResponseResultWithTotal']) {
+          const items = ir.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'items');
+          expect(items?.type, name).toEqual({ kind: 'array', items: pet });
+        }
+        // The same path without a union, and the OAS 3.1 sibling form, resolve as they did.
+        const control = onlyOperation(await parse(wrap(second), dataPath));
+        expect(control.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        const sibling = object({
+          has_more: boolean,
+          items: { type: 'array', items: { $ref: '#/components/schemas/Pet', description: 'A pet' } },
+        });
+        const viaSibling = onlyOperation(await parse(wrap({ oneOf: [withCursor, sibling] }), dataPath));
+        expect(viaSibling.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        expect(warn).not.toHaveBeenCalled();
+        // Another component under the member is still another type, named as the type builder reads it.
+        const cats = object({
+          has_more: boolean,
+          items: { type: 'array', items: { allOf: [{ $ref: '#/components/schemas/Cat' }], description: 'A cat' } },
+        });
+        expect(
+          onlyOperation(await parse(wrap({ oneOf: [withCursor, cats] }), dataPath)).pagination?.dataPath,
+        ).toBeUndefined();
+        rejected(
+          'dataPath "result.items" does not resolve to one array in the response: the variants of "result" type its items as Pet and Cat',
+        );
+      });
+
+      it('walks a variant that is itself a union, inline or a $ref to a union component, as a dataPath and as an endOfIteration (review)', async () => {
+        const nested = { anyOf: [{ oneOf: [withCursor, withTotal] }, withTotal] };
+        const inline = onlyOperation(await parse(wrap(nested), dataPath));
+        expect(warn).not.toHaveBeenCalled();
+        expect(inline.pagination).toEqual({
+          strategy: 'cursor',
+          param: 'cursor',
+          dataPath: 'result.items',
+          itemType: pet,
+        });
+        const viaRef = onlyOperation(
+          await parse(wrap({ anyOf: [{ $ref: '#/components/schemas/PetPage' }, withTotal] }), dataPath, {
+            PetPage: { oneOf: [withCursor, withTotal] },
+          }),
+        );
+        expect(warn).not.toHaveBeenCalled();
+        expect(viaRef.pagination).toMatchObject({ dataPath: 'result.items', itemType: pet });
+        // The same path as an `endOfIteration`, alone and beside the `dataPath`.
+        const endOfIteration = { kind: 'hasMore', path: 'result.has_more' };
+        const alone = onlyOperation(await parse(wrap(nested), { strategy: 'cursor', endOfIteration }));
+        expect(warn).not.toHaveBeenCalled();
+        expect(alone.pagination).toEqual({ strategy: 'cursor', param: 'cursor', itemType: wrapper, endOfIteration });
+        const both = onlyOperation(await parse(wrap(nested), { ...dataPath, endOfIteration }));
+        expect(warn).not.toHaveBeenCalled();
+        expect(both.pagination).toEqual({
+          strategy: 'cursor',
+          param: 'cursor',
+          dataPath: 'result.items',
+          itemType: pet,
+          endOfIteration,
+        });
+        // A variant of the nested union that lacks the array is named by its steps.
+        const lacking = { anyOf: [{ oneOf: [withCursor, object({ has_more: boolean, total: integer })] }, withTotal] };
+        expect(onlyOperation(await parse(wrap(lacking), dataPath)).pagination?.dataPath).toBeUndefined();
+        rejected(`${missing}: variant 2 of the oneOf in variant 1 of the anyOf at "result" declares no "items"`);
+      });
+
+      it('walks a path that crosses the same union at every segment once per segment, however long (Greptile)', async () => {
+        // `A.next` and `B.next` are both `A | B`: forty `next` segments reach
+        // the same two models each time, not twice as many as the one before.
+        const next = { oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }] };
+        const A = object({ items: petArray, next, a: { type: 'string' } });
+        const B = object({ items: petArray, next, b: { type: 'string' } });
+        const path = [...Array<string>(40).fill('next'), 'items'].join('.');
+        const started = performance.now();
+        const op = onlyOperation(
+          await parse({ $ref: '#/components/schemas/A' }, { strategy: 'cursor', dataPath: path }, { A, B }),
+        );
+        expect(performance.now() - started).toBeLessThan(2000);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: path, itemType: pet });
+      });
+
+      it('reads a component once however many routes through nested unions reach it (Greptile)', async () => {
+        // Twenty components, each an `anyOf` of two references to the next,
+        // ending on one object with `items`: every link doubles the routes.
+        const chain: Record<string, unknown> = { End: object({ items: petArray, has_more: boolean }) };
+        for (let link = 20; link >= 1; link--) {
+          const next = { $ref: `#/components/schemas/${link === 20 ? 'End' : `Link${link + 1}`}` };
+          chain[`Link${link}`] = { anyOf: [next, { ...next }] };
+        }
+        const started = performance.now();
+        const op = onlyOperation(await parse(wrap({ $ref: '#/components/schemas/Link1' }), dataPath, chain));
+        expect(performance.now() - started).toBeLessThan(2000);
+        expect(warn).not.toHaveBeenCalled();
+        expect(op.pagination).toEqual({ strategy: 'cursor', param: 'cursor', dataPath: 'result.items', itemType: pet });
+      });
+    });
+  });
+
   describe('operationHints[...].pagination from ParseOptions', () => {
     it('applies the hint keyed by "METHOD /path"', async () => {
       const op = onlyOperation(
