@@ -3771,18 +3771,28 @@ function typedOutsideMerges<T>(build: () => T): T {
 
 /**
  * The merged shape as one object schema, for a site that builds its model
- * from a schema rather than from the merged list (`extractDirectResource`,
- * `extractInlineModelDeep`): every property under its name in merged order,
- * the collected `required`, and the wrapper's own `deprecated`, limits and
- * link, as `buildMergedModel` carries them — a member's stay on that member,
- * a `$ref` member's on its component. The wrapper's `description` is left
- * off, as both sites left it off the schemas they rebuilt before.
+ * from a schema rather than from the merged list (`extractDirectResource`:
+ * the primary success body and each further success code's — every other
+ * body site builds from the list): every property under its name in
+ * merged order, the collected `required`, the wrapper's limits conjoined
+ * with its inline members', and the wrapper layer's `description`,
+ * `deprecated`, link and `x-*` keys, exactly as `buildMergedModel` carries
+ * them onto the model a field's merge builds — a member's stay on that
+ * member, a `$ref` member's on its component. So the model built from the
+ * schema (`buildInlineModel`) is documented as the model built from the
+ * list is: a response body `{ allOf: [{ $ref: Base }, { properties: { name
+ * } }, { description: 'A pet.' }] }` is described "A pet.", as the same
+ * schema is as a request body, a field, a secondary media type's or an
+ * error body (#604: the text alone was left off here, kept off from before
+ * the merge read the wrapper layer at all, so `CreatePetResponse` had none
+ * while `CreatePetRequest` did).
  */
 export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
   return {
     type: 'object',
     properties: Object.fromEntries(merged.properties.map((p) => [p.name, p.schema])),
     required: merged.required,
+    ...(merged.description !== undefined ? { description: merged.description } : {}),
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
