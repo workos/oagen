@@ -597,14 +597,18 @@ export interface OperationModified {
    * and ranges do not count — since a caller that checks the declared code
    * (generated code, or the smoke helpers that read `responseStatusCode`)
    * stops matching, and a redirect moving between temporary and permanent
-   * (`302` → `301`) changes what caches may do: the first, third and last
-   * cases, and a lone `200` that became a lone `204`. Additive when the old
-   * code is still declared, as in the second case: the `201` is still
-   * answered, so a caller built for it still works (#407). Only two lone
-   * primaries pair over the move, though: a primary replaced among several
-   * 2xx (the last case) no longer declares its old code, so its headers and
-   * media types are reported removed under that code, breaking, beside this
-   * flag, as they are for a `200` dropped beside a kept `202` (#408).
+   * (`302` → `301`) changes what caches may do: the first and last cases,
+   * and a lone `200` that became a lone `204`. Additive when the old code
+   * is still declared, as in the second and third cases: the `201` beside
+   * the added `200` is still answered, so a caller built for it still
+   * works, and the `200` whose body lost its type is still declared — what
+   * breaks there is its body, reported as a `responseContentTypeChanges`
+   * entry under `200` (`retyped`, or `removed` when the body is gone), not
+   * the move (#407). Only two lone primaries pair over the move, though: a
+   * primary replaced among several 2xx (the last case) no longer declares
+   * its old code, so its headers and media types are reported removed under
+   * that code, breaking, beside this flag, as they are for a `200` dropped
+   * beside a kept `202` (#408).
    * Compared only while both sides carry a code, as `requestBodyRequired`
    * is while both carry a body; an operation gaining or losing its only
    * 2xx/3xx is not a move but `responseChanged`. Not mirrored into
