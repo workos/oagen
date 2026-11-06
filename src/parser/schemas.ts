@@ -4891,6 +4891,15 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
  * Without the map a `$ref` member declares nothing, as the allOf+oneOf
  * readers read a variant's inline members only.
+ *
+ * A property several members declare keeps its first declaration, unless a
+ * later one pins it to one value the earlier left open — a const narrows
+ * and never widens — so `Base.kind: { type: 'string' }` under a `$ref`
+ * member read before the variant's own `kind: { const: 'cat' }` (`Cat: {
+ * allOf: [{ $ref: Base }, { properties: { kind } }] }`) leaves the variant
+ * pinned, in either member order, as it was when the `$ref` member was not
+ * followed (#590 review). A pin behind a `$ref` on the declaration counts
+ * (`pinnedDeclarationValue`).
  */
 function getEffectiveProperties(
   schema: SchemaObject,
@@ -4904,7 +4913,16 @@ function getEffectiveProperties(
     if (seen.has(s)) return;
     seen.add(s);
     for (const [k, v] of Object.entries(s.properties ?? {})) {
-      if (!props.has(k) && v) props.set(k, v);
+      if (!v) continue;
+      const held = props.get(k);
+      // A later pin replaces an open declaration; `set` keeps the key's
+      // position, so the property order is still the order first declared.
+      if (
+        held === undefined ||
+        (pinnedDeclarationValue(held, schemas) === null && pinnedDeclarationValue(v, schemas) !== null)
+      ) {
+        props.set(k, v);
+      }
     }
     for (const sub of s.allOf ?? []) {
       const member = followMemberRefs(sub, schemas, seen);
@@ -4937,9 +4955,21 @@ function getEffectiveConstPropertyValue(
   const direct = getConstPropertyValue(schema, property);
   if (direct !== null) return direct;
   const effective = getEffectiveProperties(schema, schemas)[property];
-  if (!effective) return null;
-  const declaration = followMemberRefs(effective, schemas, new Set());
-  return declaration ? pinnedStringValue(declaration) : null;
+  return effective ? pinnedDeclarationValue(effective, schemas) : null;
+}
+
+/**
+ * The one string a property declaration pins, as written (`pinnedStringValue`)
+ * or through a `$ref` to a component pinning one value, or an alias chain
+ * ending in one, when `schemas` is handed in (`followMemberRefs`; a chain
+ * that repeats pins nothing); null otherwise.
+ */
+function pinnedDeclarationValue(
+  declaration: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): string | null {
+  const target = followMemberRefs(declaration, schemas, new Set());
+  return target ? pinnedStringValue(target) : null;
 }
 
 /**

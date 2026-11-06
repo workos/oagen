@@ -3534,6 +3534,45 @@ describe('#568', () => {
       expect(touched).not.toContain('Pet');
       if (openapi === '3.1.0') expect(changes).toEqual([]);
     });
+
+    it.each([
+      ['first', true],
+      ['last', false],
+    ])(
+      'keeps a variant’s const over the plain declaration a shared base makes for the property, the base’s $ref %s in its allOf, on a field and as a component (review)',
+      async (_, baseFirst) => {
+        const over = (own: Record<string, unknown>) => ({ allOf: baseFirst ? [ref('Base'), own] : [own, ref('Base')] });
+        for (const discriminated of [true, false]) {
+          const spec = await parse(
+            {
+              Base: {
+                type: 'object',
+                required: ['kind'],
+                properties: { kind: { type: 'string' }, name: { type: 'string' } },
+              },
+              HamsterKind: pin('hamster'),
+              Cat: over(animal('cat', { lives: { type: 'integer' } })),
+              Dog: over(animal('dog', { barks: { type: 'boolean' } })),
+              // A pin behind a `$ref` to a const component outranks the base's open declaration too.
+              Hamster: over({ type: 'object', properties: { kind: ref('HamsterKind') } }),
+              Pet: union([ref('Cat'), ref('Dog'), ref('Hamster')], discriminated),
+              Owner: {
+                type: 'object',
+                properties: { pet: union([ref('Cat'), ref('Dog'), ref('Hamster')], discriminated) },
+              },
+            },
+            {},
+            openapi,
+          );
+          const mapping = { cat: 'Cat', dog: 'Dog', hamster: 'Hamster' };
+          expect(discriminatorOf(spec, 'Pet'), `keyword: ${discriminated}`).toEqual({ property: 'kind', mapping });
+          expect(fieldType(spec, 'Owner', 'pet'), `keyword: ${discriminated}`).toEqual(
+            unionOf(['Cat', 'Dog', 'Hamster'], mapping),
+          );
+          expect(unresolvedMappingTargets(spec)).toEqual([]);
+        }
+      },
+    );
   });
 });
 
