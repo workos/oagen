@@ -163,14 +163,21 @@ export interface WebhookEntry {
    */
   identity?: string;
   /**
-   * How many callbacks sit between the declaring operation or webhook and
-   * this one: 0 for an operation's or webhook's own callback, 1 for one a
-   * callback operation declares, and so on. Orders the minting
-   * (`buildReceivedRequests`), once the stems are settled across every
-   * depth: a group is minted at its shallowest member's depth, after every
-   * group shallower than it. Absent on a webhook, read as 0.
+   * The callback entry whose operation declares this one; absent on a
+   * webhook and on an operation's or webhook's own callback. The chain of
+   * parents is the entry's depth (`depthOf`) and its ancestry: a
+   * descendant's names never move an ancestor's stem, and a group is
+   * minted at its shallowest member's depth, after every group shallower
+   * than it (`buildReceivedRequests`).
    */
-  depth?: number;
+  parent?: WebhookEntry;
+}
+
+/** How many callbacks sit between the declaring operation or webhook and `entry`: 0 for a webhook or a direct callback. */
+function depthOf(entry: WebhookEntry): number {
+  let depth = 0;
+  for (let parent = entry.parent; parent !== undefined; parent = parent.parent) depth++;
+  return depth;
 }
 
 /** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
@@ -308,23 +315,26 @@ export interface BuiltReceivedRequests {
  * that resolve to one operation object and are named from its operationId,
  * and key-named callbacks reading one object under one plain stem, mint
  * once and share the minting, whatever depths their members sit at; every
- * other entry mints on its own. The stems are then settled once, over every
- * group at every depth (`resolveWebhookModelStems`): a group whose plain
- * stem another group's equals, or which a name the document already holds
- * embeds, hashes its stem from its identity — both of a colliding pair
- * move, as the `webhooks` map's do, symmetrically — so a group's stem never
- * depends on which depths reference it, and a reference added at another
- * depth renames nothing. Minting then proceeds ancestors first, in waves by
- * each group's shallowest member's depth (`WebhookEntry.depth`, 0 for a
- * webhook): every group with a member at depth 0, then those at depth 1,
- * and so on, each wave minted against the reserved names and every name the
- * waves before minted, so a name a group would mint that an earlier wave
- * already holds — a nested callback's payload landing on its parent's
- * parameter model — moves the group's stem by hash at mint time, the
- * earlier names untouched, while a group that spans depths is one minting,
+ * other entry mints on its own. The stems are then settled once, in one
+ * resolution over every group at every depth (`resolveWebhookModelStems`),
+ * exactly as the `webhooks` map's are: a name a group would mint that the
+ * document already holds, or that another group also mints, hashes its
+ * stem from its identity, the reserved-name hits and the collisions decided
+ * together, so both of a colliding pair move and a group's stem never
+ * depends on which depths reference it. The one rule the `webhooks` map
+ * never exercises: a descendant's name never moves an ancestor's stem —
+ * a nested callback's payload landing on its parent's parameter model moves
+ * the nested stem alone — so a nested callback added renames nothing above
+ * it. Minting then proceeds ancestors first, in waves by each group's
+ * shallowest member's depth (`depthOf`, 0 for a webhook): every group with
+ * a member at depth 0, then those at depth 1, and so on, each wave minted
+ * against the reserved names and every name the waves before minted, where
+ * a name still taken — a spent hash, an enum an earlier wave minted —
+ * steps aside at mint time; a group that spans depths is one minting,
  * named at its shallowest depth and reused by its deeper members (#382).
  * The outcome depends only on the document, never on the order its entries
- * are read in.
+ * are read in, and a document without callbacks names its webhooks as it
+ * always has.
  *
  * The nodes come back in entry order, not group order: a shared
  * operation's second key keeps its own place. A group's owner takes the
@@ -345,21 +355,33 @@ export function buildReceivedRequests(
   siblingDocs: SiblingDocs,
 ): BuiltReceivedRequests {
   const { groups, groupOf } = groupEntries(entries);
-  // The stems, settled once over every group at every depth: two groups
-  // whose plain stems coincide both move, whichever depths reference them.
-  const plainStems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  // The groups a group descends from: those of its members' parents, at
+  // every remove. None for the `webhooks` map.
+  const ancestorsOf = new Map<WebhookGroup, Set<WebhookGroup>>();
+  for (const group of groups) {
+    const ancestors = new Set<WebhookGroup>();
+    for (const entry of group.entries) {
+      for (let parent = entry.parent; parent !== undefined; parent = parent.parent) {
+        const ancestor = groupOf.get(parent);
+        if (ancestor !== undefined && ancestor !== group) ancestors.add(ancestor);
+      }
+    }
+    ancestorsOf.set(group, ancestors);
+  }
+  // The stems, settled once over every group at every depth, reserved-name
+  // hits and collisions decided together as the `webhooks` map's are: both
+  // of a colliding pair move, whichever depths reference them. The one
+  // exception is a descendant's name, which never moves an ancestor's stem.
   const settled = resolveWebhookModelStems(
     groups,
     reserved,
     components,
     siblingDocs,
     undefined,
-    (group, other) => plainStems.get(group) === plainStems.get(other),
+    (group, other) => !ancestorsOf.get(other)!.has(group),
   );
   // Each group's wave: its shallowest member's depth.
-  const waveOf = new Map(
-    groups.map((group) => [group, Math.min(...group.entries.map((entry) => entry.depth ?? 0))] as const),
-  );
+  const waveOf = new Map(groups.map((group) => [group, Math.min(...group.entries.map(depthOf))] as const));
   const waves = [...new Set(waveOf.values())].sort((a, b) => a - b);
   // What every wave steps around at mint time: the reserved names, and the
   // names and enums the waves before minted.
@@ -568,7 +590,7 @@ function collectWebhookEntries(
 /** Where a path item's operations are read for (`readPathItemEntries`): the entry's key, how each method is labelled, and a callback's own fields. */
 export interface PathItemEntrySite extends Pick<
   WebhookEntry,
-  'kind' | 'name' | 'expression' | 'expressionCount' | 'parentStem' | 'depth'
+  'kind' | 'name' | 'expression' | 'expressionCount' | 'parentStem' | 'parent'
 > {
   /** The diagnostic label of one method's operation. */
   labelOf: (method: HttpMethod) => string;
@@ -630,7 +652,7 @@ export function readPathItemEntries(
     if (site.expression !== undefined) entry.expression = site.expression;
     if (site.expressionCount !== undefined) entry.expressionCount = site.expressionCount;
     if (site.parentStem !== undefined) entry.parentStem = site.parentStem;
-    if (site.depth !== undefined) entry.depth = site.depth;
+    if (site.parent !== undefined) entry.parent = site.parent;
     entries.push(entry);
   }
   return entries;
@@ -743,11 +765,13 @@ export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRe
  * the webhook's stem otherwise (`PetAdoptedComp`), as it does for
  * operations.
  *
- * `buildReceivedRequests` runs this twice: once over every group, where
- * `contends` lets only a group of the same plain stem move another's — the
- * settling that holds across depths — and once per minting wave from the
- * `settled` stems and hash lengths, where any name already taken moves a
- * stem further, the mint-time step-around.
+ * `buildReceivedRequests` runs this twice: once over every group at every
+ * depth, with every name counted as above except a descendant's, which
+ * `contends` keeps from moving an ancestor's stem — the settling that holds
+ * across depths — and once per minting wave from the `settled` stems and
+ * hash lengths, where a name still taken moves a stem further, the
+ * mint-time step-around. For the `webhooks` map, which nests nothing and
+ * mints in one wave, the two are the one resolution this always was.
  */
 function resolveWebhookModelStems(
   groups: WebhookGroup[],

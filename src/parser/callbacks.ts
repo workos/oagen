@@ -29,7 +29,8 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other — once, across every depth, symmetrically; the minting then
+ * each other — once, across every depth, as the `webhooks` map's are, a
+ * descendant's names alone never moving an ancestor's stem; the minting then
  * proceeds ancestors first (see `extractCallbacks`) — so a collision hashes the
  * NEW stem as a webhook's is hashed — from the callback's identity: its
  * owner's identity (an operation's operationId, else `METHOD /path`; a
@@ -110,14 +111,17 @@ interface PendingCallback {
  * (`plainStemOf`), parents preceding children — and every entry is grouped,
  * named, minted and built by `buildReceivedRequests`, as the `webhooks` map
  * is, in three phases: the groups are formed over every entry of the
- * document; the stems are settled once, across every depth, symmetrically
- * — two groups whose plain stems coincide both hash, whichever depths
- * reference them, so a reference added at another depth renames nothing;
- * and the minting proceeds ancestors first, in waves by each group's
- * shallowest member's depth — every group with a member at depth 0, then
- * those at depth 1, and so on — each wave stepping around every name the
- * waves before minted at mint time, so a new nested callback never renames
- * its parent's parameter or payload model (it is the one that steps aside),
+ * document; the stems are settled once, in one resolution across every
+ * depth, exactly as the `webhooks` map's are — a name a group would mint
+ * that the document holds or another group also mints hashes the stem,
+ * both of a colliding pair moving whichever depths reference them, so a
+ * reference added at another depth renames nothing — with the one rule the
+ * `webhooks` map never exercises, that a descendant's name never moves an
+ * ancestor's stem, so a new nested callback never renames its parent's
+ * parameter or payload model (it is the one that hashes); and the minting
+ * proceeds ancestors first, in waves by each group's shallowest member's
+ * depth — every group with a member at depth 0, then those at depth 1, and
+ * so on — each wave stepping around at mint time any name still taken,
  * while a group that spans depths is still one minting, named at its
  * shallowest depth and reused by its deeper members. Entries reading one
  * operation object and named from
@@ -153,7 +157,6 @@ export function extractCallbacks(
       owner,
       stem,
       identity ?? label,
-      0,
       new Set(),
       pending,
       components,
@@ -196,7 +199,8 @@ export function extractCallbacks(
   // Every callback of the document at once, as the `webhooks` map is read:
   // entries reading one operation object under one plain stem form one
   // group whatever their depths (`groupEntries`); the stems are settled
-  // once across every depth, symmetrically; the groups are minted in waves
+  // once across every depth, as the `webhooks` map's are, a descendant's
+  // names never moving an ancestor's stem; the groups are minted in waves
   // by their shallowest member's depth, each wave stepping around every
   // name decided before it, and each mints once.
   const batch = buildReceivedRequests(
@@ -245,8 +249,6 @@ function collectPendingCallbacks(
   owner: PendingCallback['owner'],
   ownerStem: string | undefined,
   ownerIdentity: string | undefined,
-  /** How many callbacks sit between the declaring operation or webhook and the ones read here (`WebhookEntry.depth`). */
-  depth: number,
   ancestors: ReadonlySet<object>,
   pending: PendingCallback[],
   components: WebhookComponents,
@@ -283,7 +285,8 @@ function collectPendingCallbacks(
           name: key,
           expression,
           expressionCount: expressions.length,
-          depth,
+          // The parent callback's entry, for the depth and the ancestry.
+          ...(isPending(owner) ? { parent: owner.entry } : {}),
           labelOf: (method) => callbackContext(label, { name: key, expression, httpMethod: method }),
         },
         components,
@@ -299,7 +302,6 @@ function collectPendingCallbacks(
           candidate,
           undefined,
           undefined,
-          depth + 1,
           onPath,
           pending,
           components,
