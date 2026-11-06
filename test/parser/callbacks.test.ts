@@ -638,6 +638,67 @@ describe('#382', () => {
             expect(warnings()).toEqual([]);
           },
         );
+
+        it.each([
+          { order: 'direct callback first', directFirst: true },
+          { order: 'nesting operation first', directFirst: false },
+        ])(
+          'hashes two groups whose stems coincide across depths from the start, so a reference added directly renames nothing, $order (Greptile)',
+          async ({ directFirst }) => {
+            // `createPet`'s `petAdopted` declares `operationId: notify_adoption`
+            // (depth 0); `registerPet`'s `registered` nests the shared component
+            // `Adopted`, whose operation declares `operationId: notifyAdoption`
+            // (depth 1). Both stems are `NotifyAdoption`.
+            const adopted = callbackPosting(
+              { type: 'object', properties: { adopted: { type: 'boolean' } } },
+              { operationId: 'notifyAdoption' },
+            );
+            const reference = { adopted: { $ref: '#/components/callbacks/Adopted' } };
+            const pets = {
+              post: opWith(
+                { petAdopted: callbackPosting(petIdSchema, { operationId: 'notify_adoption' }) },
+                'createPet',
+              ),
+            };
+            const registrations = {
+              post: opWith({ registered: callbackPosting(petIdSchema, { callbacks: reference }) }, 'registerPet'),
+            };
+            const document = (direct: boolean) =>
+              documentWith(
+                openapi,
+                {
+                  ...(directFirst
+                    ? { '/pets': pets, '/registrations': registrations }
+                    : { '/registrations': registrations, '/pets': pets }),
+                  ...(direct ? { '/adoptions': { post: opWith(reference, 'adoptPet') } } : {}),
+                },
+                { components: { callbacks: { Adopted: adopted } } },
+              );
+            const byName = (spec: ApiSpec) => new Map(operations(spec).map((op) => [op.name, op]));
+
+            const nestedOnly = await parseJson(document(false));
+            const [direct] = payloadNames(byName(nestedOnly).get('createPet')!);
+            const [registered, nested] = payloadNames(byName(nestedOnly).get('registerPet')!);
+            // Both hash from the start — the stems are settled across every
+            // depth, symmetrically — never alike, the hashes from their
+            // operationIds.
+            expect(direct).toMatch(/^NotifyAdoption[0-9A-Fa-f]{6}Payload$/);
+            expect(nested).toMatch(/^NotifyAdoption[0-9A-Fa-f]{6}Payload$/);
+            expect(direct).not.toBe(nested);
+            expect(registered).toBe('RegisterPetRegisteredPayload');
+            expect(modelNames(nestedOnly).sort()).toEqual([direct, nested, registered].sort());
+
+            // A direct reference to `Adopted` renames nothing: the same two
+            // names, the direct site reading the nested one's model.
+            const both = await parseJson(document(true));
+            expect(payloadNames(byName(both).get('createPet')!)).toEqual([direct]);
+            expect(payloadNames(byName(both).get('registerPet')!)).toEqual([registered, nested]);
+            expect(payloadNames(byName(both).get('adoptPet')!)).toEqual([nested]);
+            expect(modelNames(both).sort()).toEqual([direct, nested, registered].sort());
+            for (const spec of [nestedOnly, both]) expectResolved(spec);
+            expect(warnings()).toEqual([]);
+          },
+        );
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {

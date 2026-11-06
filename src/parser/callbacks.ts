@@ -29,8 +29,8 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other — the groups spanning depths, ancestors named before their
- * descendants (see `extractCallbacks`) — so a collision hashes the
+ * each other — once, across every depth, symmetrically; the minting then
+ * proceeds ancestors first (see `extractCallbacks`) — so a collision hashes the
  * NEW stem as a webhook's is hashed — from the callback's identity: its
  * owner's identity (an operation's operationId, else `METHOD /path`; a
  * shared callback operation's operationId) with the key, expression and
@@ -109,15 +109,18 @@ interface PendingCallback {
  * one, a parent callback's plain stem before any collision hash
  * (`plainStemOf`), parents preceding children — and every entry is grouped,
  * named, minted and built by `buildReceivedRequests`, as the `webhooks` map
- * is, in two phases: the groups are formed over every entry of the
- * document, then named in waves by their shallowest member's depth — every
- * group with a member at depth 0 first, then those at depth 1, and so on —
- * each wave stepping around every name the waves before minted, so an
- * ancestor's names are settled before any descendant can collide with them
- * (a new nested callback never renames its parent's parameter or payload
- * model; it is the one that steps aside), while a group that spans depths
- * is still one minting, named at its shallowest depth and reused by its
- * deeper members. Entries reading one operation object and named from
+ * is, in three phases: the groups are formed over every entry of the
+ * document; the stems are settled once, across every depth, symmetrically
+ * — two groups whose plain stems coincide both hash, whichever depths
+ * reference them, so a reference added at another depth renames nothing;
+ * and the minting proceeds ancestors first, in waves by each group's
+ * shallowest member's depth — every group with a member at depth 0, then
+ * those at depth 1, and so on — each wave stepping around every name the
+ * waves before minted at mint time, so a new nested callback never renames
+ * its parent's parameter or payload model (it is the one that steps aside),
+ * while a group that spans depths is still one minting, named at its
+ * shallowest depth and reused by its deeper members. Entries reading one
+ * operation object and named from
  * its operationId form one group whatever their depths (a
  * `components/callbacks` entry an operation references directly and
  * another callback nests), and so do key-named entries reading one object
@@ -192,9 +195,10 @@ export function extractCallbacks(
 
   // Every callback of the document at once, as the `webhooks` map is read:
   // entries reading one operation object under one plain stem form one
-  // group whatever their depths (`groupEntries`); the groups are named in
-  // waves by their shallowest member's depth, each wave stepping around
-  // every name decided before it, and each mints once.
+  // group whatever their depths (`groupEntries`); the stems are settled
+  // once across every depth, symmetrically; the groups are minted in waves
+  // by their shallowest member's depth, each wave stepping around every
+  // name decided before it, and each mints once.
   const batch = buildReceivedRequests(
     pending.map(({ entry }) => entry),
     components,

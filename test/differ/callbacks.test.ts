@@ -954,6 +954,76 @@ describe('#382', () => {
     );
 
     it.each([
+      { order: 'direct callback first', directFirst: true },
+      { order: 'nesting operation first', directFirst: false },
+    ])(
+      'reports only the callback added when a direct reference joins a nested group whose stem a direct callback shares, $order (Greptile)',
+      async ({ directFirst }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ok = { '200': { description: 'OK' } };
+        const reference = { adopted: { $ref: '#/components/callbacks/Adopted' } };
+        // `createPet`'s `petAdopted` declares `operationId: notify_adoption`;
+        // `registerPet`'s `registered` nests `Adopted`, whose operation
+        // declares `operationId: notifyAdoption`. Both stems are `NotifyAdoption`.
+        const pets = {
+          post: {
+            operationId: 'createPet',
+            responses: ok,
+            callbacks: { petAdopted: posting({ operationId: 'notify_adoption' }) },
+          },
+        };
+        // The direct reference joins `registerPet`'s own callbacks.
+        const registrations = (direct: boolean) => ({
+          post: {
+            operationId: 'registerPet',
+            responses: ok,
+            callbacks: { registered: posting({ callbacks: reference }), ...(direct ? reference : {}) },
+          },
+        });
+        const document = (direct: boolean) => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: directFirst
+            ? { '/pets': pets, '/registrations': registrations(direct) }
+            : { '/registrations': registrations(direct), '/pets': pets },
+          components: {
+            callbacks: {
+              Adopted: posting(
+                { operationId: 'notifyAdoption' },
+                { type: 'object', properties: { adopted: { type: 'boolean' } } },
+              ),
+            },
+          },
+        });
+        const nestedOnly = await parseDocument(document(false));
+        const both = await parseDocument(document(true));
+        // Both `NotifyAdoption` stems hash on each side: the same three models.
+        const names = (spec: ApiSpec) => spec.models.map((m) => m.name).sort();
+        expect(names(nestedOnly)).toEqual(names(both));
+        expect(names(nestedOnly).filter((name) => /^NotifyAdoption[0-9A-Fa-f]{6}Payload$/.test(name))).toHaveLength(2);
+        expect(names(nestedOnly)).toContain('RegisterPetRegisteredPayload');
+
+        // The direct reference is the one additive `callback-added`, exit 1; nothing is renamed.
+        const added = diffSpecs(nestedOnly, both);
+        expect(added.changes).toEqual([
+          {
+            kind: 'callback-added',
+            name: 'adopted',
+            expression: '{$request.body#/callbackUrl}',
+            httpMethod: 'post',
+            serviceName: 'Registrations',
+            operationName: 'registerPet',
+            classification: 'additive',
+          },
+        ]);
+        expect(added.summary).toMatchObject({ added: 1, modified: 0, removed: 0, breaking: 0, additive: 1 });
+        expect(diffSpecs(both, nestedOnly).changes.map((c) => [c.kind, c.classification])).toEqual([
+          ['callback-removed', 'breaking'],
+        ]);
+      },
+    );
+
+    it.each([
       { order: 'parameter before callbacks', parametersFirst: true },
       { order: 'callbacks before parameter', parametersFirst: false },
     ])(

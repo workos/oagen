@@ -165,10 +165,10 @@ export interface WebhookEntry {
   /**
    * How many callbacks sit between the declaring operation or webhook and
    * this one: 0 for an operation's or webhook's own callback, 1 for one a
-   * callback operation declares, and so on. Orders the naming
-   * (`buildReceivedRequests`): a group is named at its shallowest member's
-   * depth, after every group shallower than it. Absent on a webhook, read
-   * as 0.
+   * callback operation declares, and so on. Orders the minting
+   * (`buildReceivedRequests`), once the stems are settled across every
+   * depth: a group is minted at its shallowest member's depth, after every
+   * group shallower than it. Absent on a webhook, read as 0.
    */
   depth?: number;
 }
@@ -303,22 +303,28 @@ export interface BuiltReceivedRequests {
 
 /**
  * Name, mint and build one batch of entries — the `webhooks` map's, or
- * every callback of the document (`extractCallbacks`) — against `reserved`.
- * The entries are grouped first (`groupEntries`): those that resolve to one
- * operation object and are named from its operationId, and key-named
- * callbacks reading one object under one plain stem, mint once and share
- * the minting, whatever depths their members sit at; every other entry
- * mints on its own. The groups are then named in waves by their shallowest
- * member's depth (`WebhookEntry.depth`, 0 for a webhook): every group with
- * a member at depth 0 first, then those at depth 1, and so on, the stems
- * of each wave resolved together (`resolveWebhookModelStems`) against the
- * reserved names and every name the waves before minted, so an ancestor's
- * names are settled before any descendant can collide with them — a nested
- * callback asking for a name its parent's parameter or payload model holds
- * is the one that steps aside, and adding it renames nothing above it —
- * while a group that spans depths is one minting, named at its shallowest
- * depth and reused by its deeper members (#382). The outcome depends only
- * on the document, never on the order its entries are read in.
+ * every callback of the document (`extractCallbacks`) — against `reserved`,
+ * in three phases. The entries are grouped first (`groupEntries`): those
+ * that resolve to one operation object and are named from its operationId,
+ * and key-named callbacks reading one object under one plain stem, mint
+ * once and share the minting, whatever depths their members sit at; every
+ * other entry mints on its own. The stems are then settled once, over every
+ * group at every depth (`resolveWebhookModelStems`): a group whose plain
+ * stem another group's equals, or which a name the document already holds
+ * embeds, hashes its stem from its identity — both of a colliding pair
+ * move, as the `webhooks` map's do, symmetrically — so a group's stem never
+ * depends on which depths reference it, and a reference added at another
+ * depth renames nothing. Minting then proceeds ancestors first, in waves by
+ * each group's shallowest member's depth (`WebhookEntry.depth`, 0 for a
+ * webhook): every group with a member at depth 0, then those at depth 1,
+ * and so on, each wave minted against the reserved names and every name the
+ * waves before minted, so a name a group would mint that an earlier wave
+ * already holds — a nested callback's payload landing on its parent's
+ * parameter model — moves the group's stem by hash at mint time, the
+ * earlier names untouched, while a group that spans depths is one minting,
+ * named at its shallowest depth and reused by its deeper members (#382).
+ * The outcome depends only on the document, never on the order its entries
+ * are read in.
  *
  * The nodes come back in entry order, not group order: a shared
  * operation's second key keeps its own place. A group's owner takes the
@@ -339,13 +345,24 @@ export function buildReceivedRequests(
   siblingDocs: SiblingDocs,
 ): BuiltReceivedRequests {
   const { groups, groupOf } = groupEntries(entries);
+  // The stems, settled once over every group at every depth: two groups
+  // whose plain stems coincide both move, whichever depths reference them.
+  const plainStems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  const settled = resolveWebhookModelStems(
+    groups,
+    reserved,
+    components,
+    siblingDocs,
+    undefined,
+    (group, other) => plainStems.get(group) === plainStems.get(other),
+  );
   // Each group's wave: its shallowest member's depth.
   const waveOf = new Map(
     groups.map((group) => [group, Math.min(...group.entries.map((entry) => entry.depth ?? 0))] as const),
   );
   const waves = [...new Set(waveOf.values())].sort((a, b) => a - b);
-  // What every wave steps around: the reserved names, and the names and
-  // enums the waves before minted.
+  // What every wave steps around at mint time: the reserved names, and the
+  // names and enums the waves before minted.
   const all = new Set(reserved.all);
   const enums = new Set(reserved.enums);
   const stems = new Map<WebhookGroup, string>();
@@ -354,10 +371,10 @@ export function buildReceivedRequests(
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
   for (const wave of waves) {
     const waveGroups = groups.filter((group) => waveOf.get(group) === wave);
-    // One reserved set for the wave's resolution and its minting, so what
-    // the resolution minted is what is kept; the next wave reserves it.
+    // One reserved set for the wave's step-around and its minting, so what
+    // the step-around minted is what is kept; the next wave reserves it.
     const waveReserved: ReservedNames = { all: new Set(all), enums: new Set(enums) };
-    const waveStems = resolveWebhookModelStems(waveGroups, waveReserved, components, siblingDocs);
+    const waveStems = resolveWebhookModelStems(waveGroups, waveReserved, components, siblingDocs, settled).stems;
     for (const group of waveGroups) {
       const stem = waveStems.get(group)!;
       const minted = mintWebhook(group.owner, stem, components, waveReserved, siblingDocs);
@@ -725,19 +742,29 @@ export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRe
  * name when the component admits the shape and renames the variant under
  * the webhook's stem otherwise (`PetAdoptedComp`), as it does for
  * operations.
+ *
+ * `buildReceivedRequests` runs this twice: once over every group, where
+ * `contends` lets only a group of the same plain stem move another's — the
+ * settling that holds across depths — and once per minting wave from the
+ * `settled` stems and hash lengths, where any name already taken moves a
+ * stem further, the mint-time step-around.
  */
 function resolveWebhookModelStems(
   groups: WebhookGroup[],
   reserved: ReservedNames,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
-): Map<WebhookGroup, string> {
+  /** Stems and hash lengths already settled, to start from and extend instead of the plain stems (`buildReceivedRequests`'s minting). */
+  settled?: ResolvedStems,
+  /** Whether a name `other` mints may move `group`'s stem; any may unless said otherwise. */
+  contends: (group: WebhookGroup, other: WebhookGroup) => boolean = () => true,
+): ResolvedStems {
   const mint = (group: WebhookGroup, stem: string): Set<string> =>
     mintWebhook(group.owner, stem, components, reserved, siblingDocs).names;
   // How many hex characters of its hash each group's stem carries: none
   // until it clashes, six more each time it still does.
-  const hashLength = new Map<WebhookGroup, number>();
-  let stems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  const hashLength = new Map<WebhookGroup, number>(settled?.hashLength);
+  let stems = new Map(groups.map((group) => [group, settled?.stems.get(group) ?? plainStem(group.owner, '')]));
   let names = new Map(groups.map((group) => [group, mint(group, stems.get(group)!)]));
   for (;;) {
     // Only a clashing name the hash would move — one that embeds the stem —
@@ -747,12 +774,13 @@ function resolveWebhookModelStems(
       return [...names.get(group)!].some(
         (name) =>
           name.includes(stem) &&
-          (reserved.all.has(name) || groups.some((other) => other !== group && names.get(other)!.has(name))),
+          (reserved.all.has(name) ||
+            groups.some((other) => other !== group && contends(group, other) && names.get(other)!.has(name))),
       );
     });
     // A clash that survives the whole hash is left to the model merge.
     const movable = clashing.filter((group) => (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH);
-    if (movable.length === 0) return stems;
+    if (movable.length === 0) return { stems, hashLength };
     const moved = new Map(stems);
     for (const group of movable) {
       const length = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
@@ -773,6 +801,12 @@ function resolveWebhookModelStems(
 
 /** The hex characters a SHA-1 spells: the most a disambiguator can take. */
 const SHA1_HEX_LENGTH = 40;
+
+/** What `resolveWebhookModelStems` settles: each group's stem, and how many hex characters of its hash the stem carries. */
+interface ResolvedStems {
+  stems: Map<WebhookGroup, string>;
+  hashLength: Map<WebhookGroup, number>;
+}
 
 /**
  * What an entry's disambiguator is hashed from: its operationId when its
