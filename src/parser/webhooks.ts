@@ -12,7 +12,7 @@ import type {
 } from '../ir/types.js';
 import { collectModelTypeRefs, collectOperationTypeRefs, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
 import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
-import { numberedName, toPascalCase } from '../utils/naming.js';
+import { numberedName, numberedProperty, toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment, mediaTypeNamingOrder } from '../utils/media-type.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
@@ -833,9 +833,12 @@ function mintSecondaryPayload(
 /**
  * A parameter's schema typed and materialized under the first synthetic
  * property whose minted names are all free: the parameter's own name, then
- * `<in>_<name>`, then that numbered by numberedName (`query_payload2`,
+ * `<in>_<name>`, then that numbered by numberedProperty (`query_payload2`,
  * `query_payload3`, …; `query_v2No2` for a name that ends in a digit, which
- * an `_` before the number would not set off once PascalCased). A schema that
+ * an `_` before the number would not set off once PascalCased, and
+ * `query_filter[v2]No2` for one that ends in a digit once cased, which a
+ * number behind the bracket would run into once it is dropped —
+ * `QueryFilterV2No2`, never `QueryFilterV22`, #533). A schema that
  * mints nothing (a primitive, a `$ref`) keeps the parameter's name at once.
  * When a candidate changes none of the clashing names — they do not embed
  * the property, as a title-mapped union variant does not — no candidate can
@@ -861,7 +864,7 @@ function mintParameter(
   const stem = foldParameterName(param.in, param.name);
   for (let attempt = 0; ; attempt++) {
     const property =
-      attempt === 0 ? stem : attempt === 1 ? `${param.in}_${stem}` : numberedName(`${param.in}_${stem}`, attempt);
+      attempt === 0 ? stem : attempt === 1 ? `${param.in}_${stem}` : numberedProperty(`${param.in}_${stem}`, attempt);
     const minted = mintSchema(schema, property, parent, componentSchemas, reserved);
     const clashing = [...minted.names]
       .filter((name) => taken.has(name))
