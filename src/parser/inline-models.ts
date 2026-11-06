@@ -2992,15 +2992,25 @@ export function declareProperty(
  * { payload: { b } }] }` beside `{ allOf: [{ $ref: C }, { payload: { c }
  * }] }`, `C.payload { a }`, is `payload: { a, b } | { a, c }` (#398 review
  * round 2: the guard was shared across the variants, so the second read
- * `{ c }` alone).
+ * `{ c }` alone). A union nested in the variant is read the same way, one
+ * level down: each of its branches is a conjunction of its own, settled
+ * before it joins the variant's ledger as branch-only, with a guard of its
+ * own — so the same two branches nested in a variant are `payload: { a, b
+ * } | { a, c }` too (#398 review round 4: the nested branches were read
+ * into the variant's ledger as one more set of alternatives, `{ a } | { b }
+ * | { c }`, sharing its guard, so the second skipped `C`). `walking` is
+ * the path above the variant — the conjunctions it is nested in — which a
+ * schema met again on ends, so a component naming itself under a nested
+ * union still terminates.
  */
 export function declareVariant(
   ledger: Map<string, PropertyDeclarations>,
   variant: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
+  walking: ReadonlySet<SchemaObject> = new Set(),
 ): void {
   const own = new Map<string, PropertyDeclarations>();
-  readVariant(own, variant, componentSchemas, new Set(), false);
+  readVariant(own, variant, componentSchemas, new Set(), walking);
   for (const { name, unconditional, conditional } of own.values()) {
     declareProperty(ledger, name, unconditional?.schema ?? unionOfDeclarations(conditional), null, true);
   }
@@ -3010,33 +3020,40 @@ export function declareVariant(
  * Read a `oneOf`/`anyOf` variant, or a schema met under one, into
  * `ledger` as `declareVariant` describes: what always applies within the
  * variant — its properties, an `allOf` member's, a nullable wrapper's one
- * variant's, the component a `$ref` names — in the capacity it is reached
- * in (`onBranch`: always-applying for the variant itself), and what a
- * union nested in it declares as branch-only, however deep. `seen` is this
- * one variant's: a schema met again under it declares nothing more.
+ * variant's, the component a `$ref` names — as always-applying, and each
+ * branch of a union nested in it as a conjunction of its own
+ * (`declareVariant`, one level down), branch-only in this ledger. `seen` is
+ * this one conjunction's: a schema met again within it declares nothing
+ * more; `walking` is the path above it, which a schema met again on ends.
  */
 function readVariant(
   ledger: Map<string, PropertyDeclarations>,
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
-  onBranch: boolean,
+  walking: ReadonlySet<SchemaObject>,
 ): void {
-  if (seen.has(schema)) return;
+  if (seen.has(schema) || walking.has(schema)) return;
   seen.add(schema);
   if (schema.$ref) {
     const target = schemaRefTarget(schema.$ref, componentSchemas);
-    if (target) readVariant(ledger, target, componentSchemas, seen, onBranch);
+    if (target) readVariant(ledger, target, componentSchemas, seen, walking);
     return;
   }
   for (const [key, value] of Object.entries(schema.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, onBranch);
+    if (value) declareProperty(ledger, key, value, null, false);
   }
-  for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, onBranch);
+  for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, walking);
   for (const variants of unionAxesOf(schema)) {
     const branch = nullableAxisBranch(schema, variants);
-    if (branch) readVariant(ledger, branch, componentSchemas, seen, onBranch);
-    else for (const nested of variants) readVariant(ledger, nested, componentSchemas, seen, true);
+    if (branch) {
+      readVariant(ledger, branch, componentSchemas, seen, walking);
+      continue;
+    }
+    // Each nested branch is a conjunction of its own; the path it is on is
+    // this conjunction and everything above it.
+    const above = new Set([...walking, ...seen]);
+    for (const nested of variants) declareVariant(ledger, nested, componentSchemas, above);
   }
 }
 

@@ -3827,6 +3827,51 @@ describe('#398', () => {
       },
     );
 
+    // Round 4 (Greptile): a union nested in a variant. Each nested branch is
+    // read as a conjunction of its own, settled before it joins the variant's
+    // ledger, with a guard of its own (the branches were read into the
+    // variant's ledger as one more set of alternatives, `{ a } | { b } | { c }`,
+    // sharing its guard); the path above still ends a self-naming component.
+    it.each(cases)(
+      'reads each branch of a union nested in a variant as a conjunction of its own (OAS %s, %s)',
+      async (openapi, keyword) => {
+        const nested: SchemaObject = {
+          [keyword]: [
+            { allOf: [ref('C'), obj({ payload: obj({ b: str }) })] },
+            { allOf: [ref('C'), obj({ payload: obj({ c: str }) })] },
+          ],
+        };
+        const pet: SchemaObject = { allOf: [base, { oneOf: [nested, obj({ other: str })] }] };
+        const loop: SchemaObject = {
+          allOf: [base, { oneOf: [{ [keyword]: [ref('Loop'), obj({ x: str })] }, obj({ y: str })] }],
+        };
+        const ir = await parseWithoutWarnings(
+          doc(
+            openapi,
+            { C: obj({ payload: obj({ a: str }) }), Pet: pet, Holder: obj({ pet }), Loop: loop },
+            {
+              '/pets': getOp('getPet', pet),
+              '/holders': getOp('getHolder', ref('Holder')),
+              '/loops': getOp('getLoop', ref('Loop')),
+            },
+          ),
+        );
+        const models = modelsByName(ir);
+        for (const name of ['Pet', 'HolderPet', 'GetPetResponse']) {
+          expect(typed(models[name]), name).toEqual([
+            'name: string',
+            `payload?: (${name}Payload | ${name}PayloadWithC)`,
+            'other?: string',
+          ]);
+          expect(fieldsOf(models[`${name}Payload`]), name).toEqual(['a?: string', 'b?: string']);
+          expect(fieldsOf(models[`${name}PayloadWithC`]), name).toEqual(['a?: string', 'c?: string']);
+        }
+        // A component naming itself under the nested union ends where it meets itself again.
+        expect(typed(models['Loop'])).toEqual(['name: string', 'y?: string', 'x?: string']);
+        expectSound(ir, ['C', 'Pet', 'Holder', 'Loop']);
+      },
+    );
+
     // Round 2 (Greptile): two variants inheriting one component. Each
     // variant is a conjunction of its own, with a cycle guard of its own, so
     // the component declares into both (the guard was shared across the
