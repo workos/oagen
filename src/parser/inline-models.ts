@@ -989,8 +989,8 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * makes it an extension and `extractOperations` steps over it, in a
  * Responses Object, as
  * `readFallbackResponse` steps over it, and in a Callback Object, where the
- * specification makes it an extension (the parser reads no callbacks, so
- * nothing named under one is ever typed). A `$ref` entry
+ * specification makes it an extension and `extractCallbacks` steps over it
+ * (#382). A `$ref` entry
  * anywhere carries no schema of its own: the target is a component, or
  * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
  * read under its own map. A `schema` is yielded and not entered, so one
@@ -1149,7 +1149,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
   const follow = (
     value: unknown,
-    section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers',
+    section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'callbacks',
   ): Record<string, unknown> | undefined => {
     const entries = components[section];
     const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
@@ -1237,61 +1237,87 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
     }
     for (const resolved of byIdentity.values()) typed(resolved, direction);
   };
+  /**
+   * The Callback Objects on the path to the one being read, by identity
+   * after `$ref` resolution: a callback that refers back to one it sits in
+   * is read once, as `extractCallbacks` reads it (#382).
+   */
+  const readingCallbacks = new Set<object>();
+  /** Each callback of an operation: its path items are read as a webhook's is, since a callback's request is one the SDK is sent. */
+  const callbacks = (map: unknown): void => {
+    if (!isRecord(map)) return;
+    for (const raw of Object.values(map)) {
+      const callback = follow(raw, 'callbacks');
+      if (!callback || readingCallbacks.has(callback)) continue;
+      readingCallbacks.add(callback);
+      for (const [expression, entry] of Object.entries(callback)) {
+        // An `x-` key is a specification extension of the Callback Object.
+        if (expression.startsWith('x-')) continue;
+        const item = follow(entry, 'pathItems');
+        if (item) pathItem(item, true);
+      }
+      readingCallbacks.delete(callback);
+    }
+  };
+  /** A path item's operations, their requests read as sent or — a webhook's or a callback's — received. */
+  const pathItem = (item: Record<string, unknown>, received: boolean): void => {
+    const request: SiteDirection = received ? 'received' : 'sent';
+    for (const method of PATH_ITEM_OPERATIONS) {
+      const operation = item[method];
+      if (!isRecord(operation)) continue;
+      parameters(item, operation, request);
+      content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
+      callbacks(operation['callbacks']);
+      const responses = operation['responses'];
+      if (received || !isRecord(responses)) continue;
+      // Read as `extractResponses` reads the map, each key classified as
+      // the reader classifies it (`classifyResponseKey`): a 200–599 status
+      // code, `default` and a `1XX`–`5XX` range are read, body and headers
+      // alike, and of two range keys that differ in case alone (`4XX`
+      // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
+      // status code is kept as written and nothing of it typed, an `x-`
+      // key is an extension, and a key OpenAPI does not define (`600`,
+      // `6XX`) is warned about — once, by the reader — and ignored; none
+      // of those reaches a component (#540 review).
+      const ranges = new Set<string>();
+      for (const [code, entry] of Object.entries(responses)) {
+        const key = classifyResponseKey(code);
+        if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
+        if (key.kind === 'status' && key.code < 200) continue;
+        if (key.kind === 'range') {
+          if (ranges.has(key.range)) continue;
+          ranges.add(key.range);
+        }
+        const response = follow(entry, 'responses');
+        if (!response) continue;
+        content(response['content'], 'received');
+        const headers = response['headers'];
+        if (!isRecord(headers)) continue;
+        // Read as `extractResponseHeaders` reads the map: header names are
+        // case-insensitive, so of two keys that differ in case alone the
+        // later declaration is the header (#295), and a `Content-Type`
+        // header, which OpenAPI says to ignore, is skipped by its key,
+        // whatever its `$ref` leads to (`isIgnoredResponseHeader`). Nothing
+        // types the dropped declaration or the ignored header, so neither
+        // reaches a component (#540).
+        const declared = new Map<string, unknown>();
+        for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
+        for (const [name, header] of declared) {
+          if (isIgnoredResponseHeader(name)) continue;
+          const resolved = follow(header, 'headers');
+          if (resolved) typed(resolved, 'received');
+        }
+      }
+    }
+  };
   const pathItems = (map: unknown, webhooks: boolean): void => {
     if (!isRecord(map)) return;
-    // A webhook's request is one the SDK is sent.
-    const request: SiteDirection = webhooks ? 'received' : 'sent';
     for (const [key, raw] of Object.entries(map)) {
       // An extension under `paths`; a webhook's name under `webhooks` (#421).
       if (!webhooks && key.startsWith('x-')) continue;
       const item = follow(raw, 'pathItems');
-      if (!item) continue;
-      for (const method of PATH_ITEM_OPERATIONS) {
-        const operation = item[method];
-        if (!isRecord(operation)) continue;
-        parameters(item, operation, request);
-        content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
-        const responses = operation['responses'];
-        if (webhooks || !isRecord(responses)) continue;
-        // Read as `extractResponses` reads the map, each key classified as
-        // the reader classifies it (`classifyResponseKey`): a 200–599 status
-        // code, `default` and a `1XX`–`5XX` range are read, body and headers
-        // alike, and of two range keys that differ in case alone (`4XX`
-        // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
-        // status code is kept as written and nothing of it typed, an `x-`
-        // key is an extension, and a key OpenAPI does not define (`600`,
-        // `6XX`) is warned about — once, by the reader — and ignored; none
-        // of those reaches a component (#540 review).
-        const ranges = new Set<string>();
-        for (const [code, entry] of Object.entries(responses)) {
-          const key = classifyResponseKey(code);
-          if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
-          if (key.kind === 'status' && key.code < 200) continue;
-          if (key.kind === 'range') {
-            if (ranges.has(key.range)) continue;
-            ranges.add(key.range);
-          }
-          const response = follow(entry, 'responses');
-          if (!response) continue;
-          content(response['content'], 'received');
-          const headers = response['headers'];
-          if (!isRecord(headers)) continue;
-          // Read as `extractResponseHeaders` reads the map: header names are
-          // case-insensitive, so of two keys that differ in case alone the
-          // later declaration is the header (#295), and a `Content-Type`
-          // header, which OpenAPI says to ignore, is skipped by its key,
-          // whatever its `$ref` leads to (`isIgnoredResponseHeader`). Nothing
-          // types the dropped declaration or the ignored header, so neither
-          // reaches a component (#540).
-          const declared = new Map<string, unknown>();
-          for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
-          for (const [name, header] of declared) {
-            if (isIgnoredResponseHeader(name)) continue;
-            const resolved = follow(header, 'headers');
-            if (resolved) typed(resolved, 'received');
-          }
-        }
-      }
+      // A webhook's request is one the SDK is sent.
+      if (item) pathItem(item, webhooks);
     }
   };
   pathItems(document['paths'], false);

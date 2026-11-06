@@ -176,12 +176,18 @@ export function collectReferencedNames(
           collectFromTypeRef(sr.type);
         }
       }
+      // A callback's payload or header type is public surface too, handed to
+      // the user as a webhook's is (#382); nested callbacks come with it.
+      for (const callback of op.callbacks ?? []) {
+        for (const ref of collectWebhookTypeRefs(callback)) collectFromTypeRef(ref);
+      }
     }
   }
 
   // A webhook payload or header type is public surface an emitter hands the
   // user, so it seeds reachability like an operation's types; without this a
-  // model referenced only by a webhook would be pruned as an orphan.
+  // model referenced only by a webhook would be pruned as an orphan. Its
+  // callbacks' types come with it (`collectWebhookTypeRefs` reaches them).
   for (const webhook of opts.webhooks ?? []) {
     for (const ref of collectWebhookTypeRefs(webhook)) collectFromTypeRef(ref);
   }

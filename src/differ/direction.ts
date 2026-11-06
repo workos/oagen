@@ -67,11 +67,15 @@ export function buildDirectionIndex(...specs: ApiSpec[]): DirectionIndex {
         for (const { type } of collectResponseBodyTypes(op)) responseSeeds.push(type);
         for (const success of op.successResponses ?? []) responseSeeds.push(success.type);
         for (const error of op.errors) if (error.type) responseSeeds.push(error.type);
+        // A callback's payload and parameters are received by the SDK user,
+        // as a webhook's are (#382), so they are response-facing too.
+        for (const callback of op.callbacks ?? []) responseSeeds.push(...collectWebhookTypeRefs(callback));
       }
     }
     // A webhook's payload and parameters are received, never constructed, by
     // the SDK user, so they are response-facing: a newly required payload
-    // field is something the sender now always provides.
+    // field is something the sender now always provides. Its callbacks'
+    // come with it (`collectWebhookTypeRefs` reaches them).
     for (const webhook of spec.webhooks ?? []) responseSeeds.push(...collectWebhookTypeRefs(webhook));
   }
 

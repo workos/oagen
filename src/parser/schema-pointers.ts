@@ -83,6 +83,7 @@
  * (`settleDeferredMappingEntries`).
  */
 import type {
+  Callback,
   Constraints,
   MapType,
   Model,
@@ -94,6 +95,7 @@ import type {
   Webhook,
 } from '../ir/types.js';
 import {
+  callbackContext,
   collectRequestBodyTypes,
   collectResponseBodyTypes,
   collectResponseHeaders,
@@ -204,15 +206,7 @@ export function resolveSchemaPointers(
     for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
   }
   for (const webhook of sites.webhooks) {
-    const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
-    for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
-      visitSite(p, `${context}.${p.name}`);
-    }
-    if (webhook.requestBody) visit(webhook.requestBody, `${context}.requestBody`);
-    for (const content of webhook.requestBodyContents ?? []) {
-      if (content.type !== webhook.requestBody)
-        visit(content.type, `${context}.requestBodyContents.${content.contentType}`);
-    }
+    visitReceived(webhook, `webhooks.${webhook.name}.${webhook.httpMethod}`, visit, visitSite);
   }
 
   // Every variant is settled: a mapping entry that named a pointer variant
@@ -321,6 +315,36 @@ function visitOperation(
       for (const p of variant.parameters)
         visitSite(p, `${context}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
     }
+  }
+  visitCallbacks(op, context, visit, visitSite);
+}
+
+/** A webhook's or a callback's sites — its parameters, payload and secondary payloads — and its callbacks' after them. */
+function visitReceived(
+  node: Webhook,
+  context: string,
+  visit: (ref: TypeRef, context: string) => void,
+  visitSite: (site: LimitedSite, context: string) => void,
+): void {
+  for (const p of [...node.headerParams, ...node.queryParams, ...(node.cookieParams ?? [])]) {
+    visitSite(p, `${context}.${p.name}`);
+  }
+  if (node.requestBody) visit(node.requestBody, `${context}.requestBody`);
+  for (const content of node.requestBodyContents ?? []) {
+    if (content.type !== node.requestBody) visit(content.type, `${context}.requestBodyContents.${content.contentType}`);
+  }
+  visitCallbacks(node, context, visit, visitSite);
+}
+
+/** Each callback of an operation, webhook or callback, under `<context>.callbacks.<name>.<expression>.<method>` (#382). */
+function visitCallbacks(
+  node: { callbacks?: Callback[] },
+  context: string,
+  visit: (ref: TypeRef, context: string) => void,
+  visitSite: (site: LimitedSite, context: string) => void,
+): void {
+  for (const callback of node.callbacks ?? []) {
+    visitReceived(callback, callbackContext(context, callback), visit, visitSite);
   }
 }
 

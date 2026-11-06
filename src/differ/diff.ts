@@ -1,6 +1,9 @@
-import type { ApiSpec, Enum, SecurityRequirementSet } from '../ir/types.js';
+import type { ApiSpec, Callback, Enum, SecurityRequirementSet } from '../ir/types.js';
+import { callbackContext } from '../ir/types.js';
 import type {
   BehaviorChange,
+  CallbackModified,
+  CallbackSite,
   Change,
   DeprecatedChanged,
   DeprecatedNode,
@@ -69,12 +72,12 @@ export function diffSpecs(oldSpec: ApiSpec, newSpec: ApiSpec): DiffReport {
  * nothing otherwise. `[]` and an undeclared list both mean no authentication
  * and compare equal. Classified from each side that inherits the default in
  * both documents: the caller's when an operation does, the receiver's when a
- * webhook does, each paired across the documents as its own change is —
- * breaking if any such side breaks. No other node reads both defaults:
- * `securityShift` compares one that declares its own list on either side,
- * and one only one document has is reported as added or removed. When
- * nothing inherits it in both documents, no request reads both defaults, so
- * the change is additive.
+ * webhook or a callback does (#382), each paired across the documents as its
+ * own change is — breaking if any such side breaks. No other node reads
+ * both defaults: `securityShift` compares one that declares its own list on
+ * either side, and one only one document has is reported as added or
+ * removed. When nothing inherits it in both documents, no request reads
+ * both defaults, so the change is additive.
  */
 function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
   const oldSecurity = oldSpec.security ?? [];
@@ -82,24 +85,38 @@ function diffDocumentSecurity(oldSpec: ApiSpec, newSpec: ApiSpec): Change[] {
   if (securityEqual(oldSecurity, newSecurity)) return [];
   // The nodes that declare no `security`, keyed as the diff pairs them across
   // the two documents: an operation by its service and name, a webhook by its
-  // method and name.
+  // method and name, a callback by its owner and its own triple
+  // (`callbackContext`), nested ones included.
   const operations = (spec: ApiSpec): Set<string> =>
     new Set(
       spec.services.flatMap((service) =>
         service.operations.filter((op) => op.security === undefined).map((op) => `${service.name}.${op.name}`),
       ),
     );
-  const webhooks = (spec: ApiSpec): Set<string> =>
-    new Set(
-      (spec.webhooks ?? [])
-        .filter((webhook) => webhook.security === undefined)
-        .map((webhook) => `${webhook.httpMethod} ${webhook.name}`),
-    );
+  const receivers = (spec: ApiSpec): Set<string> => {
+    const keys = new Set<string>();
+    const callbacks = (node: { callbacks?: Callback[] }, context: string): void => {
+      for (const callback of node.callbacks ?? []) {
+        const own = callbackContext(context, callback);
+        if (callback.security === undefined) keys.add(own);
+        callbacks(callback, own);
+      }
+    };
+    for (const webhook of spec.webhooks ?? []) {
+      const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
+      if (webhook.security === undefined) keys.add(context);
+      callbacks(webhook, context);
+    }
+    for (const service of spec.services) {
+      for (const op of service.operations) callbacks(op, `operations.${service.name}.${op.name}`);
+    }
+    return keys;
+  };
   const inheritsTwice = (oldKeys: Set<string>, newKeys: Set<string>): boolean =>
     [...newKeys].some((key) => oldKeys.has(key));
   const sides: SecuritySide[] = [];
   if (inheritsTwice(operations(oldSpec), operations(newSpec))) sides.push('caller');
-  if (inheritsTwice(webhooks(oldSpec), webhooks(newSpec))) sides.push('receiver');
+  if (inheritsTwice(receivers(oldSpec), receivers(newSpec))) sides.push('receiver');
   const breaking = sides.some((side) => classifySecurityChange(oldSecurity, newSecurity, side) === 'breaking');
   return [{ kind: 'security-changed', oldSecurity, newSecurity, classification: breaking ? 'breaking' : 'additive' }];
 }
@@ -204,6 +221,28 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
       continue;
     }
 
+    if (c.kind === 'callback-modified') {
+      // Mirrored exactly as a webhook's are, the site carried along (#382).
+      const callback = { name: c.name, expression: c.expression, httpMethod: c.httpMethod, ...callbackSiteOf(c) };
+      if (c.deprecatedChanged) out.push(flipped({ node: 'callback', ...callback }, c));
+      if (c.securityChanged) out.push(shiftedOn({ node: 'callback', ...callback }, c, 'receiver'));
+      for (const pc of c.paramChanges) {
+        if (pc.kind !== 'param-deprecated-changed') continue;
+        out.push(
+          flipped(
+            {
+              node: 'callback-parameter',
+              ...callback,
+              paramName: pc.paramName,
+              paramLocation: pc.paramLocation ?? 'header',
+            },
+            pc,
+          ),
+        );
+      }
+      continue;
+    }
+
     if (c.kind !== 'operation-modified') continue;
     if (c.deprecatedChanged) {
       out.push(flipped({ node: 'operation', serviceName: c.serviceName, operationName: c.operationName }, c));
@@ -276,6 +315,14 @@ function collectBehaviorChanges(changes: Change[]): BehaviorChange[] {
     }
   }
   return out;
+}
+
+/** The site a `callback-modified` change carries, as its `behaviorChanges` mirrors carry it: the owner's name, and `parents` when nested. */
+function callbackSiteOf(change: CallbackModified): CallbackSite {
+  const parents = change.parents ? { parents: change.parents } : {};
+  return 'serviceName' in change
+    ? { serviceName: change.serviceName, operationName: change.operationName, ...parents }
+    : { webhookName: change.webhookName, webhookMethod: change.webhookMethod, ...parents };
 }
 
 function diffEnums(oldEnums: Enum[], newEnums: Enum[]): Change[] {

@@ -11,6 +11,7 @@ import {
 import { attachSharedRefs, extractOperations } from './operations.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
+import { extractCallbacks } from './callbacks.js';
 import { siblingDocsMode } from './reference-objects.js';
 import {
   mergeInlineResponseModels,
@@ -150,6 +151,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       examples?: Record<string, unknown>;
       headers?: Record<string, unknown>;
       pathItems?: Record<string, unknown>;
+      callbacks?: Record<string, unknown>;
       securitySchemes?: Record<string, SecuritySchemeObject>;
     };
   };
@@ -238,7 +240,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     mintedFor,
   });
 
-  const { services, inlineModels, inlineModelBundles, componentSites } = extractOperations(
+  const { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
     spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
@@ -269,20 +271,23 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Their models are named last, against every model and enum decided so far —
   // components, operations, and the components' own inline field models — so
   // a webhook never takes a name another pass has already minted.
+  const receivedComponents = {
+    schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
+    requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+    responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
+    pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
+  };
   const {
     webhooks,
     inlineModels: webhookInlineModels,
     inlineModelBundles: webhookInlineModelBundles,
+    declaredCallbacks: webhookCallbacks,
   } = extractWebhooks(
     spec.webhooks,
-    {
-      schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-      parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
-      requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
-      responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
-      examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
-      pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
-    },
+    receivedComponents,
     collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
     collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
     // Text beside a `$ref` is read by the document's version, as for operations.
@@ -291,6 +296,35 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.paths,
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
+
+  // The callbacks every operation and webhook declares are read last, into
+  // `Operation.callbacks` / `Webhook.callbacks`, through the webhook
+  // machinery (#382): their models are named against every name decided so
+  // far — components, operations, webhooks, the components' field models —
+  // and join the webhooks' from here on, since a callback's payload is
+  // received exactly as a webhook's is and every later pass reaches it the
+  // same way (`collectWebhookTypeRefs`, `collectOperationTypeRefs`).
+  const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = extractCallbacks(
+    [...declaredCallbacks, ...webhookCallbacks],
+    receivedComponents,
+    collectExistingNames(
+      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
+      services,
+      enums,
+      webhooks,
+    ),
+    collectExistingEnumNames(
+      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
+      services,
+      enums,
+      webhooks,
+    ),
+    siblingDocsMode(version),
+    spec.paths,
+    spec.webhooks,
+  );
+  webhookInlineModels.push(...callbackInlineModels);
+  webhookInlineModelBundles.push(...callbackInlineModelBundles);
 
   // The references a schema `$ref` that names no component left pending —
   // a pointer deeper into a component, `#/components/schemas/Pet/properties/
@@ -397,7 +431,14 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // name an `EnumRef` carries) and the collectors never meet on one name.
   collectInlineEnumsFromModels(collapsedModels, enums);
   collectInlineEnumsFromOperations(services, enums, componentSites, collapsedModels, componentNames);
+  // A webhook's callbacks are reached through the webhook; an operation's
+  // are lifted here, as received requests, after the operation's own.
   collectInlineEnumsFromWebhooks(webhooks, enums, collapsedModels);
+  collectInlineEnumsFromWebhooks(
+    services.flatMap((service) => service.operations.flatMap((op) => op.callbacks ?? [])),
+    enums,
+    collapsedModels,
+  );
   // Noted once the collectors have settled the name: `PetJsonMode` renamed
   // to `PetMode` beside a component model `PetMode` is lifted as `PetMode2`.
   for (const [name, ref] of foldedEnums) console.warn(`[oagen] Folded enum "${name}" into "${ref.name}"`);
@@ -458,8 +499,8 @@ function applyFieldHints(
  * reading it silently would make the IR depend on a convention the document
  * never declared. A document that carries one is told so, once, so the
  * omission is a visible choice rather than a quiet loss. An operation's
- * `callbacks`, which are not read either, are reported per operation by
- * `warnOnIgnoredCallbacks` at the sites that read Operation Objects.
+ * `callbacks`, which have an agreed shape, are read (`extractCallbacks`;
+ * #382).
  */
 function warnOnLegacyWebhooks(legacy: unknown): void {
   if (typeof legacy !== 'object' || legacy === null) return;

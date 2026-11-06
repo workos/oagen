@@ -44,10 +44,12 @@ export type {
   ErrorResponse,
   Webhook,
   WebhookResponse,
+  Callback,
 } from './ir/types.js';
 
 export {
   assertNever,
+  callbackContext,
   typeRefConstraints,
   walkTypeRef,
   mapTypeRef,
@@ -166,6 +168,12 @@ export type {
   WebhookAdded,
   WebhookRemoved,
   WebhookModified,
+  ReceivedRequestModified,
+  CallbackAdded,
+  CallbackRemoved,
+  CallbackModified,
+  CallbackSite,
+  CallbackParent,
   ParamChange,
   ParamLocation,
   ResponseContentTypesChange,

@@ -123,8 +123,10 @@ export interface ApiSpec {
  * resolved operation name.
  *
  * An operation's `callbacks` (OpenAPI 3.x), whose path items have this
- * shape, are not read into `Webhook` or anywhere else; the parser warns at
- * every site that declares any (see `warnOnIgnoredCallbacks`).
+ * shape, are read the same way: each is a `Callback`, a `Webhook` tied to
+ * the operation that registers it, carried on `Operation.callbacks` — and
+ * on `callbacks` here, since a `webhooks` operation may declare its own
+ * (#382).
  */
 export interface Webhook {
   /** The key under `webhooks`, verbatim (`petAdopted`, `user.created`). */
@@ -238,12 +240,63 @@ export interface Webhook {
    * `[]` means none, otherwise one alternative per requirement object.
    */
   security?: SecurityRequirementSet[];
+  /**
+   * The callbacks the webhook's operation declares, read exactly as
+   * `Operation.callbacks` is: present only when at least one is readable, in
+   * document order. A callback nests through this field in turn, since a
+   * `Callback` is a `Webhook`.
+   */
+  callbacks?: Callback[];
 }
 
 /** One status code a webhook's sender expects back, with the document's description of it. */
 export interface WebhookResponse {
   statusCode: number;
   description?: string;
+}
+
+/**
+ * A request the API sends to a URL the caller handed it: one HTTP method of
+ * one path item under one runtime expression of one `callbacks` entry
+ * (OpenAPI 3.x). Read from the receiver's side exactly as a `Webhook` is —
+ * the payload, parameters, responses, docs, deprecation, tags and security
+ * are the same fields, read by the same code — and tied to the operation
+ * or webhook that registers it through `Operation.callbacks` /
+ * `Webhook.callbacks` (#382). A callback has no fixed path: the path item
+ * is keyed by a runtime expression the sender evaluates per request, kept
+ * verbatim as `expression`. One `callbacks` key may map several expressions
+ * to path items, each declaring several methods, so `name` + `expression`
+ * + `httpMethod` identifies a callback, and that triple is what `oagen
+ * diff` keys its `callback-added` / `callback-removed` / `callback-modified`
+ * changes on. A callback is never an SDK method, as a webhook is not.
+ *
+ * Its payload is materialized as `<Stem>Payload` where the stem is the
+ * callback operation's `operationId` when it declares one that names
+ * something and no other callback operation declares the same, else the
+ * owner's stem followed by the key PascalCased — `createPet`'s `petAdopted`
+ * mints `CreatePetPetAdoptedPayload` (see the parser's `extractCallbacks`).
+ */
+export interface Callback extends Webhook {
+  /** The key under the operation's `callbacks` map, verbatim (`petAdopted`). */
+  name: string;
+  /** The runtime expression the path item is keyed by, verbatim (`{$request.body#/callbackUrl}`); a callback has no fixed path. */
+  expression: string;
+}
+
+/**
+ * The site a callback is read and reported under, below its owner's
+ * `context` — an operation's `operationId` (else `METHOD /path`) or
+ * `<service>.<operation>`, a webhook's `webhooks.<key>.<method>`, a parent
+ * callback's own: `<context>.callbacks.<name>.<expression>.<method>`
+ * (`createPet.callbacks.petAdopted.{$request.body#/callbackUrl}.post`).
+ * One format for the parser's warnings and for every walker's diagnostics
+ * (#382).
+ */
+export function callbackContext(
+  context: string,
+  callback: Pick<Callback, 'name' | 'expression' | 'httpMethod'>,
+): string {
+  return `${context}.callbacks.${callback.name}.${callback.expression}.${callback.httpMethod}`;
 }
 
 /** A service groups related operations (maps to an SDK resource class) */
@@ -609,6 +662,20 @@ export interface Operation {
    * remains.
    */
   extensions?: Extensions;
+  /**
+   * The requests the API sends back to URLs the caller supplied, from the
+   * Operation Object's `callbacks` map (OpenAPI 3.x), each read as a
+   * `Webhook` is (see `Callback`; #382). Present only when the operation
+   * declares at least one readable callback, in document order: `callbacks`
+   * key order, then expression order within each Callback Object, then the
+   * path item's method order. A callback is not an SDK method: it belongs
+   * to no service, gets no resolved operation name, and is untouched by
+   * operation hints and mount rules; an emitter types its payload, or a
+   * handler for it, beside the operation. Its models are named from this
+   * operation's stem (`CreatePetPetAdoptedPayload`) and assigned to this
+   * operation's service, as the operation's own are.
+   */
+  callbacks?: Callback[];
 }
 
 /**
@@ -1923,6 +1990,17 @@ export function assignModelsToServices(
           referencedModels.add(name);
         }
       }
+      // A callback's payload and parameters are the operation's too: the
+      // request is tied to it, so its models land in the operation's
+      // service as the operation's own do (#382). A webhook's callbacks
+      // belong to no service, as the webhook does.
+      for (const callback of op.callbacks ?? []) {
+        for (const ref of collectWebhookTypeRefs(callback)) {
+          for (const name of collectModelRefs(ref)) {
+            referencedModels.add(name);
+          }
+        }
+      }
     }
 
     // Transitively collect models referenced by the directly-referenced models
@@ -2061,13 +2139,15 @@ export function collectFallbackResponseTypes(op: Operation): TypeRef[] {
 
 /**
  * Every type reference a webhook carries: its parameters' types, its
- * request body, and the payload of every other media type it declares (each
- * `requestBodyContents` entry whose type is not `requestBody`'s own). Every
- * pass that walks an operation's type refs (reachability, ref rewriting and
+ * request body, the payload of every other media type it declares (each
+ * `requestBodyContents` entry whose type is not `requestBody`'s own), and
+ * — after its own — everything each of its `callbacks` carries, nested
+ * callbacks included, since a `Callback` is a `Webhook` (#382). Every pass
+ * that walks an operation's type refs (reachability, ref rewriting and
  * validation, the differ's direction index, inline-enum collection) walks a
- * webhook's through this, so a model reached only through a webhook payload
- * or header is treated the way one reached through an operation is, and a
- * field added to `Webhook` later has one place to join.
+ * webhook's through this, so a model reached only through a webhook or
+ * callback payload or header is treated the way one reached through an
+ * operation is, and a field added to `Webhook` later has one place to join.
  */
 export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
   const refs: TypeRef[] = [];
@@ -2078,6 +2158,7 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
   for (const content of webhook.requestBodyContents ?? []) {
     if (content.type !== webhook.requestBody) refs.push(content.type);
   }
+  for (const callback of webhook.callbacks ?? []) refs.push(...collectWebhookTypeRefs(callback));
   return refs;
 }
 
@@ -2087,8 +2168,10 @@ export function collectWebhookTypeRefs(webhook: Webhook): TypeRef[] {
  * and the body of every other request media type (`collectRequestBodyTypes`),
  * its primary response and every other success body, every error body, the
  * pagination iterator's item type and envelope fields, every response header
- * (`collectResponseHeaders`) and every secondary, fallback and range body
- * (`collectResponseBodyTypes`). The one list for a pass that reserves or
+ * (`collectResponseHeaders`), every secondary, fallback and range body
+ * (`collectResponseBodyTypes`), and — last — everything each of its
+ * `callbacks` carries, through `collectWebhookTypeRefs`, nested callbacks
+ * included (#382). The one list for a pass that reserves or
  * collects names across an operation's references — the enum names held
  * before the deferred schemas are named, the names a merge pass must mint
  * around, the names a webhook must step around — as `collectWebhookTypeRefs`
@@ -2120,6 +2203,7 @@ export function collectOperationTypeRefs(op: Operation): TypeRef[] {
   }
   for (const header of collectResponseHeaders(op)) refs.push(header.type);
   for (const { type } of collectResponseBodyTypes(op)) refs.push(type);
+  for (const callback of op.callbacks ?? []) refs.push(...collectWebhookTypeRefs(callback));
   return refs;
 }
 

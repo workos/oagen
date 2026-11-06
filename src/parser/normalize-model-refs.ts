@@ -1,5 +1,11 @@
-import type { ApiSpec, TypeRef } from '../ir/types.js';
-import { walkTypeRef, collectResponseHeaders, collectRequestBodyTypes, collectResponseBodyTypes } from '../ir/types.js';
+import type { ApiSpec, Callback, TypeRef, Webhook } from '../ir/types.js';
+import {
+  walkTypeRef,
+  callbackContext,
+  collectResponseHeaders,
+  collectRequestBodyTypes,
+  collectResponseBodyTypes,
+} from '../ir/types.js';
 
 export function validateModelRefs(spec: ApiSpec): void {
   const knownNames = new Set<string>();
@@ -14,6 +20,25 @@ export function validateModelRefs(spec: ApiSpec): void {
         }
       },
     });
+  }
+
+  /** A webhook's or a callback's references, and its callbacks' after them, under `<context>.callbacks.<name>.<expression>.<method>` (#382). */
+  function walkReceived(node: Webhook, context: string): void {
+    for (const p of [...node.headerParams, ...node.queryParams, ...(node.cookieParams ?? [])]) {
+      walkRef(p.type, `${context}.${p.name}`);
+    }
+    if (node.requestBody) walkRef(node.requestBody, `${context}.requestBody`);
+    // The payload of every other media type, which shares no reference with `requestBody`.
+    for (const content of node.requestBodyContents ?? []) {
+      if (content.type !== node.requestBody) {
+        walkRef(content.type, `${context}.requestBodyContents.${content.contentType}`);
+      }
+    }
+    walkCallbacks(node, context);
+  }
+
+  function walkCallbacks(node: { callbacks?: Callback[] }, context: string): void {
+    for (const callback of node.callbacks ?? []) walkReceived(callback, callbackContext(context, callback));
   }
 
   for (const model of spec.models) {
@@ -68,20 +93,11 @@ export function validateModelRefs(spec: ApiSpec): void {
           }
         }
       }
+      walkCallbacks(op, `${service.name}.${op.name}`);
     }
   }
 
   for (const webhook of spec.webhooks ?? []) {
-    const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
-    for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
-      walkRef(p.type, `${context}.${p.name}`);
-    }
-    if (webhook.requestBody) walkRef(webhook.requestBody, `${context}.requestBody`);
-    // The payload of every other media type, which shares no reference with `requestBody`.
-    for (const content of webhook.requestBodyContents ?? []) {
-      if (content.type !== webhook.requestBody) {
-        walkRef(content.type, `${context}.requestBodyContents.${content.contentType}`);
-      }
-    }
+    walkReceived(webhook, `webhooks.${webhook.name}.${webhook.httpMethod}`);
   }
 }

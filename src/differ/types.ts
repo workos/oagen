@@ -96,7 +96,18 @@ export type DeprecatedNode =
       httpMethod: string;
       paramName: string;
       paramLocation: ParamLocation;
-    };
+    }
+  // A callback and its parameter, named by the triple that identifies the
+  // callback and the site the owning `callback-modified` change carries (#382).
+  | ({ node: 'callback'; name: string; expression: string; httpMethod: string } & CallbackSite)
+  | ({
+      node: 'callback-parameter';
+      name: string;
+      expression: string;
+      httpMethod: string;
+      paramName: string;
+      paramLocation: ParamLocation;
+    } & CallbackSite);
 
 /**
  * The security requirements a node's requests must satisfy changed. Mirrors
@@ -105,8 +116,9 @@ export type DeprecatedNode =
  * change, copying `oldSecurity`/`newSecurity` from it. The classification is
  * the security change's own — `classifySecurityChange` on the two lists,
  * read from the caller's side for an operation and from the receiver's side
- * for a webhook, and for the document as `DocumentSecurityChanged` says — not
- * the owning change's, which may be breaking for another reason.
+ * for a webhook or a callback, and for the document as
+ * `DocumentSecurityChanged` says — not the owning change's, which may be
+ * breaking for another reason.
  */
 export type SecurityChanged = {
   kind: 'security-changed';
@@ -119,7 +131,8 @@ export type SecurityChanged = {
 export type SecurityNode =
   | { node: 'document' }
   | { node: 'operation'; serviceName: string; operationName: string }
-  | { node: 'webhook'; name: string; httpMethod: string };
+  | { node: 'webhook'; name: string; httpMethod: string }
+  | ({ node: 'callback'; name: string; expression: string; httpMethod: string } & CallbackSite);
 
 /**
  * An IR node's `extensions` — the `x-*` keys of the object it was built
@@ -172,7 +185,10 @@ export type Change =
   | DocumentSecurityChanged
   | WebhookAdded
   | WebhookRemoved
-  | WebhookModified;
+  | WebhookModified
+  | CallbackAdded
+  | CallbackRemoved
+  | CallbackModified;
 
 export interface ModelAdded {
   kind: 'model-added';
@@ -852,12 +868,90 @@ export interface WebhookRemoved {
  * receiver's side too: a credential the sender stops presenting, or an
  * alternative it may now present that the handler never checked for, is
  * breaking. A webhook carries no `servers` in the IR (`Webhook` has no such
- * field), so there is no `serversChanged` or `serverChanges` here.
+ * field), so there is no `serversChanged` or `serverChanges` here. The
+ * fields are `ReceivedRequestModified`'s, which a `callback-modified`
+ * change carries too, since a callback is compared exactly as a webhook is
+ * (#382).
  */
-export interface WebhookModified {
+export interface WebhookModified extends ReceivedRequestModified {
   kind: 'webhook-modified';
   name: string;
   httpMethod: string;
+}
+
+/**
+ * Where a callback sits, named the way the owning change names its owner:
+ * an operation's callback by `serviceName` + `operationName` (the
+ * `operation-modified` change's), a webhook's by `webhookName` +
+ * `webhookMethod` (the `webhook-modified` change's `name` + `httpMethod`).
+ * A nested callback — one declared by a callback operation — additionally
+ * lists the callbacks between the owner and itself under `parents`,
+ * outermost first, present only when nested. Carried on every
+ * `callback-added` / `callback-removed` / `callback-modified` change and on
+ * the `callback` and `callback-parameter` nodes of `behaviorChanges` (#382).
+ */
+export type CallbackSite = (
+  | { serviceName: string; operationName: string }
+  | { webhookName: string; webhookMethod: string }
+) & { parents?: CallbackParent[] };
+
+/** One callback on the way down to a nested one: the triple that identifies it (see `Callback`). */
+export interface CallbackParent {
+  name: string;
+  expression: string;
+  httpMethod: string;
+}
+
+/**
+ * A callback is identified by its `name`, `expression` and `httpMethod`
+ * together — one `callbacks` key may map several runtime expressions to
+ * path items, each declaring several methods — so an expression or method
+ * edit reports as one callback removed and another added, as a webhook's
+ * method edit does. Reported for each pair of operations or webhooks both
+ * documents carry, right after the owner's `operation-modified` /
+ * `webhook-modified` change or where it would be: a callback change is
+ * reported even when the owner itself has no other change, and an owner
+ * added or removed reports nothing for its callbacks, since the owner's
+ * change already says it (#382).
+ */
+export type CallbackAdded = {
+  kind: 'callback-added';
+  name: string;
+  expression: string;
+  httpMethod: string;
+  classification: 'additive';
+} & CallbackSite;
+
+export type CallbackRemoved = {
+  kind: 'callback-removed';
+  name: string;
+  expression: string;
+  httpMethod: string;
+  classification: 'breaking';
+} & CallbackSite;
+
+/**
+ * Changes to a callback the receiver already handles: the comparison and
+ * classification `webhook-modified` makes, read from the receiver's side
+ * (`ReceivedRequestModified`), on the callback the site names. Its own
+ * `deprecated` flip and security change are mirrored into `behaviorChanges`
+ * as `callback` nodes and a parameter's flip as a `callback-parameter`
+ * node, each carrying the site, as a webhook's are (#382).
+ */
+export type CallbackModified = {
+  kind: 'callback-modified';
+  name: string;
+  expression: string;
+  httpMethod: string;
+} & ReceivedRequestModified &
+  CallbackSite;
+
+/**
+ * What a `webhook-modified` and a `callback-modified` change carry beside
+ * the node's identity: the comparison of a request the SDK user receives,
+ * read from the receiver's side (`diffReceivedRequest`).
+ */
+export interface ReceivedRequestModified {
   paramChanges: ParamChange[];
   /**
    * True when the payload's type changed, or — both specs declaring a

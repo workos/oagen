@@ -52,6 +52,7 @@ import {
   typeRefsEqual,
 } from './models.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
+import { diffCallbacks } from './webhooks.js';
 
 /**
  * The two documents' `servers`, so `diffOperations` can resolve what an
@@ -395,6 +396,17 @@ export function diffOperations(
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
+    // The operation's callbacks, right after its own change or where it
+    // would be: compared as webhooks are, from the receiver's side (#382).
+    changes.push(
+      ...diffCallbacks(
+        oldOp.callbacks ?? [],
+        newOp.callbacks ?? [],
+        { serviceName, operationName: name },
+        documentSecurity,
+        shapes,
+      ),
+    );
   }
 
   return changes;

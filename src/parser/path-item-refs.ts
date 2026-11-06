@@ -15,11 +15,22 @@ import { unescapePointerFragment } from '@redocly/openapi-core';
 
 /** Where a path item is read from, for diagnostics. */
 export interface PathItemSite {
-  /** `'path'` for an entry under `paths`, `'webhook'` for one under `webhooks`. */
-  kind: 'path' | 'webhook';
-  /** The entry's key: the path template (`/pets`) or the webhook name (`petAdopted`). */
+  /**
+   * `'path'` for an entry under `paths`, `'webhook'` for one under
+   * `webhooks`, `'callback'` for the path item under one runtime expression
+   * of a Callback Object (#382).
+   */
+  kind: 'path' | 'webhook' | 'callback';
+  /**
+   * The entry's key: the path template (`/pets`), the webhook name
+   * (`petAdopted`), or, for a callback, the site down to its expression
+   * (`createPet.callbacks.petAdopted.{$request.body#/callbackUrl}`).
+   */
   key: string;
 }
+
+/** The noun a path item site's diagnostics name it by. */
+const SITE_NOUNS: Record<PathItemSite['kind'], string> = { path: 'Path', webhook: 'Webhook', callback: 'Callback' };
 
 /**
  * The document's own `paths` and `webhooks` maps, as written: a Path Item's
@@ -57,7 +68,7 @@ export function resolvePathItemRef(
   site: PathItemSite,
   documentPathItems?: DocumentPathItems,
 ): Record<string, unknown> | undefined {
-  const label = `${site.kind === 'path' ? 'Path' : 'Webhook'} "${site.key}"`;
+  const label = `${SITE_NOUNS[site.kind]} "${site.key}"`;
   const seenRefs = new Set<string>();
   /** Keys written beside a `$ref` along the chain, in document order; reported once the item is resolved. */
   const droppedKeys: string[] = [];
@@ -147,7 +158,7 @@ function documentMapOf(ref: string): 'paths' | 'webhooks' | undefined {
  */
 export function resolveComponentRef(
   ref: string,
-  section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'examples',
+  section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'examples' | 'callbacks',
   components: Record<string, Record<string, unknown>> | undefined,
 ): Record<string, unknown> | undefined {
   const prefix = `#/components/${section}/`;

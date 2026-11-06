@@ -41,6 +41,7 @@ import {
   selectRequestBodyContent,
   warnUnreadParameterContent,
   warnUnreadRequestBody,
+  type DeclaredCallbacks,
   type OperationObject,
   type ParameterObject,
   type PathItem,
@@ -51,7 +52,6 @@ import { resolvePathItemRef } from './path-item-refs.js';
 import { followReference, type SiblingDocs } from './reference-objects.js';
 import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
-import { warnOnIgnoredCallbacks } from './callbacks.js';
 
 /** The `components` sections webhook extraction resolves references against. */
 export interface WebhookComponents {
@@ -65,6 +65,8 @@ export interface WebhookComponents {
    * point into, as it may name another `webhooks` or `paths` entry.
    */
   pathItems?: Record<string, Record<string, unknown>>;
+  /** `components.callbacks`, which a `callbacks` entry's `$ref` may point into (`extractCallbacks`; #382). */
+  callbacks?: Record<string, Record<string, unknown>>;
 }
 
 export interface WebhookExtractionResult {
@@ -81,10 +83,31 @@ export interface WebhookExtractionResult {
    * repoints exactly those, as it does an operation's (`InlineModelBundle`).
    */
   inlineModelBundles: InlineModelBundle[];
+  /**
+   * Every `callbacks` map a webhook's operation declares, in webhook order,
+   * for `extractCallbacks` to read once every webhook is named (#382).
+   */
+  declaredCallbacks: DeclaredCallbacks[];
 }
 
-/** One (key, method) pair of the `webhooks` map, with its references resolved. */
-interface WebhookEntry {
+/**
+ * What a received request is read from: a (key, method) of the `webhooks`
+ * map, or a (key, expression, method) of a `callbacks` map (#382). Names
+ * the noun in diagnostics (`a webhook has no path`, `callback operation`)
+ * and the word put in front of a stem that would be empty or start with a
+ * digit (`Webhook2FaEnabledPayload`, `Callback2FaEnabledPayload`).
+ */
+export type ReceivedRequestKind = 'webhook' | 'callback';
+
+/**
+ * One (key, method) pair of the `webhooks` map — or, for a callback, one
+ * (key, expression, method) of a `callbacks` map — with its references
+ * resolved. Every reader below takes one of these, so a webhook and a
+ * callback are typed, named and built by one code path.
+ */
+export interface WebhookEntry {
+  kind: ReceivedRequestKind;
+  /** The `webhooks` key, or the `callbacks` key, verbatim. */
   name: string;
   method: HttpMethod;
   op: OperationObject;
@@ -97,17 +120,32 @@ interface WebhookEntry {
   /** The webhook's own parameters after path-item-level ones, deduplicated by (in, name). */
   params: ParameterObject[];
   body: RequestBodyObject | undefined;
-  /** `webhooks.<name>.<method>`, for diagnostics. */
+  /** `webhooks.<name>.<method>`, or `<owner label>.callbacks.<name>.<expression>.<method>`, for diagnostics. */
   label: string;
   /** How many methods the entry's path item declares; a second one qualifies a key-derived stem. */
   methodCount: number;
   /**
    * The operationId the stem is named from: the operation's own, when it
    * names something (`namesNothing`; #564) and no different operation
-   * object declares the same one (see `collectWebhookEntries`). Absent, the
-   * stem comes from the key.
+   * object among the entries read together declares the same one (see
+   * `settleStemOperationIds`). Absent, the stem comes from the key.
    */
   stemOperationId?: string;
+  /** A callback's runtime expression, verbatim (`{$request.body#/callbackUrl}`); absent on a webhook. */
+  expression?: string;
+  /**
+   * How many expressions the Callback Object declares; a second one
+   * qualifies a key-derived stem with the expression PascalCased, as a
+   * second method qualifies it with the method. Absent on a webhook.
+   */
+  expressionCount?: number;
+  /**
+   * The stem of the operation, webhook or callback that declares the
+   * callback (`DeclaredCallbacks.stem`), which a key-derived stem is
+   * prefixed with: `CreatePet` + `petAdopted` → `CreatePetPetAdopted`.
+   * Absent on a webhook, whose key stands alone.
+   */
+  parentStem?: string;
 }
 
 /** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
@@ -182,6 +220,11 @@ type MintedShape = Pick<
  * `collectExistingNames` — so a webhook never mints a name one of them owns,
  * and `reservedEnumNames` the enums among them (`collectExistingEnumNames`),
  * which no webhook model may take even where the stem cannot move it.
+ *
+ * A webhook operation's `callbacks` are not read here: each map is
+ * recorded (`declaredCallbacks`) with the webhook's label and stem for
+ * `extractCallbacks` to read once every webhook is named, so a callback's
+ * models step around the webhooks' too (#382).
  */
 export function extractWebhooks(
   webhooks: unknown,
@@ -197,32 +240,76 @@ export function extractWebhooks(
   // `$ref` may name (`resolvePathItemRef`), as it may name another webhook's.
   paths?: unknown,
 ): WebhookExtractionResult {
-  if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
+  if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [], declaredCallbacks: [] };
   if (!isRecord(webhooks)) {
     console.warn('[oagen] Warning: Top-level `webhooks` is not an object; ignoring it.');
-    return { webhooks: [], inlineModels: [], inlineModelBundles: [] };
+    return { webhooks: [], inlineModels: [], inlineModelBundles: [], declaredCallbacks: [] };
   }
 
   const entries = collectWebhookEntries(webhooks, components, siblingDocs, paths);
-  const { groups, groupOf } = groupEntries(entries);
   const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
+  const { built, inlineModels, inlineModelBundles } = buildReceivedRequests(entries, components, reserved, siblingDocs);
+  // Each webhook's `callbacks`, read after every webhook is named, under
+  // the webhook's label and the stem its own models took.
+  const declaredCallbacks: DeclaredCallbacks[] = built
+    .filter(({ entry }) => entry.op.callbacks !== undefined)
+    .map(({ entry, node, stem }) => ({ owner: node, callbacks: entry.op.callbacks, label: entry.label, stem }));
+  return { webhooks: built.map(({ node }) => node), inlineModels, inlineModelBundles, declaredCallbacks };
+}
+
+/** What `buildReceivedRequests` made of a batch of entries. */
+export interface BuiltReceivedRequests {
+  /** One node per entry, in entry order, with the entry and the stem its models were named from. */
+  built: Array<{ entry: WebhookEntry; node: Webhook; stem: string }>;
+  /** The models the batch minted, to merge into `ApiSpec.models`. */
+  inlineModels: Model[];
+  /** Where those models came from (see `WebhookExtractionResult.inlineModelBundles`). */
+  inlineModelBundles: InlineModelBundle[];
+  /** Every model and inline-enum name the batch minted, for a later batch to reserve. */
+  names: Set<string>;
+}
+
+/**
+ * Name, mint and build one batch of entries — the `webhooks` map's, or one
+ * level of callbacks (`extractCallbacks`) — against `reserved`: the stems
+ * are resolved over the whole batch (`resolveWebhookModelStems`), so the
+ * outcome depends only on the document, never on the order its entries are
+ * read in. Entries that resolve to one operation object and are named from
+ * its operationId mint once and share the minting (`groupEntries`); every
+ * other entry mints on its own.
+ *
+ * The nodes come back in entry order, not group order: a shared
+ * operation's second key keeps its own place. A group's owner takes the
+ * minted parameters and payload as they are; every other member gets its
+ * own copy, so no two nodes share IR nodes — a copy that keeps each
+ * reference's provenance (`cloneMintedShape`), so a `$ref` to a component
+ * stays one on every member when a merge pass renames the group's models.
+ * Each group's models are one site (`inlineModelBundles`): every member's
+ * references, the copies included, so a rename reaches every node that
+ * shares the minting and nothing else. The bundle is recorded before any
+ * callback is attached to a node, so it owns the node's own references and
+ * not a nested callback's, which has a bundle of its own.
+ */
+export function buildReceivedRequests(
+  entries: WebhookEntry[],
+  components: WebhookComponents,
+  reserved: ReservedNames,
+  siblingDocs: SiblingDocs,
+): BuiltReceivedRequests {
+  const { groups, groupOf } = groupEntries(entries);
   const stems = resolveWebhookModelStems(groups, reserved, components, siblingDocs);
   const inlineModels: Model[] = [];
+  const names = new Set<string>();
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
   for (const group of groups) {
     const minted = mintWebhook(group.owner, stems.get(group)!, components, reserved, siblingDocs);
     inlineModels.push(...minted.inlineModels);
+    for (const name of minted.names) names.add(name);
     mintedByGroup.set(group, minted);
   }
 
-  // Document order of the entries, not of the groups: a shared operation's
-  // second key keeps its own place. A group's owner takes the minted
-  // parameters and payload as they are; every other member gets its own
-  // copy, so no two webhooks share IR nodes — a copy that keeps each
-  // reference's provenance (`cloneMintedShape`), so a `$ref` to a component
-  // stays one on every member when a merge pass renames the group's models.
-  const result: Webhook[] = [];
-  const webhooksByGroup = new Map<WebhookGroup, Webhook[]>();
+  const built: BuiltReceivedRequests['built'] = [];
+  const nodesByGroup = new Map<WebhookGroup, Webhook[]>();
   for (const entry of entries) {
     const group = groupOf.get(entry)!;
     const minted = mintedByGroup.get(group)!;
@@ -236,31 +323,23 @@ export function extractWebhooks(
       requestBodyContentTypes: minted.requestBodyContentTypes,
       requestBodyContents: minted.requestBodyContents,
     };
-    const webhook = buildWebhook(
-      entry,
-      entry === group.owner ? shape : cloneMintedShape(shape),
-      components,
-      siblingDocs,
-    );
-    result.push(webhook);
-    webhooksByGroup.set(group, [...(webhooksByGroup.get(group) ?? []), webhook]);
+    const node = buildWebhook(entry, entry === group.owner ? shape : cloneMintedShape(shape), components, siblingDocs);
+    built.push({ entry, node, stem: stems.get(group)! });
+    nodesByGroup.set(group, [...(nodesByGroup.get(group) ?? []), node]);
   }
 
-  // Each group's models are one site: every member's references, the
-  // copies included, so a rename reaches every webhook that shares the
-  // minting and nothing else.
   const inlineModelBundles: InlineModelBundle[] = [];
   for (const group of groups) {
     const minted = mintedByGroup.get(group)!;
     if (minted.inlineModels.length === 0) continue;
     inlineModelBundles.push({
       qualifier: toPascalCase(stems.get(group)!),
-      roots: (webhooksByGroup.get(group) ?? []).flatMap((webhook) => collectWebhookTypeRefs(webhook)),
+      roots: (nodesByGroup.get(group) ?? []).flatMap((node) => collectWebhookTypeRefs(node)),
       models: minted.inlineModels,
     });
   }
 
-  return { webhooks: result, inlineModels, inlineModelBundles };
+  return { built, inlineModels, inlineModelBundles, names };
 }
 
 /**
@@ -273,8 +352,13 @@ export function extractWebhooks(
  * one that exists — and keeps the check from depending on which pass minted
  * what.
  */
-export function collectExistingNames(models: Model[], services: Service[], enums: Enum[]): Set<string> {
-  return collectExistingNamesByKind(models, services, enums).all;
+export function collectExistingNames(
+  models: Model[],
+  services: Service[],
+  enums: Enum[],
+  webhooks: readonly Webhook[] = [],
+): Set<string> {
+  return collectExistingNamesByKind(models, services, enums, webhooks).all;
 }
 
 /**
@@ -283,20 +367,31 @@ export function collectExistingNames(models: Model[], services: Service[], enums
  * webhook model may never take one of these (`mintSchema`): a model and an
  * enum under one name would reach an emitter as one public symbol.
  */
-export function collectExistingEnumNames(models: Model[], services: Service[], enums: Enum[]): Set<string> {
-  return collectExistingNamesByKind(models, services, enums).enums;
+export function collectExistingEnumNames(
+  models: Model[],
+  services: Service[],
+  enums: Enum[],
+  webhooks: readonly Webhook[] = [],
+): Set<string> {
+  return collectExistingNamesByKind(models, services, enums, webhooks).enums;
 }
 
 /** The names a webhook's minting must step around: every decided name, and among them the enums'. */
-interface ReservedNames {
+export interface ReservedNames {
   all: ReadonlySet<string>;
   enums: ReadonlySet<string>;
 }
 
+/**
+ * `webhooks` — every webhook read so far, their callbacks included — is
+ * given when the callbacks are named after them (`extractCallbacks`), so a
+ * callback's models step around a webhook's too (#382).
+ */
 function collectExistingNamesByKind(
   models: Model[],
   services: Service[],
   enums: Enum[],
+  webhooks: readonly Webhook[],
 ): { all: Set<string>; enums: Set<string> } {
   const names = new Set<string>();
   const enumNames = new Set<string>();
@@ -320,6 +415,7 @@ function collectExistingNamesByKind(
   for (const service of services) {
     for (const op of service.operations) for (const ref of collectOperationTypeRefs(op)) collect(ref);
   }
+  for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) collect(ref);
   return { all: names, enums: enumNames };
 }
 
@@ -352,57 +448,105 @@ function collectWebhookEntries(
       { paths, webhooks },
     ) as PathItem | undefined;
     if (!pathItem) continue;
-    // The path item's own key order, as the IR promises document order; an
-    // entry declaring `put` before `post` keeps `put` first.
-    const methods = (Object.keys(pathItem) as string[]).filter(
-      (key): key is HttpMethod =>
-        (HTTP_METHODS as readonly string[]).includes(key) && isRecord(pathItem[key as HttpMethod]),
+    entries.push(
+      ...readPathItemEntries(
+        pathItem,
+        { kind: 'webhook', name, labelOf: (method) => `webhooks.${name}.${method}` },
+        components,
+        siblingDocs,
+      ),
     );
-    for (const method of methods) {
-      const op = pathItem[method] as OperationObject;
-      const label = `webhooks.${name}.${method}`;
-      warnOnIgnoredCallbacks(op.callbacks, label);
-      // Same precedence as buildOperation: an operation-level parameter replaces
-      // a path-item-level one of the same identity (`parameterKey`: location
-      // and name, a header's name case-folded), in the path-level position;
-      // an `Accept`, `Content-Type` or `Authorization` header is dropped.
-      const paramsByIdentity = new Map<string, ParameterObject>();
-      for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
-        const param = resolveParameterRef(rawParam, components.parameters, label, siblingDocs);
-        if (isIgnoredHeaderParameter(param)) continue;
-        paramsByIdentity.set(parameterKey(param.in, param.name), param);
-      }
-      const params: ParameterObject[] = [];
-      for (const param of paramsByIdentity.values()) {
-        if (param.in === 'path') {
-          console.warn(
-            `[oagen] Warning: Parameter "${param.name}" (in: path) on ${label} ignored: a webhook has no path to place it in.`,
-          );
-          continue;
-        }
-        // Reported here, once per webhook parameter: the mint below runs
-        // twice for each webhook, so it must not report.
-        warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${label}`);
-        params.push(param);
-      }
-      const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label, siblingDocs);
-      // Reported here, once per webhook: the mint below runs twice for each
-      // (`resolveWebhookModelStems`, then the build), so it must not report.
-      warnUnreadRequestBody(body, label);
-      entries.push({ name, method, op, pathItem, params, body, label, methodCount: methods.length });
-    }
   }
+  settleStemOperationIds(entries, 'webhook');
+  return entries;
+}
 
-  // An operationId names the stem only when it names something and exactly
-  // one operation object declares it. One with no ASCII letter or digit
-  // once its trailing overload markers are stripped (`' '`, `'-'`, `'[1]'`,
-  // `'[1][2]'`) counts as absent, as `''` does and as an operation's does
-  // (`namesNothing`; #564): it neither names the stem nor counts toward a
-  // duplicate, so the key names the models, as when no id is declared. Two
-  // keys that `$ref` one path item resolve to the same object and are fine
-  // — they will share a stem (see `groupEntries`); two different objects
-  // declaring one id is a document error OpenAPI forbids, so neither is
-  // named from it, with a warning.
+/** Where a path item's operations are read for (`readPathItemEntries`): the entry's key, how each method is labelled, and a callback's own fields. */
+export interface PathItemEntrySite extends Pick<
+  WebhookEntry,
+  'kind' | 'name' | 'expression' | 'expressionCount' | 'parentStem'
+> {
+  /** The diagnostic label of one method's operation. */
+  labelOf: (method: HttpMethod) => string;
+}
+
+/**
+ * One entry per HTTP method of a resolved path item, in the path item's own
+ * key order, as the IR promises document order (an entry declaring `put`
+ * before `post` keeps `put` first); a method whose value is not an object
+ * is skipped. Each entry's parameters are read with the same precedence as
+ * `buildOperation`'s — an operation-level parameter replaces a
+ * path-item-level one of the same identity (`parameterKey`: location and
+ * name, a header's name case-folded), in the path-level position; an
+ * `Accept`, `Content-Type` or `Authorization` header is dropped — and a
+ * `path` parameter, which a received request has no path to place in, is
+ * dropped with a warning. The request body's `components/requestBodies`
+ * ref is resolved here too. A parameter `content` map or a request body
+ * none of whose media types is read is reported here, once per entry: the
+ * mint runs twice for each (`resolveWebhookModelStems`, then the build), so
+ * it must not report. `stemOperationId` is left for `settleStemOperationIds`
+ * to set over the whole batch.
+ */
+export function readPathItemEntries(
+  pathItem: PathItem,
+  site: PathItemEntrySite,
+  components: WebhookComponents,
+  siblingDocs: SiblingDocs,
+): WebhookEntry[] {
+  const { kind, name, labelOf } = site;
+  const entries: WebhookEntry[] = [];
+  const methods = (Object.keys(pathItem) as string[]).filter(
+    (key): key is HttpMethod =>
+      (HTTP_METHODS as readonly string[]).includes(key) && isRecord(pathItem[key as HttpMethod]),
+  );
+  for (const method of methods) {
+    const op = pathItem[method] as OperationObject;
+    const label = labelOf(method);
+    const paramsByIdentity = new Map<string, ParameterObject>();
+    for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
+      const param = resolveParameterRef(rawParam, components.parameters, label, siblingDocs);
+      if (isIgnoredHeaderParameter(param)) continue;
+      paramsByIdentity.set(parameterKey(param.in, param.name), param);
+    }
+    const params: ParameterObject[] = [];
+    for (const param of paramsByIdentity.values()) {
+      if (param.in === 'path') {
+        console.warn(
+          `[oagen] Warning: Parameter "${param.name}" (in: path) on ${label} ignored: a ${kind} has no path to place it in.`,
+        );
+        continue;
+      }
+      warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${label}`);
+      params.push(param);
+    }
+    const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label, siblingDocs);
+    warnUnreadRequestBody(body, label);
+    const entry: WebhookEntry = { kind, name, method, op, pathItem, params, body, label, methodCount: methods.length };
+    // A callback's own fields, present only on a callback.
+    if (site.expression !== undefined) entry.expression = site.expression;
+    if (site.expressionCount !== undefined) entry.expressionCount = site.expressionCount;
+    if (site.parentStem !== undefined) entry.parentStem = site.parentStem;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+/**
+ * Decide which entries are named from their operationId. An operationId
+ * names the stem only when it names something and exactly one operation
+ * object among `entries` declares it. One with no ASCII letter or digit
+ * once its trailing overload markers are stripped (`' '`, `'-'`, `'[1]'`,
+ * `'[1][2]'`) counts as absent, as `''` does and as an operation's does
+ * (`namesNothing`; #564): it neither names the stem nor counts toward a
+ * duplicate, so the key names the models, as when no id is declared. Two
+ * keys that `$ref` one path item resolve to the same object and are fine
+ * — they will share a stem (see `groupEntries`); two different objects
+ * declaring one id is a document error OpenAPI forbids, so neither is
+ * named from it, with a warning naming every site. The batch is the
+ * `webhooks` map's entries, or every callback entry of the document read
+ * together (`extractCallbacks`), so the rule is the same for both.
+ */
+export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRequestKind): void {
   const objectsByOperationId = new Map<string, Set<OperationObject>>();
   for (const entry of entries) {
     const id = entry.op.operationId;
@@ -418,11 +562,10 @@ function collectWebhookEntries(
       continue;
     }
     console.warn(
-      `[oagen] Warning: operationId "${id}" is declared by more than one webhook operation ` +
-        `(${declaring.map((entry) => entry.label).join(', ')}); naming their models from the webhook keys instead.`,
+      `[oagen] Warning: operationId "${id}" is declared by more than one ${kind} operation ` +
+        `(${declaring.map((entry) => entry.label).join(', ')}); naming their models from the ${kind} keys instead.`,
     );
   }
-  return entries;
 }
 
 /**
@@ -508,10 +651,18 @@ function resolveWebhookModelStems(
         name.includes(stem) &&
         (reserved.all.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name))),
     );
-    const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? owner.name) : '';
+    // Hashed from the operationId when named from one, else from the key —
+    // and, for a callback, its expression with it, so two expressions of
+    // one key that PascalCase alike (`#/url` and `#/URL`) still part.
+    const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? keyedIdentity(owner)) : '';
     stems.set(group, plainStem(owner, disambiguator));
   }
   return stems;
+}
+
+/** What a key-named entry is hashed from: a webhook's key; a callback's key and expression, one per line. */
+function keyedIdentity(entry: WebhookEntry): string {
+  return entry.expression === undefined ? entry.name : `${entry.name}\n${entry.expression}`;
 }
 
 /**
@@ -544,23 +695,37 @@ function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupO
   return { groups, groupOf };
 }
 
-/** The stem of `entry` with `disambiguator` (possibly empty) inserted before the method qualifier. */
+/**
+ * The stem of `entry` with `disambiguator` (possibly empty) inserted before
+ * the qualifiers. A key-derived stem is the key PascalCased, prefixed with
+ * the declaring node's stem for a callback (`CreatePet` + `petAdopted` →
+ * `CreatePetPetAdopted`; #382), then qualified by the expression
+ * PascalCased when the callback's key declares several
+ * (`CreatePetPetAdoptedRequestBodyCallbackUrl` for
+ * `{$request.body#/callbackUrl}`) and by the method when the path item
+ * declares several (`PetUpdatedPut`), so no two entries of one key share a
+ * model; an operationId-derived stem needs neither. An empty stem, or one
+ * starting with a digit, gets the kind's noun in front (`Webhook`,
+ * `Callback`).
+ */
 function plainStem(entry: WebhookEntry, disambiguator: string): string {
   const operationId = entry.stemOperationId;
+  const expression = !operationId && (entry.expressionCount ?? 1) > 1 ? toPascalCase(entry.expression ?? '') : '';
   const method = !operationId && entry.methodCount > 1 ? entry.method : '';
-  const base = operationId ? operationIdModelBase(operationId) : toPascalCase(entry.name);
+  const base = operationId ? operationIdModelBase(operationId) : `${entry.parentStem ?? ''}${toPascalCase(entry.name)}`;
   // `_` separators guarantee a word boundary on each side of the disambiguator
-  // and the method, whatever the base ends with; splitWords drops them, so
+  // and the qualifiers, whatever the base ends with; splitWords drops them, so
   // the disambiguator is the suffix numberedName gives the base: a hash that
   // starts with a digit is set off from a base that ends in one as a number
   // is (`PetV2No2780A4`), as an operation's path prefix sets it off.
   const hash = numberedName(base, disambiguator).slice(base.length);
-  const stem = toPascalCase([base, hash, method].filter(Boolean).join('_'));
-  if (stem === '') return 'Webhook';
-  return /^\d/.test(stem) ? `Webhook${stem}` : stem;
+  const stem = toPascalCase([base, hash, expression, method].filter(Boolean).join('_'));
+  const noun = entry.kind === 'callback' ? 'Callback' : 'Webhook';
+  if (stem === '') return noun;
+  return /^\d/.test(stem) ? `${noun}${stem}` : stem;
 }
 
-/** The first six hex characters of the SHA-1 of a webhook's key. */
+/** The first six hex characters of the SHA-1 of a webhook's key (or a callback's key and expression). */
 function webhookDisambiguator(name: string): string {
   return createHash('sha1').update(name).digest('hex').slice(0, 6);
 }

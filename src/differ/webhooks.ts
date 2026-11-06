@@ -1,5 +1,11 @@
-import type { Webhook } from '../ir/types.js';
-import type { Change, ParamChange, RequestBodyContentTypesChange } from './types.js';
+import type { Callback, Webhook } from '../ir/types.js';
+import type {
+  CallbackSite,
+  Change,
+  ParamChange,
+  ReceivedRequestModified,
+  RequestBodyContentTypesChange,
+} from './types.js';
 import { jsonEncodedOnBothSides, locatedParams, paramKey, parameterContentTypeShift } from './params.js';
 import {
   deprecationDetails,
@@ -22,7 +28,8 @@ import type { DocumentShapes } from './shapes.js';
  * methods), so a method change is a removal plus an addition.
  * `documentSecurity` — the two documents' `security` — lets a webhook that
  * declares none of its own be compared on what it inherits; `diffSpecs`
- * passes it, a direct caller may leave it out.
+ * passes it, a direct caller may leave it out. Each pair's callbacks are
+ * compared right after it (`diffCallbacks`; #382).
  */
 export function diffWebhooks(
   oldWebhooks: Webhook[],
@@ -61,63 +68,147 @@ export function diffWebhooks(
     const oldWebhook = oldByKey.get(k);
     if (!oldWebhook) continue;
 
-    const paramChanges = diffWebhookParams(oldWebhook, newWebhook);
-    const body = diffWebhookBody(oldWebhook, newWebhook, shapes);
-    const responses = diffWebhookResponses(oldWebhook, newWebhook);
-    // Additive either way: the handler's signature is unchanged, but a
-    // changelog has to say it, so a flipped flag alone is a change.
-    const deprecation = deprecationFlip(oldWebhook, newWebhook);
-    const deprecatedChanged = deprecation !== undefined;
-    // What the request carries, `webhook.security ?? document security` on
-    // each side, resolved as an operation's is; read from the receiver's
-    // side, so what the sender may now present must still carry what the
-    // handler checked for.
-    const security = securityShift(oldWebhook, newWebhook, documentSecurity);
-    const securityChanged = security !== undefined;
-    const securityBreaking =
-      security !== undefined &&
-      classifySecurityChange(security.oldSecurity, security.newSecurity, 'receiver') === 'breaking';
-    // Additive always, as on an operation.
-    const tags = tagsShift(oldWebhook, newWebhook);
-    const tagsChanged = tags !== undefined;
-    if (
-      paramChanges.length === 0 &&
-      body.changes.length === 0 &&
-      responses.changes.length === 0 &&
-      !deprecatedChanged &&
-      !securityChanged &&
-      !tagsChanged
-    ) {
-      continue;
+    const modified = diffReceivedRequest(oldWebhook, newWebhook, documentSecurity, shapes);
+    if (modified) {
+      changes.push({ kind: 'webhook-modified', name: newWebhook.name, httpMethod: newWebhook.httpMethod, ...modified });
     }
-
-    const hasBreaking =
-      body.breaking ||
-      responses.breaking ||
-      securityBreaking ||
-      paramChanges.some((pc) => pc.classification === 'breaking');
-    const details = [...body.changes, ...responses.changes];
-    changes.push({
-      kind: 'webhook-modified',
-      name: newWebhook.name,
-      httpMethod: newWebhook.httpMethod,
-      paramChanges,
-      requestBodyChanged: body.changes.length > 0,
-      ...body.encoding,
-      ...(body.mediaTypes ? { requestBodyContentTypeChange: body.mediaTypes } : {}),
-      responsesChanged: responses.changes.length > 0,
-      deprecatedChanged,
-      ...deprecation,
-      securityChanged,
-      ...security,
-      tagsChanged,
-      ...tags,
-      ...(details.length > 0 ? { details: details.join('; ') } : {}),
-      classification: hasBreaking ? 'breaking' : 'additive',
-    });
+    changes.push(
+      ...diffCallbacks(
+        oldWebhook.callbacks ?? [],
+        newWebhook.callbacks ?? [],
+        { webhookName: newWebhook.name, webhookMethod: newWebhook.httpMethod },
+        documentSecurity,
+        shapes,
+      ),
+    );
   }
 
   return changes;
+}
+
+/**
+ * Report the callbacks of one operation or webhook pair added, removed and
+ * modified between two specs, on the `site` that names the owner (#382). A
+ * callback is keyed by `name` + `expression` + `httpMethod` — one
+ * `callbacks` key may map several runtime expressions to path items, each
+ * declaring several methods — so an expression or method edit is a removal
+ * plus an addition, as a webhook's method edit is. A pair is compared
+ * exactly as a webhook pair is (`diffReceivedRequest`), from the receiver's
+ * side, and its own callbacks right after it, on a site that lists the
+ * callbacks between (`parents`, outermost first). The owner's own change
+ * is the caller's to report first; an owner only one document carries
+ * never reaches here, so its callbacks report nothing.
+ */
+export function diffCallbacks(
+  oldCallbacks: Callback[],
+  newCallbacks: Callback[],
+  site: CallbackSite,
+  documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
+): Change[] {
+  const changes: Change[] = [];
+  const key = (callback: Callback): string => `${callback.httpMethod}\n${callback.name}\n${callback.expression}`;
+  const identity = ({ name, expression, httpMethod }: Callback) => ({ name, expression, httpMethod });
+  const oldByKey = new Map(oldCallbacks.map((c) => [key(c), c]));
+  const newByKey = new Map(newCallbacks.map((c) => [key(c), c]));
+
+  for (const [k, callback] of newByKey) {
+    if (!oldByKey.has(k)) {
+      changes.push({ kind: 'callback-added', ...identity(callback), ...site, classification: 'additive' });
+    }
+  }
+
+  for (const [k, callback] of oldByKey) {
+    if (!newByKey.has(k)) {
+      changes.push({ kind: 'callback-removed', ...identity(callback), ...site, classification: 'breaking' });
+    }
+  }
+
+  for (const [k, newCallback] of newByKey) {
+    const oldCallback = oldByKey.get(k);
+    if (!oldCallback) continue;
+
+    const modified = diffReceivedRequest(oldCallback, newCallback, documentSecurity, shapes);
+    if (modified) changes.push({ kind: 'callback-modified', ...identity(newCallback), ...site, ...modified });
+    changes.push(
+      ...diffCallbacks(
+        oldCallback.callbacks ?? [],
+        newCallback.callbacks ?? [],
+        { ...site, parents: [...(site.parents ?? []), identity(newCallback)] },
+        documentSecurity,
+        shapes,
+      ),
+    );
+  }
+
+  return changes;
+}
+
+/**
+ * Compare a request the SDK user receives — a webhook, or a callback — from
+ * the receiver's side: its parameters (`diffWebhookParams`), payload
+ * (`diffWebhookBody`), accepted responses (`diffWebhookResponses`),
+ * `deprecated` flag, security and tags. `undefined` when nothing differs;
+ * otherwise the fields a `webhook-modified` or `callback-modified` change
+ * carries, classified breaking when any part is.
+ */
+export function diffReceivedRequest(
+  oldNode: Webhook,
+  newNode: Webhook,
+  documentSecurity?: DocumentSecurity,
+  shapes?: DocumentShapes,
+): ReceivedRequestModified | undefined {
+  const paramChanges = diffWebhookParams(oldNode, newNode);
+  const body = diffWebhookBody(oldNode, newNode, shapes);
+  const responses = diffWebhookResponses(oldNode, newNode);
+  // Additive either way: the handler's signature is unchanged, but a
+  // changelog has to say it, so a flipped flag alone is a change.
+  const deprecation = deprecationFlip(oldNode, newNode);
+  const deprecatedChanged = deprecation !== undefined;
+  // What the request carries, `node.security ?? document security` on
+  // each side, resolved as an operation's is; read from the receiver's
+  // side, so what the sender may now present must still carry what the
+  // handler checked for.
+  const security = securityShift(oldNode, newNode, documentSecurity);
+  const securityChanged = security !== undefined;
+  const securityBreaking =
+    security !== undefined &&
+    classifySecurityChange(security.oldSecurity, security.newSecurity, 'receiver') === 'breaking';
+  // Additive always, as on an operation.
+  const tags = tagsShift(oldNode, newNode);
+  const tagsChanged = tags !== undefined;
+  if (
+    paramChanges.length === 0 &&
+    body.changes.length === 0 &&
+    responses.changes.length === 0 &&
+    !deprecatedChanged &&
+    !securityChanged &&
+    !tagsChanged
+  ) {
+    return undefined;
+  }
+
+  const hasBreaking =
+    body.breaking ||
+    responses.breaking ||
+    securityBreaking ||
+    paramChanges.some((pc) => pc.classification === 'breaking');
+  const details = [...body.changes, ...responses.changes];
+  return {
+    paramChanges,
+    requestBodyChanged: body.changes.length > 0,
+    ...body.encoding,
+    ...(body.mediaTypes ? { requestBodyContentTypeChange: body.mediaTypes } : {}),
+    responsesChanged: responses.changes.length > 0,
+    deprecatedChanged,
+    ...deprecation,
+    securityChanged,
+    ...security,
+    tagsChanged,
+    ...tags,
+    ...(details.length > 0 ? { details: details.join('; ') } : {}),
+    classification: hasBreaking ? 'breaking' : 'additive',
+  };
 }
 
 /**

@@ -44,7 +44,7 @@ When changing pipeline behavior:
 
 ## Directory Landmarks
 
-- `src/parser/`: OpenAPI to IR (refs, schemas, operations, pagination, webhooks, inline models)
+- `src/parser/`: OpenAPI to IR (refs, schemas, operations, pagination, webhooks, callbacks, inline models)
 - `src/engine/`: orchestration, writer, merger, registry, shared engine types
 - Language-specific emitters live in the separate `oagen-emitters` project (import from `@workos/oagen`)
 - `src/differ/`: spec diffing and breaking change classification
