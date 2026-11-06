@@ -4046,6 +4046,105 @@ describe('#539', () => {
         );
       });
 
+      it('types a map pointer as the values only when that schema is the one the values are typed from, and a model’s additionalProperties as its catch-all field', async () => {
+        captureWarnings();
+        const Made = { type: 'object', properties: { ok: { type: 'boolean' } } };
+        const spec = await parse(
+          {
+            Made,
+            Box: { type: 'object', properties: { id: { type: 'string' } }, additionalProperties: { type: 'integer' } },
+            Maps: {
+              type: 'object',
+              properties: {
+                byPattern: {
+                  type: 'object',
+                  patternProperties: { '^s': { type: 'string' }, '^n': { type: 'integer' } },
+                },
+                both: {
+                  type: 'object',
+                  additionalProperties: { type: 'boolean' },
+                  patternProperties: { '^s': { type: 'string' } },
+                },
+                any: { type: 'object', additionalProperties: {}, patternProperties: { '^s': { type: 'string' } } },
+                boxed: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  additionalProperties: { type: 'integer' },
+                },
+                patterned: {
+                  type: 'object',
+                  properties: { id: { type: 'string' } },
+                  patternProperties: { '^s': { type: 'string' } },
+                },
+              },
+            },
+          },
+          {
+            '/a/{id}': getOp('getBoxValues', ref('Box/additionalProperties')),
+            '/b/{id}': getOp('getPatternS', ref('Maps/properties/byPattern/patternProperties/^s')),
+            '/c/{id}': getOp('getPatternN', ref('Maps/properties/byPattern/patternProperties/^n')),
+            '/d/{id}': getOp('getBothValues', ref('Maps/properties/both/additionalProperties')),
+            '/e/{id}': getOp('getBothPattern', ref('Maps/properties/both/patternProperties/^s')),
+            '/f/{id}': getOp('getAnyValues', ref('Maps/properties/any/additionalProperties')),
+            '/g/{id}': getOp('getAnyPattern', ref('Maps/properties/any/patternProperties/^s')),
+            '/h/{id}': getOp('getBoxedValues', ref('Maps/properties/boxed/additionalProperties')),
+            '/i/{id}': getOp('getPatternedValues', ref('Maps/properties/patterned/patternProperties/^s')),
+            '/j/{id}': {
+              get: {
+                operationId: 'getPatternNOrMade',
+                parameters: [idParam],
+                responses: {
+                  '200': {
+                    description: 'OK',
+                    content: { 'application/json': { schema: ref('Maps/properties/byPattern/patternProperties/^n') } },
+                  },
+                  '201': { description: 'Made', content: { 'application/json': { schema: ref('Made') } } },
+                },
+              },
+            },
+          },
+          openapi,
+        );
+        const integer = { kind: 'primitive', type: 'integer' } as const;
+        // A model with named properties carries its `additionalProperties` as a catch-all map field; its values are that field's.
+        expect(fieldOf(spec, 'Box', 'additionalProperties')?.type).toEqual({ kind: 'map', valueType: integer });
+        expect(responseOf(spec, 'getBoxValues')).toEqual(integer);
+        // A map's values are typed from one schema: the first pattern here, so the second names no type, never the first's.
+        expect(fieldOf(spec, 'Maps', 'byPattern')?.type).toEqual({ kind: 'map', valueType: string });
+        expect(responseOf(spec, 'getPatternS')).toEqual(string);
+        expect(responseOf(spec, 'getPatternN')).toEqual(unknown);
+        // A non-empty `additionalProperties` wins over every pattern.
+        expect(responseOf(spec, 'getBothValues')).toEqual({ kind: 'primitive', type: 'boolean' });
+        expect(responseOf(spec, 'getBothPattern')).toEqual(unknown);
+        // `additionalProperties: {}` types the values `unknown` on its own, so a pointer to it is `unknown` with no warning.
+        expect(fieldOf(spec, 'Maps', 'any')?.type).toEqual({ kind: 'map', valueType: unknown });
+        expect(responseOf(spec, 'getAnyValues')).toEqual(unknown);
+        expect(responseOf(spec, 'getAnyPattern')).toEqual(unknown);
+        // An inline object with named properties builds no catch-all field, and no model carries a pattern.
+        expect(responseOf(spec, 'getBoxedValues')).toEqual(unknown);
+        expect(responseOf(spec, 'getPatternedValues')).toEqual(unknown);
+        // The primary-response pick reads the same rule: the `^n` pointer settles to unknown, so the typed 201 wins.
+        expect(operation(spec, 'getPatternNOrMade')?.response).toEqual(model('Made'));
+        expect(operation(spec, 'getPatternNOrMade')?.responseStatusCode).toBe(201);
+        expect(modelNames(spec)).toEqual(['Box', 'Made', 'Maps', 'MapsBoxed', 'MapsPatterned']);
+        const other = (pointer: string, step: string, site: string) =>
+          `[oagen] Warning: Unresolved schema $ref "#/components/schemas/${pointer}" in ${site}: the values are typed from another schema than "${step}" — typing the site as unknown`;
+        expect(warnings.sort()).toEqual(
+          [
+            other('Maps/properties/byPattern/patternProperties/^n', 'patternProperties/^n', 'C.getPatternN.response'),
+            other('Maps/properties/both/patternProperties/^s', 'patternProperties/^s', 'E.getBothPattern.response'),
+            other('Maps/properties/any/patternProperties/^s', 'patternProperties/^s', 'G.getAnyPattern.response'),
+            '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Maps/properties/boxed/additionalProperties" in H.getBoxedValues.response: model "MapsBoxed" is no map to read "additionalProperties" from — typing the site as unknown',
+            '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Maps/properties/patterned/patternProperties/^s" in I.getPatternedValues.response: a schema with named properties types no "patternProperties/^s" values — typing the site as unknown',
+            other(
+              'Maps/properties/byPattern/patternProperties/^n',
+              'patternProperties/^n',
+              'J.getPatternNOrMade.successResponses.200',
+            ),
+          ].sort(),
+        );
+      });
+
       it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
         captureWarnings();
         const spec = await parse(
