@@ -1141,10 +1141,12 @@ describe('modelAdmits', () => {
     expect(modelAdmits(base, model([{ ...field('a', false), description: 'doc' }], { description: 'doc' }))).toBe(true);
   });
 
-  it('reads every model and inline enum reference under `readName` when given — fields, variants and mapping targets, both sides', () => {
+  it('reads every model reference under `readModelName` and every inline enum reference under `readEnumName` when given — fields, variants and mapping targets, both sides', () => {
     const ref = (name: string): TypeRef => ({ kind: 'model', name });
-    // The `…Json` fold's reading: `PetJson…` as `Pet…`.
-    const fold = { readName: (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name) };
+    // The `…Json` fold's reading: `PetJson…` as `Pet…`. The fold reads each kind among the names
+    // of its own kind (#534), so it hands a reader per kind; here both read alike.
+    const readAsPet = (name: string) => (name.startsWith('PetJson') ? `Pet${name.slice(7)}` : name);
+    const fold = { readModelName: readAsPet, readEnumName: readAsPet };
     const owner = model([field('inner', false, ref('PetInner'))]);
     const candidate = model([field('inner', false, ref('PetJsonInner'))]);
     expect(modelAdmits(owner, candidate)).toBe(false);

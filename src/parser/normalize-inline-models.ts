@@ -1244,28 +1244,38 @@ function applyFold(base: Model, json: Model): void {
 }
 
 /**
+ * The kind of a name the `…Json` fold reads: a model's, or an inline
+ * enum's. A name is read among the names of its own kind and no other
+ * (#534), so the fold keeps the two apart wherever it reads one.
+ */
+type NameKind = 'model' | 'enum';
+
+/**
  * A `<Name>Json` model, the `<Name>` model it may fold onto, and every name
- * the `…Json` model reaches (`reachedNames`) — the only names its fold may
- * rename.
+ * the `…Json` model reaches (`reachedNames`), by kind — the only names its
+ * fold may rename.
  */
 interface FoldCandidate {
   readonly jsonModel: Model;
   readonly baseModel: Model;
-  readonly reached: ReadonlySet<string>;
+  readonly reached: Readonly<Record<NameKind, ReadonlySet<string>>>;
 }
 
 /**
- * Every name `jsonModel` reaches: its own, the model and inline enum
- * references among its fields, variants and mapping targets, and those of
- * every model they name in turn (`byName`), whatever that model is called.
- * A reference no model of `byName` answers is reached and goes no further.
+ * Every name `jsonModel` reaches, by the kind that holds it. Under `model`:
+ * its own name and the model references among its fields, variants and
+ * mapping targets, and those of every model they name in turn (`byName`),
+ * whatever that model is called; a reference no model of `byName` answers
+ * is reached and goes no further. Under `enum`: the inline enum references
+ * among the same. The two are kept apart because each kind follows only
+ * names of its own kind (`foldReading`, #534).
  */
-function reachedNames(jsonModel: Model, byName: ReadonlyMap<string, Model>): Set<string> {
-  const reached = new Set([jsonModel.name]);
+function reachedNames(jsonModel: Model, byName: ReadonlyMap<string, Model>): FoldCandidate['reached'] {
+  const reached = { model: new Set([jsonModel.name]), enum: new Set<string>() };
   const walked = new Set([jsonModel]);
   const pending = [jsonModel];
   const reach = (name: string): void => {
-    reached.add(name);
+    reached.model.add(name);
     const model = byName.get(name);
     if (model && !walked.has(model)) {
       walked.add(model);
@@ -1277,7 +1287,7 @@ function reachedNames(jsonModel: Model, byName: ReadonlyMap<string, Model>): Set
       walkTypeRef(ref, {
         model: (r) => reach(r.name),
         enum: (r) => {
-          if (r.values) reached.add(r.name);
+          if (r.values) reached.enum.add(r.name);
         },
       });
     }
@@ -1287,57 +1297,78 @@ function reachedNames(jsonModel: Model, byName: ReadonlyMap<string, Model>): Set
 }
 
 /**
- * How every name reads once the `accepted` folds are applied, as a function
- * of the names the models hold now: a name a fold renames (`innermostFold`:
- * one its `…Json` model reaches that begins with that model's name as
- * whole words) reads with that prefix replaced by its base's reading, and
- * the name that gives is read in turn, so a child that lands on a name
- * another child vacates follows it. `PetJson` reads as `Pet`, `PetJsonWithA`
- * as `PetWithA`, `PetJsonJsonThing` as `PetThing` by way of a child
- * `PetJsonThing` (as `PetJsonThing` when the fold reaches nothing of that
- * name), and `NoteJsonPetJsonToy` as `NotePetToy` under the folds of
- * `NoteJsonPetJson` and `NoteJson`, whichever the document declares first.
- * Every step shortens the name, so the reading ends, and it ends on a name
- * that reads as itself, so no name a model is renamed to is renamed again.
- * A name no fold renames reads as it is — `PetJsonPatch` beside a `PetJson`
- * that never reaches it, `PetJsonification` whether reached or not: the fold
- * renames no literal and no component enum.
+ * How every name reads once a set of folds is applied (`foldReading`): one
+ * reader per kind, the options every shape comparison of the fold reads
+ * under (`ShapeReadOptions`).
  */
-function foldReading(accepted: readonly FoldCandidate[]): (name: string) => string {
-  const read = new Map<string, string>();
-  const reading = (name: string): string => {
-    const known = read.get(name);
-    if (known !== undefined) return known;
-    const fold = innermostFold(accepted, name);
-    const result = fold ? reading(reading(fold.baseModel.name) + name.slice(fold.jsonModel.name.length)) : name;
-    read.set(name, result);
-    return result;
-  };
-  return reading;
+interface FoldReading {
+  readonly readModelName: (name: string) => string;
+  readonly readEnumName: (name: string) => string;
 }
 
 /**
- * The accepted fold that renames `name` first: of those whose `…Json`
- * model reaches it (`FoldCandidate.reached`) and whose name it begins with
- * as whole words — the next character, if any, is no lower-case letter, so
- * it starts a word of its own as `splitWords` reads one (`PetJsonPatch`,
- * `PetJson2`, never `PetJsonification`) — the one with the longest name;
- * none when no fold renames it.
+ * How every name reads once the `accepted` folds are applied, as a function
+ * of the names the models hold now, each kind read among the names of its
+ * own kind: a name a fold renames (`innermostFold`: one its `…Json` model
+ * reaches as that kind, that begins with that model's name as whole words)
+ * reads with that prefix replaced by its base's reading, and the name that
+ * gives is read in turn as the same kind, so a child that lands on a name
+ * another child of its kind vacates follows it, while one that lands on a
+ * name the other kind vacates stops there (#534). `PetJson` reads as `Pet`,
+ * `PetJsonWithA` as `PetWithA`, and a model `PetJsonJsonThing` as `PetThing`
+ * by way of a child model `PetJsonThing` — as `PetJsonThing` when the fold
+ * reaches no model of that name, an inline enum `PetJsonThing` beside it
+ * reading as `PetThing` on its own — and `NoteJsonPetJsonToy` as
+ * `NotePetToy` under the folds of `NoteJsonPetJson` and `NoteJson`,
+ * whichever the document declares first. Every step shortens the name, so
+ * the reading ends, and it ends on a name that reads as itself, so no name
+ * a model or an enum is renamed to is renamed again. A name no fold renames
+ * reads as it is — `PetJsonPatch` beside a `PetJson` that never reaches it,
+ * `PetJsonification` whether reached or not: the fold renames no literal
+ * and no component enum.
  */
-function innermostFold(accepted: readonly FoldCandidate[], name: string): FoldCandidate | undefined {
+function foldReading(accepted: readonly FoldCandidate[]): FoldReading {
+  const read: Record<NameKind, Map<string, string>> = { model: new Map(), enum: new Map() };
+  const reading = (name: string, kind: NameKind): string => {
+    const known = read[kind].get(name);
+    if (known !== undefined) return known;
+    const fold = innermostFold(accepted, name, kind);
+    // The base is a model whatever kind the name is: a `PetJsonMode` enum
+    // reads as `Pet`'s reading plus `Mode`.
+    const result = fold
+      ? reading(reading(fold.baseModel.name, 'model') + name.slice(fold.jsonModel.name.length), kind)
+      : name;
+    read[kind].set(name, result);
+    return result;
+  };
+  return { readModelName: (name) => reading(name, 'model'), readEnumName: (name) => reading(name, 'enum') };
+}
+
+/**
+ * The accepted fold that renames `name`, a name of `kind`, first: of those
+ * whose `…Json` model reaches it as that kind (`FoldCandidate.reached`) and
+ * whose name it begins with as whole words — the next character, if any,
+ * is no lower-case letter, so it starts a word of its own as `splitWords`
+ * reads one (`PetJsonPatch`, `PetJson2`, never `PetJsonification`) — the
+ * one with the longest name; none when no fold renames it. A model
+ * `PetJsonMode` is renamed by a fold that reaches the model, never by one
+ * that reaches only an inline enum of that name (#534).
+ */
+function innermostFold(accepted: readonly FoldCandidate[], name: string, kind: NameKind): FoldCandidate | undefined {
   let innermost: FoldCandidate | undefined;
   for (const candidate of accepted) {
     const prefix = candidate.jsonModel.name;
-    if (!candidate.reached.has(name) || !name.startsWith(prefix) || /[a-z]/.test(name.charAt(prefix.length))) continue;
+    if (!candidate.reached[kind].has(name) || !name.startsWith(prefix) || /[a-z]/.test(name.charAt(prefix.length)))
+      continue;
     if (!innermost || prefix.length > innermost.jsonModel.name.length) innermost = candidate;
   }
   return innermost;
 }
 
-/** The names of the models `model` dispatches to — every model reference among its variants — read under `readName`. */
-function variantModelNames(model: Model, readName: (name: string) => string): Set<string> {
+/** The names of the models `model` dispatches to — every model reference among its variants — read under `readModelName`. */
+function variantModelNames(model: Model, readModelName: (name: string) => string): Set<string> {
   const names = new Set<string>();
-  for (const variant of model.variants ?? []) walkTypeRef(variant, { model: (r) => names.add(readName(r.name)) });
+  for (const variant of model.variants ?? []) walkTypeRef(variant, { model: (r) => names.add(readModelName(r.name)) });
   return names;
 }
 
@@ -1358,9 +1389,11 @@ function variantModelNames(model: Model, readName: (name: string) => string): Se
  * document left them). Pass 2 decides the candidates together, so the
  * result depends on the document's names and shapes and never on the order
  * it declares them in: every name is read as it ends once the accepted
- * folds are applied (`foldReading`, every model and inline enum reference
- * through `ShapeReadOptions.readName`), a base as the shape it takes
- * (`foldedShape`), and
+ * folds are applied (`foldReading` — a model's name among the models' and
+ * an inline enum's among the inline enums', each kind following only names
+ * of its own kind (#534); every model reference through
+ * `ShapeReadOptions.readModelName` and every inline enum reference through
+ * `readEnumName`), a base as the shape it takes (`foldedShape`), and
  *
  * - a candidate whose base dispatches by union rules the `…Json` model does
  *   not preserve, or declares a field the `…Json` model's does not admit
@@ -1375,10 +1408,14 @@ function variantModelNames(model: Model, readName: (name: string) => string): Se
  *   dispatches to the name, else a shape warning. Two folds whose children
  *   would end under one name with different shapes refuse each other.
  * - a name an enum holds and no model keeps admits no model: a member
- *   renamed onto one — a component enum or one the component pass lifted
- *   (`enums`), or an inline enum a model, operation or webhook carries,
- *   read under the folds — refuses the fold that renames it, so a fold
- *   never puts a model and an enum under one name.
+ *   renamed onto one — a component enum, or an inline enum a model,
+ *   operation or webhook carries, read under the folds (the entry the
+ *   component pass lifted under such an enum's old name, in `enums`, is
+ *   read the same way: it holds that name only as long as the reference
+ *   does) — refuses the fold that renames it, so a fold never puts a model
+ *   and an enum under one name. A renamed model that lands on the name a
+ *   renamed inline enum leaves is no such member: the model stops there
+ *   while the enum reads on (#534).
  *
  * A refusal changes how the remaining names read, so the decision is
  * repeated over the folds still accepted until none is refused; a fold is
@@ -1388,18 +1425,27 @@ function variantModelNames(model: Model, readName: (name: string) => string): Se
  * `…Json` models and the collapsed members are dropped, and the names are
  * set. Nothing is collapsed by name alone, and nothing is half-applied.
  *
- * An inline enum a fold renames was lifted into `enums` under its old name
- * by the component pass (a `…Json` component's field enum): once no
- * reference carries that name, the entry is dropped and the collectors
- * that run after the fold lift the renamed reference afresh — onto the
- * base's own enum when one has its members (`PetJsonStatus` folds into
- * `PetStatus`), under the new name otherwise (`PetJsonMode` becomes
- * `PetMode`), stepping around a different enum or a model of that name as
- * they do for any inline enum (`PetMode2` beside a component model
- * `PetMode`). Each entry dropped is recorded in `foldedEnums` under its old
- * name with a reference that carries the new one, so the caller can note
- * the name the collectors settle on. An enum in `componentNames` is
- * declared by the document and stays whether referenced or not.
+ * An inline enum a fold renames or removes was lifted into `enums` under
+ * its old name by the component pass (a `…Json` component's field enum):
+ * once no reference carries that name — every reference was renamed, or
+ * the only one sat on a field the fold replaced (a base's own, which its
+ * `…Json` model's of the same name takes the place of down a chain:
+ * `PetJson.mode` under `PetJsonJson.mode`) or on a collapsed member
+ * (`PetJsonCarrier.mode`, collapsed onto `PetCarrier`), and went with it —
+ * the entry is dropped and the collectors that run after the fold lift the
+ * reference that carries its reading afresh, the renamed reference or the
+ * twin of the one that went (the field or member that took its place reads
+ * to the same name) — onto the base's own enum when one has its members
+ * (`PetJsonStatus` folds into `PetStatus`), under the new name otherwise
+ * (`PetJsonMode` becomes `PetMode`), stepping around a different enum or a
+ * model of that name as they do for any inline enum (`PetMode2` beside a
+ * component model `PetMode`). So a model that lands on the old name
+ * (`PetJsonJsonJsonMode` on `PetJsonMode`) never meets the entry there.
+ * Each entry dropped is recorded in `foldedEnums` under its old name with
+ * that reference, so the caller can note the name the collectors settle
+ * on. An enum in `componentNames` is declared by the document and stays
+ * whether referenced or not, as does an entry no reference carried going
+ * in: the fold answers only for the references it renames or removes.
  */
 export function collapseJsonSuffixModels(
   models: Model[],
@@ -1455,8 +1501,8 @@ export function collapseJsonSuffixModels(
   let accepted = candidates;
   let read = foldReading(accepted);
   for (;;) {
-    const readName = read;
-    const options: ShapeReadOptions = { readName };
+    const { readModelName, readEnumName } = read;
+    const options: ShapeReadOptions = read;
     const jsonOf = new Map(accepted.map((candidate) => [candidate.baseModel, candidate.jsonModel]));
     // A `…Json` model that is itself a base (`PetJson` under `PetJsonJson`)
     // passes on the shape it ends with, as the folds are applied.
@@ -1487,8 +1533,8 @@ export function collapseJsonSuffixModels(
       // with the same members and no other; a literal, or a component
       // enum, as it is. The models the variants name are compared below, as
       // every folded child is. Identical shapes fold as before.
-      const baseShape = unionShapeKey(baseModel, (v) => typeShapeKey(v, options), { modelName: readName });
-      const jsonShape = unionShapeKey(jsonModel, (v) => typeShapeKey(v, options), { modelName: readName });
+      const baseShape = unionShapeKey(baseModel, (v) => typeShapeKey(v, options), { modelName: readModelName });
+      const jsonShape = unionShapeKey(jsonModel, (v) => typeShapeKey(v, options), { modelName: readModelName });
       if (baseShape !== '' && baseShape !== jsonShape) {
         refuse(candidate, unionRulesWarning(candidate));
         continue;
@@ -1516,22 +1562,33 @@ export function collapseJsonSuffixModels(
     // reads it (`flagAdmits`): a deprecated child collapses onto a live
     // holder, as a deprecated `<Name>Json` folds onto a live `<Name>`, and a
     // live child never onto a deprecated one. A name an enum holds and no
-    // model keeps admits no child: a component enum, one the component pass
-    // lifted, or an inline enum a model, operation or webhook carries, read
-    // as the folds leave it, which the collectors lift after the fold — a
-    // `toy` query enum `PetToy` of a `pet` service would step past a renamed
-    // `PetJsonToy`, and the parameter's type would hang on the fold. A model
-    // the document already keeps under such a name is a holder like any
-    // other: a child collapsing onto it adds no type under the name.
-    const enumNames = new Set(enums.map((e) => e.name));
+    // model keeps admits no child: a component enum, or an inline enum a
+    // model, operation or webhook carries, read as the folds leave it
+    // (`readEnumName`), which the collectors lift after the fold — a `toy`
+    // query enum `PetToy` of a `pet` service would step past a renamed
+    // `PetJsonToy`, and the parameter's type would hang on the fold. The
+    // entry the component pass lifted under an inline enum's old name
+    // (`enums`) is read the same way, since it holds that name only as long
+    // as a reference does: it is dropped below once the fold leaves none
+    // carrying it, whether every reference was renamed or the only one went
+    // with the folded `…Json` model or collapsed member that carried it (a
+    // twin on the base or the holder reads to the same name); a component
+    // enum is declared and keeps its name. The names are read
+    // per kind, so a renamed model that lands on a name a renamed inline
+    // enum leaves (`PetJsonJsonMode` on `PetJsonMode`, whose enum reads on
+    // as `PetMode`) meets no enum there (#534). A model the document
+    // already keeps under such a name is a holder like any other: a child
+    // collapsing onto it adds no type under the name.
+    const enumNames = new Set<string>();
+    for (const { name } of enums) enumNames.add(componentNames.has(name) ? name : readEnumName(name));
     for (const ref of typeRefsInPlay(normalizedModels, services, webhooks)) {
-      walkTypeRef(ref, { enum: (r) => enumNames.add(r.values ? readName(r.name) : r.name) });
+      walkTypeRef(ref, { enum: (r) => enumNames.add(r.values ? readEnumName(r.name) : r.name) });
     }
     const folded = new Set(accepted.map((candidate) => candidate.jsonModel));
     const groups = new Map<string, Model[]>();
     for (const model of normalizedModels) {
       if (folded.has(model)) continue;
-      const name = readName(model.name);
+      const name = readModelName(model.name);
       const group = groups.get(name);
       if (group) group.push(model);
       else groups.set(name, [model]);
@@ -1540,7 +1597,7 @@ export function collapseJsonSuffixModels(
       const holder = members.find((member) => member.name === name);
       if (!holder && enumNames.has(name)) {
         for (const member of members) {
-          const fold = innermostFold(accepted, member.name)!;
+          const fold = innermostFold(accepted, member.name, 'model')!;
           refuse(fold, enumWarning(fold, member, name));
         }
         continue;
@@ -1548,10 +1605,12 @@ export function collapseJsonSuffixModels(
       if (members.length < 2) continue;
       const admits = (owner: Model, member: Model): boolean => modelAdmits(shapeOf(owner), shapeOf(member), options);
       const refuseMember = (member: Model, detail: string): void => {
-        const fold = innermostFold(accepted, member.name)!;
+        const fold = innermostFold(accepted, member.name, 'model')!;
         refuse(
           fold,
-          variantModelNames(fold.baseModel, readName).has(name) ? unionRulesWarning(fold) : shapeWarning(fold, detail),
+          variantModelNames(fold.baseModel, readModelName).has(name)
+            ? unionRulesWarning(fold)
+            : shapeWarning(fold, detail),
         );
       };
       if (holder) {
@@ -1583,8 +1642,14 @@ export function collapseJsonSuffixModels(
   // operations and the webhooks hold, at once.
   const renames = new Map<string, string>();
   for (const model of normalizedModels) {
-    const name = read(model.name);
+    const name = read.readModelName(model.name);
     if (name !== model.name) renames.set(model.name, name);
+  }
+  // The enum names a reference carries as the document stands, before a
+  // fold takes any away: the lifted entries the fold answers for below.
+  const carried = new Set<string>();
+  for (const ref of typeRefsInPlay(normalizedModels, services, webhooks)) {
+    walkTypeRef(ref, { enum: (r) => carried.add(r.name) });
   }
   // The deepest fold first: a base that is itself a folded `…Json` model
   // (`PetJson` under `PetJsonJson`) takes its shape before its own base
@@ -1599,20 +1664,20 @@ export function collapseJsonSuffixModels(
   const keepers = new Map<string, Model>();
   for (const model of normalizedModels) {
     if (removed.has(model)) continue;
-    const name = read(model.name);
+    const name = read.readModelName(model.name);
     if (!keepers.has(name) || model.name === name) keepers.set(name, model);
   }
   for (const candidate of accepted) {
     const { jsonModel, baseModel } = candidate;
     console.warn(
-      `[oagen] Merged "${jsonModel.name}" into "${read(baseModel.name)}" (${jsonModel.fields.length} fields, superset)`,
+      `[oagen] Merged "${jsonModel.name}" into "${read.readModelName(baseModel.name)}" (${jsonModel.fields.length} fields, superset)`,
     );
     // e.g. when AuditLogSchemaJson → AuditLogSchema, also rename
     // AuditLogSchemaJsonTarget → AuditLogSchemaTarget, or collapse it onto
     // an AuditLogSchemaTarget that already exists.
     for (const model of normalizedModels) {
-      if (removed.has(model) || innermostFold(accepted, model.name) !== candidate) continue;
-      const name = read(model.name);
+      if (removed.has(model) || innermostFold(accepted, model.name, 'model') !== candidate) continue;
+      const name = read.readModelName(model.name);
       if (keepers.get(name) === model) {
         console.warn(`[oagen] Renamed child "${model.name}" → "${name}"`);
       } else {
@@ -1621,23 +1686,45 @@ export function collapseJsonSuffixModels(
       }
     }
   }
-  for (const model of normalizedModels) if (!removed.has(model)) model.name = read(model.name);
+  for (const model of normalizedModels) if (!removed.has(model)) model.name = read.readModelName(model.name);
   const kept = normalizedModels.filter((m) => !removed.has(m));
   // A folded `…Json` model's fields and variants are its base's now, and a
   // collapsed member is gone, so each reference is rewritten once.
-  const enumRenames = rewriteModelRefs(kept, services, renames, webhooks, read);
+  const enumRenames = rewriteModelRefs(kept, services, renames, webhooks, read.readEnumName);
 
-  // A lifted enum the renames left unreferenced.
-  if (enumRenames.size > 0) {
-    const inPlay = new Set<string>();
-    for (const ref of typeRefsInPlay(kept, services, webhooks)) walkTypeRef(ref, { enum: (r) => inPlay.add(r.name) });
-    for (const [oldName, ref] of enumRenames) {
-      if (componentNames.has(oldName) || inPlay.has(oldName)) continue;
-      const index = enums.findIndex((e) => e.name === oldName);
-      if (index < 0) continue;
-      enums.splice(index, 1);
-      foldedEnums.set(oldName, ref);
-    }
+  // A lifted enum the fold left unreferenced: an entry a reference carried
+  // going in and none carries now, because every reference to it was
+  // renamed (`enumRenames`), or because the only one sat on a field the
+  // fold replaced — a base's own, which its `…Json` model's of the same
+  // name takes the place of down a chain — or on a collapsed member, and
+  // went with it. The entry is dropped either way, and noted under a
+  // reference that carries its reading now, one carrying its values, which
+  // the collectors lift: the first renamed from it, else the twin of the
+  // one that went — the field or member that took its place reads to the
+  // same name (`fieldAdmits`, `modelAdmits`), so a twin always carries it.
+  // A component enum stays, as does an entry no reference carried going in.
+  const inPlay = new Set<string>();
+  const carriers = new Map<string, EnumRef>();
+  for (const ref of typeRefsInPlay(kept, services, webhooks)) {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        inPlay.add(r.name);
+        if (r.values && !carriers.has(r.name)) carriers.set(r.name, r);
+      },
+    });
+  }
+  const drop = (oldName: string, ref: EnumRef): void => {
+    const index = enums.findIndex((e) => e.name === oldName);
+    if (index < 0) return;
+    enums.splice(index, 1);
+    foldedEnums.set(oldName, ref);
+  };
+  for (const [oldName, ref] of enumRenames) {
+    if (!componentNames.has(oldName) && !inPlay.has(oldName)) drop(oldName, ref);
+  }
+  for (const name of enums.map((e) => e.name)) {
+    if (componentNames.has(name) || !carried.has(name) || inPlay.has(name)) continue;
+    drop(name, carriers.get(read.readEnumName(name))!);
   }
 
   return kept;
