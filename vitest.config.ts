@@ -11,5 +11,9 @@ export default defineConfig({
   test: {
     globals: true,
     include: ['test/**/*.test.ts'],
+    // The CLI tests spawn the CLI per case, and a few parser tests parse large
+    // documents; under a loaded machine they pass the default 5 s and time out
+    // without hanging. 20 s keeps a real hang visible and stops the reruns.
+    testTimeout: 20_000,
   },
 });

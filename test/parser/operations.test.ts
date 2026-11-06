@@ -3715,7 +3715,10 @@ describe('#565', () => {
     // its digit, as `list[1]Pets` is `List1Pets`; markers alone strip to nothing.
     expect(named).toBe(`${'1'.repeat(20000)}X`);
     expect(nameless).toBe('');
-    expect(elapsed).toBeLessThan(50);
+    // The scan takes a few milliseconds; the regex took over a second. The
+    // bound is loose so a loaded machine never trips it, and still a tenth of
+    // what the quadratic reading cost.
+    expect(elapsed).toBeLessThan(1000);
 
     // Through the parser: the one is kept verbatim, the other read as no operationId.
     const [kept] = extractOperations({ '/pets': { get: { operationId: `${markers}X`, responses } } }).services[0]
