@@ -18,18 +18,25 @@
  * `items` to the array's items, `additionalProperties` or
  * `patternProperties/<pattern>` to the map's values, `oneOf/<n>` or
  * `anyOf/<n>` to the union's or the named union's n-th non-null variant,
- * and `allOf/<n>` to the member's own type for a `$ref` member and the
- * merged model's for an inline one — and writes the type it reaches into
- * the pending reference in place (`replaceTypeRef`), so every holder keeps
- * the object it holds. A pointer that leads nowhere is reported once, at
- * the site, and the site typed `unknown`: one into another section, to a
- * component the document lacks, to no schema (`Pet/properties/id/type`,
- * `Pet/enum/0`), or to a schema the parser builds no type for at that place
- * (a `null` variant, an enum's own members, a keyword it never reads, the
- * fields of an enum or primitive component), and a chain of pointers that
- * reaches itself. Pointers are followed as RFC 6901 §4 evaluates them,
- * structurally, never through a `$ref` on the way (`schemaAtPointer`); a
- * pointer that lands on a `$ref` schema is typed as that `$ref` is.
+ * and `allOf/<n>` to the member's own type: a `$ref` member's reference,
+ * or, for the one member the `allOf` is read as (its one typing member
+ * beside members that only annotate it; #555), the `allOf`'s own type —
+ * and writes the type it reaches into the pending reference in place
+ * (`replaceTypeRef`), so every holder keeps the object it holds. A pointer
+ * that leads nowhere is reported once, at the site, and the site typed
+ * `unknown`: one into another section, to a component the document lacks,
+ * to no schema (`Pet/properties/id/type`, `Pet/enum/0`), or to a schema
+ * the parser builds no type for at that place (a `null` variant, an enum's
+ * own members, a keyword it never reads, the fields of an enum or
+ * primitive component, and any other inline `allOf` member, which declares
+ * into the merged model and has no type of its own — `Pet/allOf/1` beside
+ * a `$ref` member, though `Pet/allOf/1/properties/nickname` reads on
+ * through it to the merged model's field), and a chain of pointers that
+ * reaches itself — through a field whose type is the site, or through an
+ * array component whose items point back into it. Pointers are followed as
+ * RFC 6901 §4 evaluates them, structurally, never through a `$ref` on the
+ * way (`schemaAtPointer`); a pointer that lands on a `$ref` schema is typed
+ * as that `$ref` is.
  *
  * The limits are settled with the type (#545 review). A `$ref` to a
  * primitive or array component gives the site the component's limits
@@ -48,8 +55,16 @@
  * a schema typed as a model or enum adds none: that node carries its own,
  * and the site keeps what it wrote beside the `$ref`, as beside a `$ref` to
  * a model component.
+ *
+ * What a site decided from the pending reference before the settle is
+ * decided again from the settled type: an operation whose primary response
+ * was pending chooses its iterator's item type from the settled response
+ * (`paginatedItemType`), so a paginated response pointing at an array of
+ * strings yields strings; and a discriminator mapping entry that named a
+ * pointer variant is written as the model the variant settled to
+ * (`settleDeferredMappingEntries`).
  */
-import type { Constraints, Model, ModelRef, Operation, Service, TypeRef, Webhook } from '../ir/types.js';
+import type { Constraints, Model, ModelRef, Operation, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
 import {
   collectRequestBodyTypes,
   collectResponseBodyTypes,
@@ -61,16 +76,20 @@ import {
   combineConstraints,
   componentTypeRef,
   isNullSchema,
+  referenceTypesAsUnknown,
   schemaToTypeRef,
   withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
-import { replaceTypeRef } from './inline-models.js';
+import { allOfTypingMember, readInlineAllOf, replaceTypeRef } from './inline-models.js';
+import { paginatedItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
+  isPendingVariant,
   pendingSiteLimitsOf,
   schemaAtPointer,
   schemaRefTokens,
+  settleDeferredMappingEntries,
   settlePendingSchemaRef,
 } from './schema-refs.js';
 
@@ -94,19 +113,28 @@ interface LimitedSite {
  * `schemas` (see the module comment), in place. Returns the references
  * settled, so the caller can give each to the site of the model it now
  * names (`attachSharedRefs`): a merge pass that renames that model then
- * repoints the reference with the model's own.
+ * repoints the reference with the model's own. A reference settled as a
+ * variant of a discriminated union is returned as the union — the inline
+ * union holding it, or a view onto a named union model's `variants` and
+ * `discriminator` — so the rename reaches the mapping entry naming the
+ * variant with the variant (`renameVariants`), as it does for a union a
+ * site minted; a bare reference would be repointed alone and leave the
+ * mapping naming the old name.
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
   schemas: Record<string, SchemaObject> | undefined,
 ): TypeRef[] {
   const resolver = new PointerResolver(sites.models, schemas);
+  /** Every discriminated union met, the named union models' as views; their variants are settled once the walk is done. */
+  const unions: UnionType[] = [];
   const visit = (ref: TypeRef, context: string): void => {
     walkTypeRef(ref, {
       model: (reference) => {
         if (isPendingSchemaRef(reference)) resolver.settle(reference, context, new Set());
       },
     });
+    collectDiscriminatedUnions(ref, unions);
   };
   /** A field's or parameter's type settled, then its own limits aligned with the type's (`alignSiteLimits`). */
   const visitSite = (site: LimitedSite, context: string): void => {
@@ -117,6 +145,14 @@ export function resolveSchemaPointers(
   for (const model of sites.models) {
     for (const field of model.fields) visitSite(field, `${model.name}.${field.name}`);
     for (const variant of model.variants ?? []) visit(variant, `${model.name}.variants`);
+    if (model.variants && model.discriminator) {
+      unions.push({
+        kind: 'union',
+        variants: model.variants,
+        ...(model.compositionKind ? { compositionKind: model.compositionKind } : {}),
+        discriminator: model.discriminator,
+      });
+    }
   }
   for (const service of sites.services) {
     for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
@@ -132,27 +168,212 @@ export function resolveSchemaPointers(
         visit(content.type, `${context}.requestBodyContents.${content.contentType}`);
     }
   }
-  return resolver.settled;
+
+  // Every variant is settled: a mapping entry that named a pointer variant
+  // takes the model it settled to, and a union holding a settled variant
+  // stands in for it among the references returned.
+  const bare = new Set(resolver.settled);
+  const roots: TypeRef[] = [];
+  for (const union of unions) {
+    settleDeferredMappingEntries(union.discriminator?.mapping);
+    const own = union.variants
+      .map(variantModelRef)
+      .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
+    if (own.length === 0) continue;
+    for (const ref of own) bare.delete(ref);
+    roots.push(union);
+  }
+  return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
 }
 
-/** Every type an operation holds, as `validateModelRefs` reads them; a parameter or envelope field through `visitSite`, which aligns its own limits too. */
+/** The model reference `variant` is, directly or under its nullable wrapper; `undefined` for any other variant. */
+function variantModelRef(variant: TypeRef): ModelRef | undefined {
+  if (variant.kind === 'nullable') return variantModelRef(variant.inner);
+  return variant.kind === 'model' ? variant : undefined;
+}
+
+/** Collect every discriminated union under `ref` into `out`, the nested ones first. */
+function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
+  switch (ref.kind) {
+    case 'union':
+      for (const variant of ref.variants) collectDiscriminatedUnions(variant, out);
+      if (ref.discriminator) out.push(ref);
+      break;
+    case 'array':
+      collectDiscriminatedUnions(ref.items, out);
+      break;
+    case 'nullable':
+      collectDiscriminatedUnions(ref.inner, out);
+      break;
+    case 'map':
+      if (ref.keyType) collectDiscriminatedUnions(ref.keyType, out);
+      collectDiscriminatedUnions(ref.valueType, out);
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * Every type an operation holds, as `validateModelRefs` reads them and
+ * `collectOperationTypeRefs` lists them: every parameter location, the
+ * cookies' included, the bodies, the primary response and every other
+ * success entry's own type, the iterator's, the errors', the headers' and
+ * every secondary media type's. A parameter or envelope field goes through
+ * `visitSite`, which aligns its own limits with its settled type's too.
+ */
 function visitOperation(
   op: Operation,
   context: string,
   visit: (ref: TypeRef, context: string) => void,
   visitSite: (site: LimitedSite, context: string) => void,
 ): void {
-  for (const p of [...op.pathParams, ...op.queryParams, ...(op.bodyOwnedQueryParams ?? []), ...op.headerParams]) {
+  for (const p of [
+    ...op.pathParams,
+    ...op.queryParams,
+    ...(op.bodyOwnedQueryParams ?? []),
+    ...op.headerParams,
+    ...(op.cookieParams ?? []),
+  ]) {
     visitSite(p, `${context}.${p.name}`);
   }
   if (op.requestBody) visit(op.requestBody, `${context}.requestBody`);
+  // The iterator's item type was chosen from the response as the pending
+  // reference it was — the response itself, since no reference is an array
+  // — so it is chosen again from the settled response: an array's items, as
+  // `detectPagination` reads any response (`paginatedItemType`). Only the
+  // item type taken from the response itself is reread; one an override or
+  // an envelope decided stands.
+  const responseWasPending = isPendingVariant(op.response);
   visit(op.response, `${context}.response`);
+  if (responseWasPending && op.pagination && op.pagination.itemType === op.response) {
+    op.pagination.itemType = paginatedItemType(op.response);
+  }
+  for (const entry of op.successResponses ?? []) visit(entry.type, `${context}.successResponses.${entry.statusCode}`);
   if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
   for (const field of op.pagination?.envelopeFields ?? []) visitSite(field, `${context}.pagination.${field.name}`);
   for (const error of op.errors) if (error.type) visit(error.type, `${context}.errors.${error.statusCode}`);
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
   for (const { type, source } of collectRequestBodyTypes(op)) visit(type, `${context}.${source}`);
+}
+
+/** The keywords a pointer steps through with a name or index after them; every other keyword the walk reads holds one schema. */
+const KEYED_STEP_KEYWORDS: ReadonlySet<string> = new Set([
+  'properties',
+  'patternProperties',
+  'allOf',
+  'oneOf',
+  'anyOf',
+]);
+
+/** One step of a pointer's walk: from `node`, through `keyword` (and the `name` or index after it), to `next`. */
+export interface PointerStep {
+  keyword: string;
+  name: string | undefined;
+  node: SchemaObject;
+  next: SchemaObject;
+}
+
+/**
+ * The steps a pointer `path` makes from `component`, read from the document
+ * alone, or the reason the parser types nothing at the end of it: the one
+ * grammar the settle walks (`PointerResolver.resolve`, which then reads the
+ * IR along the steps) and the primary-response pick reads ahead of the IR
+ * (`pointerTypesAsUnknown`), so a pointer counts as typed exactly when the
+ * settle types it. Each step goes through a keyword the IR holds a type
+ * under — `properties/<name>`, `items`, `additionalProperties`,
+ * `patternProperties/<pattern>`, `oneOf/<n>`, `anyOf/<n>`, `allOf/<n>` —
+ * to a schema (`schemaAtPointer`); a `oneOf`/`anyOf` step to the `null`
+ * variant leads to no type (the IR carries it as nullability), nor does any
+ * other keyword (`not`, `prefixItems`, `$defs`, …: the parser types nothing
+ * under it), nor an `allOf` step that ends the pointer at an inline member
+ * the `allOf` is not read as (`readInlineAllOf`): the member declares into
+ * the merged model, or only annotates the member the `allOf` is read as,
+ * and has no type of its own — while an `allOf` step on the way through
+ * (`allOf/1/properties/nickname`) reads on to the merged model's field.
+ */
+export function pointerSteps(
+  component: SchemaObject,
+  path: readonly string[],
+  schemas: Record<string, SchemaObject> | undefined,
+): PointerStep[] | { problem: string } {
+  const steps: PointerStep[] = [];
+  let node = component;
+  for (let index = 0; index < path.length; index++) {
+    const keyword = path[index]!;
+    const name = KEYED_STEP_KEYWORDS.has(keyword) ? path[++index] : undefined;
+    const next = schemaAtPointer(node, name === undefined ? [keyword] : [keyword, name]);
+    if (!next) return { problem: 'no schema at that pointer' };
+    switch (keyword) {
+      case 'properties':
+      case 'items':
+      case 'additionalProperties':
+      case 'patternProperties':
+        break;
+      case 'oneOf':
+      case 'anyOf':
+        if (isNullSchema(next))
+          return { problem: `"${keyword}/${name}" is the null variant, which the IR carries as nullability` };
+        break;
+      case 'allOf':
+        if (!next.$ref && index === path.length - 1 && !allOfReadAsMember(node, next, schemas))
+          return { problem: `"${keyword}/${name}" is an inline allOf member, which has no type of its own` };
+        break;
+      default:
+        return { problem: `the parser types nothing under "${keyword}"` };
+    }
+    steps.push({ keyword, name, node, next });
+    node = next;
+  }
+  return steps;
+}
+
+/** Whether `schema`'s `allOf` is read as its inline `member` — the one typing member beside members that only annotate it — so the member's type is the `allOf`'s own. */
+function allOfReadAsMember(
+  schema: SchemaObject,
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): boolean {
+  const members = schema.allOf ?? [];
+  if (readInlineAllOf(members, schema, schemas) !== 'unwrapped') return false;
+  return (allOfTypingMember(members) ?? members[0]) === member;
+}
+
+/** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */
+const pointersBeingRead = new Set<string>();
+
+/**
+ * Whether a site written as `ref`, a schema `$ref` that names no component,
+ * settles to the bare `unknown` — decided from the document before any
+ * model is built, for the reader that must know before a body is typed
+ * (`referenceTypesAsUnknown`, choosing the primary response: a `200` body
+ * pointing at an untyped schema loses to a typed `201`, as the same schema
+ * written inline would). True when the pointer leads nowhere (into another
+ * section, to a component the document lacks, to no schema) or to a schema
+ * the parser builds no type for at that place (`pointerSteps`), and
+ * otherwise exactly when the schema it lands on is typed `unknown` where
+ * it stands, read as a body written there is (`referenceTypesAsUnknown`:
+ * `{}`, a `$ref` to an untyped primitive component, an `allOf` read as
+ * one). A chain of pointers that reaches itself is read as the settle
+ * reads it, `unknown`.
+ */
+export function pointerTypesAsUnknown(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
+  if (pointersBeingRead.has(ref)) return true;
+  const tokens = schemaRefTokens(ref);
+  if (!tokens) return true;
+  const [key, ...path] = tokens;
+  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
+  if (!component) return true;
+  const steps = pointerSteps(component, path, schemas);
+  if ('problem' in steps) return true;
+  const landed = steps.length === 0 ? component : steps[steps.length - 1]!.next;
+  pointersBeingRead.add(ref);
+  try {
+    return referenceTypesAsUnknown(landed);
+  } finally {
+    pointersBeingRead.delete(ref);
+  }
 }
 
 /** The walk one document's pending references are settled by; `settled` collects them. */
@@ -170,23 +391,27 @@ class PointerResolver {
   }
 
   /**
-   * Write the type `pending` names into it. `stack` holds the references
-   * being settled on the way here, so a pointer that leads back to a site
-   * still being settled — through a field whose type is that site, or a
-   * chain of pointers — is a cycle, reported and typed `unknown`.
+   * Write the type `pending` names into it. `stack` holds the `$ref`s being
+   * settled on the way here, so a pointer that leads back to one still
+   * being settled — through a field whose type is that site, a chain of
+   * pointers, or an array component whose items point back into it — is a
+   * cycle, reported and typed `unknown`. The `$ref`s, not the references:
+   * an array component's items are built afresh at every read
+   * (`componentTypeRef`), so the reference met on the way back is never
+   * the one the walk started from, while its `$ref` is.
    */
-  settle(pending: ModelRef, context: string, stack: Set<ModelRef>): void {
+  settle(pending: ModelRef, context: string, stack: Set<string>): void {
     if (!isPendingSchemaRef(pending)) return;
     const ref = pending.name;
     let type: TypeRef | undefined;
-    if (stack.has(pending)) {
+    if (stack.has(ref)) {
       console.warn(
         `[oagen] Warning: Circular schema $ref chain starting at "${ref}" in ${context} — typing the site as unknown`,
       );
     } else {
-      stack.add(pending);
+      stack.add(ref);
       type = this.resolve(ref, context, stack);
-      stack.delete(pending);
+      stack.delete(ref);
     }
     settlePendingSchemaRef(pending);
     const site = pendingSiteLimitsOf(pending);
@@ -235,7 +460,7 @@ class PointerResolver {
   }
 
   /** The type `ref` names, or `undefined` after one warning saying why it names none. */
-  private resolve(ref: string, context: string, stack: Set<ModelRef>): TypeRef | undefined {
+  private resolve(ref: string, context: string, stack: Set<string>): TypeRef | undefined {
     const fail = (reason: string): undefined => {
       console.warn(
         `[oagen] Warning: Unresolved schema $ref "${ref}" in ${context}: ${reason} — typing the site as unknown`,
@@ -245,9 +470,10 @@ class PointerResolver {
     const tokens = schemaRefTokens(ref);
     if (!tokens) return fail('only a $ref into components/schemas is followed');
     const [key, ...path] = tokens;
-    const component = this.schemas && Object.hasOwn(this.schemas, key) ? this.schemas[key] : undefined;
+    const component = this.schemas && Object.hasOwn(this.schemas, key!) ? this.schemas[key!] : undefined;
     if (!component) return fail(`no component schema "${key}"`);
-    if (schemaAtPointer(component, path) === undefined) return fail('no schema at that pointer');
+    const steps = pointerSteps(component, path, this.schemas);
+    if ('problem' in steps) return fail(steps.problem);
 
     // The reference being settled: a type reached on the way that is itself
     // pending is settled first, in place, so the walk reads what it names.
@@ -263,19 +489,11 @@ class PointerResolver {
     const describe = (type: TypeRef): string =>
       type.kind === 'model' || type.kind === 'enum' ? `${type.kind} "${type.name}"` : type.kind;
 
-    let node: SchemaObject = component;
-    let type: TypeRef = componentTypeRef(key);
-    for (let index = 0; index < path.length; index++) {
-      const keyword = path[index];
-      const step = ['properties', 'patternProperties', 'allOf', 'oneOf', 'anyOf'].includes(keyword)
-        ? [keyword, path[++index]]
-        : [keyword];
-      const next = schemaAtPointer(node, step);
-      if (!next) return fail('no schema at that pointer');
+    let type: TypeRef = componentTypeRef(key!);
+    for (const { keyword, name, node, next } of steps) {
       const bare = bareOf(type);
       switch (keyword) {
         case 'properties': {
-          const name = step[1];
           const model = bare.kind === 'model' ? this.modelsByName.get(bare.name) : undefined;
           if (!model) return fail(`${describe(bare)} has no fields to read "${name}" from`);
           const field = model.fields.find((candidate) => candidate.name === name);
@@ -295,12 +513,9 @@ class PointerResolver {
         case 'oneOf':
         case 'anyOf': {
           // The IR carries a union's non-null variants only: the `null`
-          // variant is its nullability, and a union of one variant beside
-          // it is read as that variant.
+          // variant is its nullability (`pointerSteps` stops at it), and a
+          // union of one variant beside it is read as that variant.
           const members = node[keyword] ?? [];
-          const position = Number(step[1]);
-          if (isNullSchema(next))
-            return fail(`"${keyword}/${step[1]}" is the null variant, which the IR carries as nullability`);
           const nonNull = members.filter((member) => !isNullSchema(member));
           const variant = nonNull.indexOf(next);
           const variants =
@@ -311,24 +526,25 @@ class PointerResolver {
                 : undefined;
           if (variants) {
             if (variants[variant] === undefined)
-              return fail(`${describe(bare)} carries no variant "${keyword}/${position}"`);
+              return fail(`${describe(bare)} carries no variant "${keyword}/${name}"`);
             type = variants[variant];
           } else if (nonNull.length === 1) {
             type = bare;
           } else {
-            return fail(`${describe(bare)} is no union to read "${keyword}/${position}" from`);
+            return fail(`${describe(bare)} is no union to read "${keyword}/${name}" from`);
           }
           break;
         }
         case 'allOf':
           // A `$ref` member is typed as the reference it is; an inline member
-          // declares into the merged model, whose type stays at hand.
+          // is the merged model's, or the `allOf`'s own when it is read as
+          // that member — `pointerSteps` has ruled out a pointer that ends
+          // at any other inline member — so the type at hand stays.
           if (next.$ref) type = schemaToTypeRef(next);
           break;
         default:
           return fail(`the parser types nothing under "${keyword}"`);
       }
-      node = next;
     }
     // Whatever the type reached holds that is still pending is settled
     // before the copy is made, so the site never carries a pending copy.

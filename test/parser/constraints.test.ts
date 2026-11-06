@@ -1719,9 +1719,12 @@ describe('#545', () => {
   it.each(['3.1.0', '3.0.3'] as const)(
     'reads a parameter’s limits as a field’s, so a keyword beside an `allOf` member that writes it too is one reading on the parameter, the field and the type (OAS %s)',
     async (openapi) => {
-      // Michael's review of #545: the parameter read its own `^a` and `2`
-      // (`extractConstraints`) while the field and the type read the
-      // annotating member's `z$` and `3` (`schemaConstraints`).
+      // Michael's review of #545: the parameter read `extractConstraints` on
+      // its own while the field and the type read `schemaConstraints`, and
+      // the two disagreed on a keyword an annotating member writes too. All
+      // three read `schemaConstraints` now, and the schema's own keyword
+      // wins over the member's on each (#587 review: `combineConstraints`
+      // keeps the first `pattern` and `multipleOf`).
       const name = { type: 'string', pattern: '^a', allOf: [{ pattern: 'z$' }] };
       const step = { type: 'number', multipleOf: 2, allOf: [{ multipleOf: 3 }] };
       const spec = await parse(
@@ -1737,12 +1740,12 @@ describe('#545', () => {
       const params = byName(getPet.queryParams);
       const fields = byName(fieldsOf(spec, 'GetPetResponse'));
       for (const site of [params.name, fields.name]) {
-        expect(site.constraints).toEqual({ pattern: 'z$' });
-        expect(site.type).toEqual(limited(string, { pattern: 'z$' }));
+        expect(site.constraints).toEqual({ pattern: '^a' });
+        expect(site.type).toEqual(limited(string, { pattern: '^a' }));
       }
       for (const site of [params.step, fields.step]) {
-        expect(site.constraints).toEqual({ multipleOf: 3 });
-        expect(site.type).toEqual(limited({ kind: 'primitive', type: 'number' }, { multipleOf: 3 }));
+        expect(site.constraints).toEqual({ multipleOf: 2 });
+        expect(site.type).toEqual(limited({ kind: 'primitive', type: 'number' }, { multipleOf: 2 }));
       }
       expectOneReading(spec);
     },
