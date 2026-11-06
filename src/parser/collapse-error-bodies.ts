@@ -578,15 +578,17 @@ class ModelKeys {
    * since `sharedFieldType` reads those values across the group; a string
    * inside an array, union or map keeps its value in the key (`L"a"`,
    * `E["a","b"]`), since nothing combines values there, so two bodies that
-   * list different codes in an array stay two models.
+   * list different codes in an array stay two models. An inline enum's
+   * values are read sorted (`sortedEnumValues`), as the name spells them,
+   * so reordering its entries moves no body.
    */
   type(type: TypeRef, direct: boolean): string {
     switch (type.kind) {
       case 'literal':
         return direct && typeof type.value === 'string' ? 'S' : `L${JSON.stringify(type.value)}`;
       case 'enum':
-        if (isStringValuedInlineEnum(type)) return direct ? 'S' : `E${JSON.stringify([...type.values!].sort())}`;
-        return type.values ? `E${JSON.stringify(type.values)}` : `E:${type.name}`;
+        if (direct && isStringValuedInlineEnum(type)) return 'S';
+        return type.values ? `E${JSON.stringify(sortedEnumValues(type.values))}` : `E:${type.name}`;
       case 'primitive':
         return direct && type.type === 'string' && !type.format ? 'S' : `P:${type.type}:${type.format ?? ''}`;
       case 'model':
@@ -899,10 +901,12 @@ function typeToken(
  * `string[] | null`); a format (`DateTime`, `Int64`) or type (`Integer`,
  * `Number`, `Boolean`) in PascalCase; a non-string `const` by its value
  * (`Status404`, `OkTrue`, `RatioMinus1Point5`) and an inline
- * enum of non-string values by its values joined with `Or`
- * (`Status404Or410`), since the key keeps those values and nothing combines
- * them (#515). A number is set off by `No` from a word that ends in a digit
- * (`V2No3`), as every number in a name is (`numberedName`).
+ * enum of non-string values by its values, sorted as the key sorts them
+ * (`sortedEnumValues`) so that reordering the entries renames nothing, and
+ * joined with `Or` (`Status404Or410`), since the key keeps those values and
+ * nothing combines them (#515). A number is set off by `No` from a word
+ * that ends in a digit (`V2No3`), as every number in a name is
+ * (`numberedName`).
  */
 function scalarToken(word: string, type: TypeRef): string {
   switch (type.kind) {
@@ -915,7 +919,9 @@ function scalarToken(word: string, type: TypeRef): string {
       return typeof type.value === 'string' ? word : valueToken(word, type.value);
     case 'enum':
       if (!type.values || isStringValuedInlineEnum(type)) return word;
-      return type.values.map((value, i) => valueToken(i === 0 ? word : 'Or', value)).join('');
+      return sortedEnumValues(type.values)
+        .map((value, i) => valueToken(i === 0 ? word : 'Or', value))
+        .join('');
     default:
       return word;
   }
@@ -1124,15 +1130,57 @@ function sharedFieldType(
     const wrapped: TypeRef = nullable ? { kind: 'nullable', inner: type } : type;
     return { type: wrapped, changed: stableJson(wrapped) !== stableJson(first.type) };
   }
+  // An inline enum reads by its sorted values, as the key reads it, and not
+  // by the name the parser minted it under per operation: two members that
+  // list the same values, in any order, share the first member's enum.
   const seen = new Map<string, TypeRef>();
   for (const sibling of siblings) {
-    const own = rewritten(sibling.type, renames);
+    const own = normalizeInlineEnums(rewritten(sibling.type, renames), true);
     const type = constraints === undefined ? stripConstraints(own) : own;
-    seen.set(stableJson(type), type);
+    const key = stableJson(normalizeInlineEnums(type, false));
+    if (!seen.has(key)) seen.set(key, type);
   }
   if (seen.size === 1) return { type: [...seen.values()][0], changed: false };
   const types = [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, type]) => type);
   return { type: unionOf(types, constraints), changed: true };
+}
+
+/**
+ * An inline enum's values in the one order the key and the name read them
+ * — numbers ascending, then strings in code-unit order — so that reordering
+ * the entries in the document changes no shape and no name.
+ */
+function sortedEnumValues(values: readonly (string | number)[]): (string | number)[] {
+  return [...values].sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    if (typeof a === 'number') return -1;
+    if (typeof b === 'number') return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+/**
+ * `type` with every inline enum's values sorted (`sortedEnumValues`), and,
+ * unless `keepNames`, without the names the parser minted them under, as a
+ * new tree; a reference to a component enum, and every other type, is
+ * returned as it is.
+ */
+function normalizeInlineEnums(type: TypeRef, keepNames: boolean): TypeRef {
+  switch (type.kind) {
+    case 'enum':
+      if (!type.values) return type;
+      return { kind: 'enum', name: keepNames ? type.name : '', values: sortedEnumValues(type.values) };
+    case 'nullable':
+      return { kind: 'nullable', inner: normalizeInlineEnums(type.inner, keepNames) };
+    case 'array':
+      return { ...type, items: normalizeInlineEnums(type.items, keepNames) };
+    case 'map':
+      return { ...type, valueType: normalizeInlineEnums(type.valueType, keepNames) };
+    case 'union':
+      return { ...type, variants: type.variants.map((variant) => normalizeInlineEnums(variant, keepNames)) };
+    default:
+      return type;
+  }
 }
 
 /**

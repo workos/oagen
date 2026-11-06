@@ -1402,6 +1402,41 @@ describe('#515', () => {
     expectSound(hinted);
   });
 
+  it.each(['3.0.3', '3.1.0'] as const)(
+    "reads an inline enum's values sorted in the shape and the name, so reordering its entries changes nothing, under OAS %s",
+    async (version) => {
+      const status = (values: number[]): Doc => obj({ message: str, status: { type: 'integer', enum: values } });
+      const ordered = {
+        ...doc(getOp('pets', { '404': { description: 'nf', content: json(status([404, 410])) } })),
+        openapi: version,
+      };
+      const reversed = {
+        ...doc(getOp('pets', { '404': { description: 'nf', content: json(status([410, 404])) } })),
+        openapi: version,
+      };
+      const a = await parseWithoutWarnings(ordered);
+      const b = await parseWithoutWarnings(reversed);
+      expect(modelNames(a)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
+      expect(modelNames(b)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
+      expect(enumValues(b, 'GetPetsError404Status')).toEqual(['404', '410']);
+      expect(diffOf(a, b).changes).toEqual([]);
+      // Two bodies listing the same values in either order are one shape,
+      // and share one enum on the shared model rather than a union of two.
+      const both = await parseWithoutWarnings({
+        ...doc({
+          ...getOp('pets', { '404': { description: 'nf', content: json(status([404, 410])) } }),
+          ...getOp('notes', { '404': { description: 'nf', content: json(status([410, 404])) } }),
+        }),
+        openapi: version,
+      });
+      expect(modelNames(both)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
+      const field = both.models.find((m) => m.name === 'ErrorBodyWithStatus404Or410')!.fields[1];
+      expect(field.type).toEqual({ kind: 'enum', name: 'GetNotesError404Status', values: [404, 410] });
+      expect(both.enums.map((e) => e.name)).toEqual(['GetNotesError404Status']);
+      expectSound(both);
+    },
+  );
+
   it('prints requiredness, nullability, domain names and types in the warning for what no name can spell', async () => {
     // Two bodies that reference different components under one field name
     // are two shapes with one name: the one whose shape sorts first keeps
