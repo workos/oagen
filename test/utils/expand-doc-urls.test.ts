@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { expandDocUrls } from '../../src/utils/expand-doc-urls.js';
 import { collectResponseHeaders } from '../../src/ir/types.js';
-import type { ApiSpec, Operation, Parameter, ResponseHeader } from '../../src/ir/types.js';
+import type { ApiSpec, Callback, Operation, Parameter, ResponseHeader } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function minimalSpec(overrides: Partial<ApiSpec> = {}): ApiSpec {
@@ -534,6 +534,132 @@ describe('expandDocUrls – every collection that holds a documented node', () =
     ).webhooks![0];
     expect('summary' in bare).toBe(false);
     expect('cookieParams' in bare).toBe(false);
+  });
+
+  it("walks an operation's and a webhook's callbacks, nested ones included, and leaves one without links unchanged (#382, Greptile)", () => {
+    const callback = (name: string, extra: Partial<Callback> = {}): Callback => ({
+      name,
+      expression: '{$request.body#/callbackUrl}',
+      httpMethod: 'post',
+      summary: text,
+      description: text,
+      externalDocs: relative,
+      requestBodyDescription: text,
+      headerParams: [param('x-signature')],
+      queryParams: [param('q')],
+      cookieParams: [param('session')],
+      responses: [{ statusCode: 200, description: text }],
+      ...extra,
+    });
+    const expectCallback = (cb: Callback): void => {
+      expect(cb.summary).toBe(expandedText);
+      expect(cb.description).toBe(expandedText);
+      expect(cb.externalDocs).toEqual(absolute);
+      expect(cb.requestBodyDescription).toBe(expandedText);
+      expectExpanded(cb.headerParams[0]);
+      expectExpanded(cb.queryParams[0]);
+      expectExpanded(cb.cookieParams![0]);
+      expect(cb.responses[0].description).toBe(expandedText);
+    };
+    const nested = () => callback('petAdopted', { callbacks: [callback('confirmed')] });
+
+    const op = run({ callbacks: [nested()] });
+    expectCallback(op.callbacks![0]);
+    expectCallback(op.callbacks![0].callbacks![0]);
+
+    const [hook] = expandDocUrls(
+      minimalSpec({
+        webhooks: [
+          {
+            name: 'petReturned',
+            httpMethod: 'post',
+            headerParams: [],
+            queryParams: [],
+            responses: [],
+            callbacks: [nested()],
+          },
+        ],
+      }),
+      base,
+    ).webhooks!;
+    expectCallback(hook.callbacks![0]);
+    expectCallback(hook.callbacks![0].callbacks![0]);
+
+    // A callback without links comes back equal, every optional key still
+    // absent; the key itself stays absent on a node without callbacks.
+    const bare: Callback = {
+      name: 'bare',
+      expression: '{$request.body#/url}',
+      httpMethod: 'post',
+      headerParams: [],
+      queryParams: [],
+      responses: [],
+    };
+    const out = run({ callbacks: [bare] }).callbacks![0];
+    expect(out).toEqual(bare);
+    expect(Object.keys(out)).toEqual(Object.keys(bare));
+    expect('callbacks' in out).toBe(false);
+    expect('callbacks' in run({})).toBe(false);
+  });
+
+  it("expands `See [adopted](/reference/adopted).` on a callback's summary, description and responses beside the operation's own link (Michael's finding 3)", () => {
+    const docs = 'https://docs.example.com';
+    const adopted = 'See [adopted](/reference/adopted).';
+    const expandedAdopted = `See [adopted](${docs}/reference/adopted).`;
+    const callback = (name: string, extra: Partial<Callback> = {}): Callback => ({
+      name,
+      expression: '{$request.body#/callbackUrl}',
+      httpMethod: 'post',
+      summary: adopted,
+      description: adopted,
+      headerParams: [],
+      queryParams: [],
+      responses: [{ statusCode: 204, description: adopted }],
+      ...extra,
+    });
+    const expectAdopted = (cb: Callback): void => {
+      expect(cb.summary).toBe(expandedAdopted);
+      expect(cb.description).toBe(expandedAdopted);
+      expect(cb.responses[0].description).toBe(expandedAdopted);
+    };
+    const nested = () => callback('petAdopted', { callbacks: [callback('confirmed')] });
+
+    const op = expandDocUrls(
+      minimalSpec({
+        services: [
+          {
+            name: 'Pets',
+            operations: [
+              operation({ name: 'createPet', description: 'See [pets](/reference/pets).', callbacks: [nested()] }),
+            ],
+          },
+        ],
+      }),
+      docs,
+    ).services[0].operations[0];
+    expect(op.description).toBe(`See [pets](${docs}/reference/pets).`);
+    expectAdopted(op.callbacks![0]);
+    expectAdopted(op.callbacks![0].callbacks![0]);
+
+    const [hook] = expandDocUrls(
+      minimalSpec({
+        webhooks: [
+          {
+            name: 'petReturned',
+            httpMethod: 'post',
+            description: 'See [pets](/reference/pets).',
+            headerParams: [],
+            queryParams: [],
+            responses: [],
+            callbacks: [nested()],
+          },
+        ],
+      }),
+      docs,
+    ).webhooks!;
+    expect(hook.description).toBe(`See [pets](${docs}/reference/pets).`);
+    expectAdopted(hook.callbacks![0]);
+    expectAdopted(hook.callbacks![0].callbacks![0]);
   });
 
   it('expands requestBodyDescription on an operation and on a webhook, and leaves the key absent otherwise (issue #316)', () => {

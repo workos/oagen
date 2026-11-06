@@ -1126,6 +1126,10 @@ function rewriteModelRefs(
       for (const header of collectResponseHeaders(op)) renameTypeRefModels(header.type, renames);
       for (const { type } of collectResponseBodyTypes(op)) renameTypeRefModels(type, renames);
       for (const { type } of collectRequestBodyTypes(op)) renameTypeRefModels(type, renames);
+      // The operation's callbacks, nested ones included, as a webhook's are (#382).
+      for (const callback of op.callbacks ?? []) {
+        for (const ref of collectWebhookTypeRefs(callback)) renameTypeRefModels(ref, renames);
+      }
     }
   }
   for (const webhook of webhooks) {

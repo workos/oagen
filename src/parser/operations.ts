@@ -21,6 +21,7 @@ import type {
   ExternalDocs,
   ServerEntry,
   StatusRange,
+  Webhook,
 } from '../ir/types.js';
 import { isParameterSegment, pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
@@ -141,7 +142,6 @@ import { extractSecurityRequirements, type RawSecurityRequirements } from './sec
 import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
-import { warnOnIgnoredCallbacks } from './callbacks.js';
 import { resolvePathItemRef } from './path-item-refs.js';
 import { componentKeyOf } from './schema-refs.js';
 import { followReference, siblingDocsMode, type SiblingDocs } from './reference-objects.js';
@@ -200,8 +200,53 @@ export interface OperationObject {
   servers?: unknown;
   'x-mutually-exclusive-parameter-groups'?: Record<string, ParameterGroupExtension>;
   'x-mutually-exclusive-body-groups'?: Record<string, ParameterGroupExtension>;
-  /** Not read; `warnOnIgnoredCallbacks` reports an operation that declares any. */
+  /**
+   * The Operation Object's `callbacks` map, as written: Callback Objects, or
+   * `$ref`s into `components/callbacks`, keyed by name. Not read here — the
+   * operations pass records it with the operation's label and model stem
+   * (`DeclaredCallbacks`) for `extractCallbacks` to read once every webhook
+   * is named, so a callback's models step around every name in the
+   * document (#382).
+   */
   callbacks?: unknown;
+}
+
+/**
+ * The `callbacks` map an Operation Object declares, held for the callback
+ * reader (`extractCallbacks` in `callbacks.ts`) with what reading it needs:
+ * the IR node the callbacks hang off — a `paths` operation or a `webhooks`
+ * entry — that node's diagnostic label, which a callback's sites are
+ * labelled under (`<label>.callbacks.<key>.<expression>.<method>`), and
+ * the stem the node's own models are named from, which a key-named
+ * callback's are prefixed with (`CreatePet` + `petAdopted` →
+ * `CreatePetPetAdoptedPayload`). Recorded whenever the Operation Object
+ * carries the key, whatever its value: the reader decides what declares a
+ * callback (#382).
+ */
+export interface DeclaredCallbacks {
+  /** The operation or webhook that declares the map; its `callbacks` field is set by the reader. */
+  owner: Operation | Webhook;
+  /** The map as written. */
+  callbacks: unknown;
+  /** The owner's label as its own diagnostics name it: the `operationId`, else `METHOD /path`; `webhooks.<key>.<method>`. */
+  label: string;
+  /**
+   * The stem the owner's own models are named from: an operation's
+   * `modelQualifier` (the one `<Stem>Request` and `<Stem>Response` use), a
+   * webhook's resolved stem (`resolveWebhookModelStems`).
+   */
+  stem: string;
+  /**
+   * The owner's stable identity, which a key-named callback's collision
+   * hash is taken from (`WebhookEntry.identity`): an operation's
+   * operationId — the one its models are named from — else `METHOD /path`;
+   * a webhook's operationId when its stem is named from one, else its
+   * label. Two owners whose stems coincide (`createPet`, `create_pet`) have
+   * two identities, while two `webhooks` keys sharing a path item with an
+   * operationId have one, so their callbacks hash alike whichever key comes
+   * first. Defaults to `label`.
+   */
+  identity?: string;
 }
 
 /**
@@ -586,6 +631,11 @@ export interface OperationExtractionResult {
    * steps to `…Body` (`collectInlineEnumsFromOperations`).
    */
   componentSites: ReadonlySet<TypeRef>;
+  /**
+   * Every `callbacks` map a `paths` operation declares, in document order,
+   * for `extractCallbacks` to read after the webhooks are named (#382).
+   */
+  declaredCallbacks: DeclaredCallbacks[];
 }
 
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
@@ -616,7 +666,9 @@ export function extractOperations(
   /** The document's `webhooks` map, as written, whose entries a `paths` entry's `$ref` may name. */
   documentWebhooks?: unknown,
 ): OperationExtractionResult {
-  if (!paths) return { services: [], inlineModels: [], inlineModelBundles: [], componentSites: new Set() };
+  if (!paths) {
+    return { services: [], inlineModels: [], inlineModelBundles: [], componentSites: new Set(), declaredCallbacks: [] };
+  }
 
   // Every pass below reads the resolved map: each entry as itself, or as the
   // Path Item its `$ref` leads to, with an entry that resolves to nothing
@@ -745,6 +797,8 @@ export function extractOperations(
   // Each success body a `components/responses` entry declares, typed with
   // its operation rather than deferred (`componentSites` below).
   const componentBodies: TypeRef[] = [];
+  // Each operation's `callbacks` map, read after the webhooks (`extractCallbacks`).
+  const declaredCallbacks: DeclaredCallbacks[] = [];
 
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     // Everything read at path-item level — `parameters`, `servers`, and the
@@ -786,6 +840,7 @@ export function extractOperations(
         operationQualifier,
         modelQualifier,
         componentBodies: opComponentBodies,
+        declaredCallbacks: opCallbacks,
       } = buildOperation(
         method,
         path,
@@ -814,6 +869,7 @@ export function extractOperations(
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
+      if (opCallbacks) declaredCallbacks.push(opCallbacks);
       // The operation's models join the registry under its qualifier, so a
       // later operation's items and every deferred schema step around them;
       // its settled item models are already there (`typeInlineItems`).
@@ -943,7 +999,7 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles, componentSites };
+  return { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks };
 }
 
 /** What `planOperations` settles for one operation. */
@@ -3166,9 +3222,10 @@ function buildOperation(
   modelQualifier: string;
   /** Each success body a `components/responses` entry declares (`OperationExtractionResult.componentSites`). */
   componentBodies: TypeRef[];
+  /** The operation's `callbacks` map, when the Operation Object carries the key, for `extractCallbacks` (#382). */
+  declaredCallbacks?: DeclaredCallbacks;
 } {
   const opLabel = operationLabel(op, path, method);
-  warnOnIgnoredCallbacks(op.callbacks, opLabel);
   // The Operation Object as every model name reads it (the request and
   // response bodies, the error and fallback bodies, the qualifiers): with
   // the `operationId` the reuse of its own leaves it, if any.
@@ -3595,6 +3652,21 @@ function buildOperation(
     operationQualifier,
     modelQualifier,
     componentBodies,
+    // The callbacks are read after every webhook is named, under this
+    // operation's label and the stem its own models are named from.
+    ...(op.callbacks !== undefined
+      ? {
+          declaredCallbacks: {
+            owner: operation,
+            callbacks: op.callbacks,
+            label: opLabel,
+            stem: modelQualifier,
+            // The operationId the models are named from (the reuse of its
+            // own may have renamed it), else the method and path.
+            identity: namingOp.operationId ?? `${method.toUpperCase()} ${path}`,
+          },
+        }
+      : {}),
   };
 }
 

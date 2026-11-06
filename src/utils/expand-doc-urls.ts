@@ -1,5 +1,6 @@
 import type {
   ApiSpec,
+  Callback,
   ExternalDocs,
   Field,
   Operation,
@@ -24,13 +25,15 @@ import type {
  * `externalDocs`, whose `url` is left exactly as written (OpenAPI allows it
  * to be relative to the document's own location, which is not the doc site).
  * The nodes are every one that carries them — the spec, its services,
- * operations, webhooks, parameters, response headers, models, fields, enums
- * and enum values — reached through every collection that holds them: each
- * parameter list (a webhook's header, query and cookie parameters included),
+ * operations, webhooks, callbacks (an operation's, a webhook's and a
+ * callback's own, nested; each is walked as a webhook is, #382),
+ * parameters, response headers, models, fields, enums and enum values —
+ * reached through every collection that holds them: each parameter list (a
+ * webhook's or a callback's header, query and cookie parameters included),
  * the mutually exclusive parameter groups, the headers of the primary, of
  * each alternate success and of each error response, the list envelope's
- * companion fields and a webhook's response descriptions. A key a node does
- * not have stays absent.
+ * companion fields, and a webhook's or a callback's response descriptions.
+ * A key a node does not have stays absent.
  *
  * The IR shares some nodes by identity: a grouped parameter is the same
  * object in `queryParams` and in its `parameterGroups` variant, and the
@@ -143,13 +146,16 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
       ...(op.defaultResponse ? { defaultResponse: response(op.defaultResponse) } : {}),
       ...(op.rangeResponses ? { rangeResponses: op.rangeResponses.map(response) } : {}),
       ...(op.pagination ? { pagination: pagination(op.pagination) } : {}),
+      ...callbacks(op),
     };
   }
 
   // A webhook's prose, link and parameters follow the same rules as an
-  // operation's; its responses carry a description each. Every optional key
-  // stays absent.
-  function webhook(hook: Webhook): Webhook {
+  // operation's; its responses carry a description each; its callbacks
+  // follow it, each walked as a webhook (a `Callback` is one), nested ones
+  // through theirs (#382). Every optional key stays absent. Generic so a
+  // callback comes back as a `Callback`.
+  function webhook<T extends Webhook>(hook: T): T {
     return {
       ...hook,
       ...expandText(hook, 'summary'),
@@ -160,7 +166,13 @@ export function expandDocUrls(spec: ApiSpec, docUrl: string): ApiSpec {
       queryParams: parameters(hook.queryParams),
       ...(hook.cookieParams ? { cookieParams: parameters(hook.cookieParams) } : {}),
       responses: hook.responses.map((entry) => ({ ...entry, ...expandText(entry, 'description') })),
+      ...callbacks(hook),
     };
+  }
+
+  /** `{ callbacks }` expanded when the node has any, `{}` otherwise, so the key stays absent as the parser left it. */
+  function callbacks(node: { callbacks?: Callback[] }): { callbacks?: Callback[] } {
+    return node.callbacks ? { callbacks: node.callbacks.map(webhook) } : {};
   }
 
   return {

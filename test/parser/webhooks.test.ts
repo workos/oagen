@@ -13,7 +13,7 @@ import { collectReferencedNames } from '../../src/engine/generate-files.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { assignModelsToServices, collectModelRefs, collectWebhookTypeRefs } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
-import type { ApiSpec, Enum, Model, Webhook } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Model, TypeRef, Webhook } from '../../src/ir/types.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(__dirname, '../fixtures');
@@ -506,13 +506,21 @@ describe('webhooks', () => {
 
   describe('extractWebhooks', () => {
     it('returns nothing for an absent map, and warns about one that is not an object', () => {
-      expect(extractWebhooks(undefined)).toEqual({ webhooks: [], inlineModels: [], inlineModelBundles: [] });
+      // `declaredCallbacks` — the `callbacks` maps the webhooks' operations
+      // declare, for `extractCallbacks` — joined the result in #382.
+      expect(extractWebhooks(undefined)).toEqual({
+        webhooks: [],
+        inlineModels: [],
+        inlineModelBundles: [],
+        declaredCallbacks: [],
+      });
       expect(warn).not.toHaveBeenCalled();
 
       expect(extractWebhooks([postWith(petSchema)])).toEqual({
         webhooks: [],
         inlineModels: [],
         inlineModelBundles: [],
+        declaredCallbacks: [],
       });
       expect(warn).toHaveBeenCalledTimes(1);
       expect(warn.mock.calls[0][0]).toContain('`webhooks` is not an object');
@@ -1469,5 +1477,502 @@ describe('#564', () => {
       expect(webhooks[0].requestBody, operationId).toEqual({ kind: 'model', name: 'PetAdoptedPayload' });
     }
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('#382 guard: webhook naming is unchanged from main', () => {
+  // A document without callbacks parses to the IR origin/main (2ec18701)
+  // produced, webhook names included: `buildReceivedRequests` settles the
+  // stems in the one resolution `resolveWebhookModelStems` always was —
+  // reserved-name hits and collisions decided together — and the minting
+  // wave the `webhooks` map is cannot move a settled stem. Each signature
+  // below — every model and enum name in order, each webhook's method,
+  // payload and parameter types, and how many warnings the parse printed —
+  // was captured by running main's parser on the same document. The ninth
+  // is Greptile's regression on #626: a settle pass that let only a group
+  // of the same plain stem move another's hashed `petEvent` alone, for the
+  // component, and `returnedPetEvent` lost its hash.
+  let warn: ReturnType<typeof vi.spyOn>;
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-webhooks-guard-'));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  const idSchema = { type: 'object', properties: { id: { type: 'string' } } };
+  const reason = { type: 'object', properties: { reason: { type: 'string' } } };
+  const union = {
+    oneOf: [
+      { type: 'object', properties: { kind: { const: 'adopted' }, pet_id: { type: 'string' } } },
+      { type: 'object', properties: { kind: { const: 'returned' }, pet_id: { type: 'string' } } },
+    ],
+    discriminator: { propertyName: 'kind' },
+  };
+
+  /** A reference's names: a model's or enum's, a union's variants', an array's items'; a primitive's kind and type. */
+  function refName(ref: TypeRef | undefined): string {
+    if (ref === undefined) return '-';
+    switch (ref.kind) {
+      case 'model':
+      case 'enum':
+        return ref.name;
+      case 'union':
+        return `union(${ref.variants.map(refName).join('|')})`;
+      case 'array':
+        return `array(${refName(ref.items)})`;
+      case 'map':
+        return `map(${refName(ref.valueType)})`;
+      case 'nullable':
+        return `nullable(${refName(ref.inner)})`;
+      case 'primitive':
+        return `primitive:${ref.type}`;
+      default:
+        return ref.kind;
+    }
+  }
+
+  /** What the guard pins of a parse: the names, and what each webhook references. */
+  function signature(spec: ApiSpec) {
+    return {
+      models: spec.models.map((m) => m.name),
+      enums: spec.enums.map((e) => e.name),
+      webhooks: (spec.webhooks ?? []).map((w) =>
+        [
+          w.name,
+          w.httpMethod,
+          refName(w.requestBody),
+          ...[...w.headerParams, ...w.queryParams, ...(w.cookieParams ?? [])].map(
+            (p) => `${p.name}:${refName(p.type)}`,
+          ),
+        ].join(' '),
+      ),
+      warnings: warn.mock.calls.length,
+    };
+  }
+
+  type Document = {
+    webhooks: Record<string, unknown>;
+    components?: Record<string, unknown>;
+    paths?: Record<string, unknown>;
+  };
+  type Signature = ReturnType<typeof signature>;
+
+  const cases: Array<[string, Document, Signature]> = [
+    [
+      'two keys flatten to one stem',
+      { webhooks: { pet_adopted: postWith(petSchema), petAdopted: postWith(petSchema) } },
+      {
+        models: ['PetAdoptedF79708Payload', 'PetAdoptedB4A950Payload'],
+        enums: [],
+        webhooks: ['pet_adopted post PetAdoptedF79708Payload', 'petAdopted post PetAdoptedB4A950Payload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a reserved name the stem would mint',
+      { webhooks: { orderShipped: postWith(petSchema) }, components: { schemas: { OrderShippedPayload: idSchema } } },
+      {
+        models: ['OrderShippedPayload', 'OrderShippedA13Ec8Payload'],
+        enums: [],
+        webhooks: ['orderShipped post OrderShippedA13Ec8Payload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a reserved name the stem would not mint',
+      {
+        webhooks: { orderShipped: postWith(petSchema) },
+        components: { schemas: { OrderShippedPayloadItem: idSchema } },
+      },
+      {
+        models: ['OrderShippedPayloadItem', 'OrderShippedPayload'],
+        enums: [],
+        webhooks: ['orderShipped post OrderShippedPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a reserved name of a nested model',
+      {
+        webhooks: { order: postWith({ type: 'object', properties: { item: petSchema } }) },
+        components: { schemas: { OrderPayloadItem: idSchema } },
+      },
+      {
+        models: ['OrderPayloadItem', 'OrderCce55EPayload', 'OrderCce55EPayloadItem'],
+        enums: [],
+        webhooks: ['order post OrderCce55EPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      "a component's nested inline model",
+      {
+        webhooks: { order: postWith({ type: 'object', properties: { item: petSchema } }) },
+        components: {
+          schemas: {
+            Order: {
+              type: 'object',
+              properties: { payload_item: { type: 'object', properties: { sku: { type: 'string' } } } },
+            },
+          },
+        },
+      },
+      {
+        models: ['Order', 'OrderPayloadItem', 'OrderCce55EPayload', 'OrderCce55EPayloadItem'],
+        enums: [],
+        webhooks: ['order post OrderCce55EPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a reserved name of a parameter model',
+      {
+        webhooks: {
+          order: {
+            post: {
+              parameters: [{ name: 'X-Meta', in: 'header', schema: petSchema }],
+              responses: { '200': { description: 'ok' } },
+            },
+          },
+        },
+        components: { schemas: { OrderXMeta: idSchema } },
+      },
+      {
+        models: ['OrderXMeta', 'OrderCce55EXMeta'],
+        enums: [],
+        webhooks: ['order post - X-Meta:OrderCce55EXMeta'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a reserved name a const-prefixed variant would collide on',
+      { webhooks: { petEvent: postWith(union) }, components: { schemas: { ReturnedPetEventPayload: idSchema } } },
+      {
+        models: ['ReturnedPetEventPayload', 'PetEvent59656FPayload', 'ReturnedPetEvent59656FPayload'],
+        enums: [],
+        webhooks: ['petEvent post union(PetEvent59656FPayload|ReturnedPetEvent59656FPayload)'],
+        warnings: 0,
+      },
+    ],
+    [
+      'two webhooks minting one name, const prefixes included',
+      { webhooks: { petEvent: postWith(union), returnedPetEvent: postWith(reason) } },
+      {
+        models: ['PetEvent59656FPayload', 'ReturnedPetEvent59656FPayload', 'ReturnedPetEvent978BcdPayload'],
+        enums: [],
+        webhooks: [
+          'petEvent post union(PetEvent59656FPayload|ReturnedPetEvent59656FPayload)',
+          'returnedPetEvent post ReturnedPetEvent978BcdPayload',
+        ],
+        warnings: 0,
+      },
+    ],
+    [
+      "Greptile's: both minting one name beside a component naming the first's payload",
+      {
+        webhooks: { petEvent: postWith(union), returnedPetEvent: postWith(reason) },
+        components: { schemas: { PetEventPayload: idSchema } },
+      },
+      {
+        models: [
+          'PetEventPayload',
+          'PetEvent59656FPayload',
+          'ReturnedPetEvent59656FPayload',
+          'ReturnedPetEvent978BcdPayload',
+        ],
+        enums: [],
+        webhooks: [
+          'petEvent post union(PetEvent59656FPayload|ReturnedPetEvent59656FPayload)',
+          'returnedPetEvent post ReturnedPetEvent978BcdPayload',
+        ],
+        warnings: 0,
+      },
+    ],
+    [
+      'a stem another stem starts with',
+      {
+        webhooks: {
+          petAdopted: postWith({ type: 'object', properties: { pet: petSchema } }),
+          petAdoptedPayloadPet: postWith(petSchema),
+        },
+      },
+      {
+        models: ['PetAdoptedPayload', 'PetAdoptedPayloadPet', 'PetAdoptedPayloadPetPayload'],
+        enums: [],
+        webhooks: ['petAdopted post PetAdoptedPayload', 'petAdoptedPayloadPet post PetAdoptedPayloadPetPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      "a component's map-of-objects field model",
+      {
+        webhooks: { event: postWith(petSchema) },
+        components: {
+          schemas: {
+            Event: { type: 'object', properties: { payload: { type: 'object', additionalProperties: idSchema } } },
+          },
+        },
+      },
+      {
+        models: ['Event', 'Event5006EdPayload', 'EventPayload'],
+        enums: [],
+        webhooks: ['event post Event5006EdPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a component enum named like a parameter enum',
+      {
+        webhooks: {
+          petAdopted: {
+            post: {
+              parameters: [{ name: 'X-Source', in: 'header', schema: { type: 'string', enum: ['app', 'web'] } }],
+              responses: { '200': { description: 'ok' } },
+            },
+          },
+        },
+        components: { schemas: { PetAdoptedXSource: { type: 'string', enum: ['legacy'] } } },
+      },
+      {
+        models: [],
+        enums: ['PetAdoptedXSource', 'PetAdoptedB4A950XSource'],
+        webhooks: ['petAdopted post - X-Source:PetAdoptedB4A950XSource'],
+        warnings: 0,
+      },
+    ],
+    [
+      'parameters named like the payload and like each other',
+      {
+        webhooks: {
+          petAdopted: postWith(petSchema, {
+            parameters: [
+              { name: 'payload', in: 'query', schema: idSchema },
+              { name: 'X-Meta', in: 'header', schema: { type: 'object', properties: { etag: { type: 'string' } } } },
+              { name: 'x_meta', in: 'query', schema: { type: 'object', properties: { trace: { type: 'string' } } } },
+            ],
+          }),
+        },
+      },
+      {
+        models: ['PetAdoptedPayload', 'PetAdoptedQueryPayload', 'PetAdoptedXMeta', 'PetAdoptedQueryXMeta'],
+        enums: [],
+        webhooks: [
+          'petAdopted post PetAdoptedPayload X-Meta:PetAdoptedXMeta payload:PetAdoptedQueryPayload x_meta:PetAdoptedQueryXMeta',
+        ],
+        warnings: 0,
+      },
+    ],
+    [
+      'two keys referencing one path item with an operationId',
+      {
+        webhooks: {
+          a: { $ref: '#/components/pathItems/S' },
+          other: postWith(reason),
+          b: { $ref: '#/components/pathItems/S' },
+        },
+        components: {
+          pathItems: {
+            S: postWith(petSchema, {
+              operationId: 'shared',
+              parameters: [{ name: 'X-Sig', in: 'header', required: true, schema: { type: 'string' } }],
+            }),
+          },
+        },
+      },
+      {
+        models: ['SharedPayload', 'OtherPayload'],
+        enums: [],
+        webhooks: [
+          'a post SharedPayload X-Sig:primitive:string',
+          'other post OtherPayload',
+          'b post SharedPayload X-Sig:primitive:string',
+        ],
+        warnings: 0,
+      },
+    ],
+    [
+      'a stem named from an operationId with trailing markers',
+      { webhooks: { anything: postWith(idSchema, { operationId: 'petAdopted[1][2]' }) } },
+      { models: ['PetAdoptedPayload'], enums: [], webhooks: ['anything post PetAdoptedPayload'], warnings: 0 },
+    ],
+    [
+      'one operationId two webhook operations declare',
+      {
+        webhooks: {
+          petAdopted: postWith(idSchema, { operationId: 'petEvent' }),
+          petReturned: postWith(idSchema, { operationId: 'petEvent' }),
+        },
+      },
+      {
+        models: ['PetAdoptedPayload', 'PetReturnedPayload'],
+        enums: [],
+        webhooks: ['petAdopted post PetAdoptedPayload', 'petReturned post PetReturnedPayload'],
+        warnings: 1,
+      },
+    ],
+    [
+      'operationIds that name nothing',
+      {
+        webhooks: {
+          petAdopted: postWith(idSchema, { operationId: '-' }),
+          petReturned: postWith(idSchema, { operationId: ' ' }),
+        },
+      },
+      {
+        models: ['PetAdoptedPayload', 'PetReturnedPayload'],
+        enums: [],
+        webhooks: ['petAdopted post PetAdoptedPayload', 'petReturned post PetReturnedPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'one key declaring several methods',
+      {
+        webhooks: {
+          petEvent: {
+            ...postWith(petSchema),
+            put: {
+              requestBody: { content: { 'application/json': { schema: reason } } },
+              responses: { '200': { description: 'ok' } },
+            },
+          },
+        },
+      },
+      {
+        models: ['PetEventPostPayload', 'PetEventPutPayload'],
+        enums: [],
+        webhooks: ['petEvent post PetEventPostPayload', 'petEvent put PetEventPutPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'a stem that would start with a digit',
+      { webhooks: { '2fa_enabled': postWith(petSchema) } },
+      {
+        models: ['Webhook2FaEnabledPayload'],
+        enums: [],
+        webhooks: ['2fa_enabled post Webhook2FaEnabledPayload'],
+        warnings: 0,
+      },
+    ],
+    [
+      'an inline enum payload and an array of inline objects',
+      {
+        webhooks: {
+          status: postWith({ type: 'string', enum: ['on', 'off'] }),
+          batch: postWith({ type: 'array', items: petSchema }),
+        },
+      },
+      {
+        models: ['BatchPayload'],
+        enums: ['StatusPayload'],
+        webhooks: ['status post StatusPayload', 'batch post array(BatchPayload)'],
+        warnings: 0,
+      },
+    ],
+    [
+      "webhook stems beside an operation's inline models",
+      {
+        paths: {
+          '/pets': {
+            post: {
+              operationId: 'petAdopted',
+              requestBody: {
+                content: { 'application/json': { schema: { type: 'object', properties: { payload: idSchema } } } },
+              },
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: { 'application/json': { schema: { type: 'object', properties: { payload: petSchema } } } },
+                },
+              },
+            },
+          },
+        },
+        webhooks: { petAdopted: postWith(petSchema), petAdoptedRequest: postWith(reason) },
+      },
+      {
+        models: [
+          'PetAdoptedResponse',
+          'PetAdoptedResponsePayload',
+          'PetAdoptedRequest',
+          'PetAdoptedRequestPayload',
+          'PetAdoptedPayload',
+          'PetAdoptedRequestF06F0FPayload',
+        ],
+        enums: [],
+        webhooks: ['petAdopted post PetAdoptedPayload', 'petAdoptedRequest post PetAdoptedRequestF06F0FPayload'],
+        warnings: 0,
+      },
+    ],
+  ];
+
+  async function parseDocument(openapi: string, { webhooks, components, paths }: Document): Promise<ApiSpec> {
+    const specFile = path.join(tmpDir, 'guard.json');
+    const doc = {
+      openapi,
+      info: { title: 't', version: '1' },
+      paths: paths ?? {},
+      webhooks,
+      ...(components ? { components } : {}),
+    };
+    await fs.writeFile(specFile, JSON.stringify(doc), 'utf-8');
+    return parseSpec(specFile);
+  }
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    describe(`OpenAPI ${openapi}`, () => {
+      it.each(cases)('names %s as main does', async (_name, document, expected) => {
+        expect(signature(await parseDocument(openapi, document))).toEqual(expected);
+      });
+
+      it("keeps both stems hashed in Greptile's document, the component's fields its own", async () => {
+        const spec = await parseDocument(openapi, {
+          webhooks: { petEvent: postWith(union), returnedPetEvent: postWith(reason) },
+          components: { schemas: { PetEventPayload: idSchema } },
+        });
+        expect(spec.models.map((m) => m.name)).toEqual([
+          'PetEventPayload',
+          'PetEvent59656FPayload',
+          'ReturnedPetEvent59656FPayload',
+          'ReturnedPetEvent978BcdPayload',
+        ]);
+        expect(fieldsOf(spec, { name: 'PetEventPayload' })).toEqual(['id']);
+        expect(spec.webhooks![1].requestBody).toEqual({ kind: 'model', name: 'ReturnedPetEvent978BcdPayload' });
+        expect(fieldsOf(spec, spec.webhooks![1].requestBody)).toEqual(['reason']);
+        // The component is unreferenced here, so only the references are checked.
+        validateModelRefs(spec);
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
+  }
+
+  it('names the webhooks fixture as main does', async () => {
+    const spec = await parseSpec(`${FIXTURES}/webhooks.yml`);
+    expect(spec.models.map((m) => m.name)).toEqual([
+      'AdoptionEvent',
+      'PetReturnedPayload',
+      'PetReturnedPayloadPet',
+      'ShelterClosedXMeta',
+      'PetEventPayload',
+      'ReturnedPetEventPayload',
+      'PetUpdatedPostPayload',
+      'PetUpdatedPutPayload',
+    ]);
+    expect(spec.enums.map((e) => e.name)).toEqual(['PetReturnedPayloadReason', 'PetReturnedXEventType']);
+    expect(spec.webhooks!.map((w) => `${w.name} ${w.httpMethod} ${refName(w.requestBody)}`)).toEqual([
+      'petAdopted post AdoptionEvent',
+      'pet.returned post PetReturnedPayload',
+      'shelterClosed post -',
+      'petEvent post union(PetEventPayload|ReturnedPetEventPayload)',
+      'petUpdated post PetUpdatedPostPayload',
+      'petUpdated put PetUpdatedPutPayload',
+    ]);
   });
 });
