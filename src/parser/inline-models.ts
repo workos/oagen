@@ -1,4 +1,14 @@
-import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type {
+  Constraints,
+  EnumRef,
+  Extensions,
+  ExternalDocs,
+  Model,
+  ModelRef,
+  Field,
+  TypeRef,
+  UnionType,
+} from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -20,9 +30,10 @@ import {
   markComponentModelRef,
   arraySchemaOf,
   declaresNull,
+  derivedCopy,
   isInlineObjectSchema,
   isNullSchema,
-  nullableUnionBranch,
+  nullableAxisBranch,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -30,6 +41,7 @@ import {
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
+  sourceDeclaration,
   titleMappedVariantNames,
   variantMemberSchemas,
   foldSiblingProperties,
@@ -41,9 +53,12 @@ import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import {
+  carryDeferredMappingEntries,
   componentKeyOf,
   isPendingSchemaRef,
   markPendingSchemaRef,
+  pendingSiteLimitsOf,
+  recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
@@ -54,6 +69,7 @@ import {
   type ParameterObject,
   type SchemaOrContent,
 } from './operations.js';
+import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
@@ -120,8 +136,10 @@ export interface MintedInlineName {
  * inside, re-entering their own properties as `materializeMergedAllOf`
  * does. One reached again is the same conjunction built once more
  * (`combinedDeclarations`), for which the extractor builds nothing
- * (workos/oagen#566), so the walk mints nothing for it either. Empty
- * between walks.
+ * (workos/oagen#566), so the walk mints nothing for it either. Keyed as
+ * `materializingMergedAllOf` is, by the declaration a schema stands for
+ * (`sourceDeclaration`), so a merge under a nullable wrapper is met once
+ * however often the wrapper is stripped. Empty between walks.
  */
 const mintingMergedAllOf = new Set<SchemaObject>();
 
@@ -166,13 +184,7 @@ export function mintedInlineNameEntries(
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
     const reading = readInlineAllOf(s.allOf, s);
     if (reading === 'unwrapped') {
-      return mintedInlineNameEntries(
-        contextName,
-        allOfTypingMember(s.allOf) ?? s.allOf[0]!,
-        parentModelName,
-        reserved,
-        deep,
-      );
+      return mintedInlineNameEntries(contextName, annotatedTypingMember(s), parentModelName, reserved, deep);
     }
     if (reading !== 'merged') return [];
     if (!deep) return modelName();
@@ -181,13 +193,14 @@ export function mintedInlineNameEntries(
     // declares the property too and the two conjoin. A merge already on the
     // path of this walk mints nothing more, as the extractor types it as the
     // model it is building and builds nothing for the re-entry (#566).
-    if (mintingMergedAllOf.has(s)) return [];
-    mintingMergedAllOf.add(s);
+    const declaration = sourceDeclaration(s);
+    if (mintingMergedAllOf.has(declaration)) return [];
+    mintingMergedAllOf.add(declaration);
     try {
       const own = mergeAllOfMembers(s, documentComponentSchemas()).properties.filter((p) => p.origin === null);
       return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
     } finally {
-      mintingMergedAllOf.delete(s);
+      mintingMergedAllOf.delete(declaration);
     }
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
@@ -1078,15 +1091,24 @@ type SiteDirection = 'sent' | 'received';
  * as `buildOperation` merges them, so a Path Item parameter the operation
  * overrides is no site — each written inline or through
  * `components/requestBodies` and `components/parameters`; what it receives
- * is every response it declares — a body at any status code, `default` or
- * range, and a header, inline or through `components/responses` and
- * `components/headers`, the `headers` map read as `extractResponseHeaders`
- * reads it: of two keys that differ in case alone, the later declaration
- * (#295), and never one keyed `Content-Type`, whatever its case, which
- * OpenAPI says to ignore (`isIgnoredResponseHeader`, #540) — so a
- * `Content-Type` header of `$ref: Pet` on `createPet`'s `204` leaves `Pet`
- * only sent, as the response without it does. A parameter or header is
- * read by the one schema that types it (`parameterTyping`): its `schema`,
+ * is every response `extractResponses` reads — a body and a header under a
+ * 200–599 status code, `default` or a `1XX`–`5XX` range, inline or through
+ * `components/responses` and `components/headers` — and nothing under a key
+ * the reader skips, each key classified as the reader classifies it
+ * (`classifyResponseKey`): a 1xx status code, which it keeps as written and
+ * types nothing of, an `x-` extension, a key OpenAPI does not define
+ * (`600`, `6XX`), warned about and ignored, and the later of two range keys
+ * that differ in case alone (`4xx` after `4XX`, `readFallbackResponse`) —
+ * so a `103` on `listNotes` with an `X-Pet` header or a body of `$ref: Pet`
+ * leaves `Pet` only sent, as the document without it does, while a `1XX`
+ * range with the same header receives it (#540 review). The `headers` map
+ * is read as `extractResponseHeaders` reads it: of two keys that differ in
+ * case alone, the later declaration (#295), and never one keyed
+ * `Content-Type`, whatever its case, which OpenAPI says to ignore
+ * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
+ * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
+ * parameter or header is read by the one schema that types it
+ * (`parameterTyping`): its `schema`,
  * else the schema of the `content` entry `selectParameterContent` picks, so
  * one the parser types as a string — a `content` map none of whose media
  * types is read, or a map beside a `schema`, which wins — reaches nothing.
@@ -1099,8 +1121,8 @@ type SiteDirection = 'sent' | 'received';
  * its responses type no body (`extractWebhookResponses`), and `callbacks`
  * are never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths` or a Responses Object stepped over and every `webhooks` key
- * read as a webhook. A schema
+ * of `paths` stepped over, a Responses Object's keys read as above and every
+ * `webhooks` key read as a webhook. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1231,9 +1253,26 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
         const responses = operation['responses'];
         if (webhooks || !isRecord(responses)) continue;
+        // Read as `extractResponses` reads the map, each key classified as
+        // the reader classifies it (`classifyResponseKey`): a 200–599 status
+        // code, `default` and a `1XX`–`5XX` range are read, body and headers
+        // alike, and of two range keys that differ in case alone (`4XX`
+        // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
+        // status code is kept as written and nothing of it typed, an `x-`
+        // key is an extension, and a key OpenAPI does not define (`600`,
+        // `6XX`) is warned about — once, by the reader — and ignored; none
+        // of those reaches a component (#540 review).
+        const ranges = new Set<string>();
         for (const [code, entry] of Object.entries(responses)) {
+          const key = classifyResponseKey(code);
+          if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
+          if (key.kind === 'status' && key.code < 200) continue;
+          if (key.kind === 'range') {
+            if (ranges.has(key.range)) continue;
+            ranges.add(key.range);
+          }
           const response = follow(entry, 'responses');
-          if (code.startsWith('x-') || !response) continue;
+          if (!response) continue;
           content(response['content'], 'received');
           const headers = response['headers'];
           if (!isRecord(headers)) continue;
@@ -1567,9 +1606,10 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
  * `properties`, those of its `allOf` members (following a member's `$ref`
  * into `schemas` when given, as `extractAllOfModel` does), those of a
  * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
- * member it wraps (`nullableUnionBranch`, the definition the model walks
- * resolve a member by, so a nullable `$ref` member's component is followed
- * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
+ * member it wraps (`nullableAxisBranch`, per keyword, the definition the
+ * model walks resolve a member by, so a nullable `$ref` member's component
+ * is followed here as `mergeAllOfMembers` and `readComponentAllOfMember`
+ * follow it, and an `anyOf` beside a nullable `oneOf` is read too), and
  * those of every other `oneOf`/`anyOf` variant, a `$ref` variant's
  * component followed when `schemas` is given, whose fields the model
  * extractors flatten in (`declareVariant`) — in the order first declared,
@@ -1597,10 +1637,14 @@ export function collectProperties(
       if (value) declareProperty(ledger, key, value, null, onBranch);
     }
     for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
-    const branch = nullableUnionBranch(s);
-    if (branch) visit(branch, followRef, onBranch);
-    // A variant's `$ref` is followed as the merges follow it (`declareVariant`).
-    else for (const axis of unionAxesOf(s)) for (const variant of axis) visit(variant, true, true);
+    for (const axis of unionAxesOf(s)) {
+      // A nullable wrapper is its one variant, decided per keyword
+      // (`nullableAxisBranch`); a variant's `$ref` is followed as the merges
+      // follow it (`declareVariant`).
+      const branch = nullableAxisBranch(s, axis);
+      if (branch) visit(branch, followRef, onBranch);
+      else for (const variant of axis) visit(variant, true, true);
+    }
   };
   visit(schema, false, false);
   return new Map(
@@ -1871,7 +1915,10 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
     case 'model': {
       const copy: ModelRef = { ...ref };
       if (isComponentModelRef(ref)) markComponentModelRef(copy);
-      if (isPendingSchemaRef(ref)) markPendingSchemaRef(copy);
+      if (isPendingSchemaRef(ref)) {
+        markPendingSchemaRef(copy);
+        recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+      }
       const key = inheritedModelRefs.get(ref);
       if (key !== undefined) recordInheritedRef(copy, key);
       return copy;
@@ -1891,14 +1938,24 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
         valueType: cloneTypeRef(ref.valueType),
         ...(ref.keyType ? { keyType: cloneTypeRef(ref.keyType) } : {}),
       };
-    case 'union':
-      return {
+    case 'union': {
+      const copy: UnionType = {
         ...ref,
         variants: ref.variants.map(cloneTypeRef),
         ...(ref.discriminator
           ? { discriminator: { ...ref.discriminator, mapping: { ...ref.discriminator.mapping } } }
           : {}),
       };
+      // A mapping entry deferred to a pointer variant (#539) follows the
+      // variant's copy, so the copy's mapping is settled with its own variants.
+      if (ref.discriminator && copy.discriminator) {
+        carryDeferredMappingEntries(
+          { variants: ref.variants, mapping: ref.discriminator.mapping },
+          { variants: copy.variants, mapping: copy.discriminator.mapping },
+        );
+      }
+      return copy;
+    }
     case 'literal':
     case 'primitive':
       return { ...ref };
@@ -2283,14 +2340,15 @@ export interface MergedAllOf {
   resolvedRefs: string[];
   /** The `$ref` members no component schema answers, each once, in order; they contribute nothing. */
   unresolvedRefs: string[];
+  /** The wrapper layer's text (`allOfWrapperLayer`): the wrapper's own, else the first annotating member's — a member that declares no type (#555 review); a typing member's stays on that member, a `$ref` member's on its component. */
   description: string | undefined;
-  /** The wrapper's own link, read like its description. */
+  /** The wrapper layer's link, read like its description. */
   externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
-  /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
+  /** `true` when the wrapper itself, or an annotating member, says `deprecated: true`; a typing member's flag is not read (a `$ref` member's stays on its model). */
   deprecated: boolean | undefined;
-  /** The wrapper's own extensions (`extensionsOf`), read like its link; a member's stay on that member, a `$ref` member's on its component. */
+  /** The wrapper layer's extensions (`extensionsOf`), read like its link; a typing member's stay on that member, a `$ref` member's on its component. */
   extensions: Extensions | undefined;
 }
 
@@ -2319,17 +2377,18 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
   // }]` is the merged model, not a bare reference to `Pet` with the union
   // dropped (#398). A nullable wrapper is no union, nor is a union of one
   // variant: each is read as its one variant, as the type builder reads it
-  // (`nullableUnionBranch`, `loneUnionVariant`), so `{ oneOf: [{ $ref: PetId
-  // }], nullable: true }` beside a `description` stays the reference (#555).
+  // (`nullableAxisBranch`, per keyword; `loneUnionVariant`), so `{ oneOf: [{
+  // $ref: PetId }], nullable: true }` beside a `description` stays the
+  // reference (#555).
   const declares = (s: SchemaObject, onBranch: boolean): boolean => {
     if (seen.has(s)) return false;
     seen.add(s);
     if (s.$ref) return onBranch;
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
-    const branch = nullableUnionBranch(s);
-    if (branch) return declares(branch, onBranch);
     return unionAxesOf(s).some((axis) => {
+      const branch = nullableAxisBranch(s, axis);
+      if (branch) return declares(branch, onBranch);
       const variants = axis.filter((variant) => !isNullSchema(variant));
       return variants.some((variant) => declares(variant, onBranch || variants.length > 1));
     });
@@ -2377,14 +2436,18 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     array, a primitive, an enum — `required` constrains nothing, and the
  *     member is the schema. Members beside it that declare no type of
  *     their own (`declaresType`: a `description`, a `deprecated`, a
- *     `maxLength`, an `x-*` key) add nothing to it either — they annotate
- *     or limit the schema, as the wrapper's own keywords do — so the one
- *     member that declares a type is the schema when every other member
- *     declares none (`allOfTypingMember`): `allOf: [{ type: 'string',
- *     enum: ['cat', 'dog'] }, { description: 'The kind of pet.' }]` is
- *     that enum, documented by the second member, exactly as `{ allOf:
- *     [{ type: 'string', enum: [...] }], description }` is
- *     (workos/oagen#555: it was `unknown`, the description lost with it).
+ *     `maxLength`, an `x-*` key, `items` that declare none themselves) add
+ *     nothing to it either — they annotate or limit the schema, as the
+ *     wrapper's own keywords do — so the one member that declares a type
+ *     is the schema when every other member declares none
+ *     (`allOfTypingMember`): `allOf: [{ type: 'string', enum: ['cat',
+ *     'dog'] }, { description: 'The kind of pet.' }]` is that enum,
+ *     documented by the second member, exactly as `{ allOf: [{ type:
+ *     'string', enum: [...] }], description }` is (workos/oagen#555: it
+ *     was `unknown`, the description lost with it), and `allOf: [{ type:
+ *     'array', items: { $ref: Owner } }, { items: { description } }]` is
+ *     an `Owner[]` whose items the second member documents
+ *     (`annotatedTypingMember`; the #555 review).
  *     Two members that each declare a type, neither of them properties —
  *     two primitives, say — are read as neither, and `allOfTypesSchema`
  *     leaves such a schema to its own keywords.
@@ -2440,11 +2503,16 @@ export function readInlineAllOf(
  * The one member of an `allOf` that declares a type of its own
  * (`declaresType`) when exactly one does, the others annotating or
  * limiting it — a `description`, `deprecated`, `readOnly`, an `example`, a
- * `maxLength`, an `x-*` key — which `readInlineAllOf` reads as the schema
- * (`'unwrapped'`, and `allOfTypesSchema` admits as an `allOf` that types
- * it). `undefined` when no member declares a type, or more than one does:
- * two inline objects merge, a `$ref` beside an inline object augments it,
- * and two primitives are read as neither (#555).
+ * `maxLength`, an `x-*` key, or `items` that declare no type themselves
+ * (`{ items: { description: 'An owner.' } }`, which documents the typing
+ * member's items: `annotatedTypingMember`) — which `readInlineAllOf` reads
+ * as the schema (`'unwrapped'`, and `allOfTypesSchema` admits as an `allOf`
+ * that types it). The member as written: the wrapper's keywords and the
+ * annotating members' land on it elsewhere (`annotatedTypingMember`,
+ * `unwrappedAllOfMember`, `allOfWrapperLayer`). `undefined` when no member
+ * declares a type, or more than one does: two inline objects merge, a
+ * `$ref` beside an inline object augments it, and two primitives — or an
+ * array beside `{ items: { type: 'string' } }` — are read as neither (#555).
  */
 export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObject | undefined {
   const typing = members.filter(declaresType);
@@ -2456,18 +2524,49 @@ export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObjec
  * (`declaresType`), in document order — each annotating or limiting the
  * schema rather than typing it, so what they write is the schema's own, as
  * a wrapper's keywords are: their limits conjoin (`extractConstraints`),
- * and their `description`, link, examples, flags, `default` and `x-*` keys
+ * their `description`, link, examples, flags, `default` and `x-*` keys
  * are the schema's wherever it declares none itself (`allOfWrapperLayer`,
- * `buildFieldFromSchema`, `extractParams`). Whatever the other members —
+ * `buildFieldFromSchema`, `extractParams`), and their `items` document the
+ * typing member's (`annotatedTypingMember`). Whatever the other members —
  * one typing member unwrapped (`allOfTypingMember`), a `$ref` read as the
  * reference, a merge — a member that declares no type documents the field
- * the schema is written on, never a model or component (#555: `allOf:
- * [{ $ref: Kind }, { description }]` was typed `Kind` with no description
- * on the field, and `{ deprecated: true }` or `{ readOnly: true }` beside
- * the `$ref` was dropped). Empty for a schema with no `allOf`.
+ * the schema is written on and the model built from the schema itself
+ * (`mergeAllOfMembers`, `extractAllOfModel`), never a component another
+ * member references (#555: `allOf: [{ $ref: Kind }, { description }]` was
+ * typed `Kind` with no description on the field, and `{ deprecated: true }`
+ * or `{ readOnly: true }` beside the `$ref` was dropped). Empty for a
+ * schema with no `allOf`.
  */
 export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
   return (schema.allOf ?? []).filter((member) => !declaresType(member));
+}
+
+/**
+ * The member an `allOf` read as `'unwrapped'` (`readInlineAllOf`) is typed
+ * and extracted as, as written: the one typing member
+ * (`allOfTypingMember`), or the first member where none types, its `items`
+ * — when it declares any — carrying what each annotating member's `items`
+ * write and they leave unset, the first such member's first
+ * (`withAnnotatedItems`, the reading `combineDeclarations` gives the same
+ * two declarations of one property; #431), so `allOf: [{ type: 'array',
+ * items: { $ref: Owner } }, { items: { description: 'An owner.' } }]` is
+ * `{ type: 'array', items: { $ref: Owner, description: 'An owner.' } }` —
+ * an `Owner[]` whose items the member documents, and an inline enum lifted
+ * from such items carries the text (#555 review: `items` counted as a
+ * type, so the member was a second typing member and the schema
+ * `unknown`). The wrapper's own keywords and the members' other keys are
+ * not read here: `unwrappedAllOfMember` carries the limits, flag and
+ * documentation, the type builder the layer's documentation
+ * (`allOfWrapperLayer`). Read by both, by `typesAsUnknown`,
+ * `mintedInlineNameEntries` and `resolveBareSchema`, so every site reads
+ * one member.
+ */
+export function annotatedTypingMember(wrapper: SchemaObject): SchemaObject {
+  const members = wrapper.allOf ?? [];
+  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  return annotatingAllOfMembers(wrapper)
+    .filter((other) => other !== member)
+    .reduce((typing, other) => withAnnotatedItems(typing, other), member);
 }
 
 /**
@@ -2483,8 +2582,16 @@ export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
  * says so, as `Field.deprecated` reads the levels of a field. The wrapper
  * itself when it has no annotating member. Read wherever a wrapper's
  * documentation lands on what it unwraps to (`unwrappedAllOfMember`, the
- * type builder's unwrapped branch) and wherever a wrapper's own text is
- * read as the schema's (`unwrapCollapsedWrappers`).
+ * type builder's unwrapped branch), wherever a wrapper's own text is
+ * read as the schema's (`unwrapCollapsedWrappers`), and by the model built
+ * from the wrapper itself — a component `allOf` (`extractAllOfModel`) or an
+ * inline merge (`mergeAllOfMembers`) — whose `description`, link,
+ * `deprecated` and `x-*` keys are the layer's, so `Owner: { allOf: [{ $ref:
+ * Base }, { properties: { name } }, { description: 'An owner.',
+ * deprecated: true }] }` is a deprecated `Owner` described "An owner.", as
+ * the same keys beside the `allOf` make it (#555 review: the model read the
+ * wrapper's own keys alone, and `oagen diff` between the two spellings
+ * reported `deprecatedChanged`).
  */
 export function allOfWrapperLayer(wrapper: SchemaObject): SchemaObject {
   const annotating = annotatingAllOfMembers(wrapper);
@@ -2522,8 +2629,9 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
 /**
  * The member of an `allOf` read as `'unwrapped'` (`readInlineAllOf`), read
  * as the schema itself: the lone member, or the one member that declares a
- * type among members that only annotate or limit it (`allOfTypingMember`;
- * #555). The wrapper's own keywords, conjoined with every member's, are the
+ * type among members that only annotate or limit it, its items documented
+ * by theirs (`annotatedTypingMember`; #555). The wrapper's own keywords,
+ * conjoined with every member's, are the
  * schema's limits (see `extractConstraints`), so they ride along with the
  * member and the model built from it carries the same constraints; its
  * `deprecated` is the wrapper layer's alone — the wrapper's own, or an
@@ -2539,13 +2647,15 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
  * stands in where no member declares a type, a shape no site unwraps.
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
-  const members = wrapper.allOf ?? [];
-  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  const member = annotatedTypingMember(wrapper);
   // The wrapper layer's documentation — text, link, examples, extensions —
   // rides onto the member by the one wrapper rule (`withWrapperDocs`), the
   // wrapper's winning, as the type builder gives the same wrapper on a field.
   const layer = allOfWrapperLayer(wrapper);
-  return withWrapperDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, layer), layer);
+  // The copy stands for the member it was spread from (`derivedCopy`), so a
+  // reader that guards by identity meets a merge under the wrapper once.
+  const limited = derivedCopy({ ...member, ...extractConstraints(wrapper) }, member);
+  return withWrapperDocs(withWrapperDeprecation(limited, layer), layer);
 }
 
 /**
@@ -2562,19 +2672,26 @@ export interface PropertyDeclarations {
 
 /**
  * Whether a declaration says what an instance is: a `type`, a `$ref`,
- * `properties`, `items`, an `enum` or `const`, a composition, or an
- * `additionalProperties`/`patternProperties` map. One that declares none —
- * a bare `description`, `title`, `example`, `deprecated`, `default`, or a
- * validation keyword on its own (`minimum: 1`) — annotates or constrains a
- * type another declaration gives, and is never read as the type itself
- * (`combineDeclarations`).
+ * `properties`, `items` that say so themselves, an `enum` or `const`, a
+ * composition, or an `additionalProperties`/`patternProperties` map. One
+ * that declares none — a bare `description`, `title`, `example`,
+ * `deprecated`, `default`, a validation keyword on its own (`minimum: 1`),
+ * or `items` that only document or limit an array's items (`items: {
+ * description }`, `items: {}`, read by this same test) — annotates or
+ * constrains a type another declaration gives, and is never read as the
+ * type itself (`combineDeclarations`, `allOfTypingMember`): `allOf:
+ * [{ type: 'array', items: { $ref: Owner } }, { items: { description: 'An
+ * owner.' } }]` is an `Owner[]` whose items the second member documents,
+ * as the same two declarations of one property are read (#431), not two
+ * typing members read as neither (#555 review: `items` counted as a type,
+ * and the schema was `unknown`).
  */
 export function declaresType(schema: SchemaObject): boolean {
   return (
     schema.type !== undefined ||
     schema.$ref !== undefined ||
     schema.properties !== undefined ||
-    schema.items !== undefined ||
+    (schema.items !== undefined && declaresType(schema.items)) ||
     schema.enum !== undefined ||
     schema.const !== undefined ||
     schema.allOf !== undefined ||
@@ -2593,7 +2710,9 @@ export function declaresType(schema: SchemaObject): boolean {
  * workos/oagen#531) and the extraction of a merged `allOf` whose merge
  * reaches its own conjunction (`materializeMergedAllOf`; workos/oagen#566)
  * each end at a conjunction they have already read because it is the same
- * object. Keyed by the declarations themselves, which the document owns;
+ * object — or a copy standing for it, once a wrapper it keeps is stripped
+ * (`sourceDeclaration`). Keyed by the declarations themselves, which the
+ * document owns;
  * what a pair combines into depends on the document's components
  * (`composesObject`), so the memo is reset with them
  * (`resetCombinedDeclarations`).
@@ -2619,9 +2738,12 @@ export function resetCombinedDeclarations(): void {
  * The first declaration that declares a type (`declaresType`) types the
  * property, whatever comes after it; a declaration that declares none never
  * does, before or after, and only fills in the keywords the typing one
- * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
- * member's `has_more: { description: 'More pages' }` is a described boolean
- * whichever is read first. Two typing declarations conjoin as JSON Schema
+ * leaves unset, its `items` — typeless too — those the typing one's items
+ * leave unset (`annotateDeclaration`) — so `has_more: { type: 'boolean' }`
+ * beside an `allOf` member's `has_more: { description: 'More pages' }` is
+ * a described boolean whichever is read first, and `data: { type: 'array',
+ * items: { $ref: Pet } }` beside `data: { items: { description: 'A pet' } }`
+ * a `Pet[]` whose items carry the text. Two typing declarations conjoin as JSON Schema
  * applies both: two inline objects (`isInlineObjectSchema`) merge their
  * properties — a name both declare by this same rule — and unite their
  * `required`, the later's other keywords (a `description`) over the
@@ -2653,9 +2775,11 @@ export function resetCombinedDeclarations(): void {
  * adds nothing to it, so a lone declaration keeps its identity. The same two
  * declarations combine into the same object throughout the document
  * (`combinedDeclarations`), so a reader that guards by identity meets a
- * conjunction once, however often the merges build it (workos/oagen#551
- * memoized the title walk alone; workos/oagen#566: the extractor still got
- * a new object from every merge, and re-entered it without end).
+ * conjunction once, however often the merges build it — through whatever
+ * wrapper it strips from it, the copy read as the conjunction
+ * (`sourceDeclaration`) — (workos/oagen#551 memoized the title walk alone;
+ * workos/oagen#566: the extractor still got a new object from every merge,
+ * and re-entered it without end).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
   let byNext = combinedDeclarations.get(held);
@@ -2667,10 +2791,44 @@ export function combineDeclarations(held: SchemaObject, next: SchemaObject): Sch
 
 /** What `combineDeclarations` returns, built anew on every call. */
 function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
-  if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
+  if (!declaresType(held) && declaresType(next)) return annotateDeclaration(next, held);
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
-  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
-  return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+  return annotateDeclaration(held, next);
+}
+
+/**
+ * `typing` with what `annotating` — a declaration that declares no type
+ * (`declaresType`), before or after it — writes and `typing` leaves unset
+ * filled in, the one reading `combineDeclarations` gives such a pair. Its
+ * `items`, which declare no type either, fill in the typing declaration's
+ * own items the same way (`withAnnotatedItems`) and supply none where it
+ * declares none: `{ type: 'array', items: { $ref: Pet } }` beside `{ items:
+ * { description: 'A pet' } }` is a `Pet[]` whose items carry the text,
+ * whichever is read first (#431), and `{ type: 'string' }` beside it stays
+ * a `string`. `typing` itself when nothing is added.
+ */
+function annotateDeclaration(typing: SchemaObject, annotating: SchemaObject): SchemaObject {
+  const { items: _items, ...keywords } = annotating;
+  const unset = Object.entries(keywords).filter(([key]) => !Object.hasOwn(typing, key));
+  const filled = unset.length === 0 ? typing : { ...Object.fromEntries(unset), ...typing };
+  return withAnnotatedItems(filled, annotating);
+}
+
+/**
+ * `typing` with its `items`, when it declares any, carrying what
+ * `annotating`'s `items` write and they leave unset
+ * (`combineDeclarations`: `annotating` declares no type, so neither do its
+ * items) — the reading of a typeless `items` beside a typed one wherever
+ * two declarations meet: a property two members declare
+ * (`annotateDeclaration`) and the one typing member of an `allOf` beside a
+ * member that only documents its items (`annotatedTypingMember`; #555
+ * review). `typing` itself when either declares no `items`, or the items
+ * gain nothing.
+ */
+function withAnnotatedItems(typing: SchemaObject, annotating: SchemaObject): SchemaObject {
+  if (typing.items === undefined || annotating.items === undefined) return typing;
+  const items = combineDeclarations(typing.items, annotating.items);
+  return items === typing.items ? typing : { ...typing, items };
 }
 
 /** Two typing declarations of one property, conjoined as `combineDeclarations` describes; `first` when they do not combine. */
@@ -2777,46 +2935,86 @@ export function declareProperty(
 
 /**
  * Declare into `ledger`, as branch-only (`declareProperty`), every
- * property a `oneOf`/`anyOf` variant declares: its own `properties`, those
- * of its `allOf` members, those of the one variant of a nullable wrapper
- * it carries (`nullableUnionBranch`), those of every variant of the unions
- * nested in it (`unionAxesOf`, both keywords), and — through a `$ref`, the
- * variant itself or one met anywhere under it — those the component it
- * names declares, read the same way (its own properties, its `allOf`
- * chain, a union of its own). A variant's `required` is not read: its
- * properties are present only on that branch. The one branch reader the
- * component reader (`readComponentAllOfMember`) and the inline merge
- * (`mergeAllOfMembers`) flatten a variant with, so a flattened union
- * declares the same properties as a component and inline (#398: the
- * component reader read a variant's own `properties` and its `allOf`
- * wrappers' only, so `{ oneOf: [{ oneOf: [{ a }, { b }] }, { c }] }` gave
- * `c` alone and a `$ref` variant gave nothing, while the inline merge read
- * nested unions but followed no `$ref`). A schema in `seen` was read under
- * a variant already and declares nothing more, which ends a component that
- * names itself under a variant.
+ * property a `oneOf`/`anyOf` variant declares — one declaration per name,
+ * the variant read as the one conjunction it is (`readVariant`): its own
+ * `properties`, those of its `allOf` members, those of the one variant of
+ * a nullable wrapper it carries (`nullableAxisBranch`, per keyword) and —
+ * through a `$ref`, the variant itself or one met anywhere under it —
+ * those the component it names declares, read the same way (its own
+ * properties, its `allOf` chain, a union of its own), all always-applying
+ * within the variant and settled as every `allOf` merge settles a name two
+ * members declare (`combineDeclarations`: the first typing declaration
+ * types it, a typeless one only annotates it), so a variant `{ allOf: [{
+ * properties: { value: { type: 'string' } } }, { properties: { value: {
+ * description: 'doc' } } }] }` declares one `value`, a described string
+ * (#398 review: each member's declaration was a branch of its own, so the
+ * variant declared `value` twice and the field was typed `string |
+ * unknown`, where the component kept `string`); and those of every
+ * variant of the unions nested in it (`unionAxesOf`, both keywords),
+ * branch-only within the variant — the union of their distinct
+ * declarations where nothing in the variant always declares the name
+ * (`unionOfDeclarations`, as the merge types such a property). A
+ * variant's `required` is not read: its properties are present only on
+ * that branch. The one branch reader the component reader
+ * (`readComponentAllOfMember`) and the inline merge (`mergeAllOfMembers`)
+ * flatten a variant with, so a flattened union declares the same
+ * properties as a component and inline (#398: the component reader read a
+ * variant's own `properties` and its `allOf` wrappers' only, so `{ oneOf:
+ * [{ oneOf: [{ a }, { b }] }, { c }] }` gave `c` alone and a `$ref`
+ * variant gave nothing, while the inline merge read nested unions but
+ * followed no `$ref`). A schema met again within one variant's reading
+ * declares nothing more, which ends a component that names itself under a
+ * variant; the guard is the variant's own, so a component two variants
+ * name declares into each variant's conjunction — `{ allOf: [{ $ref: C },
+ * { payload: { b } }] }` beside `{ allOf: [{ $ref: C }, { payload: { c }
+ * }] }`, `C.payload { a }`, is `payload: { a, b } | { a, c }` (#398 review
+ * round 2: the guard was shared across the variants, so the second read
+ * `{ c }` alone).
  */
 export function declareVariant(
   ledger: Map<string, PropertyDeclarations>,
   variant: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
-  seen: Set<SchemaObject>,
 ): void {
-  if (seen.has(variant)) return;
-  seen.add(variant);
-  if (variant.$ref) {
-    const target = schemaRefTarget(variant.$ref, componentSchemas);
-    if (target) declareVariant(ledger, target, componentSchemas, seen);
+  const own = new Map<string, PropertyDeclarations>();
+  readVariant(own, variant, componentSchemas, new Set(), false);
+  for (const { name, unconditional, conditional } of own.values()) {
+    declareProperty(ledger, name, unconditional?.schema ?? unionOfDeclarations(conditional), null, true);
+  }
+}
+
+/**
+ * Read a `oneOf`/`anyOf` variant, or a schema met under one, into
+ * `ledger` as `declareVariant` describes: what always applies within the
+ * variant — its properties, an `allOf` member's, a nullable wrapper's one
+ * variant's, the component a `$ref` names — in the capacity it is reached
+ * in (`onBranch`: always-applying for the variant itself), and what a
+ * union nested in it declares as branch-only, however deep. `seen` is this
+ * one variant's: a schema met again under it declares nothing more.
+ */
+function readVariant(
+  ledger: Map<string, PropertyDeclarations>,
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject>,
+  onBranch: boolean,
+): void {
+  if (seen.has(schema)) return;
+  seen.add(schema);
+  if (schema.$ref) {
+    const target = schemaRefTarget(schema.$ref, componentSchemas);
+    if (target) readVariant(ledger, target, componentSchemas, seen, onBranch);
     return;
   }
-  for (const [key, value] of Object.entries(variant.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, true);
+  for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    if (value) declareProperty(ledger, key, value, null, onBranch);
   }
-  for (const sub of variant.allOf ?? []) declareVariant(ledger, sub, componentSchemas, seen);
-  const branch = nullableUnionBranch(variant);
-  if (branch) declareVariant(ledger, branch, componentSchemas, seen);
-  else
-    for (const axis of unionAxesOf(variant))
-      for (const nested of axis) declareVariant(ledger, nested, componentSchemas, seen);
+  for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, onBranch);
+  for (const variants of unionAxesOf(schema)) {
+    const branch = nullableAxisBranch(schema, variants);
+    if (branch) readVariant(ledger, branch, componentSchemas, seen, onBranch);
+    else for (const nested of variants) readVariant(ledger, nested, componentSchemas, seen, true);
+  }
 }
 
 /**
@@ -2846,7 +3044,8 @@ export function declareVariant(
  * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for each `oneOf`/`anyOf` it carries (`unionAxesOf`:
- * a member writing both carries two; #398 read only the `oneOf`), those of
+ * a member writing both carries two, a nullable wrapper among them decided
+ * per keyword, `nullableAxisBranch`; #398 read only the `oneOf`), those of
  * every variant — read through the variant's own `allOf` members, its
  * nested unions and the component a `$ref` variant names, by the one
  * branch reader the component reader flattens a variant with
@@ -2897,17 +3096,20 @@ export function declareVariant(
  * A schema reached twice is read once in each capacity it is reached in —
  * as an inline member (the merged model's own, unions included), through a
  * `$ref` member (inherited, a union its component dispatches left to the
- * component) or under a variant (`required` unread) — and only an inline
- * reading stands for the others: a schema shared between a variant and a
- * member (a YAML anchor, an object a `transformSpec` hook reuses, a `$ref`
- * written twice) still contributes its `required` and is still followed
- * when the member is reached, and a component's own object reused as an
- * inline member still has a dispatched union flattened after the `$ref`
- * reading left it to the component (`done`). The walk reads property lists
- * only — it never descends into a property — so it is finite for any
- * component graph: a schema already read in the same capacity is not read
- * again, which is what stops a component that extends itself. `required`
- * lists each name once.
+ * component) or under a variant (`required` unread, once per variant that
+ * reaches it: each variant is read as a conjunction of its own,
+ * `declareVariant`, so a component two variants name declares into both)
+ * — and only an inline reading stands for the others: a schema shared
+ * between a variant and a member (a YAML anchor, an object a
+ * `transformSpec` hook reuses, a `$ref` written twice) still contributes
+ * its `required` and is still followed when the member is reached, and a
+ * component's own object reused as an inline member still has a dispatched
+ * union flattened after the `$ref` reading left it to the component
+ * (`done`). The walk reads property lists only — it never descends into a
+ * property — so it is finite for any component graph: a schema already
+ * read in the same capacity is not read again, and a variant's walk ends
+ * where it meets a schema again, which is what stops a component that
+ * extends itself. `required` lists each name once.
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
@@ -2918,22 +3120,20 @@ export function mergeAllOfMembers(
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
   // The schemas read so far, by capacity: `inline` (an always-applying
-  // member read as the merged model's own, every union flattened),
+  // member read as the merged model's own, every union flattened) and
   // `inherited` (reached through a `$ref` member, a union its component
-  // dispatches left to the component) and `conditional` (under a variant,
-  // `required` unread; `declareVariant`). An inline reading is complete, so
-  // it stands for every capacity; an inherited or conditional reading is
-  // not, so the same schema reached again in another capacity is read once
-  // more for what that capacity contributes — a component's own object
-  // reused as an inline member (an object a `transformSpec` hook shares)
-  // still has a dispatched union flattened, a variant's object reused as a
-  // member still has its `required` read. A schema already read in the same
-  // capacity is not read again, which is what stops a component that
-  // extends itself.
+  // dispatches left to the component). An inline reading is complete, so
+  // it stands for both; an inherited reading is not, so the same schema
+  // reached again inline is read once more for what that capacity
+  // contributes — a component's own object reused as an inline member (an
+  // object a `transformSpec` hook shares) still has a dispatched union
+  // flattened. A schema already read in the same capacity is not read
+  // again, which is what stops a component that extends itself. A schema
+  // under a variant is read by the variant's own walk (`declareVariant`),
+  // `required` unread, once per variant that reaches it.
   const done = {
     inline: new Set<SchemaObject>(),
     inherited: new Set<SchemaObject>(),
-    conditional: new Set<SchemaObject>(),
   };
   // `wrapperDiscriminator`: the `discriminator` the `allOf` wrapper `s` sits
   // in writes for a union among its members (`wrapperDiscriminatorOf`), by
@@ -2977,28 +3177,34 @@ export function mergeAllOfMembers(
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
     for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s));
     // A nullable union wrapper — one non-null variant beside `null`, decided
-    // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
-    // collapses by, which `readComponentAllOfMember` reads a component's
-    // member through and the envelope collector reads every member through
-    // (`resolveBareSchema`) — is that variant, applying as the member does:
-    // an instance that is not null is the variant, and beside an object
-    // member it is never null. So the variant is read in the member's own
-    // capacity — its `$ref` followed, its `required` read, its properties
-    // always-applying — wherever the member sits, a `$ref` member's
-    // component included (workos/oagen#308: read as a branch, `Base`'s
-    // `has_more` ended the iteration but was missing from the model). Any
-    // other union is flattened, each variant read as the component reader
-    // reads it (`declareVariant`) — unless a `$ref` member's component
-    // dispatches it, in which case it belongs to that component's model
-    // (`componentUnionDispatches`; #429).
-    const branch = nullableUnionBranch(s);
-    if (branch) visit(branch, origin);
-    else {
-      for (const variants of unionAxesOf(s)) {
-        const explicit = s.discriminator ?? wrapperDiscriminator;
-        if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
-        for (const variant of variants) declareVariant(declared, variant, componentSchemas, done.conditional);
+    // per keyword by `nullableAxisBranch`, `nullableUnionBranch`'s
+    // definition, the one `unwrapNullableSchema` collapses by, which
+    // `readComponentAllOfMember` reads a component's member through and the
+    // envelope collector reads every member through (`resolveBareSchema`) —
+    // is that variant, applying as the member does: an instance that is not
+    // null is the variant, and beside an object member it is never null. So
+    // the variant is read in the member's own capacity — its `$ref`
+    // followed, its `required` read, its properties always-applying —
+    // wherever the member sits, a `$ref` member's component included
+    // (workos/oagen#308: read as a branch, `Base`'s `has_more` ended the
+    // iteration but was missing from the model). Any other union is
+    // flattened, each variant read as the component reader reads it
+    // (`declareVariant`) — unless a `$ref` member's component dispatches
+    // it, in which case it belongs to that component's model
+    // (`componentUnionDispatches`; #429). Each axis is decided on its own,
+    // so a member writing a nullable `oneOf` beside an `anyOf` has the
+    // `anyOf` flattened, as two members would (#398 review: the wrapper was
+    // decided on the member, which reads one keyword, and the `anyOf` was
+    // never read).
+    for (const variants of unionAxesOf(s)) {
+      const branch = nullableAxisBranch(s, variants);
+      if (branch) {
+        visit(branch, origin);
+        continue;
       }
+      const explicit = s.discriminator ?? wrapperDiscriminator;
+      if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
+      for (const variant of variants) declareVariant(declared, variant, componentSchemas);
     }
   };
   visit(schema, null);
@@ -3009,16 +3215,24 @@ export function mergeAllOfMembers(
   );
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
+  // The text, link, flag and extensions are the wrapper layer's: the
+  // wrapper's own, with an annotating member's — one that declares no type
+  // — where it declares none (`allOfWrapperLayer`; #555 review: `allOf:
+  // [{ properties: { a } }, { description: 'D', deprecated: true }]` built
+  // a model with neither, while the same keys beside the `allOf` were its
+  // own). A typing member's stay on that member, a `$ref` member's on its
+  // component.
+  const layer = allOfWrapperLayer(schema);
   return {
     properties,
     required,
     resolvedRefs,
     unresolvedRefs,
-    description: schema.description,
-    externalDocs: readExternalDocs(schema.externalDocs),
+    description: layer.description,
+    externalDocs: readExternalDocs(layer.externalDocs),
     constraints: extractConstraints(schema),
-    deprecated: schema.deprecated === true || undefined,
-    extensions: extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
+    deprecated: layer.deprecated === true || undefined,
+    extensions: extensionsOf(layer, SCHEMA_CONSUMED_EXTENSIONS),
   };
 }
 
@@ -3189,19 +3403,21 @@ export function unionOfDeclarations(declarations: readonly SchemaObject[]): Sche
     if (group) group.push(declaration);
     else groups.set(key, [declaration]);
   }
-  const shapes = [...groups.values()].map(shapeVariant);
+  // Each shape is its first declaration, the limits inside its items and
+  // values read by the agreement of every declaration of that shape
+  // (`withAgreedNestedLimits`), whether it is the one shape or one of
+  // several: a limit one array declaration's items write and another's
+  // leave out is no limit of the items whichever array is declared first,
+  // and whether or not an integer is declared beside them (#545 review).
+  const shapes = [...groups.values()].map((group) => withAgreedNestedLimits(shapeVariant(group), group));
   // One shape: the first declaration, carrying the agreed keywords and
-  // extensions in place of its own — inside its items and values too, for
-  // the limits their types carry.
+  // extensions in place of its own.
   if (shapes.length === 1) {
     const first = shapes[0]!;
     const disputed = new Set(
       LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
     );
-    return withAgreedExtensions(
-      withAgreedNestedLimits(disputed.size > 0 ? omitKeys(first, disputed) : first, declarations),
-      extensions,
-    );
+    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
   }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
@@ -3209,17 +3425,22 @@ export function unionOfDeclarations(declarations: readonly SchemaObject[]): Sche
 }
 
 /**
- * `shape`, the one declaration a single shape is typed from, with the
- * limits inside its array items and map values (`NESTED_DECLARATION_KEYWORDS`,
- * recursively) read by the same agreement as its own: a limit the items or
- * values of every declaration write the same way stays, one any declaration
- * leaves unset or writes otherwise is dropped (`agreedDeclarationKeys`).
- * The items' or values' type carries those limits (#545), and the value
- * takes one branch, so a `maxLength: 5` one declaration's items write and
- * another's leave out is no limit of the field's items; before, nothing in
- * the IR read them there. Every other lifted keyword written inside the
- * items or values — `readOnly`, `description`, `default`, … — stays the
- * first declaration's, as it did, since a field reads none of them there.
+ * `shape`, the declaration one shape is typed from (`shapeVariant`), with
+ * the limits inside its array items and map values
+ * (`NESTED_DECLARATION_KEYWORDS`, recursively) read by the agreement of
+ * `declarations`, the declarations of that shape, as a single shape's own
+ * are read by every declaration's: a limit the items or values of every
+ * declaration write the same way stays, one any declaration leaves unset
+ * or writes otherwise is dropped (`agreedDeclarationKeys`). The items' or
+ * values' type carries those limits (#545), and the value takes one
+ * branch, so a `maxLength: 5` one declaration's items write and another's
+ * leave out is no limit of the field's items; before, nothing in the IR
+ * read them there. Read per shape, so two array declarations beside an
+ * integer agree on their items as they would without it, whichever array
+ * comes first (#545 review: the first array's `pattern` was every item's).
+ * Every other lifted keyword written inside the items or values —
+ * `readOnly`, `description`, `default`, … — stays the first declaration's,
+ * as it did, since a field reads none of them there.
  */
 function withAgreedNestedLimits(shape: SchemaObject, declarations: readonly SchemaObject[]): SchemaObject {
   let out = shape;
@@ -3325,7 +3546,15 @@ function withoutNull(schema: SchemaObject): SchemaObject {
  * typeless `reply: { description }` and the array `replies` forms, and two
  * components that do this to each other, end the same way; workos/oagen#566:
  * each merge built a new conjunction that was re-entered under a longer name
- * without end). Shared by the field extractor and `extractInlineModelDeep`,
+ * without end). The path is keyed by the declaration a schema stands for
+ * (`sourceDeclaration`), not by the schema handed in, so the same holds
+ * under a nullable wrapper of any spelling, or a single-member `allOf`
+ * wrapper: a typeless redeclaration annotates the conjunction without
+ * stripping the wrapper, every unwrap of it makes a copy
+ * (`unwrapNullableField`), and the copy is read as the declaration it was
+ * spread from (workos/oagen#566 review: the guard never met the same copy
+ * twice, and a nullable `Note.reply` beside `reply: { description }` still
+ * overflowed). Shared by the field extractor and `extractInlineModelDeep`,
  * so a field nested under a discriminated component variant is built exactly
  * as the same field anywhere else.
  */
@@ -3336,9 +3565,12 @@ export function materializeMergedAllOf(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): void {
   // Already being built on this path: the reference that named this
-  // re-entry resolves to the model under construction (see above).
-  if (materializingMergedAllOf.has(schema)) return;
-  materializingMergedAllOf.set(schema, name);
+  // re-entry resolves to the model under construction (see above). The
+  // path is keyed by the declaration `schema` stands for, so a copy a
+  // stripped wrapper left is the merge it was spread from.
+  const declaration = sourceDeclaration(schema);
+  if (materializingMergedAllOf.has(declaration)) return;
+  materializingMergedAllOf.set(declaration, name);
   try {
     const merged = mergeAllOfMembers(schema, componentSchemas);
     results.push(buildMergedModel(name, merged, componentSchemas));
@@ -3349,7 +3581,7 @@ export function materializeMergedAllOf(
     const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
     extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
   } finally {
-    materializingMergedAllOf.delete(schema);
+    materializingMergedAllOf.delete(declaration);
   }
 }
 
@@ -3361,13 +3593,29 @@ export function materializeMergedAllOf(
  * conjunction built once more (`combinedDeclarations`), so the field is
  * typed as the model on the path (`materializingMergedAllOfName`, read by
  * `schemaToTypeRef`) and the re-entry builds nothing (workos/oagen#566).
- * Empty between extractions.
+ *
+ * The identity rule: a merge is the declaration that carries its `allOf` —
+ * a document's own object, or the conjunction `combineDeclarations`
+ * memoizes for two of them — and every schema is keyed by the declaration
+ * it stands for (`sourceDeclaration`), so a copy a reader spreads from one
+ * — a nullable wrapper stripped, sibling properties folded, a wrapper's
+ * documentation or limits carried onto the branch it collapses to
+ * (`derivedCopy`, at each such site) — is the declaration it was spread
+ * from, and the extractor and the type builder meet one key for a merge
+ * whichever wrapper each strips. A transform that memoizes its copy per
+ * declaration composes with the rule, since the one copy is itself a
+ * stable key; one that records its copy resolves to the declaration. Under
+ * a nullable wrapper the two spellings that flag the schema (`nullable:
+ * true`, `type: ['object', 'null']`) key the field's declaration itself,
+ * and a `oneOf: [{ allOf }, { type: 'null' }]` or single-member `allOf`
+ * wrapper keys the branch or member that carries the `allOf`, which the
+ * wrapper and a conjunction annotating it share. Empty between extractions.
  */
 let materializingMergedAllOf = new Map<SchemaObject, string>();
 
-/** The name `materializeMergedAllOf` is building the model for `schema` under, on the path the extraction is inside; `undefined` off it. */
+/** The name `materializeMergedAllOf` is building the model for the declaration `schema` stands for under (`sourceDeclaration`), on the path the extraction is inside; `undefined` off it. */
 export function materializingMergedAllOfName(schema: SchemaObject): string | undefined {
-  return materializingMergedAllOf.get(schema);
+  return materializingMergedAllOf.get(sourceDeclaration(schema));
 }
 
 /**

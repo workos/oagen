@@ -1628,4 +1628,66 @@ describe('#429', () => {
     expect(warnings).toEqual([]);
     expectSound(spec, ['Pet', 'Dog', 'Owner', 'Base', 'Cat', 'DogKind']);
   });
+
+  // Review round 1 (Greptile, on #398's pagination check): the override
+  // check reads a union exactly when the model carries its fields
+  // (`unionCounts`, mirroring `componentUnionDispatches`). `PetMeta`'s
+  // const-pinned union is dispatched by a component whose direct `$ref`
+  // member names it (above: `Dog` dispatches `Pet`'s), whose variant models
+  // carry `has_more`, and left to `PetMeta` by the inline merge, which
+  // carries the base fields only; through a lone-`allOf` alias the nested
+  // dispatcher stays its own, through a nullable alias it is the member's.
+  it.each(openapis)(
+    "an endOfIteration behind PetMeta's dispatched union is kept for a component that dispatches it and rejected for a merge that leaves it to PetMeta (OAS %s)",
+    async (openapi) => {
+      const cursor = obj({ kind: { type: 'string', const: 'cursor' }, has_more: bool, next_after: str });
+      const page = obj({ kind: { type: 'string', const: 'page' }, has_more: bool, next_page: int });
+      const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+      const listPets = (meta: SchemaObject) => ({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: str }],
+            responses: ok(obj({ data: { type: 'array', items: str }, meta })),
+            'x-pagination': { endOfIteration },
+          },
+        },
+      });
+      const schemas = {
+        PetMeta: { type: 'object', properties: { base: str }, oneOf: [cursor, page] },
+        DogMeta: { allOf: [ref('PetMeta')], properties: { trace_id: str } },
+        AliasMeta: { allOf: [ref('PetMeta')] },
+        ViaAlias: { allOf: [ref('AliasMeta')], properties: { trace_id: str } },
+        NullableAlias: { oneOf: [ref('PetMeta'), { type: 'null' }] },
+        ViaNullable: { allOf: [ref('NullableAlias')], properties: { trace_id: str } },
+      };
+      const names = Object.keys(schemas);
+      for (const name of ['DogMeta', 'ViaNullable']) {
+        const { spec, warnings } = await parse(
+          `kept-${name}-${openapi}`,
+          specDoc(listPets(ref(name)), schemas, { openapi }),
+        );
+        expect(opsOf(spec).listPets!.pagination?.endOfIteration, name).toEqual(endOfIteration);
+        expect(modelOf(spec, name).discriminator?.property, name).toBe('kind');
+        expect(warnings, name).toEqual([]);
+        expectSound(spec, names);
+      }
+      const rejected = [
+        ['inline', { allOf: [ref('PetMeta'), obj({ trace_id: str })] } as SchemaObject, 'Meta'],
+        ['ViaAlias', ref('ViaAlias'), 'ViaAlias'],
+      ] as const;
+      for (const [label, meta, model] of rejected) {
+        const { spec, warnings } = await parse(
+          `rejected-${label}-${openapi}`,
+          specDoc(listPets(meta), schemas, { openapi }),
+        );
+        expect(opsOf(spec).listPets!.pagination?.endOfIteration, label).toBeUndefined();
+        expect(warnings, label).toEqual([
+          expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field'),
+        ]);
+        expect([...fieldsOf(spec, model)].sort(), label).toEqual(['base?: string', 'trace_id?: string']);
+        expect(modelOf(spec, model).discriminator, label).toBeUndefined();
+      }
+    },
+  );
 });

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { buildDirectionIndex } from '../../src/differ/direction.js';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Model, Parameter, Webhook } from '../../src/ir/types.js';
+import type { ApiSpec, Model, Parameter, TypeRef, Webhook } from '../../src/ir/types.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 
 function webhook(overrides: Partial<Webhook> = {}): Webhook {
@@ -599,5 +599,114 @@ describe('#528 — a required flag on a payload carried in requestBodyContents a
     const none = webhook({ requestBody: undefined });
     expect(diffSpecs(spec([none]), spec([carried({ requestBodyRequired: true })])).changes).toEqual([]);
     expect(diffSpecs(spec([carried({ requestBodyRequired: true })]), spec([none])).changes).toEqual([]);
+  });
+
+  describe('#528 review — the media types of such a payload are compared, its encoding is not', () => {
+    /** `petAdopted`'s payload under the given media types, `required` on both sides. */
+    const documentWith = (content: Record<string, unknown>) => ({
+      openapi: '3.1.0',
+      info: { title: 'Pets', version: '1' },
+      webhooks: {
+        petAdopted: {
+          post: { requestBody: { required: true, content }, responses: { '200': { description: 'ok' } } },
+        },
+      },
+    });
+    const object = { type: 'object', properties: { name: { type: 'string' } } };
+    const webhookChanges = (before: ApiSpec, after: ApiSpec) =>
+      diffSpecs(before, after).changes.filter((c) => c.kind === 'webhook-modified');
+
+    it("reports the media types a payload carried in requestBodyContents alone gained or lost, from the receiver's side, with no encoding", async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const xml = await parseDocument(documentWith({ 'application/xml': { schema: object } }));
+      const xmlCsv = await parseDocument(
+        documentWith({ 'application/xml': { schema: object }, 'text/csv': { schema: { type: 'string' } } }),
+      );
+      // Neither side is read as `requestBody`, and no encoding is read from such a payload.
+      for (const spec of [xml, xmlCsv]) {
+        expect(spec.webhooks?.[0]?.requestBody).toBeUndefined();
+        expect(spec.webhooks?.[0]?.requestBodyEncoding).toBeUndefined();
+      }
+      expect(xmlCsv.webhooks?.[0]?.requestBodyContentTypes).toEqual(['application/xml', 'text/csv']);
+
+      const gained = webhookChanges(xml, xmlCsv);
+      expect(gained).toEqual([
+        {
+          ...modified('payload media type text/csv added', 'breaking'),
+          requestBodyContentTypeChange: expect.objectContaining({
+            added: ['text/csv'],
+            removed: [],
+            classification: 'breaking',
+          }),
+        },
+      ]);
+      expect(gained[0]).not.toHaveProperty('oldRequestBodyEncoding');
+      expect(gained[0]).not.toHaveProperty('newRequestBodyEncoding');
+      expect(webhookChanges(xmlCsv, xml)).toEqual([
+        {
+          ...modified('payload media type text/csv removed', 'additive'),
+          requestBodyContentTypeChange: expect.objectContaining({
+            added: [],
+            removed: ['text/csv'],
+            classification: 'additive',
+          }),
+        },
+      ]);
+    });
+
+    it('compares no encoding across the two readings, though the payload read as requestBody carries one', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const xml = await parseDocument(documentWith({ 'application/xml': { schema: object } }));
+      const json = await parseDocument(documentWith({ 'application/json': { schema: object } }));
+      const form = await parseDocument(documentWith({ 'application/x-www-form-urlencoded': { schema: object } }));
+      expect(json.webhooks?.[0]?.requestBodyEncoding).toBe('json');
+      const [added] = webhookChanges(xml, json);
+      expect(added).toMatchObject({
+        details: 'payload added; payload media type application/json added; payload media type application/xml removed',
+      });
+      expect(added).not.toHaveProperty('oldRequestBodyEncoding');
+      expect(added).not.toHaveProperty('newRequestBodyEncoding');
+      const [removed] = webhookChanges(json, xml);
+      expect(removed).toMatchObject({
+        details:
+          'payload removed; payload media type application/xml added; payload media type application/json removed',
+      });
+      expect(removed).not.toHaveProperty('oldRequestBodyEncoding');
+      expect(removed).not.toHaveProperty('newRequestBodyEncoding');
+      // While both read the payload as `requestBody`, the encoding is compared as before.
+      expect(webhookChanges(json, form)[0]).toMatchObject({
+        details:
+          'encoding json → form-urlencoded; payload media type application/x-www-form-urlencoded added; payload media type application/json removed',
+        oldRequestBodyEncoding: 'json',
+        newRequestBodyEncoding: 'form-urlencoded',
+      });
+    });
+
+    it('compares no encoding on a hand-built payload carried in requestBodyContents alone, even one that carries an encoding', () => {
+      const event: TypeRef = { kind: 'model', name: 'AdoptionEvent' };
+      const carried = (encoding: Webhook['requestBodyEncoding'], ...contentTypes: string[]): Webhook =>
+        webhook({
+          requestBody: undefined,
+          requestBodyRequired: true,
+          requestBodyContentTypes: contentTypes,
+          requestBodyContents: contentTypes.map((contentType) => ({ contentType, type: event })),
+          ...(encoding ? { requestBodyEncoding: encoding } : {}),
+        });
+      // A hand-built IR may set `requestBodyEncoding` beside a payload with no `requestBody`; the parser never does.
+      expect(
+        diffSpecs(spec([carried('text', 'application/xml')]), spec([carried('binary', 'application/xml')])).changes,
+      ).toEqual([]);
+      expect(
+        diffSpecs(
+          spec([carried(undefined, 'application/xml')]),
+          spec([carried(undefined, 'application/xml', 'text/csv')]),
+        ).changes,
+      ).toEqual([
+        {
+          ...modified('payload media type text/csv added', 'breaking'),
+          requestBodyContentTypeChange: expect.objectContaining({ added: ['text/csv'] }),
+        },
+      ]);
+    });
   });
 });

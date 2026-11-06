@@ -7,10 +7,15 @@
  *
  * Usage:
  *   OPENAPI_SPEC_PATH=path/to/spec.yaml npm run smoke:baseline
+ *   npx tsx scripts/smoke/baseline.ts --spec path/to/spec.yaml [--ir path/to/ir.json]
+ *
+ * `oagen verify` runs this script with `--ir`: the IR it parsed `--spec` to
+ * with the config's settings, as `generate` parses it, so the baseline lists
+ * the operations `generate` reads rather than those of a bare parse (see
+ * `loadSmokeSpec`, #567). Run by hand without `--ir`, it parses `--spec` bare.
  */
 
 import { writeFileSync } from 'node:fs';
-import { parseSpec } from '../../src/parser/parse.js';
 import {
   planOperations,
   generatePayload,
@@ -18,16 +23,17 @@ import {
   resolvePath,
   parseCliArgs,
   loadSmokeConfig,
+  loadSmokeSpec,
   type CapturedExchange,
   type SmokeResults,
 } from './shared.js';
 
 async function main() {
-  const { spec: specPath, smokeConfig } = parseCliArgs();
-  loadSmokeConfig(smokeConfig);
+  const args = parseCliArgs();
+  loadSmokeConfig(args.smokeConfig);
 
-  console.log('Parsing spec...');
-  const spec = await parseSpec(specPath);
+  console.log(args.ir ? 'Reading the IR verify parsed...' : 'Parsing spec...');
+  const spec = await loadSmokeSpec(args);
   console.log(`Spec: ${spec.name} v${spec.version}`);
 
   const groups = planOperations(spec);

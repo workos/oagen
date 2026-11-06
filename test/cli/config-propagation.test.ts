@@ -998,6 +998,58 @@ describe('the settings generate reads from config reach compat-extract and verif
     ]);
   });
 
+  it('compat-extract: matches the methods mountRules and a name hint give the SDK', async () => {
+    // `generate` under the retry config writes `Animals: get_pet, list_all`;
+    // an SDK whose `Animals` carries `get` (named after its operationId) and
+    // `list_all` is that SDK. Matched by the IR's `Pets.get` and `Pets.list`
+    // alone, both got `operationId: null, route: null`.
+    const method = (name: string) => [{ name, params: [], returnType: 'Pet', async: true }];
+    writeFileSync(
+      sdkSurface,
+      JSON.stringify(
+        surface({
+          classes: {
+            Animals: {
+              name: 'Animals',
+              methods: { get: method('get'), list_all: method('list_all') },
+              properties: {},
+              constructorParams: [],
+            },
+          },
+          interfaces: { Pet: iface('Pet', { name: 'string' }) },
+        }),
+      ),
+    );
+    const result = await run([
+      '--config',
+      retryConfig,
+      'compat-extract',
+      '--sdk-path',
+      sdk,
+      '--lang',
+      'pets',
+      '--output',
+      dir,
+      '--spec',
+      petsSpec,
+    ]);
+    expect(result.code).toBe(0);
+    const symbols = JSON.parse(readFileSync(snapshot, 'utf8')).symbols as Array<{
+      kind: string;
+      fqName: string;
+      operationId?: string;
+      route?: unknown;
+    }>;
+    expect(
+      symbols
+        .filter((s) => s.kind === 'callable')
+        .map(({ fqName, operationId, route }) => ({ fqName, operationId, route })),
+    ).toEqual([
+      { fqName: 'Animals.get', operationId: 'get', route: { method: 'get', path: '/pets/{id}' } },
+      { fqName: 'Animals.list_all', operationId: 'list', route: { method: 'get', path: '/pets' } },
+    ]);
+  });
+
   it('verify: the overlay retry regenerates with the mount rules, hints and emitter options generate used', async () => {
     const generated = await run([
       '--config',

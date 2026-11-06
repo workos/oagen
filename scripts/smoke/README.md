@@ -87,6 +87,8 @@ npm run smoke:baseline
 npm run smoke -- --lang node --sdk-path ../path/to/sdk --raw-results smoke-results-spec-baseline.json
 ```
 
+Run by hand, the script parses `--spec` (or `OPENAPI_SPEC_PATH`) bare: no `oagen.config.ts` setting reaches it. `oagen verify` instead hands it `--ir <path>`, a JSON file holding the IR `verify` parsed with the config's settings (`operationIdTransform`, `transformSpec`, `operationHints`, …) exactly as `generate` parses it, so the baseline lists the operations `generate` reads: `Pets.list` under a transform that strips `PetsController_`, and no `Pets.get` under a `transformSpec` that drops `/pets/{id}`. The runner gets the same `--ir` beside `--spec`; `loadSmokeSpec(parseCliArgs())` from `@workos/oagen/smoke` reads it when present and parses `--spec` otherwise, so a runner that uses it plans the same operations as the baseline.
+
 ---
 
 ## Individual Steps
@@ -233,7 +235,7 @@ oagen generate --spec v2.yml --lang {lang} --output {sdk-path}
 oagen verify --spec v2.yml --lang {lang} --output {sdk-path}
 ```
 
-If no baseline exists, `verify` auto-generates a spec-only baseline (offline, no API key needed). To use a specific baseline:
+If no baseline exists, `verify` auto-generates a spec-only baseline (offline, no API key needed) from the IR it parsed with the config's settings (see [Spec-Only Baseline](#spec-only-baseline)). To use a specific baseline:
 
 ```bash
 oagen verify --lang {lang} --output {sdk-path} --raw-results smoke-results-raw.json
