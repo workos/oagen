@@ -158,7 +158,15 @@ function documentMapOf(ref: string): 'paths' | 'webhooks' | undefined {
  */
 export function resolveComponentRef(
   ref: string,
-  section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'examples' | 'callbacks',
+  section:
+    | 'pathItems'
+    | 'parameters'
+    | 'requestBodies'
+    | 'responses'
+    | 'headers'
+    | 'examples'
+    | 'callbacks'
+    | 'securitySchemes',
   components: Record<string, Record<string, unknown>> | undefined,
 ): Record<string, unknown> | undefined {
   const prefix = `#/components/${section}/`;

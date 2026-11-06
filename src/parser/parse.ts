@@ -12,7 +12,7 @@ import { attachSharedRefs, extractOperations } from './operations.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
 import { extractCallbacks } from './callbacks.js';
-import { siblingDocsMode } from './reference-objects.js';
+import { followReference, siblingDocsMode, type ReferenceObject, type SiblingDocs } from './reference-objects.js';
 import {
   mergeInlineResponseModels,
   collapseJsonSuffixModels,
@@ -152,7 +152,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
       headers?: Record<string, unknown>;
       pathItems?: Record<string, unknown>;
       callbacks?: Record<string, unknown>;
-      securitySchemes?: Record<string, SecuritySchemeObject>;
+      securitySchemes?: Record<string, SecuritySchemeObject | ReferenceObject>;
     };
   };
 
@@ -448,7 +448,8 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // to `PetMode` beside a component model `PetMode` is lifted as `PetMode2`.
   for (const [name, ref] of foldedEnums) console.warn(`[oagen] Folded enum "${name}" into "${ref.name}"`);
 
-  const auth = extractAuthSchemes(spec.components?.securitySchemes);
+  // A `$ref` entry's sibling text is read by the document's version, as for operations.
+  const auth = extractAuthSchemes(spec.components?.securitySchemes, siblingDocsMode(version));
 
   const result: ApiSpec = {
     name: spec.info?.title ?? 'Unknown API',
@@ -531,11 +532,40 @@ interface SecuritySchemeObject {
  * `schemeName` so emitters can join the requirements under `ApiSpec.security`
  * and `Operation.security` back to it.
  * Schemes the IR cannot represent are omitted with a warning rather than silently.
+ *
+ * An entry may be a `$ref` to another entry of the map — OAS 3.0.3 and
+ * 3.1.0 both allow a Reference Object under `components.securitySchemes` —
+ * and is followed, chains included, through `followReference`, the walk
+ * every Reference Object takes, so the scheme is read under the REFERENCING
+ * key with the target's definition: `petKey: { $ref:
+ * '#/components/securitySchemes/sharedKey' }` is `schemeName: 'petKey'`
+ * beside `sharedKey`'s own entry, and a requirement naming `petKey` joins to
+ * it (#384). A `description` written beside the `$ref` overrides the
+ * target's under 3.1 and is ignored under 3.0 (`siblingDocs`). A ref the map
+ * does not answer — a pointer into another section, or a `$ref` that is not
+ * a string — is omitted with the same warning an unsupported scheme gets,
+ * naming the ref and how the walk ended; one that names no component at
+ * all, or a cycle of refs, fails the bundle before parsing, as any dangling
+ * ref does.
  */
-function extractAuthSchemes(securitySchemes?: Record<string, SecuritySchemeObject>): AuthScheme[] | undefined {
+function extractAuthSchemes(
+  securitySchemes: Record<string, SecuritySchemeObject | ReferenceObject> | undefined,
+  siblingDocs: SiblingDocs,
+): AuthScheme[] | undefined {
   if (!securitySchemes) return undefined;
   const schemes: AuthScheme[] = [];
-  for (const [schemeName, scheme] of Object.entries(securitySchemes)) {
+  // Every pointer is `#/components/securitySchemes/<name>`, so the map
+  // itself is what a ref resolves against.
+  const components = securitySchemes as unknown as Record<string, Record<string, unknown>>;
+  for (const [schemeName, entry] of Object.entries(securitySchemes)) {
+    const followed = followReference<SecuritySchemeObject>(entry, 'securitySchemes', components, siblingDocs);
+    if (followed.outcome !== 'resolved') {
+      console.warn(
+        `[oagen] Warning: Unsupported security scheme "${schemeName}" ($ref ${followed.ref} ${followed.outcome}) omitted from spec.auth`,
+      );
+      continue;
+    }
+    const scheme = followed.value;
     // Omit `description` entirely (rather than setting it to undefined) when the
     // document does not declare one. An explicit empty string is a declared value
     // and is kept, so consumers can tell "empty" from "missing".

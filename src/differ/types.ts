@@ -1305,11 +1305,20 @@ export interface DocumentSecurityChanged {
 /**
  * A security scheme the new document declares under
  * `components.securitySchemes` (`ApiSpec.auth`) and the old did not,
- * matched by `schemeName` (#384). Additive: no request built for the old
- * document carried it, and a requirement that starts naming it is reported
- * as the requirement change it is (`security-changed`, `securityChanged`).
- * Listed after the document's `security-changed` change and before the
- * models, with the removed and modified schemes after it.
+ * matched by `schemeName` (#384). Breaking when the old document already
+ * had the scheme in use — named by the effective requirement list,
+ * `node.security ?? spec.security ?? []`, of one of its operations or
+ * webhooks — under a definition the parser omits from `auth`
+ * (`openIdConnect`, an `http` scheme such as `digest`, `mutualTLS`): every
+ * old request carried that, not what the new definition reads, so `petKey:
+ * { type: openIdConnect, … }` becoming `{ type: apiKey, in: header, name:
+ * X-Key }` under `security: [{ petKey: [] }]` breaks, as the reverse (a
+ * `security-scheme-removed` a requirement still names) does. Additive
+ * otherwise: no request built for the old document carried it, and a
+ * requirement that starts naming it is reported as the requirement change
+ * it is (`security-changed`, `securityChanged`). Listed after the
+ * document's `security-changed` change and before the models, with the
+ * removed and modified schemes after it.
  */
 export interface SecuritySchemeAdded {
   kind: 'security-scheme-added';
@@ -1317,7 +1326,7 @@ export interface SecuritySchemeAdded {
   schemeName: string;
   /** The definition as the new document declares it. */
   scheme: AuthScheme;
-  classification: 'additive';
+  classification: 'additive' | 'breaking';
 }
 
 /**
@@ -1344,28 +1353,36 @@ export interface SecuritySchemeRemoved {
 
 /**
  * A security scheme both documents declare whose definitions differ in
- * anything but `description` (documentation is never a change, as
- * everywhere in the differ) (#384). Breaking when its wire form changed —
- * the `kind`; an `apiKey`'s `in` or `name`; an `oauth2` scheme's `flows`
- * compared deeply, key order aside, with each flow's `scopes` map taken
- * out, so a changed `authorizationUrl`, `tokenUrl` or `refreshUrl`, a flow
- * added or removed, or a flow's other keys changing all count — and the
- * scheme is in use in the new document (named by the effective requirement
- * list of one of its operations, webhooks or callbacks, as for a removed
- * scheme): an
- * SDK built for the old definition sends `X-Key` to a server that now reads
- * `X-Api-Key`, and a webhook handler built for it checks a header the
- * sender no longer carries. Additive when nothing in the new document uses
- * it (no request carries the old form to the new server), or when only an
- * `oauth2` flow's `scopes` map changed: the scopes a request needs are the
- * requirement's, which `security-changed` already compares, so a scope
- * added, removed or re-described in the definition moves nothing on the
- * wire. An `apiKey` header's `name` is compared folded (`foldHeaderName`),
- * since HTTP header names are case-insensitive (RFC 9110 §5.1): a header
- * respelled `X-Key` → `x-key` is still reported, with the spelling in
- * `details`, but is additive, as a case-only header parameter rename is; a
- * query or cookie name is case-sensitive, so the same respelling there is
- * breaking in use.
+ * anything but `description` and `x-*` keys (documentation and extensions
+ * are never a change, as everywhere in the differ) (#384). Breaking when
+ * its wire form regressed and the scheme is in use in the new document
+ * (named by the effective requirement list of one of its operations,
+ * webhooks or callbacks, as for a removed scheme): an SDK built for the
+ * old definition sends `X-Key` to a server that now reads `X-Api-Key`, and
+ * a webhook handler built for it checks a header the sender no longer
+ * carries. Additive when nothing in the new document uses it (no request
+ * carries the old form to the new server), or when the definition only
+ * grew.
+ *
+ * The wire form is the `kind`; an `apiKey`'s `in` and `name`, a header's
+ * name compared folded (`foldHeaderName`) since HTTP header names are
+ * case-insensitive (RFC 9110 §5.1) — a header respelled `X-Key` → `x-key`
+ * is still reported, with the spelling in `details`, but is additive, as a
+ * case-only header parameter rename is, while a query or cookie name is
+ * case-sensitive, so the same respelling there is breaking in use; and an
+ * `oauth2` scheme's `flows`, read the way `security-changed` reads a
+ * requirement's alternatives: a flow added beside unchanged ones, or a
+ * `refreshUrl` added to a flow that had none, is an alternative a caller
+ * may use and is additive, while a flow removed, or a URL a flow already
+ * declared (`authorizationUrl`, `tokenUrl`, `refreshUrl`) changed or
+ * removed, is breaking in use. Each flow's `scopes` map is the
+ * requirement's to need, which `security-changed` compares, so a scope
+ * added, re-described, or removed while no requirement names it is
+ * reported but additive; a scope the old definition offered in some flow,
+ * the new offers in none, and a requirement in the new document still
+ * names on the scheme is breaking, `details` naming it: the document now
+ * asks for what its definition no longer offers, as it does for a removed
+ * scheme a requirement still names.
  */
 export interface SecuritySchemeModified {
   kind: 'security-scheme-modified';
@@ -1379,8 +1396,11 @@ export interface SecuritySchemeModified {
    * What changed, in words: `apiKey → http basic` (`http bearer`, `oauth2`)
    * for a changed kind; `apiKey in header "X-Key" → in header "X-Api-Key"`
    * for an `apiKey` whose location or name moved; `oauth2 flows changed`
-   * when an `oauth2` scheme's wire form moved; `oauth2 scopes changed` when
-   * only a flow's `scopes` map did.
+   * when anything but a `scopes` map moved in an `oauth2` scheme's flows,
+   * `oauth2 scopes changed` when only scopes did, either followed by
+   * `; required scope "write:pets" removed` (`required scopes "a", "b"
+   * removed`, sorted) when a scope a requirement in the new document still
+   * names is no longer offered.
    */
   details: string;
   classification: 'additive' | 'breaking';
