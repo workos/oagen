@@ -53,7 +53,9 @@
  * on — what its own type carries where it stands, under any nullable
  * wrapper, the conjoined reading of a chain included — conjoined with the
  * site's own (`combineConstraints`, the component's first, the stricter
- * bound winning), and a field or parameter whose type that is carries the
+ * bound winning: what is written beside the pointer, then around a
+ * wrapper the type builder reads through, as `withTypeConstraints`
+ * records them), and a field or parameter whose type that is carries the
  * same (`Field.constraints`, `Parameter.constraints`), so `{ $ref:
  * '#/components/schemas/Owner/properties/code', maxLength: 3 }` to `{
  * type: 'string', pattern: '^own_', maxLength: 8 }` is `{ maxLength: 3,
@@ -244,9 +246,14 @@ function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
  * Every type an operation holds, as `validateModelRefs` reads them and
  * `collectOperationTypeRefs` lists them: every parameter location, the
  * cookies' included, the bodies, the primary response and every other
- * success entry's own type, the iterator's, the errors', the headers' and
- * every secondary media type's. A parameter or envelope field goes through
- * `visitSite`, which aligns its own limits with its settled type's too.
+ * success entry's own type, the iterator's, the errors', the headers',
+ * every secondary media type's, and the members of its mutually-exclusive
+ * parameter groups — a query group's are the operation's own parameters,
+ * settled with them; a body group's are built afresh from the body's
+ * variant schemas (`extractBodyParameterGroups`), so a member written as a
+ * pointer holds a pending reference of its own. A parameter, a group member
+ * or an envelope field goes through `visitSite`, which aligns its own
+ * limits with its settled type's too.
  */
 function visitOperation(
   op: Operation,
@@ -282,6 +289,12 @@ function visitOperation(
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
   for (const { type, source } of collectRequestBodyTypes(op)) visit(type, `${context}.${source}`);
+  for (const group of op.parameterGroups ?? []) {
+    for (const variant of group.variants) {
+      for (const p of variant.parameters)
+        visitSite(p, `${context}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
+    }
+  }
 }
 
 /** The keywords a pointer steps through with a name or index after them; every other keyword the walk reads holds one schema. */
