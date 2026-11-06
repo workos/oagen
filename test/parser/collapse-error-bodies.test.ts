@@ -1437,6 +1437,77 @@ describe('#515', () => {
     },
   );
 
+  it.each(['3.0.3', '3.1.0'] as const)(
+    "keeps the model of a field named like another field's qualifier when the qualified shape is added, whichever operation declares which, under OAS %s",
+    async (version) => {
+      // `code_integer: string` and `code: integer` both spell `CodeInteger`:
+      // no qualifier is beyond what a field name can spell, so the plain
+      // shape sorts first and keeps the name, and the qualified one stays
+      // as it is with a warning printing both shapes.
+      const plain = obj({ message: str, code_integer: str });
+      const typed = obj({ message: str, code: { type: 'integer' } });
+      const before = {
+        ...doc(getOp('pets', { '404': { description: 'nf', content: json(plain) } })),
+        openapi: version,
+      };
+      const old = await parseWithoutWarnings(before);
+      expect(modelNames(old)).toEqual(['ErrorBodyWithCodeInteger', 'Note']);
+      for (const [plainOp, typedOp] of [
+        ['pets', 'notes'],
+        ['notes', 'pets'],
+      ] as const) {
+        const typedModel = typedOp === 'pets' ? 'GetPetsError404' : 'GetNotesError404';
+        const ir = await parseWithWarnings(
+          {
+            ...doc({
+              ...getOp(plainOp, { '404': { description: 'nf', content: json(plain) } }),
+              ...getOp(typedOp, { '404': { description: 'nf', content: json(typed) } }),
+            }),
+            openapi: version,
+          },
+          [
+            typedOp === 'pets'
+              ? /The shared error body \{ message: string, code: integer \} would be named "ErrorBodyWithCodeInteger", which the shared error body "ErrorBodyWithCodeInteger" \{ message: string, code_integer: string \} already holds — keeping model "GetPetsError404" as it is/
+              : /The shared error body \{ message: string, code: integer \} would be named "ErrorBodyWithCodeInteger", which the shared error body "ErrorBodyWithCodeInteger" \{ message: string, code_integer: string \} already holds — keeping model "GetNotesError404" as it is/,
+          ],
+        );
+        expect(modelNames(ir)).toEqual(['ErrorBodyWithCodeInteger', typedModel, 'Note'].sort());
+        expect(errorType(ir, `get${plainOp[0].toUpperCase()}${plainOp.slice(1)}`, 404)).toEqual({
+          kind: 'model',
+          name: 'ErrorBodyWithCodeInteger',
+        });
+        expect(fieldSummary(ir, 'ErrorBodyWithCodeInteger')).toEqual(['message: string', 'code_integer: string']);
+        expectSound(ir);
+        if (plainOp === 'pets') {
+          const { changes, exit } = diffOf(old, ir);
+          expect(changes).toEqual(['additive model-added GetNotesError404', 'additive service-added Notes']);
+          expect(exit).toBe(1);
+        }
+      }
+      // A pinned value that spells a family prefix is the same case: the
+      // shape with fewer fields keeps `OptionalErrorBody`.
+      const prefix = await parseWithWarnings(
+        {
+          ...doc({
+            ...getOp('pets', {
+              '404': {
+                description: 'nf',
+                content: json(obj({ message: str, code: { type: 'string', const: 'optional' } })),
+              },
+            }),
+            ...getOp('notes', { '404': { description: 'nf', content: json(obj({ message: str }, [])) } }),
+          }),
+          openapi: version,
+        },
+        [
+          /The shared error body \{ message: string, code: "optional" \} would be named "OptionalErrorBody", which the shared error body "OptionalErrorBody" \{ message\?: string \} already holds — keeping model "GetPetsError404" as it is/,
+        ],
+      );
+      expect(modelNames(prefix)).toEqual(['GetPetsError404', 'Note', 'OptionalErrorBody']);
+      expectSound(prefix);
+    },
+  );
+
   it('prints requiredness, nullability, domain names and types in the warning for what no name can spell', async () => {
     // Two bodies that reference different components under one field name
     // are two shapes with one name: the one whose shape sorts first keeps

@@ -90,11 +90,18 @@
  * gains a field the component lacks moves alone. A name anything else holds
  * — a component of another shape, an enum, a shared body whose shape
  * differs in what no name can spell (a value pinned inside an array, a
- * discriminator mapping, the component or named enum a field references) —
- * leaves the group's models exactly as the parser materialized them, with
- * every error-only model they reach or are reached from, and says so in a
- * warning that prints both shapes with their types; the fold then runs
- * again without them, since a freed name may now suit another group.
+ * discriminator mapping, the component or named enum a field references, a
+ * field named like another field's qualifier, a pinned value that spells a
+ * family prefix) — leaves the group's models exactly as the parser
+ * materialized them, with every error-only model they reach or are reached
+ * from, and says so in a warning that prints both shapes with their types;
+ * the fold then runs again without them, since a freed name may now suit
+ * another group. The groups are ordered by shape, never by operation: fewer
+ * named fields first, a shape whose name is its field names alone before
+ * one a qualifier spelled (`qualified`), then the key, so the same shape
+ * keeps a contested name whichever operation declared it, and adding
+ * `{ message, code: integer }` beside `{ message, code_integer }` (both
+ * `ErrorBodyWithCodeInteger`) leaves the latter's model as it is.
  *
  * A string field a group pins to two or more values becomes an enum shared by
  * every error body that has a field of that name — `ErrorBodyCode` for
@@ -272,12 +279,18 @@ function fold(
     else groups.set(key, [byName.get(name)!]);
   }
   // Groups are ordered by shape, never by the operations that produced them:
-  // fewer named fields first, then the key, so when two shapes ask for one
-  // name the same one keeps it whichever operation declared it, and renaming
-  // an operation moves no model name.
+  // fewer named fields first, then a shape whose name is its field names
+  // alone before one a qualifier spelled, then the key, so when two shapes
+  // ask for one name the same one keeps it whichever operation declared it,
+  // renaming an operation moves no model name, and a field named like
+  // another field's qualifier (`code_integer` beside `code: integer`, both
+  // `ErrorBodyWithCodeInteger`) keeps its model when the qualified shape is
+  // added.
   const orderedGroups = [...groups.entries()].sort(([keyA, a], [keyB, b]) => {
     const fields = namedFields(a[0]).length - namedFields(b[0]).length;
-    return fields !== 0 ? fields : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+    if (fields !== 0) return fields;
+    const plain = Number(qualified(a[0], naming)) - Number(qualified(b[0], naming));
+    return plain !== 0 ? plain : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
   });
   const pinnedByKey = new Map<string, Map<string, PinnedValues>>();
   for (const [key, members] of orderedGroups) pinnedByKey.set(key, pinnedValues(members));
@@ -788,6 +801,21 @@ function singlePinned(
   // A value that is empty or starts with a digit (`4001`) names nothing.
   if (word.length === 0 || /^\d/.test(word)) return undefined;
   return { field, value };
+}
+
+/**
+ * Whether a body's name spells more than its named fields' names: some
+ * field's token carries a qualifier — `Nullable`, a type or format, a
+ * value, a domain name after `As`, `List`, `Or`, a nested body's fields. No
+ * qualifier is beyond what a field name can spell, in the IR or once an
+ * emitter re-cases it (`code_integer` is `CodeInteger`, as `code: integer`
+ * is), so the fold cannot keep the two apart by spelling; it orders a plain
+ * shape before a qualified one instead, so that adding the qualified shape
+ * leaves the plain one's model as it is.
+ */
+function qualified(model: Model, naming: NamingContext): boolean {
+  const visiting = new Set([model.name]);
+  return namedFields(model).some((field) => fieldToken(field, true, naming, visiting) !== toPascalCase(field.name));
 }
 
 /** A plain string a name need not spell: a free, pinned or enumerated string under no `null`, no format and no domain name. */

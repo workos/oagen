@@ -98,8 +98,12 @@ export interface ParseOptions {
    * requires no field is named from every field under `Optional`
    * (`OptionalErrorBody` for `{ message? }`); what no name can spell — a
    * value pinned inside an array, a discriminator mapping, the component or
-   * named enum a field references — leaves the later shape's models as
-   * they are, with a warning. A component of the shared name takes each
+   * named enum a field references, a field named like another field's
+   * qualifier (`code_integer` beside `code: integer`), a pinned value that
+   * spells a family prefix (`code: 'optional'` beside `{ message? }`) —
+   * leaves the later shape's models as they are, with a warning; a shape
+   * whose name is its field names alone sorts before one a qualifier
+   * spelled, so adding the qualified shape moves no model. A component of the shared name takes each
    * body it declares every field, domain name and limit of, and leaves a
    * body it would narrow as it is. An optional field's hint is carried
    * whichever bodies give it, and dropped with a warning when two bodies
