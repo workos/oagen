@@ -3401,8 +3401,10 @@ function buildSyntheticEnumRef(
  * The name `schemaToTypeRef` gives an inline enum typed under `contextName`
  * (`GetPetError404`; `status` → `Status`): qualified by `parentModelName`
  * with its list-item markers stripped (`DirectoryListItem` + `State` →
- * `DirectoryState`) unless the name already starts with it (`Connection` +
- * `ConnectionType` → `ConnectionType`), then passed through the active
+ * `DirectoryState`) unless the name already starts with it and adds
+ * something after it (`extendsParentName`: `Connection` + `ConnectionType` →
+ * `ConnectionType`; `Reply` + `Reply` → `ReplyReply`, never the model's own
+ * name, workos/oagen#621), then passed through the active
  * `schemaNameTransform` as a component's name is, so a project's rename map
  * (`RadarAction` → `RadarListAction` in `oagen.config.ts`) reaches inline
  * enums too. One rule for every inline enum: an `enum:` list and a `oneOf`
@@ -3411,7 +3413,8 @@ function buildSyntheticEnumRef(
 export function inlineEnumName(contextName: string | undefined, parentModelName: string | undefined): string {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
-  const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
+  const qualifiedName =
+    cleanParent && !extendsParentName(baseName, cleanParent) ? `${cleanParent}${baseName}` : baseName;
   return activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
 }
 
@@ -6742,6 +6745,7 @@ import {
   mintedInlineNames,
   modelFingerprint,
   type PropertyDeclarations,
+  extendsParentName,
   qualifyInlineModelName,
   recordLiftedFieldModel,
   reservedInlineNames,
