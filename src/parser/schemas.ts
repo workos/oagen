@@ -80,7 +80,7 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
 /**
  * Resolved names of named-union components that admit `null`
  * (a `type: 'null'` variant, an OAS 3.1 `type` list with `'null'`, or OAS
- * 3.0 `nullable: true`). The null variant is not a member (`namedUnionMembers`
+ * 3.0 `nullable: true`). The null variant is not a member (`unionMembers`
  * drops it), so, as for a nullable enum, a `$ref` to one of these resolves to
  * `nullable(model)`: the IR then says what the inline form of the same union
  * says (`nullable<union>`).
@@ -1901,6 +1901,9 @@ export function nameUndiscriminatedVariant(
 /** No reserved names: for a union with no sibling properties (a request body or response that is itself a union). */
 const NO_RESERVED: ReadonlySet<string> = new Set();
 
+/** No inline variant names: for a union read before its variants are named (`titleMappedVariantNames`). */
+const NO_INLINE_NAMES: ReadonlyMap<SchemaObject, string> = new Map();
+
 /**
  * True when the union's inline object variants (two or more) each carry a
  * title and no two titles PascalCase to the same prefix: the one case in
@@ -1979,7 +1982,8 @@ export function nameInlineVariant(
  *
  * One union shape is named differently: a `oneOf` with no explicit
  * `discriminator:` whose every variant carries a `$ref` or a `title` and pins
- * the same const property (`titleMappedDiscriminatorProperty`). Its
+ * the same const property, a `$ref` variant's read from its component
+ * (`titleMappedDiscriminatorProperty`). Its
  * discriminator mapping has always named an inline variant by its title
  * (`resolveSchemaName(title)`: `Circle`, `Square`, run through the project's
  * schema-name transform like a component), and `schemaToTypeRef` references
@@ -2080,27 +2084,59 @@ export function nameInlineVariantEntries(
 /**
  * The inline object variants of a title-mapped union — a `oneOf` with no
  * explicit `discriminator:` whose every non-null variant carries a `$ref` or
- * a `title` and pins the same const property
- * (`titleMappedDiscriminatorProperty`) — each with the name its title
- * resolves to (`resolveVariantModelName`: the title run through the
- * project's schema-name transform, like a component name). Empty for any
- * other union, so a caller can read "is title-mapped" off the map's size.
- * `nameInlineVariantEntries` names such a variant from this map, and
- * `markContestedTitles` reads the same map to find the variants that give
- * one title two shapes under one root, so the two cannot disagree on which
- * variants a title names.
+ * a `title` and pins the same const property, a `$ref` variant's read from
+ * the component it points at (`titleMappedDiscriminatorProperty`; #568) —
+ * each with the name its title resolves to (`resolveVariantModelName`: the
+ * title run through the project's schema-name transform, like a component
+ * name). Empty for any other union, so a caller can read "is title-mapped"
+ * off the map's size. `nameInlineVariantEntries` names such a variant from
+ * this map, and `markContestedTitles` reads the same map to find the
+ * variants that give one title two shapes under one root, so the two cannot
+ * disagree on which variants a title names. A `$ref` resolves against the
+ * document's components (`documentComponentSchemas`) unless a map is handed in.
  */
-export function titleMappedVariantNames(union: SchemaObject): ReadonlyMap<SchemaObject, string> {
+export function titleMappedVariantNames(
+  union: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined = documentComponentSchemas(),
+): ReadonlyMap<SchemaObject, string> {
   const names = new Map<SchemaObject, string>();
   if (union.oneOf === undefined || union.discriminator) return names;
-  const nonNullVariants = union.oneOf.filter((v) => !isNullSchema(v));
-  if (titleMappedDiscriminatorProperty(nonNullVariants) === null) return names;
-  for (const variant of nonNullVariants) {
-    if (!isInlineObjectSchema(variant)) continue;
-    const titled = resolveVariantModelName(variant);
-    if (titled !== null) names.set(variant, titled);
+  // Read before the variants are named, so an inline object variant is
+  // named by its title alone — the name `nameInlineVariantEntries` keeps.
+  const members = unionMembers(union, NO_INLINE_NAMES, schemas);
+  if (titleMappedDiscriminatorProperty(members, schemas) === null) return names;
+  for (const { raw, name } of members) {
+    if (isInlineObjectSchema(raw) && name !== null) names.set(raw, name);
   }
   return names;
+}
+
+/**
+ * The property a title-mapped union pins: when every member is named — an
+ * inline object by its title before naming, a `$ref` by its component, a
+ * wrapper by the one model it wraps (`unionMembers`) — the first property
+ * the first member pins that every member pins too, a `$ref` variant's
+ * read from its component, through a `$ref` member of its `allOf` or a
+ * `$ref` on the property (`getEffectiveConstPropertyValue`; #568); null
+ * when a member is unnamed or no property is shared. The naming side's test (`titleMappedVariantNames`):
+ * the titles are kept whether or not the values are distinct — a title
+ * given twice within one union falls back through `emitted`
+ * (`nameInlineVariantEntries`) — while the discriminator itself needs
+ * values that tell the variants apart (`implicitUnionDiscriminator`), so a
+ * union of two variants pinning one value keeps its titles and carries no
+ * discriminator.
+ */
+function titleMappedDiscriminatorProperty(
+  members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
+): string | null {
+  if (members.length < 2 || members.some((m) => m.name === null)) return null;
+  const first = members[0];
+  if (!first) return null;
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    if (members.every((m) => getEffectiveConstPropertyValue(m.resolved, property, schemas) !== null)) return property;
+  }
+  return null;
 }
 
 /**
@@ -2109,10 +2145,10 @@ export function titleMappedVariantNames(union: SchemaObject): ReadonlyMap<Schema
  * discriminated union without an explicit `discriminator:` keyword. Used by
  * `nameInlineVariant` to derive variant names from the const values.
  *
- * Distinct from `detectConstPropertyDiscriminator` (which requires every
- * variant to carry a `$ref` or `title` so a name mapping can be built):
- * this pass operates on inline anonymous variants, where naming is exactly
- * what we're trying to derive.
+ * Distinct from `implicitUnionDiscriminator` (which reads every variant
+ * once named — a `$ref` and a wrapper by their component — to build the
+ * mapping): this pass operates on inline anonymous variants, where naming
+ * is exactly what we're trying to derive.
  */
 function deriveConstNamingDiscriminator(variants: SchemaObject[]): { property: string } | null {
   if (variants.length < 2) return null;
@@ -3094,40 +3130,23 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
 export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
 
 /**
- * Detect an implicit discriminator on a `oneOf` whose every variant pins the
- * same property to a const value AND is nameable on its own — by a `$ref` to
- * a component or by a `title` — so the IR can represent the union as
- * discriminated, with a mapping to concrete names, without an explicit
- * `discriminator:` keyword. Returns the property, or null when any variant
- * doesn't fit the pattern or when the variants disagree on which property
- * carries the discriminator. The mapping itself is built by `schemaToTypeRef`
- * from the names `nameInlineVariants` gives the inline variants (their titles
- * unless taken) and the component names of `$ref` variants, so it can only
- * ever point at a model that exists.
- *
- * Both const shapes are supported:
+ * The string const a schema pins `property` to in its own `properties`, in
+ * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
+ * Null when it pins none there (`getEffectiveConstPropertyValue` reads
+ * through `allOf` wrappers too).
  */
-function titleMappedDiscriminatorProperty(variants: SchemaObject[]): string | null {
-  if (variants.length < 2) return null;
-  // Require a $ref or title on every variant so there is a concrete name to map to.
-  if (!variants.every((v) => resolveVariantModelName(v) !== null)) return null;
-
-  // The first property whose const value is present on every variant.
-  const candidates = Object.keys(variants[0]?.properties ?? {});
-  for (const propName of candidates) {
-    if (variants.every((v) => getConstPropertyValue(v, propName) !== null)) return propName;
-  }
-  return null;
-}
-
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
   const prop = schema.properties?.[property];
-  if (!prop) return null;
-  if (typeof prop.const === 'string') return prop.const;
-  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string') {
-    return prop.enum[0];
+  return prop ? pinnedStringValue(prop) : null;
+}
+
+/** The one string a schema pins as written — a string `const`, or an `enum:` of exactly one string; null otherwise. */
+function pinnedStringValue(schema: SchemaObject): string | null {
+  if (typeof schema.const === 'string') return schema.const;
+  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
+    return schema.enum[0];
   }
   return null;
 }
@@ -3171,35 +3190,6 @@ export function inlineMappingTargets(mapping: Record<string, string> | undefined
   return Object.fromEntries(
     Object.entries(mapping ?? {}).map(([k, v]) => [k, v.replace(/^#\/components\/schemas\//, '')]),
   );
-}
-
-/**
- * Derive a discriminator value → variant model name mapping for an inline-
- * variant `oneOf` from the names `nameInlineVariants` gave its variants
- * (`inlineVariantNames`): the explicit `discriminator:` without a `mapping:`
- * clause, and the implicit const discriminator of anonymous inline variants
- * (`ApiKeyCreatedData.owner`: `ApiKeyCreatedDataOwner`,
- * `UserApiKeyCreatedDataOwner`). Reading the names rather than deriving them
- * again is what keeps the mapping pointing at models the extractors create.
- * Returns null without a context name, when any variant is not an inline
- * object, or when a variant lacks a const value on the property.
- */
-function deriveInlineVariantMapping(
-  variants: SchemaObject[],
-  discriminatorProperty: string,
-  contextName: string | undefined,
-  inlineVariantNames: ReadonlyMap<SchemaObject, string>,
-): Record<string, string> | null {
-  if (variants.length === 0 || !contextName) return null;
-  const mapping: Record<string, string> = {};
-  for (const variant of variants) {
-    const variantName = inlineVariantNames.get(variant);
-    if (variantName === undefined) return null;
-    const constValue = getConstPropertyValue(variant, discriminatorProperty);
-    if (constValue === null) return null;
-    mapping[constValue] = variantName;
-  }
-  return mapping;
 }
 
 /**
@@ -3387,23 +3377,28 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   };
 }
 
-/** One non-null variant of a named `oneOf`/`anyOf` component schema (see `namedUnionMembers`). */
-interface NamedUnionMember {
+/** One non-null variant of a `oneOf`/`anyOf`, a named union component's or an inline union's alike (see `unionMembers`). */
+interface UnionMember {
   /** The variant as written. */
   raw: SchemaObject;
   /**
    * The component schema a `$ref` variant points at (as `extractAllOfModel`
    * resolves its members), or the one a wrapper variant wraps
-   * (`wrappedVariantReference`); `raw` otherwise.
+   * (`wrappedVariantReference`); `raw` otherwise. Its consts are read
+   * through its `allOf` members, a `$ref` member or a `$ref` on the
+   * property followed to the component it names
+   * (`getEffectiveConstPropertyValue`).
    */
   resolved: SchemaObject;
   /**
    * The model name the variant is referenced by: an inline object variant's
-   * extracted model (`nameNamedUnionVariants`), a `$ref` variant's component,
-   * a wrapper variant's one wrapped component (`nullable<Bird>`,
+   * extracted model (`nameNamedUnionVariants`, `nameInlineObjectVariants`)
+   * — its title alone before the variants are named — a `$ref` variant's
+   * component, a wrapper variant's one wrapped component (`nullable<Bird>`,
    * `union<Bird|string>`). `null` for a variant that is none of those (a
-   * primitive, an inline enum, an array), which a derived discriminator
-   * cannot map.
+   * primitive, an inline enum, an array, an `allOf` merged into a model of
+   * its own — titled or not, since no model is extracted under such a
+   * variant's title), which a derived discriminator cannot map.
    */
   name: string | null;
 }
@@ -3417,7 +3412,7 @@ interface NamedUnionMember {
 interface NamedUnionPlan {
   compositionKind: 'oneOf' | 'anyOf';
   /** The non-null variants, in document order; `variants[i]` is built from `members[i]`. */
-  members: NamedUnionMember[];
+  members: UnionMember[];
   /** The inline object variants' model names (`nameNamedUnionVariants`). */
   inlineNames: ReadonlyMap<SchemaObject, string>;
   /**
@@ -3496,7 +3491,7 @@ function buildNamedUnionPlan(
   if (!isNamedUnionSchema(schema)) return null;
   const compositionKind: 'oneOf' | 'anyOf' = schema.oneOf ? 'oneOf' : 'anyOf';
   const inlineNames = nameNamedUnionVariants(name, schema, schemas);
-  const members = namedUnionMembers(schema, inlineNames, schemas);
+  const members = unionMembers(schema, inlineNames, schemas);
   const memberProperties = new Map<string, SchemaObject>();
   const memberContexts = new Map<SchemaObject, string>();
   const claimed = namedUnionClaimedShapes(name, schema, schemas);
@@ -3506,7 +3501,7 @@ function buildNamedUnionPlan(
     memberProperties.set(key, raw);
     memberContexts.set(raw, key);
   });
-  const discriminator = namedUnionDiscriminator(schema, compositionKind, members);
+  const discriminator = namedUnionDiscriminator(schema, compositionKind, members, schemas);
   return {
     compositionKind,
     members,
@@ -3558,36 +3553,44 @@ function namedUnionEntry(
 }
 
 /**
- * The non-null variants of a named union, each with the schema its const
- * values and properties are read from (a `$ref` resolved against the
- * components, so a discriminator pinned inside the referenced schema is
- * seen) and the model name it is referenced by. A variant that wraps one
+ * The non-null variants of a union — a named union component's, or one
+ * written inline as a field's, a body's or an item's — each with the schema
+ * its const values and properties are read from (a `$ref` resolved against
+ * the components, so a discriminator pinned inside the referenced schema is
+ * seen — in its own `properties`, under a `$ref` member of its `allOf`, or
+ * as a `$ref` on the property to a const component) and the model name it
+ * is referenced by. A variant that wraps one
  * reference to a model (`wrappedVariantReference`) is read as that reference,
  * so its const reaches a derived mapping as a bare `$ref` variant's does (#427).
+ * The one reader both derivations share, so a union carries the same
+ * mapping inline as it does as a component (#568): `inlineNames` is the
+ * name each inline object variant's model takes, as the site decided it
+ * (`nameNamedUnionVariants`, `nameInlineObjectVariants`); before the
+ * variants are named (`titleMappedVariantNames`) an inline object variant
+ * is named by its title alone. A title on any other variant names nothing,
+ * since no model is extracted under it.
  */
-function namedUnionMembers(
+function unionMembers(
   schema: SchemaObject,
   inlineNames: ReadonlyMap<SchemaObject, string>,
   schemas: Record<string, SchemaObject> | undefined,
-): NamedUnionMember[] {
-  const members: NamedUnionMember[] = [];
+): UnionMember[] {
+  const members: UnionMember[] = [];
   for (const raw of schema.oneOf ?? schema.anyOf ?? []) {
     if (isNullSchema(raw)) continue;
     const named = raw.$ref || inlineNames.has(raw) ? raw : (wrappedVariantReference(raw, schemas) ?? raw);
-    let resolved = raw;
-    if (named.$ref) {
-      const refName = named.$ref.split('/').pop() ?? '';
-      const target = schemas && Object.hasOwn(schemas, refName) ? schemas[refName] : undefined;
-      if (target) resolved = target;
-    }
-    members.push({ raw, resolved, name: inlineNames.get(raw) ?? resolveVariantModelName(named) });
+    const resolved = named.$ref ? (componentSchemaOf(named.$ref, schemas) ?? raw) : raw;
+    let name = inlineNames.get(raw) ?? null;
+    if (name === null && (named.$ref || isInlineObjectSchema(raw))) name = resolveVariantModelName(named);
+    members.push({ raw, resolved, name });
   }
   return members;
 }
 
 /**
- * The one `$ref` to a model a named union's variant wraps, read through the
- * wrappers the differ reads a variant's models through (`variantModelNames`):
+ * The one `$ref` to a model a union's variant wraps, named or inline, read
+ * through the wrappers the differ reads a variant's models through
+ * (`variantModelNames`):
  * a nullable wrapper (`unwrapNullableSchema`: `anyOf: [{ $ref: Bird }, { type:
  * 'null' }]`), an `allOf` read as its reference (`allOfReadAsMember`), and a
  * nested `oneOf`/`anyOf`, whose primitive, enum, array or map members name no
@@ -4439,29 +4442,28 @@ function isEnumAliasRef(schema: SchemaObject): boolean {
 }
 
 /**
- * The discriminator of a named union, resolved from the same four sources
- * `schemaToTypeRef` reads for an inline union, in the same order, with a
- * `$ref` variant's const read from the component it points at:
+ * The discriminator of a named union, resolved from the same sources
+ * `schemaToTypeRef` reads for an inline union, in the same order, from the
+ * same members (`unionMembers`: a `$ref` variant's const read from the
+ * component it points at), differing only in how the spec's own targets are
+ * spelled:
  *   1. An explicit `discriminator:` with a `mapping:` — the spec's own, each
  *      target reduced to the IR model name it refers to (the last `$ref`
  *      segment through `resolveSchemaName`, so `schemaNameTransform` applies,
  *      as it does to every mapping value `Model.discriminator` carries). An
  *      entry naming a schema outside the variant list is kept as written.
  *   2. An explicit `discriminator:` without `mapping:` — each variant's const
- *      on the property paired with its model name; `{}` when any variant
- *      pins none or is unnamed, as `deriveInlineVariantMapping` leaves it.
- *   3./4. No keyword, `oneOf` only — when every variant is named, the first
- *      property the first variant pins whose values are distinct across all
- *      of them, with that mapping (`titleMappedDiscriminatorProperty` /
- *      `deriveConstNamingDiscriminator` for an inline union). A constant
- *      every variant shares (`version: 'v1'`) is passed over, not taken as
- *      proof there is no discriminator; an unnamed variant is no signal, and
- *      an `anyOf` is never discriminated implicitly.
+ *      on the property paired with its model name (`unionConstMapping`); `{}`
+ *      when any variant pins none or is unnamed, as it is inline.
+ *   3. No keyword, `oneOf` only — the implicit discriminator
+ *      (`implicitUnionDiscriminator`), as inline; an `anyOf` is never
+ *      discriminated implicitly.
  */
 function namedUnionDiscriminator(
   schema: SchemaObject,
   compositionKind: 'oneOf' | 'anyOf',
-  members: readonly NamedUnionMember[],
+  members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
 ): { property: string; mapping: Record<string, string> } | undefined {
   if (schema.discriminator) {
     const property = schema.discriminator.propertyName;
@@ -4471,15 +4473,32 @@ function namedUnionDiscriminator(
         ? Object.fromEntries(
             explicit.map(([value, target]) => [value, resolveSchemaName(target.split('/').pop() ?? '')]),
           )
-        : (namedUnionConstMapping(members, property) ?? {});
+        : (unionConstMapping(members, property, schemas) ?? {});
     return { property, mapping };
   }
-  if (compositionKind !== 'oneOf' || members.length < 2) return undefined;
-  if (members.some((m) => m.name === null)) return undefined;
+  return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members, schemas) : undefined;
+}
+
+/**
+ * The implicit discriminator of a `oneOf` with no `discriminator:` keyword,
+ * named or inline: when every member is named — an inline object by its
+ * model or its title, a `$ref` by its component, a wrapper by the one model
+ * it wraps (`unionMembers`) — the first property the first member pins whose
+ * values are distinct across all of them, with that mapping
+ * (`unionConstMapping`). A constant every variant shares (`version: 'v1'`)
+ * is passed over, not taken as proof there is no discriminator; an unnamed
+ * variant is no signal, nor is a union of one variant; and the OpenAPI
+ * default of "the discriminator value is the schema name" is not synthesized.
+ */
+function implicitUnionDiscriminator(
+  members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
+): { property: string; mapping: Record<string, string> } | undefined {
+  if (members.length < 2 || members.some((m) => m.name === null)) return undefined;
   const first = members[0];
   if (!first) return undefined;
-  for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    const mapping = namedUnionConstMapping(members, property);
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    const mapping = unionConstMapping(members, property, schemas);
     if (mapping) return { property, mapping };
   }
   return undefined;
@@ -4488,17 +4507,23 @@ function namedUnionDiscriminator(
 /**
  * `property`'s const value on every member paired with the member's model
  * name, or null when any member is unnamed, pins no string const on the
- * property (through its `allOf` wrappers, like an allOf+oneOf variant), or
- * repeats another member's value. Collected in a Map, so a value spelled like
+ * property (through its `allOf` wrappers, a `$ref` member or a `$ref` on
+ * the property followed to the component it names —
+ * `getEffectiveConstPropertyValue`; #568 review), or repeats another
+ * member's value. Collected in a Map, so a value spelled like
  * an inherited property (`constructor`, `toString`) is neither mistaken for a
  * duplicate nor lost; the result has every value as an own key.
  */
-function namedUnionConstMapping(members: readonly NamedUnionMember[], property: string): Record<string, string> | null {
+function unionConstMapping(
+  members: readonly UnionMember[],
+  property: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): Record<string, string> | null {
   if (members.length === 0) return null;
   const mapping = new Map<string, string>();
   for (const member of members) {
     if (member.name === null) return null;
-    const value = getEffectiveConstPropertyValue(member.resolved, property);
+    const value = getEffectiveConstPropertyValue(member.resolved, property, schemas);
     if (value === null || mapping.has(value)) return null;
     mapping.set(value, member.name);
   }
@@ -4771,16 +4796,54 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * so a oneOf variant of the form `{ allOf: [{ properties: { … } }, { oneOf: […] }] }`
  * still surfaces its top-level `properties` (in particular its discriminator
  * `const`) instead of being treated as having none.
+ *
+ * A `$ref` member of an `allOf` is followed to the component it names when
+ * the document's components are handed in (`schemas`), through a chain of
+ * aliases (`followMemberRefs`), so a union member's const that its base
+ * component pins is seen (#568 review): `Cat: { allOf: [{ $ref: CatBase },
+ * { properties: { lives } }] }` pins what `CatBase` pins, and `Puppy: {
+ * allOf: [{ $ref: Dog }] }` what `Dog` pins, as the models built for them
+ * carry `kind`. A component reached again on one walk is read once, so a
+ * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
+ * Without the map a `$ref` member declares nothing, as the allOf+oneOf
+ * readers read a variant's inline members only.
+ *
+ * A property several members declare keeps its first declaration, unless a
+ * later one pins it to one value the earlier left open — a const narrows
+ * and never widens — so `Base.kind: { type: 'string' }` under a `$ref`
+ * member read before the variant's own `kind: { const: 'cat' }` (`Cat: {
+ * allOf: [{ $ref: Base }, { properties: { kind } }] }`) leaves the variant
+ * pinned, in either member order, as it was when the `$ref` member was not
+ * followed (#590 review). A pin behind a `$ref` on the declaration counts
+ * (`pinnedDeclarationValue`).
  */
-function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObject> {
+function getEffectiveProperties(
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): Record<string, SchemaObject> {
   // Collected in a `Map` and returned through `Object.fromEntries`, so a
   // property named `__proto__` is an own entry rather than the prototype.
   const props = new Map<string, SchemaObject>();
+  const seen = new Set<SchemaObject>();
   const visit = (s: SchemaObject): void => {
+    if (seen.has(s)) return;
+    seen.add(s);
     for (const [k, v] of Object.entries(s.properties ?? {})) {
-      if (!props.has(k) && v) props.set(k, v);
+      if (!v) continue;
+      const held = props.get(k);
+      // A later pin replaces an open declaration; `set` keeps the key's
+      // position, so the property order is still the order first declared.
+      if (
+        held === undefined ||
+        (pinnedDeclarationValue(held, schemas) === null && pinnedDeclarationValue(v, schemas) !== null)
+      ) {
+        props.set(k, v);
+      }
     }
-    for (const sub of s.allOf ?? []) visit(sub);
+    for (const sub of s.allOf ?? []) {
+      const member = followMemberRefs(sub, schemas, seen);
+      if (member) visit(member);
+    }
     // Do NOT walk into oneOf / anyOf — those are alternatives, not
     // simultaneously-present properties.
   };
@@ -4788,16 +4851,41 @@ function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObje
   return Object.fromEntries(props);
 }
 
-function getEffectiveConstPropertyValue(schema: SchemaObject, property: string): string | null {
+/**
+ * The string const `schema` pins `property` to: in its own `properties`
+ * (`getConstPropertyValue`), else through its `allOf` wrappers
+ * (`getEffectiveProperties`, a `$ref` member followed to its component when
+ * `schemas` is handed in). The declaration found may itself be a `$ref` to
+ * a component pinning one value — `kind: { $ref: HamsterKind }` with
+ * `HamsterKind: { const: 'hamster' }`, or `{ enum: ['hamster'] }` in OAS
+ * 3.0 — or to an alias chain ending in one; it is followed with the map
+ * (#568 review), a chain that repeats pinning nothing. Null when the
+ * property is undeclared or pins no one string (an enum of several values,
+ * a plain `type: string`).
+ */
+function getEffectiveConstPropertyValue(
+  schema: SchemaObject,
+  property: string,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
   const direct = getConstPropertyValue(schema, property);
   if (direct !== null) return direct;
-  const effective = getEffectiveProperties(schema)[property];
-  if (!effective) return null;
-  if (typeof effective.const === 'string') return effective.const;
-  if (Array.isArray(effective.enum) && effective.enum.length === 1 && typeof effective.enum[0] === 'string') {
-    return effective.enum[0];
-  }
-  return null;
+  const effective = getEffectiveProperties(schema, schemas)[property];
+  return effective ? pinnedDeclarationValue(effective, schemas) : null;
+}
+
+/**
+ * The one string a property declaration pins, as written (`pinnedStringValue`)
+ * or through a `$ref` to a component pinning one value, or an alias chain
+ * ending in one, when `schemas` is handed in (`followMemberRefs`; a chain
+ * that repeats pins nothing); null otherwise.
+ */
+function pinnedDeclarationValue(
+  declaration: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): string | null {
+  const target = followMemberRefs(declaration, schemas, new Set());
+  return target ? pinnedStringValue(target) : null;
 }
 
 /**
@@ -5616,10 +5704,10 @@ export function schemaToTypeRef(
     // The inline object variants' model names, decided once for this TypeRef
     // and every extractor (`nameInlineVariants`): variant 0's bare qualified
     // field name, a const prefix, a title, a distinguishing property or a
-    // counter — or, for a `oneOf` whose every variant is titled and pins a
-    // const (3. below), the title itself — never a name a sibling property
-    // mints. Computed first because the derived discriminator mappings below
-    // are read from it, so a mapping can only point at a model that exists.
+    // counter — or, for a title-mapped `oneOf` (3. below), the title itself
+    // — never a name a sibling property mints. Computed first because the
+    // derived discriminator mappings below are read from it, so a mapping
+    // can only point at a model that exists.
     const inlineVariantNames = nameInlineObjectVariants(
       schema,
       contextName,
@@ -5628,63 +5716,55 @@ export function schemaToTypeRef(
       reservedNames,
     );
 
-    // Resolve the discriminator. Four sources, in order:
-    //   1. Explicit `discriminator:` with explicit `mapping:` — trust the spec.
+    // The variants as a named union reads them (`unionMembers`): an inline
+    // object variant named by its model, a `$ref` variant by its component,
+    // with its const read from that component, and a variant wrapping one
+    // model `$ref` (`oneOf: [{ $ref: Bird }, { $ref: Song }]`, `Song` an
+    // enum) through that reference (#568). Without a context name nothing is
+    // extracted for an inline object variant (`nonObjectVariantContexts`),
+    // so it is named by its title alone, as before naming.
+    const componentSchemas = documentComponentSchemas();
+    const members = unionMembers(
+      schema,
+      contextName === undefined ? NO_INLINE_NAMES : inlineVariantNames,
+      componentSchemas,
+    );
+
+    // Resolve the discriminator. Three sources, in order — the ones a named
+    // union reads (`namedUnionDiscriminator`), from the same members:
+    //   1. Explicit `discriminator:` with explicit `mapping:` — trust the
+    //      spec, each target as the document spelled it (`inlineMappingTargets`).
     //   2. Explicit `discriminator:` with no `mapping:` — pair each variant's
-    //      const value on the property with its inline model name
-    //      (`deriveInlineVariantMapping`). This covers `ApiKey.owner`-shaped
-    //      schemas where the spec uses `discriminator: { propertyName: type }`
-    //      but lists inline anonymous `oneOf` variants instead of `$ref` links.
-    //   3. No explicit discriminator, but every variant carries a `$ref` or a
-    //      `title` and pins the same const property
-    //      (`titleMappedDiscriminatorProperty`): the mapping names a `$ref`
-    //      variant by its component and an inline variant by the name
+    //      const value on the property with its model name
+    //      (`unionConstMapping`); `{}` when any variant pins none or is
+    //      unnamed. This covers `ApiKey.owner`-shaped schemas where the spec
+    //      uses `discriminator: { propertyName: type }` but lists inline
+    //      anonymous `oneOf` variants instead of `$ref` links, and a
+    //      `oneOf: [{ $ref: Cat }, { $ref: Dog }]` under the keyword alike.
+    //   3. No explicit discriminator, `oneOf` only — when every variant is
+    //      named and one const property tells them all apart
+    //      (`implicitUnionDiscriminator`): the mapping names a `$ref` variant
+    //      by its component and an inline variant by the name
     //      `nameInlineVariants` gave it — its title (`Circle`, `Square`)
-    //      unless that is taken — so the extracted model and the mapping agree.
-    //   4. Otherwise, when every inline variant pins the same const property
-    //      with distinct values (`deriveConstNamingDiscriminator`), the same
-    //      value → inline model name pairing as 2. This covers
-    //      `ApiKeyCreatedData.owner`-shaped schemas (oneOf with inline
-    //      const-discriminating variants but no `discriminator:` keyword).
+    //      unless that is taken, else a const prefix
+    //      (`ApiKeyCreatedData.owner`: `ApiKeyCreatedDataOwner`,
+    //      `UserApiKeyCreatedDataOwner`) — so the extracted model and the
+    //      mapping agree.
     let resolvedDiscriminator: { property: string; mapping: Record<string, string> } | undefined;
     if (schema.discriminator) {
       const property = schema.discriminator.propertyName;
-      let mapping: Record<string, string> = inlineMappingTargets(schema.discriminator.mapping);
-      if (Object.keys(mapping).length === 0) {
-        const inlineMapping = deriveInlineVariantMapping(nonNullVariants, property, contextName, inlineVariantNames);
-        if (inlineMapping) mapping = inlineMapping;
-      }
+      const explicit = inlineMappingTargets(schema.discriminator.mapping);
+      const mapping =
+        Object.keys(explicit).length > 0 ? explicit : (unionConstMapping(members, property, componentSchemas) ?? {});
       resolvedDiscriminator = { property, mapping };
     } else if (compositionKind === 'oneOf') {
-      const titleProperty = titleMappedDiscriminatorProperty(nonNullVariants);
-      if (titleProperty) {
-        const mapping: Record<string, string> = {};
-        for (const v of nonNullVariants) {
-          const value = getConstPropertyValue(v, titleProperty);
-          const mappedName = inlineVariantNames.get(v) ?? resolveVariantModelName(v);
-          if (value !== null && mappedName !== null) mapping[value] = mappedName;
-        }
-        resolvedDiscriminator = { property: titleProperty, mapping };
-      } else {
-        const namingDisc = deriveConstNamingDiscriminator(nonNullVariants);
-        if (namingDisc) {
-          const inlineMapping = deriveInlineVariantMapping(
-            nonNullVariants,
-            namingDisc.property,
-            contextName,
-            inlineVariantNames,
-          );
-          if (inlineMapping) {
-            resolvedDiscriminator = { property: namingDisc.property, mapping: inlineMapping };
-          }
-        }
-      }
+      resolvedDiscriminator = implicitUnionDiscriminator(members, componentSchemas);
     }
 
     // Build variants. An inline object variant is referenced by the name its
     // extracted model carries (`inlineVariantNames`); a discriminator mapping
     // entry substitutes for it only when the spec's own `mapping:` (1.) names
-    // the variant, since the derived mappings (2.–4.) are read from the same
+    // the variant, since the derived mappings (2.–3.) are read from the same
     // names. Falling back to `schemaToTypeRef` instead would hand every
     // inline variant the same parent-derived name (e.g. `ApiKeyOwner`),
     // collapsing the union onto one repeated model ref while the extractor

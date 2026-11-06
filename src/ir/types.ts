@@ -990,6 +990,29 @@ export interface LiteralType {
 export interface UnionType {
   kind: 'union';
   variants: TypeRef[];
+  /**
+   * When set, the union is discriminated on `property`, and `mapping` names
+   * the variant each value selects. Resolved from the same sources, in the
+   * same order, as a named union's (`Model.discriminator`), from the same
+   * reading of the variants (#568): the spec's own `discriminator.mapping`,
+   * each target as the document spelled it with a leading
+   * `#/components/schemas/` stripped — an inline union's values are not IR
+   * model names, unlike a named union's; else, under the keyword, each
+   * variant's const on the property paired with the model it is referenced
+   * by, `{}` when any variant pins none or is unnamed; else, for a `oneOf`
+   * without the keyword, the first property the first variant pins whose
+   * values tell every variant apart. A `$ref` variant is named by its
+   * component and its const read from it — through the component's `allOf`
+   * members, a `$ref` member followed to the component it names, and
+   * through a `$ref` on the property to a component pinning one value
+   * (`Cat: { allOf: [{ $ref: CatBase }, …] }` pins what `CatBase` pins;
+   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — a
+   * variant wrapping one model `$ref` through that reference, an inline
+   * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
+   * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
+   * does as a component.
+   * A request body's union carries only the spec's own mapping.
+   */
   discriminator?: { property: string; mapping: Record<string, string> };
   /** Which OAS composition keyword produced this union. Emitters can use this to
    *  distinguish inheritance (allOf) from exclusive union (oneOf) from open union (anyOf). */
@@ -1109,7 +1132,8 @@ export interface Model {
   /**
    * When set, this model is a discriminated union — over its `variants` (a
    * named `oneOf`/`anyOf` with a `discriminator:` keyword or a const-pinned
-   * property shared by every variant) or over allOf+oneOf variants (where
+   * property shared by every variant, a `$ref` variant's read from its
+   * component as `UnionType.discriminator` reads it) or over allOf+oneOf variants (where
    * `variants` is absent and the mapping alone names them). Emitters should
    * generate a dispatcher (factory) instead of a regular dataclass. The
    * `property` field is the discriminator key (e.g. "event"), and `mapping`

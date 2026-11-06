@@ -951,10 +951,13 @@ describe('a union holding a `$ref` and an inline variant of one name (Greptile)'
   const legacy = obj({ kind: { type: 'string', const: 'legacy' }, id: str });
   const fresh = obj({ kind: { type: 'string', const: 'new' }, c: str }, { title: 'Comp' });
   const mixed = { oneOf: [{ $ref: '#/components/schemas/Comp' }, fresh] };
-  it('is what the parser builds: the `$ref` keeps the component, the inline variant its context-qualified name, with no mapping, on a field, a response and a webhook payload', async () => {
-    // Beside a `$ref` sibling the title is not kept, so the two never share a
-    // name and no entry can be misassigned; the positional rule below guards a
-    // union built any other way.
+  it('is what the parser builds: the `$ref` keeps the component, the inline variant its context-qualified name, each mapped by its own const, on a field, a response and a webhook payload', async () => {
+    // The union is title-mapped — the `$ref` variant's const is read from
+    // the component (#568) — so the inline variant takes its title, which is
+    // the component's name and another shape: the fold renames it off the
+    // component, with the warning, as it renames any inline model so named,
+    // and its mapping entry follows. The two never share a name, and the
+    // positional rule below guards a union built any other way.
     const built = (inline: string) => ({
       kind: 'union',
       variants: [
@@ -962,23 +965,24 @@ describe('a union holding a `$ref` and an inline variant of one name (Greptile)'
         { kind: 'model', name: inline },
       ],
       compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { legacy: 'Comp', new: inline } },
     });
     const field = await parse('mixed-field', specDoc({ Comp: legacy, Thing: obj({ shape: mixed }) }));
-    expect(field.spec.models.find((m) => m.name === 'Thing')?.fields[0]?.type).toEqual(built('ThingShape'));
-    expect(field.warnings).toEqual([]);
+    expect(field.spec.models.find((m) => m.name === 'Thing')?.fields[0]?.type).toEqual(built('ThingComp'));
+    expect(field.warnings).toEqual([renamed('Comp', 'ThingComp')]);
     expectSound(field.spec, { Comp: ['kind', 'id'], Thing: ['shape'] });
 
     const response = await parse(
       'mixed-response',
       specDoc({ Comp: legacy }, { '/things/{id}': getOp('getThing', mixed) }),
     );
-    expect(opsOf(response.spec).getThing?.response).toEqual(built('GetThingResponse'));
-    expect(response.warnings).toEqual([]);
+    expect(opsOf(response.spec).getThing?.response).toEqual(built('GetThingComp'));
+    expect(response.warnings).toEqual([renamed('Comp', 'GetThingComp')]);
     expectSound(response.spec, { Comp: ['kind', 'id'] });
 
     const webhook = await parse('mixed-webhook', webhookDoc({ Comp: legacy }, mixed));
-    expect(webhook.spec.webhooks?.[0]?.requestBody).toEqual(built('PetAdoptedPayload'));
-    expect(webhook.warnings).toEqual([]);
+    expect(webhook.spec.webhooks?.[0]?.requestBody).toEqual(built('PetAdoptedComp'));
+    expect(webhook.warnings).toEqual([renamed('Comp', 'PetAdoptedComp')]);
     expectSound(webhook.spec, { Comp: ['kind', 'id'] });
   });
 
