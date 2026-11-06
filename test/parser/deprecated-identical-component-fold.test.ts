@@ -1840,6 +1840,246 @@ describe('#441: a deprecated component admits no inline copy, so deprecating the
     });
   });
 
+  describe('copies sharing a qualified name beside a deprecated component keep sharing it when one is deprecated (#625 review)', () => {
+    const sharedBy = (warning: string, sites: number): string => `${warning} (shared by ${sites} sites)`;
+    /** Every pair of the documents, diffed in both directions: the changes each way. */
+    const pairs = (specs: Record<string, ApiSpec>): Record<string, ReturnType<typeof describeDiff>> => {
+      const out: Record<string, ReturnType<typeof describeDiff>> = {};
+      const labels = Object.keys(specs);
+      for (const a of labels)
+        for (const b of labels) if (a !== b) out[`${a}→${b}`] = describeDiff(specs[a]!, specs[b]!);
+      return out;
+    };
+    const unchanged = { breaking: 0, changes: [] };
+
+    describe.each(['3.0.3', '3.1.0'])(
+      'two identical responses beside a deprecated `Widget`, on OpenAPI %s',
+      (openapi) => {
+        const schemas = { Widget: { ...widget, deprecated: true } };
+        const paths = (legacy: boolean, old: boolean): Array<[string, unknown]> => [
+          ['/legacy-widget', getOp('getLegacyWidget', deprecate(widget, legacy))],
+          ['/old-widget', getOp('getOldWidget', deprecate(widget, old))],
+          ['/widget', getOp('getWidget', { $ref: '#/components/schemas/Widget' })],
+        ];
+
+        it('one `GetLegacyWidgetWidget` under every flag combination, live unless both copies are deprecated, named by the first site in either order', async () => {
+          const combos: Array<[string, boolean, boolean]> = [
+            ['live', false, false],
+            ['old', false, true],
+            ['legacy', true, false],
+            ['both', true, true],
+          ];
+          const byOrder: Record<string, Record<string, ApiSpec>> = {};
+          for (const [label, legacy, old] of combos) {
+            for (const { order, spec, warnings } of await parseBothOrders(
+              `441-shared-${label}-${openapi}`,
+              schemas,
+              paths(legacy, old),
+              { openapi },
+            )) {
+              const where = `${label}, ${order}`;
+              const first = order === 'as-written' ? 'GetLegacyWidgetWidget' : 'GetOldWidgetWidget';
+              const deprecated = legacy && old;
+              expect(describeModels(spec), where).toEqual([
+                'Widget (deprecated) {object: literal, name: string}',
+                `${first}${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`,
+              ]);
+              expect(opsOf(spec).getLegacyWidget?.response, where).toEqual({ kind: 'model', name: first });
+              expect(opsOf(spec).getOldWidget?.response, where).toEqual({ kind: 'model', name: first });
+              // A mixed pair keeps the live definition: the deprecated copy
+              // folds onto it with the warning a deprecated copy folding
+              // onto its live twin gets, and the note names the live flag.
+              expect(warnings, where).toEqual(
+                deprecated
+                  ? [sharedBy(refused('Widget', first), 2)]
+                  : [...(legacy || old ? [folded('Widget')] : []), sharedBy(liveWhile('Widget', first), 2)],
+              );
+              expectSound(
+                spec,
+                ['Widget'],
+                deprecated
+                  ? [
+                      'getWidget.response → Widget',
+                      `getLegacyWidget.response → ${first}`,
+                      `getOldWidget.response → ${first}`,
+                    ]
+                  : ['getWidget.response → Widget'],
+              );
+              (byOrder[order] ??= {})[label] = spec;
+            }
+          }
+          // Flipping one copy's flag changes nothing a caller compiles
+          // against — the response has no node of its own to carry the flag,
+          // as between two inline twins — and flipping both is the model's
+          // flip alone, additive in either direction.
+          for (const [order, specs] of Object.entries(byOrder)) {
+            const first = order === 'as-written' ? 'GetLegacyWidgetWidget' : 'GetOldWidgetWidget';
+            const flip = { breaking: 0, changes: [`model-modified ${first} deprecatedChanged: additive`] };
+            expect(pairs(specs), order).toEqual({
+              'live→old': unchanged,
+              'live→legacy': unchanged,
+              'live→both': flip,
+              'old→live': unchanged,
+              'old→legacy': unchanged,
+              'old→both': flip,
+              'legacy→live': unchanged,
+              'legacy→old': unchanged,
+              'legacy→both': flip,
+              'both→live': flip,
+              'both→old': flip,
+              'both→legacy': flip,
+            });
+          }
+        });
+      },
+    );
+
+    it('three identical responses, the middle one deprecated, share one live model, and deprecating it changes nothing', async () => {
+      const schemas = { Widget: { ...widget, deprecated: true } };
+      const paths = (middle: boolean) => ({
+        '/widget': getOp('getWidget', { $ref: '#/components/schemas/Widget' }),
+        '/a-widget': getOp('getAWidget', widget),
+        '/b-widget': getOp('getBWidget', deprecate(widget, middle)),
+        '/c-widget': getOp('getCWidget', widget),
+      });
+      const live = await parse('441-three-live', specDoc(schemas, paths(false)));
+      const mixed = await parse('441-three-mixed', specDoc(schemas, paths(true)));
+      for (const { spec } of [live, mixed]) {
+        expect(describeModels(spec)).toEqual([
+          'Widget (deprecated) {object: literal, name: string}',
+          'GetAWidgetWidget {object: literal, name: string}',
+        ]);
+        for (const op of ['getAWidget', 'getBWidget', 'getCWidget']) {
+          expect(opsOf(spec)[op]?.response, op).toEqual({ kind: 'model', name: 'GetAWidgetWidget' });
+        }
+        expectSound(spec, ['Widget'], ['getWidget.response → Widget']);
+      }
+      expect(live.warnings).toEqual([sharedBy(liveWhile('Widget', 'GetAWidgetWidget'), 3)]);
+      expect(mixed.warnings).toEqual([folded('Widget'), sharedBy(liveWhile('Widget', 'GetAWidgetWidget'), 3)]);
+      expect(describeDiff(live.spec, mixed.spec)).toEqual(unchanged);
+      expect(describeDiff(mixed.spec, live.spec)).toEqual(unchanged);
+    });
+
+    it('body site: a body is named from its operation, so two bodies never share a model, and each flips on its own', async () => {
+      const putNote = {
+        put: {
+          operationId: 'putNote',
+          requestBody: {
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CreateNoteRequest' } } },
+          },
+          responses: { '200': { description: 'OK' } },
+        },
+      };
+      const doc = (note: boolean, old: boolean) =>
+        specDoc(
+          { CreateNoteRequest: { ...title, deprecated: true } },
+          {
+            '/legacy-notes': postOp('createNote', deprecate(title, note)),
+            '/old-notes': postOp('createOldNote', deprecate(title, old)),
+            '/notes': putNote,
+          },
+        );
+      const live = await parse('441-bodies-live', doc(false, false));
+      const old = await parse('441-bodies-old', doc(false, true));
+      const both = await parse('441-bodies-both', doc(true, true));
+      for (const { spec } of [live, old, both]) {
+        expect(opsOf(spec).createNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest2' });
+        expect(opsOf(spec).createOldNote?.requestBody).toEqual({ kind: 'model', name: 'CreateOldNoteRequest' });
+        expect(opsOf(spec).putNote?.requestBody).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+      }
+      expect(describeModels(old.spec)).toEqual([
+        'CreateNoteRequest (deprecated) {title: string}',
+        'CreateNoteRequest2 {title: string}',
+        'CreateOldNoteRequest (deprecated) {title: string}',
+      ]);
+      expect(describeDiff(live.spec, old.spec)).toEqual({
+        breaking: 0,
+        changes: ['model-modified CreateOldNoteRequest deprecatedChanged: additive'],
+      });
+      expect(describeDiff(old.spec, both.spec)).toEqual({
+        breaking: 0,
+        changes: ['model-modified CreateNoteRequest2 deprecatedChanged: additive'],
+      });
+      expect(describeDiff(both.spec, live.spec)).toEqual({
+        breaking: 0,
+        changes: [
+          'model-modified CreateNoteRequest2 deprecatedChanged: additive',
+          'model-modified CreateOldNoteRequest deprecatedChanged: additive',
+        ],
+      });
+    });
+
+    it('field site, across passes: `Pet.owner` and a `getOwner` response of the same `object: pet_owner` shape share one `PetOwner2`, live unless both are deprecated', async () => {
+      // The field's copy leaves the deprecated `PetOwner` when the fields
+      // are settled, before any operation is read; the response's copy
+      // joins the model it minted (`naming.mintedFor`), by shape, flag
+      // apart: a live response makes the model live, the field keeping its
+      // own flag, and a deprecated response folds onto the live model.
+      const petOwner = obj({ object: { type: 'string', const: 'pet_owner' }, name: str });
+      const schemas = (field: boolean) => ({
+        Pet: obj({ owner: deprecate(petOwner, field) }),
+        PetOwner: { ...petOwner, deprecated: true },
+      });
+      const paths = (response: boolean): Array<[string, unknown]> => [
+        ['/pets', getOp('getPet', { $ref: '#/components/schemas/Pet' })],
+        ['/owners', getOp('getOwner', deprecate(petOwner, response))],
+      ];
+      const combos: Array<[string, boolean, boolean]> = [
+        ['live', false, false],
+        ['response', false, true],
+        ['field', true, false],
+        ['both', true, true],
+      ];
+      const byOrder: Record<string, Record<string, ApiSpec>> = {};
+      for (const [label, field, response] of combos) {
+        for (const { order, spec, warnings } of await parseBothOrders(
+          `441-field-shared-${label}`,
+          schemas(field),
+          paths(response),
+        )) {
+          const where = `${label}, ${order}`;
+          const deprecated = field && response;
+          expect(describeModels(spec), where).toEqual([
+            `Pet {owner${field ? ' (deprecated)' : ''}: PetOwner2}`,
+            'PetOwner (deprecated) {object: literal, name: string}',
+            `PetOwner2${deprecated ? ' (deprecated)' : ''} {object: literal, name: string}`,
+          ]);
+          expect(opsOf(spec).getOwner?.response, where).toEqual({ kind: 'model', name: 'PetOwner2' });
+          const fieldNote = field ? refused('PetOwner', 'PetOwner2') : liveWhile('PetOwner', 'PetOwner2');
+          const responseNote = sharedBy(
+            deprecated || response ? refused('PetOwner', 'PetOwner2') : liveWhile('PetOwner', 'PetOwner2'),
+            2,
+          );
+          expect(warnings, where).toEqual([
+            fieldNote,
+            ...(field !== response ? [folded('PetOwner')] : []),
+            responseNote,
+          ]);
+          expectSound(spec, ['Pet', 'PetOwner'], deprecated ? ['getOwner.response → PetOwner2'] : []);
+          (byOrder[order] ??= {})[label] = spec;
+        }
+      }
+      const fieldFlip = ['model-modified Pet: additive', 'field-deprecated-changed owner: additive'];
+      const modelFlip = 'model-modified PetOwner2 deprecatedChanged: additive';
+      for (const [order, specs] of Object.entries(byOrder)) {
+        expect(pairs(specs), order).toEqual({
+          'live→response': unchanged,
+          'live→field': { breaking: 0, changes: fieldFlip },
+          'live→both': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'response→live': unchanged,
+          'response→field': { breaking: 0, changes: fieldFlip },
+          'response→both': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'field→live': { breaking: 0, changes: fieldFlip },
+          'field→response': { breaking: 0, changes: fieldFlip },
+          'field→both': { breaking: 0, changes: [modelFlip] },
+          'both→live': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'both→response': { breaking: 0, changes: [...fieldFlip, modelFlip] },
+          'both→field': { breaking: 0, changes: [modelFlip] },
+        });
+      }
+    });
+  });
+
   describe('the predicates', () => {
     const string = { kind: 'primitive', type: 'string' } as const;
     const model = (extra: Partial<Model> = {}): Model => ({
