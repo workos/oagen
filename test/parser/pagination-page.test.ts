@@ -1184,20 +1184,19 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
     expect(problem({ allOf: [{ oneOf: [after, trace] }, { oneOf: [after, numbered] }] })).toBeUndefined();
 
     // The union as a `$ref` member of the inline `allOf` (#527 review): the
-    // model that `allOf` is merged into reads no union behind a `$ref`
-    // member, however many of `MetaUnion`'s variants are written inline, so
-    // `Meta` would be `trace_id` alone — the override resolves to no field.
-    // Pinned as kept before the review; the same `allOf` as a component (the
-    // review's `Meta`) is its own model, which does read the union.
+    // model that `allOf` is merged into reads the union `MetaUnion` carries
+    // as `MetaUnion`'s own model does — flattened, since no variant pins a
+    // const — so `Meta` has `has_more` and the override resolves to it,
+    // inline exactly as for the same `allOf` as a component (the review's
+    // `Meta`; #429: the merge read no union behind a `$ref` member, and the
+    // override was rejected inline while the component kept it).
     const referenced = beside({ $ref: '#/components/schemas/MetaUnion' });
-    expect(problem(referenced)).toBe(missing('meta.has_more'));
-    expect(problem({ allOf: [{ allOf: [{ $ref: '#/components/schemas/MetaUnion' }] }, trace] })).toBe(
-      missing('meta.has_more'),
-    );
-    expect(problem({ allOf: [{ oneOf: [{ $ref: '#/components/schemas/MetaUnion' }, { type: 'null' }] }, trace] })).toBe(
-      missing('meta.has_more'),
-    );
-    expect(problem(object({ page: referenced }), 'meta.page.has_more')).toBe(missing('meta.page.has_more'));
+    expect(problem(referenced)).toBeUndefined();
+    expect(problem({ allOf: [{ allOf: [{ $ref: '#/components/schemas/MetaUnion' }] }, trace] })).toBeUndefined();
+    expect(
+      problem({ allOf: [{ oneOf: [{ $ref: '#/components/schemas/MetaUnion' }, { type: 'null' }] }, trace] }),
+    ).toBeUndefined();
+    expect(problem(object({ page: referenced }), 'meta.page.has_more')).toBeUndefined();
     expect(
       bodyEndOfIterationProblem(
         { kind: 'hasMore', path: 'meta.has_more' },
@@ -1260,23 +1259,24 @@ describe('bodyEndOfIterationProblem — an explicit stop field, read where a det
       );
     const missing = (path: string) => `endOfIteration path "${path}" does not resolve to a field in the response`;
 
-    it('reads a union an allOf flattens as its model does, which leaves the $ref variants to their components', () => {
+    it("reads a union an allOf flattens as its model does, which flattens the $ref variants' components in (#398)", () => {
       // The issue's `meta`, inline and as a component; then the variants
       // beside `null`, each a lone `allOf` member, the union one `allOf`
       // deeper or a `$ref` to a union component, a component of the union
       // alone (its own `allOf` model), and the wrapper one segment down.
-      expect(problem(beside({ oneOf: refs }))).toBe(missing('meta.has_more'));
-      expect(problem(beside({ anyOf: refs }))).toBe(missing('meta.has_more'));
-      expect(problem(ref('Meta'))).toBe(missing('meta.has_more'));
-      expect(problem(beside({ oneOf: [...refs, { type: 'null' }] }))).toBe(missing('meta.has_more'));
-      expect(problem(beside({ oneOf: refs.map((r) => ({ allOf: [r] })) }))).toBe(missing('meta.has_more'));
-      expect(problem({ allOf: [{ allOf: [{ oneOf: refs }] }, trace] })).toBe(missing('meta.has_more'));
-      expect(problem(beside(ref('MetaUnion')))).toBe(missing('meta.has_more'));
-      expect(problem(ref('LoneMeta'))).toBe(missing('meta.has_more'));
-      expect(problem({ allOf: [ref('LoneMeta')] })).toBe(missing('meta.has_more'));
-      expect(problem(object({ page: beside({ oneOf: refs }) }), 'meta.page.has_more')).toBe(
-        missing('meta.page.has_more'),
-      );
+      // The flattened model has `has_more` from both `$ref` variants, so
+      // the override resolves to it at every one of them (#527 rejected it
+      // while the model left a `$ref` variant's fields to its component).
+      expect(problem(beside({ oneOf: refs }))).toBeUndefined();
+      expect(problem(beside({ anyOf: refs }))).toBeUndefined();
+      expect(problem(ref('Meta'))).toBeUndefined();
+      expect(problem(beside({ oneOf: [...refs, { type: 'null' }] }))).toBeUndefined();
+      expect(problem(beside({ oneOf: refs.map((r) => ({ allOf: [r] })) }))).toBeUndefined();
+      expect(problem({ allOf: [{ allOf: [{ oneOf: refs }] }, trace] })).toBeUndefined();
+      expect(problem(beside(ref('MetaUnion')))).toBeUndefined();
+      expect(problem(ref('LoneMeta'))).toBeUndefined();
+      expect(problem({ allOf: [ref('LoneMeta')] })).toBeUndefined();
+      expect(problem(object({ page: beside({ oneOf: refs }) }), 'meta.page.has_more')).toBeUndefined();
     });
 
     it('keeps a union the object is typed as, and a flattened one a variant written inline declares the field in', () => {
@@ -1437,19 +1437,21 @@ describe('an explicit dataPath through the variants of a union (#556)', () => {
       );
     });
 
-    it('keeps the plain reason where no union is on the way, or where the one on the way is not read (#527)', () => {
+    it('keeps the plain reason where no union is on the way, and walks the one a $ref member carries (#527, #429)', () => {
       expect(dataPathProblem(body(object({ total: integer })), 'result.items', components)).toBe(missing);
       expect(dataPathProblem(body(object({ items: integer })), 'result.items', components)).toBe(missing);
       expect(dataPathProblem(undefined, 'result.items', components)).toBe(missing);
-      // An inline `allOf` reads no union behind a `$ref` member, so its model
-      // declares no `items` for an iterator to read (#527).
+      // An inline `allOf` reads the union behind a `$ref` member as the
+      // component's model does, flattened, so its model declares `items` for
+      // an iterator to read (#527 rejected the path while the merge read no
+      // such union).
       expect(
         dataPathProblem(
           body({ allOf: [ref('ResultUnion'), object({ trace_id: { type: 'string' } })] }),
           'result.items',
           components,
         ),
-      ).toBe(missing);
+      ).toBeUndefined();
     });
 
     it('compares the items as the type builder reads them: a $ref under a lone allOf member or a nullable wrapper is one Pet (#585 review)', () => {

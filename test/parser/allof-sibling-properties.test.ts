@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { diffSpecs } from '../../src/differ/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { classifyAndExtractResponse } from '../../src/parser/responses.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
@@ -900,7 +901,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
           { '/dogs': getOp('getDog', { allOf: [ref('Pet'), flatMember] }) },
           {
             Pet: pet,
-            // The component's own model keeps the documented rule: the object, variants not read.
+            // The component's own model flattens the union beside its properties too (#429).
             Base: { properties: { id: str }, required: ['id'], oneOf: [obj({ a: str }), obj({ b: str })] },
             Pup: { allOf: [ref('Base')], properties: { breed: str } },
             Dog: { allOf: [ref('Pet'), flatMember] },
@@ -917,7 +918,7 @@ describe('workos/oagen#307: properties written beside allOf', () => {
           },
         ),
       );
-      expect(fieldsOf(spec, 'Base')).toEqual(['id: string']);
+      expect(fieldsOf(spec, 'Base')).toEqual(['id: string', 'a?: string', 'b?: string']);
       expect(fieldsOf(spec, 'Pup')).toEqual(['breed?: string', 'id: string', 'a?: string', 'b?: string']);
       expect(fieldsOf(spec, 'Dog')).toEqual(['name: string', 'x: string', 'a?: string', 'b?: string']);
       // The same schema as a response body has the same fields.
@@ -1234,12 +1235,19 @@ describe("workos/oagen#430: a discriminated variant never takes its component's 
         ),
       );
       expect(modelOf(spec, 'CatEvent').discriminator, nameless).toBeUndefined();
+      // `kind` is typed as the union of the variants' declarations, an enum
+      // of the two consts, as the same schema inline types it (#398: the
+      // first variant's const alone).
       expect(fieldsOf(spec, 'CatEvent'), nameless).toEqual([
         'id: string',
-        `kind?: ${JSON.stringify(nameless)}`,
+        'kind?: CatEventKind',
         'meow?: string',
         'bark?: string',
       ]);
+      expect(
+        spec.enums.find((e) => e.name === 'CatEventKind')?.values.map((v) => v.value),
+        nameless,
+      ).toEqual([nameless, 'dog']);
       expect(modelNames(spec).sort(), nameless).toEqual(['CatEvent', 'Event']);
       expect(warnings, nameless).toEqual([]);
       expectSound(spec, ['Event', 'CatEvent']);
@@ -1470,9 +1478,10 @@ describe("workos/oagen#430: a discriminated variant never takes its component's 
             ),
           );
           expect(modelOf(spec, 'CatEvent').discriminator, tag).toBeUndefined();
+          // `kind`: the enum of both variants' consts (#398).
           expect(fieldsOf(spec, 'CatEvent'), tag).toEqual([
             'id: string',
-            `kind?: ${JSON.stringify(nameless)}`,
+            'kind?: CatEventKind',
             ...fields,
             'bark?: string',
           ]);
@@ -1494,9 +1503,191 @@ describe("workos/oagen#430: a discriminated variant never takes its component's 
       ),
     );
     expect(modelOf(spec, 'Ab').discriminator).toBeUndefined();
-    expect(fieldsOf(spec, 'Ab')).toEqual(['id: string', 'kind?: "a-b"', 'x?: string', 'y?: string']);
+    // `kind`: the enum of both variants' consts (#398).
+    expect(fieldsOf(spec, 'Ab')).toEqual(['id: string', 'kind?: AbKind', 'x?: string', 'y?: string']);
+    expect(spec.enums.find((e) => e.name === 'AbKind')?.values.map((v) => v.value)).toEqual(['a-b', 'a_b']);
     expect(modelNames(spec).sort()).toEqual(['Ab', 'Event']);
     expect(warnings).toEqual([]);
     expectSound(spec, ['Event', 'Ab']);
   });
+});
+
+/**
+ * workos/oagen#429: a union the component a `$ref` member names carried
+ * (`Pet: { properties: { id }, oneOf: [...] }`) was flattened into the
+ * inheriting component (`Dog`) and into no other model: not into `Pet`'s
+ * own, whose union beside `properties` was not read, nor into the same
+ * `allOf` merged inline as a response body or a field. One reading now:
+ * `Pet` is the object and one of the variants, flattened or dispatched as
+ * beside an `allOf`, and a merge that names `Pet` reads its union as
+ * `Pet`'s model does.
+ */
+describe('#429', () => {
+  const dog: SchemaObject = { allOf: [ref('Pet')], properties: { breed: str } };
+  const paths = {
+    '/pets': getOp('getPet', ref('Pet')),
+    '/dogs': getOp('getDog', ref('Dog')),
+    '/dogs/inline': getOp('getDogInline', dog),
+    '/owners': getOp('getOwner', ref('Owner')),
+  };
+  const withPet = (pet: SchemaObject, more: Record<string, SchemaObject> = {}, openapi = '3.1.0') =>
+    specDoc(paths, { Pet: pet, Dog: dog, Owner: obj({ dog }), ...more }, { openapi });
+  const inherited = ['breed?: string', 'id: string', 'ownerId?: string', 'shelterId?: string'];
+  const openapis = ['3.1.0', '3.0.3'];
+  const cases = openapis.flatMap((openapi) =>
+    (['oneOf', 'anyOf'] as const).map((keyword) => [openapi, keyword] as const),
+  );
+
+  it.each(cases)(
+    "the issue's document (OAS %s, %s): the four sites agree, the variants' properties on all of them",
+    async (openapi, keyword) => {
+      const pet: SchemaObject = {
+        type: 'object',
+        properties: { id: str },
+        required: ['id'],
+        [keyword]: [obj({ ownerId: str }), obj({ shelterId: str })],
+      };
+      const { spec, warnings } = await parse(`issue-${openapi}-${keyword}`, withPet(pet, {}, openapi));
+      expect(fieldsOf(spec, 'Pet')).toEqual(['id: string', 'ownerId?: string', 'shelterId?: string']);
+      expect(modelOf(spec, 'Pet').discriminator).toBeUndefined();
+      expect(modelOf(spec, 'Pet').variants).toBeUndefined();
+      expect(fieldsOf(spec, 'Dog')).toEqual(inherited);
+      expect(fieldsOf(spec, 'GetDogInlineResponse')).toEqual(inherited);
+      expect(fieldsOf(spec, 'OwnerDog')).toEqual(inherited);
+      expect(show(opsOf(spec).getDogInline!.response)).toBe('GetDogInlineResponse');
+      expect(warnings).toEqual([]);
+      expectSound(spec, ['Pet', 'Dog', 'Owner']);
+      // The one reading: `Pet` written as `allOf: [{ properties }, { oneOf }]` diffs as nothing.
+      const { spec: composed } = await parse(
+        `composed-${openapi}-${keyword}`,
+        withPet({ allOf: [obj({ id: str }, { required: ['id'] }), { [keyword]: pet[keyword] }] }, {}, openapi),
+      );
+      expect(diffSpecs(composed, spec).changes).toEqual([]);
+    },
+  );
+
+  it('a union whose variants pin a const is dispatched by Pet, and left to it by the merges that name Pet', async () => {
+    const cat = obj({ kind: { type: 'string', const: 'cat' }, lives: str }, { required: ['kind'] });
+    const dogVariant = obj({ kind: { type: 'string', const: 'dog' }, breed: str }, { required: ['kind'] });
+    const { spec, warnings } = await parse(
+      'dispatched',
+      withPet({ type: 'object', properties: { id: str }, required: ['id'], oneOf: [cat, dogVariant] }),
+    );
+    expect(modelOf(spec, 'Pet').discriminator).toEqual({ property: 'kind', mapping: { cat: 'PetCat', dog: 'PetDog' } });
+    expect(fieldsOf(spec, 'Pet')).toEqual(['id: string']);
+    expect(fieldsOf(spec, 'PetCat')).toEqual(['id: string', 'kind: "cat"', 'lives?: string']);
+    expect(fieldsOf(spec, 'PetDog')).toEqual(['id: string', 'kind: "dog"', 'breed?: string']);
+    // `Dog` reads `Pet`'s union as a member's, and dispatches it as before;
+    // the inline merges carry the base fields the dispatchers carry.
+    expect(modelOf(spec, 'Dog').discriminator).toEqual({ property: 'kind', mapping: { cat: 'DogCat', dog: 'DogDog' } });
+    for (const name of ['Dog', 'GetDogInlineResponse', 'OwnerDog']) {
+      expect(fieldsOf(spec, name), name).toEqual(['breed?: string', 'id: string']);
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Pet', 'Dog', 'Owner']);
+
+    // With `$ref` variants and the keyword, the mapping names the components.
+    const declared = await parse(
+      'dispatched-declared',
+      withPet(
+        {
+          type: 'object',
+          properties: { id: str },
+          required: ['id'],
+          oneOf: [ref('Cat'), ref('DogKind')],
+          discriminator: { propertyName: 'kind' },
+        },
+        { Cat: cat, DogKind: dogVariant },
+      ),
+    );
+    expect(modelOf(declared.spec, 'Pet').discriminator).toEqual({
+      property: 'kind',
+      mapping: { cat: 'Cat', dog: 'DogKind' },
+    });
+    expect(fieldsOf(declared.spec, 'GetDogInlineResponse')).toEqual(['breed?: string', 'id: string']);
+    expect(declared.warnings).toEqual([]);
+    expectSound(declared.spec, ['Pet', 'Dog', 'Owner', 'Cat', 'DogKind']);
+  });
+
+  it('a union an allOf component dispatches stays its own: a $ref member to it, inline or in a component, carries the base fields', async () => {
+    const cat = obj({ kind: { type: 'string', const: 'cat' }, lives: str }, { required: ['kind'] });
+    const dogVariant = obj({ kind: { type: 'string', const: 'dog' }, breed: str }, { required: ['kind'] });
+    const { spec, warnings } = await parse(
+      'inherit-dispatcher',
+      withPet(
+        { allOf: [ref('Base'), { oneOf: [ref('Cat'), ref('DogKind')] }], discriminator: { propertyName: 'kind' } },
+        { Base: obj({ id: str }, { required: ['id'] }), Cat: cat, DogKind: dogVariant },
+      ),
+    );
+    expect(modelOf(spec, 'Pet').discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'DogKind' } });
+    expect(fieldsOf(spec, 'Pet')).toEqual(['id: string']);
+    for (const name of ['Dog', 'GetDogInlineResponse', 'OwnerDog']) {
+      expect(fieldsOf(spec, name), name).toEqual(['breed?: string', 'id: string']);
+      expect(modelOf(spec, name).discriminator, name).toBeUndefined();
+    }
+    expect(warnings).toEqual([]);
+    expectSound(spec, ['Pet', 'Dog', 'Owner', 'Base', 'Cat', 'DogKind']);
+  });
+
+  // Review round 1 (Greptile, on #398's pagination check): the override
+  // check reads a union exactly when the model carries its fields
+  // (`unionCounts`, mirroring `componentUnionDispatches`). `PetMeta`'s
+  // const-pinned union is dispatched by a component whose direct `$ref`
+  // member names it (above: `Dog` dispatches `Pet`'s), whose variant models
+  // carry `has_more`, and left to `PetMeta` by the inline merge, which
+  // carries the base fields only; through a lone-`allOf` alias the nested
+  // dispatcher stays its own, through a nullable alias it is the member's.
+  it.each(openapis)(
+    "an endOfIteration behind PetMeta's dispatched union is kept for a component that dispatches it and rejected for a merge that leaves it to PetMeta (OAS %s)",
+    async (openapi) => {
+      const cursor = obj({ kind: { type: 'string', const: 'cursor' }, has_more: bool, next_after: str });
+      const page = obj({ kind: { type: 'string', const: 'page' }, has_more: bool, next_page: int });
+      const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+      const listPets = (meta: SchemaObject) => ({
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: str }],
+            responses: ok(obj({ data: { type: 'array', items: str }, meta })),
+            'x-pagination': { endOfIteration },
+          },
+        },
+      });
+      const schemas = {
+        PetMeta: { type: 'object', properties: { base: str }, oneOf: [cursor, page] },
+        DogMeta: { allOf: [ref('PetMeta')], properties: { trace_id: str } },
+        AliasMeta: { allOf: [ref('PetMeta')] },
+        ViaAlias: { allOf: [ref('AliasMeta')], properties: { trace_id: str } },
+        NullableAlias: { oneOf: [ref('PetMeta'), { type: 'null' }] },
+        ViaNullable: { allOf: [ref('NullableAlias')], properties: { trace_id: str } },
+      };
+      const names = Object.keys(schemas);
+      for (const name of ['DogMeta', 'ViaNullable']) {
+        const { spec, warnings } = await parse(
+          `kept-${name}-${openapi}`,
+          specDoc(listPets(ref(name)), schemas, { openapi }),
+        );
+        expect(opsOf(spec).listPets!.pagination?.endOfIteration, name).toEqual(endOfIteration);
+        expect(modelOf(spec, name).discriminator?.property, name).toBe('kind');
+        expect(warnings, name).toEqual([]);
+        expectSound(spec, names);
+      }
+      const rejected = [
+        ['inline', { allOf: [ref('PetMeta'), obj({ trace_id: str })] } as SchemaObject, 'Meta'],
+        ['ViaAlias', ref('ViaAlias'), 'ViaAlias'],
+      ] as const;
+      for (const [label, meta, model] of rejected) {
+        const { spec, warnings } = await parse(
+          `rejected-${label}-${openapi}`,
+          specDoc(listPets(meta), schemas, { openapi }),
+        );
+        expect(opsOf(spec).listPets!.pagination?.endOfIteration, label).toBeUndefined();
+        expect(warnings, label).toEqual([
+          expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field'),
+        ]);
+        expect([...fieldsOf(spec, model)].sort(), label).toEqual(['base?: string', 'trace_id?: string']);
+        expect(modelOf(spec, model).discriminator, label).toBeUndefined();
+      }
+    },
+  );
 });

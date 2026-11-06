@@ -4913,6 +4913,13 @@ describe('a title two unions give different shapes at different depths of one ro
         body: (inner) => ({ allOf: [ref('Base'), obj({ meta: marker(inner) })] }),
         schemas: (top) => ({ Base: obj({ meta: obj({ shape: top }) }) }),
       },
+      {
+        // The merge flattens a `$ref` variant's component in (#398), so
+        // `Base.shape` is carried beside `marker.shape` here too.
+        label: "a `$ref` under an inline member's variant",
+        body: (inner) => ({ allOf: [marker(inner), { oneOf: [ref('Base'), obj({ other: n })] }] }),
+        schemas: base,
+      },
     ])('reads what a merged `allOf` inherits with the root, through $label (#374)', (merge) => {
       // The issue's `allof.json`: the response merges `Base` with an inline
       // member into one model, which carries `Base.shape` beside the inline
@@ -4927,11 +4934,6 @@ describe('a title two unions give different shapes at different depths of one ro
       {
         label: 'an `allOf` read as a plain reference',
         body: (inner) => obj({ base: { allOf: [ref('Base')] }, marker: obj({ shape: inner }) }),
-        schemas: base,
-      },
-      {
-        label: "a `$ref` under an inline member's variant",
-        body: (inner) => ({ allOf: [marker(inner), { oneOf: [ref('Base'), obj({ other: n })] }] }),
         schemas: base,
       },
       {

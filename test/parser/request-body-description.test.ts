@@ -995,10 +995,13 @@ describe('request body descriptions (issue #316)', () => {
 
         // Review: `nullableUnionBranch` gives no branch under an `allOf`
         // beside the union either, so the request-body builder tells a
-        // nullable `oneOf` wrapper only where there is none (`nullableWrapper`)
-        // and otherwise builds the `oneOf` as written, the `allOf` aside, as
-        // it did before #535 — not the type a field with the same schema gets.
-        it('builds a nullable oneOf beside an allOf as the union of one variant it was, the allOf aside', async () => {
+        // nullable `oneOf` wrapper only where there is none (`nullableWrapper`).
+        // A typing union beside a typing `allOf` is one more member of it at
+        // every site (#398), so beside a `$ref` the body is the merged model
+        // the same schema is on a field; beside an `allOf` of a typeless
+        // member, which types nothing, the `oneOf` is built as written, the
+        // `allOf` aside, as it was before #535.
+        it('builds a nullable oneOf beside a typing allOf as the merged model, and beside a typeless allOf as the union of one variant it was (#398)', async () => {
           const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
           const spec = await parseDocument(
             document(
@@ -1023,12 +1026,12 @@ describe('request body descriptions (issue #316)', () => {
           const ops = opsOf(spec);
           const models = modelsOf(spec);
 
-          // An `allOf` of a `$ref`: the union of the one object variant, nullable, not the component it refers to.
-          expect(ops.addRef.requestBody).toEqual({
-            kind: 'nullable',
-            inner: { kind: 'union', variants: [{ kind: 'model', name: 'AddRefRequest' }] },
-          });
-          expect(models.get('AddRefRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
+          // An `allOf` of a `$ref` with the union beside it: the union is one
+          // more member (#398), so the body is the merged model of the
+          // component and the one variant — its `null` set aside beside an
+          // object member — as the same schema on a field is.
+          expect(ops.addRef.requestBody).toEqual({ kind: 'model', name: 'AddRefRequest' });
+          expect(models.get('AddRefRequest')?.fields.map((f) => f.name)).toEqual(['name', 'nickname']);
           expect(ops.addRef).not.toHaveProperty('requestBodyDescription');
           // An `allOf` of text alone: the same union, not the collapsed model.
           expect(ops.addText.requestBody).toEqual({

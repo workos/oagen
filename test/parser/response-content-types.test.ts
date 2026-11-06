@@ -1600,12 +1600,13 @@ describe('response content types', () => {
       expect(typeOf(op, 'application/vnd.oneof-properties+json')).toMatchObject({ kind: 'union' });
       expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponse')).toEqual(['name', 'a']);
       expect(fieldsOf(spec, 'ListThingsApplicationVndOneofPropertiesJsonResponseWithB')).toEqual(['name', 'b']);
-      // `allOf` wins over `oneOf`.
+      // `allOf` and `oneOf` together: the `allOf` types the schema, with the
+      // union as one more member, so the variants' fields are flattened in (#398).
       expect(typeOf(op, 'application/vnd.allof-oneof+json')).toEqual({
         kind: 'model',
         name: 'ListThingsApplicationVndAllofOneofJsonResponse',
       });
-      expect(fieldsOf(spec, 'ListThingsApplicationVndAllofOneofJsonResponse')).toEqual(['base']);
+      expect(fieldsOf(spec, 'ListThingsApplicationVndAllofOneofJsonResponse')).toEqual(['base', 'a', 'b']);
 
       // The same forms as fields of a component model, through the component
       // and general extractors — which must agree with each other too.
@@ -1628,7 +1629,7 @@ describe('response content types', () => {
       expect(fieldsOf(spec, 'PuzzleOneOfProperty')).toEqual(['name', 'a']);
       expect(fieldsOf(spec, 'PuzzleOneOfPropertyWithB')).toEqual(['name', 'b']);
       expect(fieldType('allOfOneOf')).toEqual({ kind: 'model', name: 'PuzzleAllOfOneOf' });
-      expect(fieldsOf(spec, 'PuzzleAllOfOneOf')).toEqual(['base']);
+      expect(fieldsOf(spec, 'PuzzleAllOfOneOf')).toEqual(['base', 'a', 'b']);
     });
   });
 

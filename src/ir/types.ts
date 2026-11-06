@@ -1219,11 +1219,18 @@ export interface Model {
    * named `oneOf`/`anyOf` with a `discriminator:` keyword or a const-pinned
    * property shared by every variant, a `$ref` variant's read from its
    * component as `UnionType.discriminator` reads it) or over allOf+oneOf variants (where
-   * `variants` is absent and the mapping alone names them). Emitters should
-   * generate a dispatcher (factory) instead of a regular dataclass. The
-   * `property` field is the discriminator key (e.g. "event"), and `mapping`
-   * maps each discriminator value to the concrete variant model name (an IR
-   * model name, after `schemaNameTransform`).
+   * `variants` is absent and the mapping alone names them: the union a
+   * composed component carries, as an `allOf` member, beside the `allOf`
+   * or beside the component's own `properties`, whose every variant pins
+   * one property to a distinct const — a `$ref` variant's read from its
+   * component — or that the document declares a `discriminator:` for, on
+   * the union or on the component itself). Emitters should generate a
+   * dispatcher (factory) instead of a regular dataclass. The `property`
+   * field is the discriminator key (e.g. "event"), and `mapping` maps each
+   * discriminator value to the concrete variant model name (an IR model
+   * name, after `schemaNameTransform`): an inline variant's model, built
+   * for it, or a `$ref` variant's component (`{ cat: "Cat", dog: "Dog" }`),
+   * which stands for it (#398).
    */
   discriminator?: {
     property: string;

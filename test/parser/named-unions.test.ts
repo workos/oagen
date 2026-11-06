@@ -572,7 +572,7 @@ ${animals}`);
     expect(unresolvedRefs(ir)).toEqual([]);
   });
 
-  it("keeps today's object model for a oneOf written beside properties", async () => {
+  it('reads a oneOf written beside properties as the object and one of the variants: a dispatcher when they pin a const (#429)', async () => {
     const ir = await parseInline(`${header}
 components:
   schemas:
@@ -585,11 +585,15 @@ components:
         - $ref: '#/components/schemas/Dog'
 ${animals}`);
 
+    // Not a named union: the properties are the base every variant carries,
+    // and the union is dispatched as it is beside an `allOf` (#429: the
+    // object model alone, the union not read).
     const pet = model(ir, 'Pet');
     expect(pet.fields.map((f) => f.name)).toEqual(['name']);
     expect(pet.variants).toBeUndefined();
     expect(pet.compositionKind).toBeUndefined();
-    expect(pet.discriminator).toBeUndefined();
+    expect(pet.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
+    expect(unresolvedRefs(ir)).toEqual([]);
   });
 
   it('keeps a nullable wrapper around one inline object as that object, and makes a wrapper around one $ref a union of one', async () => {

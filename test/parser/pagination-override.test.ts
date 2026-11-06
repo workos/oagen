@@ -1334,18 +1334,24 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
           ir.models.find((m) => m.name === name)?.fields.map((f) => f.name);
 
         it.each(['oneOf', 'anyOf'] as const)(
-          'rejects the override when only $ref variants of the %s declare the field, as before #463 (the issue)',
+          'keeps the override when only $ref variants of the %s declare the field, which the model flattens in (the issue; #398)',
           async (keyword) => {
+            // The flattened model reads a `$ref` variant's component as an
+            // inline variant (#398), so `Meta` has `has_more` and the
+            // iterator reads a field its response type has (#527 rejected
+            // the override while the model left the variants' fields out).
             for (const openapi of ['3.1.0', '3.0.3']) {
               for (const { meta, components } of sites(flattened(keyword, [ref('CursorMeta'), ref('PageMeta')]))) {
                 const spec = (extension?: unknown) => ({ ...cursorSpec(meta, extension, components), openapi });
-                const bare = await parseJson(spec());
-                expect(warn).not.toHaveBeenCalled();
                 const overridden = await parseJson(spec({ endOfIteration }));
-                rejected('endOfIteration path "meta.has_more" does not resolve to a field in the response');
-                expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
-                expect(fieldsOf(overridden, 'Meta')).toEqual(['trace_id']);
-                warn.mockClear();
+                expect(onlyOperation(overridden).pagination).toMatchObject({
+                  strategy: 'cursor',
+                  param: 'after',
+                  endOfIteration,
+                });
+                expect(warn).not.toHaveBeenCalled();
+                expectSound(overridden, Object.keys(components.schemas));
+                expect(fieldsOf(overridden, 'Meta')).toEqual(['has_more', 'next_after', 'next_page', 'trace_id']);
               }
             }
           },
@@ -1381,19 +1387,27 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
             kind: 'union',
           });
           expect(warn).not.toHaveBeenCalled();
-          const dropped = await parseJson(cursorSpec(component.meta, { endOfIteration }, component.components));
-          rejected('endOfIteration path "meta.has_more" does not resolve to a field in the response');
-          expect(fieldsOf(dropped, 'Meta')).toEqual([]);
+          // The component's own model flattens the `$ref` variants'
+          // components in (#398), so it has `has_more` and the override is
+          // kept there too (#527 rejected it over an empty `Meta`).
+          const flattenedInComponent = await parseJson(
+            cursorSpec(component.meta, { endOfIteration }, component.components),
+          );
+          expect(onlyOperation(flattenedInComponent).pagination?.endOfIteration).toEqual(endOfIteration);
+          expect(warn).not.toHaveBeenCalled();
+          expect(fieldsOf(flattenedInComponent, 'Meta')).toEqual(['has_more', 'next_after', 'next_page']);
         });
 
         // Review round 1 (MichaelDeBoey): the union written inline in a
         // component a `$ref` member of the `allOf` names. The inline `allOf`
-        // is merged by `mergeAllOfMembers`, which reads no union behind a
-        // `$ref` member, so `Meta` is `trace_id` alone and the override was
-        // kept over a field the model lacks; the same `allOf` as the component
-        // `Meta` is its own model, which does read it.
+        // is merged by `mergeAllOfMembers`, which reads the union behind a
+        // `$ref` member as the component's own model reads it — flattened
+        // (#429) — so `Meta` has `has_more` inline exactly as the same
+        // `allOf` as the component `Meta` has it, and the override is kept
+        // over a field the model has at both sites (#527 rejected it inline,
+        // where the merge read no such union and `Meta` was `trace_id` alone).
         it.each(['oneOf', 'anyOf'] as const)(
-          'rejects it over an inline allOf whose %s a $ref member carries, and keeps it over the same allOf as a component',
+          'keeps it over an inline allOf whose %s a $ref member carries, as over the same allOf as a component (#429)',
           async (keyword) => {
             const components = { schemas: { ...schemas, MetaUnion: { [keyword]: [cursorMeta, pageMeta] } } };
             const member = (wrapped: unknown) => ({ allOf: [wrapped, object({ trace_id: { type: 'string' } })] });
@@ -1404,13 +1418,14 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
                 member({ [keyword]: [ref('MetaUnion'), { type: 'null' }] }),
               ]) {
                 const spec = (extension?: unknown) => ({ ...cursorSpec(meta, extension, components), openapi });
-                const bare = await parseJson(spec());
-                expect(warn).not.toHaveBeenCalled();
                 const overridden = await parseJson(spec({ endOfIteration }));
-                rejected('endOfIteration path "meta.has_more" does not resolve to a field in the response');
-                expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(bare).pagination);
-                expect(fieldsOf(overridden, 'Meta')).toEqual(['trace_id']);
-                warn.mockClear();
+                expect(onlyOperation(overridden).pagination).toMatchObject({
+                  strategy: 'cursor',
+                  param: 'after',
+                  endOfIteration,
+                });
+                expect(warn).not.toHaveBeenCalled();
+                expect(fieldsOf(overridden, 'Meta')).toEqual(['has_more', 'next_after', 'next_page', 'trace_id']);
               }
               const inComponent = {
                 schemas: { ...components.schemas, Meta: member(ref('MetaUnion')) },
