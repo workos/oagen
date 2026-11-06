@@ -609,13 +609,23 @@ export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRe
  * stem that merely starts with another's (`petAdopted` beside
  * `petAdoptedPayloadPet`) does not collide unless a name coincides. A
  * colliding stem takes the first six hex characters of the SHA-1 of the
- * webhook's operationId when it is named from one and of its key otherwise,
+ * webhook's operationId when it is named from one and of its key otherwise
+ * — for a callback, of its site label (`stemIdentity`): the owner's label,
+ * the key, the expression and the method, so the callbacks of two owners
+ * whose stems coincide (`createPet` beside `create_pet`, both `CreatePet`)
+ * under one key never hash alike, each keeping its own payload (#382) —
  * before the method qualifier (`PetAdoptedB4A950`), exactly as an
  * operationId-less operation's path prefix does, and is minted again under
- * it. Both sides of a webhook-to-webhook collision are hashed, since neither
- * key is more canonical than the other. The outcome depends only on the
- * document's keys, operationIds, components and operations, never on their
- * order, and a key that stops colliding returns to its plain stem.
+ * it. The names minted under the moved stems are then checked again,
+ * against the reserved names and every other group's: a group still
+ * clashing — two hash prefixes that coincide, a reserved name that spells a
+ * hashed stem — takes six more characters of its hash, and so on until no
+ * stem-embedding name clashes or the hash is spent, when the clash is left
+ * to the model merge. Both sides of a webhook-to-webhook collision are
+ * hashed, since neither key is more canonical than the other. The outcome
+ * depends only on the document's keys, operationIds, components and
+ * operations, never on their order, and a key that stops colliding returns
+ * to its plain stem.
  *
  * A name that does not embed the stem — a title-mapped union variant, which
  * is context-free by design — cannot be moved by the hash, so a clash on it
@@ -634,35 +644,57 @@ function resolveWebhookModelStems(
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
 ): Map<WebhookGroup, string> {
-  const minted = new Map<WebhookGroup, Set<string>>();
-  for (const group of groups) {
-    minted.set(group, mintWebhook(group.owner, plainStem(group.owner, ''), components, reserved, siblingDocs).names);
-  }
-
-  const stems = new Map<WebhookGroup, string>();
-  for (const group of groups) {
-    const names = minted.get(group)!;
-    const { owner } = group;
+  const mint = (group: WebhookGroup, stem: string): Set<string> =>
+    mintWebhook(group.owner, stem, components, reserved, siblingDocs).names;
+  // How many hex characters of its hash each group's stem carries: none
+  // until it clashes, six more each time it still does.
+  const hashLength = new Map<WebhookGroup, number>();
+  let stems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  let names = new Map(groups.map((group) => [group, mint(group, stems.get(group)!)]));
+  for (;;) {
     // Only a clashing name the hash would move — one that embeds the stem —
     // moves the stem.
-    const stem = toPascalCase(plainStem(owner, ''));
-    const taken = [...names].some(
-      (name) =>
-        name.includes(stem) &&
-        (reserved.all.has(name) || groups.some((other) => other !== group && minted.get(other)!.has(name))),
+    const clashing = groups.filter((group) => {
+      const stem = toPascalCase(stems.get(group)!);
+      return [...names.get(group)!].some(
+        (name) =>
+          name.includes(stem) &&
+          (reserved.all.has(name) || groups.some((other) => other !== group && names.get(other)!.has(name))),
+      );
+    });
+    // A clash that survives the whole hash is left to the model merge.
+    const movable = clashing.filter((group) => (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH);
+    if (movable.length === 0) return stems;
+    const moved = new Map(stems);
+    for (const group of movable) {
+      const length = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
+      hashLength.set(group, length);
+      moved.set(group, plainStem(group.owner, webhookDisambiguator(stemIdentity(group.owner), length)));
+    }
+    // Minted again under the moved stems alone, then checked again: the
+    // groups that did not move keep the names they minted.
+    names = new Map(
+      groups.map((group) => [
+        group,
+        moved.get(group) === stems.get(group) ? names.get(group)! : mint(group, moved.get(group)!),
+      ]),
     );
-    // Hashed from the operationId when named from one, else from the key —
-    // and, for a callback, its expression with it, so two expressions of
-    // one key that PascalCase alike (`#/url` and `#/URL`) still part.
-    const disambiguator = taken ? webhookDisambiguator(owner.stemOperationId ?? keyedIdentity(owner)) : '';
-    stems.set(group, plainStem(owner, disambiguator));
+    stems = moved;
   }
-  return stems;
 }
 
-/** What a key-named entry is hashed from: a webhook's key; a callback's key and expression, one per line. */
-function keyedIdentity(entry: WebhookEntry): string {
-  return entry.expression === undefined ? entry.name : `${entry.name}\n${entry.expression}`;
+/** The hex characters a SHA-1 spells: the most a disambiguator can take. */
+const SHA1_HEX_LENGTH = 40;
+
+/**
+ * What an entry's disambiguator is hashed from: its operationId when its
+ * stem is named from one; else a webhook's key, and a callback's site label
+ * — the owner's label, the key, the expression and the method — so two
+ * owners declaring one callback key, or two expressions of one key that
+ * PascalCase alike (`#/url` and `#/URL`), never hash alike (#382).
+ */
+function stemIdentity(entry: WebhookEntry): string {
+  return entry.stemOperationId ?? (entry.kind === 'callback' ? entry.label : entry.name);
 }
 
 /**
@@ -725,9 +757,9 @@ function plainStem(entry: WebhookEntry, disambiguator: string): string {
   return /^\d/.test(stem) ? `${noun}${stem}` : stem;
 }
 
-/** The first six hex characters of the SHA-1 of a webhook's key (or a callback's key and expression). */
-function webhookDisambiguator(name: string): string {
-  return createHash('sha1').update(name).digest('hex').slice(0, 6);
+/** The first `length` (six, by default) hex characters of the SHA-1 of what names an entry (`stemIdentity`). */
+function webhookDisambiguator(name: string, length = 6): string {
+  return createHash('sha1').update(name).digest('hex').slice(0, length);
 }
 
 /**

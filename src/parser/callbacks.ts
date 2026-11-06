@@ -29,9 +29,13 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other, one level of nesting at a time, so a collision hashes the
- * NEW stem (`CreatePetPetAdoptedD62D88Payload`, from the key and expression
- * together) as a webhook's is hashed, and never renames an existing model.
+ * each other, in rounds (see `extractCallbacks`), so a collision hashes the
+ * NEW stem as a webhook's is hashed — from the callback's site label, the
+ * owner's label with the key, expression and method, so the callbacks of
+ * two owners whose stems coincide (`createPet` beside `create_pet`) under
+ * one key never hash alike (`CreatePetPetAdopted2Fac84Payload` beside a
+ * component `CreatePetPetAdoptedPayload`), the moved names checked again —
+ * and never renames an existing model.
  *
  * **Cycles.** A `components/callbacks` entry, or a nested callback, can
  * refer back to a callback it sits in (a callback whose operation `$ref`s

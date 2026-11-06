@@ -397,6 +397,37 @@ describe('#382', () => {
         },
       );
 
+      it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {
+        // `createPet` and `create_pet` both name their models from `CreatePet`;
+        // each declares `petAdopted` under the same expression.
+        const owners = (second: Record<string, unknown>) =>
+          documentWith(openapi, {
+            '/pets': { post: opWith({ petAdopted: callbackPosting(petIdSchema) }, 'createPet') },
+            '/animals': { post: opWith({ petAdopted: callbackPosting(second) }, 'create_pet') },
+          });
+
+        const differing = await parseJson(owners({ type: 'object', properties: { petId: { type: 'integer' } } }));
+        const [first, second] = operations(differing).map((op) => payloadNames(op)[0]!);
+        // Both plain stems are `CreatePetPetAdopted`, so both are hashed —
+        // from each callback's site label, never alike — and each callback
+        // references its own model with its own field type.
+        expect(first).not.toBe(second);
+        for (const name of [first, second]) expect(name).toMatch(/^CreatePetPetAdopted[0-9A-Fa-f]{6}Payload$/);
+        const typeOf = (name: string) => differing.models.find((m) => m.name === name)!.fields[0]!.type;
+        expect(typeOf(first)).toMatchObject({ kind: 'primitive', type: 'string' });
+        expect(typeOf(second)).toMatchObject({ kind: 'primitive', type: 'integer' });
+        expect(modelNames(differing).sort()).toEqual([first, second].sort());
+        expectResolved(differing);
+        expect(warnings()).toEqual([]);
+
+        // Identical payloads part the same way: neither owner is more
+        // canonical, as neither of two webhook keys that flatten to one stem is.
+        const identical = await parseJson(owners(petIdSchema));
+        expect(modelNames(identical).sort()).toEqual([first, second].sort());
+        expect(operations(identical).map((op) => payloadNames(op)[0]!)).toEqual([first, second]);
+        expect(warnings()).toEqual([]);
+      });
+
       it('hashes the stem of a callback whose payload name a component already holds, and never renames the component', async () => {
         const spec = await parseJson(
           documentWith(
@@ -412,10 +443,10 @@ describe('#382', () => {
 
         // The component keeps its name and its field; the callback steps to a
         // hashed stem, as a webhook's does, and references the hashed model.
-        expect(modelNames(spec)).toEqual(['CreatePetPetAdoptedPayload', 'CreatePetPetAdoptedD62D88Payload']);
+        expect(modelNames(spec)).toEqual(['CreatePetPetAdoptedPayload', 'CreatePetPetAdopted2Fac84Payload']);
         expect(spec.models[0]!.fields.map((f) => f.name)).toEqual(['other']);
         expect(spec.models[1]!.fields.map((f) => f.name)).toEqual(['petId']);
-        expect(payloadNames(operations(spec)[0]!)).toEqual(['CreatePetPetAdoptedD62D88Payload']);
+        expect(payloadNames(operations(spec)[0]!)).toEqual(['CreatePetPetAdopted2Fac84Payload']);
         expectResolved(spec);
         expect(warnings()).toEqual([]);
       });
@@ -807,10 +838,10 @@ describe('#382', () => {
       );
 
       // Both keys flatten to `XPetAdopted`, and the name is reserved too, so
-      // both are hashed — from the key and the expression together, so
-      // `petAdopted` takes the hash it takes under any owner (`D62D88`).
-      expect(result.inlineModels.map((m) => m.name)).toEqual(['XPetAdoptedD62D88Payload', 'XPetAdoptedDdcd98Payload']);
-      expect(payloadNames(node)).toEqual(['XPetAdoptedD62D88Payload', 'XPetAdoptedDdcd98Payload']);
+      // both are hashed — from each callback's site label (owner, key,
+      // expression and method), so neither takes the other's hash.
+      expect(result.inlineModels.map((m) => m.name)).toEqual(['XPetAdoptedFfca5CPayload', 'XPetAdopted30De9DPayload']);
+      expect(payloadNames(node)).toEqual(['XPetAdoptedFfca5CPayload', 'XPetAdopted30De9DPayload']);
       expect(warn).not.toHaveBeenCalled();
     });
 
