@@ -754,6 +754,121 @@ describe('#382', () => {
             expect(warnings()).toEqual([]);
           },
         );
+
+        it.each([
+          { order: 'petEvent first', petEventFirst: true },
+          { order: 'returnedPetEvent first', petEventFirst: false },
+        ])(
+          'keeps the payloads of two shared callbacks that nest each other apart, each with its own fields, $order (Greptile)',
+          async ({ petEventFirst }) => {
+            // `PetEvent`'s union mints `ReturnedPetEventPayload` for its
+            // `returned` variant; `ReturnedPetEvent`'s body wants that name
+            // too. Each nests a reference to the other, so the two groups are
+            // ancestors of each other — peers, both hashed — and the cycle
+            // guard stops each walk one level down, with a warning each.
+            const union = {
+              oneOf: [
+                { type: 'object', properties: { kind: { const: 'adopted' }, pet_id: { type: 'string' } } },
+                { type: 'object', properties: { kind: { const: 'returned' }, pet_id: { type: 'string' } } },
+              ],
+              discriminator: { propertyName: 'kind' },
+            };
+            const callbacks = {
+              PetEvent: callbackPosting(union, {
+                operationId: 'petEvent',
+                callbacks: { returnedPetEvent: { $ref: '#/components/callbacks/ReturnedPetEvent' } },
+              }),
+              ReturnedPetEvent: callbackPosting(
+                { type: 'object', properties: { reason: { type: 'string' } } },
+                {
+                  operationId: 'returnedPetEvent',
+                  callbacks: { petEvent: { $ref: '#/components/callbacks/PetEvent' } },
+                },
+              ),
+            };
+            const petEvent = { $ref: '#/components/callbacks/PetEvent' };
+            const returnedPetEvent = { $ref: '#/components/callbacks/ReturnedPetEvent' };
+            const spec = await parseJson(
+              documentWith(
+                openapi,
+                {
+                  '/pets': {
+                    post: opWith(
+                      petEventFirst ? { petEvent, returnedPetEvent } : { returnedPetEvent, petEvent },
+                      'createPet',
+                    ),
+                  },
+                },
+                { components: { callbacks } },
+              ),
+            );
+
+            const [first, second] = operations(spec)[0]!.callbacks!;
+            const [petEventNode, returnedNode] = petEventFirst ? [first!, second!] : [second!, first!];
+            const unionOf = (node: Callback) => {
+              expect(node.requestBody).toMatchObject({ kind: 'union' });
+              return (node.requestBody as { variants: Array<{ name: string }> }).variants.map((v) => v.name);
+            };
+            const [adoptedName, returnedVariant] = unionOf(petEventNode);
+            const returnedPayload = (returnedNode.requestBody as { name: string }).name;
+            expect(adoptedName).toMatch(/^PetEvent[0-9A-Fa-f]{6}Payload$/);
+            expect(returnedVariant).toMatch(/^ReturnedPetEvent[0-9A-Fa-f]{6}Payload$/);
+            expect(returnedPayload).toMatch(/^ReturnedPetEvent[0-9A-Fa-f]{6}Payload$/);
+            expect(returnedVariant).not.toBe(returnedPayload);
+            const fieldsOf = (name: string) => spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
+            expect(fieldsOf(returnedVariant)).toEqual(['kind', 'pet_id']);
+            expect(fieldsOf(returnedPayload)).toEqual(['reason']);
+            expect(modelNames(spec).sort()).toEqual([adoptedName, returnedVariant, returnedPayload].sort());
+            // The nested sites reference the same models as the direct ones.
+            expect(unionOf(returnedNode.callbacks![0]!)).toEqual([adoptedName, returnedVariant]);
+            expect(petEventNode.callbacks![0]!.requestBody).toEqual({ kind: 'model', name: returnedPayload });
+            expectResolved(spec);
+            // The cycle guard's two warnings, and no "more than one definition".
+            expect(warnings()).toHaveLength(2);
+            for (const warning of warnings()) expect(warning).toContain('refers back to a callback it sits in');
+          },
+        );
+      });
+
+      it('parts two callbacks whose title-mapped variants share a name, which no stem hash moves, under the later stem', async () => {
+        // Both payloads are title-mapped unions — every variant titled and
+        // pinning `kind` — carrying a variant titled `Shape`: a context-free
+        // name the stem resolution ignores, since no hash would move it, with
+        // different fields on each side. The catch-all after minting renames
+        // the later callback's under its stem; the earlier keeps `Shape`.
+        const titled = (title: string, own: Record<string, unknown>) => ({
+          title,
+          type: 'object',
+          properties: { kind: { type: 'string', const: title.toLowerCase() }, ...own },
+        });
+        const shaped = (own: Record<string, unknown>, other: string) => ({
+          oneOf: [titled('Shape', own), titled(other, { text: { type: 'string' } })],
+        });
+        const spec = await parseJson(
+          documentWith(openapi, {
+            '/pets': {
+              post: opWith(
+                {
+                  petAdopted: callbackPosting(shaped({ sides: { type: 'integer' } }, 'Note')),
+                  petReturned: callbackPosting(shaped({ radius: { type: 'number' } }, 'Memo')),
+                },
+                'createPet',
+              ),
+            },
+          }),
+        );
+
+        const [adopted, returned] = operations(spec)[0]!.callbacks!;
+        const variants = (node: Callback) =>
+          (node.requestBody as { variants: Array<{ name: string }> }).variants.map((v) => v.name);
+        expect(variants(adopted!)).toEqual(['Shape', 'Note']);
+        expect(variants(returned!)).toEqual(['CreatePetPetReturnedShape', 'Memo']);
+        const fieldsOf = (name: string) => spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
+        expect(fieldsOf('Shape')).toEqual(['kind', 'sides']);
+        expect(fieldsOf('CreatePetPetReturnedShape')).toEqual(['kind', 'radius']);
+        expect(modelNames(spec).sort()).toEqual(['CreatePetPetReturnedShape', 'Memo', 'Note', 'Shape']);
+        expectResolved(spec);
+        expect(warnings()).toEqual([]);
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {

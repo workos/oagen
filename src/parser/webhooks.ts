@@ -330,14 +330,17 @@ export interface BuiltReceivedRequests {
  * callback added renames nothing above it. (The resolution compares the
  * names minted, not the stems, so without that rule the parent's parameter
  * model would move the nested payload and the nested payload the parent's
- * stem alike.) Minting then proceeds ancestors first, in waves by each group's
+ * stem alike.) Two groups that each nest a reference to the other are
+ * peers again, neither protected. Minting then proceeds ancestors first, in waves by each group's
  * shallowest member's depth (`depthOf`, 0 for a webhook): every group with
  * a member at depth 0, then those at depth 1, and so on, each wave minted
  * against the reserved names and every name the waves before minted, where
  * a name still taken — a spent hash, an enum an earlier wave minted —
  * steps aside at mint time; a group that spans depths is one minting,
  * named at its shallowest depth and reused by its deeper members (#382).
- * The outcome depends only on the document, never on the order its entries
+ * Last, for a callback batch, whatever let two groups mint one name past
+ * all that moves the later group alone (`separateMintedNames`). The
+ * outcome depends only on the document, never on the order its entries
  * are read in, and a document without callbacks names its webhooks as it
  * always has.
  *
@@ -381,8 +384,21 @@ export function buildReceivedRequests(
   // name a descendant mints under a stem of its own never moves an
   // ancestor's stem, so the descendant is the one that hashes.
   const plainStems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  /**
+   * Whether a name `other` mints may move `group`'s stem: it may when the
+   * plain stems agree, when neither group is a strict descendant of the
+   * other, or when each descends from the other — mutual ancestry makes
+   * them peers, neither protected: `petEvent`, whose union mints
+   * `ReturnedPetEventPayload`, and `returnedPetEvent`, whose body wants
+   * that name, each nesting a reference to the other (the cycle guard
+   * stops each walk one level down), both hash as two `webhooks` keys
+   * would. Only a name a strict descendant mints under a stem of its own
+   * never moves its ancestor's stem.
+   */
   const contends = (group: WebhookGroup, other: WebhookGroup): boolean =>
-    plainStems.get(other) === plainStems.get(group) || !ancestorsOf.get(other)!.has(group);
+    plainStems.get(other) === plainStems.get(group) ||
+    !ancestorsOf.get(other)!.has(group) ||
+    ancestorsOf.get(group)!.has(other);
   const settled = resolveWebhookModelStems(groups, reserved, components, siblingDocs, undefined, contends);
   // Each group's wave: its shallowest member's depth.
   const waveOf = new Map(groups.map((group) => [group, Math.min(...group.entries.map(depthOf))] as const));
@@ -392,35 +408,33 @@ export function buildReceivedRequests(
   const all = new Set(reserved.all);
   const enums = new Set(reserved.enums);
   const stems = new Map<WebhookGroup, string>();
-  const inlineModels: Model[] = [];
-  const names = new Set<string>();
+  const hashLength = new Map<WebhookGroup, number>();
+  const reservedOf = new Map<WebhookGroup, ReservedNames>();
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
   for (const wave of waves) {
     const waveGroups = groups.filter((group) => waveOf.get(group) === wave);
     // One reserved set for the wave's step-around and its minting, so what
     // the step-around minted is what is kept; the next wave reserves it.
     const waveReserved: ReservedNames = { all: new Set(all), enums: new Set(enums) };
-    const waveStems = resolveWebhookModelStems(
-      waveGroups,
-      waveReserved,
-      components,
-      siblingDocs,
-      settled,
-      contends,
-    ).stems;
+    const resolved = resolveWebhookModelStems(waveGroups, waveReserved, components, siblingDocs, settled, contends);
     for (const group of waveGroups) {
-      const stem = waveStems.get(group)!;
+      const stem = resolved.stems.get(group)!;
       const minted = mintWebhook(group.owner, stem, components, waveReserved, siblingDocs);
       stems.set(group, stem);
+      hashLength.set(group, resolved.hashLength.get(group) ?? 0);
+      reservedOf.set(group, waveReserved);
       mintedByGroup.set(group, minted);
-      inlineModels.push(...minted.inlineModels);
-      for (const name of minted.names) {
-        names.add(name);
-        all.add(name);
-      }
+      for (const name of minted.names) all.add(name);
       for (const name of mintedEnumNames(minted)) enums.add(name);
     }
   }
+  // The groups in minting order: by wave, then as the document declares them.
+  const order = waves.flatMap((wave) => groups.filter((group) => waveOf.get(group) === wave));
+  if (entries[0]?.kind === 'callback') {
+    separateMintedNames(order, stems, hashLength, mintedByGroup, reservedOf, components, siblingDocs);
+  }
+  const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
+  const names = new Set(order.flatMap((group) => [...mintedByGroup.get(group)!.names]));
 
   const built: BuiltReceivedRequests['built'] = [];
   const nodesByGroup = new Map<WebhookGroup, Webhook[]>();
@@ -457,18 +471,109 @@ export function buildReceivedRequests(
 }
 
 /**
+ * The catch-all after a callback batch is minted, independent of what the
+ * resolution counted: no two groups may mint one model or enum name,
+ * whatever let a collision through — a title-mapped union variant, which
+ * embeds no stem and so no stem hash moves (`resolveWebhookModelStems`), a
+ * hash coincidence, a spent hash. Each collision, found in minting order
+ * (by wave, then as the document declares the groups), moves the LATER
+ * group alone, the earlier one's models and stem untouched: a colliding
+ * name that embeds the group's stem is moved as the resolution moves one,
+ * the stem settled with six more characters of its identity's hash and
+ * the group minted again; one the hash cannot move is renamed under the
+ * group's stem (`<Stem><Name>`, numbered when that is taken too), every
+ * reference among the group's models and in its parameters and payload
+ * repointed, as a variant named like a decided enum is (`mintSchema`). The
+ * check runs again until no name is shared. A collision on an inline enum
+ * name once the hash is spent cannot be moved — nothing renames an enum
+ * reference — and is warned about and left to the model merge, never
+ * merged silently.
+ *
+ * The `webhooks` map is not held to this: the one name the resolution
+ * leaves two webhooks sharing is a title-mapped variant, which the model
+ * merge shares when the shapes agree and renames otherwise, as it always
+ * has, and a document without callbacks names its webhooks as before. A
+ * callback batch — nested, shared across depths, its stems built on its
+ * owners' — is held to the stricter rule (#382).
+ */
+function separateMintedNames(
+  order: WebhookGroup[],
+  stems: Map<WebhookGroup, string>,
+  hashLength: Map<WebhookGroup, number>,
+  mintedByGroup: Map<WebhookGroup, MintedWebhook>,
+  reservedOf: Map<WebhookGroup, ReservedNames>,
+  components: WebhookComponents,
+  siblingDocs: SiblingDocs,
+): void {
+  // The groups whose collision was warned about, left to the merge.
+  const given = new Set<WebhookGroup>();
+  for (;;) {
+    const owners = new Map<string, WebhookGroup>();
+    let collision: { group: WebhookGroup; name: string } | undefined;
+    search: for (const group of order) {
+      for (const name of mintedByGroup.get(group)!.names) {
+        if (!owners.has(name)) owners.set(name, group);
+        else if (!given.has(group)) {
+          collision = { group, name };
+          break search;
+        }
+      }
+    }
+    if (collision === undefined) return;
+    const { group, name } = collision;
+    const reserved = reservedOf.get(group)!;
+    const stem = toPascalCase(stems.get(group)!);
+    const length = hashLength.get(group) ?? 0;
+    if (name.includes(stem) && length < SHA1_HEX_LENGTH) {
+      // The hash moves it: six more characters, minted again.
+      const next = Math.min(SHA1_HEX_LENGTH, length + 6);
+      const moved = plainStem(group.owner, webhookDisambiguator(groupIdentity(group), next));
+      hashLength.set(group, next);
+      stems.set(group, moved);
+      mintedByGroup.set(group, mintWebhook(group.owner, moved, components, reserved, siblingDocs));
+      continue;
+    }
+    const minted = mintedByGroup.get(group)!;
+    const model = minted.inlineModels.find((m) => m.name === name);
+    if (model === undefined) {
+      console.warn(
+        `[oagen] Warning: Callback "${group.owner.label}" names an inline enum "${name}" as another callback does, and no hash parts them; leaving the two to the model merge.`,
+      );
+      given.add(group);
+      continue;
+    }
+    // A name the hash cannot move: renamed under the stem, every reference
+    // of the group repointed, the earlier group's model keeping the name.
+    const taken = new Set([...reserved.all, ...order.flatMap((other) => [...mintedByGroup.get(other)!.names])]);
+    let to = `${stem}${name}`;
+    for (let n = 2; taken.has(to); n++) to = numberedName(`${stem}${name}`, n);
+    model.name = to;
+    for (const other of minted.inlineModels) {
+      for (const ref of collectModelTypeRefs(other)) repointMintedRefs(ref, name, to);
+    }
+    for (const ref of mintedShapeRefs(minted)) repointMintedRefs(ref, name, to);
+    minted.names.delete(name);
+    minted.names.add(to);
+  }
+}
+
+/** Every reference a minting's shape holds: its parameters' types, its payload and its content entries' types. */
+function mintedShapeRefs(minted: MintedWebhook): TypeRef[] {
+  return [
+    ...[...minted.headerParams, ...minted.queryParams, ...minted.cookieParams].map((param) => param.type),
+    ...(minted.requestBody ? [minted.requestBody] : []),
+    ...(minted.requestBodyContents ?? []).map((content) => content.type),
+  ];
+}
+
+/**
  * Every inline enum name a minting produced — an enum reference carrying
  * its `values`, in a minted model's field or in the shape's own references
  * — which a later wave's model may not take (`ReservedNames.enums`).
  */
 function mintedEnumNames(minted: MintedWebhook): Set<string> {
   const names = new Set<string>();
-  const refs: TypeRef[] = [
-    ...minted.inlineModels.flatMap(collectModelTypeRefs),
-    ...[...minted.headerParams, ...minted.queryParams, ...minted.cookieParams].map((param) => param.type),
-    ...(minted.requestBody ? [minted.requestBody] : []),
-    ...(minted.requestBodyContents ?? []).map((content) => content.type),
-  ];
+  const refs: TypeRef[] = [...minted.inlineModels.flatMap(collectModelTypeRefs), ...mintedShapeRefs(minted)];
   for (const ref of refs) {
     walkTypeRef(ref, {
       enum: (r) => {

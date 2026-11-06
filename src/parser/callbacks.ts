@@ -121,12 +121,16 @@ interface PendingCallback {
  * inside it, or both — with the one rule the `webhooks` map never
  * exercises, that a name a descendant mints under a stem of its own never
  * moves an ancestor's stem, so a new nested callback never renames its
- * parent's parameter or payload model (it is the one that hashes); and the minting
+ * parent's parameter or payload model (it is the one that hashes), two
+ * groups nesting each other being peers again; and the minting
  * proceeds ancestors first, in waves by each group's shallowest member's
  * depth — every group with a member at depth 0, then those at depth 1, and
  * so on — each wave stepping around at mint time any name still taken,
  * while a group that spans depths is still one minting, named at its
- * shallowest depth and reused by its deeper members. Entries reading one
+ * shallowest depth and reused by its deeper members; last, whatever lets
+ * two groups mint one name past all that — a title-mapped variant no stem
+ * hash moves — moves the later group alone (`separateMintedNames`), so no
+ * two callbacks ever share a model by accident. Entries reading one
  * operation object and named from
  * its operationId form one group whatever their depths (a
  * `components/callbacks` entry an operation references directly and

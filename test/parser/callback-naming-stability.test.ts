@@ -71,6 +71,8 @@ interface Row {
   touched?: string[];
   /** The edit reorders only: the diff is empty. */
   reorder?: boolean;
+  /** The warnings the two parses print — a cycle guard's — none by default; a "more than one definition" is never one. */
+  warnings?: number;
 }
 
 const rows: Row[] = [
@@ -209,6 +211,45 @@ const rows: Row[] = [
     touched: ['callback-modified petAdopted'],
   },
   {
+    name: 'two shared callbacks made to nest each other',
+    base: (openapi) =>
+      document(
+        openapi,
+        {
+          '/pets': {
+            post: op('createPet', { petEvent: reference('PetEvent'), returnedPetEvent: reference('ReturnedPetEvent') }),
+          },
+        },
+        {
+          components: {
+            callbacks: {
+              PetEvent: posting(
+                {
+                  oneOf: [
+                    { type: 'object', properties: { kind: { const: 'adopted' }, pet_id: { type: 'string' } } },
+                    { type: 'object', properties: { kind: { const: 'returned' }, pet_id: { type: 'string' } } },
+                  ],
+                  discriminator: { propertyName: 'kind' },
+                },
+                { operationId: 'petEvent' },
+              ),
+              ReturnedPetEvent: posting(
+                { type: 'object', properties: { reason: { type: 'string' } } },
+                { operationId: 'returnedPetEvent' },
+              ),
+            },
+          },
+        },
+      ),
+    edit: (doc) => {
+      const callbacks = (doc.components as { callbacks: Record<string, unknown> }).callbacks;
+      callbackOpOf({ callbacks }, 'PetEvent').callbacks = { returnedPetEvent: reference('ReturnedPetEvent') };
+      callbackOpOf({ callbacks }, 'ReturnedPetEvent').callbacks = { petEvent: reference('PetEvent') };
+    },
+    // The cycle guard stops each nested walk one level down, with a warning each.
+    warnings: 2,
+  },
+  {
     name: 'two paths reordered',
     base: (openapi) =>
       document(
@@ -293,7 +334,8 @@ describe('#382 naming stability under one edit', () => {
       row.edit(after);
       const base = await parse(before, 'base.json');
       const edited = await parse(after, 'edited.json');
-      expect(warn.mock.calls).toEqual([]);
+      expect(warn.mock.calls).toHaveLength(row.warnings ?? 0);
+      for (const call of warn.mock.calls) expect(String(call[0])).not.toContain('more than one definition');
 
       const { changes } = diffSpecs(base, edited);
       if (row.reorder) {
