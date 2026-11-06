@@ -28,7 +28,10 @@
  * with named properties, to the catch-all `additionalProperties` field's
  * values (`Box/additionalProperties` is `integer` for `Box: { properties:
  * { id }, additionalProperties: { type: integer } }`), `oneOf/<n>` or
- * `anyOf/<n>` to the union's or the named union's n-th non-null variant,
+ * `anyOf/<n>` to the union's or the named union's n-th non-null variant
+ * (the one non-null member of a union collapsed to a nullable wrapper is
+ * the wrapper's inner type whole, a union of its own or a named union
+ * included),
  * and `allOf/<n>` to the member's own type: a `$ref` member's reference,
  * or, for the one member the `allOf` is read as (its one typing member
  * beside members that only annotate it; #555), the `allOf`'s own type —
@@ -627,9 +630,17 @@ class PointerResolver {
         case 'anyOf': {
           // The IR carries a union's non-null variants only: the `null`
           // variant is its nullability (`pointerSteps` stops at it), and a
-          // union of one variant beside it is read as that variant.
+          // union of one member beside it is collapsed to a nullable wrapper
+          // (`nullableUnionBranch`), so that member is the wrapper's inner
+          // type whatever it is — a union of its own (`type: ['array',
+          // 'string']`), a named union — read before any variants are
+          // indexed, which would take the member's own first variant for it.
           const members = node[keyword] ?? [];
           const nonNull = members.filter((member) => !isNullSchema(member));
+          if (nonNull.length === 1 && members.length > nonNull.length) {
+            type = bare;
+            break;
+          }
           const variant = nonNull.indexOf(next);
           const variants =
             bare.kind === 'union'
