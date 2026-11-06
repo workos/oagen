@@ -5622,9 +5622,12 @@ export function derivePathBasedName(
  * (resolvePathModelBaseNames); an operation not there names them from its
  * own. `sharedWith` holds, for a path that `$ref`s the Operation Object of
  * another, the path whose models it shares. Reused means declared on more
- * than one Operation Object, which OpenAPI forbids: every such operation
- * would otherwise name its models alike (`CreateNoteRequest`), and the
- * merge would keep one body for all of them.
+ * than one Operation Object, which OpenAPI forbids — as written, or up to
+ * the trailing overload markers (normalizeOperationIdForNaming): `listPets[1]`
+ * and `listPets[2]` or `listPets[1][2]` take one name and one stem, so
+ * they are one id, reused, exactly as `listPets` declared twice is (#565).
+ * Every such operation would otherwise name its models alike
+ * (`CreateNoteRequest`), and the merge would keep one body for all of them.
  *
  * Each Operation Object claims the stem (operationIdModelBase) of the name
  * the first of its paths ends up with (planOperations): its `operationId`'s
@@ -5658,15 +5661,20 @@ function resolveReusedOperationIds(
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
       if (!op?.operationId) continue;
-      const entries = declaring.get(op.operationId) ?? [];
+      // Ids that strip to one (`listPets[1]`, `listPets[2]`, `listPets[1][2]`)
+      // take one name and one stem, so they are one id, reused.
+      const id = normalizeOperationIdForNaming(op.operationId);
+      const entries = declaring.get(id) ?? [];
       entries.push({ key: `${method} ${path}`, path, method, op });
-      declaring.set(op.operationId, entries);
+      declaring.set(id, entries);
     }
   }
   const reused = (entries: Array<{ op: OperationObject }>) => new Set(entries.map(({ op }) => op)).size > 1;
   // Every stem an `operationId` declared on one Operation Object holds.
   const held = new Set(
-    [...declaring].filter(([, entries]) => !reused(entries)).map(([operationId]) => operationIdModelBase(operationId)),
+    [...declaring.values()]
+      .filter((entries) => !reused(entries))
+      .map(([{ op }]) => operationIdModelBase(op.operationId!)),
   );
   const claims = [...declaring.values()]
     .filter(reused)
