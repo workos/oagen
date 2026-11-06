@@ -186,6 +186,11 @@ export type {
   ServerVariableChange,
   ServerChange,
   DocumentSecurityChanged,
+  SecuritySchemeAdded,
+  SecuritySchemeRemoved,
+  SecuritySchemeModified,
+  SecuritySchemeChange,
+  SecuritySchemeChanged,
 } from './differ/types.js';
 
 // Core parse + generate
