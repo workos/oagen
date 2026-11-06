@@ -688,6 +688,51 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
 }
 
 /**
+ * The declaration each copy a reader spreads from one stands for: a
+ * nullable wrapper stripped (`unwrapNullableSchema`; the type builder's own
+ * strip in `buildTypeRef`), sibling properties folded into a composition
+ * (`foldSiblingProperties`), a wrapper's documentation, `deprecated` or
+ * limits carried onto the branch or member it collapses to
+ * (`withWrapperDocs`, `withWrapperDeprecation`, `unwrapNullableField`,
+ * `unwrappedAllOfMember`). A reader that must know whether two schemas are
+ * one declaration — the guard on a merge already being built
+ * (`materializingMergedAllOf`, `mintingMergedAllOf`; workos/oagen#566) —
+ * compares what `sourceDeclaration` resolves each to, so the extractor and
+ * the type builder meet the same key whichever wrapper each strips and
+ * however many copies a strip makes. Keyed by the copies, which no reader
+ * shares, so a document's own object and a conjunction
+ * `combineDeclarations` memoizes — the declarations themselves — are never
+ * entries and resolve to themselves.
+ */
+const derivedFrom = new WeakMap<SchemaObject, SchemaObject>();
+
+/**
+ * `copy`, recorded as standing for the declaration `source` stands for
+ * (`sourceDeclaration`; see `derivedFrom`): the one call a reader makes
+ * where it spreads a schema into a copy, so the copy is read as that
+ * declaration wherever identity decides. Nothing is recorded when `copy`
+ * is `source` itself.
+ */
+export function derivedCopy(copy: SchemaObject, source: SchemaObject): SchemaObject {
+  if (copy !== source) derivedFrom.set(copy, sourceDeclaration(source));
+  return copy;
+}
+
+/**
+ * The declaration `schema` stands for: the one it was spread from, through
+ * every recorded copy (`derivedCopy`), else `schema` itself — a document's
+ * own object, a conjunction `combineDeclarations` built, or a copy no
+ * reader recorded. The key every reader that guards by identity compares
+ * (`materializingMergedAllOf`, `mintingMergedAllOf`): a transform that
+ * memoizes its copy per declaration composes with it, since one memoized
+ * copy is itself a stable key, and one that records its copy resolves to
+ * the declaration.
+ */
+export function sourceDeclaration(schema: SchemaObject): SchemaObject {
+  return derivedFrom.get(schema) ?? schema;
+}
+
+/**
  * Strip the nullable wrappers `schemaToTypeRef` unwraps before it names
  * anything — the OAS 3.1 `type: [X, 'null']` array, the OAS 3.0
  * `nullable: true` flag, and a `oneOf`/`anyOf` with a single non-null
@@ -704,7 +749,9 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
  * (`withWrapperDocs`). The default keeps the branch as written, which is
  * what every site that only dispatches on the unwrapped shape needs. The
  * type-array and `nullable: true` forms unwrap by spreading, so every
- * keyword of theirs survives without it.
+ * keyword of theirs survives without it. Every copy made here stands for
+ * the schema it was spread from (`derivedCopy`), so a reader that guards by
+ * identity reads it as that declaration (`sourceDeclaration`).
  */
 export function unwrapNullableSchema(
   schema: SchemaObject,
@@ -719,10 +766,10 @@ export function unwrapNullableSchema(
   if (Array.isArray(folded.type)) {
     const nonNullTypes = folded.type.filter((t) => t !== 'null');
     if (nonNullTypes.length !== 1) return folded;
-    return unwrapNullableSchema({ ...folded, type: nonNullTypes[0], nullable: false }, carry);
+    return unwrapNullableSchema(derivedCopy({ ...folded, type: nonNullTypes[0], nullable: false }, folded), carry);
   }
   if (folded.nullable && folded.type) {
-    return unwrapNullableSchema({ ...folded, nullable: false }, carry);
+    return unwrapNullableSchema(derivedCopy({ ...folded, nullable: false }, folded), carry);
   }
   // A nullable union collapses onto its one non-null variant — decided by
   // `nullableUnionBranch`, the same definition `collapsedNullableBranch`
@@ -938,7 +985,14 @@ export function declaresNull(schema: SchemaObject): boolean {
  * copy whenever a wrapper was stripped — a copy that still carries the union
  * when a multi-variant `oneOf`/`anyOf` sits beside `type: [X, 'null']`, so
  * identity with `schema` does not tell whether a union collapsed to one
- * branch; `collapsedNullableBranch` does.
+ * branch; `collapsedNullableBranch` does. The copy stands for the branch it
+ * was spread from (`derivedCopy`): the schema itself for the type-array and
+ * `nullable: true` forms, the one variant for the union form — the object
+ * that carries what the field is — so a reader that guards by identity
+ * (`materializingMergedAllOf`) meets a merge under a nullable wrapper once,
+ * however often the wrapper is stripped (workos/oagen#566 review: the
+ * conjunction a typeless redeclaration annotates keeps the wrapper, and
+ * every unwrap of it made a copy the guard had never seen).
  */
 export function unwrapNullableField(schema: SchemaObject): SchemaObject {
   // The documentation of every collapsed level rides onto the branch as it
@@ -949,7 +1003,7 @@ export function unwrapNullableField(schema: SchemaObject): SchemaObject {
   // wrapper's alone, as `Field.deprecated` reads it.
   const inner = unwrapNullableSchema(schema, withWrapperDocs);
   if (inner === schema || schema.allOf || !(schema.oneOf ?? schema.anyOf)) return inner;
-  return withWrapperDeprecation({ ...inner, ...extractConstraints(schema) }, schema);
+  return withWrapperDeprecation(derivedCopy({ ...inner, ...extractConstraints(schema) }, inner), schema);
 }
 
 /**
@@ -982,7 +1036,7 @@ export function collapsedNullableBranch(schema: SchemaObject): SchemaObject | un
  * the field does: the wrapper's, never the branch's or the member's own.
  */
 export function withWrapperDeprecation(inner: SchemaObject, wrapper: SchemaObject): SchemaObject {
-  const result: SchemaObject = { ...inner, ...deprecatedEntry(wrapper) };
+  const result: SchemaObject = derivedCopy({ ...inner, ...deprecatedEntry(wrapper) }, inner);
   if (wrapper.deprecated !== true) delete result.deprecated;
   return result;
 }
@@ -1029,7 +1083,7 @@ export function withWrapperDocs(inner: SchemaObject, wrapper: SchemaObject): Sch
   if (Object.hasOwn(wrapper, 'example')) carried.example = wrapper.example;
   if (Array.isArray(wrapper.examples) && wrapper.examples.length > 0) carried.examples = wrapper.examples;
   Object.assign(carried, extensionsOf(wrapper, SCHEMA_CONSUMED_EXTENSIONS));
-  return Object.keys(carried).length === 0 ? inner : { ...inner, ...carried };
+  return Object.keys(carried).length === 0 ? inner : derivedCopy({ ...inner, ...carried }, inner);
 }
 
 /** Keywords where the stricter of two declarations is the larger value. */
@@ -2591,14 +2645,16 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * copy with no `properties` or `required` of its own, every other keyword —
  * `description`, `nullable`, limits, `discriminator`, `additionalProperties`
  * — kept; so folding a folded schema changes nothing. The copy is made
- * once per document schema (`foldedSchemas`): the same schema folds to
- * the same object at every site that folds it, so a reader that guards by
- * identity meets the folded schema once, however often it is folded. A
- * folded variant is a copy of the document's, and `foldedVariantOrigin`
- * gives the document's back, so a decision recorded against it (a
- * contested title, `isContestedTitle`) reaches the copy. A component
- * schema's own `properties` beside its `allOf` are read the same way, as
- * its first member, by `componentAllOfMembers`.
+ * once per document schema (`foldedSchemas`) and stands for the schema it
+ * was spread from (`derivedCopy`): the same schema folds to the same
+ * object at every site that folds it, so a reader that guards by identity
+ * meets the folded schema once, however often it is folded, and reads it
+ * as that declaration (`sourceDeclaration`). A folded variant is a copy of
+ * the document's, and `foldedVariantOrigin` gives the document's back, so
+ * a decision recorded against it (a contested title, `isContestedTitle`)
+ * reaches the copy. A component schema's own `properties` beside its
+ * `allOf` are read the same way, as its first member, by
+ * `componentAllOfMembers`.
  */
 export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
   let folded = foldedSchemas.get(schema);
@@ -2639,11 +2695,16 @@ function foldAfresh(schema: SchemaObject): SchemaObject {
   if (kind !== 'allOf' && kind !== 'union') return folded;
   const { properties, required, ...rest } = folded;
   const own: SchemaObject = { type: 'object', properties, ...(required && required.length > 0 && { required }) };
-  if (kind === 'allOf') return { ...rest, allOf: [own, ...(folded.allOf ?? [])] };
+  // The fold stands for the schema it was spread from (`derivedCopy`), so a
+  // reader that guards by identity reads it as that declaration.
+  if (kind === 'allOf') return derivedCopy({ ...rest, allOf: [own, ...(folded.allOf ?? [])] }, folded);
   const conjoin = (variant: SchemaObject): SchemaObject => conjoinSiblingProperties(variant, own);
-  return folded.oneOf
-    ? { ...rest, oneOf: folded.oneOf.map(conjoin) }
-    : { ...rest, anyOf: (folded.anyOf ?? []).map(conjoin) };
+  return derivedCopy(
+    folded.oneOf
+      ? { ...rest, oneOf: folded.oneOf.map(conjoin) }
+      : { ...rest, anyOf: (folded.anyOf ?? []).map(conjoin) },
+    folded,
+  );
 }
 
 /**
@@ -2667,14 +2728,16 @@ function foldAfresh(schema: SchemaObject): SchemaObject {
  * in, and by `componentAllOfMembers` for a component schema, so the two
  * agree. A union of bare limits beside the `allOf`, or a union beside an
  * `allOf` of bare limits, is left as written: the one keyword that types
- * the schema is read as before.
+ * the schema is read as before. The copy stands for the schema it was
+ * spread from (`derivedCopy`), as every fold's does, so the fold of its
+ * own properties that follows chains back to the document's declaration.
  */
 function foldSiblingUnions(schema: SchemaObject): SchemaObject {
   if (schema.$ref || !schema.allOf || !allOfTypesSchema(schema.allOf)) return schema;
   const unions = besideUnionMembers(schema);
   if (unions.length === 0) return schema;
   const { oneOf: _oneOf, anyOf: _anyOf, discriminator: _discriminator, ...rest } = schema;
-  return { ...rest, allOf: [...schema.allOf, ...unions] };
+  return derivedCopy({ ...rest, allOf: [...schema.allOf, ...unions] }, schema);
 }
 
 /**
@@ -5745,7 +5808,7 @@ function buildTypeRef(
     if (schema.type.includes('null') && nonNullTypes.length === 1) {
       return asNullable(
         schemaToTypeRef(
-          { ...schema, type: nonNullTypes[0], nullable: false },
+          derivedCopy({ ...schema, type: nonNullTypes[0], nullable: false }, schema),
           contextName,
           parentModelName,
           siblingProperties,
@@ -5771,10 +5834,18 @@ function buildTypeRef(
     }
   }
 
-  // Handle OAS 3.0 nullable flag
+  // Handle OAS 3.0 nullable flag. The copy stands for the schema it was
+  // spread from (`derivedCopy`), as the extractor's strip of the same
+  // wrapper does, so both meet one key for a merge under it.
   if (schema.nullable && schema.type) {
     return asNullable(
-      schemaToTypeRef({ ...schema, nullable: false }, contextName, parentModelName, siblingProperties, reservedNames),
+      schemaToTypeRef(
+        derivedCopy({ ...schema, nullable: false }, schema),
+        contextName,
+        parentModelName,
+        siblingProperties,
+        reservedNames,
+      ),
     );
   }
 
