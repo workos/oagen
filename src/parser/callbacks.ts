@@ -99,11 +99,20 @@ interface PendingCallback {
  * first (`collectPendingCallbacks`), so an operationId names a stem only
  * when exactly one callback operation object in the whole document
  * declares it (`settleStemOperationIds`). The entries are then named and
- * built one level at a time: a level's key-derived stems are prefixed with
- * the stems the level above settled on, each level reserves every name the
- * levels above minted, and the nodes of a level are attached to their
- * owners in document order — `callbacks` key order, expression order
- * within each Callback Object, then the path item's method order.
+ * built in rounds. The first round takes every operationId-named entry,
+ * whatever its depth — its stem owes nothing to its owner, so the entries
+ * of one callback operation object reached at several depths (a
+ * `components/callbacks` entry an operation references directly and
+ * another callback nests) form one group, mint once and share one set of
+ * models (`NotifyAdoptionPayload`), as two `webhooks` keys sharing a path
+ * item do; a nested site is never named apart from a direct one — together
+ * with the key-named entries at depth 0. Each later round takes the
+ * key-named entries whose owner the rounds before built, since their stems
+ * are prefixed with the owner's settled stem; every round reserves every
+ * name the rounds before minted. Once every entry is built, the nodes are
+ * attached to their owners in document order — `callbacks` key order,
+ * expression order within each Callback Object, then the path item's
+ * method order.
  */
 export function extractCallbacks(
   declared: readonly DeclaredCallbacks[],
@@ -132,36 +141,49 @@ export function extractCallbacks(
 
   const all = new Set(reservedNames);
   const enums = new Set(reservedEnumNames);
-  const deepest = Math.max(...pending.map(({ depth }) => depth));
-  for (let depth = 0; depth <= deepest; depth++) {
-    const level = pending.filter((candidate) => candidate.depth === depth);
-    for (const candidate of level) {
+  const built = new Set<PendingCallback>();
+  // Round one: every operationId-named entry, at any depth, and the
+  // key-named entries at depth 0; then, round by round, the key-named
+  // entries whose owner is built (`parentStem` needs its stem).
+  let round = pending.filter((candidate) => candidate.entry.stemOperationId !== undefined || candidate.depth === 0);
+  while (round.length > 0) {
+    for (const candidate of round) {
+      if (candidate.entry.stemOperationId !== undefined) continue;
       candidate.entry.parentStem = isPending(candidate.owner) ? candidate.owner.stem! : candidate.ownerStem!;
     }
     const reserved: ReservedNames = { all, enums };
     const batch = buildReceivedRequests(
-      level.map(({ entry }) => entry),
+      round.map(({ entry }) => entry),
       components,
       reserved,
       siblingDocs,
     );
     inlineModels.push(...batch.inlineModels);
     inlineModelBundles.push(...batch.inlineModelBundles);
-    // The next level steps around everything this one minted: every model
+    // The next round steps around everything this one minted: every model
     // and enum name, and among them the enums (which no model may take).
     for (const name of batch.names) all.add(name);
     reserveInlineEnums(batch.inlineModels.flatMap(collectModelTypeRefs), enums);
     for (const [index, { node, stem }] of batch.built.entries()) {
-      const candidate = level[index]!;
+      const candidate = round[index]!;
       // The node `buildWebhook` made, with the expression after the key.
       const { name, ...rest } = node;
       const callback: Callback = { name, expression: candidate.entry.expression!, ...rest };
       reserveInlineEnums(collectWebhookTypeRefs(callback), enums);
       candidate.node = callback;
       candidate.stem = stem;
-      const owner = isPending(candidate.owner) ? candidate.owner.node! : candidate.owner;
-      owner.callbacks = [...(owner.callbacks ?? []), callback];
+      built.add(candidate);
     }
+    round = pending.filter(
+      (candidate) => !built.has(candidate) && isPending(candidate.owner) && built.has(candidate.owner),
+    );
+  }
+  // Attached once every node exists, in document order: `pending` is
+  // collected depth-first, so an owner's callbacks come in key, expression
+  // and method order, and a parent's node is built before its children attach.
+  for (const candidate of pending) {
+    const owner = isPending(candidate.owner) ? candidate.owner.node! : candidate.owner;
+    owner.callbacks = [...(owner.callbacks ?? []), candidate.node!];
   }
   return { inlineModels, inlineModelBundles };
 }
