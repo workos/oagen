@@ -800,4 +800,279 @@ describe('request body descriptions (issue #316)', () => {
       expectSound(spec);
     });
   });
+
+  /**
+   * Issue #535: `unwrapCollapsedWrappers` stripped a nullable `oneOf`/`anyOf`
+   * before asking whether the union is a `oneOf`/`anyOf` of consts read as
+   * an enum — which an `enum:` list beside a single const makes it — so for
+   * `{ enum: ['draft', null], anyOf: [{ const: 'draft', description }, { type: 'null' }] }`
+   * it read the lone const and the text documenting that one value became
+   * the body's. The type builder decides the enum first, so the model side
+   * now does too (`nullableUnionBranch`): such a union is the schema that
+   * declares the members, nullable or not, and its own text alone is read.
+   */
+  describe('#535', () => {
+    /** A member as the issue prints it: its value and its text, the emitted name aside. */
+    const memberText = ({ value, description }: { value: string | number; description?: string }) => ({
+      value,
+      ...(description !== undefined ? { description } : {}),
+    });
+
+    /** The OAS 3.1 and 3.0 spellings of a string const variant and of a `null` variant. */
+    const spellings = {
+      '3.1.0': {
+        constOf: (value: string, description: string) => ({ const: value, description }),
+        nul: { type: 'null' },
+      },
+      '3.0.3': {
+        constOf: (value: string, description: string) => ({ enum: [value], description }),
+        nul: { enum: [null] },
+      },
+    } as const;
+
+    for (const [openapi, { constOf, nul }] of Object.entries(spellings)) {
+      describe(`OAS ${openapi}`, () => {
+        // The issue's two documents: one const beside `null` and an `enum:` list, and two consts beside `null`.
+        const enumList = { enum: ['draft', null], anyOf: [constOf('draft', 'Only drafts are accepted.'), nul] };
+        const twoConsts = { anyOf: [constOf('draft', 'A draft.'), constOf('final', 'A final note.'), nul] };
+        // A genuine nullable wrapper around an object: still unwrapped, its branch's text read.
+        const nullableObject = {
+          anyOf: [{ type: 'object', description: 'A note.', properties: { text: { type: 'string' } } }, nul],
+        };
+
+        it('reads no variant of a nullable const union read as an enum: the issue’s two documents', async () => {
+          const spec = await parseDocument(
+            document(
+              {
+                '/enum-list': post('addEnumList', jsonBody(enumList)),
+                '/two-consts': post('addTwoConsts', jsonBody(twoConsts)),
+                '/control': post('addControl', jsonBody(nullableObject)),
+              },
+              { openapi },
+            ),
+          );
+          const ops = opsOf(spec);
+          const models = modelsOf(spec);
+          const enums = new Map(spec.enums.map((e) => [e.name, e]));
+
+          // Neither body has text of its own: the variant's documents one member, not the body.
+          expect(ops.addEnumList).not.toHaveProperty('requestBodyDescription');
+          expect(ops.addTwoConsts).not.toHaveProperty('requestBodyDescription');
+          // Both bodies are the nullable enum they were, and each member keeps its text.
+          expect(ops.addEnumList.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'AddEnumListRequest', values: ['draft'] },
+          });
+          expect(ops.addTwoConsts.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'AddTwoConstsRequest', values: ['draft', 'final'] },
+          });
+          expect(enums.get('AddEnumListRequest')).not.toHaveProperty('description');
+          expect(enums.get('AddEnumListRequest')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
+          expect(enums.get('AddTwoConstsRequest')).not.toHaveProperty('description');
+          expect(enums.get('AddTwoConstsRequest')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'A draft.' },
+            { value: 'final', description: 'A final note.' },
+          ]);
+          // The control: a nullable wrapper around an object still unwraps to its branch's text.
+          expect(ops.addControl.requestBodyDescription).toBe('A note.');
+          expect(describeType(models, ops.addControl.requestBody)).toBe('nullable AddControlRequest ("A note.")');
+          expectSound(spec);
+        });
+
+        it('reads the enum schema’s own text when it has some, under oneOf as under anyOf, and through a wrapper around it', async () => {
+          const spec = await parseDocument(
+            document(
+              {
+                // The schema that declares the members documents itself: its text is the body's and the enum's.
+                '/own': post('addOwn', jsonBody({ description: 'The state to set.', ...enumList })),
+                '/one-of': post(
+                  'addOneOf',
+                  jsonBody({ enum: ['draft', null], oneOf: [constOf('draft', 'Only drafts are accepted.'), nul] }),
+                ),
+                // A nullable wrapper around the enum unwraps to it, and stops there: the member's text is never read.
+                '/wrapped': post(
+                  'addWrapped',
+                  jsonBody({
+                    anyOf: [{ enum: ['draft'], anyOf: [constOf('draft', 'Only drafts are accepted.')] }, nul],
+                  }),
+                ),
+                '/wrapped-text': post(
+                  'addWrappedText',
+                  jsonBody({
+                    description: 'Outer.',
+                    anyOf: [{ enum: ['draft'], anyOf: [constOf('draft', 'Only drafts are accepted.')] }, nul],
+                  }),
+                ),
+              },
+              { openapi },
+            ),
+          );
+          const ops = opsOf(spec);
+          const enums = new Map(spec.enums.map((e) => [e.name, e]));
+
+          expect(ops.addOwn.requestBodyDescription).toBe('The state to set.');
+          expect(enums.get('AddOwnRequest')?.description).toBe('The state to set.');
+          expect(enums.get('AddOwnRequest')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
+          expect(ops.addOneOf).not.toHaveProperty('requestBodyDescription');
+          expect(ops.addOneOf.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'AddOneOfRequest', values: ['draft'] },
+          });
+          expect(ops.addWrapped).not.toHaveProperty('requestBodyDescription');
+          expect(ops.addWrapped.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'AddWrappedRequest', values: ['draft'] },
+          });
+          expect(enums.get('AddWrappedRequest')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
+          expect(ops.addWrappedText.requestBodyDescription).toBe('Outer.');
+          expect(enums.get('AddWrappedTextRequest')?.description).toBe('Outer.');
+          expectSound(spec);
+        });
+
+        it('reads a webhook payload by the same rule, and a response field with the same schema keeps no text either', async () => {
+          const spec = await parseDocument(
+            document(
+              {
+                '/notes': {
+                  post: {
+                    operationId: 'addNote',
+                    requestBody: jsonBody(nullableObject),
+                    responses: {
+                      '200': {
+                        description: 'The note',
+                        content: {
+                          'application/json': {
+                            schema: { type: 'object', properties: { id: { type: 'string' }, state: enumList } },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+              { openapi, webhooks: { noteAdded: post('noteAdded', jsonBody(enumList)) } },
+            ),
+          );
+          const hook = webhooksOf(spec).noteAdded;
+          const models = modelsOf(spec);
+          const enums = new Map(spec.enums.map((e) => [e.name, e]));
+
+          expect(hook).not.toHaveProperty('requestBodyDescription');
+          expect(hook.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'NoteAddedPayload', values: ['draft'] },
+          });
+          expect(enums.get('NoteAddedPayload')).not.toHaveProperty('description');
+          expect(enums.get('NoteAddedPayload')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
+          // The field typed by the same schema: no text of its own, the enum lifted from it without one, the member with its.
+          const state = models.get('AddNoteResponse')?.fields.find((f) => f.name === 'state');
+          expect(state?.description).toBeUndefined();
+          expect(state?.type).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'enum', name: 'AddNoteResponseState', values: ['draft'] },
+          });
+          expect(enums.get('AddNoteResponseState')).not.toHaveProperty('description');
+          expect(enums.get('AddNoteResponseState')?.values.map(memberText)).toEqual([
+            { value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
+          // The operation's own nullable object body is unwrapped as before, and its response is the field's model.
+          const op = opsOf(spec).addNote;
+          expect(op.requestBodyDescription).toBe('A note.');
+          expect(op.response).toEqual({ kind: 'model', name: 'AddNoteResponse' });
+          // `referencedTypes` reads no primary response, so the response model is excused by name.
+          expect(unresolvedReferences(spec)).toEqual([]);
+          expect(orphanedModels(spec, ['Pet', 'AddNoteResponse'])).toEqual([]);
+        });
+
+        // Review: `nullableUnionBranch` gives no branch under an `allOf`
+        // beside the union either, so the request-body builder tells a
+        // nullable `oneOf` wrapper only where there is none (`nullableWrapper`)
+        // and otherwise builds the `oneOf` as written, the `allOf` aside, as
+        // it did before #535 — not the type a field with the same schema gets.
+        it('builds a nullable oneOf beside an allOf as the union of one variant it was, the allOf aside', async () => {
+          const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
+          const spec = await parseDocument(
+            document(
+              {
+                '/ref': post(
+                  'addRef',
+                  jsonBody({ allOf: [{ $ref: '#/components/schemas/Pet' }], oneOf: [nickname, nul] }),
+                ),
+                '/text': post('addText', jsonBody({ allOf: [{ description: 'A pet.' }], oneOf: [nickname, nul] })),
+                '/enum': post(
+                  'addEnum',
+                  jsonBody({
+                    allOf: [{ description: 'A pet.' }],
+                    enum: ['draft', null],
+                    oneOf: [constOf('draft', 'Only drafts are accepted.'), nul],
+                  }),
+                ),
+              },
+              { openapi },
+            ),
+          );
+          const ops = opsOf(spec);
+          const models = modelsOf(spec);
+
+          // An `allOf` of a `$ref`: the union of the one object variant, nullable, not the component it refers to.
+          expect(ops.addRef.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'model', name: 'AddRefRequest' }] },
+          });
+          expect(models.get('AddRefRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
+          expect(ops.addRef).not.toHaveProperty('requestBodyDescription');
+          // An `allOf` of text alone: the same union, not the collapsed model.
+          expect(ops.addText.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'model', name: 'AddTextRequest' }] },
+          });
+          expect(models.get('AddTextRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
+          expect(ops.addText).not.toHaveProperty('requestBodyDescription');
+          // The #535 shape beside a typeless `allOf`: a union of the one literal, not the nullable enum.
+          expect(ops.addEnum.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'literal', value: 'draft' }] },
+          });
+          expect(spec.enums.map((e) => e.name)).not.toContain('AddEnumRequest');
+          expect(ops.addEnum).not.toHaveProperty('requestBodyDescription');
+          expectSound(spec);
+        });
+      });
+    }
+
+    it('reads a type list beside the union as the same nullable enum (OAS 3.1)', async () => {
+      const spec = await parseDocument(
+        document({
+          '/notes': post(
+            'addNote',
+            jsonBody({
+              type: ['string', 'null'],
+              enum: ['draft', null],
+              anyOf: [{ const: 'draft', description: 'Only drafts are accepted.' }, { type: 'null' }],
+            }),
+          ),
+        }),
+      );
+      const op = opsOf(spec).addNote;
+
+      expect(op).not.toHaveProperty('requestBodyDescription');
+      expect(op.requestBody).toEqual({
+        kind: 'nullable',
+        inner: { kind: 'enum', name: 'AddNoteRequest', values: ['draft'] },
+      });
+      expect(spec.enums.find((e) => e.name === 'AddNoteRequest')?.values.map(memberText)).toEqual([
+        { value: 'draft', description: 'Only drafts are accepted.' },
+      ]);
+      expectSound(spec);
+    });
+  });
 });

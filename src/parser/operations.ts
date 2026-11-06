@@ -4552,10 +4552,28 @@ function typePickedRequestBody(
   // array's inline items are named from the body (`CreatePetsRequest`), the
   // way `type: ['array', 'null']` and `nullable: true` already are.
   const branch = collapsedNullableBranch(schema);
+  // Whether the body is such a wrapper is told at the union's own level —
+  // one non-null variant beside `null`, and no `allOf` beside the union —
+  // not by `branch` alone: a nullable `oneOf` whose one variant is a const
+  // read as an enum beside an `enum:` list has no branch, since the enum is
+  // decided first, as the type builder decides it (workos/oagen#535), and is
+  // no union to build either. It takes the fall-through, where
+  // `schemaToTypeRef` types it as the nullable enum it is, as it did while
+  // its const was still read as a branch. Under an `allOf` beside the
+  // union `nullableUnionBranch` gives no branch either, and there the
+  // `oneOf` is still built as written, the `allOf` aside: `{ allOf:
+  // [{ $ref: Owner }], oneOf: [{ type: 'object', properties: { nickname } },
+  // { type: 'null' }] }` is `nullable<union[AddPetRequest]>`, as it was
+  // before #535, not the `Owner` a field with the same schema gets.
+  const nullableWrapper =
+    schema.allOf === undefined &&
+    schema.oneOf !== undefined &&
+    schema.oneOf.some(isNullSchema) &&
+    schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
   // If the request body is a oneOf, extract each variant as an inline model
   // and build a union type pointing to them by name.
-  if (schema.oneOf && (branch === undefined || isInlineObjectSchema(branch))) {
+  if (schema.oneOf && (!nullableWrapper || (branch !== undefined && isInlineObjectSchema(branch)))) {
     const variants: TypeRef[] = [];
     // The inline object variants of this union and the names its const-less
     // variants have taken so far, for `deriveOneOfVariantName`.
