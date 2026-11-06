@@ -4336,6 +4336,66 @@ describe('#539', () => {
         expect(warnings).toEqual([]);
       });
 
+      it('reads through a multi-type schema’s union to the member that carries the keyword', async () => {
+        captureWarnings();
+        const integer = { kind: 'primitive', type: 'integer' } as const;
+        const number = { kind: 'primitive', type: 'number' } as const;
+        const spec = await parse(
+          {
+            Thing: {
+              type: 'object',
+              properties: {
+                shape: {
+                  oneOf: [
+                    {
+                      type: 'object',
+                      properties: { kind: { type: 'string', enum: ['circle'] }, radius: { type: 'number' } },
+                    },
+                    {
+                      type: ['object', 'string'],
+                      properties: { kind: { type: 'string', enum: ['square'] }, side: { type: 'number' } },
+                    },
+                  ],
+                },
+                box: { type: ['array', 'object'], items: { type: 'integer' }, properties: { n: { type: 'integer' } } },
+                dict: { type: ['object', 'string'], additionalProperties: { type: 'boolean' } },
+                boxed: {
+                  type: ['object', 'string'],
+                  properties: { n: { type: 'integer' } },
+                  additionalProperties: { type: 'boolean' },
+                },
+              },
+            },
+          },
+          {
+            '/a/{id}': getOp('getSide', ref('Thing/properties/shape/oneOf/1/properties/side')),
+            '/b/{id}': getOp('getBoxItem', ref('Thing/properties/box/items')),
+            '/c/{id}': getOp('getBoxN', ref('Thing/properties/box/properties/n')),
+            '/d/{id}': getOp('getDictValue', ref('Thing/properties/dict/additionalProperties')),
+            '/e/{id}': getOp('getBoxedValue', ref('Thing/properties/boxed/additionalProperties')),
+            '/f/{id}': getOp('getShape', ref('Thing/properties/shape/oneOf/1')),
+            '/g/{id}': getOp('getBox', ref('Thing/properties/box')),
+          },
+          openapi,
+        );
+        // A multi-type schema is a union of one member per type; a pointer on through it reads the member that carries the keyword.
+        expect(responseOf(spec, 'getShape')).toEqual({ kind: 'union', variants: [model('SquareThingShape'), string] });
+        expect(responseOf(spec, 'getSide')).toEqual(number);
+        expect(responseOf(spec, 'getBox')).toEqual({
+          kind: 'union',
+          variants: [{ kind: 'array', items: integer }, model('ThingBox')],
+        });
+        expect(responseOf(spec, 'getBoxItem')).toEqual(integer);
+        expect(responseOf(spec, 'getBoxN')).toEqual(integer);
+        expect(responseOf(spec, 'getDictValue')).toEqual({ kind: 'primitive', type: 'boolean' });
+        // Beside named properties the object member is an inline model, which builds no catch-all field, so the values are reported.
+        expect(responseOf(spec, 'getBoxedValue')).toEqual(unknown);
+        expect(modelNames(spec)).toEqual(['SquareThingShape', 'Thing', 'ThingBox', 'ThingBoxed', 'ThingShape']);
+        expect(warnings).toEqual([
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Thing/properties/boxed/additionalProperties" in E.getBoxedValue.response: model "ThingBoxed" is no map to read "additionalProperties" from — typing the site as unknown',
+        ]);
+      });
+
       it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
         captureWarnings();
         const spec = await parse(
