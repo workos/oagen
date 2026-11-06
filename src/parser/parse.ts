@@ -90,11 +90,21 @@ export interface ParseOptions {
    * field added to a body or to a nested item moves no model (#506, #516),
    * and two shapes never ask for one name (#515): `{ message: string | null }`
    * is `ErrorBodyWithNullableMessage`, `{ code: integer, message }` is
-   * `ErrorBodyWithCodeInteger`, a `{ message }` hinted `message → detail`
-   * is `ErrorBodyWithMessageAsDetail`, and a body that requires no field is
-   * named from every field under `Optional` (`OptionalErrorBody` for
-   * `{ message? }`). On by default; `false` keeps one model per operation
-   * and status code (`<Op>Error<code>`).
+   * `ErrorBodyWithCodeInteger`, `{ status: 404, message }` is
+   * `ErrorBodyWithStatus404`, `{ error: integer, error_description }` is
+   * `OAuthErrorBodyWithErrorInteger`, `{ message, errors: [{ code, message }] }`
+   * is `ErrorBodyWithCodeMessageErrors`, a `{ message }` hinted
+   * `message → detail` is `ErrorBodyWithMessageAsDetail`, and a body that
+   * requires no field is named from every field under `Optional`
+   * (`OptionalErrorBody` for `{ message? }`); what no name can spell — a
+   * value pinned inside an array, a discriminator mapping, the component or
+   * named enum a field references — leaves the later shape's models as
+   * they are, with a warning. A component of the shared name takes each
+   * body it declares every field, domain name and limit of, and leaves a
+   * body it would narrow as it is. An optional field's hint is carried
+   * whichever bodies give it, and dropped with a warning when two bodies
+   * hint it apart. On by default; `false` keeps one model per operation and
+   * status code (`<Op>Error<code>`).
    */
   collapseErrorBodies?: boolean;
   /**
