@@ -1012,13 +1012,12 @@ describe('#567', () => {
     // One file, handed to the baseline and to the runner beside `--spec`, and
     // gone once they ran.
     const [baseline, run] = parsed;
-    expect(baseline.args.slice(1)).toEqual([
-      expect.stringMatching(/scripts\/smoke\/baseline\.ts$/),
-      '--spec',
-      spec,
-      '--ir',
-      baseline.irPath,
-    ]);
+    // The script runs as `npx tsx scripts/smoke/baseline.ts` from the source
+    // tree and as `node dist/scripts/smoke/baseline.mjs` beside a build, so
+    // find it by name rather than by position.
+    const script = baseline.args.findIndex((arg) => /smoke\/baseline\.(ts|mjs)$/.test(arg));
+    expect(script).toBeGreaterThanOrEqual(0);
+    expect(baseline.args.slice(script + 1)).toEqual(['--spec', spec, '--ir', baseline.irPath]);
     expect(run.args).toEqual([
       runner,
       '--lang',
