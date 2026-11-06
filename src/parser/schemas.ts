@@ -5404,9 +5404,14 @@ function detectAllOfVariantDiscriminator(
       mapping: Object.fromEntries(written.map(([value, target]) => [value, mappingTargetModelName(target)])),
     };
   }
+  // The tags are read through the component map (#568 review): one a
+  // variant inherits through an `allOf` `$ref` member, or declares as a
+  // `$ref` to a const schema, pins as one written on the variant does.
   const pinnedBy = (property: string): boolean =>
-    members.every((member) => getEffectiveConstPropertyValue(member.resolved, property) !== null);
-  const candidates = explicit ? [explicit.propertyName] : Object.keys(getEffectiveProperties(members[0]!.resolved));
+    members.every((member) => getEffectiveConstPropertyValue(member.resolved, property, schemas) !== null);
+  const candidates = explicit
+    ? [explicit.propertyName]
+    : Object.keys(getEffectiveProperties(members[0]!.resolved, schemas));
   const property = candidates.find(pinnedBy);
   if (property === undefined) return null;
 
@@ -5418,10 +5423,10 @@ function detectAllOfVariantDiscriminator(
   const seenModelNames = new Set<string>([fallbackName]);
   const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
   for (const member of members) {
-    const value = getEffectiveConstPropertyValue(member.resolved, property);
+    const value = getEffectiveConstPropertyValue(member.resolved, property, schemas);
     if (value === null || mapping.has(value)) return null;
     const reference = member.raw.$ref !== undefined || member.resolved !== member.raw;
-    const modelName = reference ? member.name : deriveDiscriminatedVariantName(member.raw, fallbackName);
+    const modelName = reference ? member.name : deriveDiscriminatedVariantName(member.raw, fallbackName, schemas);
     if (modelName === null || seenModelNames.has(modelName)) return null;
     seenModelNames.add(modelName);
     mapping.set(value, reference ? modelName : (plan?.names.get(member.raw) ?? modelName));
@@ -5543,7 +5548,7 @@ function extractDiscriminatedAllOfVariantModels(
   for (const { variants, rebuilt } of discriminatedVariantSchemas(schema, fallbackName, schemas)) {
     const plan = activeDispatcherVariantPlans.get(variants)?.get(fallbackName);
     for (const { variant, merged } of rebuilt) {
-      const variantName = plan?.names.get(variant) ?? deriveDiscriminatedVariantName(variant, fallbackName);
+      const variantName = plan?.names.get(variant) ?? deriveDiscriminatedVariantName(variant, fallbackName, schemas);
       for (const model of extractInlineModelDeep(variantName, merged, schemas)) {
         if (seenNames.has(model.name) || plan?.shared.has(model.name)) continue;
         seenNames.add(model.name);
@@ -5740,10 +5745,13 @@ function planDispatcherVariants(
     }
     for (const [holder, shapes] of settled) for (const shape of shapes) hold(holder, shape);
     for (const { variants, rebuilt } of axes) {
-      const taken = new Set([name, ...variants.map((variant) => deriveDiscriminatedVariantName(variant, name))]);
+      const taken = new Set([
+        name,
+        ...variants.map((variant) => deriveDiscriminatedVariantName(variant, name, schemas)),
+      ]);
       const plan: DispatcherUnionPlan = { names: new Map(), shared: new Set() };
       for (const { variant, merged } of rebuilt) {
-        const own = deriveDiscriminatedVariantName(variant, name);
+        const own = deriveDiscriminatedVariantName(variant, name, schemas);
         taken.delete(own);
         const { variantName, tree } = firstFreeVariantName(own, merged, schemas, taken, held);
         plan.names.set(variant, variantName);
@@ -5890,11 +5898,26 @@ function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
   return withAgreedExtensions(schemas[0], extensions);
 }
 
-function deriveDiscriminatedVariantName(schema: SchemaObject, fallbackName: string): string {
+/**
+ * The name an inline variant of a composed component's union settles on
+ * from the const it pins — `<component><Const>` — or `fallbackName` when
+ * it pins none. The const is read through the variant's `allOf` wrappers
+ * and, with the component map (`schemas`), through a `$ref` member among
+ * them and a `$ref` to a const schema, as the dispatcher detection reads
+ * it (`detectAllOfVariantDiscriminator`, `getEffectiveProperties`), so a
+ * variant named by an inherited tag dispatches as one tagged directly does
+ * (#398 review round 3). Every reader of a variant's name hands the map in,
+ * so detection, the variant plan and the builder settle on one name.
+ */
+function deriveDiscriminatedVariantName(
+  schema: SchemaObject,
+  fallbackName: string,
+  schemas?: Record<string, SchemaObject>,
+): string {
   // Walk through allOf wrappers so a variant of the form
   // `{ allOf: [{ properties: { type: const: 'oauth' } }, { oneOf: […] }] }`
   // still surfaces its discriminator const value for naming.
-  const effective = getEffectiveProperties(schema);
+  const effective = getEffectiveProperties(schema, schemas);
   if (Object.keys(effective).length === 0) return fallbackName;
 
   const pickConst = (name: string): string | null => {
