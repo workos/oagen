@@ -968,6 +968,65 @@ describe('#382', () => {
         });
       });
 
+      it.each([
+        { order: 'a, b, c, d', abFirst: true },
+        { order: 'c, d, a, b', abFirst: false },
+      ])(
+        'decides every contested name together, so a name other callbacks vacate is taken alike in either order: $order (Greptile)',
+        async ({ abFirst }) => {
+          // `a` and `b` carry differing variants titled `Shape`; `c` and `d`
+          // differing variants titled `CreatePetAShape` — the name `a`'s
+          // rename asks for. `c` and `d` leave it this round, so `a` takes
+          // it whichever pair comes first, never `CreatePetAShape2`.
+          const titled = (title: string, value: string, own: Record<string, unknown>) => ({
+            title,
+            type: 'object',
+            properties: { kind: { type: 'string', const: value }, ...own },
+          });
+          const union = (title: string, own: Record<string, unknown>, other: string) => ({
+            oneOf: [titled(title, 'first', own), titled(other, 'second', { text: { type: 'string' } })],
+          });
+          const a = callbackPosting(union('Shape', { sides: { type: 'integer' } }, 'Note'));
+          const b = callbackPosting(union('Shape', { radius: { type: 'number' } }, 'Memo'));
+          const c = callbackPosting(union('CreatePetAShape', { width: { type: 'number' } }, 'Tag'));
+          const d = callbackPosting(union('CreatePetAShape', { height: { type: 'number' } }, 'Label'));
+          const spec = await parseJson(
+            documentWith(openapi, {
+              '/pets': { post: opWith(abFirst ? { a, b, c, d } : { c, d, a, b }, 'createPet') },
+            }),
+          );
+
+          const first = (node: Callback) =>
+            (node.requestBody as { variants: Array<{ name: string }> }).variants[0]!.name;
+          const byKey = new Map(operations(spec)[0]!.callbacks!.map((node) => [node.name, first(node)]));
+          expect(byKey).toEqual(
+            new Map([
+              ['a', 'CreatePetAShape'],
+              ['b', 'CreatePetBShape'],
+              ['c', 'CreatePetCCreatePetAShape'],
+              ['d', 'CreatePetDCreatePetAShape'],
+            ]),
+          );
+          const fieldsOf = (name: string) => spec.models.find((m) => m.name === name)!.fields.map((f) => f.name);
+          expect(fieldsOf('CreatePetAShape')).toEqual(['kind', 'sides']);
+          expect(fieldsOf('CreatePetCCreatePetAShape')).toEqual(['kind', 'width']);
+          expect(modelNames(spec).sort()).toEqual(
+            [
+              'CreatePetAShape',
+              'CreatePetBShape',
+              'CreatePetCCreatePetAShape',
+              'CreatePetDCreatePetAShape',
+              'Label',
+              'Memo',
+              'Note',
+              'Tag',
+            ].sort(),
+          );
+          expectResolved(spec);
+          expect(warnings()).toEqual([]);
+        },
+      );
+
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {
         // `createPet` and `create_pet` both name their models from `CreatePet`;
         // each declares `petAdopted` under the same expression.
