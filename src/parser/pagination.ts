@@ -449,7 +449,9 @@ export function endOfIterationProblem(
  * The walk goes one segment at a time over every schema reached so far,
  * each counted once — by its `$ref`, else by the schema itself — so a
  * component several variants reach is walked on once, however many
- * variants reach it and however long the path.
+ * variants reach it and however long the path; and within a segment a
+ * node is read once however many routes through nested unions reach it
+ * (`FieldLookup`).
  */
 function fieldsAtPath(
   schema: SchemaObject,
@@ -457,10 +459,11 @@ function fieldsAtPath(
   componentSchemas?: Record<string, SchemaObject>,
 ): SchemaObject[] | undefined {
   let reached = [schema];
+  const lookup = newFieldLookup();
   for (const segment of path.split('.')) {
     const next = new Map<string | SchemaObject, SchemaObject>();
     for (const node of reached) {
-      const named = fieldsNamed(node, segment, componentSchemas);
+      const named = fieldsNamed(node, segment, componentSchemas, lookup);
       if (!named) return undefined;
       for (const { schema: field } of named) next.set(field.$ref ?? field, field);
     }
@@ -484,11 +487,22 @@ function fieldsAtPath(
  * oneOf: [A, B] }`), is walked by this same rule (`unionFields`) and yields
  * one field per leaf, each `via` the steps down to it, outermost first
  * (PR #585 review: such a variant was read as declaring no field, though
- * each of its own variants declared it). A variant met again below itself
+ * each of its own variants declared it). A node met again below itself
  * (`PetPage: { oneOf: [{ $ref: PetPage }, A] }`) is not read a second
  * time: the walk ends where it repeats, as `collectObjectProperties` ends
  * on a `$ref` it has followed, so such a variant declares nothing and the
- * union does not count. A `node` that is a union is typed as its
+ * union does not count. A lookup once made is kept for the walk
+ * (`lookup`, one per path: the `(node, segment)` pairs read so far), so a
+ * node several routes reach — two references to one component in one
+ * union, or a chain of such unions, where the routes double at every link
+ * — is read once, and its fields are collapsed to one per distinct field
+ * as they are met (`unionFields`), with the first route that reached it
+ * (PR #585 review: twenty components each an `anyOf` of two references to
+ * the next built over a million fields, each copying its route). A lookup
+ * a cycle closed above — one that ended on a node still on the way down
+ * above this one — depends on where the walk came from, and is not kept;
+ * one the cycle closed on itself, or no cycle touched, is the same from
+ * wherever the walk reaches the node. A `node` that is a union is typed as its
  * variants' models, a `$ref` variant's component among them; one that is an
  * `allOf`, or reaches a component composed with one (its own model, even
  * of a lone member), is one model its unions are flattened into, which
@@ -514,7 +528,56 @@ function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
-  walking: Set<SchemaObject> = new Set(),
+  lookup: FieldLookup = newFieldLookup(),
+): NamedField[] | undefined {
+  const done = lookup.memo.get(node);
+  if (done?.has(segment)) return done.get(segment);
+  // Met again below itself: it declares nothing, and the walk ends where the document repeats.
+  const above = lookup.stack.indexOf(node);
+  if (above !== -1) {
+    lookup.closed = Math.min(lookup.closed, above);
+    return undefined;
+  }
+  const depth = lookup.stack.push(node) - 1;
+  const outer = lookup.closed;
+  lookup.closed = Infinity;
+  const fields = readFieldsNamed(node, segment, componentSchemas, lookup);
+  lookup.stack.pop();
+  // Kept unless a cycle closed above this node, which would make the reading depend on the way down.
+  if (lookup.closed >= depth) {
+    const entry = done ?? new Map<string, NamedField[] | undefined>();
+    entry.set(segment, fields);
+    lookup.memo.set(node, entry);
+  }
+  lookup.closed = Math.min(outer, lookup.closed);
+  return fields;
+}
+
+/**
+ * One walk's bookkeeping for `fieldsNamed`: the lookups completed so far,
+ * by node and segment (`memo`); the nodes on the way down (`stack`), so a
+ * node met again below itself ends the walk where the document repeats; and
+ * the shallowest of those a cycle closed on during the lookup in progress
+ * (`closed`, the node's place on the stack, `Infinity` when none), which
+ * decides whether that lookup is kept. One per path walked (`fieldsAtPath`,
+ * `resolveDataPathArray`).
+ */
+interface FieldLookup {
+  memo: Map<SchemaObject, Map<string, NamedField[] | undefined>>;
+  stack: SchemaObject[];
+  closed: number;
+}
+
+function newFieldLookup(): FieldLookup {
+  return { memo: new Map(), stack: [], closed: Infinity };
+}
+
+/** The reading `fieldsNamed` keeps: the rule itself, see there. */
+function readFieldsNamed(
+  node: SchemaObject,
+  segment: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  lookup: FieldLookup,
 ): NamedField[] | undefined {
   const { properties, unions } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
@@ -532,7 +595,7 @@ function fieldsNamed(
   // reads them all.
   const inline = flattened && followed.size === 0;
   for (const union of inline ? collectObjectProperties(node).unions : unions) {
-    const fields = unionFields(union, segment, componentSchemas, walking);
+    const fields = unionFields(union, segment, componentSchemas, lookup);
     // Without the component map, a variant's properties are those it writes inline.
     const modeled = !flattened || variantsOf(union).some(({ variant }) => declaresInline(variant, segment));
     if (fields && fields.length > 0 && modeled) return fields;
@@ -569,26 +632,30 @@ function variantsOf(union: SchemaObject): Array<{ step: VariantStep; variant: Sc
  * The fields `segment` names in every non-null variant of `union`, by the
  * rule `fieldsNamed` applies to any object — so a variant that is itself a
  * union contributes one field per leaf — each `via` its own step and the
- * steps below it; `undefined` when a variant declares none. `walking` is
- * the variants above this union on the way down: a variant met again below
- * itself declares nothing, so the walk ends where the document repeats.
+ * steps below it; `undefined` when a variant declares none. Repeated
+ * fields are collapsed as they are met: one entry per distinct field — by
+ * its `$ref`, else the schema itself, as `fieldsAtPath` counts them — with
+ * the first route that reached it, so two references to one component
+ * yield its fields once, and a chain of such unions yields at each link
+ * as many fields as there are distinct ones below, not routes. `lookup`
+ * carries the walk's completed lookups and cycle guard (`fieldsNamed`).
  */
 function unionFields(
   union: SchemaObject,
   segment: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
-  walking: Set<SchemaObject>,
+  lookup: FieldLookup,
 ): NamedField[] | undefined {
-  const fields: NamedField[] = [];
+  const fields = new Map<string | SchemaObject, NamedField>();
   for (const { step, variant } of variantsOf(union)) {
-    if (walking.has(variant)) return undefined;
-    walking.add(variant);
-    const named = fieldsNamed(variant, segment, componentSchemas, walking);
-    walking.delete(variant);
+    const named = fieldsNamed(variant, segment, componentSchemas, lookup);
     if (!named) return undefined;
-    for (const field of named) fields.push({ schema: field.schema, via: [step, ...(field.via ?? [])] });
+    for (const field of named) {
+      const key = field.schema.$ref ?? field.schema;
+      if (!fields.has(key)) fields.set(key, { schema: field.schema, via: [step, ...(field.via ?? [])] });
+    }
   }
-  return fields;
+  return [...fields.values()];
 }
 
 /**
@@ -846,13 +913,14 @@ export function resolveDataPathArray(
   // through (`variant 2 of the oneOf at "result"`), none for the body itself
   // or a field an object declares on its own.
   let reached: Array<{ schema: SchemaObject; via?: string }> = [{ schema }];
+  const lookup = newFieldLookup();
   for (const [depth, segment] of segments.entries()) {
     const prefix = segments.slice(0, depth).join('.');
     const next = new Map<string | SchemaObject, { schema: SchemaObject; via?: string }>();
     for (const { schema: node, via } of reached) {
-      const named = fieldsNamed(node, segment, componentSchemas);
+      const named = fieldsNamed(node, segment, componentSchemas, lookup);
       if (!named) {
-        const lacking = variantLacking(node, segment, componentSchemas);
+        const lacking = variantLacking(node, segment, componentSchemas, lookup);
         const reason = lacking
           ? `${variantLabel(lacking, prefix)} declares no "${segment}"`
           : via === undefined
@@ -956,21 +1024,23 @@ export function dataPathProblem(
  * Loop }, A] }`). `undefined` when none does: no union at all, or one whose
  * every variant declares the segment and which still does not count (the
  * one an inline `allOf` flattens, workos/oagen#527), which the plain reason
- * covers.
+ * covers. `lookup` is the walk's, so the variants' fields are read once
+ * (`fieldsNamed`).
  */
 function variantLacking(
   node: SchemaObject,
   segment: string,
-  componentSchemas?: Record<string, SchemaObject>,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  lookup: FieldLookup,
   walking: Set<SchemaObject> = new Set(),
 ): VariantStep[] | undefined {
   for (const union of collectObjectProperties(node, componentSchemas).unions) {
     for (const { step, variant } of variantsOf(union)) {
-      if (fieldsNamed(variant, segment, componentSchemas)) continue;
+      if (fieldsNamed(variant, segment, componentSchemas, lookup)) continue;
       // Met again below itself: it declares nothing, and the step above names it.
       if (walking.has(variant)) return undefined;
       walking.add(variant);
-      const below = variantLacking(variant, segment, componentSchemas, walking);
+      const below = variantLacking(variant, segment, componentSchemas, lookup, walking);
       walking.delete(variant);
       return [step, ...(below ?? [])];
     }
