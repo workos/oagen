@@ -1259,7 +1259,12 @@ export interface SecuritySchemeRemoved {
  * `oauth2` flow's `scopes` map changed: the scopes a request needs are the
  * requirement's, which `security-changed` already compares, so a scope
  * added, removed or re-described in the definition moves nothing on the
- * wire.
+ * wire. An `apiKey` header's `name` is compared folded (`foldHeaderName`),
+ * since HTTP header names are case-insensitive (RFC 9110 §5.1): a header
+ * respelled `X-Key` → `x-key` is still reported, with the spelling in
+ * `details`, but is additive, as a case-only header parameter rename is; a
+ * query or cookie name is case-sensitive, so the same respelling there is
+ * breaking in use.
  */
 export interface SecuritySchemeModified {
   kind: 'security-scheme-modified';

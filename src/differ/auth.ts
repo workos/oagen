@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { foldParameterName } from '../ir/parameter-key.js';
 import type { ApiSpec, AuthScheme } from '../ir/types.js';
 import type { SecuritySchemeChange } from './types.js';
 
@@ -31,7 +32,12 @@ import type { SecuritySchemeChange } from './types.js';
  * `tokenUrl` or `refreshUrl`, a flow added or removed, or a flow's other
  * keys changing are wire-form changes, and a difference confined to
  * `scopes` (a scope added, removed or re-described) is reported but
- * additive.
+ * additive. An `apiKey` header's `name` is compared folded
+ * (`foldHeaderName`, through `foldParameterName`): HTTP header names are
+ * case-insensitive (RFC 9110 §5.1), so a header respelled `X-Key` → `x-key`
+ * is still reported — the spelling is visible in `details` — but additive,
+ * as a case-only header parameter rename is (`param-name-changed`); a
+ * query or cookie name is case-sensitive and compared as written.
  *
  * A scheme is in use in a document when the effective requirement list of
  * at least one of its operations or webhooks — `node.security ??
@@ -126,13 +132,26 @@ function definition(scheme: AuthScheme): unknown {
   }
 }
 
-/** The definition's wire form: `definition` with each `oauth2` flow's `scopes` map taken out. */
+/**
+ * The definition's wire form: `definition` with an `apiKey` header's `name`
+ * folded (`foldParameterName`: HTTP header names are case-insensitive, RFC
+ * 9110 §5.1, so `X-Key` and `x-key` are one header, as they are one header
+ * parameter; a query or cookie name is case-sensitive and kept as written)
+ * and with each `oauth2` flow's `scopes` map taken out.
+ */
 function wireForm(scheme: AuthScheme): unknown {
-  if (scheme.kind !== 'oauth2') return definition(scheme);
-  const flows = Object.fromEntries(
-    Object.entries(scheme.flows).map(([flowName, flow]) => [flowName, withoutScopes(flow)]),
-  );
-  return { kind: scheme.kind, flows };
+  switch (scheme.kind) {
+    case 'apiKey':
+      return { kind: scheme.kind, in: scheme.in, name: foldParameterName(scheme.in, scheme.name) };
+    case 'oauth2': {
+      const flows = Object.fromEntries(
+        Object.entries(scheme.flows).map(([flowName, flow]) => [flowName, withoutScopes(flow)]),
+      );
+      return { kind: scheme.kind, flows };
+    }
+    default:
+      return definition(scheme);
+  }
 }
 
 /** A flow object without its `scopes` key; a flow that is not an object (a malformed document) is kept as it is. */
