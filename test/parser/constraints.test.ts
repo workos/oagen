@@ -1917,4 +1917,88 @@ describe('#545', () => {
       expectOneReading(spec);
     },
   );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'keeps what is written beside a pointer branch under a wrapper that writes its own keyword, as beside a `$ref` to a primitive component (OAS %s)',
+    async (openapi) => {
+      // Greptile's third review of #545: the wrapper's reading leaves its
+      // `$ref` branch out, and it replaced what the branch had recorded, so
+      // `maxLength: 10` around `{ $ref: …/code, maxLength: 3 }` settled to
+      // the target's `8`; the same spelling around a `$ref` to a primitive
+      // component already read `3`.
+      const ptr = { $ref: '#/components/schemas/Owner/properties/code' };
+      const cmp = ref('Code');
+      const wrapped = (branch: Record<string, unknown>, own: Record<string, unknown>) => ({
+        oneOf: [branch, { type: 'null' }],
+        ...own,
+      });
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: { type: 'object', properties: { code: { type: 'string', pattern: OWN, maxLength: 8 } } },
+            Code: { type: 'string', pattern: OWN, maxLength: 8 },
+          },
+          parameters: [
+            { name: 'viaPointer', in: 'query', schema: wrapped({ ...ptr, maxLength: 3 }, { maxLength: 10 }) },
+            { name: 'viaComponent', in: 'query', schema: wrapped({ ...cmp, maxLength: 3 }, { maxLength: 10 }) },
+          ],
+          fields: {
+            viaPointer: wrapped({ ...ptr, maxLength: 3 }, { maxLength: 10 }),
+            viaComponent: wrapped({ ...cmp, maxLength: 3 }, { maxLength: 10 }),
+            // Two patterns cannot be conjoined: the pointed schema's wins, then the branch's, then the wrapper's, as a component's does.
+            conflict: wrapped({ ...ptr, pattern: PET }, { pattern: TAG }),
+            branchWins: wrapped({ ...ptr, minLength: 2 }, { maxLength: 10 }),
+          },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits }));
+      for (const site of [params.viaPointer, fields.viaPointer, params.viaComponent, fields.viaComponent]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      expect(fields.conflict.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      expect(fields.conflict.type).toEqual(owned({}));
+      expect(fields.branchWins.constraints).toEqual({ maxLength: 8, pattern: OWN, minLength: 2 });
+      expect(fields.branchWins.type).toEqual(owned({ minLength: 2 }));
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'carries a multi-type inline variant’s limits on its union, on a named union as on an inline one (OAS %s)',
+    async (openapi) => {
+      // Greptile's third review of #545: the inline union attached them and
+      // the named union (`namedUnionEntry`) did not.
+      const variant = { type: ['object', 'string'], properties: { id: { type: 'string' } }, maxLength: 5 };
+      const maybe = { type: ['object', 'string', 'null'], properties: { id: { type: 'string' } }, maxLength: 5 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Shape: { oneOf: [variant, { type: 'integer' }] },
+            MaybeShape: { oneOf: [maybe, { type: 'integer' }] },
+          },
+          fields: { shape: ref('Shape'), inline: { oneOf: [variant, { type: 'integer' }] } },
+        }),
+      );
+      const union = (model: string) => ({
+        kind: 'union',
+        variants: [{ kind: 'model', name: model }, string],
+        constraints: { maxLength: 5 },
+      });
+      expect(spec.models.find((m) => m.name === 'Shape')?.variants).toEqual([union('ShapeWithId'), integer]);
+      expect(spec.models.find((m) => m.name === 'MaybeShape')?.variants).toEqual([
+        nullable(union('MaybeShapeWithId')),
+        integer,
+      ]);
+      expect(byName(fieldsOf(spec, 'GetPetResponse')).inline.type).toEqual({
+        kind: 'union',
+        variants: [union('GetPetResponseInline'), integer],
+        compositionKind: 'oneOf',
+      });
+      expectOneReading(spec);
+    },
+  );
 });

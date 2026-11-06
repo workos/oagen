@@ -9,6 +9,7 @@ import {
   isPendingSchemaRef,
   isPendingVariant,
   pendingSchemaRef,
+  pendingSiteLimitsOf,
   recordPendingSiteLimits,
   schemaRefTarget,
 } from './schema-refs.js';
@@ -727,7 +728,13 @@ export function schemaConstraints(
  * `resolveSchemaPointers` has yet to settle, for a JSON Pointer `$ref`
  * deeper into a component (#539), records them for that pass
  * (`recordPendingSiteLimits`), which conjoins them with the pointed
- * schema's on the type it settles the site into (#545 review).
+ * schema's on the type it settles the site into (#545 review) — conjoined
+ * with what the reference already recorded, the branch's first, since a
+ * wrapper's reading leaves its `$ref` branch out (`extractConstraints`)
+ * where a component reference's levels would include it: `maxLength: 10`
+ * on `oneOf: [{ $ref: …/code, maxLength: 3 }, { type: 'null' }]` keeps
+ * the `3` (Greptile, #545 review round 3: the wrapper's `10` replaced it,
+ * and the site settled to the target's `8`).
  */
 export function withTypeConstraints(ref: TypeRef, constraints: Constraints | undefined): TypeRef {
   if (!constraints) return ref;
@@ -743,7 +750,9 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
       withTypeConstraints(ref.inner, constraints);
       return ref;
     case 'model':
-      if (isPendingSchemaRef(ref)) recordPendingSiteLimits(ref, constraints);
+      if (isPendingSchemaRef(ref)) {
+        recordPendingSiteLimits(ref, combineConstraints(pendingSiteLimitsOf(ref), constraints));
+      }
       return ref;
     case 'enum':
       return ref;
@@ -3358,6 +3367,15 @@ function nameInlineObjectVariants(
  * the mapped component would reference `CatItem`, which nothing extracts,
  * and naming them from the field would hand variant 0's model name to every
  * variant's items.
+ *
+ * The variant's own limits ride on what it is typed as, where that can
+ * carry them (#545): the union of a multi-type variant, under its nullable
+ * wrapper — `{ type: ['object', 'string'], properties, maxLength: 5 }` is
+ * `union<Model | string>` with `{ maxLength: 5 }` — as a type list's are
+ * the union's; a model reference carries none, the model its own. Attached
+ * here, so a named union's variant (`namedUnionEntry`) carries them as an
+ * inline union's does (Greptile, #545 review round 3: the inline caller
+ * attached them and the named one did not).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
   const modelRef: TypeRef = { kind: 'model', name: refName };
@@ -3374,7 +3392,7 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
         : buildTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, modelName),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
-  return nullable ? asNullable(ref) : ref;
+  return withSchemaConstraints(nullable ? asNullable(ref) : ref, variant);
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
@@ -5989,10 +6007,9 @@ function buildTypeRef(
       const inlineName = inlineVariantNames.get(v);
       if (inlineName) {
         const mappedName = resolvedDiscriminator ? mapVariantToDiscriminatorEntry(v, resolvedDiscriminator) : null;
-        // The variant's own limits ride on what it is typed as, where that
-        // can carry them: the union of a multi-type variant (#545); a model
-        // reference carries none, the model its own.
-        variants.push(withSchemaConstraints(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName), v));
+        // The variant's own limits ride on the union of a multi-type variant
+        // (#545), attached by `inlineVariantTypeRef` for every site.
+        variants.push(inlineVariantTypeRef(v, inlineName, mappedName ?? inlineName));
       } else {
         // A union of one variant stays a union, but it is the schema the
         // document wrote for its variant: the variant is typed with the
