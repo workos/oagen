@@ -19,7 +19,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { diffSpecs } from '../../src/differ/diff.js';
-import { diffAuthSchemes, schemesInUse } from '../../src/differ/auth.js';
+import { diffAuthSchemes, schemesInUse, scopesInUse } from '../../src/differ/auth.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import type {
   SecuritySchemeAdded,
@@ -372,7 +372,7 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
       });
     });
 
-    it('a flow added to a scheme in use is breaking; removed, the other way, breaking too', async () => {
+    it('a flow added beside an unchanged one is additive, exit 1 (MichaelDeBoey); removed, the other way, breaking', async () => {
       const oldFlows = { clientCredentials: clientCredentials() };
       const newFlows = {
         clientCredentials: clientCredentials(),
@@ -384,10 +384,14 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
       };
       const before = await parse(inUse(oldFlows));
       const after = await parse(inUse(newFlows));
+      // An alternative a caller may use, as `security-changed` reads one
+      // added to a requirement: a caller built for `clientCredentials`
+      // still gets its token the same way.
       expect(onlyModified(diffSpecs(before, after))).toMatchObject({
         details: 'oauth2 flows changed',
-        classification: 'breaking',
+        classification: 'additive',
       });
+      expect(exitCode(diffSpecs(before, after))).toBe(1);
       expect(onlyModified(diffSpecs(after, before))).toMatchObject({
         details: 'oauth2 flows changed',
         classification: 'breaking',
@@ -641,6 +645,244 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
         details: 'apiKey in header "X-Key" → in query "x-key"',
         classification: 'breaking',
       });
+    });
+  });
+
+  describe('review 1 — a scheme added under a name the old document already had in use is breaking (MichaelDeBoey)', () => {
+    const omitted: Array<[string, Record<string, unknown>]> = [
+      [
+        'openIdConnect',
+        { type: 'openIdConnect', openIdConnectUrl: 'https://auth.pets.example.com/.well-known/openid-configuration' },
+      ],
+      ['http digest', { type: 'http', scheme: 'digest' }],
+      // `mutualTLS` is an OAS 3.1 scheme type.
+      ...(openapi === '3.1.0' ? [['mutualTLS', { type: 'mutualTLS' }] as [string, Record<string, unknown>]] : []),
+    ];
+    const petKey: AuthScheme = { kind: 'apiKey', schemeName: 'petKey', in: 'header', name: 'X-Key' };
+
+    it.each(omitted)(
+      '%s → apiKey under security: [{ petKey: [] }]: security-scheme-added, breaking, exit 2; the reverse is the breaking removal',
+      async (_label, oldDefinition) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const before = await parse({ security: [{ petKey: [] }], securitySchemes: { petKey: oldDefinition } });
+          const after = await parse({ security: [{ petKey: [] }], securitySchemes: { petKey: xKey } });
+          // The parser omits the old definition, but the requirement still names it.
+          expect(before.auth).toBeUndefined();
+          expect(schemesInUse(before)).toEqual(new Set(['petKey']));
+
+          const diff = diffSpecs(before, after);
+          expect(diff.changes).toEqual([
+            { kind: 'security-scheme-added', schemeName: 'petKey', scheme: petKey, classification: 'breaking' },
+          ]);
+          expect(diff.behaviorChanges).toEqual([
+            { kind: 'security-scheme-changed', schemeName: 'petKey', newScheme: petKey, classification: 'breaking' },
+          ]);
+          expect(diff.summary).toEqual({
+            added: 1,
+            removed: 0,
+            modified: 0,
+            breaking: 1,
+            additive: 0,
+            behaviorChanges: 1,
+          });
+          expect(exitCode(diff)).toBe(2);
+
+          const reverse = diffSpecs(after, before);
+          expect(reverse.changes).toEqual([
+            { kind: 'security-scheme-removed', schemeName: 'petKey', scheme: petKey, classification: 'breaking' },
+          ]);
+          expect(exitCode(reverse)).toBe(2);
+        } finally {
+          warn.mockRestore();
+        }
+      },
+    );
+
+    it('stays additive, exit 1, when the old document declared the omitted scheme but nothing used it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const before = await parse({
+          security: [{ bearer: [] }],
+          securitySchemes: { petKey: { type: 'http', scheme: 'digest' }, bearer },
+        });
+        const after = await parse({ security: [{ bearer: [] }], securitySchemes: { petKey: xKey, bearer } });
+        const diff = diffSpecs(before, after);
+        expect(diff.changes).toEqual([
+          { kind: 'security-scheme-added', schemeName: 'petKey', scheme: petKey, classification: 'additive' },
+        ]);
+        expect(exitCode(diff)).toBe(1);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  });
+
+  describe('review 2 — oauth2 flows: an extension is not a flow, and a flow or URL added is an alternative added (MichaelDeBoey)', () => {
+    const inUse = (flows: Record<string, unknown>): Doc => ({
+      security: [{ oauth: ['pets:read'] }],
+      securitySchemes: { oauth: oauth2(flows) },
+    });
+
+    it('an x-* key on a flow, or beside the flows, is no change, exit 0, both directions', async () => {
+      const before = await parse(inUse({ clientCredentials: clientCredentials() }));
+      const onFlow = await parse(inUse({ clientCredentials: clientCredentials({ 'x-note': 'a' }) }));
+      const besideFlows = await parse(inUse({ clientCredentials: clientCredentials(), 'x-note': 'a' }));
+      // The parser keeps `flows` as written, extension included.
+      expect(onFlow.auth?.[0]).toMatchObject({ flows: { clientCredentials: { 'x-note': 'a' } } });
+      expect(besideFlows.auth?.[0]).toMatchObject({ flows: { 'x-note': 'a' } });
+      for (const [a, b] of [
+        [before, onFlow],
+        [onFlow, before],
+        [before, besideFlows],
+        [besideFlows, before],
+        [onFlow, besideFlows],
+      ]) {
+        const diff = diffSpecs(a, b);
+        expect(diff.changes).toEqual([]);
+        expect(diff.behaviorChanges).toEqual([]);
+        expect(exitCode(diff)).toBe(0);
+      }
+    });
+
+    it('a refreshUrl added to a flow that had none is additive, exit 1; removed, the other way, or changed, breaking, exit 2', async () => {
+      const before = await parse(inUse({ clientCredentials: clientCredentials() }));
+      const refreshed = await parse(
+        inUse({ clientCredentials: clientCredentials({ refreshUrl: 'https://auth.example.com/refresh' }) }),
+      );
+      const moved = await parse(
+        inUse({ clientCredentials: clientCredentials({ refreshUrl: 'https://auth.example.com/v2/refresh' }) }),
+      );
+      expect(onlyModified(diffSpecs(before, refreshed))).toMatchObject({
+        details: 'oauth2 flows changed',
+        classification: 'additive',
+      });
+      expect(exitCode(diffSpecs(before, refreshed))).toBe(1);
+      expect(onlyModified(diffSpecs(refreshed, before))).toMatchObject({
+        details: 'oauth2 flows changed',
+        classification: 'breaking',
+      });
+      expect(exitCode(diffSpecs(refreshed, before))).toBe(2);
+      expect(onlyModified(diffSpecs(refreshed, moved))).toMatchObject({ classification: 'breaking' });
+      expect(onlyModified(diffSpecs(moved, refreshed))).toMatchObject({ classification: 'breaking' });
+    });
+  });
+
+  describe('review 3 — a scope removed while a requirement in the new document still names it is breaking (MichaelDeBoey)', () => {
+    const tokenUrl = 'https://auth.example.com/token';
+    const petAuth = (scopes: Record<string, string>, security: unknown[], paths?: Record<string, unknown>): Doc => ({
+      security,
+      securitySchemes: { petAuth: oauth2({ clientCredentials: { tokenUrl, scopes } }) },
+      ...(paths ? { paths } : {}),
+    });
+    const parsedPetAuth = (scopes: Record<string, string>): AuthScheme => ({
+      kind: 'oauth2',
+      schemeName: 'petAuth',
+      flows: { clientCredentials: { tokenUrl, scopes } },
+    });
+    const both = { 'read:pets': 'Read pets', 'write:pets': 'Write pets' };
+    const readOnly = { 'read:pets': 'Read pets' };
+
+    it('his documents: write:pets dropped under security: [{ petAuth: [write:pets] }] exits 2, naming the scope', async () => {
+      const before = await parse(petAuth(both, [{ petAuth: ['write:pets'] }]));
+      const after = await parse(petAuth(readOnly, [{ petAuth: ['write:pets'] }]));
+      expect(scopesInUse(after)).toEqual(new Map([['petAuth', new Set(['write:pets'])]]));
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'security-scheme-modified',
+          schemeName: 'petAuth',
+          oldScheme: parsedPetAuth(both),
+          newScheme: parsedPetAuth(readOnly),
+          details: 'oauth2 scopes changed; required scope "write:pets" removed',
+          classification: 'breaking',
+        },
+      ]);
+      expect(diff.behaviorChanges).toEqual([
+        {
+          kind: 'security-scheme-changed',
+          schemeName: 'petAuth',
+          oldScheme: parsedPetAuth(both),
+          newScheme: parsedPetAuth(readOnly),
+          classification: 'breaking',
+        },
+      ]);
+      expect(exitCode(diff)).toBe(2);
+      // The scope coming back is a scope added: additive.
+      const reverse = diffSpecs(after, before);
+      expect(onlyModified(reverse)).toMatchObject({ details: 'oauth2 scopes changed', classification: 'additive' });
+      expect(exitCode(reverse)).toBe(1);
+    });
+
+    it('stays additive, exit 1, when no requirement names the removed scope', async () => {
+      const before = await parse(petAuth(both, [{ petAuth: ['read:pets'] }]));
+      const after = await parse(petAuth(readOnly, [{ petAuth: ['read:pets'] }]));
+      expect(onlyModified(diffSpecs(before, after))).toMatchObject({
+        details: 'oauth2 scopes changed',
+        classification: 'additive',
+      });
+      expect(exitCode(diffSpecs(before, after))).toBe(1);
+      expect(onlyModified(diffSpecs(after, before))).toMatchObject({ classification: 'additive' });
+    });
+
+    it('reads the scopes an operation’s own requirement names, not only the document default’s', async () => {
+      const paths = listPetsPath([{ petAuth: ['write:pets'] }]);
+      const before = await parse(petAuth(both, [{ petAuth: ['read:pets'] }], paths));
+      const after = await parse(petAuth(readOnly, [{ petAuth: ['read:pets'] }], paths));
+      expect(onlyModified(diffSpecs(before, after))).toMatchObject({
+        details: 'oauth2 scopes changed; required scope "write:pets" removed',
+        classification: 'breaking',
+      });
+      expect(exitCode(diffSpecs(before, after))).toBe(2);
+    });
+  });
+
+  describe('review 4 — a $ref under components.securitySchemes is followed and reported under the referencing key (MichaelDeBoey)', () => {
+    const viaRef = (shared: Record<string, unknown>): Doc => ({
+      security: [{ petKey: [] }],
+      securitySchemes: { petKey: { $ref: '#/components/securitySchemes/sharedKey' }, sharedKey: shared },
+    });
+    const parsedAs = (schemeName: string, name: string): AuthScheme => ({
+      kind: 'apiKey',
+      schemeName,
+      in: 'header',
+      name,
+    });
+
+    it('his documents: sharedKey’s header renamed exits 2 as a breaking security-scheme-modified petKey', async () => {
+      const before = await parse(viaRef(xKey));
+      const after = await parse(viaRef(xApiKey));
+      expect(before.auth).toEqual([parsedAs('petKey', 'X-Key'), parsedAs('sharedKey', 'X-Key')]);
+      expect(schemesInUse(before)).toEqual(new Set(['petKey']));
+
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'security-scheme-modified',
+          schemeName: 'petKey',
+          oldScheme: parsedAs('petKey', 'X-Key'),
+          newScheme: parsedAs('petKey', 'X-Api-Key'),
+          details: 'apiKey in header "X-Key" → in header "X-Api-Key"',
+          classification: 'breaking',
+        },
+        // Nothing names `sharedKey` directly.
+        {
+          kind: 'security-scheme-modified',
+          schemeName: 'sharedKey',
+          oldScheme: parsedAs('sharedKey', 'X-Key'),
+          newScheme: parsedAs('sharedKey', 'X-Api-Key'),
+          details: 'apiKey in header "X-Key" → in header "X-Api-Key"',
+          classification: 'additive',
+        },
+      ]);
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 2, breaking: 1, additive: 1, behaviorChanges: 2 });
+      expect(exitCode(diff)).toBe(2);
+      const reverse = diffSpecs(after, before);
+      expect(exitCode(reverse)).toBe(2);
+      expect(reverse.changes.map((c) => [c.kind, (c as SecuritySchemeModified).schemeName, c.classification])).toEqual([
+        ['security-scheme-modified', 'petKey', 'breaking'],
+        ['security-scheme-modified', 'sharedKey', 'additive'],
+      ]);
     });
   });
 
@@ -1044,7 +1286,7 @@ describe('#384 diffAuthSchemes', () => {
       ).toBeUndefined();
     });
 
-    it('takes each flow’s scopes out of the wire form, so a scope re-described is additive and a flow’s other keys are not', () => {
+    it('takes each flow’s scopes out of the wire form, so a scope re-described is additive, and reads a key added as an alternative', () => {
       const flows = { clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes: { a: 'A' } } };
       const redescribed = {
         clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes: { a: 'Read A' } },
@@ -1053,18 +1295,18 @@ describe('#384 diffAuthSchemes', () => {
         details: 'oauth2 scopes changed',
         classification: 'additive',
       });
+      // A `refreshUrl` added to a flow that had none is additive
+      // (MichaelDeBoey): a caller still gets its token as before.
       const refreshed = {
         clientCredentials: { ...flows.clientCredentials, refreshUrl: 'https://auth.example.com/refresh' },
       };
       expect(change([oauth(flows)], [oauth(refreshed)], used)).toMatchObject({
         details: 'oauth2 flows changed',
-        classification: 'breaking',
+        classification: 'additive',
       });
+      // An `x-*` key on a flow is an extension, not a flow (MichaelDeBoey).
       const extended = { clientCredentials: { ...flows.clientCredentials, 'x-audience': 'pets' } };
-      expect(change([oauth(flows)], [oauth(extended)], used)).toMatchObject({
-        details: 'oauth2 flows changed',
-        classification: 'breaking',
-      });
+      expect(change([oauth(flows)], [oauth(extended)], used)).toBeUndefined();
       // A flow removed, and a flow that is not an object (a malformed
       // document, kept as the parser read it), are wire-form changes too.
       expect(
@@ -1123,6 +1365,203 @@ describe('#384 diffAuthSchemes', () => {
       expect(changes).toEqual([
         { kind: 'security-scheme-removed', schemeName: 'apiKey', scheme: header, classification: 'additive' },
       ]);
+    });
+  });
+
+  describe('review 1 — added (MichaelDeBoey)', () => {
+    it('is breaking when the old document had the scheme in use, additive otherwise', () => {
+      expect(change(undefined, [header], { old: apiKeyRequirement })).toEqual({
+        kind: 'security-scheme-added',
+        schemeName: 'apiKey',
+        scheme: header,
+        classification: 'breaking',
+      });
+      expect(change([], [header], { old: apiKeyRequirement, new: apiKeyRequirement })).toMatchObject({
+        classification: 'breaking',
+      });
+      // Named only by the new document: the requirement change is
+      // `security-changed`'s, and no old request carried the scheme.
+      expect(change([], [header], { new: apiKeyRequirement })).toMatchObject({
+        kind: 'security-scheme-added',
+        classification: 'additive',
+      });
+      expect(change([], [header])).toMatchObject({ classification: 'additive' });
+      // A default every old operation overrides put nothing in use.
+      expect(
+        diffAuthSchemes(
+          spec({ security: apiKeyRequirement, services: [{ name: 'Pets', operations: [op({ security: [] })] }] }),
+          spec({ auth: [header] }),
+        ),
+      ).toEqual([{ kind: 'security-scheme-added', schemeName: 'apiKey', scheme: header, classification: 'additive' }]);
+    });
+  });
+
+  describe('review 2 — oauth2 flows (MichaelDeBoey)', () => {
+    const cc = { tokenUrl: 'https://auth.example.com/token', scopes: { a: 'A' } };
+    const ac = { authorizationUrl: 'https://auth.example.com/authorize', tokenUrl: cc.tokenUrl, scopes: { a: 'A' } };
+
+    it('drops x-* keys from the flows object and from each flow: an extension edit is no change', () => {
+      expect(
+        change([oauth({ clientCredentials: cc })], [oauth({ clientCredentials: { ...cc, 'x-note': 'a' } })], used),
+      ).toBeUndefined();
+      expect(
+        change([oauth({ clientCredentials: cc })], [oauth({ clientCredentials: cc, 'x-note': 'a' })], used),
+      ).toBeUndefined();
+      expect(
+        change(
+          [oauth({ clientCredentials: { ...cc, 'x-note': 'a' }, 'x-id': 1 })],
+          [oauth({ clientCredentials: { ...cc, 'x-note': 'b' }, 'x-id': 2 })],
+          used,
+        ),
+      ).toBeUndefined();
+    });
+
+    it('reads a flow added, or a key a flow lacked, as an alternative added: additive in use', () => {
+      expect(
+        change([oauth({ clientCredentials: cc })], [oauth({ clientCredentials: cc, authorizationCode: ac })], used),
+      ).toMatchObject({
+        details: 'oauth2 flows changed',
+        classification: 'additive',
+      });
+      const refreshed = { ...cc, refreshUrl: 'https://auth.example.com/refresh' };
+      expect(change([oauth({ clientCredentials: cc })], [oauth({ clientCredentials: refreshed })], used)).toMatchObject(
+        {
+          details: 'oauth2 flows changed',
+          classification: 'additive',
+        },
+      );
+    });
+
+    it('reads a flow removed, or a URL a flow declared changed or removed, as breaking in use', () => {
+      const refreshed = { ...cc, refreshUrl: 'https://auth.example.com/refresh' };
+      expect(
+        change([oauth({ clientCredentials: cc, authorizationCode: ac })], [oauth({ clientCredentials: cc })], used),
+      ).toMatchObject({
+        details: 'oauth2 flows changed',
+        classification: 'breaking',
+      });
+      expect(change([oauth({ clientCredentials: refreshed })], [oauth({ clientCredentials: cc })], used)).toMatchObject(
+        {
+          classification: 'breaking',
+        },
+      );
+      expect(
+        change(
+          [oauth({ clientCredentials: refreshed })],
+          [oauth({ clientCredentials: { ...refreshed, refreshUrl: 'https://auth.example.com/v2/refresh' } })],
+          used,
+        ),
+      ).toMatchObject({ classification: 'breaking' });
+      expect(
+        change(
+          [oauth({ clientCredentials: cc })],
+          [oauth({ clientCredentials: { ...cc, tokenUrl: 'https://auth.example.com/v2/token' } })],
+          used,
+        ),
+      ).toMatchObject({
+        classification: 'breaking',
+      });
+      // Out of use in the new document, the same regression is additive.
+      expect(
+        change([oauth({ clientCredentials: cc, authorizationCode: ac })], [oauth({ clientCredentials: cc })], {
+          old: apiKeyRequirement,
+        }),
+      ).toMatchObject({
+        classification: 'additive',
+      });
+    });
+  });
+
+  describe('review 3 — a required scope removed (MichaelDeBoey)', () => {
+    const flows = (scopes: Record<string, string>) => ({
+      clientCredentials: { tokenUrl: 'https://auth.example.com/token', scopes },
+    });
+    /** A requirement on the scheme (`apiKey`, as the `oauth` helper names it) asking for `scopes`. */
+    const needs = (...scopes: string[]): SecurityRequirementSet[] => [[{ schemeName: 'apiKey', scopes }]];
+
+    it('is breaking when a requirement in the new document still names the scope, with the scope in details', () => {
+      expect(
+        change([oauth(flows({ read: 'R', write: 'W' }))], [oauth(flows({ read: 'R' }))], {
+          old: needs('write'),
+          new: needs('write'),
+        }),
+      ).toMatchObject({
+        details: 'oauth2 scopes changed; required scope "write" removed',
+        classification: 'breaking',
+      });
+      // Named by the new document alone is enough: that is what asks for it.
+      expect(
+        change([oauth(flows({ read: 'R', write: 'W' }))], [oauth(flows({ read: 'R' }))], { new: needs('write') }),
+      ).toMatchObject({
+        classification: 'breaking',
+      });
+    });
+
+    it('is additive when no requirement names it, when it was added or re-described, or when another flow still offers it', () => {
+      expect(
+        change([oauth(flows({ read: 'R', write: 'W' }))], [oauth(flows({ read: 'R' }))], {
+          old: needs('write'),
+          new: needs('read'),
+        }),
+      ).toMatchObject({
+        details: 'oauth2 scopes changed',
+        classification: 'additive',
+      });
+      expect(
+        change([oauth(flows({ read: 'R' }))], [oauth(flows({ read: 'R', write: 'W' }))], { new: needs('write') }),
+      ).toMatchObject({
+        details: 'oauth2 scopes changed',
+        classification: 'additive',
+      });
+      expect(
+        change([oauth(flows({ write: 'W' }))], [oauth(flows({ write: 'Write' }))], { new: needs('write') }),
+      ).toMatchObject({
+        classification: 'additive',
+      });
+      const implicit = { authorizationUrl: 'https://auth.example.com/authorize', scopes: { write: 'W' } };
+      expect(
+        change(
+          [oauth({ ...flows({ read: 'R', write: 'W' }), implicit })],
+          [oauth({ ...flows({ read: 'R' }), implicit })],
+          { new: needs('write') },
+        ),
+      ).toMatchObject({ details: 'oauth2 scopes changed', classification: 'additive' });
+    });
+
+    it('names every required scope removed, sorted, beside a flows change too', () => {
+      expect(
+        change([oauth(flows({ a: 'A', b: 'B', c: 'C' }))], [oauth(flows({}))], { new: needs('c', 'a') }),
+      ).toMatchObject({
+        details: 'oauth2 scopes changed; required scopes "a", "c" removed',
+        classification: 'breaking',
+      });
+      const implicit = { authorizationUrl: 'https://auth.example.com/authorize', scopes: {} };
+      expect(
+        change([oauth(flows({ a: 'A' }))], [oauth({ ...flows({}), implicit })], { new: needs('a') }),
+      ).toMatchObject({
+        details: 'oauth2 flows changed; required scope "a" removed',
+        classification: 'breaking',
+      });
+    });
+
+    it('reads the scopes from every effective requirement (scopesInUse)', () => {
+      expect(
+        scopesInUse(
+          spec({
+            security: needs('a'),
+            services: [{ name: 'Pets', operations: [op(), op({ name: 'getPet', security: needs('b', 'a') })] }],
+            webhooks: [{ ...petAdopted, security: [[{ schemeName: 'hook', scopes: ['c'] }]] }],
+          }),
+        ),
+      ).toEqual(
+        new Map([
+          ['apiKey', new Set(['a', 'b'])],
+          ['hook', new Set(['c'])],
+        ]),
+      );
+      expect(
+        scopesInUse(spec({ security: needs('a'), services: [{ name: 'Pets', operations: [op({ security: [] })] }] })),
+      ).toEqual(new Map());
     });
   });
 
