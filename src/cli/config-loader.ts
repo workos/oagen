@@ -20,9 +20,14 @@ export interface OagenConfig {
   smokeRunners?: Record<string, string>;
   /**
    * Custom transform for operation IDs. When provided, replaces the default
-   * camelCase pass-through. Receives the raw operationId string; return the
-   * desired operation name (no additional conversion is applied).
-   *
+   * camelCase pass-through. Receives each operationId once, as the spec
+   * spells it with its trailing `[N]` overload markers stripped; return the
+   * desired operation name (no additional conversion is applied). A result
+   * with no ASCII letter or digit once such markers are stripped (`''`,
+   * `' '`, `'-'`, `'[1]'`), or that is not a string, names nothing: the
+   * operation is read as one without an operationId — path-named, its models
+   * named from its path — after one warning (#570). An operationId that
+   * itself names nothing is never passed.
    */
   operationIdTransform?: (id: string) => string;
   /**

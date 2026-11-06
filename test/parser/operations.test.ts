@@ -3808,3 +3808,234 @@ describe('#565', () => {
     }
   });
 });
+
+describe('#570', () => {
+  // `inferOperationName` returned whatever `operationIdTransform` gave back,
+  // so a transform that returned `''` (or `' '`) for an id named the operation
+  // `''` with `Operation.operationId` still set: `resolveOperations` then gave
+  // it the method name `''` under `operationNaming: 'operationId'`, its models
+  // were still named from the id, and two such operations in one service had
+  // the second renamed `2` with a warning. #547 kept the transform away from
+  // an `operationId` that names nothing, but not from a real one the
+  // transform maps to nothing. Now the transform's result is read as the
+  // document's id is (`namesNothing`): one with no ASCII letter or digit once
+  // its trailing overload markers are stripped — or no string at all — drops
+  // the `operationId`, with one warning, and the operation is path-named.
+  const responses = {
+    '200': {
+      description: 'OK',
+      content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+    },
+  };
+  const petId = { name: 'petId', in: 'path' as const, required: true, schema: { type: 'string' } };
+  const teamId = { name: 'teamId', in: 'path' as const, required: true, schema: { type: 'string' } };
+  /** Results that name nothing: empty, only whitespace, only punctuation, only markers, markers amid whitespace. */
+  const nothing = ['', ' ', '-', '[1]', '[1][2]', ' [1] '];
+  /** The issue's transform: what follows the first `.`, else `fallback`. */
+  const afterDot = (fallback: string) => (id: string) => id.split('.').at(1) ?? fallback;
+  /** The warning the transform's result earns, as the parser words it. */
+  const warning = (returned: string, operationId: string, operation: string) =>
+    `[oagen] Warning: operationIdTransform returned ${returned}, which names nothing, for operationId ` +
+    `"${operationId}" on ${operation}; naming the operation from its path`;
+
+  /** The method name of every operation, under each `operationNaming`. */
+  const methodNames = (services: Service[]) => {
+    const spec = {
+      name: 'Pets',
+      version: '1',
+      baseUrl: '',
+      services,
+      models: [],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+    return {
+      path: resolveOperations(spec, undefined, undefined, 'path').map((r) => r.methodName),
+      operationId: resolveOperations(spec, undefined, undefined, 'operationId').map((r) => r.methodName),
+    };
+  };
+
+  it('path-names the issue repro, in OAS 3.1 and 3.0, with one warning', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-570-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        const specFile = join(dir, `repro-${openapi.replaceAll('.', '-')}.json`);
+        const paths = {
+          '/pets': { get: { operationId: 'pets.list', responses } },
+          '/pets/{petId}': { get: { operationId: 'getPet', parameters: [petId], responses } },
+        };
+        await writeFile(specFile, JSON.stringify({ openapi, info: { title: 'Pets', version: '1' }, paths }));
+        for (const fallback of ['', ' ']) {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          try {
+            const spec = await parseSpec(specFile, { operationIdTransform: afterDot(fallback) });
+            // What the issue's script prints: `get`, never `''`, under either naming.
+            const printed = (naming: 'path' | 'operationId') =>
+              resolveOperations(spec, undefined, undefined, naming).map(
+                ({ methodName, operation }) =>
+                  `${operation.httpMethod.toUpperCase()} ${operation.path}: ${JSON.stringify(operation.name)} → ${JSON.stringify(methodName)}`,
+              );
+            expect(printed('path')).toEqual([
+              'GET /pets: "list" → "list_pets"',
+              'GET /pets/{petId}: "get" → "get_pet"',
+            ]);
+            expect(printed('operationId')).toEqual([
+              'GET /pets: "list" → "list"',
+              'GET /pets/{petId}: "get" → "get_pet"',
+            ]);
+            // The id the transform named is kept verbatim; the one it named nothing for is gone.
+            const [list, get] = spec.services[0].operations;
+            expect(list.operationId).toBe('pets.list');
+            expect(get).not.toHaveProperty('operationId');
+            // Models follow: from the id for `list`, from the path for `get`, never `GetPetResponse`.
+            expect(spec.models.map((model) => model.name)).toEqual(['PetsListResponse', 'PetsByPetIdGetResponse']);
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(warn).toHaveBeenCalledWith(warning(JSON.stringify(fallback), 'getPet', 'GET /pets/{petId}'));
+          } finally {
+            warn.mockRestore();
+          }
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads every result that names nothing, or is no string, as an absent operationId', () => {
+    const paths = (operationId?: string) => ({
+      '/pets/{petId}': {
+        get: { ...(operationId === undefined ? {} : { operationId }), parameters: [petId], responses },
+        post: {
+          ...(operationId === undefined ? {} : { operationId: `${operationId}.two` }),
+          parameters: [petId],
+          requestBody: { content: { 'application/json': { schema: { type: 'object', properties: {} } } } },
+          responses,
+        },
+      },
+    });
+    // The operation as it reads without an operationId: `get` and `create`, models from the path.
+    const pathNamed = extractOperations(paths());
+    expect(pathNamed.services[0].operations.map((op) => op.name)).toEqual(['get', 'create']);
+    expect(pathNamed.inlineModels.map((model) => model.name)).toEqual([
+      'PetsByPetIdGetResponse',
+      'PetsByPetIdPostResponse',
+      'PetsByPetIdPostRequest',
+    ]);
+    // A transform written in JavaScript can return `undefined`; it names nothing too.
+    for (const returned of [...nothing, undefined]) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const result = extractOperations(paths('getPet'), () => returned as string);
+        expect(result).toEqual(pathNamed);
+        expect(methodNames(result.services)).toEqual({
+          path: ['get_pet', 'create_pet'],
+          operationId: ['get_pet', 'create_pet'],
+        });
+        // One warning per operation, each naming the document's id, the operation and what came back.
+        const shown = returned === undefined ? 'undefined' : JSON.stringify(returned);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([
+          warning(shown, 'getPet', 'GET /pets/{petId}'),
+          warning(shown, 'getPet.two', 'POST /pets/{petId}'),
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it('tells two such operations in one service apart by their paths, without the reused-id rename', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { services, inlineModels } = extractOperations(
+        {
+          '/v1/notes': { get: { operationId: 'listNotes', responses } },
+          '/v1/{teamId}/notes': { get: { operationId: 'listTeamNotes', parameters: [teamId], responses } },
+        },
+        () => '',
+      );
+      // Not `''` and `2`: neither id names anything, so both are path-named and told apart as such.
+      expect(services[0].operations.map((op) => [op.name, op.operationId])).toEqual([
+        ['list', undefined],
+        ['listByTeamId', undefined],
+      ]);
+      expect(inlineModels.map((model) => model.name)).toEqual(['V1NotesGetResponse', 'V1ByTeamIdNotesGetResponse']);
+      expect(methodNames(services)).toEqual({
+        path: ['list_notes', 'list_v1_notes'],
+        operationId: ['list_notes', 'list_v1_notes'],
+      });
+      // The transform's warning for each; none about a reused `''`.
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([
+        warning('""', 'listNotes', 'GET /v1/notes'),
+        warning('""', 'listTeamNotes', 'GET /v1/{teamId}/notes'),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('calls the transform once per operation, markers stripped, and keeps a result that names something as returned', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const seen: string[] = [];
+      const transform = (id: string) => {
+        seen.push(id);
+        return afterDot('')(id);
+      };
+      const { services, inlineModels } = extractOperations(
+        {
+          '/pets': {
+            get: { operationId: 'pets.list[1]', responses },
+            post: { operationId: 'pets.create[0] [1]', responses },
+          },
+          '/pets/{petId}': { get: { operationId: 'getPet', parameters: [petId], responses } },
+          // Named something with its own separators, kept as the transform returned it.
+          '/pets/{petId}/adopt': { post: { operationId: 'pets.pets:adopt', parameters: [petId], responses } },
+          // An operationId that names nothing is never handed to the transform, as before.
+          '/owners': { get: { operationId: '-', responses } },
+        },
+        transform,
+      );
+      expect(seen).toEqual(['pets.list', 'pets.create', 'getPet', 'pets.pets:adopt']);
+      expect(services.map((service) => service.operations.map((op) => [op.name, op.operationId]))).toEqual([
+        [
+          ['list', 'pets.list[1]'],
+          ['create', 'pets.create[0] [1]'],
+          ['get', undefined],
+          ['pets:adopt', 'pets.pets:adopt'],
+        ],
+        [['list', undefined]],
+      ]);
+      expect(inlineModels.map((model) => model.name)).toEqual([
+        'PetsListResponse',
+        'PetsCreateResponse',
+        'PetsByPetIdGetResponse',
+        'PetsPetsAdoptResponse',
+        'OwnersGetResponse',
+      ]);
+      expect(methodNames(services)).toEqual({
+        path: ['list_pets', 'create_pet', 'get_pet', 'create_pet_adopt', 'list_owners'],
+        operationId: ['list', 'create', 'get_pet', 'pets_adopt', 'list_owners'],
+      });
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([warning('""', 'getPet', 'GET /pets/{petId}')]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('warns nothing without a transform, and nothing for a transform that names every id', () => {
+    const paths = {
+      '/pets': { get: { operationId: 'pets.list', responses } },
+      '/pets/{petId}': { get: { operationId: 'getPet', parameters: [petId], responses } },
+    };
+    for (const transform of [undefined, (id: string) => id, (id: string) => id.toUpperCase()]) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { services } = extractOperations(paths, transform);
+        expect(services[0].operations.map((op) => op.operationId)).toEqual(['pets.list', 'getPet']);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+});

@@ -281,7 +281,10 @@ export interface Operation {
    * (`operationIdTransform` applied, after the markers are stripped:
    * `listPets[1][2]` is `listPets`); this says that `name` came from one at
    * all, which is what `resolveOperations` reads to prefer it over the
-   * path-derived method name.
+   * path-derived method name. Left out as well when the transform returns a
+   * name that names nothing by the same reading (`''`, `' '`, `'-'`, `'[1]'`),
+   * or no string at all: the operation is path-named, with one warning, as
+   * if the document had declared no `operationId` (#570).
    */
   operationId?: string;
   /**

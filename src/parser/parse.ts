@@ -48,6 +48,17 @@ import type { OperationHint } from '../ir/operation-hints.js';
 export type OpenApiDocument = Record<string, unknown>;
 
 export interface ParseOptions {
+  /**
+   * Custom transform for operation IDs. Receives each `operationId` once, as
+   * the document spells it with its trailing `[N]` overload markers stripped;
+   * returns the operation's name, used as is (no casing conversion). A result
+   * with no ASCII letter or digit once such markers are stripped (`''`,
+   * `' '`, `'-'`, `'[1]'`), or that is not a string, names nothing: the
+   * operation is then read as one without an `operationId` — path-named, its
+   * models named from its path, `Operation.operationId` unset — after one
+   * warning naming the id and the operation (#570). An `operationId` that
+   * itself names nothing is never passed. When omitted, ids are camelCased.
+   */
   operationIdTransform?: (id: string) => string;
   /**
    * Custom transform for schema (model/enum) names. Receives the cleaned
