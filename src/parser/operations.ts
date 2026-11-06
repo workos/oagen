@@ -5280,8 +5280,12 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  * it shares a sibling's stem only when that sibling is an enum of the same
  * members (`SettledSite.enumValues`) and otherwise takes its own status
  * code, as an object would: a 202 enum `[c, d]` beside a 201 enum `[a, b]`
- * is `…Response202`, and a 202 enum `[a, b]` shares `…Response201`
- * (workos/oagen#538). A fallback body named
+ * is `…Response202`, and a 202 enum `[a, b]` shares `…Response201`. A
+ * body that produces neither a model nor an enum — a primitive, an array of
+ * primitives, a `$ref` to a component — owns no name and records no
+ * settlement, so a 202 object beside a 201 `type: string` body is
+ * `…Response202`, not the free `…Response201`, and keeps it when the 201's
+ * body is removed (workos/oagen#538). A fallback body named
  * from the operation carries the response's label in its bare name and an
  * error body named from it its status code, so within an operation each has
  * a bare name of its own and no sibling to try. A component response's body
