@@ -85,8 +85,30 @@ export interface ParseOptions {
   /**
    * Fold the models materialized for inline error bodies onto shared models
    * named by shape (`ErrorBody`, `ErrorBodyWithCode`, the enum `ErrorBodyCode`;
-   * see `collapseErrorBodies`). On by default; `false` keeps one model per
-   * operation and status code (`<Op>Error<code>`).
+   * see `collapseErrorBodies`). A body's shape, and so its name, is its
+   * required fields — their names, domain names and types — so an optional
+   * field added to a body or to a nested item moves no model (#506, #516),
+   * and two shapes never ask for one name (#515): `{ message: string | null }`
+   * is `ErrorBodyWithNullableMessage`, `{ code: integer, message }` is
+   * `ErrorBodyWithCodeInteger`, `{ status: 404, message }` is
+   * `ErrorBodyWithStatus404`, `{ error: integer, error_description }` is
+   * `OAuthErrorBodyWithErrorInteger`, `{ message, errors: [{ code, message }] }`
+   * is `ErrorBodyWithCodeMessageErrors`, a `{ message }` hinted
+   * `message → detail` is `ErrorBodyWithMessageAsDetail`, and a body that
+   * requires no field is named from every field under `Optional`
+   * (`OptionalErrorBody` for `{ message? }`); what no name can spell — a
+   * value pinned inside an array, a discriminator mapping, the component or
+   * named enum a field references, a field named like another field's
+   * qualifier (`code_integer` beside `code: integer`), a pinned value that
+   * spells a family prefix (`code: 'optional'` beside `{ message? }`) —
+   * leaves the later shape's models as they are, with a warning; a shape
+   * whose name is its field names alone sorts before one a qualifier
+   * spelled, so adding the qualified shape moves no model. A component of the shared name takes each
+   * body it declares every field, domain name and limit of, and leaves a
+   * body it would narrow as it is. An optional field's hint is carried
+   * whichever bodies give it, and dropped with a warning when two bodies
+   * hint it apart. On by default; `false` keeps one model per operation and
+   * status code (`<Op>Error<code>`).
    */
   collapseErrorBodies?: boolean;
   /**

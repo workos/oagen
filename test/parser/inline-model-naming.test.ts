@@ -370,7 +370,7 @@ describe('an operationId two operations declare (issue #416)', () => {
       [
         {
           "errors": [
-            "ErrorBody",
+            "OptionalErrorBody",
           ],
           "name": "getNote",
           "path": "/notes/{id}",
@@ -379,7 +379,7 @@ describe('an operationId two operations declare (issue #416)', () => {
         },
         {
           "errors": [
-            "ErrorBodyWithReason",
+            "OptionalErrorBodyWithReasonWithoutMessage",
           ],
           "name": "getNote2",
           "path": "/notes/{id}/draft",
@@ -388,13 +388,15 @@ describe('an operationId two operations declare (issue #416)', () => {
         },
       ]
     `);
+    // The error bodies require no field, so they are named from every field
+    // under `Optional` (#515).
     expect([...models].sort()).toEqual([
-      'ErrorBody {message}',
-      'ErrorBodyWithReason {reason}',
       'GetNote2Response {title, owner}',
       'GetNote2ResponseOwner {email}',
       'GetNoteResponse {id, owner}',
       'GetNoteResponseOwner {name}',
+      'OptionalErrorBody {message}',
+      'OptionalErrorBodyWithReasonWithoutMessage {reason}',
     ]);
   });
 

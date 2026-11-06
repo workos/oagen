@@ -22,42 +22,86 @@
  * those sites reach (`errorOnly`): a component schema, a model a success
  * body, parameter, header, webhook or component also reaches, and a body a
  * `components/responses` entry declares (`componentSites`) are left exactly
- * as they are. The models it takes are keyed by structure alone
- * (`ModelKeys`): field names, requiredness, flags and types, a nested
- * error-only model by its own key, and a string the document pins —
- * `const: idp_metadata_fetch_failed`, an inline `enum`, a plain `string` —
- * all as one string, so the bodies that differ only in their error code,
- * their prose or their `x-` extensions fold onto one model. A string inside
- * an array, union or map keeps its value in the key, and so does a field's
- * `domainName` (a `fieldHints` entry), so neither is lost in a fold.
+ * as they are. The models it takes are keyed by their shape (`ModelKeys`),
+ * and a body's shape is its required fields — a body that requires none, all
+ * of them (`namedFields`): each one's name, its domain name (a `fieldHints`
+ * entry) and its type, a nested error-only model by its own key, and a
+ * string the document pins — `const: idp_metadata_fetch_failed`, an inline
+ * `enum`, a plain `string` — all as one string, so the bodies that differ
+ * only in their error code, their prose or their `x-` extensions fold onto
+ * one model. An optional field is not shape (#506, #516): a body gains one
+ * without leaving its group, and the group's model carries every optional
+ * field any member declares. Nor are a field's flags, default and limits,
+ * which the shared model keeps where every member agrees, as it keeps a
+ * description; an optional field's domain name is kept when the members
+ * that hint it agree, and dropped with a warning when they do not. A string
+ * inside an array, union or map keeps its value in the key (`L"a"`,
+ * `E["a","b"]`), since nothing combines values there, so two bodies that
+ * list different codes in an array stay two models.
  *
- * Each group becomes one model, named from its shape alone (`bodyName`):
- * `ErrorBody` for `{ message }`, `OAuthErrorBody` for the OAuth error format
- * `{ error, error_description }`, else the base plus `With` and a token per
- * further field. A field's token is its name in PascalCase, qualified by what
- * its type adds so that two shapes with the same field names still read
- * apart: an array of strings is `MessageList`, a union joins its variants
- * with `Or` (`MessageOrMessageList`), and a nested error body is prefixed
- * with the field names of its own (`ErrorBodyWithCodeFieldErrors` for
- * `{ message, errors: [{ code, field }] }`). A group whose members all pin
- * one string field to one value is named from that value instead
- * (`RateLimitExceededErrorBody`, `InvalidGrantOAuthErrorBody`; the field's
- * name follows the value unless it is `code` or `error`), plus `With` and
- * the plain names of any further fields
- * (`OrganizationSelectionRequiredErrorBodyWithOrganizations`). A model only
- * another error body reaches is named from its parent and field
+ * Each group becomes one model, named from its shape alone (`bodyName`), so
+ * that a name is a function of the shape and two shapes never ask for one
+ * name (#515): `ErrorBody` for `{ message }`, `OAuthErrorBody` for the OAuth
+ * error format `{ error, error_description }`, else the base plus `With` and
+ * a token per further required field. The fields a family implies — a
+ * `message`, or `error` and `error_description` in the OAuth format — and
+ * the field a value-named group pins are left out of the name only while
+ * they are plain strings (no `null`, no format, no domain name); otherwise
+ * their token is spelled like any other (`ErrorBodyWithNullableMessage`,
+ * `OAuthErrorBodyWithErrorInteger`, `GoneErrorBodyWithNullableCode`). A
+ * body that has no required `message` says so
+ * (`ErrorBodyWithCodeWithoutMessage` for `{ code }`). A field's token is its
+ * name in PascalCase, qualified by what its type adds so that two shapes
+ * with the same field names still read apart: `Nullable` leads a field that
+ * admits `null` (`NullableMessage`), a scalar that is not a plain string
+ * follows the name (`CodeInteger`, `CreatedAtDateTime`), a non-string
+ * `const` or inline `enum` spells its values (`Status404`, `OkTrue`,
+ * `Status404Or410`; behind `No` after a name ending in a digit), a domain
+ * name follows it after `As` (`MessageAsDetail`), an array of plain values
+ * ends in `List` (`MessageList`), a union joins its variants with `Or`
+ * (`MessageOrMessageList`), and a nested error body is prefixed with the
+ * tokens of every required field of its own, the ones the parent also has
+ * included (`ErrorBodyWithCodeFieldErrors` for
+ * `{ message, errors: [{ code, field }] }`, `ErrorBodyWithCodeMessageErrors`
+ * for items `{ code, message }`). A body that requires no
+ * field is named from every field it has, under `Optional`, so it never
+ * takes a required shape's name (`OptionalErrorBody` for `{ message? }`,
+ * `OptionalErrorBodyWithCode` for `{ code?, message? }`). A group whose
+ * members all pin one required string field to one value is named from that
+ * value instead (`RateLimitExceededErrorBody`, `InvalidGrantOAuthErrorBody`;
+ * the field's name follows the value unless it is `code` or `error`), plus
+ * `With` and the tokens of any further fields, a nested body's fields left
+ * out (`OrganizationSelectionRequiredErrorBodyWithOrganizations`). A model
+ * only another error body reaches is named from its parent and field
  * (`OrganizationSelectionRequiredErrorBodyWithOrganization`, singular for an
- * array item). `ErrorBody` rather than `ErrorResponse` because an emitter
- * may already spend that name on a component called `Error` (Go does).
+ * array item), plus its own fields when the field is optional in the parent,
+ * whose name then says nothing of it (`ErrorBodyDetailWithReason` for
+ * `{ message, detail?: { reason } }`). `ErrorBody` rather than
+ * `ErrorResponse` because an emitter may already spend that name on a
+ * component called `Error` (Go does).
  *
- * The pass never numbers a name. A shared name a component schema of exactly
- * that shape already holds — one whose string fields admit every value the
- * bodies pin — is that component: the group folds onto it. A name anything
- * else holds — a component of another shape, an enum, a shared
- * body of another shape — leaves the group's models exactly as the parser
+ * The pass never numbers a name. A shared name a component schema of that
+ * shape already holds is that component for every member it can stand for
+ * (`componentAccepts`) — one that declares every field the member has,
+ * required or optional as the member has it, of its type and domain name,
+ * no stricter in its limits, and admitting every value the member pins:
+ * those members fold onto it, and a member it cannot stand for is left as
+ * it is, with a warning that prints that member's shape, so a body that
+ * gains a field the component lacks moves alone. A name anything else holds
+ * — a component of another shape, an enum, a shared body whose shape
+ * differs in what no name can spell (a value pinned inside an array, a
+ * discriminator mapping, the component or named enum a field references, a
+ * field named like another field's qualifier, a pinned value that spells a
+ * family prefix) — leaves the group's models exactly as the parser
  * materialized them, with every error-only model they reach or are reached
- * from, and says so in a warning naming both sides; the fold then runs
- * again without them, since a freed name may now suit another group.
+ * from, and says so in a warning that prints both shapes with their types;
+ * the fold then runs again without them, since a freed name may now suit
+ * another group. The groups are ordered by shape, never by operation: fewer
+ * named fields first, a shape whose name is its field names alone before
+ * one a qualifier spelled (`qualified`), then the key, so the same shape
+ * keeps a contested name whichever operation declared it, and adding
+ * `{ message, code: integer }` beside `{ message, code_integer }` (both
+ * `ErrorBodyWithCodeInteger`) leaves the latter's model as it is.
  *
  * A string field a group pins to two or more values becomes an enum shared by
  * every error body that has a field of that name — `ErrorBodyCode` for
@@ -68,10 +112,11 @@
  * is shared when the members agree; when they do not, or a model holds the
  * name, the fields stay plain strings, with a warning. One value every
  * member pins stays that literal, and a lone pinned value beside free
- * strings widens to `string`. A field's
- * description, example and extensions survive only when every member wrote
- * the same one; the response's own `description` stays on the `errors[]`
- * entry, where it always was.
+ * strings widens to `string`. An optional field the members type
+ * differently is the union of the types they wrote. A field's description,
+ * example and extensions survive only when every member wrote the same one;
+ * the response's own `description` stays on the `errors[]` entry, where it
+ * always was.
  *
  * The references are rewritten in place, so the `contents` entry that shared
  * its `type` with the entry's `type` keeps sharing it. A `oneOf` of variants
@@ -82,7 +127,7 @@
  * `collapseErrorBodies: false` on `ParseOptions` keeps the per-operation
  * models for a consumer that names them.
  */
-import type { Enum, EnumRef, Field, Model, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
+import type { Constraints, Enum, EnumRef, Field, Model, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
 import {
   collectModelRefs,
   collectModelTypeRefs,
@@ -90,12 +135,18 @@ import {
   collectWebhookTypeRefs,
   renameTypeRefModels,
 } from '../ir/types.js';
-import { singularize, toPascalCase } from '../utils/naming.js';
+import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
 
 /** The stem every shared error body is named from: `ErrorBody`, `ErrorBodyWithCode`, and the enums `ErrorBodyCode`, `ErrorBodyError`. */
 export const ERROR_BODY_BASE = 'ErrorBody';
+
+/** The prefix of the family a body that requires no field is named in: `OptionalErrorBody` for `{ message? }` (#515). */
+const OPTIONAL_PREFIX = 'Optional';
+
+/** The clause ending the name of a body that has no required `message`: `ErrorBodyWithCodeWithoutMessage` for `{ code }` (#515). */
+const WITHOUT_MESSAGE = 'WithoutMessage';
 
 export interface CollapseErrorBodiesInput {
   services: Service[];
@@ -201,6 +252,12 @@ interface FoldContext {
   errorRoots: readonly string[];
 }
 
+/** What a name reads of the models around a body: which are error-only, and each by name. */
+interface NamingContext {
+  errorOnly: ReadonlySet<string>;
+  byName: ReadonlyMap<string, Model>;
+}
+
 /**
  * One attempt at folding the error-only models `errorOnly`: the model list
  * with every group folded, or — when a shared name is taken by something of
@@ -211,7 +268,8 @@ function fold(
   errorOnly: ReadonlySet<string>,
   { input, options, byName, slots, errorRoots }: FoldContext,
 ): { models: Model[]; frozen: ReadonlySet<string> } {
-  // Group by structure, each group's members in name order.
+  const naming: NamingContext = { errorOnly, byName };
+  // Group by shape, each group's members in name order.
   const keys = new ModelKeys(errorOnly, byName);
   const groups = new Map<string, Model[]>();
   for (const name of [...errorOnly].sort()) {
@@ -221,12 +279,18 @@ function fold(
     else groups.set(key, [byName.get(name)!]);
   }
   // Groups are ordered by shape, never by the operations that produced them:
-  // fewer fields first, then the key, so when two shapes ask for one name the
-  // same one keeps it whichever operation declared it, and renaming an
-  // operation moves no model name.
+  // fewer named fields first, then a shape whose name is its field names
+  // alone before one a qualifier spelled, then the key, so when two shapes
+  // ask for one name the same one keeps it whichever operation declared it,
+  // renaming an operation moves no model name, and a field named like
+  // another field's qualifier (`code_integer` beside `code: integer`, both
+  // `ErrorBodyWithCodeInteger`) keeps its model when the qualified shape is
+  // added.
   const orderedGroups = [...groups.entries()].sort(([keyA, a], [keyB, b]) => {
-    const fields = a[0].fields.length - b[0].fields.length;
-    return fields !== 0 ? fields : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+    const fields = namedFields(a[0]).length - namedFields(b[0]).length;
+    if (fields !== 0) return fields;
+    const plain = Number(qualified(a[0], naming)) - Number(qualified(b[0], naming));
+    return plain !== 0 ? plain : keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
   });
   const pinnedByKey = new Map<string, Map<string, PinnedValues>>();
   for (const [key, members] of orderedGroups) pinnedByKey.set(key, pinnedValues(members));
@@ -255,6 +319,14 @@ function fold(
   const canonical = new Map<string, string>(); // group key → shared name
   const absorbed = new Set<string>(); // group keys folded onto a component of their shape
   const seeds = new Set<string>(); // the models of the groups left as they are
+  const leave = (name: string, holder: string, left: readonly Model[]): void => {
+    for (const member of left) seeds.add(member.name);
+    const list = left.map((member) => `"${member.name}"`).join(', ');
+    const kept = left.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
+    console.warn(
+      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${kept}; give the two the same shape, or rename one`,
+    );
+  };
   const claim = (name: string, key: string, members: readonly Model[]): void => {
     const holder = holders.get(name);
     if (holder === undefined) {
@@ -262,30 +334,28 @@ function fold(
       canonical.set(key, name);
       return;
     }
-    // A component schema of exactly this shape, admitting every value the
-    // bodies pin, is the shared body.
+    // A component schema of this shape is the shared body of every member
+    // it can stand for; a member it cannot — one with a field, a domain
+    // name, a limit or a pinned value the component does not admit — is
+    // left as it is, alone, with its own shape in the warning, and the fold
+    // runs again with the rest (#506).
     const component = byName.get(name);
-    if (
-      component &&
-      !errorOnly.has(name) &&
-      keys.of(name) === key &&
-      componentAccepts(component, pinnedByKey.get(key)!)
-    ) {
-      canonical.set(key, name);
-      absorbed.add(key);
+    if (component && !errorOnly.has(name) && keys.of(name) === key) {
+      const left = members.filter((member) => !componentAccepts(component, member, keys));
+      if (left.length === 0) {
+        canonical.set(key, name);
+        absorbed.add(key);
+        return;
+      }
+      leave(name, holder, left);
       return;
     }
-    for (const member of members) seeds.add(member.name);
-    const list = members.map((member) => `"${member.name}"`).join(', ');
-    const kept = members.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
-    console.warn(
-      `[oagen] Warning: The shared error body ${shapeOf(members[0])} would be named "${name}", which ${holder} already holds — keeping ${kept}; give the two the same shape, or rename one`,
-    );
+    leave(name, holder, members);
   };
   const frozenOut = (members: readonly Model[]): boolean => members.some((member) => seeds.has(member.name));
   for (const [key, members] of orderedGroups) {
     if (!members.some((member) => topLevel.has(member.name))) continue;
-    claim(bodyName(members[0], pinnedByKey.get(key)!, errorOnly, byName), key, members);
+    claim(bodyName(members[0], pinnedByKey.get(key)!, naming), key, members);
   }
   // Every (parent, field) that reaches a nested error-only model, read on
   // the models before the fold.
@@ -309,7 +379,7 @@ function fold(
         .flatMap((member) => parentsOf.get(member.name) ?? [])
         .map(({ parent, field }) => {
           const parentName = canonical.get(keys.of(parent.name));
-          return parentName === undefined ? undefined : nestedName(parentName, field);
+          return parentName === undefined ? undefined : nestedName(parentName, parent, field, members[0], naming);
         })
         .filter((candidate): candidate is string => candidate !== undefined)
         .sort();
@@ -322,7 +392,7 @@ function fold(
   // or through a group left as it is — is named from its own fields.
   for (const [key, members] of orderedGroups) {
     if (!canonical.has(key) && !frozenOut(members)) {
-      claim(bodyName(members[0], pinnedByKey.get(key)!, errorOnly, byName), key, members);
+      claim(bodyName(members[0], pinnedByKey.get(key)!, naming), key, members);
     }
   }
   if (seeds.size > 0) {
@@ -461,10 +531,23 @@ function closure(roots: readonly string[], byName: ReadonlyMap<string, Model>): 
 }
 
 /**
- * The structure of an error-only model, independent of its name, its
- * documentation, its `x-` extensions and the values its string fields are
- * pinned to. Memoized per model; a cycle among error bodies reads as the
- * name on the cycle.
+ * The fields a body's key and name read: its required fields, since an
+ * optional one added later must not move the body to another model (#506,
+ * #516) — or, for a body that requires none, every field it has, which is
+ * all there is to name it from (#515).
+ */
+function namedFields(model: Model): Field[] {
+  const required = model.fields.filter((field) => field.required);
+  return required.length > 0 ? required : model.fields;
+}
+
+const byFieldName = (a: Field, b: Field): number => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+/**
+ * The shape of an error-only model, independent of its name, its optional
+ * fields, its documentation, its flags and limits, its `x-` extensions and
+ * the values its string fields are pinned to. Memoized per model; a cycle
+ * among error bodies reads as the name on the cycle.
  */
 class ModelKeys {
   private readonly keys = new Map<string, string>();
@@ -481,13 +564,16 @@ class ModelKeys {
     if (this.visiting.has(name)) return `cycle:${name}`;
     this.visiting.add(name);
     const model = this.byName.get(name)!;
-    const fields = model.fields
-      .map((field) => `${field.name}${field.required ? '!' : '?'}${fieldFlags(field)}=${this.type(field.type, true)}`)
+    // Each named field's name, requiredness, domain name and type: exactly
+    // what `bodyName` spells, so two keys never ask for one name (#515).
+    const fields = namedFields(model)
+      .map(
+        (field) =>
+          `${field.name}${field.required ? '!' : '?'}${field.domainName === undefined ? '' : `~${field.domainName}`}=${this.type(field.type, true)}`,
+      )
       .sort()
       .join('|');
     const own = stableJson({
-      deprecated: model.deprecated,
-      constraints: model.constraints,
       typeParams: model.typeParams,
       compositionKind: model.compositionKind,
       variants: model.variants?.map((variant) => this.type(variant, false)).sort(),
@@ -505,15 +591,17 @@ class ModelKeys {
    * since `sharedFieldType` reads those values across the group; a string
    * inside an array, union or map keeps its value in the key (`L"a"`,
    * `E["a","b"]`), since nothing combines values there, so two bodies that
-   * list different codes in an array stay two models.
+   * list different codes in an array stay two models. An inline enum's
+   * values are read sorted (`sortedEnumValues`), as the name spells them,
+   * so reordering its entries moves no body.
    */
   type(type: TypeRef, direct: boolean): string {
     switch (type.kind) {
       case 'literal':
         return direct && typeof type.value === 'string' ? 'S' : `L${JSON.stringify(type.value)}`;
       case 'enum':
-        if (isStringValuedInlineEnum(type)) return direct ? 'S' : `E${JSON.stringify([...type.values!].sort())}`;
-        return type.values ? `E${JSON.stringify(type.values)}` : `E:${type.name}`;
+        if (direct && isStringValuedInlineEnum(type)) return 'S';
+        return type.values ? `E${JSON.stringify(sortedEnumValues(type.values))}` : `E:${type.name}`;
       case 'primitive':
         return direct && type.type === 'string' && !type.format ? 'S' : `P:${type.type}:${type.format ?? ''}`;
       case 'model':
@@ -541,29 +629,43 @@ class ModelKeys {
   }
 }
 
-/** A field's flags, limits and domain name: everything but its name, type, documentation and extensions. */
-function fieldFlags(field: Field): string {
-  return stableJson({
-    domainName: field.domainName,
-    readOnly: field.readOnly,
-    writeOnly: field.writeOnly,
-    deprecated: field.deprecated,
-    default: field.default,
-    constraints: field.constraints,
-  });
+/**
+ * One field per name the members declare, in the order the shared model
+ * lists them: the first member's fields, then the optional fields each
+ * later member adds, in its order.
+ */
+function sharedFieldOrder(members: readonly Model[]): Field[] {
+  const order: Field[] = [];
+  const seen = new Set<string>();
+  for (const member of members) {
+    for (const field of member.fields) {
+      if (seen.has(field.name)) continue;
+      seen.add(field.name);
+      order.push(field);
+    }
+  }
+  return order;
 }
 
-/** For every string field of the members (by name), the values pinned and whether any member leaves it free. */
+/** The members' fields of one name, in member order; a member without the field adds none. */
+function siblingsOf(members: readonly Model[], name: string): Field[] {
+  return members.flatMap((member) => member.fields.filter((field) => field.name === name));
+}
+
+/**
+ * For every field the members type as a string (by name), the values pinned
+ * and whether any member leaves it free. An optional field a member lacks
+ * neither pins nor frees it: that member's body never carries the field.
+ */
 function pinnedValues(members: readonly Model[]): Map<string, PinnedValues> {
   const pinned = new Map<string, PinnedValues>();
-  for (const field of members[0].fields) {
-    if (!isStringLike(unwrapNullable(field.type))) continue;
+  for (const field of sharedFieldOrder(members)) {
+    const inners = siblingsOf(members, field.name).map((sibling) => unwrapNullable(sibling.type));
+    if (!inners.every(isStringLike)) continue;
     const entry: PinnedValues = { values: new Set(), open: false };
-    for (const member of members) {
-      const sibling = member.fields.find((f) => f.name === field.name);
-      const inner = sibling ? unwrapNullable(sibling.type) : undefined;
-      if (inner?.kind === 'literal' && typeof inner.value === 'string') entry.values.add(inner.value);
-      else if (inner?.kind === 'enum' && isStringValuedInlineEnum(inner)) {
+    for (const inner of inners) {
+      if (inner.kind === 'literal' && typeof inner.value === 'string') entry.values.add(inner.value);
+      else if (inner.kind === 'enum' && isStringValuedInlineEnum(inner)) {
         for (const value of inner.values!) entry.values.add(String(value));
       } else entry.open = true;
     }
@@ -579,14 +681,35 @@ const OAUTH_ERROR_FIELDS = ['error', 'error_description'];
 const ERROR_CODE_FIELDS = ['code', 'error'];
 
 /**
- * Whether `component` admits every value the group pins: a string field the
- * group pins is, on the component, a plain string, or — when no member leaves
- * it free — a literal or inline enum holding every pinned value. The key
- * reads every string as one, so this is what tells a component the bodies
- * can reference from one that would narrow their codes.
+ * Whether `component`, whose key is the group's, can stand for `member`: it
+ * declares every field the member has, required or optional as the member
+ * has it, of the member's type and domain name, so no body loses a field or
+ * a hint by folding onto it; it is no stricter than the member — every
+ * limit it writes, on itself, a field or the field's type, the member
+ * writes the same, so no body is narrowed by folding onto it (the key
+ * leaves limits out, as the shared model merges them); and it admits every
+ * value the member pins — a string field the member pins is, on the
+ * component, a plain string, or, when the member does not leave it free, a
+ * literal or inline enum holding every pinned value. The key reads every
+ * string as one, so this is what tells a component the body can reference
+ * from one that would narrow its codes.
  */
-function componentAccepts(component: Model, pinned: ReadonlyMap<string, PinnedValues>): boolean {
-  for (const [name, { values, open }] of pinned) {
+function componentAccepts(component: Model, member: Model, keys: ModelKeys): boolean {
+  if (!noStricter(component.constraints, member.constraints)) return false;
+  for (const field of member.fields) {
+    const own = component.fields.find((f) => f.name === field.name);
+    if (
+      !own ||
+      own.required !== field.required ||
+      own.domainName !== field.domainName ||
+      keys.type(own.type, true) !== keys.type(field.type, true) ||
+      !noStricter(own.constraints, field.constraints) ||
+      !noStricter(typeConstraints(own.type), typeConstraints(field.type))
+    ) {
+      return false;
+    }
+  }
+  for (const [name, { values, open }] of pinnedValues([member])) {
     const field = component.fields.find((f) => f.name === name);
     if (!field) return false;
     const type = unwrapNullable(field.type);
@@ -606,14 +729,71 @@ function componentAccepts(component: Model, pinned: ReadonlyMap<string, PinnedVa
   return true;
 }
 
-/** `{ code, message? }`: a model's field names, the optional ones marked. */
-function shapeOf(model: Model): string {
-  return `{ ${model.fields.map((field) => (field.required ? field.name : `${field.name}?`)).join(', ')} }`;
+/** Whether every limit `component` writes, `member` writes the same: the component admits at least what the member does. */
+function noStricter(component: Constraints | undefined, member: Constraints | undefined): boolean {
+  if (component === undefined) return true;
+  const own = member ?? {};
+  return Object.entries(component).every(
+    ([keyword, value]) => stableJson(value) === stableJson(own[keyword as keyof Constraints]),
+  );
 }
 
-/** The one string field every member of a group pins to one value, when there is exactly one such field and the value can name a model. */
-function singlePinned(pinned: ReadonlyMap<string, PinnedValues>): { field: string; value: string } | undefined {
-  const single = [...pinned.entries()].filter(([, { values, open }]) => values.size === 1 && !open);
+/** The validation keywords `type` carries at its top level, through a nullable wrapper. */
+function typeConstraints(type: TypeRef): Constraints | undefined {
+  const inner = unwrapNullable(type);
+  return inner.kind === 'model' || inner.kind === 'enum' || inner.kind === 'nullable' ? undefined : inner.constraints;
+}
+
+/**
+ * `{ code: string, message?: string | null, detail as reason: Note }`: a
+ * model's fields with their requiredness, domain name and type, so that a
+ * warning printing two shapes says what tells them apart (#515).
+ */
+function shapeOf(model: Model): string {
+  if (model.fields.length === 0) return '{ }';
+  const fields = model.fields.map(
+    (field) =>
+      `${field.name}${field.required ? '' : '?'}${field.domainName === undefined ? '' : ` as ${field.domainName}`}: ${describeType(field.type)}`,
+  );
+  return `{ ${fields.join(', ')} }`;
+}
+
+/** A type as a warning prints it: `string`, `string (date-time)`, `"gone"`, `Note`, `string | null`, `(Note | Tag)[]`, `map<string>`. */
+function describeType(type: TypeRef): string {
+  switch (type.kind) {
+    case 'model':
+      return type.name;
+    case 'enum':
+      return type.name || `enum (${(type.values ?? []).map((value) => JSON.stringify(value)).join(' | ')})`;
+    case 'literal':
+      return JSON.stringify(type.value);
+    case 'primitive':
+      return type.format ? `${type.type} (${type.format})` : type.type;
+    case 'array': {
+      const items = describeType(type.items);
+      return type.items.kind === 'union' || type.items.kind === 'nullable' ? `(${items})[]` : `${items}[]`;
+    }
+    case 'nullable':
+      return `${describeType(type.inner)} | null`;
+    case 'union':
+      return type.variants.map(describeType).join(' | ');
+    case 'map':
+      return `map<${describeType(type.valueType)}>`;
+  }
+}
+
+/**
+ * The one string field among `names` every member of a group pins to one
+ * value, when there is exactly one such field and the value can name a
+ * model.
+ */
+function singlePinned(
+  pinned: ReadonlyMap<string, PinnedValues>,
+  names: ReadonlySet<string>,
+): { field: string; value: string } | undefined {
+  const single = [...pinned.entries()].filter(
+    ([field, { values, open }]) => names.has(field) && values.size === 1 && !open,
+  );
   if (single.length !== 1) return undefined;
   const [field, { values }] = single[0];
   const value = [...values][0];
@@ -624,107 +804,216 @@ function singlePinned(pinned: ReadonlyMap<string, PinnedValues>): { field: strin
 }
 
 /**
- * The name a group takes: `ErrorBody` for `{ message }`, `OAuthErrorBody`
- * for `{ error, error_description }`, else the base plus `With` and a token
- * per further field (`fieldToken`). A group every member of which pins one
- * string field to one value is named from the value instead — followed by
- * the field's name unless it is `code` or `error` — plus `With` and the plain
- * names of any further fields.
+ * Whether a body's name spells more than its named fields' names: some
+ * field's token carries a qualifier — `Nullable`, a type or format, a
+ * value, a domain name after `As`, `List`, `Or`, a nested body's fields. No
+ * qualifier is beyond what a field name can spell, in the IR or once an
+ * emitter re-cases it (`code_integer` is `CodeInteger`, as `code: integer`
+ * is), so the fold cannot keep the two apart by spelling; it orders a plain
+ * shape before a qualified one instead, so that adding the qualified shape
+ * leaves the plain one's model as it is.
  */
-function bodyName(
-  representative: Model,
-  pinned: ReadonlyMap<string, PinnedValues>,
-  errorOnly: ReadonlySet<string>,
-  byName: ReadonlyMap<string, Model>,
-): string {
-  const fields = [...representative.fields].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-  if (fields.length === 0) return `${ERROR_BODY_BASE}Empty`;
-  const names = new Set(fields.map((field) => field.name));
-  const oauth = OAUTH_ERROR_FIELDS.every((name) => names.has(name));
-  const base = oauth ? `OAuth${ERROR_BODY_BASE}` : ERROR_BODY_BASE;
-  const single = singlePinned(pinned);
-  const isProse = (field: Field): boolean =>
-    (field.name === 'message' || (oauth && field.name === 'error_description')) &&
-    isStringLike(unwrapNullable(field.type));
-  const core = new Set<string>([...(oauth ? ['error'] : []), ...(single ? [single.field] : [])]);
-  const extras = fields
-    .filter((field) => !core.has(field.name) && !isProse(field))
-    .map((field) => fieldToken(field.name, field.type, names, single === undefined, errorOnly, byName));
-  const suffix = extras.length === 0 ? '' : `With${extras.join('')}`;
-  if (single === undefined) return `${base}${suffix}`;
-  const field = ERROR_CODE_FIELDS.includes(single.field) ? '' : toPascalCase(single.field);
-  return `${toPascalCase(single.value)}${field}${base}${suffix}`;
+function qualified(model: Model, naming: NamingContext): boolean {
+  const visiting = new Set([model.name]);
+  return namedFields(model).some((field) => fieldToken(field, true, naming, visiting) !== toPascalCase(field.name));
+}
+
+/** A plain string a name need not spell: a free, pinned or enumerated string under no `null`, no format and no domain name. */
+function isPlainString(field: Field): boolean {
+  return field.domainName === undefined && isStringLike(field.type);
 }
 
 /**
- * The token a field contributes to a body's name: its name in PascalCase;
- * `List` appended for an array of plain values; a union's variants joined
- * with `Or`; and, when `qualify` is set, a nested error body's own field
- * names (the ones the parent lacks) prefixed, so `errors` arrays of
- * different items read apart (`CodeFieldErrors`, `ConstraintsPropertyErrors`).
+ * The name a group takes, read from the fields `namedFields` gives — the
+ * required ones, or every field under `Optional` when none is required:
+ * `ErrorBody` for `{ message }`, `OAuthErrorBody` for
+ * `{ error, error_description }`, else the base plus `With` and a token per
+ * further field (`fieldToken`). The fields the family implies — `message`,
+ * or `error` and `error_description` in the OAuth format — and the field a
+ * value-named group pins are left out only while they are plain strings;
+ * one that admits `null`, has a format or carries a domain name is spelled
+ * like any other field (`ErrorBodyWithNullableMessage`,
+ * `OAuthErrorBodyWithErrorInteger`, `GoneErrorBodyWithNullableCode`), so two
+ * shapes that differ there never ask for one name. A body of the
+ * `ErrorBody` family with no required `message` ends in `WithoutMessage`. A
+ * group every member of which pins one named string field to one value is
+ * named from the value instead — followed by the field's name unless it is
+ * `code` or `error` — plus `With` and the tokens of any further fields, a
+ * nested body's own fields left out.
  */
-function fieldToken(
-  name: string,
+function bodyName(representative: Model, pinned: ReadonlyMap<string, PinnedValues>, naming: NamingContext): string {
+  if (representative.fields.length === 0) return `${ERROR_BODY_BASE}Empty`;
+  const read = namedFields(representative);
+  const optional = !read[0].required;
+  const fields = [...read].sort(byFieldName);
+  const names = new Set(fields.map((field) => field.name));
+  const oauth = OAUTH_ERROR_FIELDS.every((name) => names.has(name));
+  const base = `${optional ? OPTIONAL_PREFIX : ''}${oauth ? 'OAuth' : ''}${ERROR_BODY_BASE}`;
+  const single = singlePinned(pinned, names);
+  const implied = new Set<string>(oauth ? OAUTH_ERROR_FIELDS : ['message']);
+  if (single) implied.add(single.field);
+  const extras = fields
+    .filter((field) => !(implied.has(field.name) && isPlainString(field)))
+    .map((field) => fieldToken(field, single === undefined, naming, new Set([representative.name])));
+  const suffix = extras.length === 0 ? '' : `With${extras.join('')}`;
+  const without = !oauth && !names.has('message') ? WITHOUT_MESSAGE : '';
+  if (single === undefined) return `${base}${suffix}${without}`;
+  const field = ERROR_CODE_FIELDS.includes(single.field) ? '' : toPascalCase(single.field);
+  return `${toPascalCase(single.value)}${field}${base}${suffix}${without}`;
+}
+
+/**
+ * The token a field contributes to a body's name: its name in PascalCase,
+ * its domain name after `As` when it has one, and what its type adds
+ * (`typeToken`).
+ */
+function fieldToken(field: Field, qualify: boolean, naming: NamingContext, visiting: ReadonlySet<string>): string {
+  const word = `${toPascalCase(field.name)}${field.domainName === undefined ? '' : `As${toPascalCase(field.domainName)}`}`;
+  return typeToken(word, field.type, qualify, naming, visiting);
+}
+
+/**
+ * `word` qualified by what `type` adds: `Nullable` first for a type that
+ * admits `null`; a union's variants joined with `Or`; `List` appended for
+ * an array of plain values, after what the item scalar adds; and, when
+ * `qualify` is set, a nested error body's own required fields prefixed, so
+ * `errors` arrays of different items read apart (`CodeFieldErrors`,
+ * `ConstraintsPropertyErrors`). A scalar that is not a plain string follows
+ * the word, a non-string `const` or inline `enum` by its values
+ * (`scalarToken`). A reference to a component or a named enum, a map and an
+ * untyped schema add nothing.
+ */
+function typeToken(
+  word: string,
   type: TypeRef,
-  parentNames: ReadonlySet<string>,
   qualify: boolean,
-  errorOnly: ReadonlySet<string>,
-  byName: ReadonlyMap<string, Model>,
+  naming: NamingContext,
+  visiting: ReadonlySet<string>,
 ): string {
-  const word = toPascalCase(name);
-  const inner = unwrapNullable(type);
-  switch (inner.kind) {
+  switch (type.kind) {
+    case 'nullable':
+      return `Nullable${typeToken(word, type.inner, qualify, naming, visiting)}`;
     case 'union': {
       // Sorted, as the key sorts the variants: the name does not depend on
       // which member of the group wrote the union first.
-      const tokens = inner.variants.map((variant) =>
-        fieldToken(name, variant, parentNames, qualify, errorOnly, byName),
-      );
+      const tokens = type.variants.map((variant) => typeToken(word, variant, qualify, naming, visiting));
       return [...new Set(tokens)].sort().join('Or') || word;
     }
     case 'array': {
-      const items = unwrapNullable(inner.items);
+      const items = unwrapNullable(type.items);
       if (items.kind === 'model' || items.kind === 'union') {
-        return fieldToken(name, items, parentNames, qualify, errorOnly, byName);
+        return typeToken(word, items, qualify, naming, visiting);
       }
-      return `${word}List`;
+      return `${scalarToken(word, type.items)}List`;
     }
     case 'model': {
-      const nested = qualify && errorOnly.has(inner.name) ? byName.get(inner.name) : undefined;
-      const own = nested
-        ? nested.fields
-            .map((field) => field.name)
-            .filter((fieldName) => !parentNames.has(fieldName))
-            .sort()
-            .map((fieldName) => toPascalCase(fieldName))
-            .join('')
-        : '';
+      const nested = qualify && naming.errorOnly.has(type.name) ? naming.byName.get(type.name) : undefined;
+      // A cycle among error bodies reads as the field's name alone.
+      const own = nested && !visiting.has(nested.name) ? nestedPrefix(nested, naming, visiting) : '';
       return `${own}${word}`;
     }
+    case 'primitive':
+    case 'literal':
+    case 'enum':
+      return scalarToken(word, type);
     default:
       return word;
   }
 }
 
 /**
- * The name of a nested error body reached through `field` of a body named
- * `parentName`: the parent's name plus the field, singular for an array
- * item, replacing the field where the parent's name already ends in it.
+ * `word` followed by what a scalar adds: nothing for a plain string, a
+ * string literal, an inline enum of strings, a named enum or an untyped
+ * schema; `Nullable` for an array item that admits `null` (`TagsNullableList`
+ * for `(string | null)[]`, apart from `NullableTagsList` for
+ * `string[] | null`); a format (`DateTime`, `Int64`) or type (`Integer`,
+ * `Number`, `Boolean`) in PascalCase; a non-string `const` by its value
+ * (`Status404`, `OkTrue`, `RatioMinus1Point5`) and an inline
+ * enum of non-string values by its values, sorted as the key sorts them
+ * (`sortedEnumValues`) so that reordering the entries renames nothing, and
+ * joined with `Or` (`Status404Or410`), since the key keeps those values and
+ * nothing combines them (#515). A number is set off by `No` from a word
+ * that ends in a digit (`V2No3`), as every number in a name is
+ * (`numberedName`).
  */
-function nestedName(parentName: string, field: Field): string {
-  const word = toPascalCase(field.name);
-  const inArray = unwrapNullable(field.type).kind === 'array';
-  const item = inArray ? toPascalCase(singularize(field.name)) : word;
-  return inArray && word.length > 0 && parentName.endsWith(word)
-    ? `${parentName.slice(0, -word.length)}${item}`
-    : `${parentName}${item}`;
+function scalarToken(word: string, type: TypeRef): string {
+  switch (type.kind) {
+    case 'nullable':
+      return scalarToken(`${word}Nullable`, type.inner);
+    case 'primitive':
+      if (type.type === 'unknown' || (type.type === 'string' && !type.format)) return word;
+      return `${word}${toPascalCase(type.format ?? type.type)}`;
+    case 'literal':
+      return typeof type.value === 'string' ? word : valueToken(word, type.value);
+    case 'enum':
+      if (!type.values || isStringValuedInlineEnum(type)) return word;
+      return sortedEnumValues(type.values)
+        .map((value, i) => valueToken(i === 0 ? word : 'Or', value))
+        .join('');
+    default:
+      return word;
+  }
+}
+
+/** `word` followed by a literal's value: `True`, `False`, `Null`, a number with `-` as `Minus` and `.` as `Point`, a string in PascalCase. */
+function valueToken(word: string, value: string | number | boolean | null): string {
+  if (typeof value === 'string') return `${word}${toPascalCase(value)}`;
+  if (typeof value === 'boolean') return `${word}${value ? 'True' : 'False'}`;
+  if (value === null) return `${word}Null`;
+  const spelled = String(value)
+    .replace('-', 'Minus')
+    .replace('.', 'Point')
+    .replace(/[^A-Za-z0-9]/g, '');
+  return numberedName(word, spelled);
 }
 
 /**
- * One shared model for `members`, built on the first member's field order:
- * each field's type reads as the group reads it (`sharedFieldType`); its
- * description, example and extensions are kept when every member wrote the
- * same one, and the example only while the type is still the member's own.
+ * The tokens of a nested error body's own named fields — every one, the
+ * ones its parent also has included, so `[{ code, message }]` and
+ * `[{ code }]` read apart (`CodeMessageErrors`, `CodeErrors`) — sorted by
+ * field name and joined, each read as a body's own are so a body nested
+ * deeper reads the same way.
+ */
+function nestedPrefix(item: Model, naming: NamingContext, visiting: ReadonlySet<string>): string {
+  const inner = new Set([...visiting, item.name]);
+  return [...namedFields(item)]
+    .sort(byFieldName)
+    .map((field) => fieldToken(field, true, naming, inner))
+    .join('');
+}
+
+/**
+ * The name of a nested error body `item` reached through `field` of a body
+ * `parent` named `parentName`: the parent's name plus the field, singular
+ * for an array item, replacing the field where the parent's name already
+ * ends in it. When the field is not among the ones the parent's name reads
+ * (an optional one), that name says nothing of the item, so the item's own
+ * fields follow after `With`, as they prefix the field in a required
+ * parent's name — `ErrorBodyDetailWithReason` for
+ * `{ message, detail?: { reason } }` — so two items under one optional field
+ * never ask for one name.
+ */
+function nestedName(parentName: string, parent: Model, field: Field, item: Model, naming: NamingContext): string {
+  const word = toPascalCase(field.name);
+  const inArray = unwrapNullable(field.type).kind === 'array';
+  const itemWord = inArray ? toPascalCase(singularize(field.name)) : word;
+  const base =
+    inArray && word.length > 0 && parentName.endsWith(word)
+      ? `${parentName.slice(0, -word.length)}${itemWord}`
+      : `${parentName}${itemWord}`;
+  if (namedFields(parent).includes(field)) return base;
+  const own = nestedPrefix(item, naming, new Set([parent.name]));
+  return own.length === 0 ? base : `${base}With${own}`;
+}
+
+/**
+ * One shared model for `members`, carrying every field any member declares
+ * (`sharedFieldOrder`): each field's type reads as the group reads it
+ * (`sharedFieldType`); its description, flags, default, limits and
+ * extensions are kept when every member that has the field wrote the same
+ * one, the example only while the type is still the member's own, and its
+ * domain name when every member that hints the field agrees
+ * (`sharedDomainName`).
  */
 function buildSharedModel(
   name: string,
@@ -735,27 +1024,33 @@ function buildSharedModel(
   renames: ReadonlyMap<string, string>,
 ): Model {
   const representative = members[0];
-  const fields: Field[] = representative.fields.map((field) => {
-    const siblings = members.map((member) => member.fields.find((f) => f.name === field.name)!);
+  const fields: Field[] = sharedFieldOrder(members).map((field) => {
+    const siblings = siblingsOf(members, field.name);
     const agree = <K extends keyof Field>(key: K): Field[K] | undefined =>
       siblings.every((sibling) => stableJson(sibling[key]) === stableJson(field[key])) ? field[key] : undefined;
+    const constraints = agree('constraints');
     const { type, changed } = sharedFieldType(
-      field,
+      siblings,
       pinned.get(field.name),
       enumValuesByField,
       enumNamesByField,
       renames,
+      constraints,
     );
     const shared: Field = { name: field.name, type, required: field.required };
-    // Every member agrees on the domain name: it is part of the key.
-    if (field.domainName !== undefined) shared.domainName = field.domainName;
+    const domainName = sharedDomainName(name, members, field.name);
+    if (domainName !== undefined) shared.domainName = domainName;
     const description = agree('description');
     if (description !== undefined) shared.description = description;
-    if (field.readOnly !== undefined) shared.readOnly = field.readOnly;
-    if (field.writeOnly !== undefined) shared.writeOnly = field.writeOnly;
-    if (field.deprecated !== undefined) shared.deprecated = field.deprecated;
-    if (field.default !== undefined) shared.default = field.default;
-    if (field.constraints !== undefined) shared.constraints = field.constraints;
+    const readOnly = agree('readOnly');
+    if (readOnly !== undefined) shared.readOnly = readOnly;
+    const writeOnly = agree('writeOnly');
+    if (writeOnly !== undefined) shared.writeOnly = writeOnly;
+    const deprecated = agree('deprecated');
+    if (deprecated !== undefined) shared.deprecated = deprecated;
+    const defaultValue = agree('default');
+    if (defaultValue !== undefined) shared.default = defaultValue;
+    if (constraints !== undefined) shared.constraints = constraints;
     const extensions = agree('extensions');
     if (extensions !== undefined) shared.extensions = extensions;
     if (!changed) {
@@ -769,12 +1064,17 @@ function buildSharedModel(
     return shared;
   });
   const model: Model = { name, fields };
-  if (representative.deprecated !== undefined) model.deprecated = representative.deprecated;
-  if (representative.constraints !== undefined) model.constraints = representative.constraints;
+  const agree = <K extends keyof Model>(key: K): Model[K] | undefined =>
+    members.every((member) => stableJson(member[key]) === stableJson(representative[key]))
+      ? representative[key]
+      : undefined;
+  const deprecated = agree('deprecated');
+  if (deprecated !== undefined) model.deprecated = deprecated;
+  const constraints = agree('constraints');
+  if (constraints !== undefined) model.constraints = constraints;
   if (representative.typeParams !== undefined) model.typeParams = representative.typeParams;
-  if (members.every((member) => stableJson(member.extensions) === stableJson(representative.extensions))) {
-    if (representative.extensions !== undefined) model.extensions = representative.extensions;
-  }
+  const extensions = agree('extensions');
+  if (extensions !== undefined) model.extensions = extensions;
   if (representative.variants) {
     const union = simplifyType({
       kind: 'union',
@@ -795,42 +1095,148 @@ function buildSharedModel(
 }
 
 /**
- * The type a shared model gives a field. A string the group pins — a
- * `const`, an inline `enum`, beside a plain `string` — is read as a whole:
- * two or more distinct values make the enum shared by every error body
- * with a field of that name, `<ErrorBody><Field>`, holding every value any
- * body pins it to (a string when that name is taken); one value every
- * member pins stays that literal; one value beside free strings is a
- * string. Any other type is the representative's, its references to folded
- * models repointed.
+ * The domain name the shared model `name` gives its field `field`: the one
+ * every member that hints the field gives it (a named field's is part of the
+ * key, so the members agree; an optional field's is applied by whichever
+ * members carry it, #506), or none, with a warning, when two members hint
+ * it differently — a hint keyed by the shared name applies after the fold.
+ */
+function sharedDomainName(name: string, members: readonly Model[], field: string): string | undefined {
+  const hinted = members.flatMap((member) => {
+    const own = member.fields.find((f) => f.name === field);
+    return own?.domainName === undefined ? [] : [{ member: member.name, domainName: own.domainName }];
+  });
+  const distinct = new Set(hinted.map(({ domainName }) => domainName));
+  if (distinct.size <= 1) return hinted[0]?.domainName;
+  const list = hinted.map(({ member, domainName }) => `"${member}" as "${domainName}"`).join(', ');
+  console.warn(
+    `[oagen] Warning: The shared error body "${name}" keeps "${field}" under its own name: its bodies hint it apart (${list}); hint it once, keyed by "${name}"`,
+  );
+  return undefined;
+}
+
+/**
+ * The type a shared model gives a field, read from the members' `siblings`
+ * of it. A string the group pins — a `const`, an inline `enum`, beside a
+ * plain `string` — is read as a whole: two or more distinct values make the
+ * enum shared by every error body with a field of that name,
+ * `<ErrorBody><Field>`, holding every value any body pins it to (a string
+ * when that name is taken); one value every member pins stays that literal;
+ * one value beside free strings is a string; and the field admits `null`
+ * when any member's does. Any other type every member wrote alike is that
+ * type, its references to folded models repointed; an optional field the
+ * members type differently is the union of the types they wrote, sorted so
+ * the order does not depend on the members' (`unionOf`). The type carries
+ * the limits the field does: `constraints`, the ones every member wrote,
+ * or none when they differ.
  */
 function sharedFieldType(
-  field: Field,
+  siblings: readonly Field[],
   pinned: PinnedValues | undefined,
   enumValuesByField: ReadonlyMap<string, ReadonlySet<string>>,
   enumNamesByField: ReadonlyMap<string, string>,
   renames: ReadonlyMap<string, string>,
+  constraints: Constraints | undefined,
 ): { type: TypeRef; changed: boolean } {
+  const first = siblings[0];
   if (pinned) {
-    const nullable = field.type.kind === 'nullable';
+    const nullable = siblings.some((sibling) => sibling.type.kind === 'nullable');
     let type: TypeRef;
-    const enumName = enumNamesByField.get(field.name);
+    const enumName = enumNamesByField.get(first.name);
     if (pinned.values.size >= 2 && enumName !== undefined) {
       const enumRef: EnumRef = {
         kind: 'enum',
         name: enumName,
-        values: [...(enumValuesByField.get(field.name) ?? pinned.values)].sort(),
+        values: [...(enumValuesByField.get(first.name) ?? pinned.values)].sort(),
       };
       type = enumRef;
     } else if (pinned.values.size === 1 && !pinned.open) {
-      type = { kind: 'literal', value: [...pinned.values][0] };
+      type = { kind: 'literal', value: [...pinned.values][0], ...(constraints && { constraints }) };
     } else {
-      type = { kind: 'primitive', type: 'string' };
+      type = { kind: 'primitive', type: 'string', ...(constraints && { constraints }) };
     }
     const wrapped: TypeRef = nullable ? { kind: 'nullable', inner: type } : type;
-    return { type: wrapped, changed: stableJson(wrapped) !== stableJson(field.type) };
+    return { type: wrapped, changed: stableJson(wrapped) !== stableJson(first.type) };
   }
-  return { type: rewritten(field.type, renames), changed: false };
+  // An inline enum reads by its sorted values, as the key reads it, and not
+  // by the name the parser minted it under per operation: two members that
+  // list the same values, in any order, share the first member's enum.
+  const seen = new Map<string, TypeRef>();
+  for (const sibling of siblings) {
+    const own = normalizeInlineEnums(rewritten(sibling.type, renames), true);
+    const type = constraints === undefined ? stripConstraints(own) : own;
+    const key = stableJson(normalizeInlineEnums(type, false));
+    if (!seen.has(key)) seen.set(key, type);
+  }
+  if (seen.size === 1) return { type: [...seen.values()][0], changed: false };
+  const types = [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, type]) => type);
+  return { type: unionOf(types, constraints), changed: true };
+}
+
+/**
+ * An inline enum's values in the one order the key and the name read them
+ * — numbers ascending, then strings in code-unit order — so that reordering
+ * the entries in the document changes no shape and no name.
+ */
+function sortedEnumValues(values: readonly (string | number)[]): (string | number)[] {
+  return [...values].sort((a, b) => {
+    if (typeof a === 'number' && typeof b === 'number') return a - b;
+    if (typeof a === 'number') return -1;
+    if (typeof b === 'number') return 1;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
+/**
+ * `type` with every inline enum's values sorted (`sortedEnumValues`), and,
+ * unless `keepNames`, without the names the parser minted them under, as a
+ * new tree; a reference to a component enum, and every other type, is
+ * returned as it is.
+ */
+function normalizeInlineEnums(type: TypeRef, keepNames: boolean): TypeRef {
+  switch (type.kind) {
+    case 'enum':
+      if (!type.values) return type;
+      return { kind: 'enum', name: keepNames ? type.name : '', values: sortedEnumValues(type.values) };
+    case 'nullable':
+      return { kind: 'nullable', inner: normalizeInlineEnums(type.inner, keepNames) };
+    case 'array':
+      return { ...type, items: normalizeInlineEnums(type.items, keepNames) };
+    case 'map':
+      return { ...type, valueType: normalizeInlineEnums(type.valueType, keepNames) };
+    case 'union':
+      return { ...type, variants: type.variants.map((variant) => normalizeInlineEnums(variant, keepNames)) };
+    default:
+      return type;
+  }
+}
+
+/**
+ * The union of `types`, written as the parser writes a type list's: `null`
+ * hoisted out of any member onto the whole, a member that is itself a plain
+ * union spread into it, and one member standing alone. The union carries
+ * `constraints`, the limits the field agreed on, since a spread member's
+ * are left behind with it.
+ */
+function unionOf(types: readonly TypeRef[], constraints: Constraints | undefined): TypeRef {
+  const nullable = types.some((type) => type.kind === 'nullable');
+  const variants: TypeRef[] = [];
+  const seen = new Set<string>();
+  const add = (type: TypeRef): void => {
+    const key = stableJson(type);
+    if (seen.has(key)) return;
+    seen.add(key);
+    variants.push(type);
+  };
+  for (const type of types) {
+    const inner = unwrapNullable(type);
+    if (inner.kind === 'union' && !inner.discriminator && !inner.compositionKind) {
+      for (const variant of inner.variants) add(variant);
+    } else add(inner);
+  }
+  const union: TypeRef =
+    variants.length === 1 ? variants[0] : { kind: 'union', variants, ...(constraints && { constraints }) };
+  return nullable ? { kind: 'nullable', inner: union } : union;
 }
 
 /** `type` with every reference to a folded model repointed, as a new tree. */
@@ -838,6 +1244,25 @@ function rewritten(type: TypeRef, renames: ReadonlyMap<string, string>): TypeRef
   const copy = structuredClone(type);
   renameTypeRefModels(copy, renames);
   return simplifyType(copy);
+}
+
+/** `type` without the validation keywords it carries at its top level — through a nullable wrapper — as a new tree. */
+function stripConstraints(type: TypeRef): TypeRef {
+  switch (type.kind) {
+    case 'nullable':
+      return { kind: 'nullable', inner: stripConstraints(type.inner) };
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union': {
+      if (type.constraints === undefined) return type;
+      const { constraints: _constraints, ...rest } = type;
+      return rest as TypeRef;
+    }
+    default:
+      return type;
+  }
 }
 
 /**

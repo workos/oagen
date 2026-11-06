@@ -506,15 +506,18 @@ describe('collapseErrorBodies from config reaches every command that parses a sp
 });
 
 describe('fieldHints from config reach every command that parses a spec (#507)', () => {
-  // A hinted field's `domainName` is part of an error body's fold key (#497),
-  // so hinting getPet's 404 keeps it apart from getNote's identical one:
-  // generation reads `ErrorBody` (`message` → `detail`) beside the kept
-  // `GetNoteError404`, where a parse without the hint folds both onto one
-  // `ErrorBody`. Every other command has to read the models generation writes.
+  // A hinted field's `domainName` is part of an error body's shape (#497),
+  // which its shared name reads (#515), so hinting getPet's 404 keeps it
+  // apart from getNote's identical one: generation reads
+  // `ErrorBodyWithMessageAsDetail` (`message` → `detail`) beside getNote's
+  // `ErrorBody`, where a parse without the hint folds both onto one
+  // `ErrorBody`; getToy's 404, hinted to `reason`, is a third model. Every
+  // other command has to read the models generation writes.
   const dir = resolve(os.tmpdir(), `oagen-field-hints-config-${process.pid}`);
   const config = resolve(dir, 'oagen.config.mjs');
   const spec = resolve(dir, 'spec.json');
   const withToys = resolve(dir, 'with-toys.json');
+  const withClash = resolve(dir, 'with-clash.json');
   const surface = resolve(dir, 'surface.json');
   const runner = resolve(dir, 'smoke-runner.mjs');
   const get = (operationId: string) => ({
@@ -545,7 +548,9 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     extractedFrom: dir,
     extractedAt: '2026-01-01T00:00:00.000Z',
     classes: {},
-    interfaces: Object.fromEntries(['ErrorBody', 'GetNoteError404', 'GetToyError404'].map((n) => [n, iface(n)])),
+    interfaces: Object.fromEntries(
+      ['ErrorBody', 'ErrorBodyWithMessageAsDetail', 'ErrorBodyWithMessageAsReason'].map((n) => [n, iface(n)]),
+    ),
     typeAliases: {},
     enums: {},
     exports: {},
@@ -556,7 +561,7 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     writeFileSync(
       config,
       `export default {
-        fieldHints: { GetPetError404: { message: 'detail' } },
+        fieldHints: { GetPetError404: { message: 'detail' }, GetToyError404: { message: 'reason' } },
         extractors: [{
           language: 'field-hints',
           hints: { derivedModelNames: () => [] },
@@ -568,6 +573,17 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     writeFileSync(
       withToys,
       JSON.stringify(doc({ '/pets': get('getPet'), '/notes': get('getNote'), '/toys': get('getToy') })),
+    );
+    // A component of another shape holding the hinted body's name: the fold
+    // leaves that body as it is, with a warning, only when it reads the hint.
+    writeFileSync(
+      withClash,
+      JSON.stringify({
+        ...doc({ '/pets': get('getPet'), '/notes': get('getNote') }),
+        components: {
+          schemas: { ErrorBodyWithMessageAsDetail: { type: 'object', properties: { unrelated: { type: 'string' } } } },
+        },
+      }),
     );
     writeFileSync(surface, JSON.stringify(sdkSurface));
     writeFileSync(runner, '');
@@ -592,7 +608,10 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
 
     const hinted = await run(['--config', config, 'parse', '--spec', spec]);
     expect(hinted.code).toBe(0);
-    expect(modelsOf(hinted.stdout)).toEqual(['ErrorBody { message → detail }', 'GetNoteError404 { message }']);
+    expect(modelsOf(hinted.stdout)).toEqual([
+      'ErrorBody { message }',
+      'ErrorBodyWithMessageAsDetail { message → detail }',
+    ]);
   });
 
   it('diff: reports the model a new unhinted body adds beside the hinted one, as generation would', async () => {
@@ -607,14 +626,20 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
 
     const hinted = await run(['--config', config, 'diff', '--old', spec, '--new', withToys]);
     expect(hinted.code).toBe(1);
-    expect(addedModels(hinted.stdout)).toEqual(['GetToyError404']);
+    expect(addedModels(hinted.stdout)).toEqual(['ErrorBodyWithMessageAsReason']);
   });
 
   it('resolve: warns about the body the hint keeps apart, as generation does', async () => {
     // `resolve` prints no model; the fold's warning naming the kept one tells.
-    const result = await run(['--config', config, 'resolve', '--spec', spec, '--format', 'json']);
+    const unhinted = await run(['resolve', '--spec', withClash, '--format', 'json']);
+    expect(unhinted.code).toBe(0);
+    expect(unhinted.stderr).not.toContain('GetPetError404');
+
+    const result = await run(['--config', config, 'resolve', '--spec', withClash, '--format', 'json']);
     expect(result.code).toBe(0);
-    expect(result.stderr).toContain('GetNoteError404');
+    expect(result.stderr).toContain(
+      'would be named "ErrorBodyWithMessageAsDetail", which component schema "ErrorBodyWithMessageAsDetail" already holds — keeping model "GetPetError404" as it is',
+    );
   });
 
   it('compat-extract: gives the kept model’s SDK symbols their schema name', async () => {
@@ -636,8 +661,8 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     expect((snapshot.symbols as Array<{ schemaName?: string }>).map((s) => s.schemaName).filter(Boolean)).toEqual([
       'ErrorBody',
       'ErrorBody.message',
-      'GetNoteError404',
-      'GetNoteError404.message',
+      'ErrorBodyWithMessageAsDetail',
+      'ErrorBodyWithMessageAsDetail.message',
     ]);
   });
 
@@ -667,11 +692,11 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     // Each of the three parses needs the hint: without it, the compat parse of
     // the new spec keeps only `ErrorBody` in scope (1/3), the staleness parse
     // of the old spec finds nothing removed, and that of the new spec reports
-    // `GetNoteError404` stale as well.
+    // `ErrorBodyWithMessageAsDetail` stale as well.
     expect(result.stdout).toContain('(scoped to spec: 2/3 baseline symbols in scope)');
     expect(result.stdout).toContain('Found 1 stale symbol(s):');
     expect(result.stdout).toContain(
-      'GetToyError404 — Interface "GetToyError404" is no longer defined in the OpenAPI spec',
+      'ErrorBodyWithMessageAsReason — Interface "ErrorBodyWithMessageAsReason" is no longer defined in the OpenAPI spec',
     );
   });
 });
