@@ -127,7 +127,8 @@ export interface SettledSite {
    * an `enum:` list, or an array of one, which mints no model. A later enum
    * site shares the stem only on the same members (`sameEnumShape`), and a
    * site that mints a model never does (`shares`). Unset for a site that
-   * minted a model, and in the string form (`SiblingStems`).
+   * produced a model, and in the string form (`SiblingStems`); a site that
+   * produced neither a model nor an enum records no settlement (`commit`).
    */
   enumValues?: readonly EnumValue[];
 }
@@ -148,7 +149,10 @@ export interface SettledSite {
  * argument a call mutates, and only this field of it. A site tries only the
  * stems it could share: a site that mints a model those a model settled on,
  * one that is itself an inline enum those an enum of the same members
- * settled on (`SettledSite.enumValues`, `shares`).
+ * settled on (`SettledSite.enumValues`, `shares`). A site that produced
+ * neither — a primitive body, an array of primitives, a `$ref` to a
+ * component — owns no name under its stem and records nothing, so no later
+ * site takes the free stem it sat on (`commit`).
  */
 export interface SiblingSites {
   /** The settlements so far, in the order the sites were resolved; appended to by `materializeInlineSchema`. */
@@ -418,7 +422,8 @@ function candidateStem(index: number, options: ResolvedOptions, firstClashOwners
  * Whether a site may share the stem an earlier sibling settled on: one that
  * mints a model shares a model's, and one that is itself an inline enum
  * (`enumSite`, its members) an enum's of the same members
- * (`SettledSite.enumValues`). An enum site clashes on nothing in the
+ * (`SettledSite.enumValues`); every settlement is one or the other, since a
+ * site that produced neither records none (`commit`). An enum site clashes on nothing in the
  * registry, so left to the trial it would settle on the first sibling's stem
  * whatever that sibling was, and the enum collector would then number it
  * past that sibling's name (`…Response201No2`) where the site's own status
@@ -542,7 +547,13 @@ function sameNames(a: string[], b: string[]): boolean {
  * The site's settlement — the stem it settled on, the renames made under it
  * and, for a site that is itself an inline enum, its members — is recorded
  * for its siblings, whether it minted models or shared every one of them; a
- * stem an earlier site already recorded keeps that site's.
+ * stem an earlier site already recorded keeps that site's. A site that
+ * produced neither a model nor an enum — a primitive body, an array of
+ * primitives, a `$ref` to a component — owns no name under its stem, so it
+ * records no settlement: offered as a sibling's, the free stem would be
+ * taken by the next object body of the group (a 202's `…Response201`
+ * beside a 201 `type: string` body) and given up again once the primitive
+ * body is removed.
  */
 function commit(trial: Trial, options: ResolvedOptions): TypeRef {
   for (const model of trial.models) {
@@ -565,10 +576,10 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
     options.registry.set(model.name, { fingerprint, operation: options.operation });
     options.models.push(model);
   }
-  const { siblings } = options;
+  const { siblings, enumSite: enumValues } = options;
   const { settledStem } = trial;
-  if (siblings && settledStem !== undefined && !siblings.settled.some((site) => site.stem === settledStem)) {
-    const { enumSite: enumValues } = options;
+  const owns = trial.models.length > 0 || enumValues !== undefined;
+  if (siblings && owns && settledStem !== undefined && !siblings.settled.some((site) => site.stem === settledStem)) {
     siblings.settled.push({ stem: settledStem, renames: [...trial.renames], ...(enumValues && { enumValues }) });
   }
   return trial.type ?? schemaToTypeRef(trial.schema, trial.propertyName, options.parentName, undefined, trial.reserved);
