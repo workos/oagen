@@ -58,6 +58,16 @@ export function validateModelRefs(spec: ApiSpec): void {
       for (const { type, source } of collectRequestBodyTypes(op)) {
         walkRef(type, `${service.name}.${op.name}.${source}`);
       }
+      // A body group's members are typed afresh from the body's variant
+      // schemas, so they are references of their own; a query group's are
+      // the operation's parameters, walked above.
+      for (const group of op.parameterGroups ?? []) {
+        for (const variant of group.variants) {
+          for (const p of variant.parameters) {
+            walkRef(p.type, `${service.name}.${op.name}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
+          }
+        }
+      }
     }
   }
 

@@ -4264,6 +4264,78 @@ describe('#539', () => {
         );
       });
 
+      it('settles a pointer in a mutually-exclusive body group’s member, beside a query group’s settled parameter', async () => {
+        captureWarnings();
+        const spec = await parse(
+          { Pet },
+          {
+            '/adopt': {
+              post: {
+                operationId: 'adopt',
+                parameters: [
+                  { name: 'pet_id', in: 'query', schema: ref('Pet/properties/id') },
+                  { name: 'owner_name', in: 'query', schema: ref('Pet/properties/owner/properties/name') },
+                ],
+                'x-mutually-exclusive-parameter-groups': {
+                  who: { optional: false, variants: { byPet: ['pet_id'], byOwner: ['owner_name'] } },
+                },
+                requestBody: {
+                  content: {
+                    'application/json': {
+                      schema: {
+                        allOf: [
+                          { type: 'object', properties: { note: { type: 'string' } } },
+                          {
+                            oneOf: [
+                              {
+                                type: 'object',
+                                properties: { pet_id: ref('Pet/properties/id') },
+                                required: ['pet_id'],
+                              },
+                              {
+                                type: 'object',
+                                properties: { owner: ref('Pet/properties/owner') },
+                                required: ['owner'],
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+                'x-mutually-exclusive-body-groups': {
+                  target: { optional: false, variants: { byId: ['pet_id'], byOwner: ['owner'] } },
+                },
+                responses: { '201': { description: 'created' } },
+              },
+            },
+          },
+          openapi,
+        );
+        const op = operation(spec, 'adopt');
+        const members = (group: string) =>
+          op?.parameterGroups
+            ?.find((g) => g.name === group)
+            ?.variants.map((v) =>
+              v.parameters.map(
+                ({ name, type }) =>
+                  `${name}: ${type.kind === 'model' ? type.name : type.kind === 'primitive' ? type.type : type.kind}`,
+              ),
+            );
+        // A body group's members are typed afresh from the body's variant schemas, so each holds a reference of its own.
+        expect(members('target')).toEqual([['pet_id: string'], ['owner: PetOwner']]);
+        // A query group's members are the operation's own parameters, settled with them.
+        expect(members('who')).toEqual([['pet_id: string'], ['owner_name: string']]);
+        expect(op?.queryParams.map(({ name, type }) => ({ name, type }))).toEqual([
+          { name: 'pet_id', type: string },
+          { name: 'owner_name', type: string },
+        ]);
+        expect(fieldOf(spec, 'AdoptRequest', 'owner')?.type).toEqual(model('PetOwner'));
+        expect(modelNames(spec)).toEqual(['AdoptRequest', 'Pet', 'PetOwner']);
+        expect(warnings).toEqual([]);
+      });
+
       it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
         captureWarnings();
         const spec = await parse(
