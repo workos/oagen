@@ -3128,6 +3128,34 @@ describe('#398', () => {
       },
     );
 
+    it.each(cases)(
+      'under a nullable wrapper, a union beside the allOf that reaches the field again ends where the member spelling ends (OAS %s, %s)',
+      async (openapi, keyword) => {
+        // Left to #596's review at round 1: every unwrap of the wrapper made
+        // a copy the guard had never seen. The fold's copy stands for the
+        // declaration it was spread from (`derivedCopy`), as the unwrap's
+        // does, so the guard meets one key through both and the re-entry
+        // ends here as it does without the wrapper.
+        const nullable: SchemaObject =
+          openapi === '3.1.0' ? { type: ['object', 'null'] } : { type: 'object', nullable: true };
+        const depth = obj({ depth: int });
+        const member: SchemaObject = { ...nullable, allOf: [depth, selfOrOther(keyword)] };
+        const beside: SchemaObject = { ...nullable, allOf: [depth], ...selfOrOther(keyword) };
+        const asMember = await parseWithoutWarnings(noteDoc(openapi, member));
+        const asBeside = await parseWithoutWarnings(noteDoc(openapi, beside));
+        const expected = ['depth?: integer', 'id?: string', 'reply?: nullable', 'other?: string'];
+        expect(fieldsOf(modelsByName(asMember)['NoteReply'])).toEqual(expected);
+        expect(fieldsOf(modelsByName(asBeside)['NoteReply'])).toEqual(expected);
+        for (const ir of [asMember, asBeside]) {
+          const reply = (name: string) => modelsByName(ir)[name]?.fields.find((f) => f.name === 'reply')?.type;
+          expect(reply('Note')).toEqual({ kind: 'nullable', inner: model('NoteReply') });
+          expect(reply('NoteReply')).toEqual({ kind: 'nullable', inner: model('NoteReply') });
+        }
+        expect(diffSpecs(asMember, asBeside).changes).toEqual([]);
+        expectSound(asBeside, ['Note']);
+      },
+    );
+
     // Round 1 (MichaelDeBoey, finding 2; Greptile): a member writing a
     // nullable `oneOf` beside an `anyOf`. The wrapper is decided per keyword
     // (`nullableAxisBranch`), so the `anyOf` is flattened as it is when the
