@@ -784,7 +784,8 @@ export function deprecatedEntry(schema: SchemaObject): { deprecated?: boolean } 
 /**
  * The declaration each copy a reader spreads from one stands for: a
  * nullable wrapper stripped (`unwrapNullableSchema`; the type builder's own
- * strip in `buildTypeRef`), sibling properties folded into a composition
+ * strips in `buildTypeRef`), a type list read one type at a time
+ * (`buildTypeRef`, `inlineVariantTypeRef`), sibling properties folded into a composition
  * (`foldSiblingProperties`), a wrapper's documentation, `deprecated` or
  * limits carried onto the branch or member it collapses to
  * (`withWrapperDocs`, `withWrapperDeprecation`, `unwrapNullableField`,
@@ -3440,7 +3441,10 @@ function nameInlineObjectVariants(
  * the union's; a model reference carries none, the model its own. Attached
  * here, so a named union's variant (`namedUnionEntry`) carries them as an
  * inline union's does (Greptile, #545 review round 3: the inline caller
- * attached them and the named one did not).
+ * attached them and the named one did not). Each per-type copy of the
+ * variant stands for the variant (`derivedCopy`), so a merge the variant
+ * carries is the one the extractor builds for it, whichever type it is read
+ * as (`materializingMergedAllOfName`; #566 review).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
   const modelRef: TypeRef = { kind: 'model', name: refName };
@@ -3454,7 +3458,11 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
     .map((t) =>
       t === 'object'
         ? modelRef
-        : buildTypeRef({ ...variant, type: t, nullable: false }, t === 'array' ? keys.item : keys.value, modelName),
+        : buildTypeRef(
+            derivedCopy({ ...variant, type: t, nullable: false }, variant),
+            t === 'array' ? keys.item : keys.value,
+            modelName,
+          ),
     );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return withSchemaConstraints(nullable ? asNullable(ref) : ref, variant);
@@ -5863,10 +5871,20 @@ function buildTypeRef(
     // variant is the same schema read as one of its types, so the limits
     // are read from the union, once, for whichever type the value takes
     // (#545). The variants are built without them (`buildTypeRef`); what
-    // they nest — items, values — carries its own.
+    // they nest — items, values — carries its own. Each per-type copy
+    // stands for the schema it was spread from (`derivedCopy`), so a merge
+    // the schema carries (`allOf` beside `type: ['object', 'string']`) is
+    // the one the extractor is building for the schema itself
+    // (`materializingMergedAllOfName`; #566 review).
     if (nonNullTypes.length > 1) {
       const variants = nonNullTypes.map((t: string) =>
-        buildTypeRef({ ...schema, type: t }, contextName, parentModelName, siblingProperties, reservedNames),
+        buildTypeRef(
+          derivedCopy({ ...schema, type: t }, schema),
+          contextName,
+          parentModelName,
+          siblingProperties,
+          reservedNames,
+        ),
       );
       const ref: TypeRef = { kind: 'union', variants };
       if (schema.type.includes('null')) {

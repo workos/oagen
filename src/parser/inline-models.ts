@@ -3472,8 +3472,9 @@ export function materializeMergedAllOf(
  * memoizes for two of them — and every schema is keyed by the declaration
  * it stands for (`sourceDeclaration`), so a copy a reader spreads from one
  * — a nullable wrapper stripped, sibling properties folded, a wrapper's
- * documentation or limits carried onto the branch it collapses to
- * (`derivedCopy`, at each such site) — is the declaration it was spread
+ * documentation or limits carried onto the branch it collapses to, a type
+ * list read one type at a time (`derivedCopy`, at each such site) — is the
+ * declaration it was spread
  * from, and the extractor and the type builder meet one key for a merge
  * whichever wrapper each strips. A transform that memoizes its copy per
  * declaration composes with the rule, since the one copy is itself a
