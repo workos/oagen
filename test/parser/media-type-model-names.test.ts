@@ -827,7 +827,9 @@ describe("a later 2xx's secondary body is named for its status code, as its prim
           'application/yaml': { schema: { type: 'string', enum: members } },
         },
       });
-      const json = (code = '') => `application/json → CreatePetResponse${code}`;
+      const jsonType = (code = '') => `application/json → CreatePetResponse${code}`;
+      /** A response with `{ id }` under `application/json` alone. */
+      const json = () => ({ description: 'ok', content: { 'application/json': { schema: obj({ id: str }) } } });
 
       it('keeps the 201’s numbered body when the 200 gains a third case-only key: the new body is the only change', async () => {
         const before = await parseDocument(
@@ -840,13 +842,13 @@ describe("a later 2xx's secondary body is named for its status code, as its prim
         // The 201's second YAML body is numbered under its status code, not
         // `…Response2`, the stem the primary's bodies step to next.
         expect(contentsOf(before)).toEqual([
-          `200: ${json()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200`,
-          `201: ${json('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
+          `200: ${jsonType()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200`,
+          `201: ${jsonType('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
         ]);
         // The 200's third key takes `…Response2`; the 201's bodies are untouched.
         expect(contentsOf(after)).toEqual([
-          `200: ${json()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200, APPLICATION/YAML → ${YAML}2`,
-          `201: ${json('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
+          `200: ${jsonType()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200, APPLICATION/YAML → ${YAML}2`,
+          `201: ${jsonType('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
         ]);
         expect(modelsOf(after)).toEqual([
           'CreatePetResponse { id }',
@@ -919,6 +921,42 @@ describe("a later 2xx's secondary body is named for its status code, as its prim
           changes: [`additive enum-added ${YAML}203`, `additive enum-modified ${YAML}202`],
           exit: 1,
         });
+      });
+
+      it('never lets a later object take the stem of a later primitive or $ref body, which owns no name (Greptile)', async () => {
+        const components = { schemas: { Pet: obj({ name: str }) } };
+        const withYaml = (yaml?: unknown) => ({
+          description: 'created',
+          content: {
+            'application/json': { schema: obj({ id: str }) },
+            ...(yaml !== undefined && { 'application/yaml': { schema: yaml } }),
+          },
+        });
+        // The 201's YAML body removed: the 202's model must not move.
+        const without = await parseDocument(
+          createPet(
+            openapi,
+            { '200': json(), '201': withYaml(), '202': jsonAndYaml({ c: str }, 'accepted') },
+            components,
+          ),
+        );
+        expect(yamlOf(without)).toEqual(['200: none', '201: none', `202: ${YAML}202`]);
+
+        for (const yaml201 of [str, { type: 'array', items: str }, { $ref: '#/components/schemas/Pet' }]) {
+          const spec = await parseDocument(
+            createPet(
+              openapi,
+              { '200': json(), '201': withYaml(yaml201), '202': jsonAndYaml({ c: str }, 'accepted') },
+              components,
+            ),
+          );
+          // The 201's body is a string, an array of strings or `Pet`, never
+          // a model named `…Response201`; the 202's object is `…Response202`,
+          // not the free `…Response201`.
+          expect(yamlOf(spec)[2]).toBe(`202: ${YAML}202`);
+          expect(modelsOf(spec).filter((m) => m.includes('Yaml'))).toEqual([`${YAML}202 { c }`]);
+          expect(diff(spec, without)).toEqual({ changes: ['breaking operation-modified createPet'], exit: 2 });
+        }
       });
 
       it('never shares a later enum with a later object, nor the reverse: each is named for its status code', async () => {
