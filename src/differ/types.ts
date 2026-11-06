@@ -591,17 +591,24 @@ export interface OperationModified {
    * `201` that became a lone `200`, a `200` added beside a lone `201` (the
    * `200` is now the primary), a `201` that became the primary beside a
    * `200` whose body is no longer typed, or a `200` beside a `202` that
-   * became a `201` beside the `202`. Additive on its own: the old code
-   * may still be declared, as in the second case, and whether a bare status
-   * move breaks callers is left to a separate issue — this flag only says
-   * the move happened, so a changelog can. Only two lone primaries pair
-   * over the move, though: a primary replaced among several 2xx (the last
-   * case) no longer declares its old code, so its headers and media types
-   * are reported removed under that code, breaking, beside this flag, as
-   * they are for a `200` dropped beside a kept `202` (#408). Compared only
-   * while both sides carry a code, as `requestBodyRequired` is while both
-   * carry a body; an operation gaining or losing its only 2xx/3xx is not a
-   * move but `responseChanged`. Not mirrored into `behaviorChanges`.
+   * became a `201` beside the `202`. Breaking when the new spec no longer
+   * declares the code the old primary answered with — neither as its
+   * `responseStatusCode` nor among its `successResponses`; errors, `default`
+   * and ranges do not count — since a caller that checks the declared code
+   * (generated code, or the smoke helpers that read `responseStatusCode`)
+   * stops matching, and a redirect moving between temporary and permanent
+   * (`302` → `301`) changes what caches may do: the first, third and last
+   * cases, and a lone `200` that became a lone `204`. Additive when the old
+   * code is still declared, as in the second case: the `201` is still
+   * answered, so a caller built for it still works (#407). Only two lone
+   * primaries pair over the move, though: a primary replaced among several
+   * 2xx (the last case) no longer declares its old code, so its headers and
+   * media types are reported removed under that code, breaking, beside this
+   * flag, as they are for a `200` dropped beside a kept `202` (#408).
+   * Compared only while both sides carry a code, as `requestBodyRequired`
+   * is while both carry a body; an operation gaining or losing its only
+   * 2xx/3xx is not a move but `responseChanged`. Not mirrored into
+   * `behaviorChanges`.
    */
   responseStatusCodeChanged: boolean;
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
