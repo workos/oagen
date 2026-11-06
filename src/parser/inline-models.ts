@@ -22,7 +22,7 @@ import {
   declaresNull,
   isInlineObjectSchema,
   isNullSchema,
-  nullableUnionBranch,
+  nullableAxisBranch,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -1567,9 +1567,10 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
  * `properties`, those of its `allOf` members (following a member's `$ref`
  * into `schemas` when given, as `extractAllOfModel` does), those of a
  * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
- * member it wraps (`nullableUnionBranch`, the definition the model walks
- * resolve a member by, so a nullable `$ref` member's component is followed
- * here as `mergeAllOfMembers` and `readComponentAllOfMember` follow it), and
+ * member it wraps (`nullableAxisBranch`, per keyword, the definition the
+ * model walks resolve a member by, so a nullable `$ref` member's component
+ * is followed here as `mergeAllOfMembers` and `readComponentAllOfMember`
+ * follow it, and an `anyOf` beside a nullable `oneOf` is read too), and
  * those of every other `oneOf`/`anyOf` variant, a `$ref` variant's
  * component followed when `schemas` is given, whose fields the model
  * extractors flatten in (`declareVariant`) — in the order first declared,
@@ -1597,10 +1598,14 @@ export function collectProperties(
       if (value) declareProperty(ledger, key, value, null, onBranch);
     }
     for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
-    const branch = nullableUnionBranch(s);
-    if (branch) visit(branch, followRef, onBranch);
-    // A variant's `$ref` is followed as the merges follow it (`declareVariant`).
-    else for (const axis of unionAxesOf(s)) for (const variant of axis) visit(variant, true, true);
+    for (const axis of unionAxesOf(s)) {
+      // A nullable wrapper is its one variant, decided per keyword
+      // (`nullableAxisBranch`); a variant's `$ref` is followed as the merges
+      // follow it (`declareVariant`).
+      const branch = nullableAxisBranch(s, axis);
+      if (branch) visit(branch, followRef, onBranch);
+      else for (const variant of axis) visit(variant, true, true);
+    }
   };
   visit(schema, false, false);
   return new Map(
@@ -2319,17 +2324,18 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
   // }]` is the merged model, not a bare reference to `Pet` with the union
   // dropped (#398). A nullable wrapper is no union, nor is a union of one
   // variant: each is read as its one variant, as the type builder reads it
-  // (`nullableUnionBranch`, `loneUnionVariant`), so `{ oneOf: [{ $ref: PetId
-  // }], nullable: true }` beside a `description` stays the reference (#555).
+  // (`nullableAxisBranch`, per keyword; `loneUnionVariant`), so `{ oneOf: [{
+  // $ref: PetId }], nullable: true }` beside a `description` stays the
+  // reference (#555).
   const declares = (s: SchemaObject, onBranch: boolean): boolean => {
     if (seen.has(s)) return false;
     seen.add(s);
     if (s.$ref) return onBranch;
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
-    const branch = nullableUnionBranch(s);
-    if (branch) return declares(branch, onBranch);
     return unionAxesOf(s).some((axis) => {
+      const branch = nullableAxisBranch(s, axis);
+      if (branch) return declares(branch, onBranch);
       const variants = axis.filter((variant) => !isNullSchema(variant));
       return variants.some((variant) => declares(variant, onBranch || variants.length > 1));
     });
@@ -2777,23 +2783,36 @@ export function declareProperty(
 
 /**
  * Declare into `ledger`, as branch-only (`declareProperty`), every
- * property a `oneOf`/`anyOf` variant declares: its own `properties`, those
- * of its `allOf` members, those of the one variant of a nullable wrapper
- * it carries (`nullableUnionBranch`), those of every variant of the unions
- * nested in it (`unionAxesOf`, both keywords), and — through a `$ref`, the
- * variant itself or one met anywhere under it — those the component it
- * names declares, read the same way (its own properties, its `allOf`
- * chain, a union of its own). A variant's `required` is not read: its
- * properties are present only on that branch. The one branch reader the
- * component reader (`readComponentAllOfMember`) and the inline merge
- * (`mergeAllOfMembers`) flatten a variant with, so a flattened union
- * declares the same properties as a component and inline (#398: the
- * component reader read a variant's own `properties` and its `allOf`
- * wrappers' only, so `{ oneOf: [{ oneOf: [{ a }, { b }] }, { c }] }` gave
- * `c` alone and a `$ref` variant gave nothing, while the inline merge read
- * nested unions but followed no `$ref`). A schema in `seen` was read under
- * a variant already and declares nothing more, which ends a component that
- * names itself under a variant.
+ * property a `oneOf`/`anyOf` variant declares — one declaration per name,
+ * the variant read as the one conjunction it is (`readVariant`): its own
+ * `properties`, those of its `allOf` members, those of the one variant of
+ * a nullable wrapper it carries (`nullableAxisBranch`, per keyword) and —
+ * through a `$ref`, the variant itself or one met anywhere under it —
+ * those the component it names declares, read the same way (its own
+ * properties, its `allOf` chain, a union of its own), all always-applying
+ * within the variant and settled as every `allOf` merge settles a name two
+ * members declare (`combineDeclarations`: the first typing declaration
+ * types it, a typeless one only annotates it), so a variant `{ allOf: [{
+ * properties: { value: { type: 'string' } } }, { properties: { value: {
+ * description: 'doc' } } }] }` declares one `value`, a described string
+ * (#398 review: each member's declaration was a branch of its own, so the
+ * variant declared `value` twice and the field was typed `string |
+ * unknown`, where the component kept `string`); and those of every
+ * variant of the unions nested in it (`unionAxesOf`, both keywords),
+ * branch-only within the variant — the union of their distinct
+ * declarations where nothing in the variant always declares the name
+ * (`unionOfDeclarations`, as the merge types such a property). A
+ * variant's `required` is not read: its properties are present only on
+ * that branch. The one branch reader the component reader
+ * (`readComponentAllOfMember`) and the inline merge (`mergeAllOfMembers`)
+ * flatten a variant with, so a flattened union declares the same
+ * properties as a component and inline (#398: the component reader read a
+ * variant's own `properties` and its `allOf` wrappers' only, so `{ oneOf:
+ * [{ oneOf: [{ a }, { b }] }, { c }] }` gave `c` alone and a `$ref`
+ * variant gave nothing, while the inline merge read nested unions but
+ * followed no `$ref`). A schema in `seen` was read under a variant already
+ * and declares nothing more, which ends a component that names itself
+ * under a variant.
  */
 export function declareVariant(
   ledger: Map<string, PropertyDeclarations>,
@@ -2801,22 +2820,44 @@ export function declareVariant(
   componentSchemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
 ): void {
-  if (seen.has(variant)) return;
-  seen.add(variant);
-  if (variant.$ref) {
-    const target = schemaRefTarget(variant.$ref, componentSchemas);
-    if (target) declareVariant(ledger, target, componentSchemas, seen);
+  const own = new Map<string, PropertyDeclarations>();
+  readVariant(own, variant, componentSchemas, seen, false);
+  for (const { name, unconditional, conditional } of own.values()) {
+    declareProperty(ledger, name, unconditional?.schema ?? unionOfDeclarations(conditional), null, true);
+  }
+}
+
+/**
+ * Read a `oneOf`/`anyOf` variant, or a schema met under one, into
+ * `ledger` as `declareVariant` describes: what always applies within the
+ * variant — its properties, an `allOf` member's, a nullable wrapper's one
+ * variant's, the component a `$ref` names — in the capacity it is reached
+ * in (`onBranch`: always-applying for the variant itself), and what a
+ * union nested in it declares as branch-only, however deep.
+ */
+function readVariant(
+  ledger: Map<string, PropertyDeclarations>,
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject>,
+  onBranch: boolean,
+): void {
+  if (seen.has(schema)) return;
+  seen.add(schema);
+  if (schema.$ref) {
+    const target = schemaRefTarget(schema.$ref, componentSchemas);
+    if (target) readVariant(ledger, target, componentSchemas, seen, onBranch);
     return;
   }
-  for (const [key, value] of Object.entries(variant.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, true);
+  for (const [key, value] of Object.entries(schema.properties ?? {})) {
+    if (value) declareProperty(ledger, key, value, null, onBranch);
   }
-  for (const sub of variant.allOf ?? []) declareVariant(ledger, sub, componentSchemas, seen);
-  const branch = nullableUnionBranch(variant);
-  if (branch) declareVariant(ledger, branch, componentSchemas, seen);
-  else
-    for (const axis of unionAxesOf(variant))
-      for (const nested of axis) declareVariant(ledger, nested, componentSchemas, seen);
+  for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, onBranch);
+  for (const variants of unionAxesOf(schema)) {
+    const branch = nullableAxisBranch(schema, variants);
+    if (branch) readVariant(ledger, branch, componentSchemas, seen, onBranch);
+    else for (const nested of variants) readVariant(ledger, nested, componentSchemas, seen, true);
+  }
 }
 
 /**
@@ -2846,7 +2887,8 @@ export function declareVariant(
  * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for each `oneOf`/`anyOf` it carries (`unionAxesOf`:
- * a member writing both carries two; #398 read only the `oneOf`), those of
+ * a member writing both carries two, a nullable wrapper among them decided
+ * per keyword, `nullableAxisBranch`; #398 read only the `oneOf`), those of
  * every variant — read through the variant's own `allOf` members, its
  * nested unions and the component a `$ref` variant names, by the one
  * branch reader the component reader flattens a variant with
@@ -2977,28 +3019,34 @@ export function mergeAllOfMembers(
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
     for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s));
     // A nullable union wrapper — one non-null variant beside `null`, decided
-    // by `nullableUnionBranch`, the definition `unwrapNullableSchema`
-    // collapses by, which `readComponentAllOfMember` reads a component's
-    // member through and the envelope collector reads every member through
-    // (`resolveBareSchema`) — is that variant, applying as the member does:
-    // an instance that is not null is the variant, and beside an object
-    // member it is never null. So the variant is read in the member's own
-    // capacity — its `$ref` followed, its `required` read, its properties
-    // always-applying — wherever the member sits, a `$ref` member's
-    // component included (workos/oagen#308: read as a branch, `Base`'s
-    // `has_more` ended the iteration but was missing from the model). Any
-    // other union is flattened, each variant read as the component reader
-    // reads it (`declareVariant`) — unless a `$ref` member's component
-    // dispatches it, in which case it belongs to that component's model
-    // (`componentUnionDispatches`; #429).
-    const branch = nullableUnionBranch(s);
-    if (branch) visit(branch, origin);
-    else {
-      for (const variants of unionAxesOf(s)) {
-        const explicit = s.discriminator ?? wrapperDiscriminator;
-        if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
-        for (const variant of variants) declareVariant(declared, variant, componentSchemas, done.conditional);
+    // per keyword by `nullableAxisBranch`, `nullableUnionBranch`'s
+    // definition, the one `unwrapNullableSchema` collapses by, which
+    // `readComponentAllOfMember` reads a component's member through and the
+    // envelope collector reads every member through (`resolveBareSchema`) —
+    // is that variant, applying as the member does: an instance that is not
+    // null is the variant, and beside an object member it is never null. So
+    // the variant is read in the member's own capacity — its `$ref`
+    // followed, its `required` read, its properties always-applying —
+    // wherever the member sits, a `$ref` member's component included
+    // (workos/oagen#308: read as a branch, `Base`'s `has_more` ended the
+    // iteration but was missing from the model). Any other union is
+    // flattened, each variant read as the component reader reads it
+    // (`declareVariant`) — unless a `$ref` member's component dispatches
+    // it, in which case it belongs to that component's model
+    // (`componentUnionDispatches`; #429). Each axis is decided on its own,
+    // so a member writing a nullable `oneOf` beside an `anyOf` has the
+    // `anyOf` flattened, as two members would (#398 review: the wrapper was
+    // decided on the member, which reads one keyword, and the `anyOf` was
+    // never read).
+    for (const variants of unionAxesOf(s)) {
+      const branch = nullableAxisBranch(s, variants);
+      if (branch) {
+        visit(branch, origin);
+        continue;
       }
+      const explicit = s.discriminator ?? wrapperDiscriminator;
+      if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
+      for (const variant of variants) declareVariant(declared, variant, componentSchemas, done.conditional);
     }
   };
   visit(schema, null);

@@ -3060,4 +3060,239 @@ describe('#398', () => {
       },
     );
   });
+
+  describe('review', () => {
+    // Round 1 (MichaelDeBoey, finding 1): a union beside the `allOf` whose
+    // `$ref` variant is the component the field sits in. The merge reaches
+    // `Note.reply` again through the variant, so the extractor's guard
+    // (#566) must meet the same folded schema on every re-entry:
+    // `foldSiblingProperties` folds a schema to one object (it made a new
+    // copy on every fold, and the re-entry never ended).
+    const noteDoc = (openapi: string, reply: SchemaObject) =>
+      doc(
+        openapi,
+        { Note: obj({ id: str, reply }, { required: ['id'] }) },
+        { '/notes': getOp('getNote', ref('Note')) },
+      );
+    const selfOrOther = (keyword: 'oneOf' | 'anyOf'): SchemaObject => ({
+      [keyword]: [ref('Note'), obj({ other: str })],
+    });
+    const sortedFields = (ir: ApiSpec): Record<string, string[]> =>
+      Object.fromEntries(ir.models.map((m) => [m.name, [...(fieldsOf(m) ?? [])].sort()]));
+
+    it.each(cases)(
+      'a union beside an allOf whose $ref variant is the component the field sits in ends where the member spelling ends (OAS %s, %s)',
+      async (openapi, keyword) => {
+        const depth = obj({ depth: int });
+        const beside: SchemaObject = { allOf: [depth], ...selfOrOther(keyword) };
+        const member: SchemaObject = { allOf: [depth, selfOrOther(keyword)] };
+        const asMember = await parseWithoutWarnings(noteDoc(openapi, member));
+        const expected = ['depth?: integer', 'id?: string', 'reply?: NoteReply', 'other?: string'];
+        expect(fieldsOf(modelsByName(asMember)['NoteReply'])).toEqual(expected);
+        const asBeside = await parseWithoutWarnings(noteDoc(openapi, beside));
+        expect(fieldsOf(modelsByName(asBeside)['NoteReply'])).toEqual(expected);
+        expect(diffSpecs(asMember, asBeside).changes).toEqual([]);
+        expectSound(asBeside, ['Note']);
+        // As array items and as map values alike.
+        for (const wrap of [
+          (reply: SchemaObject): SchemaObject => ({ type: 'array', items: reply }),
+          (reply: SchemaObject): SchemaObject => ({ type: 'object', additionalProperties: reply }),
+        ]) {
+          const wrappedMember = await parseWithoutWarnings(noteDoc(openapi, wrap(member)));
+          const wrappedBeside = await parseWithoutWarnings(noteDoc(openapi, wrap(beside)));
+          expect(sortedFields(wrappedBeside)).toEqual(sortedFields(wrappedMember));
+          expect(diffSpecs(wrappedMember, wrappedBeside).changes).toEqual([]);
+          expectSound(wrappedBeside, ['Note']);
+        }
+      },
+    );
+
+    it.each(openapis)(
+      'properties beside an allOf that reaches the field again end where the member spelling ends (OAS %s; predates the PR)',
+      async (openapi) => {
+        // #566's shape with the inline member's properties written beside
+        // the `allOf`: folded as the member, so the re-entry ends at the
+        // conjunction it already built (it overflowed on the base too).
+        const own = { quoted: str, reply: obj({ depth: int }) };
+        const asMember = await parseWithoutWarnings(noteDoc(openapi, { allOf: [ref('Note'), obj(own)] }));
+        expect(fieldsOf(modelsByName(asMember)['NoteReplyReply'])).toEqual([
+          'id: string',
+          'reply?: NoteReplyReply',
+          'quoted?: string',
+          'depth?: integer',
+        ]);
+        const asBeside = await parseWithoutWarnings(noteDoc(openapi, { allOf: [ref('Note')], properties: own }));
+        expect(sortedFields(asBeside)).toEqual(sortedFields(asMember));
+        expect(diffSpecs(asMember, asBeside).changes).toEqual([]);
+        expectSound(asBeside, ['Note']);
+      },
+    );
+
+    // Round 1 (MichaelDeBoey, finding 2; Greptile): a member writing a
+    // nullable `oneOf` beside an `anyOf`. The wrapper is decided per keyword
+    // (`nullableAxisBranch`), so the `anyOf` is flattened as it is when the
+    // two keywords are two members, or the union sits beside the `allOf`
+    // (the member was read by one keyword, and `b`, `c` were lost).
+    it.each(openapis)(
+      'a nullable oneOf beside an anyOf on one member keeps the anyOf, as two members and the union beside the allOf do (OAS %s)',
+      async (openapi) => {
+        const unions = { oneOf: [obj({ a: str }), { type: 'null' }], anyOf: [obj({ b: str }), obj({ c: str })] };
+        const spellings: Record<string, SchemaObject> = {
+          'one member': { allOf: [base, { ...unions }] },
+          'two members': { allOf: [base, { oneOf: unions.oneOf }, { anyOf: unions.anyOf }] },
+          'beside the allOf': { allOf: [base], ...unions },
+        };
+        const expected = ['name: string', 'a?: string', 'b?: string', 'c?: string'];
+        const parsed: Record<string, ApiSpec> = {};
+        for (const [label, schema] of Object.entries(spellings)) {
+          const ir = await parseWithoutWarnings(sites(openapi, schema));
+          parsed[label] = ir;
+          const models = modelsByName(ir);
+          for (const name of ['NewPet', 'HolderPet', 'CreatePetResponse', 'CreatePetRequest']) {
+            expect(fieldsOf(models[name]), `${label} ${name}`).toEqual(expected);
+          }
+          expect(opsOf(ir)['createPet']?.requestBody, label).toEqual(model('CreatePetRequest'));
+          expectSound(ir, ['NewPet', 'Holder']);
+        }
+        expect(diffSpecs(parsed['two members']!, parsed['one member']!).changes).toEqual([]);
+        expect(diffSpecs(parsed['two members']!, parsed['beside the allOf']!).changes).toEqual([]);
+        // The mirror: a nullable `anyOf` beside a `oneOf`.
+        const mirror: SchemaObject = {
+          allOf: [base, { anyOf: [obj({ a: str }), { type: 'null' }], oneOf: [obj({ b: str }), obj({ c: str })] }],
+        };
+        const mirrored = await parseWithoutWarnings(sites(openapi, mirror));
+        expect(fieldsOf(modelsByName(mirrored)['NewPet'])).toEqual([
+          'name: string',
+          'b?: string',
+          'c?: string',
+          'a?: string',
+        ]);
+        expect(fieldsOf(modelsByName(mirrored)['HolderPet'])).toEqual(fieldsOf(modelsByName(mirrored)['NewPet']));
+      },
+    );
+
+    // Round 1 (Greptile): declarations inside one variant's `allOf` apply
+    // together. The variant is read as the one conjunction it is
+    // (`declareVariant`, through `readVariant`), so documenting a field in
+    // a second member does not widen it (each member's declaration was a
+    // branch of its own, and `value` was `string | unknown`).
+    it.each(cases)(
+      "declarations inside one variant's allOf conjoin before the variant joins the union (OAS %s, %s)",
+      async (openapi, keyword) => {
+        const documented: SchemaObject = { allOf: [obj({ value: str }), obj({ value: { description: 'doc' } })] };
+        const expected = ['name: string', 'value?: string', 'other?: string'];
+        for (const schema of [
+          { allOf: [base, { [keyword]: [documented, obj({ other: str })] }] },
+          { allOf: [base], [keyword]: [documented, obj({ other: str })] },
+        ] as SchemaObject[]) {
+          const ir = await parseWithoutWarnings(sites(openapi, schema));
+          const models = modelsByName(ir);
+          for (const name of ['NewPet', 'HolderPet', 'CreatePetResponse', 'CreatePetRequest']) {
+            expect(fieldsOf(models[name]), name).toEqual(expected);
+            expect(models[name]?.fields.find((f) => f.name === 'value')?.description, name).toBe('doc');
+          }
+          expectSound(ir, ['NewPet', 'Holder']);
+        }
+        // Through a `$ref` variant to a component written so, the same.
+        const viaRef = await parseWithoutWarnings(
+          doc(
+            openapi,
+            {
+              Documented: documented,
+              NewPet: { allOf: [base, { [keyword]: [ref('Documented'), obj({ other: str })] }] },
+            },
+            { '/new-pets': getOp('getNewPet', ref('NewPet')) },
+          ),
+        );
+        expect(fieldsOf(modelsByName(viaRef)['NewPet'])).toEqual(expected);
+        expect(modelsByName(viaRef)['NewPet']?.fields.find((f) => f.name === 'value')?.description).toBe('doc');
+        expect(fieldsOf(modelsByName(viaRef)['Documented'])).toEqual(['value?: string']);
+        expectSound(viaRef, ['Documented', 'NewPet']);
+        // A union nested in the variant still makes alternatives of what its
+        // own variants declare, beside what the variant always declares.
+        const nested: SchemaObject = {
+          allOf: [
+            base,
+            {
+              [keyword]: [
+                { allOf: [obj({ value: str })], oneOf: [obj({ x: str }), obj({ x: int })] },
+                obj({ other: str }),
+              ],
+            },
+          ],
+        };
+        const withNested = await parseWithoutWarnings(sites(openapi, nested));
+        expect(typed(modelsByName(withNested)['NewPet'])).toEqual([
+          'name: string',
+          'value?: string',
+          'x?: (string | integer)',
+          'other?: string',
+        ]);
+      },
+    );
+
+    // Round 1 (Greptile): a stop field behind a union a `$ref` member's
+    // component dispatches. The merge leaves the union to the component
+    // (#429), so `Meta` carries the base fields and no variant's; the
+    // override check reads the unions the model carries the fields of
+    // (`unionCounts`), and rejects the path (every union counted, and the
+    // iterator was told to read a field the model lacks).
+    it.each(openapis)(
+      "rejects an endOfIteration behind a union a $ref member's component dispatches, which the model leaves to it (OAS %s)",
+      async (openapi) => {
+        const cursorMeta = obj({ kind: { type: 'string', const: 'cursor' }, has_more: bool, next_after: str });
+        const pageMeta = obj({ kind: { type: 'string', const: 'page' }, has_more: bool, next_page: int });
+        const union = { oneOf: [ref('CursorMeta'), ref('PageMeta')] };
+        const declared = { ...union, discriminator: { propertyName: 'kind' } };
+        const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+        const listPets = (meta: SchemaObject) => ({
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: { '200': jsonResponse(obj({ data: { type: 'array', items: str }, meta })) },
+              'x-pagination': { endOfIteration },
+            },
+          },
+        });
+        for (const axis of [union, declared]) {
+          const schemas = {
+            CursorMeta: cursorMeta,
+            PageMeta: pageMeta,
+            MetaDispatcher: { allOf: [obj({ base: str }), axis] },
+          };
+          const meta: SchemaObject = { allOf: [ref('MetaDispatcher'), obj({ trace_id: str })] };
+          for (const [label, site, components] of [
+            ['inline', meta, schemas],
+            ['component', ref('Meta'), { ...schemas, Meta: meta }],
+          ] as const) {
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            try {
+              const ir = await parseTempSpec(doc(openapi, components, listPets(site)));
+              expect(opsOf(ir)['listPets']?.pagination?.endOfIteration, label).toBeUndefined();
+              expect(
+                warn.mock.calls.map(([m]) => String(m)),
+                label,
+              ).toEqual([expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field')]);
+              const models = modelsByName(ir);
+              expect(fieldsOf(models['Meta']), label).toEqual(['base?: string', 'trace_id?: string']);
+              expect(models['Meta']?.discriminator, label).toBeUndefined();
+              expect(models['MetaDispatcher']?.discriminator, label).toEqual({
+                property: 'kind',
+                mapping: { cursor: 'CursorMeta', page: 'PageMeta' },
+              });
+            } finally {
+              warn.mockRestore();
+            }
+          }
+          // `meta` typed as the dispatcher itself, bare or as a lone `allOf`
+          // member: every variant model has the field, and the path resolves.
+          for (const site of [ref('MetaDispatcher'), { allOf: [ref('MetaDispatcher')] }] as SchemaObject[]) {
+            const ir = await parseWithoutWarnings(doc(openapi, schemas, listPets(site)));
+            expect(opsOf(ir)['listPets']?.pagination?.endOfIteration).toEqual(endOfIteration);
+          }
+        }
+      },
+    );
+  });
 });

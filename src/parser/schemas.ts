@@ -746,15 +746,48 @@ export function unwrapNullableSchema(
  * built from the union itself, nullable or not, and the variant documents
  * that one value, not the schema (workos/oagen#535: collapsed to the lone
  * const, a request body's text reader gave the member's text to the body).
- * Exported for the response path, which wraps an array it builds itself in
- * `nullable` exactly when `schemaToTypeRef` would (`nullableIf`).
+ * Reads the one keyword the schema writes, `oneOf` first; the readers of
+ * a composed schema's members decide a member that writes both per axis
+ * (`nullableAxisBranch`). Exported for the response path, which wraps an
+ * array it builds itself in `nullable` exactly when `schemaToTypeRef`
+ * would (`nullableIf`).
  */
 export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
-  const variants = schema.allOf ? undefined : (schema.oneOf ?? schema.anyOf);
-  if (!variants) return undefined;
+  const variants = schema.oneOf ?? schema.anyOf;
+  return variants ? nullableAxisBranch(schema, variants) : undefined;
+}
+
+/**
+ * The one variant one union axis of `schema` — a `oneOf` or `anyOf` list
+ * it carries (`unionAxesOf`) — collapses to when that axis is a nullable
+ * wrapper: `nullableUnionBranch`'s definition, applied to the axis alone,
+ * so a member that writes both keywords has each decided on its own. The
+ * readers of a composed schema's members read every axis through it
+ * (`mergeAllOfMembers`, `readComponentAllOfMember`, `declareVariant`,
+ * `collectProperties`, `declaresInlineProperties`), so a member `{ oneOf:
+ * [{ a }, { type: 'null' }], anyOf: [{ b }, { c }] }` is `a` read as one
+ * more member and `b`, `c` flattened — exactly as the two keywords written
+ * as two members are read, and as the union beside the `allOf` folds them
+ * (#398 review: the member was read through `nullableUnionBranch`, which
+ * reads one keyword, so the `oneOf`'s wrapper collapsed and the `anyOf`
+ * was never read: `NewPet { name, a }` as one member, `{ name, a, b, c }`
+ * as two). `undefined` for an axis under an `allOf`, with no `null`
+ * variant, with more than one non-null variant, or read as an enum — the
+ * enum spelling decided on the axis alone (`axisAlone`) when the schema
+ * writes both keywords.
+ */
+export function nullableAxisBranch(schema: SchemaObject, variants: readonly SchemaObject[]): SchemaObject | undefined {
+  if (schema.allOf) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
   if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
-  return inlineEnumSpelling(schema)?.spelling === 'const-union' ? undefined : nonNull[0];
+  return inlineEnumSpelling(axisAlone(schema, variants))?.spelling === 'const-union' ? undefined : nonNull[0];
+}
+
+/** `schema` carrying `variants` as its one union, for a decision made per axis (`nullableAxisBranch`); `schema` itself when it writes one keyword. */
+function axisAlone(schema: SchemaObject, variants: readonly SchemaObject[]): SchemaObject {
+  if (!schema.oneOf || !schema.anyOf) return schema;
+  const { oneOf: _oneOf, anyOf: _anyOf, ...rest } = schema;
+  return variants === schema.oneOf ? { ...rest, oneOf: schema.oneOf } : { ...rest, anyOf: schema.anyOf };
 }
 
 /**
@@ -1181,6 +1214,7 @@ export function extractSchemas(
   // components, so they are combined afresh too.
   resetInheritedModelRefs();
   resetCombinedDeclarations();
+  resetFoldedSchemas();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -1453,6 +1487,7 @@ export function clearSchemaNameTransform(): void {
   activeEnumAliasKeys = new Set();
   activeDispatcherVariantPlans = new Map();
   resetCombinedDeclarations();
+  resetFoldedSchemas();
   markContestedTitles(undefined);
 }
 
@@ -2555,14 +2590,49 @@ function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * `constructor` or `toString` is a field. Returns the schema itself when nothing folds, else a
  * copy with no `properties` or `required` of its own, every other keyword —
  * `description`, `nullable`, limits, `discriminator`, `additionalProperties`
- * — kept; so folding a folded schema changes nothing. A folded variant is a
- * copy of the document's, and `foldedVariantOrigin` gives the document's
- * back, so a decision recorded against it (a contested title,
- * `isContestedTitle`) reaches the copy. A component schema's own
- * `properties` beside its `allOf` are read the same way, as its first
- * member, by `componentAllOfMembers`.
+ * — kept; so folding a folded schema changes nothing. The copy is made
+ * once per document schema (`foldedSchemas`): the same schema folds to
+ * the same object at every site that folds it, so a reader that guards by
+ * identity meets the folded schema once, however often it is folded. A
+ * folded variant is a copy of the document's, and `foldedVariantOrigin`
+ * gives the document's back, so a decision recorded against it (a
+ * contested title, `isContestedTitle`) reaches the copy. A component
+ * schema's own `properties` beside its `allOf` are read the same way, as
+ * its first member, by `componentAllOfMembers`.
  */
 export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
+  let folded = foldedSchemas.get(schema);
+  if (!folded) foldedSchemas.set(schema, (folded = foldAfresh(schema)));
+  return folded;
+}
+
+/**
+ * The schema each document schema folds to (`foldSiblingProperties`), so
+ * every site that folds one schema — the type builder, the extractors, the
+ * request and response readers, the pagination walk, the title walk —
+ * reads one object for it, however often it folds. The extractor guards
+ * the merge it is materializing by the folded schema's identity
+ * (`materializeMergedAllOf`, workos/oagen#566), and a field whose merge
+ * reaches itself through a `$ref` variant — `Note.reply: { allOf: [{ depth
+ * }], oneOf: [{ $ref: Note }, { other }] }` — is folded again on every
+ * re-entry (#398 review: each fold built a new copy no guard had seen, so
+ * the re-entry never ended, where the same union written as an `allOf`
+ * member ended at once with `NoteReply { depth, id, reply, other }`; the
+ * `properties`-beside-`allOf` fold, `{ allOf: [{ $ref: Note }],
+ * properties: { reply: { depth } } }`, did the same). Forgotten per
+ * document (`resetFoldedSchemas`), where the combined declarations are
+ * (`resetCombinedDeclarations`). A schema that folds nothing maps to
+ * itself.
+ */
+let foldedSchemas = new WeakMap<SchemaObject, SchemaObject>();
+
+/** Forget every folded schema: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+function resetFoldedSchemas(): void {
+  foldedSchemas = new WeakMap();
+}
+
+/** What `foldSiblingProperties` returns for a schema not folded yet (see there). */
+function foldAfresh(schema: SchemaObject): SchemaObject {
   const folded = foldSiblingUnions(schema);
   if (!hasFoldableProperties(folded)) return folded;
   const kind = classifyInlineSchema(folded);
@@ -4654,19 +4724,23 @@ interface MemberReadingOptions {
  * properties: { id }, oneOf: [...] }`, whose union is then this model's to
  * dispatch or flatten, as it is `Pet`'s own; #429). A
  * member's `oneOf`/`anyOf` with exactly one non-null variant beside `null`
- * is a nullable wrapper, not a union — decided by `nullableUnionBranch`, the
- * definition `unwrapNullableSchema` collapses by, which `mergeAllOfMembers`
- * reads an inline member through and the envelope collector reads every
- * member through (`resolveBareSchema`) — and that variant is read as one
- * more member, in this member's own capacity: `{ oneOf: [{ $ref: Base }, {
+ * is a nullable wrapper, not a union — decided per keyword by
+ * `nullableAxisBranch`, `nullableUnionBranch`'s definition, the one
+ * `unwrapNullableSchema` collapses by, which `mergeAllOfMembers` reads an
+ * inline member through and the envelope collector reads every member
+ * through (`resolveBareSchema`) — and that variant is read as one more
+ * member, in this member's own capacity: `{ oneOf: [{ $ref: Base }, {
  * type: 'null' }] }` applies `Base` whole, its `$ref` followed and its
  * `required` read, since an instance that is not null is a `Base` and
  * beside an object member it is never null (workos/oagen#308: read as a
  * union, `Base`'s `has_more` ended the operation's iteration but was
  * missing from the model); the wrapper itself is recorded as read, so a
- * component that wraps a reference to itself ends there. Each union the
- * member carries (`unionAxesOf`: a `oneOf` and an `anyOf` written together
- * are two) is a dispatcher when its variants pin one property to distinct
+ * component that wraps a reference to itself ends there. A member writing
+ * a nullable `oneOf` beside an `anyOf` has the `anyOf` read as below, as
+ * two members would be (#398 review: the wrapper was decided on the
+ * member, which reads one keyword, and the `anyOf` was lost). Each union
+ * the member carries (`unionAxesOf`: a `oneOf` and an `anyOf` written
+ * together are two) is a dispatcher when its variants pin one property to distinct
  * consts, or the document declares a `discriminator` for it — on the
  * member, or on the wrapper whose `allOf` the member sits in
  * (`wrapperDiscriminator`; `detectAllOfVariantDiscriminator`, which reads a
@@ -4708,17 +4782,24 @@ function readComponentAllOfMember(
     if (value) declareProperty(ledger, key, value, null, false);
   }
   // A nullable wrapper is its one non-null variant, read as one more member
-  // in this member's own capacity (`nullableUnionBranch`); the wrapper is
-  // recorded so a component that wraps a reference to itself ends here.
-  const branch = nullableUnionBranch(resolved);
-  if (branch) {
+  // in this member's own capacity — decided per axis (`nullableAxisBranch`),
+  // so a member writing a nullable `oneOf` beside an `anyOf` has the `anyOf`
+  // read too; the wrapper is recorded so a component that wraps a reference
+  // to itself ends here.
+  const axes = unionAxesOf(resolved).filter((variants) => variants !== options.skipAxis);
+  const branches = axes.map((variants) => nullableAxisBranch(resolved, variants));
+  if (branches.some((branch) => branch !== undefined)) {
     if (seen.has(resolved)) return undefined;
     seen.add(resolved);
-    return readComponentAllOfMember(name, branch, schemas, reading, options);
   }
   let discriminator: AllOfDiscriminator | undefined;
-  for (const variants of unionAxesOf(resolved)) {
-    if (variants === options.skipAxis) continue;
+  for (const [index, variants] of axes.entries()) {
+    const branch = branches[index];
+    if (branch) {
+      const wrapped = readComponentAllOfMember(name, branch, schemas, reading, options);
+      discriminator ??= wrapped;
+      continue;
+    }
     // A dispatcher: the discriminator is kept instead of the variants'
     // fields — the base members already carry the fields every variant
     // shares (e.g. EventSchema, where each variant pins `event`).

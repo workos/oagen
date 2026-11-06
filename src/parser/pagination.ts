@@ -12,10 +12,13 @@ import type { SchemaObject } from './schemas.js';
 import { componentKeyOf } from './schema-refs.js';
 import {
   classifyInlineSchema,
+  componentUnionDispatches,
   isArraySchema,
   isNullSchema,
   resolveComponentSchemaRef,
+  resolveSchemaName,
   unwrapNullableSchema,
+  wrapperDiscriminatorOf,
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
 import { allOfTypingMember, combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
@@ -483,23 +486,57 @@ function fieldsAtPath(
  * its variants are written (workos/oagen#527: the flattened model left a
  * `$ref` variant's fields to its component and read no union behind a
  * `$ref` member, so the field was rejected there as one the model lacked).
- * Every union the walk meets counts, its variants read through the
- * component map. `undefined` when there is none.
+ * A union the walk meets counts exactly when the model carries its fields
+ * (`unionCounts`): one a `$ref` member's component dispatches is left to
+ * that component, as the model leaves it, and contributes nothing here.
+ * `undefined` when there is none.
  */
 function fieldsNamed(
   node: SchemaObject,
   segment: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): { fields: SchemaObject[]; union?: SchemaObject } | undefined {
-  const { properties, unions } = collectObjectProperties(node, componentSchemas);
+  const { properties, unions, named } = collectObjectProperties(node, componentSchemas);
   const own = properties[segment];
   if (own) return { fields: [own] };
   for (const union of unions) {
-    const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+    if (!unionCounts(union, named, componentSchemas)) continue;
+    const variants = (union.schema.oneOf ?? union.schema.anyOf ?? []).filter((variant) => !isNullSchema(variant));
     const fields = variants.map((variant) => objectProperties(variant, componentSchemas)[segment]);
-    if (fields.length > 0 && fields.every((field) => field !== undefined)) return { fields, union };
+    if (fields.length > 0 && fields.every((field) => field !== undefined)) return { fields, union: union.schema };
   }
   return undefined;
+}
+
+/**
+ * Whether a union the walk met (`collectObjectProperties`) is one the
+ * node's model carries the fields of — flattened in, or dispatched to
+ * variant models of its own — so that a field its every variant declares
+ * is one the model has (`fieldsNamed`). The node's own unions are: an
+ * inline `allOf` flattens every union of its inline members, and a
+ * component flattens or dispatches its own. A union a `$ref` member's
+ * component carries is read as the model reads the member (#429):
+ * flattened into the model when the component's model flattens it, and
+ * left to the component when that model dispatches it
+ * (`componentUnionDispatches`, the one decision the inline merge and the
+ * component reader apply) — the model then carries the base fields the
+ * dispatcher carries and no variant's, so the field is not one it has,
+ * whatever the variants declare (#398 review: every union counted, so
+ * `meta: { allOf: [{ $ref: MetaDispatcher }, { trace_id }] }` accepted a
+ * `has_more` every dispatched variant declares, and the iterator read a
+ * field `Meta { base, trace_id }` lacks). One exception, the component
+ * reader's own (`readComponentAllOfMember`): a component's direct `$ref`
+ * member to a plain object that carries the union — no `allOf` of its own
+ * nor on the way to it — dispatches the component itself (`Dog: { allOf:
+ * [{ $ref: Pet }] }` with `Pet: { properties: { id }, oneOf: [cat, dog] }`
+ * dispatches to `DogCat` and `DogDog`), whose variant models carry the
+ * field; an inline merge of the same member carries the base fields only.
+ */
+function unionCounts(union: CollectedUnion, named: boolean, componentSchemas?: Record<string, SchemaObject>): boolean {
+  if (union.origin === null) return true;
+  if (named && union.origin.direct) return true;
+  const variants = union.schema.oneOf ?? union.schema.anyOf ?? [];
+  return !componentUnionDispatches(variants, union.origin.name, componentSchemas, union.discriminator);
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -630,31 +667,66 @@ function objectProperties(
  * it. (Envelope detection reads the
  * members' own `properties`; a `oneOf`/`anyOf` member with more than one
  * non-null variant declares none, so it contributes no property here; it is
- * listed in `unions`, with every other `oneOf`/`anyOf` the walk meets — the
- * body itself first, then the members in the order walked — for the
- * override check, which reads a field every variant of one declares
- * (`fieldsNamed`). A body that is not an envelope is merged by
- * `mergeAllOfMembers`, which reads such a member's variants.)
+ * listed in `unions`, with every other `oneOf`/`anyOf` the walk meets —
+ * the body itself first, then the members in the order walked — each with
+ * the component a `$ref` member on the way names and the `discriminator`
+ * the document declares for it (`CollectedUnion`), and `named` says
+ * whether the body is typed as a component's model (a `$ref`, or a nullable
+ * wrapper or lone `allOf` member around one), for the override check,
+ * which reads a field every variant of one declares exactly when the model
+ * carries it (`fieldsNamed`, `unionCounts`). A body that is not an
+ * envelope is merged by `mergeAllOfMembers`, which reads such a member's
+ * variants.)
  */
 export function collectObjectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-): { properties: Record<string, SchemaObject>; required: string[]; unions: SchemaObject[] } {
+): { properties: Record<string, SchemaObject>; required: string[]; unions: CollectedUnion[]; named: boolean } {
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
-  const unions: SchemaObject[] = [];
+  const unions: CollectedUnion[] = [];
   const seenRefs = new Set<string>();
   const seenNodes = new WeakSet<SchemaObject>();
+  let named = false;
 
-  const visit = (s: SchemaObject): void => {
+  // The component a member's `$ref` names, as the model reads the member
+  // (`CollectedUnion.origin`): the first reference the resolver followed
+  // for the member, counting from the `from`th it recorded; `direct` when
+  // the member is one of the node's own and every component on the way to
+  // the schema it lands on is a plain object or an alias — none composed
+  // with `allOf`, which the component reader reads as a nested component
+  // whose own dispatcher stays its own. `null` for an inline member.
+  const memberOrigin = (from: number, depth: number): CollectedUnion['origin'] => {
+    const refs = [...seenRefs].slice(from);
+    const key = componentKeyOf(refs[0]);
+    if (key === undefined) return null;
+    const direct =
+      depth === 1 &&
+      refs.every((ref) => resolveComponentSchemaRef({ $ref: ref }, componentSchemas)?.allOf === undefined);
+    return { name: resolveSchemaName(key), direct };
+  };
+
+  const visit = (
+    s: SchemaObject,
+    depth: number,
+    inherited: CollectedUnion['origin'],
+    wrapperDiscriminator?: SchemaObject['discriminator'],
+  ): void => {
     if (seenNodes.has(s)) return;
     seenNodes.add(s);
+    const followed = seenRefs.size;
     const bare = resolveBareSchema(s, componentSchemas, seenRefs);
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
-    if (bare.oneOf ?? bare.anyOf) unions.push(bare);
-    for (const sub of bare.allOf ?? []) visit(sub);
+    // The node's own unions are its model's, whatever it resolves through;
+    // a member's are read as the component its `$ref` names reads them.
+    if (depth === 0) named = seenRefs.size > followed;
+    const origin = depth === 0 ? null : (inherited ?? memberOrigin(followed, depth));
+    if (bare.oneOf ?? bare.anyOf) {
+      unions.push({ schema: bare, origin, discriminator: bare.discriminator ?? wrapperDiscriminator });
+    }
+    for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare));
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       const existing = properties[key];
@@ -662,9 +734,26 @@ export function collectObjectProperties(
     }
     if (bare.required) required.push(...bare.required);
   };
-  visit(schema);
+  visit(schema, 0, null);
 
-  return { properties, required, unions };
+  return { properties, required, unions, named };
+}
+
+/**
+ * One `oneOf`/`anyOf` the walk meets (`collectObjectProperties`): the
+ * resolved schema that writes it; the component a `$ref` member of an
+ * `allOf` on the way names, as the model reads the member (`direct` when
+ * that member is one of the node's own and the component itself carries
+ * the union), or `null` for a union the node's own model carries — the
+ * node itself, or an inline member; and the `discriminator` the document
+ * declares for it, on the schema or on the `allOf` wrapper around it
+ * (`wrapperDiscriminatorOf`). What the override check decides from
+ * (`unionCounts`).
+ */
+export interface CollectedUnion {
+  schema: SchemaObject;
+  origin: { name: string; direct: boolean } | null;
+  discriminator?: SchemaObject['discriminator'];
 }
 
 // ---------------------------------------------------------------------------
@@ -794,11 +883,11 @@ export function dataPathProblem(
  * Which variant of a union `node` is composed of lacks `segment`, when that
  * is why `fieldsNamed` found no field of that name — `variant 2 of the oneOf
  * at "result" declares no "items"` — for the warning a `dataPath` is
- * rejected with. The unions are read in the order `fieldsNamed` reads them;
- * the first with a non-null variant that declares no such property explains
- * the miss. `undefined` when none does: no union at all, or one whose every
- * variant declares the segment and which still does not count (the one an
- * inline `allOf` flattens, workos/oagen#527), which the plain reason covers.
+ * rejected with. The unions are read in the order `fieldsNamed` reads them,
+ * the ones it counts (`unionCounts`); the first with a non-null variant
+ * that declares no such property explains the miss. `undefined` when none
+ * does: no union at all, or one left to the component that dispatches it,
+ * whatever its variants declare, which the plain reason covers.
  */
 function variantLacking(
   node: SchemaObject,
@@ -806,10 +895,12 @@ function variantLacking(
   prefix: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  for (const union of collectObjectProperties(node, componentSchemas).unions) {
-    const variants = (union.oneOf ?? union.anyOf ?? []).filter((variant) => !isNullSchema(variant));
+  const { unions, named } = collectObjectProperties(node, componentSchemas);
+  for (const union of unions) {
+    if (!unionCounts(union, named, componentSchemas)) continue;
+    const variants = (union.schema.oneOf ?? union.schema.anyOf ?? []).filter((variant) => !isNullSchema(variant));
     const index = variants.findIndex((variant) => objectProperties(variant, componentSchemas)[segment] === undefined);
-    if (index !== -1) return `${variantLabels(union, prefix)[index]} declares no "${segment}"`;
+    if (index !== -1) return `${variantLabels(union.schema, prefix)[index]} declares no "${segment}"`;
   }
   return undefined;
 }
