@@ -16,7 +16,11 @@
  * alongside the document — from the component's own type
  * (`componentTypeRef`), through `properties/<name>` to that field's type,
  * `items` to the array's items, `additionalProperties` or
- * `patternProperties/<pattern>` to the map's values — when that schema is
+ * `patternProperties/<pattern>` to the map's values — through the member
+ * of a multi-type schema's union that carries the keyword (`type:
+ * ['object', 'string']` is a union of one member per type, so its
+ * `properties/<name>` are the object member's fields, its `items` the
+ * array member's) — when that schema is
  * the one the map's values are typed from (`mapValueSchema`: a non-empty
  * `additionalProperties`, else the first pattern; `additionalProperties:
  * {}` types them `unknown`), so `patternProperties/^n` beside a first
@@ -568,10 +572,28 @@ class PointerResolver {
     };
     const describe = (type: TypeRef): string =>
       type.kind === 'model' || type.kind === 'enum' ? `${type.kind} "${type.name}"` : type.kind;
+    /**
+     * The member of a multi-type schema's union that carries `keyword`: a
+     * `type: ['object', 'string']` schema is typed as a union of one member
+     * per type (`schemaToTypeRef`), so its `properties/<name>` are the
+     * object member's fields, its `items` the array member's, its
+     * `additionalProperties` the map member's values — or the object
+     * member's catch-all field, beside named properties. Any other type,
+     * and a union of some other making, is itself.
+     */
+    const memberCarrying = (bare: TypeRef, node: SchemaObject, keyword: string): TypeRef => {
+      if (bare.kind !== 'union' || !Array.isArray(node.type)) return bare;
+      const kinds = keyword === 'properties' ? ['model'] : keyword === 'items' ? ['array'] : ['map', 'model'];
+      for (const kind of kinds) {
+        const members = bare.variants.map(bareOf).filter((member) => member.kind === kind);
+        if (members.length === 1) return members[0]!;
+      }
+      return bare;
+    };
 
     let type: TypeRef = componentTypeRef(key!);
     for (const { keyword, name, node, next } of steps) {
-      const bare = bareOf(type);
+      const bare = memberCarrying(bareOf(type), node, keyword);
       switch (keyword) {
         case 'properties': {
           const model = bare.kind === 'model' ? this.modelsByName.get(bare.name) : undefined;
