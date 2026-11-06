@@ -1,4 +1,14 @@
-import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type {
+  Constraints,
+  EnumRef,
+  Extensions,
+  ExternalDocs,
+  Model,
+  ModelRef,
+  Field,
+  TypeRef,
+  UnionType,
+} from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -38,6 +48,7 @@ import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import {
+  carryDeferredMappingEntries,
   componentKeyOf,
   isPendingSchemaRef,
   markPendingSchemaRef,
@@ -1834,14 +1845,24 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
         valueType: cloneTypeRef(ref.valueType),
         ...(ref.keyType ? { keyType: cloneTypeRef(ref.keyType) } : {}),
       };
-    case 'union':
-      return {
+    case 'union': {
+      const copy: UnionType = {
         ...ref,
         variants: ref.variants.map(cloneTypeRef),
         ...(ref.discriminator
           ? { discriminator: { ...ref.discriminator, mapping: { ...ref.discriminator.mapping } } }
           : {}),
       };
+      // A mapping entry deferred to a pointer variant (#539) follows the
+      // variant's copy, so the copy's mapping is settled with its own variants.
+      if (ref.discriminator && copy.discriminator) {
+        carryDeferredMappingEntries(
+          { variants: ref.variants, mapping: ref.discriminator.mapping },
+          { variants: copy.variants, mapping: copy.discriminator.mapping },
+        );
+      }
+      return copy;
+    }
     case 'literal':
     case 'primitive':
       return { ...ref };

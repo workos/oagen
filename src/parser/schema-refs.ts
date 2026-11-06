@@ -16,33 +16,40 @@
  * document — a Response, Parameter or Request Body Object is no Schema
  * Object, and a pointer under `paths` is not followed — names nothing here.
  *
- * Tokens are unescaped as RFC 6901 §4 says, `~1` to `/` before `~0` to `~`,
- * so `#/components/schemas/a~1b` names the key `a/b` and
- * `#/components/schemas/Pet/properties/x~1y` the property `x/y`.
- * Percent-escapes are left as written: a schema `$ref` is a URI fragment
- * the bundler has already decoded, and no document spells a key with them.
+ * Tokens are decoded as the bundler decodes them when it checks that the
+ * `$ref` resolves (`unescapePointerFragment` from `@redocly/openapi-core`,
+ * which `pathItemRefTarget` reads a Path Item `$ref` with too): per token,
+ * the JSON Pointer escapes undone as RFC 6901 §4 says, `~1` to `/` before
+ * `~0` to `~`, then the percent-escapes a `$ref` carries as a URI fragment
+ * decoded (RFC 6901 §6). So `#/components/schemas/a~1b` names the key
+ * `a/b`, `#/components/schemas/Pet/properties/x~1y` the property `x/y`,
+ * `#/components/schemas/Pet%20Owner` the key `Pet Owner` and
+ * `#/components/schemas/Note/properties/due%20date` the property `due
+ * date`. The bundler keeps the `$ref` string as written, so the parser
+ * decodes it itself, and in the bundler's order, so every `$ref` the
+ * bundler resolved is followed to the same place here (a `%2F` decodes
+ * inside its token and never splits one).
  */
-import type { ModelRef } from '../ir/types.js';
+import { unescapePointerFragment } from '@redocly/openapi-core';
+import type { ModelRef, TypeRef } from '../ir/types.js';
 import type { SchemaObject } from './schemas.js';
 
 const SCHEMA_REF_PREFIX = '#/components/schemas/';
 
 /**
- * The reference tokens of a schema `$ref` into `components/schemas`, JSON
- * Pointer escapes undone: `['Pet']` for `#/components/schemas/Pet`, `['Pet',
- * 'properties', 'owner']` for a pointer into it. `undefined` for a `$ref`
- * that is not a string, that points anywhere else in the document, or that
- * ends at the map itself.
+ * The reference tokens of a schema `$ref` into `components/schemas`, each
+ * decoded as the bundler decodes it (`unescapePointerFragment`: the JSON
+ * Pointer escapes undone, `~1` first, so `~01` is `~1` and not `/`, then
+ * the percent-escapes): `['Pet']` for `#/components/schemas/Pet`, `['Pet',
+ * 'properties', 'owner']` for a pointer into it, `['Pet Owner']` for
+ * `#/components/schemas/Pet%20Owner`. `undefined` for a `$ref` that is not
+ * a string, that points anywhere else in the document, or that ends at the
+ * map itself.
  */
 export function schemaRefTokens(ref: unknown): string[] | undefined {
   if (typeof ref !== 'string' || !ref.startsWith(SCHEMA_REF_PREFIX)) return undefined;
   const rest = ref.slice(SCHEMA_REF_PREFIX.length);
-  return rest === '' ? undefined : rest.split('/').map(unescapePointerToken);
-}
-
-/** One reference token as written, its escapes undone (RFC 6901 §4): `~1` first, so `~01` is `~1` and not `/`. */
-function unescapePointerToken(token: string): string {
-  return token.replace(/~1/g, '/').replace(/~0/g, '~');
+  return rest === '' ? undefined : rest.split('/').map(unescapePointerFragment);
 }
 
 /**
@@ -192,4 +199,89 @@ export function markPendingSchemaRef(ref: ModelRef): void {
 /** Forget the mark once `ref` is settled into the type the pointer names. */
 export function settlePendingSchemaRef(ref: ModelRef): void {
   pendingSchemaRefs.delete(ref);
+}
+
+/**
+ * The entries of a discriminator `mapping` whose target is a pointer
+ * variant's schema, settled with that variant (#539 review). A mapping
+ * target that is a pointer deeper into a component never reaches the parser
+ * as written: the bundler hoists the schema it points at into a new
+ * component named by the pointer's last token (`#/components/schemas/Zoo/
+ * properties/dog` becomes a component `dog`, the same object `Zoo.dog` is)
+ * and rewrites the target to `#/components/schemas/dog`, while a variant
+ * written as that pointer is left as written. Read by key, the target would
+ * name the model built for the hoisted copy (`Dog`), a model outside the
+ * union, while the variant settles to the model `Zoo.dog` is built as
+ * (`ZooDog`). So a site that builds a discriminated union matches each
+ * explicit target's schema (`schemaRefTarget`) by identity against its
+ * variants' and, for a variant that is a pointer — unnamed until it is
+ * settled — records the entry here against the variant's own reference
+ * (`deferMappingEntry`); once `resolveSchemaPointers` has settled the
+ * variant, the entry is written as the model it names
+ * (`settleDeferredMappingEntries`). A copy of the union carries its
+ * entries with its copied variants (`carryDeferredMappingEntries`, from
+ * `cloneTypeRef`). Keyed by the mapping object, so a mapping the IR no
+ * longer holds is forgotten with it.
+ */
+interface DeferredMappingEntry {
+  /** The discriminator value whose entry is deferred. */
+  value: string;
+  /** The variant the entry names: the pointer's reference, or its nullable wrapper, as the union holds it. */
+  variant: TypeRef;
+}
+
+const deferredMappingEntries = new WeakMap<Record<string, string>, DeferredMappingEntry[]>();
+
+/** Record that `mapping`'s entry for `value` names `variant`, a pointer variant to be settled, and is to be written as the model it settles to. */
+export function deferMappingEntry(mapping: Record<string, string>, value: string, variant: TypeRef): void {
+  const entries = deferredMappingEntries.get(mapping) ?? [];
+  entries.push({ value, variant });
+  deferredMappingEntries.set(mapping, entries);
+}
+
+/**
+ * Carry the deferred entries of `from`'s mapping onto `to`'s, each against
+ * the copy of its variant at the same position — for `cloneTypeRef`, which
+ * copies a union's variants and mapping alike.
+ */
+export function carryDeferredMappingEntries(
+  from: { variants: readonly TypeRef[]; mapping: Record<string, string> },
+  to: { variants: readonly TypeRef[]; mapping: Record<string, string> },
+): void {
+  for (const { value, variant } of deferredMappingEntries.get(from.mapping) ?? []) {
+    const index = from.variants.indexOf(variant);
+    const copy = to.variants[index];
+    if (copy !== undefined) deferMappingEntry(to.mapping, value, copy);
+  }
+}
+
+/**
+ * Write every deferred entry of `mapping` whose variant has settled to a
+ * model — directly or under its nullable wrapper — as that model's name,
+ * and forget the entries. An entry whose variant settled to no model (a
+ * pointer to a string, or one that led nowhere) is left as the bundled
+ * document spells it: the hoisted component's name, which names no variant.
+ * Run once the variants are settled (`resolveSchemaPointers`).
+ */
+export function settleDeferredMappingEntries(mapping: Record<string, string> | undefined): void {
+  if (mapping === undefined) return;
+  const entries = deferredMappingEntries.get(mapping);
+  if (entries === undefined) return;
+  deferredMappingEntries.delete(mapping);
+  for (const { value, variant } of entries) {
+    const model = settledVariantModel(variant);
+    if (model !== undefined && Object.hasOwn(mapping, value)) mapping[value] = model.name;
+  }
+}
+
+/** The model `variant` names, directly or under its nullable wrapper, once settled; `undefined` while pending or for any other type. */
+function settledVariantModel(variant: TypeRef): ModelRef | undefined {
+  if (variant.kind === 'nullable') return settledVariantModel(variant.inner);
+  return variant.kind === 'model' && !isPendingSchemaRef(variant) ? variant : undefined;
+}
+
+/** Whether `variant`, directly or under its nullable wrapper, is a reference `resolveSchemaPointers` has yet to settle. */
+export function isPendingVariant(variant: TypeRef): boolean {
+  if (variant.kind === 'nullable') return isPendingVariant(variant.inner);
+  return variant.kind === 'model' && isPendingSchemaRef(variant);
 }

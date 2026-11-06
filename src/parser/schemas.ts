@@ -3,7 +3,14 @@ import { walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
-import { componentKeyOf, pendingSchemaRef, schemaRefTarget } from './schema-refs.js';
+import {
+  componentKeyOf,
+  deferMappingEntry,
+  isPendingVariant,
+  pendingSchemaRef,
+  schemaRefTarget,
+} from './schema-refs.js';
+import { pointerTypesAsUnknown } from './schema-pointers.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -3088,7 +3095,11 @@ function mapVariantToDiscriminatorEntry(
  * target with a leading `#/components/schemas/` stripped and otherwise as the
  * document spelled it (`cat_dto` stays `cat_dto`; a target in another section
  * stays whole) — unlike a named union's, whose targets are resolved to IR
- * model names (`namedUnionDiscriminator`). The one reader for every site
+ * model names (`namedUnionDiscriminator`) — except an entry whose target is
+ * a pointer variant's schema, which the bundler has rewritten to the
+ * component it hoisted that schema into and which is settled with the
+ * variant to the model it settles to (`deferPointerMappingEntries`; #539):
+ * the hoisted key (`dog`) names no variant, cleaned or not. The one reader for every site
  * that builds an inline union, a field or a response (`schemaToTypeRef`) and
  * a request body (`typePickedRequestBody`) alike, so the same union reads the
  * same wherever it is written and the differ can tell a key a new variant
@@ -3446,6 +3457,10 @@ function namedUnionEntry(
     if (raw.$ref) return schemaToTypeRef(raw);
     return schemaToTypeRef(raw, memberContexts.get(raw), name, memberProperties);
   });
+  // An explicit entry naming a pointer variant is settled with the variant (#539).
+  const written = schema.discriminator?.mapping;
+  if (discriminator && written)
+    deferPointerMappingEntries(written, plan.members, variants, discriminator.mapping, schemas);
 
   return { variants, compositionKind: plan.compositionKind, ...(discriminator ? { discriminator } : {}) };
 }
@@ -4245,14 +4260,27 @@ function isPrimitiveComponentRef(schema: SchemaObject): boolean {
  * the way makes it `nullable<unknown>`, not bare unknown; an `allOf` read as
  * the reference takes its `$ref` member's answer, one read as its lone
  * typing member that member's; an alias of an alias resolves in turn. So
- * for a `$ref`: whether it names a primitive component (by key, as
- * `schemaToTypeRef` resolves it; false outside an extraction) whose schema
- * answers so here. For any other schema: `typesAsUnknown`, then — for an
- * `allOf` that predicate leaves because the member it is read as is a
- * `$ref` (`readInlineAllOf`) — that member's answer here.
+ * for a `$ref` to a component: whether it names a primitive component (by
+ * key, as `schemaToTypeRef` resolves it; false outside an extraction) whose
+ * schema answers so here. For a `$ref` that names no component — a pointer
+ * deeper into one, or a `$ref` into another section (#539) — the site is
+ * settled once every model is built, to the type of the schema the pointer
+ * lands on where it stands, or to `unknown` when it leads nowhere; what it
+ * settles to is read ahead from the document (`pointerTypesAsUnknown`,
+ * false outside an extraction likewise), so a `200` body pointing at an
+ * untyped schema (`Pet/properties/anything`, `anything: {}`) loses to a
+ * typed `201` as the same schema written inline would, and never selects
+ * the operation's primary response only to settle to `unknown`. For any
+ * other schema: `typesAsUnknown`, then — for an `allOf` that predicate
+ * leaves because the member it is read as is a `$ref` (`readInlineAllOf`)
+ * — that member's answer here.
  */
 export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) {
+    if (componentKeyOf(schema.$ref) === undefined) {
+      const schemas = documentComponentSchemas();
+      return schemas !== undefined && pointerTypesAsUnknown(String(schema.$ref), schemas);
+    }
     const component = isPrimitiveComponentRef(schema) ? componentSchemaOf(schema.$ref) : undefined;
     return component !== undefined && referenceTypesAsUnknown(component);
   }
@@ -4291,8 +4319,11 @@ function isEnumAliasRef(schema: SchemaObject): boolean {
  *      `$ref` names, or a bare schema name, through `resolveSchemaName`, so
  *      `schemaNameTransform` applies, as it does to every mapping value
  *      `Model.discriminator` carries; `mappingTargetModelName`). An entry
- *      naming a schema outside the variant list, or no component (a pointer
- *      deeper into one; #539), is kept as written.
+ *      naming a schema outside the variant list is kept as written. An
+ *      entry whose target is a pointer variant's schema is settled with
+ *      the variant, to the model it settles to (`deferPointerMappingEntries`;
+ *      #539): the bundler hoists such a target into a component of its
+ *      own, so read by key it would name the hoisted copy.
  *   2. An explicit `discriminator:` without `mapping:` — each variant's const
  *      on the property paired with its model name (`unionConstMapping`); `{}`
  *      when any variant pins none or is unnamed, as it is inline.
@@ -4322,13 +4353,52 @@ function namedUnionDiscriminator(
  * `$ref` to a component by the component it names, a bare schema name
  * (`Cat`, which OpenAPI allows in place of the `$ref`) as that name, each
  * through `resolveSchemaName` so `schemaNameTransform` applies. A target
- * that names no component — a pointer deeper into one (#539), a `$ref` into
- * another section — is kept as written, as an entry naming a schema outside
- * the variant list is.
+ * that names no component — a `$ref` into another section, or a pointer
+ * deeper into a component written through `transformSpec` (#539; the
+ * bundler rewrites one in the document to the component it hoists the
+ * schema into, see `deferPointerMappingEntries`) — is kept as written, as
+ * an entry naming a schema outside the variant list is.
  */
 function mappingTargetModelName(target: string): string {
   const key = componentKeyOf(target) ?? (target.startsWith('#') || target.includes('/') ? undefined : target);
   return key === undefined ? target : resolveSchemaName(key);
+}
+
+/**
+ * Defer every entry of a union's explicit `mapping:` whose target is a
+ * pointer variant's schema to the variant's settle (`deferMappingEntry`;
+ * #539 review), for a named union and an inline one alike. A target that
+ * is a pointer deeper into a component (`#/components/schemas/Zoo/
+ * properties/dog`) never reaches the parser as written: the bundler hoists
+ * the schema it points at into a component of its own, named by the
+ * pointer's last token (`dog`, the very object `Zoo.dog` is), and rewrites
+ * the target to `#/components/schemas/dog`, while a variant written as the
+ * pointer stays as written and is settled later to the model `Zoo.dog` is
+ * built as (`ZooDog`). Read by key, the target names the model built for
+ * the hoisted copy (`Dog`), a model outside the union; so each target's
+ * schema (`schemaRefTarget`) is matched by identity against the members',
+ * and an entry whose schema is an unnamed member's — a pointer variant,
+ * pending until settled — is written as the model the variant settles to
+ * once it is (`settleDeferredMappingEntries`). `written` is the document's
+ * mapping, `mapping` the one the IR carries; `variants[i]` is built from
+ * `members[i]`.
+ */
+function deferPointerMappingEntries(
+  written: Record<string, unknown>,
+  members: readonly UnionMember[],
+  variants: readonly TypeRef[],
+  mapping: Record<string, string>,
+  schemas: Record<string, SchemaObject> | undefined,
+): void {
+  for (const [value, target] of Object.entries(written)) {
+    const schema = schemaRefTarget(target, schemas);
+    if (schema === undefined) continue;
+    const index = members.findIndex((member, position) => {
+      const variant = variants[position];
+      return member.name === null && member.resolved === schema && variant !== undefined && isPendingVariant(variant);
+    });
+    if (index >= 0) deferMappingEntry(mapping, value, variants[index]!);
+  }
 }
 
 /**
@@ -5606,6 +5676,14 @@ export function schemaToTypeRef(
             : schemaToTypeRef(typed, contextName, parentModelName),
         );
       }
+    }
+    // An explicit entry naming a pointer variant is settled with the variant
+    // (`deferPointerMappingEntries`; #539): its target reaches the parser
+    // as the component the bundler hoisted the pointed schema into, whose
+    // stripped key names no variant.
+    const written = schema.discriminator?.mapping;
+    if (resolvedDiscriminator && written) {
+      deferPointerMappingEntries(written, members, variants, resolvedDiscriminator.mapping, documentComponentSchemas());
     }
     const union: TypeRef = {
       kind: 'union',

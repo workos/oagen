@@ -21,6 +21,7 @@ describe('#539 schema $ref reading', () => {
     Owner: { type: 'object', properties: { email: { type: 'string' } } },
     'a/b': { type: 'integer' },
     'c~d': { type: 'number' },
+    'Pet Owner': { type: 'object', properties: { 'due date': { type: 'string' } } },
   };
 
   describe('schemaRefTokens', () => {
@@ -35,6 +36,21 @@ describe('#539 schema $ref reading', () => {
       expect(schemaRefTokens('#/components/schemas/c~0d/properties/x~1y')).toEqual(['c~d', 'properties', 'x/y']);
       // `~01` is `~1` once unescaped, never `/`.
       expect(schemaRefTokens('#/components/schemas/a~01b')).toEqual(['a~1b']);
+    });
+
+    it('decodes percent-escapes after the pointer escapes, per token, as the bundler does (RFC 6901 §6)', () => {
+      expect(schemaRefTokens('#/components/schemas/Pet%20Owner')).toEqual(['Pet Owner']);
+      expect(schemaRefTokens('#/components/schemas/Note/properties/due%20date')).toEqual([
+        'Note',
+        'properties',
+        'due date',
+      ]);
+      // A `%2F` decodes inside its token and never splits one; `~1` is undone first, so `%7E1` is `~1`, not `/`.
+      expect(schemaRefTokens('#/components/schemas/a%2Fb')).toEqual(['a/b']);
+      expect(schemaRefTokens('#/components/schemas/a%7E1b')).toEqual(['a~1b']);
+      // A sequence that is no percent-escape is kept as written.
+      expect(schemaRefTokens('#/components/schemas/100%25')).toEqual(['100%']);
+      expect(schemaRefTokens('#/components/schemas/100%')).toEqual(['100%']);
     });
 
     it('reads nothing off a $ref into another section, at the map itself, or that is no string', () => {
@@ -52,6 +68,7 @@ describe('#539 schema $ref reading', () => {
     it('names the component of an exact component ref, escapes undone', () => {
       expect(componentKeyOf('#/components/schemas/Pet')).toBe('Pet');
       expect(componentKeyOf('#/components/schemas/a~1b')).toBe('a/b');
+      expect(componentKeyOf('#/components/schemas/Pet%20Owner')).toBe('Pet Owner');
     });
 
     it('names no component for a pointer deeper into one or into another section', () => {
@@ -69,6 +86,10 @@ describe('#539 schema $ref reading', () => {
       expect(schemaRefTarget('#/components/schemas/Pet/properties/x~1y', schemas)).toBe(Pet.properties!['x/y']);
       expect(schemaRefTarget('#/components/schemas/a~1b', schemas)).toBe(schemas['a/b']);
       expect(schemaRefTarget('#/components/schemas/c~0d', schemas)).toBe(schemas['c~d']);
+      expect(schemaRefTarget('#/components/schemas/Pet%20Owner', schemas)).toBe(schemas['Pet Owner']);
+      expect(schemaRefTarget('#/components/schemas/Pet%20Owner/properties/due%20date', schemas)).toBe(
+        schemas['Pet Owner']!.properties!['due date'],
+      );
     });
 
     it('lands on a $ref schema without following it, and never passes through one', () => {

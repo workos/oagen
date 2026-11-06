@@ -3331,6 +3331,272 @@ describe('#539', () => {
       expect(fieldOf(spec, 'Kennel', 'pets')?.type).toEqual({ kind: 'array', items: model('Pet') });
       expect(warnings).toEqual([]);
     });
+
+    describe('review', () => {
+      const Made = { type: 'object', properties: { ok: { type: 'boolean' } } };
+
+      it('settles a pointer in a cookie parameter and in a secondary success body', async () => {
+        captureWarnings();
+        const spec = await parse(
+          { Pet, Made },
+          {
+            '/a/{id}': {
+              get: {
+                operationId: 'getA',
+                parameters: [idParam, { name: 'session', in: 'cookie', schema: ref('Pet/properties/id') }],
+                responses: {
+                  '200': { description: 'OK', content: { 'application/json': { schema: ref('Made') } } },
+                  '201': {
+                    description: 'Made',
+                    content: { 'application/json': { schema: ref('Pet/properties/owner') } },
+                  },
+                },
+              },
+            },
+          },
+          openapi,
+        );
+        const op = operation(spec, 'getA');
+        expect(op?.cookieParams?.map(({ name, type }) => ({ name, type }))).toEqual([
+          { name: 'session', type: string },
+        ]);
+        expect(op?.response).toEqual(model('Made'));
+        expect(op?.successResponses?.map(({ statusCode, type }) => ({ statusCode, type }))).toEqual([
+          { statusCode: 200, type: model('Made') },
+          { statusCode: 201, type: model('PetOwner') },
+        ]);
+        expect(modelNames(spec)).toEqual(['Made', 'Pet', 'PetOwner']);
+        expect(warnings).toEqual([]);
+      });
+
+      it('chooses the iterator’s item type from the settled response: a pointer to an array of strings yields strings', async () => {
+        captureWarnings();
+        const paged = (operationId: string, schema: unknown) => ({
+          get: {
+            operationId,
+            parameters: [{ name: 'cursor', in: 'query', schema: { type: 'string' } }],
+            responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+          },
+        });
+        const spec = await parse(
+          { Pet: { ...Pet, properties: { ...Pet.properties, tags: { type: 'array', items: { type: 'string' } } } } },
+          {
+            '/tags': paged('listTags', ref('Pet/properties/tags')),
+            '/owners': paged('listOwners', ref('Pet/properties/owner')),
+          },
+          openapi,
+        );
+        const tags = operation(spec, 'listTags');
+        expect(tags?.response).toEqual({ kind: 'array', items: string });
+        expect(tags?.pagination?.strategy).toBe('cursor');
+        expect(tags?.pagination?.itemType).toEqual(string);
+        // A pointer to an object yields the object, as a `$ref` to a component does.
+        const owners = operation(spec, 'listOwners');
+        expect(owners?.response).toEqual(model('PetOwner'));
+        expect(owners?.pagination?.itemType).toEqual(model('PetOwner'));
+        expect(warnings).toEqual([]);
+      });
+
+      it('picks the primary response knowing what a pointer settles to: an untyped 200 loses to a typed 201', async () => {
+        captureWarnings();
+        const twoCodes = (operationId: string, ok: unknown) => ({
+          get: {
+            operationId,
+            parameters: [idParam],
+            responses: {
+              '200': { description: 'OK', content: { 'application/json': { schema: ok } } },
+              '201': { description: 'Made', content: { 'application/json': { schema: ref('Made') } } },
+            },
+          },
+        });
+        const spec = await parse(
+          { Pet: { ...Pet, properties: { ...Pet.properties, anything: {} } }, Made },
+          {
+            '/a/{id}': twoCodes('getAnything', ref('Pet/properties/anything')),
+            '/b/{id}': twoCodes('getId', ref('Pet/properties/id')),
+            '/c/{id}': twoCodes('getNope', ref('Pet/properties/id/type')),
+          },
+          openapi,
+        );
+        const anything = operation(spec, 'getAnything');
+        expect(anything?.response).toEqual(model('Made'));
+        expect(anything?.responseStatusCode).toBe(201);
+        expect(anything?.successResponses?.map(({ statusCode, type }) => ({ statusCode, type }))).toEqual([
+          { statusCode: 200, type: unknown },
+          { statusCode: 201, type: model('Made') },
+        ]);
+        // A pointer to a typed schema is typed, so the 200 wins as a `$ref` to a typed component does.
+        const id = operation(spec, 'getId');
+        expect(id?.response).toEqual(string);
+        expect(id?.responseStatusCode).toBe(200);
+        // One that leads nowhere settles to unknown, so it loses too, reported once at its site.
+        const nope = operation(spec, 'getNope');
+        expect(nope?.response).toEqual(model('Made'));
+        expect(nope?.responseStatusCode).toBe(201);
+        expect(warnings).toEqual([
+          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pet/properties/id/type" in C.getNope.successResponses.200: no schema at that pointer — typing the site as unknown',
+        ]);
+      });
+
+      it('ends a chain of pointers that reaches itself through an array component’s items', async () => {
+        captureWarnings();
+        const spec = await parse({ Pet }, { '/a/{id}': getOp('getPet', ref('Pet')) }, openapi, {
+          // The bundler rejects a self-referencing pointer, so it is written after bundling.
+          transformSpec: (doc) => {
+            (doc.components as { schemas: Record<string, unknown> }).schemas.Loop = {
+              type: 'array',
+              items: ref('Loop/items'),
+            };
+            const paths = doc.paths as Record<string, unknown>;
+            paths['/loop/{id}'] = getOp('getLoop', ref('Loop'));
+            paths['/loop-item/{id}'] = getOp('getLoopItem', ref('Loop/items'));
+            return doc;
+          },
+        });
+        expect(responseOf(spec, 'getLoop')).toEqual({ kind: 'array', items: unknown });
+        expect(responseOf(spec, 'getLoopItem')).toEqual(unknown);
+        expect(modelNames(spec)).toEqual(['Pet', 'PetOwner']);
+        expect(warnings.sort()).toEqual(
+          [
+            '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Loop/items" in Loop.getLoop.response — typing the site as unknown',
+            '[oagen] Warning: Circular schema $ref chain starting at "#/components/schemas/Loop/items" in LoopItem.getLoopItem.response — typing the site as unknown',
+          ].sort(),
+        );
+      });
+
+      it('types a pointer to an allOf member as the member’s own type, and an inline member of a merge as unknown', async () => {
+        captureWarnings();
+        const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
+        const spec = await parse(
+          {
+            Owner: { type: 'object', required: ['email'], properties: { email: { type: 'string' } } },
+            Pet: { allOf: [ref('Owner'), nickname] },
+            Note: { type: 'object', properties: { author: { allOf: [ref('Owner'), nickname] } } },
+            Solo: {
+              allOf: [{ description: 'An annotation.' }, { type: 'object', properties: { only: { type: 'string' } } }],
+            },
+            Kind: { allOf: [{ type: 'string', enum: ['a', 'b'] }, { description: 'The kind.' }] },
+          },
+          {
+            '/a/{id}': getOp('getPetNickname', ref('Pet/allOf/1')),
+            '/b/{id}': getOp('getPetOwner', ref('Pet/allOf/0')),
+            '/c/{id}': getOp('getPetNicknameField', ref('Pet/allOf/1/properties/nickname')),
+            '/d/{id}': getOp('getNoteAuthorNickname', ref('Note/properties/author/allOf/1')),
+            '/e/{id}': getOp('getSoloMember', ref('Solo/allOf/1')),
+            '/f/{id}': getOp('getSoloAnnotation', ref('Solo/allOf/0')),
+            '/g/{id}': getOp('getKindMember', ref('Kind/allOf/0')),
+            '/h/{id}': getOp('getKind', ref('Kind')),
+          },
+          openapi,
+        );
+        // An inline member of a merge has no type of its own: never the merged model, which requires `Owner`'s `email`.
+        expect(responseOf(spec, 'getPetNickname')).toEqual(unknown);
+        expect(responseOf(spec, 'getNoteAuthorNickname')).toEqual(unknown);
+        // A `$ref` member is its reference; a pointer on through an inline member reads the merged model's field.
+        expect(responseOf(spec, 'getPetOwner')).toEqual(model('Owner'));
+        expect(responseOf(spec, 'getPetNicknameField')).toEqual(string);
+        // A member the merge reads as a property-declaring member is merged too; the one typing member beside
+        // annotating members is what the `allOf` is read as (#555), so the pointer is typed as the `allOf` is.
+        expect(responseOf(spec, 'getSoloMember')).toEqual(unknown);
+        expect(responseOf(spec, 'getSoloAnnotation')).toEqual(unknown);
+        expect(responseOf(spec, 'getKindMember')).toEqual(responseOf(spec, 'getKind'));
+        expect(responseOf(spec, 'getKindMember')).not.toEqual(unknown);
+        expect(modelNames(spec)).toEqual(['Note', 'NoteAuthor', 'Owner', 'Pet', 'Solo']);
+        const member = (pointer: string, site: string) =>
+          `[oagen] Warning: Unresolved schema $ref "#/components/schemas/${pointer}" in ${site}.response: "${pointer.slice(pointer.lastIndexOf('allOf/'))}" is an inline allOf member, which has no type of its own — typing the site as unknown`;
+        expect(warnings.sort()).toEqual(
+          [
+            member('Pet/allOf/1', 'A.getPetNickname'),
+            member('Note/properties/author/allOf/1', 'D.getNoteAuthorNickname'),
+            member('Solo/allOf/1', 'E.getSoloMember'),
+            member('Solo/allOf/0', 'F.getSoloAnnotation'),
+          ].sort(),
+        );
+      });
+
+      it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
+        captureWarnings();
+        const spec = await parse(
+          {
+            Note: { type: 'object', properties: { 'due date': { type: 'string' } } },
+            'Pet Owner': { type: 'object', properties: { name: { type: 'string' } } },
+          },
+          {
+            '/a/{id}': getOp('getNoteDueDate', { $ref: '#/components/schemas/Note/properties/due%20date' }),
+            '/b/{id}': getOp('getPetOwner', { $ref: '#/components/schemas/Pet%20Owner' }),
+          },
+          openapi,
+        );
+        expect(responseOf(spec, 'getNoteDueDate')).toEqual(string);
+        expect(responseOf(spec, 'getPetOwner')).toEqual(model('PetOwner'));
+        // No dangling `Pet20Owner`.
+        expect(modelNames(spec)).toEqual(['Note', 'PetOwner']);
+        expect(warnings).toEqual([]);
+      });
+
+      describe('a discriminator mapping target the bundler hoisted from a pointer variant', () => {
+        const kind = (value: string) => ({ type: 'string', enum: [value] });
+        const union = {
+          oneOf: [ref('Cat'), ref('Zoo/properties/dog')],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: { cat: '#/components/schemas/Cat', dog: '#/components/schemas/Zoo/properties/dog' },
+          },
+        };
+        const schemas = {
+          Cat: { type: 'object', required: ['kind'], properties: { kind: kind('cat') } },
+          Zoo: {
+            type: 'object',
+            properties: { dog: { type: 'object', required: ['kind'], properties: { kind: kind('dog') } } },
+          },
+          Pet: union,
+          Home: { type: 'object', properties: { pet: union } },
+        };
+        const expectedUnion = (dog: string) => ({
+          kind: 'union',
+          variants: [model('Cat'), model(dog)],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping: { cat: 'Cat', dog } },
+        });
+
+        it('is settled with the variant, to the model the variant is settled to, as a component and inline', async () => {
+          captureWarnings();
+          const spec = await parse(schemas, { '/pets/{id}': getOp('getPet', ref('Pet')) }, openapi);
+          const pet = spec.models.find((m) => m.name === 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ZooDog')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog' } });
+          expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog'));
+          // The bundler keeps the hoisted copy as a component `dog`, so a model `Dog` is built for it; nothing references it.
+          expect(modelNames(spec)).toEqual(['Cat', 'Dog', 'Home', 'Pet', 'Zoo', 'ZooDog']);
+          expect(warnings).toEqual([]);
+        });
+
+        it('follows a rename of the variant’s model after the settle', async () => {
+          captureWarnings();
+          const spec = await parse(
+            schemas,
+            {
+              '/pets/{id}': getOp('getPet', ref('Pet')),
+              // A `dog` query enum of the `zoo` service takes the name `ZooDog`, so `Zoo.dog`'s model steps to `ZooDog2`.
+              '/zoo': {
+                get: {
+                  operationId: 'listZoo',
+                  parameters: [{ name: 'dog', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } }],
+                  responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Zoo') } } } },
+                },
+              },
+            },
+            openapi,
+          );
+          expect(spec.enums.map((e) => e.name)).toContain('ZooDog');
+          expect(fieldOf(spec, 'Zoo', 'dog')?.type).toEqual(model('ZooDog2'));
+          const pet = spec.models.find((m) => m.name === 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ZooDog2')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog2' } });
+          expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog2'));
+        });
+      });
+    });
   });
 
   it('names a named union’s pointer variant by nothing: no implicit discriminator is derived from it', async () => {

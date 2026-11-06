@@ -997,7 +997,9 @@ export interface UnionType {
    * reading of the variants (#568): the spec's own `discriminator.mapping`,
    * each target as the document spelled it with a leading
    * `#/components/schemas/` stripped — an inline union's values are not IR
-   * model names, unlike a named union's; else, under the keyword, each
+   * model names, unlike a named union's — except an entry whose target is a
+   * pointer variant's schema, settled with the variant to the model's IR
+   * name as a named union's is (#539); else, under the keyword, each
    * variant's const on the property paired with the model it is referenced
    * by, `{}` when any variant pins none or is unnamed; else, for a `oneOf`
    * without the keyword, the first property the first variant pins whose
