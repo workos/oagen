@@ -85,9 +85,9 @@ interface PendingCallback {
   ownerStem: string | undefined;
   /** How many callbacks sit between the declaring operation or webhook and this one. */
   depth: number;
-  /** The `Callback` built for this entry, once its level is built. */
+  /** The `Callback` built for this entry, once its round is built (see `extractCallbacks`). */
   node?: Callback;
-  /** The stem the models were named from, once built. */
+  /** The stem the models were named from, once its round is built. */
   stem?: string;
 }
 
@@ -113,7 +113,11 @@ interface PendingCallback {
  * with the key-named entries at depth 0. Each later round takes the
  * key-named entries whose owner the rounds before built, since their stems
  * are prefixed with the owner's settled stem; every round reserves every
- * name the rounds before minted. Once every entry is built, the nodes are
+ * name the rounds before minted. A key-named callback such a shared
+ * operation declares itself (`noteRead` under `NoteAdded`) is reached from
+ * every site under one stem and one operation object, so its entries form
+ * one group too (`groupEntries`) and mint once (`OnNoteAddedNoteReadPayload`),
+ * however many sites reach it. Once every entry is built, the nodes are
  * attached to their owners in document order — `callbacks` key order,
  * expression order within each Callback Object, then the path item's
  * method order.

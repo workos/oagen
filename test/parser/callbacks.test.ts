@@ -397,27 +397,124 @@ describe('#382', () => {
         },
       );
 
+      describe("a key-named callback inside a shared callback operation (Michael's finding 1)", () => {
+        // `NoteAdded` (`operationId: onNoteAdded`) declares its own `noteRead`
+        // (no operationId, payload `{ read: boolean }`); `createNote`
+        // references `NoteAdded`, then `updateNote` too.
+        const noteAddedItem = {
+          post: {
+            operationId: 'onNoteAdded',
+            requestBody: {
+              content: {
+                'application/json': { schema: { type: 'object', properties: { noteId: { type: 'string' } } } },
+              },
+            },
+            responses: { '200': { description: 'OK' } },
+            callbacks: {
+              noteRead: {
+                '{$request.body#/readUrl}': {
+                  post: {
+                    requestBody: {
+                      content: {
+                        'application/json': { schema: { type: 'object', properties: { read: { type: 'boolean' } } } },
+                      },
+                    },
+                    responses: { '200': { description: 'OK' } },
+                  },
+                },
+              },
+            },
+          },
+        };
+        const reference = { noteAdded: { $ref: '#/components/callbacks/NoteAdded' } };
+        const createNote = { post: opWith(reference, 'createNote') };
+        const updateNote = { post: opWith(reference, 'updateNote') };
+        const components = { callbacks: { NoteAdded: { '{$request.body#/callbackUrl}': noteAddedItem } } };
+        const expectShared = (spec: ApiSpec, sites: number) => {
+          // One minting for `NoteAdded` and one for its `noteRead`, however many sites.
+          expect(modelNames(spec).sort()).toEqual(['OnNoteAddedNoteReadPayload', 'OnNoteAddedPayload']);
+          for (const op of operations(spec)) {
+            expect(payloadNames(op)).toEqual(['OnNoteAddedPayload', 'OnNoteAddedNoteReadPayload']);
+          }
+          expect(operations(spec)).toHaveLength(sites);
+          expectResolved(spec);
+          expect(warnings()).toEqual([]);
+        };
+
+        it.each([
+          { order: 'createNote first', paths: { '/notes': createNote, '/notes/update': updateNote } },
+          { order: 'updateNote first', paths: { '/notes/update': updateNote, '/notes': createNote } },
+        ])('mints the nested callback once for both operations, $order', async ({ paths }) => {
+          expectShared(await parseJson(documentWith(openapi, { '/notes': createNote }, { components })), 1);
+          expectShared(await parseJson(documentWith(openapi, paths, { components })), 2);
+        });
+
+        it('mints the nested callback once for two webhooks keys sharing the path item', async () => {
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              {},
+              {
+                webhooks: {
+                  a: { $ref: '#/components/pathItems/NoteAdded' },
+                  b: { $ref: '#/components/pathItems/NoteAdded' },
+                },
+                components: { pathItems: { NoteAdded: noteAddedItem } },
+              },
+            ),
+          );
+
+          expect(modelNames(spec).sort()).toEqual(['OnNoteAddedNoteReadPayload', 'OnNoteAddedPayload']);
+          expect(spec.webhooks!.map((webhook) => payloadNames(webhook))).toEqual([
+            ['OnNoteAddedNoteReadPayload'],
+            ['OnNoteAddedNoteReadPayload'],
+          ]);
+          // Two sites, two nodes, one model.
+          expect(spec.webhooks![0]!.callbacks![0]).not.toBe(spec.webhooks![1]!.callbacks![0]);
+          expectResolved(spec);
+          expect(warnings()).toEqual([]);
+        });
+      });
+
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {
         // `createPet` and `create_pet` both name their models from `CreatePet`;
         // each declares `petAdopted` under the same expression.
-        const owners = (second: Record<string, unknown>) =>
+        // Michael's documents: `POST /pets` and `POST /pet-drafts`, payloads
+        // `{ petId: string }` and `{ draftId: integer }`.
+        const owners = (second: Record<string, unknown>, otherId = 'create_pet') =>
           documentWith(openapi, {
             '/pets': { post: opWith({ petAdopted: callbackPosting(petIdSchema) }, 'createPet') },
-            '/animals': { post: opWith({ petAdopted: callbackPosting(second) }, 'create_pet') },
+            '/pet-drafts': { post: opWith({ petAdopted: callbackPosting(second) }, otherId) },
           });
+        const draft = { type: 'object', properties: { draftId: { type: 'integer' } } };
 
-        const differing = await parseJson(owners({ type: 'object', properties: { petId: { type: 'integer' } } }));
+        const differing = await parseJson(owners(draft));
         const [first, second] = operations(differing).map((op) => payloadNames(op)[0]!);
         // Both plain stems are `CreatePetPetAdopted`, so both are hashed —
         // from each callback's site label, never alike — and each callback
         // references its own model with its own field type.
         expect(first).not.toBe(second);
         for (const name of [first, second]) expect(name).toMatch(/^CreatePetPetAdopted[0-9A-Fa-f]{6}Payload$/);
-        const typeOf = (name: string) => differing.models.find((m) => m.name === name)!.fields[0]!.type;
-        expect(typeOf(first)).toMatchObject({ kind: 'primitive', type: 'string' });
-        expect(typeOf(second)).toMatchObject({ kind: 'primitive', type: 'integer' });
+        const fieldOf = (spec: ApiSpec, name: string) => spec.models.find((m) => m.name === name)!.fields[0]!;
+        expect(fieldOf(differing, first)).toMatchObject({ name: 'petId', type: { kind: 'primitive', type: 'string' } });
+        expect(fieldOf(differing, second)).toMatchObject({
+          name: 'draftId',
+          type: { kind: 'primitive', type: 'integer' },
+        });
         expect(modelNames(differing).sort()).toEqual([first, second].sort());
         expectResolved(differing);
+        // No "more than one definition" warning: nothing was merged away.
+        expect(warnings()).toEqual([]);
+
+        // `CreatePet` instead of `create_pet` cleans to the same stem and parts the same way.
+        const cased = await parseJson(owners(draft, 'CreatePet'));
+        const casedNames = operations(cased).map((op) => payloadNames(op)[0]!);
+        expect(casedNames[0]).toBe(first);
+        expect(casedNames[1]).not.toBe(first);
+        expect(fieldOf(cased, casedNames[1]!)).toMatchObject({
+          name: 'draftId',
+          type: { kind: 'primitive', type: 'integer' },
+        });
         expect(warnings()).toEqual([]);
 
         // Identical payloads part the same way: neither owner is more

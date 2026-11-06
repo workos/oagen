@@ -701,8 +701,15 @@ function stemIdentity(entry: WebhookEntry): string {
  * Entries that mint together. Those resolving to one operation object and
  * named from its operationId share a group: `owner` is the first of them in
  * document order, and its parameters and body stand for the group's, since
- * every member read the same path item. Every other entry is a group of its
- * own.
+ * every member read the same path item. So do key-named callback entries
+ * that read one operation object under one plain stem — the sites of one
+ * shared callback operation's own callbacks (`noteRead` declared by a
+ * `components/callbacks` entry two operations reference, or by a path item
+ * two `webhooks` keys share), which every site reaches under the owner's
+ * one stem — so a callback inside a shared minting mints once with it,
+ * however many sites reach it (#382). Every other entry is a group of its
+ * own: two keys reading one path item without an operationId keep their
+ * key-derived stems, and two owners' inline callbacks are two objects.
  */
 interface WebhookGroup {
   owner: WebhookEntry;
@@ -713,13 +720,28 @@ function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupO
   const groups: WebhookGroup[] = [];
   const groupOf = new Map<WebhookEntry, WebhookGroup>();
   const byOperation = new Map<OperationObject, WebhookGroup>();
+  // A key-named callback's groups, by the operation object read and the
+  // plain stem it is read under (the owner's stem, key, expression and
+  // method; `plainStem`): the sites of one shared callback operation's own
+  // callbacks read one object under one stem and mint once (#382).
+  const byOwnedOperation = new Map<OperationObject, Map<string, WebhookGroup>>();
   for (const entry of entries) {
     const shared = entry.stemOperationId !== undefined;
-    let group = shared ? byOperation.get(entry.op) : undefined;
+    const ownedStem = !shared && entry.kind === 'callback' ? plainStem(entry, '') : undefined;
+    let group = shared
+      ? byOperation.get(entry.op)
+      : ownedStem !== undefined
+        ? byOwnedOperation.get(entry.op)?.get(ownedStem)
+        : undefined;
     if (!group) {
       group = { owner: entry, entries: [] };
       groups.push(group);
       if (shared) byOperation.set(entry.op, group);
+      if (ownedStem !== undefined) {
+        const byStem = byOwnedOperation.get(entry.op) ?? new Map<string, WebhookGroup>();
+        byStem.set(ownedStem, group);
+        byOwnedOperation.set(entry.op, byStem);
+      }
     }
     group.entries.push(entry);
     groupOf.set(entry, group);

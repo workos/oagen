@@ -765,5 +765,136 @@ describe('#382', () => {
         expect(removed.changes.map((c) => [c.kind, c.classification])).toEqual([['callback-removed', 'breaking']]);
       },
     );
+
+    it.each([
+      { order: 'createNote first', reversed: false },
+      { order: 'updateNote first', reversed: true },
+    ])(
+      "reports only the callback added when a second operation references a shared callback that declares its own, $order (Michael's finding 1)",
+      async ({ reversed }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ok = { '200': { description: 'OK' } };
+        const reference = { noteAdded: { $ref: '#/components/callbacks/NoteAdded' } };
+        const createNote = { post: { operationId: 'createNote', responses: ok, callbacks: reference } };
+        // `updateNote` exists on both sides; only its reference to `NoteAdded` is added.
+        const bareUpdateNote = { post: { operationId: 'updateNote', responses: ok } };
+        const updateNote = { post: { ...bareUpdateNote.post, callbacks: reference } };
+        const document = (paths: Record<string, unknown>) => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths,
+          components: {
+            callbacks: {
+              NoteAdded: {
+                '{$request.body#/callbackUrl}': {
+                  post: {
+                    operationId: 'onNoteAdded',
+                    ...posting({}, { type: 'object', properties: { noteId: { type: 'string' } } })[
+                      '{$request.body#/callbackUrl}'
+                    ].post,
+                    callbacks: {
+                      noteRead: {
+                        '{$request.body#/readUrl}': posting(
+                          {},
+                          { type: 'object', properties: { read: { type: 'boolean' } } },
+                        )['{$request.body#/callbackUrl}'],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+        const paths = (update: unknown) =>
+          reversed
+            ? { '/notes/update': update, '/notes': createNote }
+            : { '/notes': createNote, '/notes/update': update };
+        const one = await parseDocument(document(paths(bareUpdateNote)));
+        const two = await parseDocument(document(paths(updateNote)));
+        expect(one.models.map((m) => m.name).sort()).toEqual(['OnNoteAddedNoteReadPayload', 'OnNoteAddedPayload']);
+        expect(two.models.map((m) => m.name).sort()).toEqual(['OnNoteAddedNoteReadPayload', 'OnNoteAddedPayload']);
+
+        // The untouched `createNote` reports nothing; `updateNote`'s reference
+        // is the one additive `callback-added` (its nested `noteRead` comes
+        // with it and reports nothing of its own): exit 1.
+        const added = diffSpecs(one, two);
+        expect(added.changes).toEqual([
+          {
+            kind: 'callback-added',
+            name: 'noteAdded',
+            expression: '{$request.body#/callbackUrl}',
+            httpMethod: 'post',
+            serviceName: 'Notes',
+            operationName: 'updateNote',
+            classification: 'additive',
+          },
+        ]);
+        expect(added.summary).toMatchObject({ added: 1, modified: 0, removed: 0, breaking: 0, additive: 1 });
+      },
+    );
+
+    it("reports a callback payload field made required as breaking and made optional as additive, as a webhook's (Michael's finding 4)", async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const payload = (required: boolean) => ({
+        type: 'object',
+        properties: { petId: { type: 'string' } },
+        ...(required ? { required: ['petId'] } : {}),
+      });
+      const optional = await parseDocument(document({ petAdopted: posting({}, payload(false)) }));
+      const required = await parseDocument(document({ petAdopted: posting({}, payload(true)) }));
+
+      // `field-required-changed` is direction-blind on purpose: a received
+      // payload's field made required is still breaking, exit 2.
+      const tightened = diffSpecs(optional, required);
+      expect(tightened.changes).toEqual([
+        {
+          kind: 'model-modified',
+          name: 'CreatePetPetAdoptedPayload',
+          fieldChanges: [
+            {
+              kind: 'field-required-changed',
+              fieldName: 'petId',
+              classification: 'breaking',
+              details: 'optional → required',
+            },
+          ],
+          deprecatedChanged: false,
+          classification: 'breaking',
+        },
+      ]);
+      expect(tightened.summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+      // Made optional: additive, exit 1.
+      const relaxed = diffSpecs(required, optional);
+      expect(relaxed.changes[0]).toMatchObject({
+        kind: 'model-modified',
+        fieldChanges: [{ kind: 'field-required-changed', fieldName: 'petId', classification: 'additive' }],
+        classification: 'additive',
+      });
+      expect(relaxed.summary).toMatchObject({ modified: 1, breaking: 0, additive: 1 });
+
+      // A webhook's payload is judged the same way.
+      const hook = (schema: unknown) =>
+        parseDocument({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {},
+          webhooks: {
+            petReturned: {
+              post: {
+                requestBody: { content: { 'application/json': { schema } } },
+                responses: { '200': { description: 'OK' } },
+              },
+            },
+          },
+        });
+      const hookTightened = diffSpecs(await hook(payload(false)), await hook(payload(true)));
+      expect(hookTightened.changes[0]).toMatchObject({
+        kind: 'model-modified',
+        name: 'PetReturnedPayload',
+        fieldChanges: [{ kind: 'field-required-changed', classification: 'breaking' }],
+        classification: 'breaking',
+      });
+    });
   });
 });
