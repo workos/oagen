@@ -196,8 +196,12 @@ function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
  * Every type an operation holds, as `validateModelRefs` reads them and
  * `collectOperationTypeRefs` lists them: every parameter location, the
  * cookies' included, the bodies, the primary response and every other
- * success entry's own type, the iterator's, the errors', the headers' and
- * every secondary media type's.
+ * success entry's own type, the iterator's, the errors', the headers',
+ * every secondary media type's, and the members of its mutually-exclusive
+ * parameter groups — a query group's are the operation's own parameters,
+ * settled with them; a body group's are built afresh from the body's
+ * variant schemas (`extractBodyParameterGroups`), so a member written as a
+ * pointer holds a pending reference of its own.
  */
 function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, context: string) => void): void {
   for (const p of [
@@ -228,6 +232,12 @@ function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, co
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
   for (const { type, source } of collectRequestBodyTypes(op)) visit(type, `${context}.${source}`);
+  for (const group of op.parameterGroups ?? []) {
+    for (const variant of group.variants) {
+      for (const p of variant.parameters)
+        visit(p.type, `${context}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
+    }
+  }
 }
 
 /** The keywords a pointer steps through with a name or index after them; every other keyword the walk reads holds one schema. */
