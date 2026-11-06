@@ -58,6 +58,7 @@ import {
   componentReference,
   constraintsEntry,
   deprecatedEntry,
+  enumComponentDeclaration,
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineMappingTargets,
@@ -3759,7 +3760,12 @@ export function extractParams(
       // Object for the examples it may carry. Every read below goes through
       // `schema`, so a parameter declared either way is typed by one rule.
       const { schema, media, contentType, contentTypes } = parameterTyping(p);
-      const refTarget = resolveComponentSchemaRef(schema, componentSchemas);
+      // The one component a bare `$ref` names; an enum component on the
+      // schema it declares its members on (`enumComponentDeclaration`), so
+      // `Kind: { allOf: [{ type: 'string', enum }], description, deprecated
+      // }` is read as the plain spelling is.
+      const target = resolveComponentSchemaRef(schema, componentSchemas);
+      const refTarget = target && (enumComponentDeclaration(target) ?? target);
       // A `$ref` to an array or primitive component, or to an alias of an
       // enum component (#560), bare or under a wrapper the type builder
       // reads through, is read as a field reads one (`componentReference`,

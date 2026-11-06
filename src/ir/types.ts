@@ -1262,7 +1262,12 @@ export interface Enum {
   name: string;
   /**
    * The enum schema's own `description`: a component enum's, as
-   * `Model.description` is a component model's, or — for an enum lifted
+   * `Model.description` is a component model's — the wrapper layer's over
+   * the member's when the component declares its members inside an
+   * `allOf` read as its one typing member (`Kind: { allOf: [{ type:
+   * 'string', enum }], description }`), as its link, `deprecated`,
+   * `default` and keys are read (`enumComponentDeclaration`) — or — for an
+   * enum lifted
    * from an inline schema on a property, parameter, response header,
    * request or response body (primary, secondary-media-type, error or
    * fallback) or webhook parameter or payload, including array items,

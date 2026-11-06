@@ -187,8 +187,12 @@ let activePrimitiveComponentKeys: ReadonlySet<string> = new Set();
  * reason an array component is keyed so. Such an entry becomes no `Model`
  * and no `Enum` of its own: a `$ref` to it resolves to the enum it names,
  * read through the alias as the same schema written inline is
- * (`schemaToTypeRef`; #560). Decided in `extractSchemas` before any TypeRef
- * is built and dropped with the other per-document state.
+ * (`schemaToTypeRef`; #560). A component that declares its enum inside the
+ * `allOf` itself (`Kind: { allOf: [{ type: 'string', enum }], description
+ * }`) names no enum component and is none: it is the enum `Kind`
+ * (`isEnumComponentSchema`; #588 review). Decided in `extractSchemas`
+ * before any TypeRef is built and dropped with the other per-document
+ * state.
  */
 let activeEnumAliasKeys: ReadonlySet<string> = new Set();
 
@@ -253,14 +257,69 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
  * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
  * schema (`constUnionEnumMembers`) with no `allOf` and no `properties` of
  * its own — the OAS 3.1 spelling that documents and deprecates values one
- * by one. Both become an `Enum` (`extractEnum`), and a `$ref` to either
- * resolves to an `EnumRef`; the same `oneOf` written inline collapses to an
- * inline enum (`schemaToTypeRef`), so the two spellings have one shape
- * wherever they appear. A `oneOf` with any other variant — a `$ref`, an
- * object, a number const — is a named union, as before.
+ * by one — or it declares either inside an `allOf` the type builder reads
+ * as its one typing member (`enumComponentDeclaration`: `Kind: { allOf: [{
+ * type: 'string', enum: ['cat', 'dog'] }], description }`, a lone member or
+ * one beside members that only annotate or limit it, however nested). All
+ * become an `Enum` (`extractEnum`), and a `$ref` to any resolves to an
+ * `EnumRef`; the same schemas written inline collapse to an inline enum
+ * (`schemaToTypeRef`), so the spellings have one shape wherever they
+ * appear. A `oneOf` with any other variant — a `$ref`, an object, a number
+ * const — is a named union, as before. The `allOf` spelling names no enum
+ * component, so it is no alias of one (`isEnumComponentEntry`; #588
+ * review: it was read as an alias, and its enum lifted as `UnknownEnum`).
  */
 function isEnumComponentSchema(schema: SchemaObject): boolean {
-  return Boolean(schema.enum) || isConstUnionEnumSchema(schema);
+  return enumComponentDeclaration(schema) !== undefined;
+}
+
+/**
+ * The schema an enum component declares its members on, read as the
+ * component's own, or `undefined` for a component that is no enum
+ * (`isEnumComponentSchema`): the component itself when it declares an
+ * `enum:` list or is a `oneOf`/`anyOf` of string consts
+ * (`isConstUnionEnumSchema`), or — for a component written as an `allOf`
+ * that `readInlineAllOf` reads as its one typing member (`'unwrapped'`: a
+ * lone member, or one beside members that declare no type and only
+ * annotate or limit it, #555) — that member read as the schema itself
+ * (`unwrappedAllOfMember`), in turn, with the wrapper layer's own
+ * declarations on it by the one wrapper rule a field written so follows:
+ * its `description`, `externalDocs`, `example`, `examples` and `x-*` keys
+ * over the member's (`withWrapperDocs`, the wrapper's own winning, then
+ * the first annotating member's, the member's standing where the layer has
+ * none), its `deprecated` in place of the member's
+ * (`withWrapperDeprecation`), its `default` the same way, and its limits
+ * conjoined with the member's (`extractConstraints`). So `Kind: { allOf:
+ * [{ type: 'string', enum: ['cat', 'dog'] }], description: 'The kind of
+ * pet.' }` is read as `Kind: { type: 'string', enum: ['cat', 'dog'],
+ * description: 'The kind of pet.' }` is — the enum `Kind`, its text, flag
+ * and default on the `Enum`, its limits read by a parameter that names it
+ * — and the member's own nullability (a `null` member, a type list naming
+ * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, while
+ * `nullable: true` beside the `allOf` declares nothing, as beside any
+ * schema without a `type`. A component with `properties` beside the
+ * `allOf` is a model, as it is everywhere. Read wherever an enum component
+ * is read as a whole: `extractEnum`, the nullability pass of
+ * `extractSchemas`, and what a bare `$ref` to it hands a field or
+ * parameter (`buildFieldFromSchema`, `extractParams`, through an alias
+ * `componentReference`). #588 review: such a component was an alias of
+ * nothing — `componentEntries` read the lone member as the entry's own
+ * declaration, `isEnumComponentEntry` accepted it, and `schemaToTypeRef`
+ * lifted the inline enum under no name as `UnknownEnum`, the wrapper's
+ * `deprecated` and limits lost; before #560 it was an empty model.
+ */
+export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
+  if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return schema;
+  if (!schema.allOf || Object.keys(schema.properties ?? {}).length > 0) return undefined;
+  if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {
+    return undefined;
+  }
+  const declaration = enumComponentDeclaration(unwrappedAllOfMember(schema));
+  if (declaration === undefined) return undefined;
+  // The wrapper layer's `default` — the wrapper's own, then the first
+  // annotating member's — over the member's, as its text is.
+  const layer = [schema, ...annotatingAllOfMembers(schema)].find((level) => level.default !== undefined);
+  return layer === undefined ? declaration : { ...declaration, default: layer.default };
 }
 
 /** The `oneOf`/`anyOf`-of-string-consts half of `isEnumComponentSchema`. */
@@ -1173,9 +1232,14 @@ export function extractSchemas(
   );
   for (const [name, schema] of Object.entries(schemas)) {
     const resolved = resolveSchemaName(name);
-    if (isEnumComponentSchema(schema)) {
+    // An enum component is read on the schema it declares its members on
+    // (`enumComponentDeclaration`): through an `allOf` wrapper, the
+    // member's own nullability is the enum's, and the wrapper's OAS 3.0
+    // `nullable: true` declares nothing.
+    const declaration = enumComponentDeclaration(schema);
+    if (declaration) {
       activeEnumSchemaNames.add(resolved);
-      if (isNullableEnumSchema(schema)) activeNullableEnumSchemaNames.add(resolved);
+      if (isNullableEnumSchema(declaration)) activeNullableEnumSchemaNames.add(resolved);
     } else if (
       isNamedUnionSchema(schema) &&
       isNullableUnionSchema(schema) &&
@@ -2816,7 +2880,7 @@ export interface ComponentReference {
   own: SchemaObject[];
   /** The levels of every entry the reference passes on its way to the array or primitive, nearest first (`componentEntries`, each entry with its annotating `allOf` members, `aliasEntryLevels`); for an alias of an enum, the aliases' alone. */
   entries: SchemaObject[];
-  /** The enum component an alias chain ends at (#560), read for its `example`/`examples` as a bare `$ref` to it is, and by a parameter for the fallbacks it reads from any component a bare `$ref` names; absent for an array or primitive component, whose own declarations are among `entries`. */
+  /** The enum component an alias chain ends at (#560), on the schema it declares its members on (`enumComponentDeclaration`), read for its `example`/`examples` as a bare `$ref` to it is, and by a parameter for the fallbacks it reads from any component a bare `$ref` names; absent for an array or primitive component, whose own declarations are among `entries`. */
   enumComponent?: SchemaObject;
   /** Whether the schema is the bare `$ref`, which reads the entries' documentation as well as their limits. */
   bare: boolean;
@@ -2839,7 +2903,10 @@ export function componentReference(
   const target = declares && resolveComponentSchemaRef(reference, componentSchemas);
   if (!declares || !target) return undefined;
   const entries = componentEntries(target, componentSchemas, declares) ?? [target];
-  const enumComponent = declares === isEnumComponentSchema ? entries[entries.length - 1] : undefined;
+  // The enum an alias chain ends at, read on the schema it declares its
+  // members on (`enumComponentDeclaration`), as a bare `$ref` to it reads it.
+  const last = entries[entries.length - 1];
+  const enumComponent = declares === isEnumComponentSchema ? (enumComponentDeclaration(last) ?? last) : undefined;
   return {
     own: wrapped.levels,
     entries: (enumComponent ? entries.slice(0, -1) : entries).flatMap(aliasEntryLevels),
@@ -2872,9 +2939,12 @@ export function buildFieldFromSchema(
   // entry's limits, and a bare `$ref`'s documentation too. A `$ref` to a
   // model, named union or enum leaves all of it on that node but the
   // `example` and `examples` a field takes from any component a bare `$ref`
-  // names — the enum an alias resolves to included (#560).
+  // names — the enum an alias resolves to included (#560). An enum
+  // component is read on the schema it declares its members on
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
   const reference = componentReference(fieldSchema, componentSchemas);
-  const refTarget = reference ? reference.enumComponent : resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
+  const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
   // The field's own levels: its schema and, under it, each `allOf` member
@@ -3198,15 +3268,22 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
 }
 
 function extractEnum(name: string, schema: SchemaObject): Enum {
+  // The schema the component declares its members on: itself, or — for a
+  // component written as an `allOf` read as its one typing member — that
+  // member with the wrapper layer's text, link, flag, default, examples
+  // and keys on it (`enumComponentDeclaration`), so `{ allOf: [{ type:
+  // 'string', enum }], description }` is read as `{ type: 'string', enum,
+  // description }` is.
+  const declaration = enumComponentDeclaration(schema) ?? schema;
   // The members of either spelling (`enumMembersOf`), each with its own
   // `description` and `deprecated`. A `null` member or `type: 'null'`
   // variant marks the schema as nullable (OAS 3.1); it is not a value.
   // Nullability is carried on the `$ref` side via
   // `activeNullableEnumSchemaNames`, so it is dropped here instead of
   // emitting a bogus `NULL = "null"` member.
-  const values: EnumValue[] = (enumMembersOf(schema) ?? []).map(toEnumValue);
+  const values: EnumValue[] = (enumMembersOf(declaration) ?? []).map(toEnumValue);
 
-  const rawDefault = schema.default;
+  const rawDefault = declaration.default;
   const def =
     rawDefault !== undefined && values.some((v) => v.value === rawDefault)
       ? (rawDefault as string | number)
@@ -3217,12 +3294,12 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
   // (`collectInlineEnumFromRef`). Present only when it has content.
   return {
     name,
-    ...descriptionEntry(schema.description),
+    ...descriptionEntry(declaration.description),
     values,
     default: def,
-    ...externalDocsEntry(schema.externalDocs),
-    ...deprecatedEntry(schema),
-    ...schemaExtensionsEntry(schema),
+    ...externalDocsEntry(declaration.externalDocs),
+    ...deprecatedEntry(declaration),
+    ...schemaExtensionsEntry(declaration),
   };
 }
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
@@ -3802,6 +3879,17 @@ function isPrimitiveComponentEntry(schema: SchemaObject, schemas: Record<string,
  * of its own: a `$ref` to it is the enum it names (`schemaToTypeRef`),
  * exactly as the same schema written inline is typed (#560: it was an
  * empty model, and the field typed as that model instead of the enum).
+ * An alias is only a chain that ends at a `$ref` to an enum component: a
+ * component that declares its enum inside the `allOf` itself, with no
+ * `$ref` — `Kind: { allOf: [{ type: 'string', enum: ['cat', 'dog'] }],
+ * description }`, alone or beside annotating members — is the enum
+ * component itself (`isEnumComponentSchema`, which reads the lone member
+ * as the component's own declaration, `enumComponentDeclaration`), so it
+ * is true here as any enum component is, and `extractSchemas` keeps it out
+ * of the aliases (`activeEnumAliasKeys`) by that test (#588 review:
+ * `componentEntries` read the lone member as the entry's own declaration,
+ * `isEnumComponentSchema` did not, and the entry was an alias of nothing —
+ * its model skipped and its enum lifted as `UnknownEnum`).
  */
 function isEnumComponentEntry(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
   return componentEntries(schema, schemas, isEnumComponentSchema) !== undefined;
