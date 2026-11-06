@@ -13,7 +13,7 @@ import {
   recordPendingSiteLimits,
   schemaRefTarget,
 } from './schema-refs.js';
-import { pointerTypesAsUnknown } from './schema-pointers.js';
+import { pointerTypesAsArray, pointerTypesAsUnknown } from './schema-pointers.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -969,9 +969,11 @@ function loneUnionVariant(schema: SchemaObject): SchemaObject | undefined {
  * `nullable<array<…>>`. A `$ref` is a reference and is not looked through:
  * a `$ref` to an array component is typed as the array the component
  * declares by `schemaToTypeRef` itself, with the items the component pass
- * built (`isArrayComponentRef` says whether a property is one), and the
- * explicit `dataPath` walk (`resolveBareSchema`) is the one place any other
- * reference is followed.
+ * built (`isArrayComponentRef` says whether a property is one), a pointer
+ * deeper into a component is settled to the array the schema it lands on
+ * is typed as (`isArrayPointerRef` says whether a property is one; #609),
+ * and the explicit `dataPath` walk (`resolveBareSchema`) is the one place
+ * any other reference is followed.
  */
 export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
   const bare = unwrapNullableSchema(schema);
@@ -4701,7 +4703,8 @@ function arrayComponentTypeRef(key: string): TypeRef | undefined {
  * whether a property is an array from the document (`detectListEnvelope`,
  * `buildFieldFromSchema`) answers for a reference as `schemaToTypeRef`
  * types it. False outside an extraction, as a `$ref` to an enum component
- * is a model reference there.
+ * is a model reference there, and for a `$ref` that names no component — a
+ * pointer deeper into one, which `isArrayPointerRef` answers for.
  */
 export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
   if (!schema) return false;
@@ -4709,6 +4712,36 @@ export function isArrayComponentRef(schema: SchemaObject | undefined): boolean {
   if (!bare.$ref) return isArrayComponentRef(allOfReadAsMember(bare));
   const key = componentKeyOf(bare.$ref);
   return key !== undefined && activeArrayComponentPlans.has(key);
+}
+
+/**
+ * Whether `schema` is a `$ref` that settles to an array (#609): a JSON
+ * Pointer deeper into a component (`#/components/schemas/Holder/properties/
+ * owners`) — under any nullable wrapper `unwrapNullableSchema` strips and
+ * any `allOf` read as the reference (`allOfReadAsMember`), as
+ * `isArrayComponentRef` reads a `$ref` to an array component — that lands
+ * on a schema typed as an array where it stands: an array in any spelling,
+ * a `$ref` to an array component, or another such pointer, under the same
+ * wrappers. Read ahead from the document (`pointerTypesAsArray`), as
+ * `referenceTypesAsUnknown` reads what a pointer settles to, so a reader
+ * that asks whether a property is an array before any model is built
+ * (`detectListEnvelope`) answers for a pointer as the settle
+ * (`resolveSchemaPointers`) will type it. The pointer is read in `schemas`
+ * — the document being read, unless the caller hands over the map it walks
+ * (`pointerTypesAsArray`, following a pointer that lands on another). False
+ * for a `$ref` that names a component, which `isArrayComponentRef` answers
+ * for, for a pointer that leads nowhere or to no array, and outside an
+ * extraction, as `isArrayComponentRef` is.
+ */
+export function isArrayPointerRef(
+  schema: SchemaObject | undefined,
+  schemas: Record<string, SchemaObject> | undefined = documentComponentSchemas(),
+): boolean {
+  if (!schema) return false;
+  const bare = unwrapNullableSchema(schema);
+  if (!bare.$ref) return isArrayPointerRef(allOfReadAsMember(bare), schemas);
+  if (componentKeyOf(bare.$ref) !== undefined) return false;
+  return schemas !== undefined && pointerTypesAsArray(String(bare.$ref), schemas);
 }
 
 /**
