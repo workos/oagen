@@ -3751,13 +3751,21 @@ export function isArrayComponentSchema(schema: SchemaObject): boolean {
  * or a composition (`Kind: { type: 'string', const: 'cat' }`); a union of
  * primitives — a type list of several such types, `null` among them or not
  * (`Tag: { type: ['string', 'integer'] }`, `isPrimitiveTypeList`); and
- * `unknown` — a schema that declares no type at all (`declaresType`:
- * `Anything: { description: 'Any value.' }`, `{}`, `{ format: 'uuid' }`).
- * The last three became fieldless models before #569, while the same
- * schema inline was the literal, the union or `unknown`. A type list naming
- * `object` or `array`, a `type` no rule knows, `type: 'null'` alone in
- * either spelling, and `type: 'array'` without `items` are none of these:
- * each keeps the fieldless model it always became.
+ * `unknown` — a schema that declares no type at all (`declaresNoType`:
+ * `Anything: { description: 'Any value.' }`, `{}`, `{ format: 'uuid' }`,
+ * and the same written inside an `allOf` whose members each declare none,
+ * `Metadata: { allOf: [{ description: 'Free-form metadata.' }] }`, `{
+ * allOf: [{}] }`, `{ allOf: [{ description }, { maxLength: 3 }] }`, which
+ * `classifyInlineSchema` reads as `other` since no member types it). The
+ * last three became fieldless models before #569, while the same schema
+ * inline was the literal, the union or `unknown`; so did the lone-`allOf`
+ * spelling of an untyped schema until the #569 review, while the lone-`allOf`
+ * spelling of a `const`, a type list or a primitive was read through
+ * (`componentEntries`). A type list naming `object` or `array`, a `type` no
+ * rule knows, `type: 'null'` alone in either spelling, `type: 'array'`
+ * without `items`, and an `allOf` of several typing members
+ * (`allOfTypesSchema` reads it as none of them) are none of these: each
+ * keeps the fieldless model it always became.
  */
 function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
   const bare = unwrapNullableComponent(schema);
@@ -3765,10 +3773,30 @@ function isPrimitiveComponentSchema(schema: SchemaObject): boolean {
     case 'const':
       return true;
     case 'other':
-      return bare.type === undefined ? !declaresType(bare) : isPrimitiveTypeList(bare.type);
+      return bare.type === undefined ? declaresNoType(bare) : isPrimitiveTypeList(bare.type);
     default:
       return false;
   }
+}
+
+/**
+ * Whether a schema declares no type at all, so that `schemaToTypeRef` types
+ * it as `unknown` from its own keywords: none of the keywords `declaresType`
+ * reads (`{ description: 'Any value.' }`, `{}`), or an `allOf` alone among
+ * them whose members each declare none (`{ allOf: [{ description:
+ * 'Free-form metadata.' }] }`, `{ allOf: [{}] }`, `{ allOf: [{ description:
+ * 'a' }, { maxLength: 3 }] }`; #569 review) — members that only annotate
+ * or limit the schema (`annotatingAllOfMembers`), which `allOfTypesSchema`
+ * leaves to the schema's own keywords, so `classifyInlineSchema` reads the
+ * schema as `other` and `typesAsUnknown` holds. An `allOf` with a member
+ * that declares a type is not read here: one typing member is the schema
+ * (`readInlineAllOf`), and several are a shape no site reads as unknown
+ * on purpose.
+ */
+function declaresNoType(schema: SchemaObject): boolean {
+  if (!declaresType(schema)) return true;
+  if (schema.allOf === undefined || declaresType({ ...schema, allOf: undefined })) return false;
+  return schema.allOf.every((member) => !declaresType(member));
 }
 
 /**
@@ -4259,7 +4287,15 @@ function isPrimitiveComponentRef(schema: SchemaObject): boolean {
  * `schemaToTypeRef` resolves it; false outside an extraction) whose schema
  * answers so here. For any other schema: `typesAsUnknown`, then — for an
  * `allOf` that predicate leaves because the member it is read as is a
- * `$ref` (`readInlineAllOf`) — that member's answer here.
+ * `$ref` (`readInlineAllOf`) — that member's answer here. A type list is
+ * read as `typesAsUnknown` reads it: one naming a single type without
+ * `null` is that type, so the `allOf` beside it is still followed (`Alias:
+ * { type: ['string'], allOf: [{ $ref: Anything }] }` is the reference, and
+ * `unknown`, as `schemaToTypeRef` types it; #569 review: the list stopped
+ * the walk, and a `200` naming `Alias` beside a `201` naming `Pet` kept
+ * the pick and exposed `unknown`); an empty list, one naming `null` beside
+ * a type, or one of several types is `nullable<unknown>`, nullable or a
+ * union, never the bare unknown, as `nullable: true` beside a `type` is.
  */
 export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) {
@@ -4267,7 +4303,11 @@ export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
     return component !== undefined && referenceTypesAsUnknown(component);
   }
   if (typesAsUnknown(schema)) return true;
-  if (Array.isArray(schema.type) || (schema.nullable && schema.type)) return false;
+  if (Array.isArray(schema.type)) {
+    const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
+    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
+  }
+  if (schema.nullable && schema.type) return false;
   const folded = foldSiblingProperties(schema);
   if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
   const reading = readInlineAllOf(folded.allOf, folded);

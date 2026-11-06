@@ -2508,6 +2508,11 @@ describe('#569', () => {
         Pet: { type: 'object', properties: { id: { type: 'string' } } },
         Anything: { description: 'Any value.' },
         AnyAlias: ref('Anything'),
+        // A single-entry type list beside the `allOf` is that type, so the
+        // reference is still followed (#569 review: the list stopped the
+        // walk, and the 200 kept the pick as `unknown`).
+        ListedAlias: { type: ['string'], allOf: [ref('Anything')] },
+        ListedMaybe: { type: ['string', 'null'], allOf: [ref('Anything')] },
         Kind: { type: 'string', const: 'cat' },
       },
       {
@@ -2517,7 +2522,12 @@ describe('#569', () => {
         '/annotated': {
           get: { operationId: 'annotated', ...pick({ allOf: [ref('Anything'), { description: 'Any.' }] }) },
         },
+        '/listed': { get: { operationId: 'listed', ...pick(ref('ListedAlias')) } },
+        '/listedInline': {
+          get: { operationId: 'listedInline', ...pick({ type: ['string'], allOf: [ref('Anything')] }) },
+        },
         '/maybe': { get: { operationId: 'maybe', ...pick({ oneOf: [ref('Anything'), { type: 'null' }] }) } },
+        '/listedMaybe': { get: { operationId: 'listedMaybe', ...pick(ref('ListedMaybe')) } },
         '/kind': { get: { operationId: 'kind', ...pick(ref('Kind')) } },
       },
     );
@@ -2530,10 +2540,127 @@ describe('#569', () => {
       alias: { kind: 'model', name: 'Pet' },
       wrapped: { kind: 'model', name: 'Pet' },
       annotated: { kind: 'model', name: 'Pet' },
+      listed: { kind: 'model', name: 'Pet' },
+      listedInline: { kind: 'model', name: 'Pet' },
       // `nullable<unknown>` and a literal are typed, so the 200 keeps the pick.
       maybe: nullable(unknown),
+      listedMaybe: nullable(unknown),
       kind: cat,
     });
+  });
+
+  // An untyped schema written inside a lone `allOf` is `unknown` inline, and
+  // the lone-`allOf` spelling of a `const`, a type list or a primitive is
+  // read through as a primitive component; the untyped one stayed a
+  // fieldless model (#569 review), so `Metadata: { description }` and
+  // `Metadata: { allOf: [{ description }] }` diffed as a model added and a
+  // field's type changed.
+  it.each(['3.0.3', '3.1.0'])(
+    'types a $ref to an untyped schema inside a lone allOf as unknown, the members documenting and limiting the field (OAS %s)',
+    async (openapi) => {
+      const holder = (shape: (name: string) => unknown) => ({
+        Holder: {
+          type: 'object',
+          required: ['metadata', 'empty', 'limited', 'own', 'aliased'],
+          properties: {
+            metadata: shape('Metadata'),
+            empty: shape('Empty'),
+            limited: shape('Limited'),
+            own: shape('Own'),
+            aliased: shape('MetaAlias'),
+          },
+        },
+      });
+      const components = {
+        Metadata: { allOf: [{ description: 'Free-form metadata.' }] },
+        Empty: { allOf: [{}] },
+        Limited: { allOf: [{ description: 'a' }, { maxLength: 3 }] },
+        // The schema's own text wins over a member's, as a wrapper's does.
+        Own: { allOf: [{ description: 'Member.' }], description: 'Own.', deprecated: true, 'x-kind': 'own' },
+        MetaAlias: { allOf: [ref('Metadata')] },
+      };
+      const referenced = await parse({ ...holder(ref), ...components }, {}, openapi);
+      // The same shapes written on the fields; `Metadata` stays for the alias to name.
+      const inline = await parse(
+        { ...holder((name) => components[name as keyof typeof components]), Metadata: components.Metadata },
+        {},
+        openapi,
+      );
+
+      expect(names(referenced)).toEqual({ enums: [], models: ['Holder'] });
+      expect(names(inline)).toEqual({ enums: [], models: ['Holder'] });
+      const own = ({ name, type, constraints, description, deprecated, extensions }: Field) => ({
+        name,
+        type,
+        constraints,
+        description,
+        deprecated,
+        extensions,
+      });
+      const none = { constraints: undefined, deprecated: undefined, extensions: undefined };
+      const expected = [
+        { name: 'metadata', type: unknown, ...none, description: 'Free-form metadata.' },
+        { name: 'empty', type: unknown, ...none, description: undefined },
+        { name: 'limited', type: unknown, ...none, constraints: { maxLength: 3 }, description: 'a' },
+        { name: 'own', type: unknown, ...none, description: 'Own.', deprecated: true, extensions: { 'x-kind': 'own' } },
+      ];
+      expect(fieldsOf(referenced, 'Holder').map(own)).toEqual([
+        ...expected,
+        // The alias names no model either: a bare `$ref` to it reads through to `unknown` and the member's text.
+        { name: 'aliased', type: unknown, ...none, description: 'Free-form metadata.' },
+      ]);
+      // Each is the same schema written inline, so the field reads the same
+      // either way — except under the `allOf` around the `$ref`, where the
+      // field documents itself, as it does around a `$ref` to any primitive component.
+      expect(fieldsOf(inline, 'Holder').map(own)).toEqual([
+        ...expected,
+        { name: 'aliased', type: unknown, ...none, description: undefined },
+      ]);
+    },
+  );
+
+  it('types a $ref to an untyped lone allOf as a $ref to the untyped schema itself does (the review’s diff)', async () => {
+    const pet = (metadata: unknown) => ({
+      Pet: { type: 'object', required: ['metadata'], properties: { metadata: ref('Metadata') } },
+      Metadata: metadata,
+    });
+    const plain = await parse(pet({ description: 'Free-form metadata.' }));
+    const lone = await parse(pet({ allOf: [{ description: 'Free-form metadata.' }] }));
+
+    expect(lone.models).toEqual(plain.models);
+    expect(lone.enums).toEqual(plain.enums);
+    expect(fieldsOf(lone, 'Pet').map(documented)).toEqual([
+      { name: 'metadata', type: unknown, constraints: undefined, description: 'Free-form metadata.' },
+    ]);
+  });
+
+  it('leaves an allOf with a typing member to the readings it has: one member is the member, several are a fieldless model', async () => {
+    const spec = await parse({
+      Holder: {
+        type: 'object',
+        properties: {
+          typed: ref('Typed'),
+          two_typed: ref('TwoTyped'),
+          nested: ref('Nested'),
+        },
+      },
+      // One typing member beside an annotating one is that member (#555), a primitive component.
+      Typed: { allOf: [{ type: 'string', maxLength: 5 }, { description: 'Typed.' }] },
+      // Two typing members are read as neither (`allOfTypesSchema`): the model it always became.
+      TwoTyped: { allOf: [{ type: 'string' }, { type: 'integer' }] },
+      // A lone member that is itself a lone `allOf` is unwrapped level by
+      // level (`componentEntries`), as `schemaToTypeRef` unwraps it inline,
+      // to the untyped schema; the inner member's text stays the inner
+      // wrapper's, as it does inline.
+      Nested: { allOf: [{ allOf: [{ description: 'Deep.' }] }] },
+    });
+
+    expect(names(spec)).toEqual({ enums: [], models: ['Holder', 'TwoTyped'] });
+    expect(fieldsOf(spec, 'Holder').map(documented)).toEqual([
+      { name: 'typed', type: string, constraints: { maxLength: 5 }, description: 'Typed.' },
+      { name: 'two_typed', type: { kind: 'model', name: 'TwoTyped' }, constraints: undefined, description: undefined },
+      { name: 'nested', type: unknown, constraints: undefined, description: undefined },
+    ]);
   });
 
   it('leaves a component that declares a type no rule reads as the fieldless model it always became', async () => {

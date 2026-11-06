@@ -1039,9 +1039,11 @@ export interface TypeParam {
  * A primitive component — a `string`, `integer`, `number` or `boolean`
  * schema, a `const` of any value, a type list of such primitives
  * (`['string', 'integer']`) or a schema that declares no type at all (`{
- * description: 'Any value.' }`, `{}`), nullable in any spelling, or an
- * alias of one — becomes no model either: a `$ref` to it resolves to what
- * it declares, as the same schema written inline is typed — the primitive
+ * description: 'Any value.' }`, `{}`, and the same inside an `allOf` whose
+ * members each declare none: `{ allOf: [{ description }] }`), nullable in
+ * any spelling, or an alias of one — becomes no model either: a `$ref` to
+ * it resolves to what it declares, as the same schema written inline is
+ * typed — the primitive
  * (`{ kind: 'primitive' }` with its `format`), the literal (`{ kind:
  * 'literal' }`), the union of primitives (`{ kind: 'union' }`) or `unknown`
  * (`{ kind: 'primitive', type: 'unknown' }`), under `nullable` when the
