@@ -6117,3 +6117,493 @@ describe('#540', () => {
     });
   });
 });
+
+describe('#566', () => {
+  // The issue's `Note`: `reply` merges `Note` back into itself and its inline
+  // member redeclares `reply`, so every merge of `Note` conjoins `Note.reply`
+  // with the inline `reply` — one object per pair of declarations for the
+  // whole document, which the extraction builds once and types as itself
+  // when a merge reaches it again.
+  const s: SchemaObject = { type: 'string' };
+  const bool: SchemaObject = { type: 'boolean' };
+  const int: SchemaObject = { type: 'integer' };
+  const ref = (name: string): SchemaObject => ({ $ref: `#/components/schemas/${name}` });
+  const obj = (properties: Record<string, SchemaObject>, extra: SchemaObject = {}): SchemaObject => ({
+    type: 'object',
+    properties,
+    ...extra,
+  });
+  const model = (name: string) => ({ kind: 'model', name });
+  const arrayOf = (items: unknown) => ({ kind: 'array', items });
+  /** `Note.reply` as the issue writes it: `Note` beside an inline member that declares `quoted` and redeclares `reply` as `inner`. */
+  const selfReply = (inner: SchemaObject): SchemaObject => ({
+    allOf: [ref('Note'), obj({ quoted: bool, reply: inner })],
+  });
+  const note = (reply: SchemaObject): Record<string, SchemaObject> => ({ Note: obj({ id: s, reply }) });
+  const issueNote = note(selfReply(obj({ depth: int })));
+  /** `GET /notes/{id}` (`getNote`) returning `body`, beside `schemas`, under `openapi`. */
+  const doc = (openapi: string, schemas: Record<string, SchemaObject>, body: SchemaObject = ref('Note')) => ({
+    openapi,
+    info: { title: 'notes', version: '1' },
+    paths: {
+      '/notes/{id}': {
+        get: {
+          operationId: 'getNote',
+          parameters: [{ name: 'id', in: 'path', required: true, schema: s }],
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema: body } } } },
+        },
+      },
+    },
+    components: { schemas },
+  });
+  const versions = ['3.1.0', '3.0.3'];
+
+  async function parseWithoutWarnings(spec: Record<string, unknown>): Promise<ApiSpec> {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseTempSpec(spec);
+      expect(warnSpy).not.toHaveBeenCalled();
+      return ir;
+    } finally {
+      warnSpy.mockRestore();
+    }
+  }
+  /** Each model as the issue prints it. */
+  const summaries = (ir: ApiSpec): string[] =>
+    ir.models.map(({ fields, name }) => `${name} {${fields.map((f) => f.name).join(', ')}}`);
+  /** Every model reference resolves, and every model but `roots` is referenced from a field or the response. */
+  function expectConsistent(ir: ApiSpec, roots: string[]): void {
+    const refs: TypeRef[] = [
+      ...ir.models.flatMap((m) => m.fields.map((f) => f.type)),
+      ...ir.services.flatMap((svc) => svc.operations.map((op) => op.response)),
+    ];
+    const referenced = new Set(refs.flatMap((r) => collectModelRefs(r)));
+    const known = new Set(ir.models.map((m) => m.name));
+    expect([...referenced].filter((name) => !known.has(name)).sort()).toEqual([]);
+    expect([...known].filter((name) => !roots.includes(name) && !referenced.has(name)).sort()).toEqual([]);
+  }
+  /** A second parse reads the same IR: `oagen diff` of the document against itself reads no change. */
+  async function expectStable(spec: Record<string, unknown>, ir: ApiSpec): Promise<void> {
+    expect(diffSpecs(ir, await parseWithoutWarnings(spec)).changes).toEqual([]);
+  }
+
+  it.each(versions)(
+    "parses the issue's document under OAS %s: the re-entered reply is the conjunction's own model, typed as itself",
+    async (openapi) => {
+      const spec = doc(openapi, issueNote);
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual([
+        'Note {id, reply}',
+        'NoteReply {id, reply, quoted}',
+        'NoteReplyReply {id, reply, quoted, depth}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['reply']).toEqual(model('NoteReply'));
+      // `NoteReply` owns the conjunction of `Note.reply` and the inline
+      // `reply`; `NoteReplyReply` is built from it, and its own `reply` is that
+      // same conjunction, so it is `NoteReplyReply` itself.
+      expect(types['NoteReply']?.['reply']).toEqual(model('NoteReplyReply'));
+      expect(types['NoteReplyReply']?.['reply']).toEqual(model('NoteReplyReply'));
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)(
+    'ends two components that each merge the other and redeclare its field, under OAS %s, in either document order',
+    async (openapi) => {
+      const mutualNote: SchemaObject = obj({
+        id: s,
+        thread: { allOf: [ref('Thread'), obj({ note: obj({ depth: int }) })] },
+      });
+      const mutualThread: SchemaObject = obj({
+        title: s,
+        note: { allOf: [ref('Note'), obj({ thread: obj({ pinned: bool }) })] },
+      });
+      // Each component's chain is built under its own name and closes on
+      // itself, whichever component is declared first: the same six models
+      // in either order.
+      const noteChain = [
+        'NoteThread {title, note}',
+        'NoteThreadNote {id, thread, depth}',
+        'NoteThreadNoteThread {title, note, pinned}',
+      ];
+      const threadChain = [
+        'ThreadNote {id, thread}',
+        'ThreadNoteThread {title, note, pinned}',
+        'ThreadNoteThreadNote {id, thread, depth}',
+      ];
+      const orders: [string, Record<string, SchemaObject>, string[]][] = [
+        [
+          'Note first',
+          { Note: mutualNote, Thread: mutualThread },
+          ['Note {id, thread}', 'Thread {title, note}', ...noteChain, ...threadChain],
+        ],
+        [
+          'Thread first',
+          { Thread: mutualThread, Note: mutualNote },
+          ['Thread {title, note}', 'Note {id, thread}', ...threadChain, ...noteChain],
+        ],
+      ];
+      for (const [label, schemas, expected] of orders) {
+        const spec = doc(openapi, schemas);
+        const ir = await parseWithoutWarnings(spec);
+        expect(summaries(ir), label).toEqual(expected);
+        const types = fieldTypesByModel(ir.models);
+        expect(types['Note']?.['thread'], label).toEqual(model('NoteThread'));
+        expect(types['NoteThread']?.['note'], label).toEqual(model('NoteThreadNote'));
+        expect(types['NoteThreadNote']?.['thread'], label).toEqual(model('NoteThreadNoteThread'));
+        expect(types['NoteThreadNoteThread']?.['note'], label).toEqual(model('NoteThreadNote'));
+        expect(types['Thread']?.['note'], label).toEqual(model('ThreadNote'));
+        expect(types['ThreadNote']?.['thread'], label).toEqual(model('ThreadNoteThread'));
+        expect(types['ThreadNoteThread']?.['note'], label).toEqual(model('ThreadNoteThreadNote'));
+        expect(types['ThreadNoteThreadNote']?.['thread'], label).toEqual(model('ThreadNoteThread'));
+        expectConsistent(ir, ['Note', 'Thread']);
+        await expectStable(spec, ir);
+      }
+    },
+  );
+
+  it.each(versions)(
+    'ends a typeless inline redeclaration (`reply: { description }`) under OAS %s, which annotates the inherited reply',
+    async (openapi) => {
+      const spec = doc(openapi, note(selfReply({ description: 'Latest reply.' })));
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual([
+        'Note {id, reply}',
+        'NoteReply {id, reply, quoted}',
+        'NoteReplyReply {id, reply, quoted}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['NoteReply']?.['reply']).toEqual(model('NoteReplyReply'));
+      expect(types['NoteReplyReply']?.['reply']).toEqual(model('NoteReplyReply'));
+      const replyDescription = (name: string) =>
+        ir.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'reply')?.description;
+      expect(replyDescription('Note')).toBeUndefined();
+      expect(replyDescription('NoteReply')).toBe('Latest reply.');
+      expect(replyDescription('NoteReplyReply')).toBe('Latest reply.');
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)(
+    'ends the array form (`replies` whose items merge `Note` and redeclare `replies`) under OAS %s',
+    async (openapi) => {
+      const replies = (items: SchemaObject): SchemaObject => ({ type: 'array', items });
+      const spec = doc(openapi, {
+        Note: obj({
+          id: s,
+          replies: replies({ allOf: [ref('Note'), obj({ quoted: bool, replies: replies(obj({ depth: int })) })] }),
+        }),
+      });
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual([
+        'Note {id, replies}',
+        'NoteReply {id, replies, quoted}',
+        'NoteReplyReply {id, replies, quoted, depth}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['replies']).toEqual(arrayOf(model('NoteReply')));
+      expect(types['NoteReply']?.['replies']).toEqual(arrayOf(model('NoteReplyReply')));
+      expect(types['NoteReplyReply']?.['replies']).toEqual(arrayOf(model('NoteReplyReply')));
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)('ends the same field nested under an inline object, under OAS %s', async (openapi) => {
+    // `Note.wrapper.reply` merges `Note` and redeclares `wrapper.reply`: the
+    // conjoined `wrapper` is an inline object holding the conjunction, so the
+    // re-entry reaches it through `buildInlineModel`, not a merge of its own.
+    const spec = doc(openapi, {
+      Note: obj({
+        id: s,
+        wrapper: obj({ reply: { allOf: [ref('Note'), obj({ wrapper: obj({ reply: obj({ depth: int }) }) })] } }),
+      }),
+    });
+    const ir = await parseWithoutWarnings(spec);
+    expect(summaries(ir)).toEqual([
+      'Note {id, wrapper}',
+      'NoteWrapper {reply}',
+      'NoteWrapperReply {id, wrapper}',
+      'NoteWrapperReplyWrapper {reply}',
+      'NoteWrapperReplyWrapperReply {id, wrapper, depth}',
+      'NoteWrapperReplyWrapperReplyWrapper {reply}',
+    ]);
+    const types = fieldTypesByModel(ir.models);
+    expect(types['NoteWrapperReplyWrapperReplyWrapper']?.['reply']).toEqual(model('NoteWrapperReplyWrapperReply'));
+    expectConsistent(ir, ['Note']);
+    await expectStable(spec, ir);
+  });
+
+  it.each(versions)('builds a response that merges `Note` its own chain, under OAS %s', async (openapi) => {
+    const spec = doc(openapi, issueNote, { allOf: [ref('Note'), obj({ author: s })] });
+    const ir = await parseWithoutWarnings(spec);
+    expect(summaries(ir)).toEqual([
+      'Note {id, reply}',
+      'GetNoteResponse {id, reply, author}',
+      'GetNoteResponseReply {id, reply, quoted}',
+      'GetNoteResponseReplyReply {id, reply, quoted, depth}',
+      'NoteReply {id, reply, quoted}',
+      'NoteReplyReply {id, reply, quoted, depth}',
+    ]);
+    const types = fieldTypesByModel(ir.models);
+    expect(types['GetNoteResponse']?.['reply']).toEqual(model('GetNoteResponseReply'));
+    expect(types['GetNoteResponseReply']?.['reply']).toEqual(model('GetNoteResponseReplyReply'));
+    expect(types['GetNoteResponseReplyReply']?.['reply']).toEqual(model('GetNoteResponseReplyReply'));
+    expectConsistent(ir, ['Note']);
+    await expectStable(spec, ir);
+  });
+
+  it.each(versions)('ends the walk that predicts the names a union variant mints, under OAS %s', async (openapi) => {
+    // The response is a `oneOf` of an object variant holding the issue's
+    // field beside an array variant: naming the array variant reads every
+    // name the object variant's properties mint (`mintedChildNameEntries`),
+    // re-entering each merge's own properties as the extractor does.
+    const body: SchemaObject = {
+      oneOf: [
+        obj(
+          { kind: { const: 'a' }, reply: { allOf: [ref('Note'), obj({ reply: obj({ depth: int }) })] } },
+          { title: 'A' },
+        ),
+        { type: 'array', items: obj({ x: s }) },
+      ],
+    };
+    const spec = doc(openapi, issueNote, body);
+    const ir = await parseWithoutWarnings(spec);
+    expect(summaries(ir)).toEqual([
+      'Note {id, reply}',
+      'GetNoteResponse {kind, reply}',
+      'GetNoteResponseReply {id, reply}',
+      'GetNoteResponseReplyReply {id, reply, quoted, depth}',
+      'GetNoteResponseReplyReplyReply {id, reply, quoted, depth}',
+      'GetNoteResponseItem {x}',
+      'NoteReply {id, reply, quoted}',
+      'NoteReplyReply {id, reply, quoted, depth}',
+    ]);
+    const types = fieldTypesByModel(ir.models);
+    expect(types['GetNoteResponseReplyReplyReply']?.['reply']).toEqual(model('GetNoteResponseReplyReplyReply'));
+    expectConsistent(ir, ['Note']);
+    await expectStable(spec, ir);
+  });
+
+  // Review of #596: the conjunction a typeless redeclaration annotates keeps
+  // the wrapper `Note.reply` wears, and every unwrap of it made a copy the
+  // guard had never met, so every nullable form still overflowed. The path
+  // is keyed by the declaration a schema stands for (`sourceDeclaration`).
+  const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
+  /** `schema` admitting `null` in the version's own spelling: OAS 3.0 `nullable: true`, OAS 3.1 `type: ['object', 'null']`. */
+  const nullableObject = (openapi: string, schema: SchemaObject): SchemaObject =>
+    openapi === '3.0.3' ? { type: 'object', nullable: true, ...schema } : { type: ['object', 'null'], ...schema };
+  const typelessReply = selfReply({ description: 'Latest reply.' });
+  const replyDescription = (ir: ApiSpec, name: string): string | undefined =>
+    ir.models.find((m) => m.name === name)?.fields.find((f) => f.name === 'reply')?.description;
+
+  it.each(versions)(
+    'ends a typeless redeclaration under a nullable `Note.reply` under OAS %s: the three models, `reply` nullable at every level',
+    async (openapi) => {
+      const spec = doc(openapi, note(nullableObject(openapi, typelessReply)));
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual([
+        'Note {id, reply}',
+        'NoteReply {id, reply, quoted}',
+        'NoteReplyReply {id, reply, quoted}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['reply']).toEqual(nullable(model('NoteReply')));
+      expect(types['NoteReply']?.['reply']).toEqual(nullable(model('NoteReplyReply')));
+      expect(types['NoteReplyReply']?.['reply']).toEqual(nullable(model('NoteReplyReply')));
+      expect(replyDescription(ir, 'Note')).toBeUndefined();
+      expect(replyDescription(ir, 'NoteReply')).toBe('Latest reply.');
+      expect(replyDescription(ir, 'NoteReplyReply')).toBe('Latest reply.');
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it('reads the two nullable spellings of `Note.reply` alike', async () => {
+    const flagged = await parseWithoutWarnings(
+      doc('3.1.0', note({ type: 'object', nullable: true, ...typelessReply })),
+    );
+    const listed = await parseWithoutWarnings(doc('3.1.0', note({ type: ['object', 'null'], ...typelessReply })));
+    expect(summaries(listed)).toEqual(summaries(flagged));
+    expect(diffSpecs(flagged, listed).changes).toEqual([]);
+  });
+
+  it.each(versions)(
+    'ends nullable array items (`replies` whose items merge `Note` and redeclare `replies` typeless) under OAS %s',
+    async (openapi) => {
+      const merge = (items: SchemaObject): Record<string, SchemaObject> => ({
+        Note: obj({ id: s, replies: { type: 'array', items } }),
+      });
+      const members: SchemaObject = { allOf: [ref('Note'), obj({ replies: { description: 'x' } })] };
+      // The typeless `replies` annotates the conjunction, whose items are the
+      // document's own, so the merge closes on `NoteReply` exactly as the plain
+      // typeless array form does — the item nullable.
+      const plain = await parseWithoutWarnings(doc(openapi, merge(members)));
+      expect(summaries(plain)).toEqual(['Note {id, replies}', 'NoteReply {id, replies}']);
+      expect(fieldTypesByModel(plain.models)['NoteReply']?.['replies']).toEqual(arrayOf(model('NoteReply')));
+      const spec = doc(openapi, merge(nullableObject(openapi, members)));
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual(summaries(plain));
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['replies']).toEqual(arrayOf(nullable(model('NoteReply'))));
+      expect(types['NoteReply']?.['replies']).toEqual(arrayOf(nullable(model('NoteReply'))));
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)(
+    'ends two components that each merge the other under a nullable field and redeclare its field typeless, under OAS %s',
+    async (openapi) => {
+      const spec = doc(openapi, {
+        Note: obj({
+          id: s,
+          thread: nullableObject(openapi, { allOf: [ref('Thread'), obj({ note: { description: 'The note.' } })] }),
+        }),
+        Thread: obj({
+          title: s,
+          note: nullableObject(openapi, { allOf: [ref('Note'), obj({ thread: { description: 'The thread.' } })] }),
+        }),
+      });
+      const ir = await parseWithoutWarnings(spec);
+      // The same six chain models the typed pair gives (above), each
+      // component's chain under its own name, every link nullable.
+      expect(summaries(ir)).toEqual([
+        'Note {id, thread}',
+        'Thread {title, note}',
+        'NoteThread {title, note}',
+        'NoteThreadNote {id, thread}',
+        'NoteThreadNoteThread {title, note}',
+        'ThreadNote {id, thread}',
+        'ThreadNoteThread {title, note}',
+        'ThreadNoteThreadNote {id, thread}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['thread']).toEqual(nullable(model('NoteThread')));
+      expect(types['NoteThread']?.['note']).toEqual(nullable(model('NoteThreadNote')));
+      expect(types['NoteThreadNote']?.['thread']).toEqual(nullable(model('NoteThreadNoteThread')));
+      expect(types['NoteThreadNoteThread']?.['note']).toEqual(nullable(model('NoteThreadNote')));
+      expect(types['Thread']?.['note']).toEqual(nullable(model('ThreadNote')));
+      expect(types['ThreadNote']?.['thread']).toEqual(nullable(model('ThreadNoteThread')));
+      expect(types['ThreadNoteThread']?.['note']).toEqual(nullable(model('ThreadNoteThreadNote')));
+      expect(types['ThreadNoteThreadNote']?.['thread']).toEqual(nullable(model('ThreadNoteThread')));
+      expectConsistent(ir, ['Note', 'Thread']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)(
+    'ends a nullable `oneOf` wrapper around the merge under OAS %s: the wrapper and its conjunction share the one branch',
+    async (openapi) => {
+      const spec = doc(openapi, note({ oneOf: [typelessReply, { type: 'null' }] }));
+      const ir = await parseWithoutWarnings(spec);
+      // The branch carries the `allOf`, and the conjunction annotating the
+      // wrapper collapses to the same branch, so `NoteReply`'s own `reply`
+      // is `NoteReply` itself, the annotation on the field.
+      expect(summaries(ir)).toEqual(['Note {id, reply}', 'NoteReply {id, reply, quoted}']);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['Note']?.['reply']).toEqual(nullable(model('NoteReply')));
+      expect(types['NoteReply']?.['reply']).toEqual(nullable(model('NoteReply')));
+      expect(replyDescription(ir, 'Note')).toBeUndefined();
+      expect(replyDescription(ir, 'NoteReply')).toBe('Latest reply.');
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)('ends a single-member `allOf` wrapper around the merge under OAS %s', async (openapi) => {
+    const spec = doc(openapi, note({ allOf: [typelessReply] }));
+    const ir = await parseWithoutWarnings(spec);
+    expect(summaries(ir)).toEqual(['Note {id, reply}', 'NoteReply {id, reply, quoted}']);
+    const types = fieldTypesByModel(ir.models);
+    expect(types['Note']?.['reply']).toEqual(model('NoteReply'));
+    expect(types['NoteReply']?.['reply']).toEqual(model('NoteReply'));
+    expect(replyDescription(ir, 'NoteReply')).toBe('Latest reply.');
+    expectConsistent(ir, ['Note']);
+    await expectStable(spec, ir);
+  });
+
+  it.each(versions)(
+    'ends the walk that predicts the names a union variant mints, the field nullable and redeclared typeless, under OAS %s',
+    async (openapi) => {
+      const body: SchemaObject = {
+        oneOf: [
+          obj(
+            {
+              kind: { const: 'a' },
+              reply: nullableObject(openapi, {
+                allOf: [ref('Note'), obj({ reply: { description: 'Latest reply.' } })],
+              }),
+            },
+            { title: 'A' },
+          ),
+          { type: 'array', items: obj({ x: s }) },
+        ],
+      };
+      const spec = doc(openapi, note(nullableObject(openapi, typelessReply)), body);
+      const ir = await parseWithoutWarnings(spec);
+      expect(summaries(ir)).toEqual([
+        'Note {id, reply}',
+        'GetNoteResponse {kind, reply}',
+        'GetNoteResponseReply {id, reply}',
+        'GetNoteResponseReplyReply {id, reply, quoted}',
+        'GetNoteResponseReplyReplyReply {id, reply, quoted}',
+        'GetNoteResponseItem {x}',
+        'NoteReply {id, reply, quoted}',
+        'NoteReplyReply {id, reply, quoted}',
+      ]);
+      const types = fieldTypesByModel(ir.models);
+      expect(types['GetNoteResponse']?.['reply']).toEqual(nullable(model('GetNoteResponseReply')));
+      expect(types['GetNoteResponseReplyReplyReply']?.['reply']).toEqual(
+        nullable(model('GetNoteResponseReplyReplyReply')),
+      );
+      expectConsistent(ir, ['Note']);
+      await expectStable(spec, ir);
+    },
+  );
+
+  it.each(versions)(
+    'types a multi-type `Note.reply` (`type: [object, string]`, redeclared typeless) as the model on the path under OAS %s, every reference resolving',
+    async (openapi) => {
+      // Greptile on the cascaded head: `buildTypeRef` reads each type of the
+      // list from a copy of its own, which stood for nothing, so the type
+      // builder named `NoteReplyReplyReply` where the extractor, meeting the
+      // conjunction again, built nothing.
+      const cases: [string, string[], 'union' | 'nullable'][] = [
+        ['without null', ['object', 'string'], 'union'],
+        ['with null', ['object', 'string', 'null'], 'nullable'],
+      ];
+      for (const [label, type, kind] of cases) {
+        const spec = doc(
+          openapi,
+          note({ type, allOf: [ref('Note'), { properties: { reply: { description: 'x' } } }] }),
+        );
+        const ir = await parseWithoutWarnings(spec);
+        expect(summaries(ir), label).toEqual([
+          'Note {id, reply}',
+          'NoteReply {id, reply}',
+          'NoteReplyReply {id, reply}',
+        ]);
+        const types = fieldTypesByModel(ir.models);
+        // Each type of the list is read from its own copy, each standing for
+        // the field's declaration, so every one of them names the model on
+        // the path: `NoteReplyReply`'s own `reply` is `NoteReplyReply`.
+        const chain: [string, string][] = [
+          ['Note', 'NoteReply'],
+          ['NoteReply', 'NoteReplyReply'],
+          ['NoteReplyReply', 'NoteReplyReply'],
+        ];
+        for (const [owner, target] of chain) {
+          const reply = types[owner]?.['reply'] as TypeRef | undefined;
+          expect(reply?.kind, `${label}: ${owner}.reply`).toBe(kind);
+          expect([...new Set(reply ? collectModelRefs(reply) : [])], `${label}: ${owner}.reply`).toEqual([target]);
+        }
+        expectConsistent(ir, ['Note']);
+        await expectStable(spec, ir);
+      }
+    },
+  );
+});
