@@ -171,23 +171,38 @@ describe('#563', () => {
     );
   });
 
-  it('names a $ref of any other type as String() renders it; a $ref holding undefined is no reference', () => {
+  it('names a $ref of any other type as JSON renders it; a $ref holding undefined is no reference', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     resolveResponseRef({ $ref: null }, undefined, 'ctx');
     resolveResponseRef({ $ref: true }, undefined, 'ctx');
     resolveResponseRef({ $ref: { $ref: '#/components/responses/Problem' } }, undefined, 'ctx');
-    // An array of one string renders as that string: only the message's
-    // "must be a string" tells it from a ref nothing answers.
+    resolveResponseRef({ $ref: { name: 'x' } }, undefined, 'ctx');
+    // An array reads as JSON too: an empty one as `[]`, never as nothing,
+    // and one of a single string with its brackets and quotes, never as the
+    // string the message says it is not (review of #563).
+    resolveResponseRef({ $ref: [] }, undefined, 'ctx');
     resolveResponseRef({ $ref: ['#/components/responses/Problem'] }, undefined, 'ctx');
     expect(warn.mock.calls.map(([message]) => message)).toEqual([
       expect.stringContaining('Malformed response $ref null in ctx: a $ref must be a string'),
       expect.stringContaining('Malformed response $ref true in ctx: a $ref must be a string'),
-      expect.stringContaining('Malformed response $ref [object Object] in ctx: a $ref must be a string'),
-      expect.stringContaining('Malformed response $ref #/components/responses/Problem in ctx: a $ref must be a string'),
+      expect.stringContaining(
+        'Malformed response $ref {"$ref":"#/components/responses/Problem"} in ctx: a $ref must be a string',
+      ),
+      expect.stringContaining('Malformed response $ref {"name":"x"} in ctx: a $ref must be a string'),
+      expect.stringContaining('Malformed response $ref [] in ctx: a $ref must be a string'),
+      expect.stringContaining(
+        'Malformed response $ref ["#/components/responses/Problem"] in ctx: a $ref must be a string',
+      ),
     ]);
     const unset = { $ref: undefined, description: 'Inline after all.' };
     expect(resolveResponseRef(unset, undefined, 'ctx')).toBe(unset);
-    expect(warn).toHaveBeenCalledTimes(4);
+    expect(warn).toHaveBeenCalledTimes(6);
+    // Under 'ignore' (OAS 3.0) the value is read off the copy the sibling
+    // text was dropped from, so it renders the same.
+    expect(resolveResponseRef({ $ref: [], description: 'Gone.' }, undefined, 'ctx', 'ignore')).toEqual({ $ref: [] });
+    expect(warn).toHaveBeenLastCalledWith(
+      expect.stringContaining('Malformed response $ref [] in ctx: a $ref must be a string'),
+    );
   });
 
   it("warns on a malformed $ref at the end of a chain and returns the chain's last object", () => {
