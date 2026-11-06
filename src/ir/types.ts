@@ -821,7 +821,9 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * `nullable` itself carries none; its `inner` does), and for a `$ref` to
  * an array or primitive component the component's and each alias's
  * conjoined with any written beside the reference, as `Field.constraints`
- * conjoins them. A `model` or `enum` reference carries none: the model it
+ * conjoins them, and for a JSON Pointer `$ref` deeper into a component
+ * (#539) the limits the pointed schema's own type carries, conjoined the
+ * same way once the site is settled. A `model` or `enum` reference carries none: the model it
  * names carries its own (`Model.constraints`), and what is written around
  * such a `$ref` is the field's or parameter's alone. So a field's or
  * parameter's `constraints` equal those of its type (under its nullable
@@ -971,15 +973,23 @@ export interface Parameter {
    */
   contentTypes?: string[];
   /**
-   * Validation keywords from the parameter's schema. When that schema is a
-   * `$ref`, the target's keywords are merged underneath the parameter's own
-   * — the per-value fallback `default` and `example` use — so a parameter
-   * can be read on its own without chasing the target (a primitive or an
-   * array component becomes no model, nor does an alias of an enum
-   * component, whose own limits conjoin above the enum's; #560). Absent
-   * when neither declares any. Equal to the limits `type` carries (under
-   * its nullable wrapper) whenever it can carry them — a `$ref` to a model
-   * or enum keeps the parameter's own here alone (see `Constraints`).
+   * Validation keywords from the parameter's schema, read as a field's are
+   * (`schemaConstraints`; #545 review): the schema's own conjoined with its
+   * `allOf` members' and a nullable wrapper's with its branch's, level by
+   * level, so a keyword written beside an `allOf` member that writes it too
+   * reads as the field and the type read it (`pattern: '^a'` beside `allOf:
+   * [{ pattern: 'z$' }]` is `{ pattern: 'z$' }` on all three); for a `$ref`
+   * to a primitive or array component, or to an alias of an enum component,
+   * every entry's conjoined from the component outward, since no model
+   * carries them (the alias's own above the enum's; #560). When the schema
+   * is a `$ref` to a model or enum, the target's keywords are merged
+   * underneath the parameter's own — the per-value fallback `default` and
+   * `example` use — so a parameter can be read on its own without chasing
+   * the target. Absent when neither declares any. Equal to the limits
+   * `type` carries (under its nullable wrapper) whenever it can carry them
+   * — a JSON Pointer `$ref` deeper into a component included, once the
+   * pointer is settled (see `Field.constraints`) — while a `$ref` to a
+   * model or enum keeps the parameter's own here alone (see `Constraints`).
    */
   constraints?: Constraints;
 }
@@ -1328,12 +1338,19 @@ export interface Field {
    * enforces them either way and nothing else carries them: `{ allOf: [{
    * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
    * that `pattern`, as `{ allOf: [{ $ref: PetId }] }` and `oneOf: [{ $ref:
-   * PetId }, { type: 'null' }]` do. Absent when no level declares any.
-   * Equal to the limits `type` carries (under its nullable wrapper)
-   * whenever it can carry them — a `$ref` to a model, named union or enum
-   * keeps the field's own here alone — while the limits of an array's
-   * items, a union's variants or a map's values are on those types only
-   * (see `Constraints`; #545).
+   * PetId }, { type: 'null' }]` do. A JSON Pointer `$ref` deeper into a
+   * component (#539) conjoins the same way with the limits the schema it
+   * lands on carries on its own type, once the pointer is settled
+   * (`resolveSchemaPointers`; #545 review): `{ $ref: '#/components/schemas/
+   * Owner/properties/code', maxLength: 3 }` to `{ type: 'string', pattern:
+   * '^own_', maxLength: 8 }` is `{ maxLength: 3, pattern: '^own_' }`, and
+   * the bare pointer `{ maxLength: 8, pattern: '^own_' }`; a pointer to a
+   * property typed as a model or enum adds none, as a `$ref` to a model
+   * does. Absent when no level declares any. Equal to the limits `type`
+   * carries (under its nullable wrapper) whenever it can carry them — a
+   * `$ref` to a model, named union or enum keeps the field's own here
+   * alone — while the limits of an array's items, a union's variants or a
+   * map's values are on those types only (see `Constraints`; #545).
    */
   constraints?: Constraints;
   /**

@@ -3,7 +3,13 @@ import { assertNever, walkTypeRef, collectModelTypeRefs } from '../ir/types.js';
 import { toPascalCase, cleanSchemaName, stripListItemMarkers, splitWords, numberedName } from '../utils/naming.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
-import { componentKeyOf, pendingSchemaRef, schemaRefTarget } from './schema-refs.js';
+import {
+  componentKeyOf,
+  isPendingSchemaRef,
+  pendingSchemaRef,
+  recordPendingSiteLimits,
+  schemaRefTarget,
+} from './schema-refs.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -621,7 +627,12 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  * from the component outward, as JSON Schema applies every level at once
  * and the wire enforces the component's limit whatever is written beside
  * the `$ref` (#512 review). A `$ref` to a model, named union or enum
- * contributes none of the target's: that node carries its own.
+ * contributes none of the target's: that node carries its own. A JSON
+ * Pointer `$ref` deeper into a component (#539) contributes none here
+ * either, since what it lands on is typed after the fact: once
+ * `resolveSchemaPointers` settles that type, the pointed schema's limits
+ * are conjoined with this reading on the type and on the field or
+ * parameter alike, where the type can carry them (#545 review).
  * `undefined` when no level declares any.
  */
 export function schemaConstraints(
@@ -644,7 +655,11 @@ export function schemaConstraints(
  * every level the type was built through. A `model` or `enum` reference is
  * returned as it is — the model carries its own, and what the site writes
  * around the `$ref` stays the field's or parameter's — and so is `ref`
- * when `constraints` is `undefined`, so a type stays as built.
+ * when `constraints` is `undefined`, so a type stays as built. A reference
+ * `resolveSchemaPointers` has yet to settle, for a JSON Pointer `$ref`
+ * deeper into a component (#539), records them for that pass
+ * (`recordPendingSiteLimits`), which conjoins them with the pointed
+ * schema's on the type it settles the site into (#545 review).
  */
 export function withTypeConstraints(ref: TypeRef, constraints: Constraints | undefined): TypeRef {
   if (!constraints) return ref;
@@ -660,6 +675,8 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
       withTypeConstraints(ref.inner, constraints);
       return ref;
     case 'model':
+      if (isPendingSchemaRef(ref)) recordPendingSiteLimits(ref, constraints);
+      return ref;
     case 'enum':
       return ref;
   }
@@ -5389,7 +5406,11 @@ export function componentTypeRef(key: string): TypeRef {
  * level down — the outer level's reading replaces the branch's, which it
  * accounts for (a wrapper's keywords conjoin with its branch's, a `$ref`
  * site's with its component's, in the one order `Field.constraints` reads
- * them). So a field's `constraints` and its type's are one reading.
+ * them). So a field's `constraints` and its type's are one reading — for a
+ * JSON Pointer `$ref` deeper into a component (#539) once
+ * `resolveSchemaPointers` settles the site, which conjoins the pointed
+ * schema's limits with the site's on the type and the field or parameter
+ * alike (#545 review).
  */
 export function schemaToTypeRef(
   schema: SchemaObject,

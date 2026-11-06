@@ -30,12 +30,49 @@
  * reaches itself. Pointers are followed as RFC 6901 §4 evaluates them,
  * structurally, never through a `$ref` on the way (`schemaAtPointer`); a
  * pointer that lands on a `$ref` schema is typed as that `$ref` is.
+ *
+ * The limits are settled with the type (#545 review). A `$ref` to a
+ * primitive or array component gives the site the component's limits
+ * conjoined with what is written beside the reference (`schemaConstraints`),
+ * and a pointer site reads the same once its type is known: the type the
+ * site is settled into carries the limits of the schema the pointer lands
+ * on — what its own type carries where it stands, under any nullable
+ * wrapper, the conjoined reading of a chain included — conjoined with the
+ * site's own (`combineConstraints`, the component's first, the stricter
+ * bound winning), and a field or parameter whose type that is carries the
+ * same (`Field.constraints`, `Parameter.constraints`), so `{ $ref:
+ * '#/components/schemas/Owner/properties/code', maxLength: 3 }` to `{
+ * type: 'string', pattern: '^own_', maxLength: 8 }` is `{ maxLength: 3,
+ * pattern: '^own_' }` on the field, the parameter and the type alike, and a
+ * bare pointer `{ maxLength: 8, pattern: '^own_' }`. A pointer that lands on
+ * a schema typed as a model or enum adds none: that node carries its own,
+ * and the site keeps what it wrote beside the `$ref`, as beside a `$ref` to
+ * a model component.
  */
-import type { Model, ModelRef, Operation, Service, TypeRef, Webhook } from '../ir/types.js';
-import { collectRequestBodyTypes, collectResponseBodyTypes, collectResponseHeaders, walkTypeRef } from '../ir/types.js';
-import { componentTypeRef, isNullSchema, schemaToTypeRef, type SchemaObject } from './schemas.js';
+import type { Constraints, Model, ModelRef, Operation, Service, TypeRef, Webhook } from '../ir/types.js';
+import {
+  collectRequestBodyTypes,
+  collectResponseBodyTypes,
+  collectResponseHeaders,
+  typeRefConstraints,
+  walkTypeRef,
+} from '../ir/types.js';
+import {
+  combineConstraints,
+  componentTypeRef,
+  isNullSchema,
+  schemaToTypeRef,
+  withTypeConstraints,
+  type SchemaObject,
+} from './schemas.js';
 import { replaceTypeRef } from './inline-models.js';
-import { isPendingSchemaRef, schemaAtPointer, schemaRefTokens, settlePendingSchemaRef } from './schema-refs.js';
+import {
+  isPendingSchemaRef,
+  pendingSiteLimitsOf,
+  schemaAtPointer,
+  schemaRefTokens,
+  settlePendingSchemaRef,
+} from './schema-refs.js';
 
 /** Where pending references are held: every model built so far — the components', their fields', the operations', the webhooks' — and the operations and webhooks themselves. */
 export interface SchemaPointerSites {
@@ -45,6 +82,12 @@ export interface SchemaPointerSites {
 }
 
 const UNKNOWN: TypeRef = { kind: 'primitive', type: 'unknown' };
+
+/** A site that carries its own limits beside its type — a field, an envelope field, a parameter — which stay one reading with the type's (`Field.constraints`, `Parameter.constraints`). */
+interface LimitedSite {
+  type: TypeRef;
+  constraints?: Constraints;
+}
 
 /**
  * Settle every pending reference among `sites` against the document's
@@ -65,18 +108,23 @@ export function resolveSchemaPointers(
       },
     });
   };
+  /** A field's or parameter's type settled, then its own limits aligned with the type's (`alignSiteLimits`). */
+  const visitSite = (site: LimitedSite, context: string): void => {
+    visit(site.type, context);
+    resolver.alignSiteLimits(site);
+  };
 
   for (const model of sites.models) {
-    for (const field of model.fields) visit(field.type, `${model.name}.${field.name}`);
+    for (const field of model.fields) visitSite(field, `${model.name}.${field.name}`);
     for (const variant of model.variants ?? []) visit(variant, `${model.name}.variants`);
   }
   for (const service of sites.services) {
-    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit);
+    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
   }
   for (const webhook of sites.webhooks) {
     const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
     for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
-      visit(p.type, `${context}.${p.name}`);
+      visitSite(p, `${context}.${p.name}`);
     }
     if (webhook.requestBody) visit(webhook.requestBody, `${context}.requestBody`);
     for (const content of webhook.requestBodyContents ?? []) {
@@ -87,15 +135,20 @@ export function resolveSchemaPointers(
   return resolver.settled;
 }
 
-/** Every type an operation holds, as `validateModelRefs` reads them. */
-function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, context: string) => void): void {
+/** Every type an operation holds, as `validateModelRefs` reads them; a parameter or envelope field through `visitSite`, which aligns its own limits too. */
+function visitOperation(
+  op: Operation,
+  context: string,
+  visit: (ref: TypeRef, context: string) => void,
+  visitSite: (site: LimitedSite, context: string) => void,
+): void {
   for (const p of [...op.pathParams, ...op.queryParams, ...(op.bodyOwnedQueryParams ?? []), ...op.headerParams]) {
-    visit(p.type, `${context}.${p.name}`);
+    visitSite(p, `${context}.${p.name}`);
   }
   if (op.requestBody) visit(op.requestBody, `${context}.requestBody`);
   visit(op.response, `${context}.response`);
   if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
-  for (const field of op.pagination?.envelopeFields ?? []) visit(field.type, `${context}.pagination.${field.name}`);
+  for (const field of op.pagination?.envelopeFields ?? []) visitSite(field, `${context}.pagination.${field.name}`);
   for (const error of op.errors) if (error.type) visit(error.type, `${context}.errors.${error.statusCode}`);
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
@@ -105,6 +158,8 @@ function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, co
 /** The walk one document's pending references are settled by; `settled` collects them. */
 class PointerResolver {
   readonly settled: TypeRef[] = [];
+  /** `settled`, by identity, so a site can tell whether its type was one. */
+  private readonly settledRefs = new Set<TypeRef>();
   private readonly modelsByName = new Map<string, Model>();
 
   constructor(
@@ -134,8 +189,36 @@ class PointerResolver {
       stack.delete(pending);
     }
     settlePendingSchemaRef(pending);
+    const site = pendingSiteLimitsOf(pending);
     replaceTypeRef(pending, type ?? UNKNOWN);
+    // The settled type carries the pointed schema's limits — what the type
+    // reached carries, under its nullable wrapper — conjoined with the
+    // site's own, as a `$ref` to a primitive component carries the
+    // component's conjoined with the site's (see the module comment); a
+    // model or enum carries none, and keeps the site's reading off the type.
+    // `pending` is the settled type now: `replaceTypeRef` rewrote it in place.
+    const settled = pending as TypeRef;
+    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
+    this.settledRefs.add(pending);
+  }
+
+  /**
+   * Give `site` — a field or parameter — the limits its type carries, when
+   * that type is a reference this pass settled into one that can carry
+   * them: the pointed schema's conjoined with the site's own (`settle`), so
+   * the field or parameter and its type stay one reading, as they are for
+   * a `$ref` to a primitive component (`Field.constraints`; #545 review).
+   * A site whose pointer landed on a model or enum keeps what it wrote
+   * beside the `$ref`: that node carries its own.
+   */
+  alignSiteLimits(site: LimitedSite): void {
+    const bare = site.type.kind === 'nullable' ? site.type.inner : site.type;
+    if (!this.settledRefs.has(bare) || bare.kind === 'model' || bare.kind === 'enum') return;
+    const limits = typeRefConstraints(bare);
+    if (limits) site.constraints = { ...limits };
+    else delete site.constraints;
   }
 
   /** The type `ref` names, or `undefined` after one warning saying why it names none. */

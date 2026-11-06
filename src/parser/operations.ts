@@ -21,7 +21,6 @@ import type {
   ExternalDocs,
   ServerEntry,
   StatusRange,
-  Constraints,
 } from '../ir/types.js';
 import { isParameterSegment, pathSegments, readPath, type OperationHint } from '../ir/operation-hints.js';
 import { isDefaultServerList, serverListsEqual } from '../ir/server-url.js';
@@ -54,7 +53,7 @@ import {
   resolveExamples,
   resolveComponentSchemaRef,
   extractConstraints,
-  combineConstraints,
+  schemaConstraints,
   componentReference,
   constraintsEntry,
   deprecatedEntry,
@@ -3809,35 +3808,33 @@ export function extractParams(
         { example: schema?.example, examples: nonEmptyExamples(schema?.examples) },
         ...fallbacks.map((level) => ({ example: level.example, examples: nonEmptyExamples(level.examples) })),
       ]);
-      // Like default/example, fall back per value: the `$ref` target's keywords
-      // sit under the parameter's own, so `{ $ref: Limit, minimum: 5 }` narrows
-      // one bound without discarding the target's others. A primitive or array
-      // component becomes no model, and a parameter should be readable on its
-      // own — through every alias and wrapper, its entries' limits conjoined
-      // as JSON Schema applies them, the stricter bound winning.
-      const own = schema ? extractConstraints(schema) : undefined;
-      const inherited = reference
-        ? reference.entries.reduceRight<Constraints | undefined>(
-            (limits, entry) => combineConstraints(limits, extractConstraints(entry)),
-            undefined,
-          )
-        : refTarget
-          ? extractConstraints(refTarget)
-          : undefined;
-      // For an array or primitive component the two conjoin as a field's do
+      // The parameter's own limits are read as a field's are
+      // (`schemaConstraints`; #545 review): the schema's keywords conjoined
+      // with its `allOf` members' and a nullable wrapper's with its branch's,
+      // level by level, so a keyword written beside an `allOf` member that
+      // writes it too reads as the field and the parameter's type read it
+      // (`pattern: '^a'` beside `allOf: [{ pattern: 'z$' }]` is `z$` on all
+      // three; it was `^a` here alone) — and, for an array or primitive
+      // component, or an alias of an enum component, every entry the
+      // reference passes conjoined from the component outward
       // (`combineConstraints`), the stricter bound winning: the wire enforces
       // the component's limit whatever is written beside the `$ref`, and no
       // model is left to carry it, so `{ $ref: Limit, minimum: 1 }` beside
-      // `Limit`'s `minimum: 5` keeps `5` (Greptile, review round 3). A `$ref`
-      // to a model or enum keeps the override, as before — through an alias
-      // of the enum too (#560): the alias's own limits conjoin, since no node
-      // carries them, and the enum's sit underneath as they sit under a bare
-      // `$ref` to it.
-      const conjoined = reference
-        ? combineConstraints(inherited, own)
-        : own && inherited
-          ? { ...inherited, ...own }
-          : (own ?? inherited);
+      // `Limit`'s `minimum: 5` keeps `5` (Greptile, review round 3).
+      const own = schema ? schemaConstraints(schema, componentSchemas) : undefined;
+      // Like default/example, any other `$ref` target's keywords fall back per
+      // value under the parameter's own, so `{ $ref: Limit, minimum: 5 }`
+      // narrows one bound without discarding the target's others and a
+      // parameter is readable without chasing the target: a `$ref` to a
+      // model or enum keeps the override, as before — through an alias of
+      // the enum too (#560): the alias's own limits conjoin above, since no
+      // node carries them, and the enum's sit underneath as they sit under a
+      // bare `$ref` to it — and so does a pointer deeper into a component
+      // (#539) until `resolveSchemaPointers` settles the type it lands on,
+      // which then gives the parameter the pointed schema's limits conjoined
+      // with its own, as the field reads them, where that type carries them.
+      const inherited = !reference && refTarget ? extractConstraints(refTarget) : undefined;
+      const conjoined = own && inherited ? { ...inherited, ...own } : (own ?? inherited);
       const underneath = aliased.length > 0 ? extractConstraints(aliased[0]) : undefined;
       const constraints = conjoined && underneath ? { ...underneath, ...conjoined } : (conjoined ?? underneath);
       // The schema's link, else the fallbacks' — the same chain `description`

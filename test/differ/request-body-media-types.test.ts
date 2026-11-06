@@ -505,3 +505,54 @@ describe('diffSpecs — a webhook payload model that was only renamed is no medi
     });
   });
 });
+
+describe('#545 review — a limit edited on a body is no retype', () => {
+  const text = (maxLength: number): TypeRef => ({ kind: 'primitive', type: 'string', constraints: { maxLength } });
+  const tagged: TypeRef = { kind: 'primitive', type: 'string', constraints: { pattern: '^tag_' } };
+  const array = (items: TypeRef): TypeRef => ({ kind: 'array', items });
+  const json: [string, TypeRef] = ['application/json', request];
+
+  it('reports nothing for a limit edited on a secondary representation, as for one on the primary body or on a field', () => {
+    // `typeRefsEqual` passes over a type's limits as `diffFields` passes over
+    // a field's; `sameShape` reads them under a renamed model only.
+    expect(
+      modified(createPet([json, ['text/plain', text(10)]]), createPet([json, ['text/plain', text(20)]])),
+    ).toBeUndefined();
+    expect(modified(createPet([['text/plain', text(10)]]), createPet([['text/plain', text(20)]]))).toBeUndefined();
+    expect(
+      modified(createPet([json, ['text/plain', array(tagged)]]), createPet([json, ['text/plain', array(string)]])),
+    ).toBeUndefined();
+  });
+
+  it('still reports a secondary representation whose renamed model changed its field’s items’ limits as retyped, breaking', () => {
+    const note = (name: string, items: TypeRef): Model => ({
+      name,
+      fields: [{ name: 'tags', type: array(items), required: false }],
+    });
+    const spec = (noteName: string, items: TypeRef): ApiSpec => ({
+      name: 'Test',
+      version: '1',
+      baseUrl: '',
+      services: [{ name: 'Pets', operations: [createPet([json, ['text/plain', { kind: 'model', name: noteName }]])] }],
+      webhooks: [],
+      models: [{ name: 'CreatePetRequest', fields: [] }, { name: 'Pet', fields: [] }, note(noteName, items)],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    });
+    // A rename alone surfaces through the models diff only.
+    expect(
+      diffSpecs(spec('OldNote', tagged), spec('NewNote', tagged))
+        .changes.map((c) => c.kind)
+        .sort(),
+    ).toEqual(['model-added', 'model-removed']);
+    // The renamed model's `tags` items lost their pattern: not one shape, so the body is retyped.
+    expect(
+      diffSpecs(spec('OldNote', tagged), spec('NewNote', string)).changes.find((c) => c.kind === 'operation-modified'),
+    ).toMatchObject({
+      requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
+      classification: 'breaking',
+    });
+    // Under one name the same edit is no change at all, as on any field.
+    expect(diffSpecs(spec('OldNote', tagged), spec('OldNote', string)).changes).toEqual([]);
+  });
+});

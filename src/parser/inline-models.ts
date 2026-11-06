@@ -41,6 +41,8 @@ import {
   componentKeyOf,
   isPendingSchemaRef,
   markPendingSchemaRef,
+  pendingSiteLimitsOf,
+  recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
@@ -1814,7 +1816,10 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
     case 'model': {
       const copy: ModelRef = { ...ref };
       if (isComponentModelRef(ref)) markComponentModelRef(copy);
-      if (isPendingSchemaRef(ref)) markPendingSchemaRef(copy);
+      if (isPendingSchemaRef(ref)) {
+        markPendingSchemaRef(copy);
+        recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+      }
       const key = inheritedModelRefs.get(ref);
       if (key !== undefined) recordInheritedRef(copy, key);
       return copy;
@@ -3033,19 +3038,21 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
     if (group) group.push(declaration);
     else groups.set(key, [declaration]);
   }
-  const shapes = [...groups.values()].map(shapeVariant);
+  // Each shape is its first declaration, the limits inside its items and
+  // values read by the agreement of every declaration of that shape
+  // (`withAgreedNestedLimits`), whether it is the one shape or one of
+  // several: a limit one array declaration's items write and another's
+  // leave out is no limit of the items whichever array is declared first,
+  // and whether or not an integer is declared beside them (#545 review).
+  const shapes = [...groups.values()].map((group) => withAgreedNestedLimits(shapeVariant(group), group));
   // One shape: the first declaration, carrying the agreed keywords and
-  // extensions in place of its own — inside its items and values too, for
-  // the limits their types carry.
+  // extensions in place of its own.
   if (shapes.length === 1) {
     const first = shapes[0]!;
     const disputed = new Set(
       LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
     );
-    return withAgreedExtensions(
-      withAgreedNestedLimits(disputed.size > 0 ? omitKeys(first, disputed) : first, declarations),
-      extensions,
-    );
+    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
   }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
@@ -3053,17 +3060,22 @@ function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObjec
 }
 
 /**
- * `shape`, the one declaration a single shape is typed from, with the
- * limits inside its array items and map values (`NESTED_DECLARATION_KEYWORDS`,
- * recursively) read by the same agreement as its own: a limit the items or
- * values of every declaration write the same way stays, one any declaration
- * leaves unset or writes otherwise is dropped (`agreedDeclarationKeys`).
- * The items' or values' type carries those limits (#545), and the value
- * takes one branch, so a `maxLength: 5` one declaration's items write and
- * another's leave out is no limit of the field's items; before, nothing in
- * the IR read them there. Every other lifted keyword written inside the
- * items or values — `readOnly`, `description`, `default`, … — stays the
- * first declaration's, as it did, since a field reads none of them there.
+ * `shape`, the declaration one shape is typed from (`shapeVariant`), with
+ * the limits inside its array items and map values
+ * (`NESTED_DECLARATION_KEYWORDS`, recursively) read by the agreement of
+ * `declarations`, the declarations of that shape, as a single shape's own
+ * are read by every declaration's: a limit the items or values of every
+ * declaration write the same way stays, one any declaration leaves unset
+ * or writes otherwise is dropped (`agreedDeclarationKeys`). The items' or
+ * values' type carries those limits (#545), and the value takes one
+ * branch, so a `maxLength: 5` one declaration's items write and another's
+ * leave out is no limit of the field's items; before, nothing in the IR
+ * read them there. Read per shape, so two array declarations beside an
+ * integer agree on their items as they would without it, whichever array
+ * comes first (#545 review: the first array's `pattern` was every item's).
+ * Every other lifted keyword written inside the items or values —
+ * `readOnly`, `description`, `default`, … — stays the first declaration's,
+ * as it did, since a field reads none of them there.
  */
 function withAgreedNestedLimits(shape: SchemaObject, declarations: readonly SchemaObject[]): SchemaObject {
   let out = shape;
