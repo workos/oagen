@@ -344,7 +344,9 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  *   deprecated component, and a deprecated component shares it with no
  *   deprecated copy either (`InlineModelNaming.components`, #441), so a
  *   deprecated copy keeps the qualified name its live self had (below);
- * - otherwise takes a name of its own (`renameInlineCopy`).
+ * - otherwise leaves the name with the other copies the owner does not
+ *   share (`settleRefusedCopies`, below), or, with no owner, takes a name of
+ *   its own (`renameInlineCopy`).
  *
  * A contender whose flag agrees with an owner's
  *
@@ -382,21 +384,31 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  * in the same response map or anywhere else, and never a reference another
  * site's field lent.
  *
- * Every copy that must leave a name leaves it through `renameClusters`,
- * whichever rule above moves it — the owner's shape, its flag, an enum
- * holding the name, a renamed child (below): identical copies
- * (`modelFingerprint`, the flag included, so a deprecated copy and a live
- * one never cluster) share one renamed model under the first site's
- * qualified name, every site repointed to it, with one note saying how many
- * sites share it; a copy of another shape takes a name of its own. Two
- * deprecated `address` objects beside a live `PetOwnerAddress` of another
- * shape are one `PetOwnerAddress2`, as they would be one `PetOwnerAddress`
- * without the component. Copies that leave the name in different passes
- * share it the same way (`naming.mintedFor`): a component field's copy,
- * settled before any operation is read, takes the model, and an
- * operation's identical copy joins it here, as does a deprecated copy
- * identical to a field model that yielded the name to a live copy
- * (`yielding`).
+ * Every copy that must leave a name leaves it clustered by shape, whichever
+ * rule above moves it — the owner's shape, its flag, an enum holding the
+ * name, a renamed child (below): identical copies share one renamed model
+ * under the first site's qualified name, every site repointed to it, with
+ * one note saying how many sites share it; a copy of another shape takes a
+ * name of its own. Two deprecated `address` objects beside a live
+ * `PetOwnerAddress` of another shape are one `PetOwnerAddress2`, as they
+ * would be one `PetOwnerAddress` without the component. Under an owner, the
+ * copies it does not share are settled among themselves as the copies of a
+ * name with no owner are (`settleRefusedCopies`): the flag read apart
+ * (`shapeFingerprint`), so a deprecated copy and its live twin share one
+ * model, the live definition kept and the deprecated copy folded onto it
+ * with the warning above, each cluster named by its first site whatever
+ * its flag — so flipping one copy's flag never changes a copy's name, and
+ * two identical responses beside a deprecated `Widget` keep sharing
+ * `GetLegacyWidgetWidget` once one of them is deprecated (#441). Elsewhere
+ * — a name an enum holds, a holder that references a renamed model — the
+ * flag is part of the shape (`renameClusters`, `modelFingerprint`), so a
+ * deprecated copy and a live one never cluster. Copies that leave the name
+ * in different passes share it the same way (`naming.mintedFor`): a
+ * component field's copy, settled before any operation is read, takes the
+ * model, and an operation's identical copy joins it here — of either flag
+ * under an owner, the model live as soon as one of them is — as does a
+ * deprecated copy identical to a field model that yielded the name to a
+ * live copy (`yielding`).
  *
  * Names are decided bottom-up — a name after every name its contenders'
  * fields reference, as the list-envelope pass decides nested companions —
@@ -502,15 +514,6 @@ function settleSharedNames(
   };
 
   const folded = new Map<Model, Model>();
-  /** `copies` clustered by shape (`modelFingerprint`), in their order — the clusters `renameClusters` forms. */
-  const byShape = (copies: Model[]): Model[][] => {
-    const clusters = new Map<string, Model[]>();
-    for (const copy of copies) {
-      const shape = modelFingerprint(copy);
-      clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
-    }
-    return [...clusters.values()];
-  };
 
   for (const name of bottomUp(byName)) {
     const group = byName.get(name)!;
@@ -577,7 +580,7 @@ function settleSharedNames(
       // against the holders that follow no rename, or that first cluster.
       const own = holders.filter((m) => !minted.has(m.name) && followsRename(m));
       const rest = holders.filter((m) => !own.includes(m));
-      const leaving = byShape(own);
+      const leaving = clustersBy(own, modelFingerprint);
       const first = rest.length === 0 ? (leaving.shift() ?? []) : [];
       renameClusters(
         name,
@@ -613,62 +616,68 @@ function settleSharedNames(
       if (live.length === 0 || holders.length === group.length) continue;
     }
 
-    // Under an owner, every copy is measured against it first: one the
-    // owner shares its name with (`ownerSharesWith`, the flag read by
-    // `ownerFlagAdmits`) is folded onto it — a deprecated copy onto a live
-    // owner with the warning two inline copies get, since the shared name
-    // keeps the live definition, naming what a looser owner no longer
-    // requires (`looserFields`); a deprecated owner shares with no live
-    // copy, and a deprecated component with no copy at all (#441). The
-    // copies that agree with the name's flag and that the owner does not
-    // share leave the owner's name, one model per shape (`renameClusters`),
-    // the note naming why: the shape, or — for a deprecated copy a
-    // deprecated component would share were it live (`refusedByFlag`) — the
-    // component's flag, so a deprecated copy of a deprecated `Widget` is
-    // `GetLegacyWidgetWidget` as its live self was. A copy whose flag
-    // disagrees and that the owner does not share leaves the name the same
-    // way, below.
-    const clashing: Model[] = [];
-    const refused: Model[] = [];
-    for (const copy of group) {
-      if (!owner) continue;
-      const bundle = naming && bundleOf.get(copy);
-      if (ownerSharesWith(owner, copy, bundle, fieldMinted(owner))) {
-        if (!!copy.deprecated !== nameDeprecated) console.warn(deprecatedFoldWarning(name, looserFields(owner, copy)));
-        foldOnto(copy, owner, bundleOf, folded);
-        continue;
+    if (owner) {
+      // Under an owner, every copy is measured against it first: one the
+      // owner shares its name with (`ownerSharesWith`, the flag read by
+      // `ownerFlagAdmits`) is folded onto it — a deprecated copy onto a live
+      // owner with the warning two inline copies get, since the shared name
+      // keeps the live definition, naming what a looser owner no longer
+      // requires (`looserFields`); a deprecated owner shares with no live
+      // copy, and a deprecated component with no copy at all (#441). The
+      // copies the owner does not share leave its name settled among
+      // themselves as the copies of a name with no owner are
+      // (`settleRefusedCopies`): one model per shape, the flag read apart,
+      // named by its first site, the live definition kept — so a deprecated
+      // copy of a deprecated `Widget` is `GetLegacyWidgetWidget` as its
+      // live self was, and two sites sharing it keep sharing it when one of
+      // them is deprecated. The note names why the cluster leaves: a flag
+      // the owner's does not admit — a live copy's beside a deprecated
+      // owner, the live definition a mixed cluster keeps included, or a
+      // deprecated copy's beside a live owner that does not admit its shape
+      // — or, for deprecated copies beside a deprecated owner, the shape,
+      // or the component that would share the shape were it live
+      // (`refusedByFlag`).
+      const held = owner;
+      const refused: Model[] = [];
+      for (const copy of group) {
+        const bundle = naming && bundleOf.get(copy);
+        if (ownerSharesWith(held, copy, bundle, fieldMinted(held))) {
+          if (!!copy.deprecated !== nameDeprecated) console.warn(deprecatedFoldWarning(name, looserFields(held, copy)));
+          foldOnto(copy, held, bundleOf, folded);
+          continue;
+        }
+        refused.push(copy);
       }
-      if (!!copy.deprecated !== nameDeprecated) continue;
-      (refusedByFlag(owner, copy, bundle, fieldMinted(owner)) ? refused : clashing).push(copy);
+      const differs: [string, string] = [
+        `its shape differs from component schema "${name}"`,
+        `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
+      ];
+      const flagged = (flag: boolean): [string, string] => [
+        `it is ${flagOf(flag)} while "${name}" is ${flagOf(!flag)}`,
+        `[oagen] Warning: Inline model "${name}" is ${flagOf(flag)} in one definition and ${flagOf(!flag)} in another, with different shapes, and has no site to be renamed from — keeping the usual definition under the shared name`,
+      ];
+      settleRefusedCopies(name, refused, naming, bundleOf, folded, (cluster) => {
+        const anyLive = cluster.some((m) => !m.deprecated);
+        if (!nameDeprecated) return anyLive ? differs : flagged(true);
+        if (anyLive) return flagged(false);
+        const first = cluster[0]!;
+        return refusedByFlag(held, first, naming && bundleOf.get(first), fieldMinted(held))
+          ? [
+              `"${name}" is deprecated and admits no copy`,
+              `[oagen] Warning: Inline model "${name}" is named like component schema "${name}", which is deprecated and admits no copy, and has no site to be renamed from — using the component schema`,
+            ]
+          : differs;
+      });
+      continue;
     }
-    renameClusters(
-      name,
-      clashing,
-      naming,
-      bundleOf,
-      folded,
-      `its shape differs from component schema "${name}"`,
-      `[oagen] Warning: Inline model "${name}" has a different shape than component schema "${name}" and has no site to be renamed from — using the component schema`,
-    );
-    renameClusters(
-      name,
-      refused,
-      naming,
-      bundleOf,
-      folded,
-      `"${name}" is deprecated and admits no copy`,
-      `[oagen] Warning: Inline model "${name}" is named like component schema "${name}", which is deprecated and admits no copy, and has no site to be renamed from — using the component schema`,
-    );
 
-    // The copies whose flag disagrees with the name's and that nothing takes
-    // in — no owner that shares the name, no live twin — leave it the same
-    // way, clustered by shape in document order: two identical deprecated
-    // `address` objects beside a live `PetOwnerAddress` of another shape, or
-    // beside live inline copies they do not twin, are one `PetOwnerAddress2`
-    // rather than a `PetOwnerAddress2` and a `PetOwnerAddress3`, and two
-    // identical live copies beside a deprecated component share one name the
-    // same way. The note names the copies' flag and the name's; every copy
-    // here carries the one flag the name does not.
+    // Without an owner, the copies whose flag disagrees with the name's and
+    // that no live twin takes in leave it the same way, clustered by shape
+    // in document order: two identical deprecated `address` objects beside
+    // live inline copies they do not twin are one `PetOwnerAddress2` rather
+    // than a `PetOwnerAddress2` and a `PetOwnerAddress3`. The note names the
+    // copies' flag and the name's; every copy here carries the one flag the
+    // name does not.
     const disagreeing: Model[] = [];
     for (const copy of group) {
       if (!!copy.deprecated === nameDeprecated || folded.has(copy)) continue;
@@ -834,7 +843,8 @@ function foldOnto(
  * rename moved onto it included. A copy without a site cannot be renamed
  * and is left under `name`, `noSite` said for each. The copies must agree
  * on `deprecated`: a cluster never joins a live copy to a deprecated one
- * (`differOnlyByDeprecation`).
+ * (`differOnlyByDeprecation`). The copies an owner does not share are
+ * clustered with the flag read apart instead (`settleRefusedCopies`).
  */
 function renameClusters(
   name: string,
@@ -845,38 +855,127 @@ function renameClusters(
   reason: string,
   noSite: string,
 ): void {
+  for (const cluster of clustersBy(copies, modelFingerprint)) {
+    const leader = mintedLeader(name, modelFingerprint(cluster[0]!), modelFingerprint, naming, bundleOf, folded);
+    renameCluster(name, cluster, leader, naming, bundleOf, folded, reason, noSite);
+  }
+}
+
+/**
+ * Settle `copies` — the contenders of `name` an owner does not share, every
+ * one of which must leave it — among themselves, as the copies of a name
+ * with no owner are settled: clustered by shape with the model's own
+ * `deprecated` read apart (`shapeFingerprint`, the reading
+ * `differOnlyByDeprecation` gives a deprecated copy beside its live twin),
+ * one model per cluster under the first site's qualified name whatever that
+ * site's flag (`renameCluster`), so flipping one copy's flag never changes a
+ * copy's name: two identical live `object: widget` responses beside a
+ * deprecated `Widget` share `GetLegacyWidgetWidget`, and still do once
+ * either of them is deprecated (#441 review). A cluster that mixes flags
+ * keeps the live definition — its members are identical but for the flag,
+ * so the first site's model with the flag cleared — and each deprecated
+ * member folds onto it with the warning a deprecated copy folding onto its
+ * live twin gets (`deprecatedFoldWarning`), its own field, parameter or
+ * envelope field still carrying the flag; a cluster is deprecated only when
+ * every member is. A model an earlier pass minted for copies leaving `name`
+ * (`mintedLeader`) is joined by shape the same way: a live operation copy
+ * joining the `PetOwner2` a deprecated `Pet.owner` left the name for makes
+ * it live, as its live twin would under no owner, the field keeping its own
+ * flag. `noteFor` says why a cluster leaves, and what to say for a member
+ * without a site, which stays under `name`.
+ */
+function settleRefusedCopies(
+  name: string,
+  copies: readonly Model[],
+  naming: InlineModelNaming | undefined,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+  noteFor: (cluster: readonly Model[]) => readonly [reason: string, noSite: string],
+): void {
+  for (const cluster of clustersBy(copies, shapeFingerprint)) {
+    const leader = mintedLeader(name, shapeFingerprint(cluster[0]!), shapeFingerprint, naming, bundleOf, folded);
+    const joining = cluster.filter((copy) => naming !== undefined && bundleOf.has(copy));
+    const members = leader ? [leader, ...joining] : joining;
+    const live = members.some((member) => !member.deprecated);
+    if (live) {
+      for (const member of members) if (member.deprecated) console.warn(deprecatedFoldWarning(name, []));
+    }
+    const [reason, noSite] = noteFor(cluster);
+    const kept = renameCluster(name, cluster, leader, naming, bundleOf, folded, reason, noSite);
+    if (kept && live) delete kept.deprecated;
+  }
+}
+
+/** `copies` clustered by `shapeOf`, each cluster in the copies' order and the clusters in the order of their first copy. */
+function clustersBy(copies: readonly Model[], shapeOf: (model: Model) => string): Model[][] {
   const clusters = new Map<string, Model[]>();
   for (const copy of copies) {
-    const shape = modelFingerprint(copy);
+    const shape = shapeOf(copy);
     clusters.set(shape, [...(clusters.get(shape) ?? []), copy]);
   }
-  for (const [shape, cluster] of clusters) {
-    // Only a model still a site's: one no site holds, or one folded here, may be gone from the IR.
-    let leader = [...(naming?.mintedFor?.get(name)?.keys() ?? [])].find(
-      (model) => bundleOf.has(model) && !folded.has(model) && modelFingerprint(model) === shape,
-    );
-    for (const copy of cluster) {
-      const bundle = naming && bundleOf.get(copy);
-      if (!naming || !bundle) {
-        console.warn(noSite);
-        continue;
-      }
-      if (leader === undefined) {
-        renameInlineCopy(copy, name, bundle, naming);
-        leader = copy;
-        continue;
-      }
-      repointSite(bundle, name, leader.name, copy);
-      foldOnto(copy, leader, bundleOf, folded);
+  return [...clusters.values()];
+}
+
+/**
+ * The model an earlier rename minted for copies leaving `name`
+ * (`naming.mintedFor`) that a cluster of shape `shape` joins: one of that
+ * shape under `shapeOf` that is still a site's — one no site holds, or one
+ * folded here, may be gone from the IR.
+ */
+function mintedLeader(
+  name: string,
+  shape: string,
+  shapeOf: (model: Model) => string,
+  naming: InlineModelNaming | undefined,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+): Model | undefined {
+  return [...(naming?.mintedFor?.get(name)?.keys() ?? [])].find(
+    (model) => bundleOf.has(model) && !folded.has(model) && shapeOf(model) === shape,
+  );
+}
+
+/**
+ * Move one cluster of copies off `name` (`renameClusters`): onto `leader`
+ * when an earlier rename minted one, else the first copy with a site is
+ * renamed through it (`renameInlineCopy`) and leads; every later copy is
+ * repointed to the leader's name (`repointSite`) and folded onto it. The
+ * rename is noted with `reason` and the number of sites sharing the model;
+ * `noSite` is said for a copy without a site. Returns the model the cluster
+ * ends under, or none when no copy had a site and no leader was minted.
+ */
+function renameCluster(
+  name: string,
+  cluster: readonly Model[],
+  leader: Model | undefined,
+  naming: InlineModelNaming | undefined,
+  bundleOf: ReadonlyMap<Model, InlineModelBundle>,
+  folded: Map<Model, Model>,
+  reason: string,
+  noSite: string,
+): Model | undefined {
+  for (const copy of cluster) {
+    const bundle = naming && bundleOf.get(copy);
+    if (!naming || !bundle) {
+      console.warn(noSite);
+      continue;
     }
-    const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
-    if (naming && leader && sites > 0) {
-      const shared = shareMinted(naming, name, leader, sites);
-      console.warn(
-        `[oagen] Renamed inline model "${name}" → "${leader.name}": ${reason}${shared > 1 ? ` (shared by ${shared} sites)` : ''}`,
-      );
+    if (leader === undefined) {
+      renameInlineCopy(copy, name, bundle, naming);
+      leader = copy;
+      continue;
     }
+    repointSite(bundle, name, leader.name, copy);
+    foldOnto(copy, leader, bundleOf, folded);
   }
+  const sites = cluster.filter((copy) => naming && bundleOf.has(copy)).length;
+  if (naming && leader && sites > 0) {
+    const shared = shareMinted(naming, name, leader, sites);
+    console.warn(
+      `[oagen] Renamed inline model "${name}" → "${leader.name}": ${reason}${shared > 1 ? ` (shared by ${shared} sites)` : ''}`,
+    );
+  }
+  return leader;
 }
 
 /**

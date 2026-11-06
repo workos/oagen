@@ -1320,6 +1320,71 @@ describe('#441: deprecating an inline copy of a deprecated component is a flag f
     });
   });
 
+  describe.each(['3.0.3', '3.1.0'])(
+    'two identical copies sharing `GetLegacyWidgetWidget` beside the deprecated component, on OpenAPI %s (#625 review)',
+    (openapi) => {
+      const shared = (openapi: string, legacy: boolean, old: boolean) => {
+        const base = doc(openapi, legacy);
+        return {
+          ...base,
+          paths: {
+            ...base.paths,
+            '/old-widget': {
+              get: { operationId: 'getOldWidget', responses: ok(old ? { ...widget, deprecated: true } : widget) },
+            },
+          },
+        };
+      };
+
+      it('deprecating one copy reports nothing (exit 0) and deprecating both the model’s flip (exit 1), in either direction', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          const files = {
+            live: await writeSpec(`shared-live-${openapi}.json`, shared(openapi, false, false)),
+            old: await writeSpec(`shared-old-${openapi}.json`, shared(openapi, false, true)),
+            legacy: await writeSpec(`shared-legacy-${openapi}.json`, shared(openapi, true, false)),
+            both: await writeSpec(`shared-both-${openapi}.json`, shared(openapi, true, true)),
+          };
+          const specs = Object.fromEntries(
+            await Promise.all(Object.entries(files).map(async ([label, file]) => [label, await parseSpec(file)])),
+          ) as Record<keyof typeof files, ApiSpec>;
+          for (const [label, spec] of Object.entries(specs)) {
+            expect(
+              spec.models.map((m) => `${m.name}${m.deprecated ? ' (deprecated)' : ''}`),
+              label,
+            ).toEqual(['Widget (deprecated)', `GetLegacyWidgetWidget${label === 'both' ? ' (deprecated)' : ''}`]);
+          }
+          const exitCodeOf = async (from: string, to: string): Promise<number> => {
+            const error = (await diffCommand({ old: from, new: to }).catch((e: unknown) => e)) as { exitCode: number };
+            return error.exitCode;
+          };
+          for (const [a, b] of [
+            ['live', 'old'],
+            ['live', 'legacy'],
+            ['old', 'legacy'],
+          ] as const) {
+            for (const [from, to] of [
+              [a, b],
+              [b, a],
+            ] as const) {
+              expect(diffSpecs(specs[from], specs[to]).changes, `${from} → ${to}`).toEqual([]);
+              expect(await exitCodeOf(files[from], files[to]), `${from} → ${to}`).toBe(0);
+            }
+          }
+          for (const other of ['live', 'old', 'legacy'] as const) {
+            expect(diffSpecs(specs[other], specs.both).changes, `${other} → both`).toEqual([flip(became)]);
+            expect(diffSpecs(specs.both, specs[other]).changes, `both → ${other}`).toEqual([flip(ceased)]);
+            expect(await exitCodeOf(files[other], files.both), `${other} → both`).toBe(1);
+            expect(await exitCodeOf(files.both, files[other]), `both → ${other}`).toBe(1);
+          }
+        } finally {
+          vi.restoreAllMocks();
+        }
+      });
+    },
+  );
+
   it('hand-built IR: the copy’s model flips beside the deprecated component, and the operation returning it is unchanged', () => {
     expect(diffModels([deprecatedWidget, legacy(false)], [deprecatedWidget, legacy(true)])).toEqual([flip(became)]);
     expect(diffModels([deprecatedWidget, legacy(true)], [deprecatedWidget, legacy(false)])).toEqual([flip(ceased)]);

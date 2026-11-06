@@ -542,6 +542,106 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
       expect(exitCode(diff)).toBe(2);
       expect(onlyModified(diffSpecs(after, before))).toMatchObject({ classification: 'breaking' });
     });
+
+    it('a header name that only changed case is additive for the handler too, exit 1 (Greptile)', async () => {
+      const before = await parse(only(xKey));
+      const after = await parse(only({ type: 'apiKey', in: 'header', name: 'x-key' }));
+      const diff = diffSpecs(before, after);
+      expect(onlyModified(diff)).toMatchObject({
+        schemeName: 'apiKey',
+        details: 'apiKey in header "X-Key" → in header "x-key"',
+        classification: 'additive',
+      });
+      expect(exitCode(diff)).toBe(1);
+      expect(onlyModified(diffSpecs(after, before))).toMatchObject({ classification: 'additive' });
+    });
+  });
+
+  describe('a header name that only changed case: reported, but additive, since header names are case-insensitive (Greptile)', () => {
+    const xKeyLower = { type: 'apiKey', in: 'header', name: 'x-key' };
+    const xKeyLowerScheme: AuthScheme = { kind: 'apiKey', schemeName: 'apiKey', in: 'header', name: 'x-key' };
+
+    it('on a scheme in use: one additive security-scheme-modified with the spelling in details, exit 1, both directions', async () => {
+      const before = await parse(issueOld());
+      const after = await parse({ security: [{ apiKey: [] }], securitySchemes: { apiKey: xKeyLower } });
+      expect(schemesInUse(after)).toEqual(new Set(['apiKey']));
+      const diff = diffSpecs(before, after);
+      expect(diff.changes).toEqual([
+        {
+          kind: 'security-scheme-modified',
+          schemeName: 'apiKey',
+          oldScheme: xKeyScheme,
+          newScheme: xKeyLowerScheme,
+          details: 'apiKey in header "X-Key" → in header "x-key"',
+          classification: 'additive',
+        },
+      ]);
+      expect(diff.behaviorChanges).toEqual([
+        {
+          kind: 'security-scheme-changed',
+          schemeName: 'apiKey',
+          oldScheme: xKeyScheme,
+          newScheme: xKeyLowerScheme,
+          classification: 'additive',
+        },
+      ]);
+      expect(diff.summary).toEqual({ added: 0, removed: 0, modified: 1, breaking: 0, additive: 1, behaviorChanges: 1 });
+      expect(exitCode(diff)).toBe(1);
+
+      const reverse = diffSpecs(after, before);
+      expect(onlyModified(reverse)).toMatchObject({
+        details: 'apiKey in header "x-key" → in header "X-Key"',
+        classification: 'additive',
+      });
+      expect(exitCode(reverse)).toBe(1);
+    });
+
+    it('on a scheme nothing uses: additive too, exit 1, both directions', async () => {
+      const before = await parse({ security: [{ bearer: [] }], securitySchemes: { apiKey: xKey, bearer } });
+      const after = await parse({ security: [{ bearer: [] }], securitySchemes: { apiKey: xKeyLower, bearer } });
+      expect(onlyModified(diffSpecs(before, after))).toMatchObject({
+        details: 'apiKey in header "X-Key" → in header "x-key"',
+        classification: 'additive',
+      });
+      expect(onlyModified(diffSpecs(after, before))).toMatchObject({ classification: 'additive' });
+      expect(exitCode(diffSpecs(before, after))).toBe(1);
+    });
+
+    it('a query name that only changed case stays breaking in use: query names are case-sensitive', async () => {
+      const inQuery = (name: string): Doc => ({
+        security: [{ apiKey: [] }],
+        securitySchemes: { apiKey: { type: 'apiKey', in: 'query', name } },
+      });
+      const before = await parse(inQuery('X-Key'));
+      const after = await parse(inQuery('x-key'));
+      expect(onlyModified(diffSpecs(before, after))).toMatchObject({
+        details: 'apiKey in query "X-Key" → in query "x-key"',
+        classification: 'breaking',
+      });
+      expect(onlyModified(diffSpecs(after, before))).toMatchObject({ classification: 'breaking' });
+      expect(exitCode(diffSpecs(before, after))).toBe(2);
+    });
+
+    it('a header respelling that changes letters, or moves with its location, stays breaking in use', async () => {
+      const before = await parse(issueOld());
+      const respelled = await parse({
+        security: [{ apiKey: [] }],
+        securitySchemes: { apiKey: { type: 'apiKey', in: 'header', name: 'x-api-key' } },
+      });
+      expect(onlyModified(diffSpecs(before, respelled))).toMatchObject({
+        details: 'apiKey in header "X-Key" → in header "x-api-key"',
+        classification: 'breaking',
+      });
+      expect(exitCode(diffSpecs(before, respelled))).toBe(2);
+      const moved = await parse({
+        security: [{ apiKey: [] }],
+        securitySchemes: { apiKey: { type: 'apiKey', in: 'query', name: 'x-key' } },
+      });
+      expect(onlyModified(diffSpecs(before, moved))).toMatchObject({
+        details: 'apiKey in header "X-Key" → in query "x-key"',
+        classification: 'breaking',
+      });
+    });
   });
 
   describe('a document default counts only through a node that inherits it', () => {
@@ -720,6 +820,13 @@ function spec(overrides: Partial<ApiSpec> = {}): ApiSpec {
 
 const header: AuthScheme = { kind: 'apiKey', schemeName: 'apiKey', in: 'header', name: 'X-Key' };
 const cookie: AuthScheme = { kind: 'apiKey', schemeName: 'apiKey', in: 'cookie', name: 'session' };
+/** The `apiKey` scheme at `location` under `name`. */
+const apiKeyAt = (location: 'header' | 'query' | 'cookie', name: string): AuthScheme => ({
+  kind: 'apiKey',
+  schemeName: 'apiKey',
+  in: location,
+  name,
+});
 const basicAuth: AuthScheme = { kind: 'basic', schemeName: 'apiKey' };
 const bearerAuth: AuthScheme = { kind: 'bearer', schemeName: 'apiKey' };
 const oauth = (flows: Record<string, unknown>): AuthScheme => ({ kind: 'oauth2', schemeName: 'apiKey', flows });
@@ -865,6 +972,37 @@ describe('#384 diffAuthSchemes', () => {
         details: 'apiKey in header "X-Key" → in cookie "session"',
         classification: 'breaking',
       });
+    });
+
+    it('folds a header name before comparing the wire form: a case-only respelling is reported, in use, but additive (Greptile)', () => {
+      const lower = apiKeyAt('header', 'x-key');
+      expect(change([header], [lower], used)).toEqual({
+        kind: 'security-scheme-modified',
+        schemeName: 'apiKey',
+        oldScheme: header,
+        newScheme: lower,
+        details: 'apiKey in header "X-Key" → in header "x-key"',
+        classification: 'additive',
+      });
+      expect(change([lower], [header], used)).toMatchObject({
+        details: 'apiKey in header "x-key" → in header "X-Key"',
+        classification: 'additive',
+      });
+      expect(change([header], [lower])).toMatchObject({ classification: 'additive' });
+      // Query and cookie names are case-sensitive, so the same respelling
+      // there is a wire-form change.
+      expect(change([apiKeyAt('query', 'X-Key')], [apiKeyAt('query', 'x-key')], used)).toMatchObject({
+        details: 'apiKey in query "X-Key" → in query "x-key"',
+        classification: 'breaking',
+      });
+      expect(change([cookie], [apiKeyAt('cookie', 'SESSION')], used)).toMatchObject({
+        details: 'apiKey in cookie "session" → in cookie "SESSION"',
+        classification: 'breaking',
+      });
+      // A folded name that still differs, or a location that moved with
+      // the case, is breaking.
+      expect(change([header], [apiKeyAt('header', 'x-api-key')], used)).toMatchObject({ classification: 'breaking' });
+      expect(change([header], [apiKeyAt('query', 'x-key')], used)).toMatchObject({ classification: 'breaking' });
     });
 
     it('is additive for any wire-form change on a scheme the new document does not use', () => {
