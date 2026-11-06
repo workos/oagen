@@ -200,7 +200,8 @@ export interface Webhook {
    * is: the Request Body Object's own `description`, else the `description`
    * written on the schema of the content entry `requestBody` is read from (a
    * `$ref` is not followed; a nullable `oneOf`/`anyOf` or a single-member
-   * `allOf`, `oneOf` or `anyOf` is read to its branch, its own text first; a
+   * `allOf`, `oneOf` or `anyOf` is read to its branch, its own text first,
+   * an `allOf` member that declares no type being part of the wrapper, #555; a
    * `oneOf`/`anyOf` of consts read as an enum is read as itself, never to a
    * variant, #535). Present only when one of the two has non-whitespace
    * content, kept verbatim.
@@ -412,7 +413,9 @@ export interface Operation {
    * stays on its model, while a `description` written beside the `$ref` is
    * read; a wrapper the parser collapses or sees through — a nullable
    * `oneOf`/`anyOf`, a single-member `allOf`, `oneOf` or `anyOf` — is read
-   * to its branch, its own text first, while a `oneOf`/`anyOf` of consts
+   * to its branch, its own text first, an `allOf` member that declares no
+   * type being part of the wrapper (`allOf: [{ $ref: Pet }, { description }]`
+   * carries that text; #555), while a `oneOf`/`anyOf` of consts
    * read as an enum, nullable or not, is the schema that declares the
    * members and is read as itself, never to a variant (#535). When both
    * have content the body's own wins. The schema's text is also the `description` of the model an
@@ -1036,17 +1039,28 @@ export interface TypeParam {
  */
 export interface Model {
   name: string;
+  /**
+   * The schema's own `description`; for a model built from an `allOf` — a
+   * component's, or an inline merge — the wrapper layer's: the schema's
+   * own, else the first `allOf` member's that declares no type (`allOf:
+   * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
+   * }]`; #555 review). A typing member's text stays on that member, a
+   * `$ref` member's on its component.
+   */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one. */
+  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says
    * `deprecated: true` — a component, a discriminated-union variant, or an
    * inline request body, response or field object. Only that schema's own
-   * top-level keyword counts, read as `Field.deprecated` is: an `allOf`
-   * member's or a nullable branch's flag is not read (a `$ref` member's stays
-   * on the referenced model), and a folded `<Name>Json` model's flag does not
-   * deprecate the `<Name>` it collapses into. Absent otherwise. An inline
+   * top-level keyword counts, read as `Field.deprecated` is: a nullable
+   * branch's flag is not read, nor an `allOf` member's that declares a type
+   * (a `$ref` member's stays on the referenced model) — one that declares
+   * none, `{ deprecated: true }` beside the members, is part of the wrapper
+   * and deprecates the model (#555 review) — and a folded `<Name>Json`
+   * model's flag does not deprecate the `<Name>` it collapses into. Absent
+   * otherwise. An inline
    * schema that shares the name of a model the document declares has no
    * model of its own: a deprecated schema identical to a live component
    * keeps its flag on the `Field`, `Parameter`, `ResponseHeader` or envelope
@@ -1134,7 +1148,16 @@ export interface Field {
    * (`{ allOf: [{ $ref: PetId }, { description }] }`) — the field documents
    * itself: the wrapper's text or a member's written beside the `$ref`,
    * never the component's; the same holds for every annotation, flag, default
-   * and key below, while `constraints` conjoin through a wrapper.
+   * and key below, while `constraints` conjoin through a wrapper. An `allOf`
+   * member that declares no type — `{ description }`, `{ deprecated: true }`,
+   * `{ readOnly: true }`, `{ maxLength: 3 }`, `{ 'x-internal': true }` — is
+   * part of the field's schema, whatever the other members: beside a `$ref`
+   * (`{ allOf: [{ $ref: Kind }, { description }] }` is `Kind` with that
+   * text on the field), beside the one member that types the schema
+   * (`{ allOf: [{ type: 'string', enum: [...] }, { description }] }` is the
+   * enum, read as `{ allOf: [{ type: 'string', enum: [...] }], description }`
+   * is; #555) or beside a merge — the schema's own value first, then the
+   * first such member's, for every keyword below.
    */
   description?: string;
   /**
@@ -1148,18 +1171,22 @@ export interface Field {
    */
   externalDocs?: ExternalDocs;
   /**
-   * `true` when the field schema says `readOnly: true`, or when a bare `$ref`
-   * names an array or primitive component that says so, or an alias of it
-   * on the way (see `description`). `writeOnly` is read the same way.
+   * `true` when the field schema says `readOnly: true` — itself, or an
+   * `allOf` member of its that declares no type (`allOf: [{ $ref: Kind },
+   * { readOnly: true }]`; #555) — or when a bare `$ref` names an array or
+   * primitive component that says so, or an alias of it on the way (see
+   * `description`). `writeOnly` is read the same way.
    */
   readOnly?: boolean;
   writeOnly?: boolean;
   /**
    * Present, and `true`, when the field schema says `deprecated: true` — a
-   * keyword written beside a `$ref` included — or when a bare `$ref` names
-   * an array or primitive component that says so, or an alias of it on the
-   * way, since no model carries that component's flag. The flag of a
-   * model, named union or enum a `$ref` names stays on it.
+   * keyword written beside a `$ref` included, and an `allOf` member that
+   * declares no type (`allOf: [{ $ref: Kind }, { deprecated: true }]`; #555)
+   * — or when a bare `$ref` names an array or primitive component that says
+   * so, or an alias of it on the way, since no model carries that
+   * component's flag. The flag of a model, named union or enum a `$ref`
+   * names stays on it.
    */
   deprecated?: boolean;
   /**

@@ -84,6 +84,7 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  annotatingAllOfMembers,
   agreedExtensions,
   collectProperties,
   extractInlineModelsFromProperties,
@@ -3834,7 +3835,11 @@ export function extractParams(
       // default and examples too for a bare `$ref` — through the aliases,
       // nearest first — while under a wrapper those are the parameter's own,
       // read from the wrapper and the members beside the `$ref`. Any other
-      // `$ref` falls back to the one component it names, as before.
+      // `$ref` falls back to the one component it names, as before. Any
+      // other schema reads the `allOf` members that declare no type and so
+      // only annotate or limit it (`annotatingAllOfMembers`; #555: `allOf:
+      // [{ type: 'string' }, { description }]` lost the text), as a field
+      // reads them.
       const reference = schema ? componentReference(schema, componentSchemas) : undefined;
       const fallbacks: SchemaObject[] = reference
         ? reference.bare
@@ -3842,7 +3847,9 @@ export function extractParams(
           : reference.own.slice(1)
         : refTarget
           ? [refTarget]
-          : [];
+          : schema
+            ? annotatingAllOfMembers(schema)
+            : [];
       const exampleContext = `parameter "${p.name}" in ${opLabel ?? location}`;
       // Each level is resolved on its own — the parameter's declaration, the
       // Media Type Object its schema was read from (when it was), the schema,
@@ -5602,10 +5609,16 @@ function extractResponseHeaders(
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      // The Header Object's flag or its schema's, so a deprecated schema that
-      // folds onto a live component leaves it on the header; the model or
-      // enum a bare `$ref` names keeps its own, as for a field.
-      deprecated: header.deprecated === true || schema?.deprecated === true || undefined,
+      // The Header Object's flag or its schema's — the schema's own, or an
+      // `allOf` member's that declares no type and so only annotates it
+      // (`annotatingAllOfMembers`; #555) — so a deprecated schema that folds
+      // onto a live component leaves it on the header; the model or enum a
+      // bare `$ref` names keeps its own, as for a field.
+      deprecated:
+        header.deprecated === true ||
+        (schema !== undefined &&
+          [schema, ...annotatingAllOfMembers(schema)].some((level) => level.deprecated === true)) ||
+        undefined,
       // The header schema's own link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
       ...externalDocsEntry(schema?.externalDocs),
