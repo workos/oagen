@@ -25,6 +25,7 @@ import {
   referenceTypesAsUnknown,
   typesAsUnknown,
   warnOnUncarriedProperties,
+  withSchemaConstraints,
   withWrapperDocs,
 } from './schemas.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
@@ -505,9 +506,14 @@ function extractListResponse(
     // while `itemType` is still what an iterator yields (`paginatedItemType`
     // unwraps the same wrapper). A `$ref` to an array component carries the
     // component's own nullability, and its wrapper's, the same way.
+    // The array built here carries the data property's own limits
+    // (`minItems`, `uniqueItems`, …), as `schemaToTypeRef` would have it
+    // carry them (#545); the items carry theirs.
     response:
       dataType ??
-      (dataProp ? nullableIf(dataProp, { kind: 'array', items: itemTypeRef }) : { kind: 'array', items: itemTypeRef }),
+      (dataProp
+        ? nullableIf(dataProp, withSchemaConstraints({ kind: 'array', items: itemTypeRef }, dataProp))
+        : { kind: 'array', items: itemTypeRef }),
     inlineModels,
     isPaginated: true,
     dataPath,
@@ -1046,7 +1052,9 @@ function extractDirectResource(
       settle,
     );
     return {
-      response: nullableIf(schema, { kind: 'array', items: typed.itemType }),
+      // The array carries the body's own limits, as `schemaToTypeRef` would
+      // have it carry them (#545); the items carry theirs.
+      response: nullableIf(schema, withSchemaConstraints({ kind: 'array', items: typed.itemType }, schema)),
       inlineModels: [...inlineModels, ...typed.inlineModels],
       isPaginated: false,
     };

@@ -13,7 +13,15 @@ import { extractOperations } from '../../src/parser/operations.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { createExampleBuilder } from '../../src/snippets/example-builder.js';
-import type { Model } from '../../src/ir/types.js';
+import {
+  typeRefConstraints,
+  type ApiSpec,
+  type Constraints,
+  type Field,
+  type Model,
+  type Parameter,
+  type TypeRef,
+} from '../../src/ir/types.js';
 
 describe('extractConstraints', () => {
   it('conjoins own keywords, allOf members and a nullable wrapper’s single branch', () => {
@@ -806,7 +814,8 @@ describe('parseSpec – constraints', () => {
     const spec = await parseSpec(file);
     const pet = spec.models.find(({ name }) => name === 'Pet');
     const [field] = pet?.fields ?? [];
-    expect(field?.type).toEqual({ kind: 'primitive', type: 'string' });
+    // The type carries the field's limit too (#545).
+    expect(field?.type).toEqual({ kind: 'primitive', type: 'string', constraints: { maxLength: 3 } });
     expect(field?.constraints).toEqual({ maxLength: 3 });
     const [operation] = spec.services.flatMap(({ operations }) => operations);
     expect(operation.queryParams.map((p) => [p.name, p.constraints])).toEqual([
@@ -1238,4 +1247,809 @@ describe('collapseJsonSuffixModels – constraints', () => {
       warn.mockRestore();
     }
   });
+});
+
+describe('#545', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  /** Parse `doc` from a file, as a spec is read. */
+  async function parse(doc: unknown): Promise<ApiSpec> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-545-'));
+    dirs.push(dir);
+    const file = path.join(dir, 'spec.json');
+    await fs.writeFile(file, JSON.stringify(doc));
+    return parseSpec(file);
+  }
+
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const string = { kind: 'primitive', type: 'string' } as const;
+  const integer = { kind: 'primitive', type: 'integer' } as const;
+  const nullable = (inner: unknown) => ({ kind: 'nullable', inner });
+  const array = (items: unknown, constraints?: Constraints) => ({
+    kind: 'array',
+    items,
+    ...(constraints ? { constraints } : {}),
+  });
+  const limited = (type: unknown, constraints: Constraints) => ({ ...(type as object), constraints });
+  const PET = '^pet_[0-9A-Z]{26}$';
+  const TAG = '^tag_[0-9A-Z]{26}$';
+  const OWN = '^own_[0-9A-Z]{26}$';
+
+  const fieldsOf = (spec: ApiSpec, model: string): Field[] => spec.models.find((m) => m.name === model)?.fields ?? [];
+  const byName = <T extends { name: string }>(entries: T[]): Record<string, T> =>
+    Object.fromEntries(entries.map((entry) => [entry.name, entry]));
+  /** The limits a type carries where a field's or parameter's are read: on the type under its nullable wrapper. */
+  const limitsOf = (type: TypeRef): Constraints | undefined =>
+    typeRefConstraints(type.kind === 'nullable' ? type.inner : type);
+  /** Every field and parameter of `spec` carries on its type exactly the limits it carries itself, wherever the type can carry them. */
+  const expectOneReading = (spec: ApiSpec): void => {
+    const sites: Array<Field | Parameter> = [
+      ...spec.models.flatMap((m) => m.fields),
+      ...spec.services.flatMap((s) => s.operations.flatMap((op) => [...op.pathParams, ...op.queryParams])),
+    ];
+    expect(sites.length).toBeGreaterThan(0);
+    for (const site of sites) {
+      const inner = site.type.kind === 'nullable' ? site.type.inner : site.type;
+      if (inner.kind === 'model' || inner.kind === 'enum') continue;
+      expect(limitsOf(site.type), site.name).toEqual(site.constraints);
+    }
+  };
+
+  /** A `GET /pets/{petId}` whose parameters and fields the issue lists, with `components` and `fields` added. */
+  const petsDoc = (
+    openapi: '3.0.3' | '3.1.0',
+    options: {
+      parameters?: unknown[];
+      fields?: Record<string, unknown>;
+      schemas?: Record<string, unknown>;
+      requestBody?: unknown;
+      headers?: Record<string, unknown>;
+      webhooks?: Record<string, unknown>;
+    } = {},
+  ) => ({
+    openapi,
+    info: { title: 'repro', version: '1' },
+    paths: {
+      '/pets/{petId}': {
+        get: {
+          operationId: 'getPet',
+          parameters: options.parameters ?? [],
+          ...(options.requestBody
+            ? { requestBody: { content: { 'application/json': { schema: options.requestBody } } } }
+            : {}),
+          responses: {
+            '200': {
+              description: 'ok',
+              ...(options.headers ? { headers: options.headers } : {}),
+              content: {
+                'application/json': {
+                  schema: { type: 'object', properties: options.fields ?? { id: { type: 'string' } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    ...(options.webhooks ? { webhooks: options.webhooks } : {}),
+    components: { schemas: options.schemas ?? {} },
+  });
+
+  /** The issue's repro: a `petId` that is a pet's id or any string, a `tagId` that is one tag id or several, an `ownerId` that may be null and the pet's `tagIds`. */
+  const repro = (openapi: '3.0.3' | '3.1.0') =>
+    petsDoc(openapi, {
+      parameters: [
+        {
+          name: 'petId',
+          in: 'path',
+          required: true,
+          schema: { anyOf: [{ type: 'string', pattern: PET }, { type: 'string' }] },
+        },
+        {
+          name: 'tagId',
+          in: 'query',
+          schema: {
+            anyOf: [
+              { type: 'string', pattern: TAG },
+              { type: 'array', items: { type: 'string', pattern: TAG } },
+            ],
+          },
+        },
+      ],
+      fields: {
+        ownerId:
+          openapi === '3.1.0'
+            ? { type: ['string', 'null'], pattern: OWN }
+            : { type: 'string', nullable: true, pattern: OWN },
+        tagIds: { type: 'array', items: { type: 'string', pattern: TAG } },
+      },
+    });
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'keeps each variant’s and an array’s items’ keywords on the type (the issue’s repro, OAS %s)',
+    async (openapi) => {
+      const spec = await parse(repro(openapi));
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const { petId } = byName(getPet.pathParams);
+      const { tagId } = byName(getPet.queryParams);
+      const { ownerId, tagIds } = byName(fieldsOf(spec, 'GetPetResponse'));
+
+      // `petId`'s first variant is the pet id, the second any string: an
+      // emitter can type them apart (`` `pet_${string}` | (string & {}) ``).
+      expect(petId.type).toEqual({
+        kind: 'union',
+        variants: [limited(string, { pattern: PET }), string],
+        compositionKind: 'anyOf',
+      });
+      expect(petId.constraints).toBeUndefined();
+      // `tagId`'s string variant and its array's items carry the tag pattern.
+      expect(tagId.type).toEqual({
+        kind: 'union',
+        variants: [limited(string, { pattern: TAG }), array(limited(string, { pattern: TAG }))],
+        compositionKind: 'anyOf',
+      });
+      expect(tagId.constraints).toBeUndefined();
+      // `ownerId`'s limits are the field's, as before, and its inner type's.
+      expect(ownerId.type).toEqual(nullable(limited(string, { pattern: OWN })));
+      expect(ownerId.constraints).toEqual({ pattern: OWN });
+      // `tagIds`'s items carry the pattern; the field, whose own schema declares none, keeps none.
+      expect(tagIds.type).toEqual(array(limited(string, { pattern: TAG })));
+      expect(tagIds.constraints).toBeUndefined();
+      expectOneReading(spec);
+    },
+  );
+
+  it('carries each level’s own keywords on a nested array, on nullable items and on a map’s values', async () => {
+    const spec = await parse(
+      petsDoc('3.1.0', {
+        fields: {
+          matrix: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'array', uniqueItems: true, items: { type: 'string', pattern: TAG } },
+          },
+          maybeTags: { type: 'array', items: { type: ['string', 'null'], pattern: TAG } },
+          wrappedTags: {
+            type: 'array',
+            items: { oneOf: [{ type: 'string', pattern: TAG }, { type: 'null' }], maxLength: 30 },
+          },
+          counts: { type: 'object', additionalProperties: { type: 'integer', minimum: 1 }, minProperties: 1 },
+          first: { type: 'array', items: { type: 'string', enum: ['a'], minLength: 1 } },
+        },
+      }),
+    );
+    const { matrix, maybeTags, wrappedTags, counts, first } = byName(fieldsOf(spec, 'GetPetResponse'));
+    // Each array carries its own limits; the innermost items theirs.
+    expect(matrix.type).toEqual(
+      array(array(limited(string, { pattern: TAG }), { uniqueItems: true }), { minItems: 1 }),
+    );
+    expect(matrix.constraints).toEqual({ minItems: 1 });
+    // A nullable wrapper's keywords are its inner type's, conjoined with the branch's as a field's are.
+    expect(maybeTags.type).toEqual(array(nullable(limited(string, { pattern: TAG }))));
+    expect(wrappedTags.type).toEqual(array(nullable(limited(string, { pattern: TAG, maxLength: 30 }))));
+    // A map carries the object's limits, its values theirs.
+    expect(counts.type).toEqual({
+      kind: 'map',
+      valueType: limited(integer, { minimum: 1 }),
+      constraints: { minProperties: 1 },
+    });
+    expect(counts.constraints).toEqual({ minProperties: 1 });
+    // A literal carries what is written beside its value.
+    expect(first.type).toEqual(array(limited({ kind: 'literal', value: 'a' }, { minLength: 1 })));
+    expectOneReading(spec);
+  });
+
+  it('reads OAS 3.0 items the same way, their boolean exclusive bounds normalized', async () => {
+    const spec = await parse(
+      petsDoc('3.0.3', {
+        fields: {
+          maybeTags: { type: 'array', items: { type: 'string', nullable: true, pattern: TAG } },
+          scores: { type: 'array', items: { type: 'integer', minimum: 0, exclusiveMinimum: true, maximum: 10 } },
+        },
+      }),
+    );
+    const { maybeTags, scores } = byName(fieldsOf(spec, 'GetPetResponse'));
+    expect(maybeTags.type).toEqual(array(nullable(limited(string, { pattern: TAG }))));
+    expect(scores.type).toEqual(array(limited(integer, { exclusiveMinimum: 0, maximum: 10 })));
+    expect(scores.constraints).toBeUndefined();
+  });
+
+  it('keeps a `$ref` variant’s limits on what it references, as before, and conjoins the site’s as a field does', async () => {
+    const spec = await parse(
+      petsDoc('3.1.0', {
+        schemas: {
+          PetId: { type: 'string', pattern: PET },
+          Pet: { type: 'object', properties: { name: { type: 'string' } }, minProperties: 1 },
+        },
+        fields: {
+          id: { anyOf: [ref('PetId'), { type: 'string' }] },
+          pet: { anyOf: [ref('Pet'), { type: 'string' }] },
+          ids: { type: 'array', items: { allOf: [ref('PetId'), { maxLength: 30 }] } },
+          idsBeside: { type: 'array', items: { ...ref('PetId'), maxLength: 30 } },
+          // Two patterns cannot be conjoined: the component's wins at a `$ref`
+          // site and a wrapper's own over its branch, on the field and on the type alike.
+          conflict: { allOf: [ref('PetId'), { pattern: OWN }] },
+          inlineConflict: { oneOf: [{ type: 'string', pattern: OWN }, { type: 'null' }], pattern: PET },
+        },
+      }),
+    );
+    const { id, pet, ids, idsBeside, conflict, inlineConflict } = byName(fieldsOf(spec, 'GetPetResponse'));
+    // A primitive component's own limits ride on the primitive its `$ref` resolves to.
+    expect(id.type).toEqual({
+      kind: 'union',
+      variants: [limited(string, { pattern: PET }), string],
+      compositionKind: 'anyOf',
+    });
+    expect(id.constraints).toBeUndefined();
+    // A model reference carries none: the model carries its own.
+    expect(pet.type).toEqual({
+      kind: 'union',
+      variants: [{ kind: 'model', name: 'Pet' }, string],
+      compositionKind: 'anyOf',
+    });
+    expect(spec.models.find((m) => m.name === 'Pet')?.constraints).toEqual({ minProperties: 1 });
+    // What is written around the `$ref` conjoins with the component's, in either spelling.
+    expect(ids.type).toEqual(array(limited(string, { pattern: PET, maxLength: 30 })));
+    expect(idsBeside.type).toEqual(array(limited(string, { pattern: PET, maxLength: 30 })));
+    expect(conflict.constraints).toEqual({ pattern: PET });
+    expect(conflict.type).toEqual(limited(string, { pattern: PET }));
+    expect(inlineConflict.constraints).toEqual({ pattern: PET });
+    expect(inlineConflict.type).toEqual(nullable(limited(string, { pattern: PET })));
+    expectOneReading(spec);
+  });
+
+  it('carries a union’s own keywords on the union, and a type list’s on the union alone', async () => {
+    const spec = await parse(
+      petsDoc('3.1.0', {
+        fields: {
+          either: { anyOf: [{ type: 'string', pattern: PET }, { type: 'integer' }], maxLength: 40 },
+          list: { type: ['string', 'integer'], maxLength: 20, minimum: 1 },
+          maybeList: { type: ['string', 'integer', 'null'], maxLength: 20 },
+        },
+      }),
+    );
+    const { either, list, maybeList } = byName(fieldsOf(spec, 'GetPetResponse'));
+    // Beside a `oneOf`/`anyOf`: the union's, each variant keeping its own.
+    expect(either.type).toEqual({
+      kind: 'union',
+      variants: [limited(string, { pattern: PET }), integer],
+      compositionKind: 'anyOf',
+      constraints: { maxLength: 40 },
+    });
+    expect(either.constraints).toEqual({ maxLength: 40 });
+    // A type list's variants are the same schema read as each type: the
+    // limits are read from the union for whichever type the value takes.
+    expect(list.type).toEqual({
+      kind: 'union',
+      variants: [string, integer],
+      constraints: { maxLength: 20, minimum: 1 },
+    });
+    expect(list.constraints).toEqual({ maxLength: 20, minimum: 1 });
+    expect(maybeList.type).toEqual(
+      nullable({ kind: 'union', variants: [string, integer], constraints: { maxLength: 20 } }),
+    );
+    expectOneReading(spec);
+  });
+
+  it('carries a body’s, a list’s data array’s, a header’s and a webhook payload’s limits on their types, which no field carries', async () => {
+    const spec = await parse({
+      ...petsDoc('3.1.0', {
+        schemas: {
+          Cat: { type: 'object', properties: { meow: { type: 'string' } } },
+          Dog: { type: 'object', properties: { bark: { type: 'string' } } },
+        },
+        requestBody: { type: 'array', uniqueItems: true, items: { type: 'string', pattern: TAG } },
+        headers: { 'X-Request-Id': { schema: { type: 'string', pattern: '^req_' } } },
+        webhooks: {
+          petAdopted: {
+            post: {
+              operationId: 'petAdopted',
+              requestBody: {
+                content: { 'application/json': { schema: { oneOf: [ref('Cat'), ref('Dog')], minProperties: 1 } } },
+              },
+              responses: { '200': { description: 'ok' } },
+            },
+          },
+        },
+      }),
+    });
+    const [getPet] = spec.services.flatMap((s) => s.operations);
+    expect(getPet.requestBody).toEqual(array(limited(string, { pattern: TAG }), { uniqueItems: true }));
+    expect(getPet.responseHeaders?.map((h) => [h.name, h.type])).toEqual([
+      ['X-Request-Id', limited(string, { pattern: '^req_' })],
+    ]);
+    // A `oneOf` body carries what is written beside the `oneOf`; its `$ref` variants none.
+    expect(spec.webhooks?.map((w) => w.requestBody)).toEqual([
+      {
+        kind: 'union',
+        variants: [
+          { kind: 'model', name: 'Cat' },
+          { kind: 'model', name: 'Dog' },
+        ],
+        compositionKind: 'oneOf',
+        constraints: { minProperties: 1 },
+      },
+    ]);
+    // A `oneOf` body of inline objects, which the request-body reader assembles itself, carries them the same way.
+    const inline = await parse({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    oneOf: [
+                      { type: 'object', properties: { meow: { type: 'string' } } },
+                      { type: 'object', properties: { bark: { type: 'string' } } },
+                    ],
+                    minProperties: 1,
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+    });
+    expect(inline.services.flatMap((s) => s.operations)[0]?.requestBody).toEqual({
+      kind: 'union',
+      variants: [
+        { kind: 'model', name: 'CreatePetRequest' },
+        { kind: 'model', name: 'CreatePetRequestWithBark' },
+      ],
+      constraints: { minProperties: 1 },
+    });
+
+    // A list envelope's data array, written plainly or constrained by a later `allOf` branch.
+    const list = await parse({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+            responses: {
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': {
+                    schema: {
+                      allOf: [
+                        {
+                          type: 'object',
+                          properties: {
+                            data: { type: 'array', items: ref('Pet'), minItems: 1 },
+                            list_metadata: { type: 'object', properties: { after: { type: 'string' } } },
+                          },
+                        },
+                        { type: 'object', properties: { data: { type: 'array', maxItems: 100 } } },
+                      ],
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      components: { schemas: { Pet: { type: 'object', properties: { name: { type: 'string' } } } } },
+    });
+    const [listPets] = list.services.flatMap((s) => s.operations);
+    expect(listPets.pagination?.dataPath).toBe('data');
+    expect(listPets.response).toEqual(array({ kind: 'model', name: 'Pet' }, { minItems: 1, maxItems: 100 }));
+  });
+
+  it('keeps on a field’s items only the limits every declaration of a property agrees on, as on the field itself', async () => {
+    // `tags` declared by two variants of a merged `allOf` body (see the #397 and #484 reviews).
+    const declared = (first: unknown, second: unknown) => ({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    allOf: [
+                      { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                      { oneOf: [{ properties: { tags: first } }, { properties: { tags: second } }] },
+                    ],
+                  },
+                },
+              },
+            },
+            responses: { '204': { description: 'done' } },
+          },
+        },
+      },
+    });
+    const tagsOf = (spec: ApiSpec) => byName(fieldsOf(spec, 'CreatePetRequest')).tags;
+    const tagged = { type: 'array', items: { type: 'string', pattern: TAG } };
+    const plain = { type: 'array', items: { type: 'string' } };
+    const maxed = { type: 'array', items: { type: 'string', pattern: TAG, maxLength: 30 } };
+    // One declaration's items limit is not the field's items': the value takes one branch.
+    for (const [first, second] of [
+      [tagged, plain],
+      [plain, tagged],
+    ]) {
+      expect(tagsOf(await parse(declared(first, second))).type).toEqual(array(string));
+    }
+    // Agreed limits stay, disputed ones go, limit by limit.
+    expect(tagsOf(await parse(declared(tagged, maxed))).type).toEqual(array(limited(string, { pattern: TAG })));
+    expect(tagsOf(await parse(declared(tagged, tagged))).type).toEqual(array(limited(string, { pattern: TAG })));
+  });
+
+  it('tells two inline models apart by their items’ limits, as a field’s limits already do', async () => {
+    const layer = (pattern?: string) => ({
+      type: 'object',
+      properties: { tags: { type: 'array', items: { type: 'string', ...(pattern ? { pattern } : {}) } } },
+    });
+    const doc = (sibling: unknown, items: unknown) =>
+      petsDoc('3.1.0', { fields: { layer: sibling, layers: { type: 'array', items } } });
+    // Identical shapes share the singular sibling's model, as before.
+    const shared = await parse(doc(layer(TAG), layer(TAG)));
+    expect(shared.models.map((m) => m.name).sort()).toEqual(['GetPetResponse', 'GetPetResponseLayer']);
+    expect(byName(fieldsOf(shared, 'GetPetResponse')).layers.type).toEqual(
+      array({ kind: 'model', name: 'GetPetResponseLayer' }),
+    );
+    // Shapes that differ only in the items' pattern do not: each keeps its own model and its own limits.
+    const apart = await parse(doc(layer(TAG), layer(PET)));
+    expect(apart.models.map((m) => m.name).sort()).toEqual([
+      'GetPetResponse',
+      'GetPetResponseLayer',
+      'GetPetResponseLayersItem',
+    ]);
+    expect(byName(fieldsOf(apart, 'GetPetResponseLayer')).tags.type).toEqual(array(limited(string, { pattern: TAG })));
+    expect(byName(fieldsOf(apart, 'GetPetResponseLayersItem')).tags.type).toEqual(
+      array(limited(string, { pattern: PET })),
+    );
+  });
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads a parameter’s limits as a field’s, so a keyword beside an `allOf` member that writes it too is one reading on the parameter, the field and the type (OAS %s)',
+    async (openapi) => {
+      // Michael's review of #545: the parameter read `extractConstraints` on
+      // its own while the field and the type read `schemaConstraints`, and
+      // the two disagreed on a keyword an annotating member writes too. All
+      // three read `schemaConstraints` now, and the schema's own keyword
+      // wins over the member's on each (#587 review: `combineConstraints`
+      // keeps the first `pattern` and `multipleOf`).
+      const name = { type: 'string', pattern: '^a', allOf: [{ pattern: 'z$' }] };
+      const step = { type: 'number', multipleOf: 2, allOf: [{ multipleOf: 3 }] };
+      const spec = await parse(
+        petsDoc(openapi, {
+          parameters: [
+            { name: 'name', in: 'query', schema: name },
+            { name: 'step', in: 'query', schema: step },
+          ],
+          fields: { name, step },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      for (const site of [params.name, fields.name]) {
+        expect(site.constraints).toEqual({ pattern: '^a' });
+        expect(site.type).toEqual(limited(string, { pattern: '^a' }));
+      }
+      for (const site of [params.step, fields.step]) {
+        expect(site.constraints).toEqual({ multipleOf: 2 });
+        expect(site.type).toEqual(limited({ kind: 'primitive', type: 'number' }, { multipleOf: 2 }));
+      }
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'conjoins what a JSON Pointer `$ref` lands on with the site’s own, on the field, the parameter and the type alike (OAS %s)',
+    async (openapi) => {
+      // Michael's review of #545: the type carried the pointed schema's
+      // limits, copied with the type the pointer names; the field read only
+      // what was written beside the `$ref`, and the parameter overrode.
+      const code = { $ref: '#/components/schemas/Owner/properties/code' };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: {
+              type: 'object',
+              properties: {
+                code: { type: 'string', pattern: OWN, maxLength: 8 },
+                address: { type: 'object', properties: { city: { type: 'string' } }, minProperties: 1 },
+              },
+            },
+            // A chain: `Alias.code` narrows the owner's code, and a site that points at it reads the chain's reading.
+            Alias: { type: 'object', properties: { code: { ...code, maxLength: 5 } } },
+          },
+          parameters: [
+            { name: 'ownerCode', in: 'query', schema: code },
+            { name: 'shortCode', in: 'query', schema: { ...code, maxLength: 3 } },
+          ],
+          fields: {
+            ownerCode: code,
+            shortCode: { ...code, maxLength: 3 },
+            longCode: { ...code, maxLength: 20 },
+            maybe: { oneOf: [{ ...code, maxLength: 3 }, { type: 'null' }] },
+            codes: { type: 'array', items: { ...code, maxLength: 3 } },
+            chained: { $ref: '#/components/schemas/Alias/properties/code', minLength: 2 },
+            address: { $ref: '#/components/schemas/Owner/properties/address', maxProperties: 5 },
+          },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => limited(string, { maxLength: 8, pattern: OWN, ...limits });
+      // The pointed schema's limits conjoin with what is written beside the
+      // `$ref`, the stricter bound winning, as `{ $ref: PetId, maxLength: 20 }`
+      // to a primitive component reads — on the field, the parameter and the type.
+      for (const site of [params.ownerCode, fields.ownerCode]) {
+        expect(site.constraints).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type).toEqual(owned({}));
+      }
+      for (const site of [params.shortCode, fields.shortCode]) {
+        expect(site.constraints).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type).toEqual(owned({ maxLength: 3 }));
+      }
+      expect(fields.longCode.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      expect(fields.longCode.type).toEqual(owned({}));
+      // Under a nullable wrapper, on an array's items — which no field carries — and through a chain of pointers.
+      expect(fields.maybe.constraints).toEqual({ maxLength: 3, pattern: OWN });
+      expect(fields.maybe.type).toEqual(nullable(owned({ maxLength: 3 })));
+      expect(fields.codes.constraints).toBeUndefined();
+      expect(fields.codes.type).toEqual(array(owned({ maxLength: 3 })));
+      expect(byName(fieldsOf(spec, 'Alias')).code.constraints).toEqual({ maxLength: 5, pattern: OWN });
+      expect(fields.chained.constraints).toEqual({ maxLength: 5, pattern: OWN, minLength: 2 });
+      expect(fields.chained.type).toEqual(owned({ maxLength: 5, minLength: 2 }));
+      // A pointer to a property typed as a model adds none: the model carries
+      // its own, and the site keeps what it wrote beside the `$ref`.
+      expect(fields.address.constraints).toEqual({ maxProperties: 5 });
+      expect(fields.address.type).toEqual({ kind: 'model', name: 'OwnerAddress' });
+      expect(spec.models.find((m) => m.name === 'OwnerAddress')?.constraints).toEqual({ minProperties: 1 });
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads the items’ agreement per shape when the declarations make several, whichever array comes first (OAS %s)',
+    async (openapi) => {
+      // `tags` declared three ways by the variants of a merged `allOf` body:
+      // two arrays of strings, one with a pattern on its items, and an
+      // integer (Greptile's review of #545: the integer made several shapes,
+      // the agreement was read for one shape only, and the first array's
+      // pattern was every item's).
+      const declared = (...declarations: unknown[]) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            post: {
+              operationId: 'createPet',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      allOf: [
+                        { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] },
+                        { oneOf: declarations.map((tags) => ({ properties: { tags } })) },
+                      ],
+                    },
+                  },
+                },
+              },
+              responses: { '204': { description: 'done' } },
+            },
+          },
+        },
+      });
+      const tagsOf = (spec: ApiSpec) => byName(fieldsOf(spec, 'CreatePetRequest')).tags;
+      const tagged = { type: 'array', items: { type: 'string', pattern: TAG } };
+      const plain = { type: 'array', items: { type: 'string' } };
+      const maxed = { type: 'array', items: { type: 'string', pattern: TAG, maxLength: 30 } };
+      const int = { type: 'integer' };
+      const union = (variants: unknown[]) => ({ kind: 'union', variants, compositionKind: 'oneOf' });
+      // One declaration's items limit is not the shape's items', in any order and beside another shape.
+      for (const order of [
+        [tagged, plain, int],
+        [plain, tagged, int],
+        [tagged, int, plain],
+      ]) {
+        const tags = tagsOf(await parse(declared(...order)));
+        expect(tags.type).toEqual(union([array(string), integer]));
+        expect(tags.constraints).toBeUndefined();
+      }
+      // Agreed limits stay on the shape's items beside another shape, as they do alone.
+      expect(tagsOf(await parse(declared(tagged, maxed, int))).type).toEqual(
+        union([array(limited(string, { pattern: TAG })), integer]),
+      );
+      expect(tagsOf(await parse(declared(int, tagged, tagged))).type).toEqual(
+        union([integer, array(limited(string, { pattern: TAG }))]),
+      );
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'aligns a field’s and a parameter’s limits with a pointer to a schema that admits null, which settles into a nullable wrapper (OAS %s)',
+    async (openapi) => {
+      // Greptile's second review of #545: the settled reference was looked up
+      // after being unwrapped, so a pointer to `{ type: ['string', 'null'],
+      // maxLength: 8 }` put the limits on the field's inner type and none on
+      // the field; a parameter agreed only by its build-time fallback, which
+      // keeps a looser bound written beside the pointer.
+      const code = { $ref: '#/components/schemas/Owner/properties/code' };
+      const target =
+        openapi === '3.1.0'
+          ? { type: ['string', 'null'], pattern: OWN, maxLength: 8 }
+          : { type: 'string', nullable: true, pattern: OWN, maxLength: 8 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: { Owner: { type: 'object', properties: { code: target } } },
+          parameters: [
+            { name: 'ownerCode', in: 'query', schema: code },
+            { name: 'shortCode', in: 'query', schema: { ...code, maxLength: 3 } },
+            { name: 'longCode', in: 'query', schema: { ...code, maxLength: 20 } },
+          ],
+          fields: { ownerCode: code, shortCode: { ...code, maxLength: 3 }, longCode: { ...code, maxLength: 20 } },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits }));
+      for (const site of [params.ownerCode, fields.ownerCode, params.longCode, fields.longCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({}));
+      }
+      for (const site of [params.shortCode, fields.shortCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'keeps what is written beside a pointer branch under a wrapper that writes its own keyword, as beside a `$ref` to a primitive component (OAS %s)',
+    async (openapi) => {
+      // Greptile's third review of #545: the wrapper's reading leaves its
+      // `$ref` branch out, and it replaced what the branch had recorded, so
+      // `maxLength: 10` around `{ $ref: …/code, maxLength: 3 }` settled to
+      // the target's `8`; the same spelling around a `$ref` to a primitive
+      // component already read `3`.
+      const ptr = { $ref: '#/components/schemas/Owner/properties/code' };
+      const cmp = ref('Code');
+      const wrapped = (branch: Record<string, unknown>, own: Record<string, unknown>) => ({
+        oneOf: [branch, { type: 'null' }],
+        ...own,
+      });
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: { type: 'object', properties: { code: { type: 'string', pattern: OWN, maxLength: 8 } } },
+            Code: { type: 'string', pattern: OWN, maxLength: 8 },
+          },
+          parameters: [
+            { name: 'viaPointer', in: 'query', schema: wrapped({ ...ptr, maxLength: 3 }, { maxLength: 10 }) },
+            { name: 'viaComponent', in: 'query', schema: wrapped({ ...cmp, maxLength: 3 }, { maxLength: 10 }) },
+          ],
+          fields: {
+            viaPointer: wrapped({ ...ptr, maxLength: 3 }, { maxLength: 10 }),
+            viaComponent: wrapped({ ...cmp, maxLength: 3 }, { maxLength: 10 }),
+            // Two patterns cannot be conjoined: the pointed schema's wins, then the branch's, then the wrapper's, as a component's does.
+            conflict: wrapped({ ...ptr, pattern: PET }, { pattern: TAG }),
+            branchWins: wrapped({ ...ptr, minLength: 2 }, { maxLength: 10 }),
+          },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits }));
+      for (const site of [params.viaPointer, fields.viaPointer, params.viaComponent, fields.viaComponent]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      expect(fields.conflict.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      expect(fields.conflict.type).toEqual(owned({}));
+      expect(fields.branchWins.constraints).toEqual({ maxLength: 8, pattern: OWN, minLength: 2 });
+      expect(fields.branchWins.type).toEqual(owned({ minLength: 2 }));
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'carries a multi-type inline variant’s limits on its union, on a named union as on an inline one (OAS %s)',
+    async (openapi) => {
+      // Greptile's third review of #545: the inline union attached them and
+      // the named union (`namedUnionEntry`) did not.
+      const variant = { type: ['object', 'string'], properties: { id: { type: 'string' } }, maxLength: 5 };
+      const maybe = { type: ['object', 'string', 'null'], properties: { id: { type: 'string' } }, maxLength: 5 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Shape: { oneOf: [variant, { type: 'integer' }] },
+            MaybeShape: { oneOf: [maybe, { type: 'integer' }] },
+          },
+          fields: { shape: ref('Shape'), inline: { oneOf: [variant, { type: 'integer' }] } },
+        }),
+      );
+      const union = (model: string) => ({
+        kind: 'union',
+        variants: [{ kind: 'model', name: model }, string],
+        constraints: { maxLength: 5 },
+      });
+      expect(spec.models.find((m) => m.name === 'Shape')?.variants).toEqual([union('ShapeWithId'), integer]);
+      expect(spec.models.find((m) => m.name === 'MaybeShape')?.variants).toEqual([
+        nullable(union('MaybeShapeWithId')),
+        integer,
+      ]);
+      expect(byName(fieldsOf(spec, 'GetPetResponse')).inline.type).toEqual({
+        kind: 'union',
+        variants: [union('GetPetResponseInline'), integer],
+        compositionKind: 'oneOf',
+      });
+      expectOneReading(spec);
+    },
+  );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads a chained pointer’s limits through every nullable wrapper it settles into, on the field, the parameter and the type (OAS %s)',
+    async (openapi) => {
+      // Greptile's fourth review of #545: `Alias.code`, a nullable wrapper
+      // around a pointer to a nullable `Owner.code`, settles into two
+      // wrappers; a site pointing at it read no target limits through one,
+      // so `maxLength: 20` beside the pointer replaced the target's `8` on
+      // the type and the field lost its own.
+      const owner = { $ref: '#/components/schemas/Owner/properties/code' };
+      const alias = { $ref: '#/components/schemas/Alias/properties/code' };
+      const target =
+        openapi === '3.1.0'
+          ? { type: ['string', 'null'], pattern: OWN, maxLength: 8 }
+          : { type: 'string', nullable: true, pattern: OWN, maxLength: 8 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: { type: 'object', properties: { code: target } },
+            Alias: { type: 'object', properties: { code: { oneOf: [owner, { type: 'null' }] } } },
+          },
+          parameters: [
+            { name: 'looser', in: 'query', schema: { ...alias, maxLength: 20 } },
+            { name: 'tighter', in: 'query', schema: { ...alias, maxLength: 3 } },
+          ],
+          fields: { bare: alias, looser: { ...alias, maxLength: 20 }, tighter: { ...alias, maxLength: 3 } },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      // The settled type wears the chain's wrappers as the walk copies them; the innermost node carries the limits.
+      const owned = (limits: Constraints) =>
+        nullable(nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits })));
+      expect(byName(fieldsOf(spec, 'Alias')).code.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      for (const site of [fields.bare, fields.looser, params.looser]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({}));
+      }
+      for (const site of [fields.tighter, params.tighter]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      // Every site's own limits are the innermost node's.
+      for (const site of [...getPet.queryParams, ...fieldsOf(spec, 'GetPetResponse'), ...fieldsOf(spec, 'Alias')]) {
+        let bare = site.type;
+        while (bare.kind === 'nullable') bare = bare.inner;
+        expect(typeRefConstraints(bare), site.name).toEqual(site.constraints);
+      }
+    },
+  );
 });

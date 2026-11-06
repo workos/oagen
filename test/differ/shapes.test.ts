@@ -207,3 +207,88 @@ describe('sameShape', () => {
     expect(sameShape(inlineUnion('OldCircle', 'OldSquare'), inlineUnion('NewSquare', 'NewCircle'), shapes)).toBe(false);
   });
 });
+
+describe('#545', () => {
+  const limited = (ref: TypeRef, constraints: Record<string, unknown>): TypeRef => ({ ...ref, constraints }) as TypeRef;
+  const tagged = limited(string, { pattern: '^tag_' });
+  const array = (items: TypeRef, constraints?: Record<string, unknown>): TypeRef =>
+    ({ kind: 'array', items, ...(constraints ? { constraints } : {}) }) as TypeRef;
+
+  /** The pairs of types that carry the same limits at every level, and the pairs that differ in a limit somewhere. */
+  const alike: Array<[TypeRef, TypeRef]> = [
+    [array(tagged), array(tagged)],
+    [
+      { kind: 'union', variants: [tagged, integer] },
+      { kind: 'union', variants: [tagged, integer] },
+    ],
+  ];
+  const differing: Array<[TypeRef, TypeRef]> = [
+    [array(tagged), array(limited(string, { pattern: '^pet_' }))],
+    [array(tagged), array(string)],
+    [array(string), array(tagged)],
+    // On the array itself, on a nullable wrapper's inner type, on a map's values, on a union's variants and on the union.
+    [array(string, { minItems: 1 }), array(string, { minItems: 2 })],
+    [
+      { kind: 'nullable', inner: tagged },
+      { kind: 'nullable', inner: string },
+    ],
+    [
+      { kind: 'map', valueType: tagged },
+      { kind: 'map', valueType: string },
+    ],
+    [
+      { kind: 'union', variants: [tagged, integer] },
+      { kind: 'union', variants: [string, integer] },
+    ],
+    [
+      { kind: 'union', variants: [string, integer], constraints: { maxLength: 20 } },
+      { kind: 'union', variants: [string, integer], constraints: { maxLength: 30 } },
+    ],
+  ];
+
+  it('reads two types that differ only in the limits they carry as one shape, as `typeRefsEqual` does', () => {
+    // A limit changed, added or dropped on a body's type is no retype, at
+    // any level: `typeRefsEqual` passes over a type's limits as `diffFields`
+    // passes over a field's (Greptile's review of #545: a `maxLength` edited
+    // on a secondary `text/plain` body was a breaking retype).
+    for (const [a, b] of [...alike, ...differing]) expect(sameShape(a, b), JSON.stringify([a, b])).toBe(true);
+  });
+
+  it('reads the limits a type carries as shape at every level under a renamed model, as it reads a field’s', () => {
+    const page = (name: string, type: TypeRef): Model => ({ name, fields: [{ name: 'tags', type, required: false }] });
+    const renamed = (oldType: TypeRef, newType: TypeRef): boolean =>
+      sameShape(
+        model('OldPage'),
+        model('NewPage'),
+        shapesOf({ models: [page('OldPage', oldType)] }, { models: [page('NewPage', newType)] }),
+      );
+    for (const [a, b] of alike) expect(renamed(a, b), JSON.stringify([a, b])).toBe(true);
+    for (const [a, b] of differing) expect(renamed(a, b), JSON.stringify([a, b])).toBe(false);
+    // A named union's variants are read the same way.
+    const shape = (name: string, variants: TypeRef[]): Model => ({ name, fields: [], variants });
+    const renamedUnion = (a: TypeRef[], b: TypeRef[]): boolean =>
+      sameShape(
+        model('OldShape'),
+        model('NewShape'),
+        shapesOf({ models: [shape('OldShape', a)] }, { models: [shape('NewShape', b)] }),
+      );
+    expect(renamedUnion([tagged, integer], [tagged, integer])).toBe(true);
+    expect(renamedUnion([tagged, integer], [string, integer])).toBe(false);
+  });
+
+  it('tells a renamed model apart from one whose items’ limits changed, as from one whose field’s limits did', () => {
+    const tags = (name: string, items: TypeRef, constraints?: Record<string, unknown>): Model => ({
+      name,
+      fields: [{ name: 'tags', type: array(items), required: false, ...(constraints ? { constraints } : {}) }],
+    });
+    const renamed = shapesOf({ models: [tags('OldPage', tagged)] }, { models: [tags('NewPage', tagged)] });
+    expect(sameShape(model('OldPage'), model('NewPage'), renamed)).toBe(true);
+    const itemsChanged = shapesOf({ models: [tags('OldPage', tagged)] }, { models: [tags('NewPage', string)] });
+    expect(sameShape(model('OldPage'), model('NewPage'), itemsChanged)).toBe(false);
+    const fieldChanged = shapesOf(
+      { models: [tags('OldPage', string, { minItems: 1 })] },
+      { models: [tags('NewPage', string)] },
+    );
+    expect(sameShape(model('OldPage'), model('NewPage'), fieldChanged)).toBe(false);
+  });
+});

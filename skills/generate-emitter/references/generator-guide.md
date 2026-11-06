@@ -43,6 +43,8 @@ Foundation file. Map every IR `TypeRef` kind to the target language's type repre
 
 Export a `mapTypeRef(typeRef: TypeRef, namespacePascal: string): string` function.
 
+Every `primitive`, `literal`, `array`, `map` and `union` `TypeRef` may carry `constraints?: Constraints` — the validation keywords of the schema it was built from, the same a `Field` or `Parameter` carries for its own type and the only place they are for an array's `items`, a union's variants and a map's values (a `model`, `enum` or `nullable` reference carries none; a nullable's `inner` does). A type mapper may read them where the language can express a limit (a `pattern: '^pet_'` string as `` `pet_${string}` `` in TypeScript) and ignore them otherwise; `typeRefConstraints(ref)` from `@workos/oagen` reads them for any kind.
+
 **For Scenario A:** The type mapping must produce types that match the existing SDK's conventions. If the SDK uses `Date` objects instead of ISO strings for date-time, map accordingly. If the SDK wraps nullable types in `Optional<T>`, do that. Check the design doc's type mapping table.
 
 If the language has a separate type annotation system, also export mapping functions for those (e.g., `mapTypeRefForRbs`, `mapTypeRefForSorbet`).

@@ -31,7 +31,7 @@
  * inside its token and never splits one).
  */
 import { unescapePointerFragment } from '@redocly/openapi-core';
-import type { ModelRef, TypeRef } from '../ir/types.js';
+import type { Constraints, ModelRef, TypeRef } from '../ir/types.js';
 import type { SchemaObject } from './schemas.js';
 
 const SCHEMA_REF_PREFIX = '#/components/schemas/';
@@ -199,6 +199,30 @@ export function markPendingSchemaRef(ref: ModelRef): void {
 /** Forget the mark once `ref` is settled into the type the pointer names. */
 export function settlePendingSchemaRef(ref: ModelRef): void {
   pendingSchemaRefs.delete(ref);
+}
+
+/**
+ * The limits of the site a pending reference was built at — what is
+ * written beside the `$ref`, with the wrapper's or `allOf` members' around
+ * it, read as `schemaConstraints` reads any site (#545) — kept until the
+ * reference is settled, since no `ModelRef` carries limits: the settled
+ * type then carries them conjoined with the pointed schema's own, as a
+ * `$ref` to a primitive component carries the component's conjoined with
+ * the site's, and the field or parameter reads the same
+ * (`resolveSchemaPointers`; #545 review). A copy of a pending reference
+ * keeps them (`cloneTypeRef`).
+ */
+const pendingSiteLimits = new WeakMap<ModelRef, Constraints>();
+
+/** Record `limits` as what the site of the pending `ref` writes around it, in place of any recorded before; a wrapper's reading is conjoined with its branch's by the caller (`withTypeConstraints`), since it leaves a `$ref` branch out. */
+export function recordPendingSiteLimits(ref: ModelRef, limits: Constraints | undefined): void {
+  if (limits) pendingSiteLimits.set(ref, limits);
+  else pendingSiteLimits.delete(ref);
+}
+
+/** The limits recorded for the site of the pending `ref`, `undefined` when it writes none. */
+export function pendingSiteLimitsOf(ref: ModelRef): Constraints | undefined {
+  return pendingSiteLimits.get(ref);
 }
 
 /**

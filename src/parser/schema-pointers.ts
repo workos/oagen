@@ -52,6 +52,28 @@
  * way (`schemaAtPointer`); a pointer that lands on a `$ref` schema is typed
  * as that `$ref` is.
  *
+ * The limits are settled with the type (#545 review). A `$ref` to a
+ * primitive or array component gives the site the component's limits
+ * conjoined with what is written beside the reference (`schemaConstraints`),
+ * and a pointer site reads the same once its type is known: the type the
+ * site is settled into carries the limits of the schema the pointer lands
+ * on — what its own type carries where it stands, under every nullable
+ * wrapper it settles into (`underNullableWrappers`: a chain through a
+ * nullable link to a nullable schema wears two), the conjoined reading of
+ * a chain included — conjoined with the
+ * site's own (`combineConstraints`, the component's first, the stricter
+ * bound winning: what is written beside the pointer, then around a
+ * wrapper the type builder reads through, as `withTypeConstraints`
+ * records them), and a field or parameter whose type that is carries the
+ * same (`Field.constraints`, `Parameter.constraints`), so `{ $ref:
+ * '#/components/schemas/Owner/properties/code', maxLength: 3 }` to `{
+ * type: 'string', pattern: '^own_', maxLength: 8 }` is `{ maxLength: 3,
+ * pattern: '^own_' }` on the field, the parameter and the type alike, and a
+ * bare pointer `{ maxLength: 8, pattern: '^own_' }`. A pointer that lands on
+ * a schema typed as a model or enum adds none: that node carries its own,
+ * and the site keeps what it wrote beside the `$ref`, as beside a `$ref` to
+ * a model component.
+ *
  * What a site decided from the pending reference before the settle is
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
@@ -60,13 +82,31 @@
  * pointer variant is written as the model the variant settled to
  * (`settleDeferredMappingEntries`).
  */
-import type { MapType, Model, ModelRef, Operation, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
-import { collectRequestBodyTypes, collectResponseBodyTypes, collectResponseHeaders, walkTypeRef } from '../ir/types.js';
+import type {
+  Constraints,
+  MapType,
+  Model,
+  ModelRef,
+  Operation,
+  Service,
+  TypeRef,
+  UnionType,
+  Webhook,
+} from '../ir/types.js';
 import {
+  collectRequestBodyTypes,
+  collectResponseBodyTypes,
+  collectResponseHeaders,
+  typeRefConstraints,
+  walkTypeRef,
+} from '../ir/types.js';
+import {
+  combineConstraints,
   componentTypeRef,
   isNullSchema,
   referenceTypesAsUnknown,
   schemaToTypeRef,
+  withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
@@ -74,6 +114,7 @@ import { paginatedItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
+  pendingSiteLimitsOf,
   schemaAtPointer,
   schemaRefTokens,
   settleDeferredMappingEntries,
@@ -88,6 +129,30 @@ export interface SchemaPointerSites {
 }
 
 const UNKNOWN: TypeRef = { kind: 'primitive', type: 'unknown' };
+
+/** A site that carries its own limits beside its type — a field, an envelope field, a parameter — which stay one reading with the type's (`Field.constraints`, `Parameter.constraints`). */
+interface LimitedSite {
+  type: TypeRef;
+  constraints?: Constraints;
+}
+
+/**
+ * `type` under every nullable wrapper: the node that carries a value's
+ * limits (`withTypeConstraints` puts them there). A settled site can wear
+ * more than one — a pointer to a schema that admits null, written under a
+ * nullable wrapper of its own, or reached through a chain whose link is
+ * such a wrapper (`Alias.code: { oneOf: [{ $ref: …/Owner/properties/code
+ * }, { type: 'null' }] }` to a nullable `Owner.code`), settles into a
+ * wrapper around the copied wrapper — so one level is not enough
+ * (Greptile, #545 review round 4: a field pointing through that chain with
+ * `maxLength: 20` read no target limits, replaced the target's `8` with
+ * the `20` and lost its own).
+ */
+function underNullableWrappers(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  return bare;
+}
 
 /**
  * Settle every pending reference among `sites` against the document's
@@ -117,9 +182,14 @@ export function resolveSchemaPointers(
     });
     collectDiscriminatedUnions(ref, unions);
   };
+  /** A field's or parameter's type settled, then its own limits aligned with the type's (`alignSiteLimits`). */
+  const visitSite = (site: LimitedSite, context: string): void => {
+    visit(site.type, context);
+    resolver.alignSiteLimits(site);
+  };
 
   for (const model of sites.models) {
-    for (const field of model.fields) visit(field.type, `${model.name}.${field.name}`);
+    for (const field of model.fields) visitSite(field, `${model.name}.${field.name}`);
     for (const variant of model.variants ?? []) visit(variant, `${model.name}.variants`);
     if (model.variants && model.discriminator) {
       unions.push({
@@ -131,12 +201,12 @@ export function resolveSchemaPointers(
     }
   }
   for (const service of sites.services) {
-    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit);
+    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
   }
   for (const webhook of sites.webhooks) {
     const context = `webhooks.${webhook.name}.${webhook.httpMethod}`;
     for (const p of [...webhook.headerParams, ...webhook.queryParams, ...(webhook.cookieParams ?? [])]) {
-      visit(p.type, `${context}.${p.name}`);
+      visitSite(p, `${context}.${p.name}`);
     }
     if (webhook.requestBody) visit(webhook.requestBody, `${context}.requestBody`);
     for (const content of webhook.requestBodyContents ?? []) {
@@ -208,9 +278,16 @@ function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
  * parameter groups — a query group's are the operation's own parameters,
  * settled with them; a body group's are built afresh from the body's
  * variant schemas (`extractBodyParameterGroups`), so a member written as a
- * pointer holds a pending reference of its own.
+ * pointer holds a pending reference of its own. A parameter, a group member
+ * or an envelope field goes through `visitSite`, which aligns its own
+ * limits with its settled type's too.
  */
-function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, context: string) => void): void {
+function visitOperation(
+  op: Operation,
+  context: string,
+  visit: (ref: TypeRef, context: string) => void,
+  visitSite: (site: LimitedSite, context: string) => void,
+): void {
   for (const p of [
     ...op.pathParams,
     ...op.queryParams,
@@ -218,7 +295,7 @@ function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, co
     ...op.headerParams,
     ...(op.cookieParams ?? []),
   ]) {
-    visit(p.type, `${context}.${p.name}`);
+    visitSite(p, `${context}.${p.name}`);
   }
   if (op.requestBody) visit(op.requestBody, `${context}.requestBody`);
   // The iterator's item type was chosen from the response as the pending
@@ -234,7 +311,7 @@ function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, co
   }
   for (const entry of op.successResponses ?? []) visit(entry.type, `${context}.successResponses.${entry.statusCode}`);
   if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
-  for (const field of op.pagination?.envelopeFields ?? []) visit(field.type, `${context}.pagination.${field.name}`);
+  for (const field of op.pagination?.envelopeFields ?? []) visitSite(field, `${context}.pagination.${field.name}`);
   for (const error of op.errors) if (error.type) visit(error.type, `${context}.errors.${error.statusCode}`);
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
@@ -242,7 +319,7 @@ function visitOperation(op: Operation, context: string, visit: (ref: TypeRef, co
   for (const group of op.parameterGroups ?? []) {
     for (const variant of group.variants) {
       for (const p of variant.parameters)
-        visit(p.type, `${context}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
+        visitSite(p, `${context}.parameterGroups.${group.name}.${variant.name}.${p.name}`);
     }
   }
 }
@@ -386,6 +463,8 @@ export function pointerTypesAsUnknown(ref: string, schemas: Record<string, Schem
 /** The walk one document's pending references are settled by; `settled` collects them. */
 class PointerResolver {
   readonly settled: TypeRef[] = [];
+  /** `settled`, by identity, so a site can tell whether its type was one. */
+  private readonly settledRefs = new Set<TypeRef>();
   private readonly modelsByName = new Map<string, Model>();
 
   constructor(
@@ -419,8 +498,52 @@ class PointerResolver {
       stack.delete(ref);
     }
     settlePendingSchemaRef(pending);
+    const site = pendingSiteLimitsOf(pending);
     replaceTypeRef(pending, type ?? UNKNOWN);
+    // The settled type carries the pointed schema's limits — what the type
+    // reached carries, under every nullable wrapper it settled into
+    // (`underNullableWrappers`) — conjoined with the site's own, as a `$ref`
+    // to a primitive component carries the component's conjoined with the
+    // site's (see the module comment); a model or enum carries none, and
+    // keeps the site's reading off the type. `pending` is the settled type
+    // now: `replaceTypeRef` rewrote it in place.
+    const settled = pending as TypeRef;
+    const bare = underNullableWrappers(settled);
+    withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
+    this.settledRefs.add(pending);
+  }
+
+  /**
+   * Give `site` — a field or parameter — the limits its type carries, when
+   * that type is a reference this pass settled into one that can carry
+   * them: the pointed schema's conjoined with the site's own (`settle`), so
+   * the field or parameter and its type stay one reading, as they are for
+   * a `$ref` to a primitive component (`Field.constraints`; #545 review).
+   * A site whose pointer landed on a model or enum keeps what it wrote
+   * beside the `$ref`: that node carries its own. The settled reference is
+   * the site's type itself, or the inner type of a nullable wrapper the
+   * site wrote around the pointer (`oneOf: [{ $ref }, { type: 'null' }]`),
+   * and is looked up before it is unwrapped: a pointer to a schema that
+   * admits null (`{ type: ['string', 'null'], maxLength: 8 }`) settles into
+   * a nullable wrapper itself, whose inner type carries the limits
+   * (Greptile, #545 review round 2: the wrapper was unwrapped first, so
+   * such a field kept none of its own) — into more than one through a
+   * chain whose link is itself a nullable wrapper, so every wrapper is read
+   * through (`underNullableWrappers`; review round 4).
+   */
+  alignSiteLimits(site: LimitedSite): void {
+    const settled = this.settledRefs.has(site.type)
+      ? site.type
+      : site.type.kind === 'nullable' && this.settledRefs.has(site.type.inner)
+        ? site.type.inner
+        : undefined;
+    if (!settled) return;
+    const bare = underNullableWrappers(settled);
+    if (bare.kind === 'model' || bare.kind === 'enum') return;
+    const limits = typeRefConstraints(bare);
+    if (limits) site.constraints = { ...limits };
+    else delete site.constraints;
   }
 
   /** The type `ref` names, or `undefined` after one warning saying why it names none. */

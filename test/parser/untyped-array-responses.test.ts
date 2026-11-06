@@ -283,7 +283,12 @@ describe('classifyAndExtractResponse — list envelope whose data array has no t
     );
 
     expect(result.isPaginated).toBe(true);
-    expect(result.response).toEqual({ kind: 'array', items: { kind: 'model', name: 'User' } });
+    // The later branch's limit is the array's (#545).
+    expect(result.response).toEqual({
+      kind: 'array',
+      items: { kind: 'model', name: 'User' },
+      constraints: { minItems: 1 },
+    });
     expect(result.itemType).toEqual({ kind: 'model', name: 'User' });
   });
 
@@ -703,9 +708,11 @@ describe('parseSpec — arrays without type', () => {
       },
       components: {},
     });
+    // The `allOf`'s limits are the array's (#545).
     expect(operation(ir, 'listPets').response).toEqual({
       kind: 'array',
       items: { kind: 'model', name: 'ListPetsItem' },
+      constraints: { minItems: 1, maxItems: 10 },
     });
     expect(danglingRefs(ir)).toEqual([]);
   });

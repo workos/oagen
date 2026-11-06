@@ -48,6 +48,7 @@ export type {
 
 export {
   assertNever,
+  typeRefConstraints,
   walkTypeRef,
   mapTypeRef,
   collectModelRefs,

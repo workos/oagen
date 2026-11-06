@@ -1374,6 +1374,10 @@ describe('review round 1', () => {
       kind: 'nullable',
       inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
     };
+    const limitedPetList: TypeRef = {
+      kind: 'nullable',
+      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' }, constraints: { minItems: 1 } },
+    };
     const cases: Array<[string, SchemaObject, SchemaObject, TypeRef]> = [
       // Nullable first: the later `items: pet` narrows the earlier `items: {}`.
       ['nullable first', nullable({}), plain(pet), petList],
@@ -1387,9 +1391,9 @@ describe('review round 1', () => {
         nullable(note),
         { ...petList, inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } } },
       ],
-      // Limits alone never change the items.
-      ['limits only', nullable(pet), plain(undefined, { minItems: 1 }), petList],
-      ['typed limits only', plain(pet), { type: ['array', 'null'], minItems: 1 }, petList],
+      // Limits alone never change the items; the array carries them (#545).
+      ['limits only', nullable(pet), plain(undefined, { minItems: 1 }), limitedPetList],
+      ['typed limits only', plain(pet), { type: ['array', 'null'], minItems: 1 }, limitedPetList],
     ];
     for (const [label, first, second, response] of cases) {
       const result = classifyAndExtractResponse(envelope(first, second), 'ListPetsResponse');
@@ -1830,9 +1834,10 @@ describe('(3) a nullable array is the array it is, however the null is written',
       'ListPetsResponse',
     );
     expect(result.isPaginated).toBe(true);
+    // The later branch's limit is the array's (#545).
     expect(result.response).toEqual({
       kind: 'nullable',
-      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' } },
+      inner: { kind: 'array', items: { kind: 'model', name: 'ListPetsItem' }, constraints: { minItems: 1 } },
     });
     expect(result.itemType).toEqual({ kind: 'model', name: 'ListPetsItem' });
   });

@@ -1,4 +1,5 @@
 import type { ApiSpec, Enum, Model, TypeRef } from '../ir/types.js';
+import { typeRefConstraints } from '../ir/types.js';
 import { typeRefsEqual } from './models.js';
 
 /** The named types of one document, so a body's model or enum ref can be read through to its shape. */
@@ -56,7 +57,16 @@ const ENUM_VALUE_DOC_KEYS: ReadonlySet<string> = new Set(['description']);
  * nested models and enums are read through too — plus the model's own
  * limits, type parameters, deprecation, variants (pairwise, in order) and
  * discriminator (property and mapped shapes); an enum ref is read through to
- * its values (name, value, deprecation). Documentation (descriptions, links,
+ * its values (name, value, deprecation). The limits a field's type carries
+ * (`constraints` on a primitive, literal, array, map or union; #545) are
+ * shape as the field's own are, at every level under the field
+ * (`sameLimits`): a renamed model whose `tags` items differ in `pattern`
+ * alone is not one shape with the old, as one whose `tags` field's
+ * `minItems` differs is not. At the top, two types `typeRefsEqual` reads as
+ * one are one shape whatever limits they carry, as `diffFields` passes over
+ * a field's: a `maxLength` edited on a body — the one `requestBody` is read
+ * from or a secondary representation, a model's field or an inline string
+ * — is no retype (#545 review). Documentation (descriptions, links,
  * examples) does not count. Without `shapes`, or for a name either document
  * lacks, the two refs are different shapes. So are two names both documents
  * declare, however alike: neither was renamed, so a body moved from `Note` to
@@ -128,6 +138,8 @@ function sameModelShape(oldModel: Model, newModel: Model, shapes: DocumentShapes
     if (stableStringify(omitKeys(oldField, FIELD_DOC_KEYS)) !== stableStringify(omitKeys(newField, FIELD_DOC_KEYS))) {
       return false;
     }
+    // The limits the field's type carries are its shape, as its own are (#545).
+    if (!sameLimits(oldField.type, newField.type)) return false;
     if (!sameShapeWithin(oldField.type, newField.type, shapes, seen)) return false;
   }
   if (
@@ -137,10 +149,53 @@ function sameModelShape(oldModel: Model, newModel: Model, shapes: DocumentShapes
     return false;
   }
   if (!!oldModel.variants !== !!newModel.variants) return false;
-  if (oldModel.variants && newModel.variants && !sameVariants(oldModel.variants, newModel.variants, shapes, seen)) {
+  if (
+    oldModel.variants &&
+    newModel.variants &&
+    (!sameVariantLimits(oldModel.variants, newModel.variants) ||
+      !sameVariants(oldModel.variants, newModel.variants, shapes, seen))
+  ) {
     return false;
   }
   return sameDiscriminator(oldModel.discriminator, newModel.discriminator, shapes, seen);
+}
+
+/**
+ * Whether `a` and `b` carry the same limits at every level — on the type
+ * itself and, in lockstep, on an array's items, a map's values, a nullable
+ * wrapper's inner type and a union's variants pairwise (#545). Read by
+ * `sameModelShape` for each field's type and each variant of a named
+ * union, where a field's own limits are already shape, and not at the top
+ * of `sameShapeWithin`: there `typeRefsEqual` passes over limits as
+ * `diffFields` passes over a field's, so a limit edited on a body's
+ * secondary representation is no retype while the same edit on its
+ * primary or on a field reports nothing (#545 review). A model or enum
+ * reference carries none (the model's own are compared with the model);
+ * two types of different kinds are left to the shape comparison.
+ */
+function sameLimits(a: TypeRef, b: TypeRef): boolean {
+  if (stableStringify(typeRefConstraints(a)) !== stableStringify(typeRefConstraints(b))) return false;
+  switch (a.kind) {
+    case 'array':
+      return b.kind !== 'array' || sameLimits(a.items, b.items);
+    case 'map':
+      return b.kind !== 'map' || sameLimits(a.valueType, b.valueType);
+    case 'nullable':
+      return b.kind !== 'nullable' || sameLimits(a.inner, b.inner);
+    case 'union':
+      return (
+        b.kind !== 'union' ||
+        a.variants.length !== b.variants.length ||
+        a.variants.every((variant, i) => sameLimits(variant, b.variants[i]))
+      );
+    default:
+      return true;
+  }
+}
+
+/** Whether a named union's variants carry the same limits pairwise (`sameLimits`); a different count is left to `sameVariants`. */
+function sameVariantLimits(a: TypeRef[], b: TypeRef[]): boolean {
+  return a.length !== b.length || a.every((variant, i) => sameLimits(variant, b[i]));
 }
 
 function sameVariants(a: TypeRef[], b: TypeRef[], shapes: DocumentShapes, seen: Set<string>): boolean {
