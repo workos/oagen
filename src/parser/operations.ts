@@ -311,6 +311,24 @@ export function isIgnoredHeaderParameter(param: ParameterObject): boolean {
   return param.in === 'header' && IGNORED_HEADER_PARAMETERS.has(foldHeaderName(param.name));
 }
 
+/** The response header name OpenAPI says to ignore, folded (`foldHeaderName`). */
+const IGNORED_RESPONSE_HEADER = 'content-type';
+
+/**
+ * Whether a response header named `name` is one OpenAPI says "SHALL be
+ * ignored" (OAS 3.x, Response Object): `Content-Type`, whatever its case,
+ * since the response's `content` map already carries the media type. A
+ * narrower rule than a parameter's (`isIgnoredHeaderParameter`): an
+ * `Accept` or `Authorization` response header is read. Asked by the key the
+ * `headers` map declares the header under — its name, whatever a `$ref`
+ * there leads to — before anything types it, so neither
+ * `extractResponseHeaders` nor the sent-only component walk
+ * (`sentOnlyComponentNames`, #540) reads the components its schema names.
+ */
+export function isIgnoredResponseHeader(name: string): boolean {
+  return foldHeaderName(name) === IGNORED_RESPONSE_HEADER;
+}
+
 export interface RequestBodyObject {
   description?: string;
   required?: boolean;
@@ -5609,8 +5627,9 @@ function extractResponseHeaders(
   const result: ResponseHeader[] = [];
   for (const [folded, { name, raw }] of declarations) {
     // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
-    // media type is already carried by the response's `content` map.
-    if (folded === 'content-type') continue;
+    // media type is already carried by the response's `content` map. The
+    // sent-only component walk skips it by the same rule (#540).
+    if (isIgnoredResponseHeader(name)) continue;
 
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel, ctx.refSiblingDescriptions);
     if (!header) continue;
