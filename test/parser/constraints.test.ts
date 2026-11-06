@@ -2001,4 +2001,55 @@ describe('#545', () => {
       expectOneReading(spec);
     },
   );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'reads a chained pointer’s limits through every nullable wrapper it settles into, on the field, the parameter and the type (OAS %s)',
+    async (openapi) => {
+      // Greptile's fourth review of #545: `Alias.code`, a nullable wrapper
+      // around a pointer to a nullable `Owner.code`, settles into two
+      // wrappers; a site pointing at it read no target limits through one,
+      // so `maxLength: 20` beside the pointer replaced the target's `8` on
+      // the type and the field lost its own.
+      const owner = { $ref: '#/components/schemas/Owner/properties/code' };
+      const alias = { $ref: '#/components/schemas/Alias/properties/code' };
+      const target =
+        openapi === '3.1.0'
+          ? { type: ['string', 'null'], pattern: OWN, maxLength: 8 }
+          : { type: 'string', nullable: true, pattern: OWN, maxLength: 8 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: {
+            Owner: { type: 'object', properties: { code: target } },
+            Alias: { type: 'object', properties: { code: { oneOf: [owner, { type: 'null' }] } } },
+          },
+          parameters: [
+            { name: 'looser', in: 'query', schema: { ...alias, maxLength: 20 } },
+            { name: 'tighter', in: 'query', schema: { ...alias, maxLength: 3 } },
+          ],
+          fields: { bare: alias, looser: { ...alias, maxLength: 20 }, tighter: { ...alias, maxLength: 3 } },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      // The settled type wears the chain's wrappers as the walk copies them; the innermost node carries the limits.
+      const owned = (limits: Constraints) =>
+        nullable(nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits })));
+      expect(byName(fieldsOf(spec, 'Alias')).code.constraints).toEqual({ maxLength: 8, pattern: OWN });
+      for (const site of [fields.bare, fields.looser, params.looser]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({}));
+      }
+      for (const site of [fields.tighter, params.tighter]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      // Every site's own limits are the innermost node's.
+      for (const site of [...getPet.queryParams, ...fieldsOf(spec, 'GetPetResponse'), ...fieldsOf(spec, 'Alias')]) {
+        let bare = site.type;
+        while (bare.kind === 'nullable') bare = bare.inner;
+        expect(typeRefConstraints(bare), site.name).toEqual(site.constraints);
+      }
+    },
+  );
 });
