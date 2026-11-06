@@ -992,6 +992,60 @@ describe('request body descriptions (issue #316)', () => {
           expect(unresolvedReferences(spec)).toEqual([]);
           expect(orphanedModels(spec, ['Pet', 'AddNoteResponse'])).toEqual([]);
         });
+
+        // Review: `nullableUnionBranch` gives no branch under an `allOf`
+        // beside the union either, so the request-body builder tells a
+        // nullable `oneOf` wrapper only where there is none (`nullableWrapper`)
+        // and otherwise builds the `oneOf` as written, the `allOf` aside, as
+        // it did before #535 — not the type a field with the same schema gets.
+        it('builds a nullable oneOf beside an allOf as the union of one variant it was, the allOf aside', async () => {
+          const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
+          const spec = await parseDocument(
+            document(
+              {
+                '/ref': post(
+                  'addRef',
+                  jsonBody({ allOf: [{ $ref: '#/components/schemas/Pet' }], oneOf: [nickname, nul] }),
+                ),
+                '/text': post('addText', jsonBody({ allOf: [{ description: 'A pet.' }], oneOf: [nickname, nul] })),
+                '/enum': post(
+                  'addEnum',
+                  jsonBody({
+                    allOf: [{ description: 'A pet.' }],
+                    enum: ['draft', null],
+                    oneOf: [constOf('draft', 'Only drafts are accepted.'), nul],
+                  }),
+                ),
+              },
+              { openapi },
+            ),
+          );
+          const ops = opsOf(spec);
+          const models = modelsOf(spec);
+
+          // An `allOf` of a `$ref`: the union of the one object variant, nullable, not the component it refers to.
+          expect(ops.addRef.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'model', name: 'AddRefRequest' }] },
+          });
+          expect(models.get('AddRefRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
+          expect(ops.addRef).not.toHaveProperty('requestBodyDescription');
+          // An `allOf` of text alone: the same union, not the collapsed model.
+          expect(ops.addText.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'model', name: 'AddTextRequest' }] },
+          });
+          expect(models.get('AddTextRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
+          expect(ops.addText).not.toHaveProperty('requestBodyDescription');
+          // The #535 shape beside a typeless `allOf`: a union of the one literal, not the nullable enum.
+          expect(ops.addEnum.requestBody).toEqual({
+            kind: 'nullable',
+            inner: { kind: 'union', variants: [{ kind: 'literal', value: 'draft' }] },
+          });
+          expect(spec.enums.map((e) => e.name)).not.toContain('AddEnumRequest');
+          expect(ops.addEnum).not.toHaveProperty('requestBodyDescription');
+          expectSound(spec);
+        });
       });
     }
 
