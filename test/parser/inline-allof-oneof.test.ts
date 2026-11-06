@@ -3322,5 +3322,68 @@ describe('#398', () => {
         }
       },
     );
+
+    // Round 2 (Greptile): a dispatching axis beside a nullable one on one
+    // member. The member reader decides the wrapper per keyword and
+    // dispatches the other axis; the variant builder must find that axis
+    // the same way (`memberUnions`), so every mapping target names a model
+    // it built (it collapsed the nullable `oneOf` for the whole member and
+    // built neither variant).
+    it.each(openapis)(
+      'builds the variant models a dispatching axis beside a nullable one on one member maps to (OAS %s)',
+      async (openapi) => {
+        const cat = obj({ kind: { type: 'string', const: 'cat' }, lives: str }, { required: ['kind'] });
+        const dogVariant = obj({ kind: { type: 'string', const: 'dog' }, breed: str }, { required: ['kind'] });
+        const nullable = [obj({ a: str }), { type: 'null' }];
+        for (const member of [
+          { oneOf: nullable, anyOf: [cat, dogVariant] },
+          { anyOf: nullable, oneOf: [cat, dogVariant] },
+        ] as SchemaObject[]) {
+          const ir = await parseWithoutWarnings(
+            doc(openapi, { Pet: { allOf: [base, member] } }, { '/pets': getOp('getPet', ref('Pet')) }),
+          );
+          const models = modelsByName(ir);
+          expect(models['Pet']?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'PetCat', dog: 'PetDog' } });
+          expect(fieldsOf(models['Pet'])).toEqual(['name: string', 'a?: string']);
+          // Every mapping target names a built model, carrying the base and
+          // the nullable branch's field alike.
+          expect(typed(models['PetCat'])).toEqual(['name: string', 'a?: string', 'kind: "cat"', 'lives?: string']);
+          expect(typed(models['PetDog'])).toEqual(['name: string', 'a?: string', 'kind: "dog"', 'breed?: string']);
+          expectSound(ir, ['Pet']);
+        }
+      },
+    );
+
+    // Round 2 (Greptile): two variants inheriting one component. Each
+    // variant is a conjunction of its own, with a cycle guard of its own, so
+    // the component declares into both (the guard was shared across the
+    // variants, and the second variant read its own member alone).
+    it.each(cases)(
+      "reads a component two variants name into each variant's conjunction (OAS %s, %s)",
+      async (openapi, keyword) => {
+        const variants = [
+          { allOf: [ref('C'), obj({ payload: obj({ b: str }) })] },
+          { allOf: [ref('C'), obj({ payload: obj({ c: str }) })] },
+        ];
+        const pet: SchemaObject = { allOf: [base, { [keyword]: variants }] };
+        const ir = await parseWithoutWarnings(
+          doc(
+            openapi,
+            { C: obj({ payload: obj({ a: str }) }), Pet: pet, Holder: obj({ pet }) },
+            { '/pets': getOp('getPet', pet), '/holders': getOp('getHolder', ref('Holder')) },
+          ),
+        );
+        const models = modelsByName(ir);
+        for (const name of ['Pet', 'HolderPet', 'GetPetResponse']) {
+          expect(typed(models[name]), name).toEqual([
+            'name: string',
+            `payload?: (${name}Payload | ${name}PayloadWithC)`,
+          ]);
+          expect(fieldsOf(models[`${name}Payload`]), name).toEqual(['a?: string', 'b?: string']);
+          expect(fieldsOf(models[`${name}PayloadWithC`]), name).toEqual(['a?: string', 'c?: string']);
+        }
+        expectSound(ir, ['C', 'Pet', 'Holder']);
+      },
+    );
   });
 });

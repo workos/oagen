@@ -2822,18 +2822,22 @@ export function declareProperty(
  * variant's own `properties` and its `allOf` wrappers' only, so `{ oneOf:
  * [{ oneOf: [{ a }, { b }] }, { c }] }` gave `c` alone and a `$ref`
  * variant gave nothing, while the inline merge read nested unions but
- * followed no `$ref`). A schema in `seen` was read under a variant already
- * and declares nothing more, which ends a component that names itself
- * under a variant.
+ * followed no `$ref`). A schema met again within one variant's reading
+ * declares nothing more, which ends a component that names itself under a
+ * variant; the guard is the variant's own, so a component two variants
+ * name declares into each variant's conjunction — `{ allOf: [{ $ref: C },
+ * { payload: { b } }] }` beside `{ allOf: [{ $ref: C }, { payload: { c }
+ * }] }`, `C.payload { a }`, is `payload: { a, b } | { a, c }` (#398 review
+ * round 2: the guard was shared across the variants, so the second read
+ * `{ c }` alone).
  */
 export function declareVariant(
   ledger: Map<string, PropertyDeclarations>,
   variant: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
-  seen: Set<SchemaObject>,
 ): void {
   const own = new Map<string, PropertyDeclarations>();
-  readVariant(own, variant, componentSchemas, seen, false);
+  readVariant(own, variant, componentSchemas, new Set(), false);
   for (const { name, unconditional, conditional } of own.values()) {
     declareProperty(ledger, name, unconditional?.schema ?? unionOfDeclarations(conditional), null, true);
   }
@@ -2845,7 +2849,8 @@ export function declareVariant(
  * variant — its properties, an `allOf` member's, a nullable wrapper's one
  * variant's, the component a `$ref` names — in the capacity it is reached
  * in (`onBranch`: always-applying for the variant itself), and what a
- * union nested in it declares as branch-only, however deep.
+ * union nested in it declares as branch-only, however deep. `seen` is this
+ * one variant's: a schema met again under it declares nothing more.
  */
 function readVariant(
   ledger: Map<string, PropertyDeclarations>,
@@ -2951,17 +2956,20 @@ function readVariant(
  * A schema reached twice is read once in each capacity it is reached in —
  * as an inline member (the merged model's own, unions included), through a
  * `$ref` member (inherited, a union its component dispatches left to the
- * component) or under a variant (`required` unread) — and only an inline
- * reading stands for the others: a schema shared between a variant and a
- * member (a YAML anchor, an object a `transformSpec` hook reuses, a `$ref`
- * written twice) still contributes its `required` and is still followed
- * when the member is reached, and a component's own object reused as an
- * inline member still has a dispatched union flattened after the `$ref`
- * reading left it to the component (`done`). The walk reads property lists
- * only — it never descends into a property — so it is finite for any
- * component graph: a schema already read in the same capacity is not read
- * again, which is what stops a component that extends itself. `required`
- * lists each name once.
+ * component) or under a variant (`required` unread, once per variant that
+ * reaches it: each variant is read as a conjunction of its own,
+ * `declareVariant`, so a component two variants name declares into both)
+ * — and only an inline reading stands for the others: a schema shared
+ * between a variant and a member (a YAML anchor, an object a
+ * `transformSpec` hook reuses, a `$ref` written twice) still contributes
+ * its `required` and is still followed when the member is reached, and a
+ * component's own object reused as an inline member still has a dispatched
+ * union flattened after the `$ref` reading left it to the component
+ * (`done`). The walk reads property lists only — it never descends into a
+ * property — so it is finite for any component graph: a schema already
+ * read in the same capacity is not read again, and a variant's walk ends
+ * where it meets a schema again, which is what stops a component that
+ * extends itself. `required` lists each name once.
  */
 export function mergeAllOfMembers(
   schema: SchemaObject,
@@ -2972,22 +2980,20 @@ export function mergeAllOfMembers(
   const resolvedRefs: string[] = [];
   const unresolvedRefs: string[] = [];
   // The schemas read so far, by capacity: `inline` (an always-applying
-  // member read as the merged model's own, every union flattened),
+  // member read as the merged model's own, every union flattened) and
   // `inherited` (reached through a `$ref` member, a union its component
-  // dispatches left to the component) and `conditional` (under a variant,
-  // `required` unread; `declareVariant`). An inline reading is complete, so
-  // it stands for every capacity; an inherited or conditional reading is
-  // not, so the same schema reached again in another capacity is read once
-  // more for what that capacity contributes — a component's own object
-  // reused as an inline member (an object a `transformSpec` hook shares)
-  // still has a dispatched union flattened, a variant's object reused as a
-  // member still has its `required` read. A schema already read in the same
-  // capacity is not read again, which is what stops a component that
-  // extends itself.
+  // dispatches left to the component). An inline reading is complete, so
+  // it stands for both; an inherited reading is not, so the same schema
+  // reached again inline is read once more for what that capacity
+  // contributes — a component's own object reused as an inline member (an
+  // object a `transformSpec` hook shares) still has a dispatched union
+  // flattened. A schema already read in the same capacity is not read
+  // again, which is what stops a component that extends itself. A schema
+  // under a variant is read by the variant's own walk (`declareVariant`),
+  // `required` unread, once per variant that reaches it.
   const done = {
     inline: new Set<SchemaObject>(),
     inherited: new Set<SchemaObject>(),
-    conditional: new Set<SchemaObject>(),
   };
   // `wrapperDiscriminator`: the `discriminator` the `allOf` wrapper `s` sits
   // in writes for a union among its members (`wrapperDiscriminatorOf`), by
@@ -3058,7 +3064,7 @@ export function mergeAllOfMembers(
       }
       const explicit = s.discriminator ?? wrapperDiscriminator;
       if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
-      for (const variant of variants) declareVariant(declared, variant, componentSchemas, done.conditional);
+      for (const variant of variants) declareVariant(declared, variant, componentSchemas);
     }
   };
   visit(schema, null);

@@ -4748,21 +4748,20 @@ export function unionAxesOf(schema: SchemaObject): SchemaObject[][] {
  * What one reading of a composed component collects (`readComponentAllOf`,
  * `readComponentAllOfMember`): every declaration with its provenance
  * (`declareProperty`), the names every always-applying member requires, and
- * the schemas read so far — `seen` as always-applying (a component met
- * again on the chain declares nothing more), `branches` under a variant (a
- * component a variant names, read once however many variants name it; see
- * `declareVariant`).
+ * the schemas read so far as always-applying (`seen`: a component met
+ * again on the chain declares nothing more). A variant is read as a
+ * conjunction of its own, with a guard of its own (`declareVariant`), so
+ * a component two variants name declares into each.
  */
 interface ComponentReading {
   ledger: Map<string, PropertyDeclarations>;
   required: Set<string>;
   seen: Set<SchemaObject>;
-  branches: Set<SchemaObject>;
 }
 
 /** A fresh `ComponentReading`, into `ledger` when given. */
 function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): ComponentReading {
-  return { ledger, required: new Set(), seen: new Set(), branches: new Set() };
+  return { ledger, required: new Set(), seen: new Set() };
 }
 
 /** How a member is read: the one variant axis not to read (the dispatcher base reads its axis for its own properties only), and the `discriminator` the `allOf` wrapper writes for a union among its members. */
@@ -4881,7 +4880,7 @@ function readComponentAllOfMember(
     // password vs password_hash), each variant read as the inline merge
     // reads it (workos/oagen#430 review: a wrapped `{ kind: '-', meow }` lost
     // `meow` once its nameless const sent the union here).
-    for (const variant of variants) declareVariant(ledger, variant, schemas, reading.branches);
+    for (const variant of variants) declareVariant(ledger, variant, schemas);
   }
   return discriminator;
 }
@@ -5178,32 +5177,47 @@ interface MemberUnion {
 /**
  * The unions a component's `allOf` member carries (`unionAxesOf`), read
  * through every wrapper `readComponentAllOfMember` reads the member through
- * — a chain of references (`followMemberRefs`), then a nullable union
- * wrapper (`nullableUnionBranch`) to its one non-null variant, the two
- * alternating — and none for a member that carries none, or an `allOf`
- * member (read as a component composed with `allOf`, never as a variant
- * axis). The one way the variant builder
+ * — a chain of references (`followMemberRefs`), then, per keyword, a
+ * nullable union wrapper (`nullableAxisBranch`) to its one non-null
+ * variant, the two alternating — in the order the member reader reads
+ * them: an axis that is no wrapper as it stands, a nullable axis as the
+ * unions its one variant carries. None for a member that carries none, or
+ * an `allOf` member (read as a component composed with `allOf`, never as
+ * a variant axis). The one way the variant builder
  * (`extractDiscriminatedAllOfVariantModels`) finds a variant axis, so a
  * union the member reader detects as a dispatcher is the union whose
  * variant models are built, whichever wrapper it sits under
  * (workos/oagen#308 merge review: a dispatcher detected through `{ oneOf:
  * [{ oneOf: [A, B] }, { type: 'null' }] }` mapped its tags to models
  * nothing built, since the builder looked at each direct member's union
- * only).
+ * only) and whatever is written beside it (#398 review round 2: a member
+ * `{ oneOf: [{ a }, { type: 'null' }], anyOf: [cat, dog] }` was collapsed
+ * to `{ a }` for the whole member once the reader decided its wrappers
+ * per keyword, so `Pet` mapped `cat` and `dog` to `PetCat` and `PetDog`
+ * and neither was built).
  */
-function memberUnions(member: SchemaObject, schemas: Record<string, SchemaObject> | undefined): MemberUnion[] {
-  const seen = new Set<SchemaObject>();
-  let resolved: SchemaObject | undefined = member;
-  for (;;) {
-    resolved = followMemberRefs(resolved, schemas, seen);
-    if (!resolved || resolved.allOf) return [];
-    const carrier = resolved;
-    const branch = nullableUnionBranch(carrier);
-    if (!branch) return unionAxesOf(carrier).map((variants) => ({ carrier, variants }));
+function memberUnions(
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+  seen = new Set<SchemaObject>(),
+): MemberUnion[] {
+  const carrier = followMemberRefs(member, schemas, seen);
+  if (!carrier || carrier.allOf) return [];
+  const axes = unionAxesOf(carrier);
+  const branches = axes.map((variants) => nullableAxisBranch(carrier, variants));
+  // The wrapper is recorded as read, as the member reader records it, so a
+  // component that wraps a reference to itself ends here.
+  if (branches.some((branch) => branch !== undefined)) {
     if (seen.has(carrier)) return [];
     seen.add(carrier);
-    resolved = branch;
   }
+  const unions: MemberUnion[] = [];
+  for (const [index, variants] of axes.entries()) {
+    const branch = branches[index];
+    if (branch) unions.push(...memberUnions(branch, schemas, seen));
+    else unions.push({ carrier, variants });
+  }
+  return unions;
 }
 
 /**
