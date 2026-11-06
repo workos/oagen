@@ -2040,7 +2040,7 @@ export function titleMappedVariantNames(
   // Read before the variants are named, so an inline object variant is
   // named by its title alone — the name `nameInlineVariantEntries` keeps.
   const members = unionMembers(union, NO_INLINE_NAMES, schemas);
-  if (titleMappedDiscriminatorProperty(members) === null) return names;
+  if (titleMappedDiscriminatorProperty(members, schemas) === null) return names;
   for (const { raw, name } of members) {
     if (isInlineObjectSchema(raw) && name !== null) names.set(raw, name);
   }
@@ -2052,8 +2052,9 @@ export function titleMappedVariantNames(
  * inline object by its title before naming, a `$ref` by its component, a
  * wrapper by the one model it wraps (`unionMembers`) — the first property
  * the first member pins that every member pins too, a `$ref` variant's
- * read from its component (#568); null when a member is unnamed or no
- * property is shared. The naming side's test (`titleMappedVariantNames`):
+ * read from its component, through a `$ref` member of its `allOf` or a
+ * `$ref` on the property (`getEffectiveConstPropertyValue`; #568); null
+ * when a member is unnamed or no property is shared. The naming side's test (`titleMappedVariantNames`):
  * the titles are kept whether or not the values are distinct — a title
  * given twice within one union falls back through `emitted`
  * (`nameInlineVariantEntries`) — while the discriminator itself needs
@@ -2061,12 +2062,15 @@ export function titleMappedVariantNames(
  * union of two variants pinning one value keeps its titles and carries no
  * discriminator.
  */
-function titleMappedDiscriminatorProperty(members: readonly UnionMember[]): string | null {
+function titleMappedDiscriminatorProperty(
+  members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
+): string | null {
   if (members.length < 2 || members.some((m) => m.name === null)) return null;
   const first = members[0];
   if (!first) return null;
-  for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    if (members.every((m) => getEffectiveConstPropertyValue(m.resolved, property) !== null)) return property;
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    if (members.every((m) => getEffectiveConstPropertyValue(m.resolved, property, schemas) !== null)) return property;
   }
   return null;
 }
@@ -3045,10 +3049,14 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  */
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
   const prop = schema.properties?.[property];
-  if (!prop) return null;
-  if (typeof prop.const === 'string') return prop.const;
-  if (Array.isArray(prop.enum) && prop.enum.length === 1 && typeof prop.enum[0] === 'string') {
-    return prop.enum[0];
+  return prop ? pinnedStringValue(prop) : null;
+}
+
+/** The one string a schema pins as written — a string `const`, or an `enum:` of exactly one string; null otherwise. */
+function pinnedStringValue(schema: SchemaObject): string | null {
+  if (typeof schema.const === 'string') return schema.const;
+  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
+    return schema.enum[0];
   }
   return null;
 }
@@ -3279,7 +3287,10 @@ interface UnionMember {
   /**
    * The component schema a `$ref` variant points at (as `extractAllOfModel`
    * resolves its members), or the one a wrapper variant wraps
-   * (`wrappedVariantReference`); `raw` otherwise.
+   * (`wrappedVariantReference`); `raw` otherwise. Its consts are read
+   * through its `allOf` members, a `$ref` member or a `$ref` on the
+   * property followed to the component it names
+   * (`getEffectiveConstPropertyValue`).
    */
   resolved: SchemaObject;
   /**
@@ -3393,7 +3404,7 @@ function buildNamedUnionPlan(
     memberProperties.set(key, raw);
     memberContexts.set(raw, key);
   });
-  const discriminator = namedUnionDiscriminator(schema, compositionKind, members);
+  const discriminator = namedUnionDiscriminator(schema, compositionKind, members, schemas);
   return {
     compositionKind,
     members,
@@ -3449,7 +3460,9 @@ function namedUnionEntry(
  * written inline as a field's, a body's or an item's — each with the schema
  * its const values and properties are read from (a `$ref` resolved against
  * the components, so a discriminator pinned inside the referenced schema is
- * seen) and the model name it is referenced by. A variant that wraps one
+ * seen — in its own `properties`, under a `$ref` member of its `allOf`, or
+ * as a `$ref` on the property to a const component) and the model name it
+ * is referenced by. A variant that wraps one
  * reference to a model (`wrappedVariantReference`) is read as that reference,
  * so its const reaches a derived mapping as a bare `$ref` variant's does (#427).
  * The one reader both derivations share, so a union carries the same
@@ -4302,6 +4315,7 @@ function namedUnionDiscriminator(
   schema: SchemaObject,
   compositionKind: 'oneOf' | 'anyOf',
   members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
 ): { property: string; mapping: Record<string, string> } | undefined {
   if (schema.discriminator) {
     const property = schema.discriminator.propertyName;
@@ -4311,10 +4325,10 @@ function namedUnionDiscriminator(
         ? Object.fromEntries(
             explicit.map(([value, target]) => [value, resolveSchemaName(target.split('/').pop() ?? '')]),
           )
-        : (unionConstMapping(members, property) ?? {});
+        : (unionConstMapping(members, property, schemas) ?? {});
     return { property, mapping };
   }
-  return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members) : undefined;
+  return compositionKind === 'oneOf' ? implicitUnionDiscriminator(members, schemas) : undefined;
 }
 
 /**
@@ -4330,12 +4344,13 @@ function namedUnionDiscriminator(
  */
 function implicitUnionDiscriminator(
   members: readonly UnionMember[],
+  schemas: Record<string, SchemaObject> | undefined,
 ): { property: string; mapping: Record<string, string> } | undefined {
   if (members.length < 2 || members.some((m) => m.name === null)) return undefined;
   const first = members[0];
   if (!first) return undefined;
-  for (const property of Object.keys(getEffectiveProperties(first.resolved))) {
-    const mapping = unionConstMapping(members, property);
+  for (const property of Object.keys(getEffectiveProperties(first.resolved, schemas))) {
+    const mapping = unionConstMapping(members, property, schemas);
     if (mapping) return { property, mapping };
   }
   return undefined;
@@ -4344,17 +4359,23 @@ function implicitUnionDiscriminator(
 /**
  * `property`'s const value on every member paired with the member's model
  * name, or null when any member is unnamed, pins no string const on the
- * property (through its `allOf` wrappers, like an allOf+oneOf variant), or
- * repeats another member's value. Collected in a Map, so a value spelled like
+ * property (through its `allOf` wrappers, a `$ref` member or a `$ref` on
+ * the property followed to the component it names —
+ * `getEffectiveConstPropertyValue`; #568 review), or repeats another
+ * member's value. Collected in a Map, so a value spelled like
  * an inherited property (`constructor`, `toString`) is neither mistaken for a
  * duplicate nor lost; the result has every value as an own key.
  */
-function unionConstMapping(members: readonly UnionMember[], property: string): Record<string, string> | null {
+function unionConstMapping(
+  members: readonly UnionMember[],
+  property: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): Record<string, string> | null {
   if (members.length === 0) return null;
   const mapping = new Map<string, string>();
   for (const member of members) {
     if (member.name === null) return null;
-    const value = getEffectiveConstPropertyValue(member.resolved, property);
+    const value = getEffectiveConstPropertyValue(member.resolved, property, schemas);
     if (value === null || mapping.has(value)) return null;
     mapping.set(value, member.name);
   }
@@ -4621,16 +4642,36 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * so a oneOf variant of the form `{ allOf: [{ properties: { … } }, { oneOf: […] }] }`
  * still surfaces its top-level `properties` (in particular its discriminator
  * `const`) instead of being treated as having none.
+ *
+ * A `$ref` member of an `allOf` is followed to the component it names when
+ * the document's components are handed in (`schemas`), through a chain of
+ * aliases (`followMemberRefs`), so a union member's const that its base
+ * component pins is seen (#568 review): `Cat: { allOf: [{ $ref: CatBase },
+ * { properties: { lives } }] }` pins what `CatBase` pins, and `Puppy: {
+ * allOf: [{ $ref: Dog }] }` what `Dog` pins, as the models built for them
+ * carry `kind`. A component reached again on one walk is read once, so a
+ * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
+ * Without the map a `$ref` member declares nothing, as the allOf+oneOf
+ * readers read a variant's inline members only.
  */
-function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObject> {
+function getEffectiveProperties(
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): Record<string, SchemaObject> {
   // Collected in a `Map` and returned through `Object.fromEntries`, so a
   // property named `__proto__` is an own entry rather than the prototype.
   const props = new Map<string, SchemaObject>();
+  const seen = new Set<SchemaObject>();
   const visit = (s: SchemaObject): void => {
+    if (seen.has(s)) return;
+    seen.add(s);
     for (const [k, v] of Object.entries(s.properties ?? {})) {
       if (!props.has(k) && v) props.set(k, v);
     }
-    for (const sub of s.allOf ?? []) visit(sub);
+    for (const sub of s.allOf ?? []) {
+      const member = followMemberRefs(sub, schemas, seen);
+      if (member) visit(member);
+    }
     // Do NOT walk into oneOf / anyOf — those are alternatives, not
     // simultaneously-present properties.
   };
@@ -4638,16 +4679,29 @@ function getEffectiveProperties(schema: SchemaObject): Record<string, SchemaObje
   return Object.fromEntries(props);
 }
 
-function getEffectiveConstPropertyValue(schema: SchemaObject, property: string): string | null {
+/**
+ * The string const `schema` pins `property` to: in its own `properties`
+ * (`getConstPropertyValue`), else through its `allOf` wrappers
+ * (`getEffectiveProperties`, a `$ref` member followed to its component when
+ * `schemas` is handed in). The declaration found may itself be a `$ref` to
+ * a component pinning one value — `kind: { $ref: HamsterKind }` with
+ * `HamsterKind: { const: 'hamster' }`, or `{ enum: ['hamster'] }` in OAS
+ * 3.0 — or to an alias chain ending in one; it is followed with the map
+ * (#568 review), a chain that repeats pinning nothing. Null when the
+ * property is undeclared or pins no one string (an enum of several values,
+ * a plain `type: string`).
+ */
+function getEffectiveConstPropertyValue(
+  schema: SchemaObject,
+  property: string,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
   const direct = getConstPropertyValue(schema, property);
   if (direct !== null) return direct;
-  const effective = getEffectiveProperties(schema)[property];
+  const effective = getEffectiveProperties(schema, schemas)[property];
   if (!effective) return null;
-  if (typeof effective.const === 'string') return effective.const;
-  if (Array.isArray(effective.enum) && effective.enum.length === 1 && typeof effective.enum[0] === 'string') {
-    return effective.enum[0];
-  }
-  return null;
+  const declaration = followMemberRefs(effective, schemas, new Set());
+  return declaration ? pinnedStringValue(declaration) : null;
 }
 
 /**
@@ -5484,10 +5538,11 @@ export function schemaToTypeRef(
     // enum) through that reference (#568). Without a context name nothing is
     // extracted for an inline object variant (`nonObjectVariantContexts`),
     // so it is named by its title alone, as before naming.
+    const componentSchemas = documentComponentSchemas();
     const members = unionMembers(
       schema,
       contextName === undefined ? NO_INLINE_NAMES : inlineVariantNames,
-      documentComponentSchemas(),
+      componentSchemas,
     );
 
     // Resolve the discriminator. Three sources, in order — the ones a named
@@ -5514,10 +5569,11 @@ export function schemaToTypeRef(
     if (schema.discriminator) {
       const property = schema.discriminator.propertyName;
       const explicit = inlineMappingTargets(schema.discriminator.mapping);
-      const mapping = Object.keys(explicit).length > 0 ? explicit : (unionConstMapping(members, property) ?? {});
+      const mapping =
+        Object.keys(explicit).length > 0 ? explicit : (unionConstMapping(members, property, componentSchemas) ?? {});
       resolvedDiscriminator = { property, mapping };
     } else if (compositionKind === 'oneOf') {
-      resolvedDiscriminator = implicitUnionDiscriminator(members);
+      resolvedDiscriminator = implicitUnionDiscriminator(members, componentSchemas);
     }
 
     // Build variants. An inline object variant is referenced by the name its
