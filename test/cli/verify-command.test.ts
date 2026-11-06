@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { resolve, dirname } from 'node:path';
-import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -52,6 +52,7 @@ vi.mock('../../src/engine/registry.js', () => ({
 
 import { verifyCommand } from '../../src/cli/verify.js';
 import type { ApiSpec } from '../../src/ir/types.js';
+import type { OpenApiDocument } from '../../src/parser/parse.js';
 
 /**
  * Minimal ApiSurface with one class and one interface.
@@ -944,5 +945,93 @@ describe('#567', () => {
     expect(ir.services[0].operations[0].description).toBe(
       'Lists every [User](https://docs.example.com/reference/users/user).',
     );
+  });
+
+  it('hands the smoke baseline and the runner the IR it parsed, as generate parses it', async () => {
+    // The smoke scripts run as subprocesses and parse `--spec` bare, so the
+    // spec-only baseline listed `Pets.petsControllerList` and
+    // `Pets.petsControllerGet` under a transform that strips
+    // `PetsController_`, and `Pets.get` under a `transformSpec` that drops
+    // `/pets/{id}`, where `generate` reads `Pets.list` alone. Now both
+    // scripts get `--ir`: the IR `verify` parsed, in a file that lives while
+    // they run.
+    const spec = write(
+      'pets-controller.json',
+      doc({
+        '/pets': {
+          get: {
+            operationId: 'PetsController_list',
+            responses: ok({ type: 'array', items: { $ref: '#/components/schemas/Pet' } }),
+          },
+        },
+        '/pets/{id}': {
+          get: {
+            operationId: 'PetsController_get',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: ok({ $ref: '#/components/schemas/Pet' }),
+          },
+        },
+      }),
+    );
+    const runner = resolve(tmpDir, 'runner.mjs');
+    const calls: Array<{ args: string[]; irPath?: string; operations?: string[] }> = [];
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation((_bin: string, args: string[]) => {
+      const irPath = args.includes('--ir') ? args[args.indexOf('--ir') + 1] : undefined;
+      // Read it now: the file lives only while the smoke scripts run.
+      const ir = irPath ? (JSON.parse(readFileSync(irPath, 'utf-8')) as ApiSpec) : undefined;
+      const operations = ir?.services.flatMap((s) => s.operations.map((o) => `${s.name}.${o.name}`));
+      calls.push({ args, irPath, operations });
+      return '';
+    });
+    const smoke = async (settings: Partial<Parameters<typeof verifyCommand>[0]>) => {
+      calls.length = 0;
+      const origCwd = process.cwd();
+      process.chdir(tmpDir); // no raw baseline here, so the spec-only one is generated
+      try {
+        await verifyCommand({ spec, lang: 'test-lang', output: tmpDir, smokeRunner: runner, ...settings });
+      } finally {
+        process.chdir(origCwd);
+      }
+      return [...calls];
+    };
+    const strip = (id: string) => (id.startsWith('PetsController_') ? id.slice('PetsController_'.length) : id);
+    const dropGet = (d: OpenApiDocument) => {
+      delete (d.paths as Record<string, unknown>)['/pets/{id}'];
+      return d;
+    };
+
+    const bare = await smoke({});
+    expect(bare.map((c) => c.operations)).toEqual([
+      ['Pets.petsControllerList', 'Pets.petsControllerGet'],
+      ['Pets.petsControllerList', 'Pets.petsControllerGet'],
+    ]);
+
+    const parsed = await smoke({ operationIdTransform: strip, transformSpec: dropGet });
+    expect(parsed.map((c) => c.operations)).toEqual([['Pets.list'], ['Pets.list']]);
+    // One file, handed to the baseline and to the runner beside `--spec`, and
+    // gone once they ran.
+    const [baseline, run] = parsed;
+    expect(baseline.args.slice(1)).toEqual([
+      expect.stringMatching(/scripts\/smoke\/baseline\.ts$/),
+      '--spec',
+      spec,
+      '--ir',
+      baseline.irPath,
+    ]);
+    expect(run.args).toEqual([
+      runner,
+      '--lang',
+      'test-lang',
+      '--sdk-path',
+      tmpDir,
+      '--raw-results',
+      'smoke-results-spec-baseline.json',
+      '--spec',
+      spec,
+      '--ir',
+      baseline.irPath,
+    ]);
+    expect(existsSync(baseline.irPath!)).toBe(false);
   });
 });

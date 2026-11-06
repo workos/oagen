@@ -683,6 +683,11 @@ export function extractOperations(
     modelOperationIds,
     sharedWith,
   );
+  // A stem two distinct `operationId`s clean to (`listNotes` and
+  // `listNotesByExternalId`, both `ListNotes`) qualifies neither operation's
+  // header and parameter models: each is qualified by its id as written
+  // instead (see headerOperationQualifier).
+  const contestedStems = contestedOperationIdStems(resolvedPaths, modelOperationIds, sharedWith);
 
   /** Every operation built, by its plan key (`${method} ${path}`). */
   const operationsByKey = new Map<string, Operation>();
@@ -773,6 +778,7 @@ export function extractOperations(
         registeredModels,
         registry,
         modelOperationIds.get(key),
+        contestedStems,
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
@@ -1367,12 +1373,43 @@ interface ServiceSplit {
  * to `listPets` and never keeps the first marker's digit (`listPets1`), and
  * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
  * (readOperationIds), as `[1]` does (#565). Brackets at the end (or
- * with trailing whitespace) are common in NestJS-style backends; this regex
- * is intentionally narrow to avoid eating legitimate digits like `oauth2`,
- * and a marker not at the end (`list[1]Pets`) is left as written.
+ * with trailing whitespace) are common in NestJS-style backends; the rule is
+ * intentionally narrow to avoid eating legitimate digits like `oauth2`: a
+ * marker not at the end (`list[1]Pets`) is left as written, and so is the
+ * whitespace before the first (`listPets [1]` keeps `listPets `).
+ *
+ * A marker is `[`, one or more ASCII digits and `]`, with any whitespace
+ * after it (the code units `\s` matches); nothing else is one, so `[]`,
+ * `[1 ]`, `[ 1]` and `[1]-[2]` keep their last character. The id is read
+ * once, from its end backwards, one marker at a time. A regex of the repeated
+ * group (`/(?:\[\d+\]\s*)+$/`) retried the match from every marker of an id
+ * that ends in something else, quadratic in the number of markers: sixteen
+ * thousand of them before one letter stalled the parser for half a second,
+ * and the parser reads an `operationId` of any length.
  */
 function normalizeOperationIdForNaming(operationId: string): string {
-  return operationId.replace(/(?:\[\d+\]\s*)+$/, '');
+  let end = operationId.length;
+  for (;;) {
+    // Whitespace is stripped only behind a marker: when none precedes it, it stays.
+    let i = end;
+    while (i > 0 && isWhitespace(operationId.charAt(i - 1))) i--;
+    if (i === 0 || operationId.charAt(i - 1) !== ']') break;
+    const digitsEnd = --i;
+    while (i > 0 && isAsciiDigit(operationId.charAt(i - 1))) i--;
+    if (i === digitsEnd || i === 0 || operationId.charAt(i - 1) !== '[') break;
+    end = i - 1;
+  }
+  return operationId.slice(0, end);
+}
+
+/** Whether one character is `0`–`9`: what `\d` matches. */
+function isAsciiDigit(char: string): boolean {
+  return char >= '0' && char <= '9';
+}
+
+/** Whether one UTF-16 code unit is whitespace: what `\s` matches, tested on that unit alone. */
+function isWhitespace(char: string): boolean {
+  return /\s/.test(char);
 }
 
 /**
@@ -3079,6 +3116,8 @@ function buildOperation(
    * own.
    */
   modelOperationId?: string | null,
+  /** The stems more than one operation names its models from (`contestedOperationIdStems`), which qualify no header or parameter model. */
+  contestedStems: ReadonlySet<string> = new Set(),
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3166,7 +3205,7 @@ function buildOperation(
   const opContext = serviceName;
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext);
+  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext, contestedStems);
   // What the typing of a parameter, a response header or a secondary,
   // fallback or error body reads from the operation and the spec; a schema
   // deferred through it is typed once every operation has been read
@@ -3497,8 +3536,10 @@ function buildOperation(
   // what an operationIdTransform makes of the `operationId` renames no type,
   // unless the transform makes nothing of it, which reads the `operationId`
   // as absent (readOperationIds). The header and parameter models are
-  // qualified by the same stem (`headerOperationQualifier`, since #537), so
-  // the rule holds for every model the operation mints.
+  // qualified by the same stem (`headerOperationQualifier`, since #537) —
+  // or, when another operation's models are named from that stem too, by
+  // the id PascalCased before the cleaning, which no transform changes
+  // either — so the rule holds for every model the operation mints.
   const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
@@ -3551,19 +3592,46 @@ function responseTypeRefs(op: Operation): TypeRef[] {
  * beside `NoteListResponse`, whatever an `operationIdTransform` names the
  * operation — the operation's PascalCase name, before #537, renamed the
  * header and parameter models (`PetsListNotesXMeta`) with every change to
- * the transform while the bodies kept their names. A path-named operation
- * uses the path-derived stem, so a verb or singular change in
- * inferOperationName must not rename a generated type either. That stem's
- * leading service word is dropped when it ends on a word boundary, since the
- * model name already starts with the service:
- * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
+ * the transform while the bodies kept their names. The stem must be the
+ * operation's own, though: when another operation's models are named from
+ * the same stem (`contestedStems`, see `contestedOperationIdStems`) — two
+ * distinct ids that `cleanSchemaName` makes alike, `listNotesByExternalId`
+ * beside `listNotes` (`ByExternalId` is a marker it strips), `Notes_List`
+ * beside `Note_List` (the leading word is singularized), `listNotesController`
+ * beside `listNotes` (`Controller` is stripped) — or when the stem names
+ * nothing (`ListItem` cleans to nothing), the operation is qualified by its
+ * id PascalCased before the cleaning instead (`toPascalCase` of the id, its
+ * overload markers stripped), which no transform changes either:
+ * `PetsListNotesByExternalIdXMeta` beside `listNotes`'s `PetsListNotesXMeta`,
+ * `PetsNotesListXMeta` beside `PetsNoteListXMeta`,
+ * `PetsListNotesControllerXMeta`, and `PetsListItemXMeta`. One qualifier
+ * for the two operations read as one to the shape registry and to
+ * `deferredNamingStem`'s `withinOperation` test, so the second one's
+ * clashing models fell to names that say nothing about the operation
+ * (`PetsXMeta200`, `PetsQueryFilter`, `PetsHeaderXTrace`), and which
+ * operation kept the qualified name followed document order. Whether a
+ * stem is contested depends on the document's `operationId`s alone, never
+ * on their order: an operation whose id PascalCases to its stem keeps its
+ * qualifier whatever operation is added beside it, while one whose id
+ * cleans to a different stem holds that stem only while no other operation
+ * does, and moves to its pre-clean id when one is added — its models still
+ * named for it, not stripped of it. A path-named operation uses the
+ * path-derived stem, so a verb or singular change in inferOperationName
+ * must not rename a generated type either. That stem's leading service word
+ * is dropped when it ends on a word boundary, since the model name already
+ * starts with the service: `Notes` + `ByIdPinPost` + `XMeta`, beside
+ * `NotesByIdPinPostResponse`.
  */
 function headerOperationQualifier(
   op: OperationObject,
   pathModelBaseName: string,
   serviceName: string | undefined,
+  contestedStems: ReadonlySet<string>,
 ): string {
-  if (op.operationId) return operationIdModelBase(op.operationId);
+  if (op.operationId) {
+    const stem = operationIdModelBase(op.operationId);
+    return stem && !contestedStems.has(stem) ? stem : toPascalCase(normalizeOperationIdForNaming(op.operationId));
+  }
   const parent = serviceName ? toPascalCase(serviceName) : '';
   const rest = pathModelBaseName.slice(parent.length);
   return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
@@ -4909,10 +4977,10 @@ interface DeferredInlineType {
    * Set for the secondary body of a 2xx entry after the primary, the
    * operation's own (workos/oagen#538): the body is named for its status
    * code as the entry's primary body is (`stepSecondaryBody`), so it has no
-   * bare name — `name` is tried with `statusCode` first, then a number
-   * (`deferredNamingStem`) — and its siblings are the earlier such bodies
-   * of the same name, never the primary status code's, whose model it never
-   * shares (`resolveDeferredInlineTypes`). A component response's secondary
+   * bare name — `name` is tried with `statusCode` first, then numbered
+   * under that (`deferredNamingStem`) — and its siblings are the earlier
+   * such bodies of the same name, never the primary status code's, whose
+   * model it never shares (`resolveDeferredInlineTypes`). A component response's secondary
    * body is the component's wherever it is mounted and is never this.
    */
   later?: boolean;
@@ -5008,9 +5076,10 @@ interface ResponseTypingContext {
  * whether the site is an error or a fallback entry (`componentSite`) —
  * share a record of the stems they settled on and the renames made under
  * them, so a later one shares an identical shape under whichever name the
- * earlier took (`materializeInlineSchema`); the later 2xx bodies' record
- * and the primary's are each the other's `taken`, so neither group shares
- * the other's model.
+ * earlier took (`materializeInlineSchema`); the later 2xx bodies of a name
+ * keep a record apart from the primary's and step through a numbered run of
+ * their own (`deferredNamingStem`), so neither group shares the other's
+ * model or steps into its names.
  *
  * An enum keeps a name a model also derives, wherever the document declares
  * the two. One typed as an operation is built — one a parameter, a request
@@ -5051,18 +5120,17 @@ function resolveDeferredInlineTypes(
     // alone (its body's, or a header's under the component's stem), not by
     // whether the site is an error or a fallback entry. The secondary bodies
     // of an operation's later 2xx entries (`later`) are one group and the
-    // primary's another, each named apart from the other's stems (`taken`),
-    // so a later body shares an earlier later body's model, never the
-    // primary's, whichever the document declares first (workos/oagen#538).
+    // primary's another, so a later body shares an earlier later body's
+    // model, never the primary's, whichever the document declares first;
+    // the two groups' candidates never meet (`deferredNamingStem`), so
+    // neither needs to know the other's stems (workos/oagen#538).
     const bareName =
       item.componentSite !== undefined
         ? `component\u0000${item.parentName ?? ''}\u0000${item.name}`
         : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
-    const group = (later: boolean): string => (later ? `later\u0000${bareName}` : bareName);
-    const siblings = sitesOf(group(item.later === true));
-    const taken = item.kind === 'content' && item.componentSite === undefined ? sitesOf(group(!item.later)) : undefined;
+    const siblings = sitesOf(item.later ? `later\u0000${bareName}` : bareName);
     const models: Model[] = [];
-    const type = materializeDeferredType(item, registry, models, siblings, taken);
+    const type = materializeDeferredType(item, registry, models, siblings);
     // An enum this site typed — a body that is itself an enum, one nested in
     // a model it minted — owns its name from here on, as the site's models do.
     reserveEnumNames(
@@ -5174,9 +5242,11 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  *             2. the status code              `RenderPetCardTextHtmlResponse200`
  *             3. a numeric suffix             `…Response2`, `…Response3`, …
  *   content   (a later 2xx's secondary body, `later`: named for its status
- *             code as the entry's primary body is, workos/oagen#538)
+ *             code as the entry's primary body is, then numbered under it —
+ *             a run of its own the primary's never meets, so no edit to the
+ *             primary's bodies renames it, workos/oagen#538)
  *             1. the status code              `RenderPetCardTextHtmlResponse201`
- *             2. a numeric suffix             `…Response2`, `…Response3`, …
+ *             2. a numeric suffix under it    `…Response201No2`, `…Response201No3`, …
  *   request   1. the bare name                `ReplaceWidgetTextCsvRequest`
  *             2. a numeric suffix             `ReplaceWidgetTextCsvRequest2`, `…3`, …
  *   fallback  (a `default` or `1XX`–`3XX` body)
@@ -5201,11 +5271,18 @@ export function attachSharedRefs(bundles: readonly InlineModelBundle[], componen
  * qualifier. A later 2xx's secondary body has no bare name, so its siblings'
  * stems come first: the `application/vnd.pet+json` body of a 202 tries the
  * `…Response201` its 201 took before `…Response202`. Its siblings are the
- * earlier later 2xx's bodies of its name, never the primary's, whose stems
- * it leaves out — and the primary's leave out its — so a 201 body identical
- * to the 200's is `…Response201` beside the 200's `…Response`, under
- * whichever name either settled on and whichever the document declares
- * first (workos/oagen#538). A fallback body named
+ * earlier later 2xx's bodies of its name, never the primary's, and its
+ * numbered run is its own (`…Response201No2`, never the `…Response2` the
+ * primary steps to), so a 201 body identical to the 200's is `…Response201`
+ * beside the 200's `…Response`, under whichever name either settled on and
+ * whichever the document declares first, and a 201 body that stepped to
+ * `…Response201No2` keeps it whatever the 200's bodies gain or lose. A body
+ * that is itself an inline enum mints no model and clashes on nothing, so
+ * it shares a sibling's stem only when that sibling is an enum of the same
+ * members (`SettledSite.enumValues`) and otherwise takes its own status
+ * code, as an object would: a 202 enum `[c, d]` beside a 201 enum `[a, b]`
+ * is `…Response202`, and a 202 enum `[a, b]` shares `…Response201`
+ * (workos/oagen#538). A fallback body named
  * from the operation carries the response's label in its bare name and an
  * error body named from it its status code, so within an operation each has
  * a bare name of its own and no sibling to try. A component response's body
@@ -5240,14 +5317,11 @@ function materializeDeferredType(
   registry: ModelShapeRegistry,
   models: Model[],
   siblings: SiblingSites,
-  /** The settlements this site never shares: the other group's of a later or primary 2xx's secondary bodies (workos/oagen#538). */
-  taken?: SiblingSites,
 ): TypeRef {
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),
     siblings,
     ...(item.later && { siblingsFirst: true }),
-    taken,
     parentName: item.parentName,
     componentSchemas: item.componentSchemas,
     registry,
@@ -5348,9 +5422,12 @@ function deferredNamingStem(item: DeferredInlineType): (index: number, firstClas
     }
     case 'content':
       // A later 2xx's secondary body has no bare name: it is named for its
-      // status code as its primary body is, then by number, the chain
-      // `stepSecondaryBody` steps that body through (workos/oagen#538).
-      if (item.later) return (index) => (index === 0 ? byStatus : numbered(index - 1));
+      // status code as its primary body is, then numbered under that
+      // (`…Response201No2`, behind `No` since the code ends in a digit,
+      // #533) — a run of its own, never the `…Response2`, `…Response3` the
+      // primary's bodies step through, so whichever of those the primary
+      // takes or gives up, the later body's name stands (workos/oagen#538).
+      if (item.later) return (index) => (index === 0 ? byStatus : numberedProperty(byStatus, index + 1));
       return (index) => (index === 0 ? name : index === 1 ? byStatus : numbered(index - 2));
     case 'request':
     case 'fallback':
@@ -5681,6 +5758,43 @@ function resolveReusedOperationIds(
     if (modelOperationIds.has(first)) modelOperationIds.set(key, modelOperationIds.get(first)!);
   }
   return { modelOperationIds, sharedWith };
+}
+
+/**
+ * The stems (operationIdModelBase) more than one Operation Object names its
+ * models from, which qualify no operation's header and parameter models
+ * (headerOperationQualifier). Read off the `operationId` each operation's
+ * models are named from — the one the reuse of its own left it, or its own
+ * (`modelOperationIds`) — with a path that shares another's Operation
+ * Object (`sharedWith`) and a second path onto one Path Item both reading
+ * as the one Operation Object they are, so an `operationId` declared once
+ * holds its stem alone however many paths reach it. `listNotes` and
+ * `listNotesByExternalId` both clean to `ListNotes` (`ByExternalId` is a
+ * marker cleanSchemaName strips), as `Notes_List` and `Note_List` do to
+ * `NoteList` and `listNotesController` and `listNotes` to `ListNotes`.
+ * Depends on the document's `operationId`s alone, never on their order.
+ */
+function contestedOperationIdStems(
+  paths: Record<string, PathItem>,
+  modelOperationIds: ReadonlyMap<string, string | null>,
+  sharedWith: ReadonlyMap<string, string>,
+): Set<string> {
+  const holders = new Map<string, Set<OperationObject>>();
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op) continue;
+      const key = `${method} ${path}`;
+      if (sharedWith.has(key)) continue;
+      const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
+      if (!operationId) continue;
+      const stem = operationIdModelBase(operationId);
+      const ops = holders.get(stem) ?? new Set<OperationObject>();
+      ops.add(op);
+      holders.set(stem, ops);
+    }
+  }
+  return new Set([...holders].filter(([, ops]) => ops.size > 1).map(([stem]) => stem));
 }
 
 /**
