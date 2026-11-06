@@ -214,7 +214,7 @@ export function settlePendingSchemaRef(ref: ModelRef): void {
  */
 const pendingSiteLimits = new WeakMap<ModelRef, Constraints>();
 
-/** Record `limits` as what the site of the pending `ref` writes around it, in place of any recorded before: an outer level's reading accounts for the inner's. */
+/** Record `limits` as what the site of the pending `ref` writes around it, in place of any recorded before; a wrapper's reading is conjoined with its branch's by the caller (`withTypeConstraints`), since it leaves a `$ref` branch out. */
 export function recordPendingSiteLimits(ref: ModelRef, limits: Constraints | undefined): void {
   if (limits) pendingSiteLimits.set(ref, limits);
   else pendingSiteLimits.delete(ref);

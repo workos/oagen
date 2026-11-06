@@ -53,7 +53,9 @@
  * on — what its own type carries where it stands, under any nullable
  * wrapper, the conjoined reading of a chain included — conjoined with the
  * site's own (`combineConstraints`, the component's first, the stricter
- * bound winning), and a field or parameter whose type that is carries the
+ * bound winning: what is written beside the pointer, then around a
+ * wrapper the type builder reads through, as `withTypeConstraints`
+ * records them), and a field or parameter whose type that is carries the
  * same (`Field.constraints`, `Parameter.constraints`), so `{ $ref:
  * '#/components/schemas/Owner/properties/code', maxLength: 3 }` to `{
  * type: 'string', pattern: '^own_', maxLength: 8 }` is `{ maxLength: 3,
