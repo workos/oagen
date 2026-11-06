@@ -170,10 +170,9 @@ export function diffOperations(
     // exactly when a 2xx or 3xx is declared), compared only while both sides
     // carry one, as `requestBodyRequired` is while both carry a body: an
     // operation gaining or losing its only 2xx/3xx is not a move but
-    // `responseChanged`. Reported as additive: the old code may still be
-    // declared (a `200` added beside a lone `201` makes the `200` the
-    // primary), and whether a bare status move breaks callers is left to a
-    // separate issue.
+    // `responseChanged`. The flag says the move happened; whether it breaks
+    // callers is decided below (`responseStatusCodeBreaking`, #407) by
+    // whether the new spec still declares the old code.
     const bothCarryStatus = oldOp.responseStatusCode !== undefined && newOp.responseStatusCode !== undefined;
     const responseStatusCodeChanged = bothCarryStatus && oldOp.responseStatusCode !== newOp.responseStatusCode;
     const status = responseStatusCodeChanged
@@ -289,6 +288,20 @@ export function diffOperations(
       // 2xx/3xx is breaking whatever the body.
       const responseBreaking =
         responseChanged && (successGainedOrLost || !addedUnionVariants(oldOp.response, newOp.response));
+      // responseStatusCode: a moved primary is breaking when the new spec no
+      // longer declares the code the old primary answered with (a lone `200`
+      // that became a lone `201`, a `302` that became a `301`, a `200` beside
+      // a `202` that became a `201` beside the `202`): a caller that checks
+      // the declared code — generated code, or the smoke helpers that read
+      // `responseStatusCode` — stops matching, and a redirect moving between
+      // temporary and permanent changes what caches may do. Additive when the
+      // old code is still declared (a `200` added beside a lone `201` makes
+      // the `200` the primary, but the `201` is still answered), so a caller
+      // built for it still works (#407). "Declared" is the 2xx/3xx codes the
+      // new operation answers with (`declaresSuccessCode`); errors, `default`
+      // and ranges do not count.
+      const responseStatusCodeBreaking =
+        responseStatusCodeChanged && !declaresSuccessCode(newOp, oldOp.responseStatusCode);
       // requestBodyEncoding: an SDK built for the old spec keeps sending the
       // representation that spec's body was read from. Breaking when the new
       // spec no longer accepts it — that media type gone, or its shape
@@ -328,6 +341,7 @@ export function diffOperations(
 
       const hasBreaking =
         responseBreaking ||
+        responseStatusCodeBreaking ||
         requestBodyBreaking ||
         requestBodyRequiredBreaking ||
         requestBodyEncodingBreaking ||
@@ -407,6 +421,22 @@ function endOfIterationEqual(
   if (!a && !b) return true;
   if (!a || !b) return false;
   return a.kind === b.kind && a.path === b.path;
+}
+
+/**
+ * Whether `op` still answers with `code`: the 2xx/3xx codes an operation
+ * declares are its primary's (`responseStatusCode`) and every entry of
+ * `successResponses`, which the parser sets only when it declares more than
+ * one. Errors, the `default` and range responses are not success codes a
+ * caller was promised, so they do not count. What decides whether a moved
+ * primary is breaking (#407): a lone `201` beside which a `200` was added
+ * still declares the `201`; a lone `200` that became a lone `201`, or a
+ * `200` beside a `202` that became a `201` beside the `202`, no longer
+ * declares the `200`.
+ */
+function declaresSuccessCode(op: Operation, code: number | undefined): boolean {
+  if (code === undefined) return false;
+  return op.responseStatusCode === code || (op.successResponses ?? []).some((entry) => entry.statusCode === code);
 }
 
 /**
@@ -801,7 +831,10 @@ function pairContentEntries(oldEntries: ContentEntry[], newEntries: ContentEntry
     // longer declared — so neither primary pairs, and `diffResponseHeaders`
     // and `diffResponseContentTypes` report what the `200` declared as
     // removed under its code, as for a `200` dropped beside a kept `202`
-    // (#408). Whether a lone move breaks callers is left to a separate issue.
+    // (#408). Either way `diffOperations` classifies the move itself as
+    // breaking when the new spec no longer declares the old code (#407), so
+    // the lone move is breaking too, without headers or media types to
+    // report; the pairing only decides what is reported beside the flag.
     if (isLoneSuccess(oldPrimary, oldEntries) && isLoneSuccess(newPrimary, newEntries)) {
       pairs.set(newPrimary, oldPrimary);
     }
