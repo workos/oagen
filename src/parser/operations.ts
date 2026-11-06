@@ -3886,10 +3886,14 @@ export function extractParams(
       // one bound without discarding the target's others. A primitive or array
       // component becomes no model, and a parameter should be readable on its
       // own — through every alias and wrapper, its entries' limits conjoined
-      // as JSON Schema applies them, the stricter bound winning.
+      // as JSON Schema applies them, the stricter bound winning. Each entry
+      // is read once (`limitEntries`), its annotating members' limits with
+      // its own as a field's are, so the entry's `pattern` or `multipleOf`
+      // stands where a member's conflicts (#588 review: as levels, a
+      // member's won).
       const own = schema ? extractConstraints(schema) : undefined;
       const inherited = reference
-        ? reference.entries.reduceRight<Constraints | undefined>(
+        ? reference.limitEntries.reduceRight<Constraints | undefined>(
             (limits, entry) => combineConstraints(limits, extractConstraints(entry)),
             undefined,
           )

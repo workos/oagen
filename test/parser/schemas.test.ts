@@ -2331,4 +2331,49 @@ describe('#560', () => {
       { name: 'unflagged', type: { kind: 'enum', name: 'Unflagged' } },
     ]);
   });
+
+  it.each(['3.1.0', '3.0.3'])(
+    'conjoins an alias’s limits once, its own pattern over its annotating member’s, on a field and a parameter (review, OAS %s)',
+    async (openapi) => {
+      const spec = await parse(
+        {
+          Holder: {
+            type: 'object',
+            properties: { name: ref('NameAlias'), kind: ref('KindAlias'), tags: ref('TagsAlias') },
+          },
+          Name: { type: 'string', minLength: 1 },
+          // The member is a level for documentation; its limits are read with the alias's own, which keeps `^a`.
+          NameAlias: { allOf: [ref('Name'), { pattern: 'b$', maxLength: 5, description: 'The name.' }], pattern: '^a' },
+          Kind: { type: 'string', enum: ['cat', 'dog'] },
+          KindAlias: { allOf: [ref('Kind'), { pattern: 'b$' }], pattern: '^a' },
+          Tags: { type: 'array', items: { type: 'string' } },
+          TagsAlias: { allOf: [ref('Tags'), { maxItems: 9 }], maxItems: 3 },
+        },
+        {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [
+                { name: 'name', in: 'query', schema: ref('NameAlias') },
+                { name: 'kind', in: 'query', schema: ref('KindAlias') },
+                { name: 'tags', in: 'query', schema: ref('TagsAlias') },
+              ],
+              responses: { '200': { description: 'OK', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        openapi,
+      );
+      const limits = ({ name, description, constraints }: Field | Parameter) => ({ name, description, constraints });
+      const expected = [
+        { name: 'name', description: 'The name.', constraints: { minLength: 1, maxLength: 5, pattern: '^a' } },
+        { name: 'kind', constraints: { pattern: '^a' } },
+        { name: 'tags', constraints: { maxItems: 3 } },
+      ];
+
+      expect(fieldsOf(spec, 'Holder').map(limits)).toEqual(expected);
+      const [listPets] = spec.services.flatMap((service) => service.operations);
+      expect(listPets.queryParams.map(limits)).toEqual(expected);
+    },
+  );
 });
