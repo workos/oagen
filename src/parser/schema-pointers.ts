@@ -16,7 +16,11 @@
  * alongside the document — from the component's own type
  * (`componentTypeRef`), through `properties/<name>` to that field's type,
  * `items` to the array's items, `additionalProperties` or
- * `patternProperties/<pattern>` to the map's values — when that schema is
+ * `patternProperties/<pattern>` to the map's values — through the member
+ * of a multi-type schema's union that carries the keyword (`type:
+ * ['object', 'string']` is a union of one member per type, so its
+ * `properties/<name>` are the object member's fields, its `items` the
+ * array member's) — when that schema is
  * the one the map's values are typed from (`mapValueSchema`: a non-empty
  * `additionalProperties`, else the first pattern; `additionalProperties:
  * {}` types them `unknown`), so `patternProperties/^n` beside a first
@@ -50,8 +54,10 @@
  * conjoined with what is written beside the reference (`schemaConstraints`),
  * and a pointer site reads the same once its type is known: the type the
  * site is settled into carries the limits of the schema the pointer lands
- * on — what its own type carries where it stands, under any nullable
- * wrapper, the conjoined reading of a chain included — conjoined with the
+ * on — what its own type carries where it stands, under every nullable
+ * wrapper it settles into (`underNullableWrappers`: a chain through a
+ * nullable link to a nullable schema wears two), the conjoined reading of
+ * a chain included — conjoined with the
  * site's own (`combineConstraints`, the component's first, the stricter
  * bound winning: what is written beside the pointer, then around a
  * wrapper the type builder reads through, as `withTypeConstraints`
@@ -125,6 +131,24 @@ const UNKNOWN: TypeRef = { kind: 'primitive', type: 'unknown' };
 interface LimitedSite {
   type: TypeRef;
   constraints?: Constraints;
+}
+
+/**
+ * `type` under every nullable wrapper: the node that carries a value's
+ * limits (`withTypeConstraints` puts them there). A settled site can wear
+ * more than one — a pointer to a schema that admits null, written under a
+ * nullable wrapper of its own, or reached through a chain whose link is
+ * such a wrapper (`Alias.code: { oneOf: [{ $ref: …/Owner/properties/code
+ * }, { type: 'null' }] }` to a nullable `Owner.code`), settles into a
+ * wrapper around the copied wrapper — so one level is not enough
+ * (Greptile, #545 review round 4: a field pointing through that chain with
+ * `maxLength: 20` read no target limits, replaced the target's `8` with
+ * the `20` and lost its own).
+ */
+function underNullableWrappers(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  return bare;
 }
 
 /**
@@ -474,13 +498,14 @@ class PointerResolver {
     const site = pendingSiteLimitsOf(pending);
     replaceTypeRef(pending, type ?? UNKNOWN);
     // The settled type carries the pointed schema's limits — what the type
-    // reached carries, under its nullable wrapper — conjoined with the
-    // site's own, as a `$ref` to a primitive component carries the
-    // component's conjoined with the site's (see the module comment); a
-    // model or enum carries none, and keeps the site's reading off the type.
-    // `pending` is the settled type now: `replaceTypeRef` rewrote it in place.
+    // reached carries, under every nullable wrapper it settled into
+    // (`underNullableWrappers`) — conjoined with the site's own, as a `$ref`
+    // to a primitive component carries the component's conjoined with the
+    // site's (see the module comment); a model or enum carries none, and
+    // keeps the site's reading off the type. `pending` is the settled type
+    // now: `replaceTypeRef` rewrote it in place.
     const settled = pending as TypeRef;
-    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    const bare = underNullableWrappers(settled);
     withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
     this.settledRefs.add(pending);
@@ -500,7 +525,9 @@ class PointerResolver {
    * admits null (`{ type: ['string', 'null'], maxLength: 8 }`) settles into
    * a nullable wrapper itself, whose inner type carries the limits
    * (Greptile, #545 review round 2: the wrapper was unwrapped first, so
-   * such a field kept none of its own).
+   * such a field kept none of its own) — into more than one through a
+   * chain whose link is itself a nullable wrapper, so every wrapper is read
+   * through (`underNullableWrappers`; review round 4).
    */
   alignSiteLimits(site: LimitedSite): void {
     const settled = this.settledRefs.has(site.type)
@@ -509,7 +536,7 @@ class PointerResolver {
         ? site.type.inner
         : undefined;
     if (!settled) return;
-    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    const bare = underNullableWrappers(settled);
     if (bare.kind === 'model' || bare.kind === 'enum') return;
     const limits = typeRefConstraints(bare);
     if (limits) site.constraints = { ...limits };
@@ -545,10 +572,28 @@ class PointerResolver {
     };
     const describe = (type: TypeRef): string =>
       type.kind === 'model' || type.kind === 'enum' ? `${type.kind} "${type.name}"` : type.kind;
+    /**
+     * The member of a multi-type schema's union that carries `keyword`: a
+     * `type: ['object', 'string']` schema is typed as a union of one member
+     * per type (`schemaToTypeRef`), so its `properties/<name>` are the
+     * object member's fields, its `items` the array member's, its
+     * `additionalProperties` the map member's values — or the object
+     * member's catch-all field, beside named properties. Any other type,
+     * and a union of some other making, is itself.
+     */
+    const memberCarrying = (bare: TypeRef, node: SchemaObject, keyword: string): TypeRef => {
+      if (bare.kind !== 'union' || !Array.isArray(node.type)) return bare;
+      const kinds = keyword === 'properties' ? ['model'] : keyword === 'items' ? ['array'] : ['map', 'model'];
+      for (const kind of kinds) {
+        const members = bare.variants.map(bareOf).filter((member) => member.kind === kind);
+        if (members.length === 1) return members[0]!;
+      }
+      return bare;
+    };
 
     let type: TypeRef = componentTypeRef(key!);
     for (const { keyword, name, node, next } of steps) {
-      const bare = bareOf(type);
+      const bare = memberCarrying(bareOf(type), node, keyword);
       switch (keyword) {
         case 'properties': {
           const model = bare.kind === 'model' ? this.modelsByName.get(bare.name) : undefined;
