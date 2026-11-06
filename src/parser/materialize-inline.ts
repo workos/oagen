@@ -56,6 +56,13 @@ export interface InlineModelOwner {
    * shares its name on an identical fingerprint only.
    */
   model?: Model;
+  /**
+   * Set when `model` is a model a component's field minted rather than a
+   * component schema: it still shares its name with a deprecated copy while
+   * deprecated, where a deprecated component shares it with none
+   * (`ownerFlagAdmits`, #441).
+   */
+  fieldMinted?: boolean;
 }
 
 /**
@@ -63,16 +70,19 @@ export interface InlineModelOwner {
  * `fingerprint`: a declared model (`owner.model`) when it admits the shape
  * (`modelShares`: the same fields and types, the owner no stricter on
  * requiredness or nullability, everything else identical, the model's own
- * `deprecated` read apart — a live owner shares with a deprecated copy, a
- * deprecated owner only with a deprecated one), and an operation's model
- * when the fingerprints agree, flag included. A shape the SDK sends (`sent`:
- * a request body, a parameter) shares a declared model's name on an
- * identical shape only, the flag read the same way: typed as a looser
- * component, a caller could leave out what the operation requires. The one
- * question every clash check below asks.
+ * `deprecated` read apart — a live owner shares with a copy of either flag,
+ * a deprecated component with none, so a deprecated header or parameter
+ * model beside a deprecated component takes the qualified name its live
+ * self takes (#441), a deprecated field model (`owner.fieldMinted`) only
+ * with a deprecated copy), and an operation's model when the fingerprints
+ * agree, flag included. A shape the SDK sends (`sent`: a request body, a
+ * parameter) shares a declared model's name on an identical shape only, the
+ * flag read the same way: typed as a looser component, a caller could leave
+ * out what the operation requires. The one question every clash check
+ * below asks.
  */
 export function ownerShares(owner: InlineModelOwner, model: Model, fingerprint: string, sent = false): boolean {
-  return owner.model ? modelShares(owner.model, model, sent) : owner.fingerprint === fingerprint;
+  return owner.model ? modelShares(owner.model, model, sent, !!owner.fieldMinted) : owner.fingerprint === fingerprint;
 }
 
 /**

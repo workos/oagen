@@ -10,7 +10,7 @@
  * only change, and is mirrored into `behaviorChanges`. Only `true` is
  * deprecated: `false` and an absent key are the same thing.
  */
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -18,6 +18,7 @@ import { diffSpecs } from '../../src/differ/diff.js';
 import { diffModels } from '../../src/differ/models.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffWebhooks } from '../../src/differ/webhooks.js';
+import { diffCommand } from '../../src/cli/diff.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
 import type { ApiSpec, Enum, Model, Operation, Parameter, Webhook } from '../../src/ir/types.js';
@@ -1205,5 +1206,133 @@ describe('diffSpecs – end to end (issue #256 repro)', () => {
     const same = diffSpecs(await parseSpec(afterFile), await parseSpec(afterFile));
     expect(same.changes).toEqual([]);
     expect(same.behaviorChanges).toEqual([]);
+  });
+});
+
+describe('#441: deprecating an inline copy of a deprecated component is a flag flip, additive in either direction', () => {
+  const dirs: string[] = [];
+  afterAll(async () => {
+    await Promise.all(dirs.map((d) => fs.rm(d, { recursive: true, force: true })));
+  });
+
+  async function writeSpec(name: string, doc: unknown): Promise<string> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-diff-441-'));
+    dirs.push(dir);
+    const file = path.join(dir, name);
+    await fs.writeFile(file, JSON.stringify(doc));
+    return file;
+  }
+
+  // The issue's documents: a deprecated component `Widget` returned by
+  // `getWidget`, and `getLegacyWidget` returning an identical inline object,
+  // which `new` deprecates.
+  const widget = {
+    type: 'object',
+    properties: { object: { type: 'string', const: 'widget' }, name: { type: 'string' } },
+  };
+  const ok = (schema: unknown) => ({
+    '200': { description: 'OK', content: { 'application/json': { schema } } },
+  });
+  const doc = (openapi: string, deprecated: boolean) => ({
+    openapi,
+    info: { title: 'issue-441', version: '1' },
+    paths: {
+      '/widget': { get: { operationId: 'getWidget', responses: ok({ $ref: '#/components/schemas/Widget' }) } },
+      '/legacy-widget': {
+        get: { operationId: 'getLegacyWidget', responses: ok(deprecated ? { ...widget, deprecated: true } : widget) },
+      },
+    },
+    components: { schemas: { Widget: { ...widget, deprecated: true } } },
+  });
+
+  const legacy = (deprecated: boolean): Model => ({
+    name: 'GetLegacyWidgetWidget',
+    fields: [
+      { name: 'object', type: { kind: 'literal', value: 'widget' }, required: false },
+      { name: 'name', type: { kind: 'primitive', type: 'string' }, required: false },
+    ],
+    ...(deprecated ? { deprecated: true } : {}),
+  });
+  const deprecatedWidget: Model = { ...legacy(true), name: 'Widget' };
+  const flip = (sides: typeof became | typeof ceased) => ({
+    kind: 'model-modified',
+    name: 'GetLegacyWidgetWidget',
+    fieldChanges: [],
+    deprecatedChanged: true,
+    ...sides,
+    classification: 'additive',
+  });
+
+  describe.each(['3.0.3', '3.1.0'])('the issue’s repro on OpenAPI %s', (openapi) => {
+    it('reports one additive `model-modified` with the flip, mirrored into `behaviorChanges`, and `oagen diff` exits 1, in either direction', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const oldFile = await writeSpec(`old-${openapi}.json`, doc(openapi, false));
+        const newFile = await writeSpec(`new-${openapi}.json`, doc(openapi, true));
+        const oldSpec = await parseSpec(oldFile);
+        const newSpec = await parseSpec(newFile);
+        // The copy's name is the same on both sides; only its flag differs.
+        for (const spec of [oldSpec, newSpec]) {
+          expect(spec.models.map((m) => m.name)).toEqual(['Widget', 'GetLegacyWidgetWidget']);
+          const op = spec.services.flatMap((s) => s.operations).find((o) => o.name === 'getLegacyWidget');
+          expect(op?.response).toEqual({ kind: 'model', name: 'GetLegacyWidgetWidget' });
+        }
+        expect(oldSpec.models.map((m) => m.deprecated)).toEqual([true, undefined]);
+        expect(newSpec.models.map((m) => m.deprecated)).toEqual([true, true]);
+
+        for (const [from, to, sides] of [
+          [oldSpec, newSpec, became],
+          [newSpec, oldSpec, ceased],
+        ] as const) {
+          const diff = diffSpecs(from, to);
+          expect(diff.changes).toEqual([flip(sides)]);
+          expect(diff.behaviorChanges).toEqual([
+            {
+              kind: 'deprecated-changed',
+              node: 'model',
+              modelName: 'GetLegacyWidgetWidget',
+              ...sides,
+              classification: 'additive',
+            },
+          ]);
+          expect(diff.summary).toEqual({
+            added: 0,
+            removed: 0,
+            modified: 1,
+            breaking: 0,
+            additive: 1,
+            behaviorChanges: 1,
+          });
+        }
+
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        for (const [from, to] of [
+          [oldFile, newFile],
+          [newFile, oldFile],
+        ]) {
+          const error = (await diffCommand({ old: from, new: to }).catch((e: unknown) => e)) as { exitCode: number };
+          expect(error.exitCode).toBe(1);
+        }
+      } finally {
+        vi.restoreAllMocks();
+        void warn;
+      }
+    });
+  });
+
+  it('hand-built IR: the copy’s model flips beside the deprecated component, and the operation returning it is unchanged', () => {
+    expect(diffModels([deprecatedWidget, legacy(false)], [deprecatedWidget, legacy(true)])).toEqual([flip(became)]);
+    expect(diffModels([deprecatedWidget, legacy(true)], [deprecatedWidget, legacy(false)])).toEqual([flip(ceased)]);
+    expect(diffModels([deprecatedWidget, legacy(true)], [deprecatedWidget, legacy(true)])).toEqual([]);
+    const getLegacyWidget: Operation = {
+      ...getPet,
+      name: 'getLegacyWidget',
+      path: '/legacy-widget',
+      pathParams: [],
+      queryParams: [],
+      headerParams: [],
+      response: { kind: 'model', name: 'GetLegacyWidgetWidget' },
+    };
+    expect(diffOperations('Widgets', [getLegacyWidget], [getLegacyWidget])).toEqual([]);
   });
 });
