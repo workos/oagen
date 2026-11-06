@@ -50,8 +50,10 @@
  * conjoined with what is written beside the reference (`schemaConstraints`),
  * and a pointer site reads the same once its type is known: the type the
  * site is settled into carries the limits of the schema the pointer lands
- * on — what its own type carries where it stands, under any nullable
- * wrapper, the conjoined reading of a chain included — conjoined with the
+ * on — what its own type carries where it stands, under every nullable
+ * wrapper it settles into (`underNullableWrappers`: a chain through a
+ * nullable link to a nullable schema wears two), the conjoined reading of
+ * a chain included — conjoined with the
  * site's own (`combineConstraints`, the component's first, the stricter
  * bound winning: what is written beside the pointer, then around a
  * wrapper the type builder reads through, as `withTypeConstraints`
@@ -125,6 +127,24 @@ const UNKNOWN: TypeRef = { kind: 'primitive', type: 'unknown' };
 interface LimitedSite {
   type: TypeRef;
   constraints?: Constraints;
+}
+
+/**
+ * `type` under every nullable wrapper: the node that carries a value's
+ * limits (`withTypeConstraints` puts them there). A settled site can wear
+ * more than one — a pointer to a schema that admits null, written under a
+ * nullable wrapper of its own, or reached through a chain whose link is
+ * such a wrapper (`Alias.code: { oneOf: [{ $ref: …/Owner/properties/code
+ * }, { type: 'null' }] }` to a nullable `Owner.code`), settles into a
+ * wrapper around the copied wrapper — so one level is not enough
+ * (Greptile, #545 review round 4: a field pointing through that chain with
+ * `maxLength: 20` read no target limits, replaced the target's `8` with
+ * the `20` and lost its own).
+ */
+function underNullableWrappers(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  return bare;
 }
 
 /**
@@ -474,13 +494,14 @@ class PointerResolver {
     const site = pendingSiteLimitsOf(pending);
     replaceTypeRef(pending, type ?? UNKNOWN);
     // The settled type carries the pointed schema's limits — what the type
-    // reached carries, under its nullable wrapper — conjoined with the
-    // site's own, as a `$ref` to a primitive component carries the
-    // component's conjoined with the site's (see the module comment); a
-    // model or enum carries none, and keeps the site's reading off the type.
-    // `pending` is the settled type now: `replaceTypeRef` rewrote it in place.
+    // reached carries, under every nullable wrapper it settled into
+    // (`underNullableWrappers`) — conjoined with the site's own, as a `$ref`
+    // to a primitive component carries the component's conjoined with the
+    // site's (see the module comment); a model or enum carries none, and
+    // keeps the site's reading off the type. `pending` is the settled type
+    // now: `replaceTypeRef` rewrote it in place.
     const settled = pending as TypeRef;
-    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    const bare = underNullableWrappers(settled);
     withTypeConstraints(settled, combineConstraints(typeRefConstraints(bare), site));
     this.settled.push(pending);
     this.settledRefs.add(pending);
@@ -500,7 +521,9 @@ class PointerResolver {
    * admits null (`{ type: ['string', 'null'], maxLength: 8 }`) settles into
    * a nullable wrapper itself, whose inner type carries the limits
    * (Greptile, #545 review round 2: the wrapper was unwrapped first, so
-   * such a field kept none of its own).
+   * such a field kept none of its own) — into more than one through a
+   * chain whose link is itself a nullable wrapper, so every wrapper is read
+   * through (`underNullableWrappers`; review round 4).
    */
   alignSiteLimits(site: LimitedSite): void {
     const settled = this.settledRefs.has(site.type)
@@ -509,7 +532,7 @@ class PointerResolver {
         ? site.type.inner
         : undefined;
     if (!settled) return;
-    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    const bare = underNullableWrappers(settled);
     if (bare.kind === 'model' || bare.kind === 'enum') return;
     const limits = typeRefConstraints(bare);
     if (limits) site.constraints = { ...limits };
