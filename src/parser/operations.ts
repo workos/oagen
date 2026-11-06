@@ -461,9 +461,11 @@ function resolvePathItems(
  * (normalizeOperationIdForNaming), so it camel-cases to nothing — `''`,
  * `' '`, `'-'`, `'[1]'` and `'[1][2]'` alike, since every marker at the end
  * goes (#565). The one reading of the rule, so the document's id and what a
- * transform makes of it cannot be judged differently.
+ * transform makes of it cannot be judged differently — and the reading a
+ * webhook's `operationId` gets too (`collectWebhookEntries`, `buildWebhook`),
+ * so a webhook and an operation declaring the same id are judged alike (#564).
  */
-function namesNothing(id: string): boolean {
+export function namesNothing(id: string): boolean {
   return toCamelCase(normalizeOperationIdForNaming(id)) === '';
 }
 
