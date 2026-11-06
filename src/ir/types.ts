@@ -1039,17 +1039,28 @@ export interface TypeParam {
  */
 export interface Model {
   name: string;
+  /**
+   * The schema's own `description`; for a model built from an `allOf` — a
+   * component's, or an inline merge — the wrapper layer's: the schema's
+   * own, else the first `allOf` member's that declares no type (`allOf:
+   * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
+   * }]`; #555 review). A typing member's text stays on that member, a
+   * `$ref` member's on its component.
+   */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one. */
+  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says
    * `deprecated: true` — a component, a discriminated-union variant, or an
    * inline request body, response or field object. Only that schema's own
-   * top-level keyword counts, read as `Field.deprecated` is: an `allOf`
-   * member's or a nullable branch's flag is not read (a `$ref` member's stays
-   * on the referenced model), and a folded `<Name>Json` model's flag does not
-   * deprecate the `<Name>` it collapses into. Absent otherwise. An inline
+   * top-level keyword counts, read as `Field.deprecated` is: a nullable
+   * branch's flag is not read, nor an `allOf` member's that declares a type
+   * (a `$ref` member's stays on the referenced model) — one that declares
+   * none, `{ deprecated: true }` beside the members, is part of the wrapper
+   * and deprecates the model (#555 review) — and a folded `<Name>Json`
+   * model's flag does not deprecate the `<Name>` it collapses into. Absent
+   * otherwise. An inline
    * schema that shares the name of a model the document declares has no
    * model of its own: a deprecated schema identical to a live component
    * keeps its flag on the `Field`, `Parameter`, `ResponseHeader` or envelope
