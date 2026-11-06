@@ -950,7 +950,9 @@ export interface Parameter {
    * `$ref`, the target's keywords are merged underneath the parameter's own
    * — the per-value fallback `default` and `example` use — so a parameter
    * can be read on its own without chasing the target (a primitive or an
-   * array component becomes no model). Absent when neither declares any.
+   * array component becomes no model, nor does an alias of an enum
+   * component, whose own limits conjoin above the enum's; #560). Absent
+   * when neither declares any.
    */
   constraints?: Constraints;
 }
@@ -1018,8 +1020,16 @@ export interface TypeParam {
 
 /**
  * Model definition (maps to an SDK model/data class). Every
- * `components/schemas` entry becomes one, except an enum (`Enum`), an array
- * component and a primitive component. An array component — a schema
+ * `components/schemas` entry becomes one, except an enum (`Enum`) and an
+ * alias of one, an array component and a primitive component. An alias of
+ * an enum component — a bare `$ref` to it, a nullable `oneOf`/`anyOf`
+ * around that `$ref`, or an `allOf` read as the reference, alone or beside
+ * members that only annotate it (`PetKind: { allOf: [{ $ref: Kind }, {
+ * description }] }`) — becomes no model and no enum (#560): a `$ref` to it
+ * resolves to the enum (`{ kind: 'enum' }`, under `nullable` when the alias
+ * or the enum admits null), what the alias declares is read by a field that
+ * names it with a bare `$ref` (`Field`), and the enum keeps its own on the
+ * `Enum`. An array component — a schema
  * that is an array and declares `items` (a nullable `oneOf`/`anyOf` around
  * one included), or an alias of one (a bare `$ref`, a nullable
  * `oneOf`/`anyOf` around a `$ref`, or an `allOf` of a `$ref` and limits)
@@ -1144,7 +1154,10 @@ export interface Field {
    * text — the nearest the reference passes on its way to the array or
    * primitive (an alias's own, else the component's), as `example` falls
    * back to it. A `$ref` to a model, named union or enum leaves the text on
-   * it. Under a wrapper — a nullable one, an `allOf` read as the reference
+   * it; a bare `$ref` to an alias of an enum component reads the nearest
+   * alias's own — an `allOf` member of its that declares no type included —
+   * and leaves the enum's on the enum (#560). Under a wrapper — a nullable
+   * one, an `allOf` read as the reference
    * (`{ allOf: [{ $ref: PetId }, { description }] }`) — the field documents
    * itself: the wrapper's text or a member's written beside the `$ref`,
    * never the component's; the same holds for every annotation, flag, default
@@ -1165,17 +1178,18 @@ export interface Field {
    * read like `description`: for a `$ref` with an `externalDocs` sibling
    * (legal in OAS 3.1), the sibling's link, while the referenced model keeps
    * its own; a bare `$ref` yields none, unless it names an array or
-   * primitive component, whose link the field then carries. Absent
-   * otherwise. Documentation, not shape: two fields that differ only here
-   * are one shape.
+   * primitive component, or an alias of an enum component, whose link the
+   * field then carries. Absent otherwise. Documentation, not shape: two
+   * fields that differ only here are one shape.
    */
   externalDocs?: ExternalDocs;
   /**
    * `true` when the field schema says `readOnly: true` — itself, or an
    * `allOf` member of its that declares no type (`allOf: [{ $ref: Kind },
    * { readOnly: true }]`; #555) — or when a bare `$ref` names an array or
-   * primitive component that says so, or an alias of it on the way (see
-   * `description`). `writeOnly` is read the same way.
+   * primitive component that says so, or an alias of it, or of an enum
+   * component, on the way (see `description`). `writeOnly` is read the same
+   * way.
    */
   readOnly?: boolean;
   writeOnly?: boolean;
@@ -1184,15 +1198,16 @@ export interface Field {
    * keyword written beside a `$ref` included, and an `allOf` member that
    * declares no type (`allOf: [{ $ref: Kind }, { deprecated: true }]`; #555)
    * — or when a bare `$ref` names an array or primitive component that says
-   * so, or an alias of it on the way, since no model carries that
-   * component's flag. The flag of a model, named union or enum a `$ref`
-   * names stays on it.
+   * so, or an alias of it, or of an enum component (#560), on the way, since
+   * no model carries that component's or alias's flag. The flag of a model,
+   * named union or enum a `$ref` names stays on it.
    */
   deprecated?: boolean;
   /**
    * The field schema's own `default`, an explicit `null` included; for a
-   * bare `$ref` to an array or primitive component that declares none, the
-   * nearest the reference passes (see `description`).
+   * bare `$ref` to an array or primitive component that declares none, or to
+   * an alias of an enum component, the nearest the reference passes (see
+   * `description`).
    */
   default?: unknown;
   /**
@@ -1201,8 +1216,9 @@ export interface Field {
    * with neither, the same taken from the component it points at — for an
    * array or primitive component, from the nearest level the reference
    * passes on its way to the array or primitive (an alias's own, else the
-   * component's), as `description` is read. An explicit `null` is kept.
-   * Absent when no level gives one.
+   * component's), as `description` is read; for an alias of an enum
+   * component, the aliases' own first, then the enum's. An explicit `null`
+   * is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
@@ -1210,8 +1226,8 @@ export interface Field {
    * Schema `examples` list (OAS 3.1 deprecates `example` in its favour) —
    * on the field schema, else on the component its `$ref` points at, an
    * array or primitive component's read like `example`: the nearest
-   * non-empty list the reference passes on its way to the array or
-   * primitive. Present only when the list has at least one entry.
+   * non-empty list the reference passes on its way to the array, primitive
+   * or enum. Present only when the list has at least one entry.
    */
   examples?: unknown[];
   /**
@@ -1221,7 +1237,9 @@ export interface Field {
    * its own limits; a `$ref` to an array or primitive component, which
    * names no model, conjoins the component's limits and its aliases' with
    * the field's own (`{ $ref: Tags, maxItems: 3 }` beside `Tags`'s
-   * `minItems: 1, maxItems: 5` is `{ minItems: 1, maxItems: 3 }`) — bare
+   * `minItems: 1, maxItems: 5` is `{ minItems: 1, maxItems: 3 }`), and one
+   * to an alias of an enum component conjoins the aliases' own, the enum's
+   * staying on the enum (#560) — bare
    * or under a wrapper the type builder reads through, since the wire
    * enforces them either way and nothing else carries them: `{ allOf: [{
    * $ref: PetId }, { description }] }` beside `PetId`'s `pattern` carries
@@ -1234,9 +1252,10 @@ export interface Field {
    * `x-enum-descriptions` / `x-enumDescriptions`, read like `constraints`:
    * keys written beside a `$ref` (legal in OAS 3.1) are the field's, a bare
    * `$ref` yields none — the referenced model, union or enum carries its
-   * own — unless it names an array or primitive component, whose keys and
-   * its aliases' the field then carries under its own, the field's winning
-   * per key, as it carries that component's `description`. A property
+   * own — unless it names an array or primitive component, or an alias of
+   * an enum component, whose keys and its aliases' the field then carries
+   * under its own, the field's winning per key, as it carries that
+   * component's `description`. A property
    * several `allOf` members always declare is typed by the first typing
    * declaration, keys included (a typeless one fills in what it leaves
    * unset); a property only variants declare carries exactly the keys
@@ -1254,7 +1273,12 @@ export interface Enum {
   name: string;
   /**
    * The enum schema's own `description`: a component enum's, as
-   * `Model.description` is a component model's, or — for an enum lifted
+   * `Model.description` is a component model's — the wrapper layer's over
+   * the member's when the component declares its members inside an
+   * `allOf` read as its one typing member (`Kind: { allOf: [{ type:
+   * 'string', enum }], description }`), as its link, `deprecated`,
+   * `default` and keys are read (`enumComponentDeclaration`) — or — for an
+   * enum lifted
    * from an inline schema on a property, parameter, response header,
    * request or response body (primary, secondary-media-type, error or
    * fallback) or webhook parameter or payload, including array items,

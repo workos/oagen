@@ -150,15 +150,15 @@ A missing kind means an entire category of types won't generate correctly.
 #### Field
 
 - `description` — Field-level doc comment
-- `externalDocs` — The field schema's own link (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array or primitive component, whose link the field carries), for the field doc comment
+- `externalDocs` — The field schema's own link (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array or primitive component, or an alias of an enum component, whose link the field carries), for the field doc comment
 - `readOnly` — Read-only annotation (language-appropriate: `readonly` in TS, `attr_reader` in Ruby, `val` in Kotlin, etc.)
 - `writeOnly` — Write-only annotation
-- `deprecated` — Deprecation marker on fields (the property schema's own keyword, a `$ref` sibling included; the referenced model keeps its own, except that a bare `$ref` to an array or primitive component, which has no model, deprecates the field when the component says `deprecated: true`)
+- `deprecated` — Deprecation marker on fields (the property schema's own keyword, a `$ref` sibling included; the referenced model keeps its own, except that a bare `$ref` to an array or primitive component, or to an alias of an enum component, which has no model, deprecates the field when the component or an alias it passes says `deprecated: true`, an enum keeping its own flag)
 - `default` — Default value annotation
 - `example` — Example value annotation
 - `examples` — Every example value (the list `example` is drawn from)
 - `constraints` — Validation limits (min/max, length, pattern, item counts) for doc comments or value checks
-- `extensions` — The field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array or primitive component, whose keys the field carries under its own, as it carries that component's `externalDocs`), as written; for a key the SDK knows
+- `extensions` — The field schema's own `x-*` keys (a `$ref` sibling's included; a bare `$ref` yields none unless it names an array or primitive component, or an alias of an enum component, whose keys the field carries under its own, as it carries that component's `externalDocs`), as written; for a key the SDK knows
 
 #### Enum
 
