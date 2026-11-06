@@ -3827,6 +3827,46 @@ describe('#398', () => {
       },
     );
 
+    // Round 5 (Greptile): a union a `$ref` member's component dispatches,
+    // under a nullable wrapper, with the `discriminator` on the component.
+    // The merge hands the wrapper's `discriminator` on to the wrapper's one
+    // variant, as the component reader does, so the union is left to the
+    // component at the inline sites too (the merge dropped it there and
+    // flattened the fields the component leaves out).
+    it.each(openapis)(
+      "leaves a union a $ref member's component dispatches under a nullable wrapper to it, as the component does (OAS %s)",
+      async (openapi) => {
+        const cat = obj({ kind: str, lives: str });
+        const dogVariant = obj({ kind: str, breed: str });
+        const mapping = { cat: '#/components/schemas/Cat', dog: '#/components/schemas/Dog' };
+        for (const [label, union] of [
+          ['wrapped', { oneOf: [{ oneOf: [ref('Cat'), ref('Dog')] }, { type: 'null' }] }],
+          ['bare', { oneOf: [ref('Cat'), ref('Dog')] }],
+        ] as Array<[string, SchemaObject]>) {
+          const pet: SchemaObject = { allOf: [base, union], discriminator: { propertyName: 'kind', mapping } };
+          const inline: SchemaObject = { allOf: [ref('Pet'), obj({ trace: str })] };
+          const ir = await parseWithoutWarnings(
+            doc(
+              openapi,
+              { Cat: cat, Dog: dogVariant, Pet: pet, Holder: obj({ pet: inline }) },
+              { '/pets': getOp('getPet', inline), '/holders': getOp('getHolder', ref('Holder')) },
+            ),
+          );
+          const models = modelsByName(ir);
+          expect(models['Pet']?.discriminator, label).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Cat', dog: 'Dog' },
+          });
+          expect(fieldsOf(models['Pet']), label).toEqual(['name: string']);
+          for (const name of ['GetPetResponse', 'HolderPet']) {
+            expect(fieldsOf(models[name]), `${label} ${name}`).toEqual(['name: string', 'trace?: string']);
+            expect(models[name]?.discriminator, `${label} ${name}`).toBeUndefined();
+          }
+          expectSound(ir, ['Cat', 'Dog', 'Pet', 'Holder']);
+        }
+      },
+    );
+
     // Round 4 (Greptile): a union nested in a variant. Each nested branch is
     // read as a conjunction of its own, settled before it joins the variant's
     // ledger, with a guard of its own (the branches were read into the
