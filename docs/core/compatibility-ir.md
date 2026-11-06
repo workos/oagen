@@ -182,7 +182,7 @@ Both `extract()` and `extractSnapshot()` are available. Use `extractSnapshot()` 
 
 When `oagen compat-extract` receives `--spec`, it enriches callable symbols with spec-derived metadata:
 
-- **`operationId`** — the operation name from the spec, matched by service + method name
+- **`operationId`** — the operation name from the spec, matched by the class and method name `generate` writes the operation as: the mount target and resolved method name under the config's `operationHints`, `mountRules` and `operationNaming` (any casing), then the IR's operation name on the mount target, then the IR's service + operation name
 - **`route`** — the HTTP method and path (e.g., `{ method: "POST", path: "/users" }`)
 - **`source.specSha`** — SHA-256 of the spec file
 
