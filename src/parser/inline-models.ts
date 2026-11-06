@@ -3235,11 +3235,15 @@ export function mergeAllOfMembers(
     // so a member writing a nullable `oneOf` beside an `anyOf` has the
     // `anyOf` flattened, as two members would (#398 review: the wrapper was
     // decided on the member, which reads one keyword, and the `anyOf` was
-    // never read).
+    // never read). The wrapper's `discriminator` goes with the one variant,
+    // as the component reader hands it on (`readComponentAllOfMember`), so a
+    // union a `$ref` member's component dispatches under a nullable wrapper
+    // is left to it here too (#398 review round 5: the merge followed the
+    // wrapper without it, and flattened the fields the component leaves out).
     for (const variants of unionAxesOf(s)) {
       const branch = nullableAxisBranch(s, variants);
       if (branch) {
-        visit(branch, origin);
+        visit(branch, origin, wrapperDiscriminator);
         continue;
       }
       const explicit = s.discriminator ?? wrapperDiscriminator;
