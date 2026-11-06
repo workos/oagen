@@ -8,6 +8,7 @@
 import 'dotenv/config';
 import { readFileSync } from 'node:fs';
 import type { ApiSpec, Operation, Parameter, StatusRange, TypeRef } from '../../src/ir/types.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import { toSnakeCase, toCamelCase } from '../../src/utils/naming.js';
 
 // Re-export types and functions that external smoke runners need from oagen core.
@@ -830,7 +831,12 @@ export function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function parseCliArgs(): { spec: string; sdkPath?: string; smokeConfig?: string } {
+/**
+ * The arguments a smoke script is run with: `--spec` (or `OPENAPI_SPEC_PATH`),
+ * `--ir` (the IR `oagen verify` hands the script; see {@link loadSmokeSpec}),
+ * `--sdk-path` and `--smoke-config` (or `SMOKE_CONFIG`).
+ */
+export function parseCliArgs(): { spec: string; ir?: string; sdkPath?: string; smokeConfig?: string } {
   const args = process.argv.slice(2);
   const specIdx = args.indexOf('--spec');
   const spec = specIdx !== -1 && args[specIdx + 1] ? args[specIdx + 1] : process.env.OPENAPI_SPEC_PATH;
@@ -838,9 +844,29 @@ export function parseCliArgs(): { spec: string; sdkPath?: string; smokeConfig?: 
     console.error('OpenAPI spec path is required. Set OPENAPI_SPEC_PATH env var or pass --spec <path>.');
     process.exit(1);
   }
+  const irIdx = args.indexOf('--ir');
+  const ir = irIdx !== -1 && args[irIdx + 1] ? args[irIdx + 1] : undefined;
   const sdkPathIdx = args.indexOf('--sdk-path');
   const sdkPath = sdkPathIdx !== -1 && args[sdkPathIdx + 1] ? args[sdkPathIdx + 1] : undefined;
   const configIdx = args.indexOf('--smoke-config');
   const smokeConfig = configIdx !== -1 && args[configIdx + 1] ? args[configIdx + 1] : process.env.SMOKE_CONFIG;
-  return { spec, sdkPath, smokeConfig };
+  return { spec, ir, sdkPath, smokeConfig };
+}
+
+/**
+ * The IR a smoke script plans its operations from.
+ *
+ * `oagen verify` hands every smoke script it runs — the spec-only baseline
+ * and the runner — the IR it parsed, as `--ir <path>`: a JSON file in the
+ * shape `oagen parse` prints, holding `--spec` parsed with the config's
+ * settings (`operationIdTransform`, `transformSpec`, `operationHints`, …)
+ * exactly as `generate` parses it. A script that reads it plans the
+ * operations `generate` reads: `Pets.list` and `Pets.get` under a transform
+ * that strips `PetsController_`, and no `Pets.get` under a `transformSpec`
+ * that drops `/pets/{id}` (#567). Without `--ir` — a script run by hand —
+ * `--spec` is parsed bare, so the operations are the document's as written.
+ */
+export async function loadSmokeSpec(args: { spec: string; ir?: string }): Promise<ApiSpec> {
+  if (args.ir) return JSON.parse(readFileSync(args.ir, 'utf-8')) as ApiSpec;
+  return parseSpec(args.spec);
 }

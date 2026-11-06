@@ -261,4 +261,101 @@ describe('#567', () => {
       'Pet.name',
     ]);
   });
+
+  it('matches callables by the mount target and the resolved method name, as generate writes them', async () => {
+    // `generate` writes an operation on the class its mount rule or `mountOn`
+    // hint names, as the method a `name` hint, `operationNaming` or the path
+    // gives it in the language's casing, and a split hint's wrappers beside
+    // it. The IR's `Service.operation` key, the only one matched before,
+    // names none of those: under `mountRules: { Pets: 'Animals' }` an SDK's
+    // `Animals.get` and `Animals.list` got `operationId: null, route: null`,
+    // and `Pets.list_all` did under `{ 'GET /pets': { name: 'list_all' } }`.
+    const spec = resolve(tmpDir, 'pets.json');
+    const variant = (kind: string) => ({ type: 'object', required: ['kind'], properties: { kind: { const: kind } } });
+    const union = { oneOf: [{ $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' }] };
+    writeFileSync(
+      spec,
+      JSON.stringify({
+        ...doc({
+          '/pets': {
+            get: {
+              operationId: 'list',
+              tags: ['Pets'],
+              responses: ok({ type: 'array', items: { $ref: '#/components/schemas/Pet' } }),
+            },
+            post: {
+              operationId: 'create',
+              tags: ['Pets'],
+              requestBody: { content: { 'application/json': { schema: union } } },
+              responses: ok({ $ref: '#/components/schemas/Pet' }),
+            },
+          },
+          '/pets/{id}': {
+            get: {
+              operationId: 'get',
+              tags: ['Pets'],
+              parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+              responses: ok({ $ref: '#/components/schemas/Pet' }),
+            },
+          },
+        }),
+        components: { schemas: { Pet: pet, Cat: variant('cat'), Dog: variant('dog') } },
+      }),
+    );
+    const callables = async (
+      classes: Record<string, string[]>,
+      options: Partial<Parameters<typeof compatExtractCommand>[0]> = {},
+    ) => {
+      register({
+        classes: Object.fromEntries(
+          Object.entries(classes).map(([name, methods]) => [
+            name,
+            {
+              name,
+              methods: Object.fromEntries(
+                methods.map((m) => [m, [{ name: m, params: [], returnType: 'Pet', async: true }]]),
+              ),
+              properties: {},
+              constructorParams: [],
+            },
+          ]),
+        ),
+      });
+      return (await symbolsAfter(spec, options))
+        .filter((s) => s.kind === 'callable')
+        .map(({ fqName, operationId, route }) => ({ fqName, operationId, route }));
+    };
+    const get = { operationId: 'get', route: { method: 'get', path: '/pets/{id}' } };
+    const list = { operationId: 'list', route: { method: 'get', path: '/pets' } };
+    const create = { operationId: 'create', route: { method: 'post', path: '/pets' } };
+
+    // The mount target, with the IR's names on it.
+    expect(await callables({ Animals: ['get', 'list'] })).toEqual([
+      { fqName: 'Animals.get' },
+      { fqName: 'Animals.list' },
+    ]);
+    expect(await callables({ Animals: ['get', 'list'] }, { mountRules: { Pets: 'Animals' } })).toEqual([
+      { fqName: 'Animals.get', ...get },
+      { fqName: 'Animals.list', ...list },
+    ]);
+    // A `name` hint.
+    expect(await callables({ Pets: ['list_all'] })).toEqual([{ fqName: 'Pets.list_all' }]);
+    expect(await callables({ Pets: ['list_all'] }, { operationHints: { 'GET /pets': { name: 'list_all' } } })).toEqual([
+      { fqName: 'Pets.list_all', ...list },
+    ]);
+    // The names path naming resolves to (`get_pet`, `list_pets`), in the
+    // language's casing, and a split hint's wrapper; the IR's `Pets.list`
+    // matches as it did before.
+    expect(
+      await callables(
+        { Pets: ['getPet', 'ListPets', 'create_cat', 'list'] },
+        { operationHints: { 'POST /pets': { split: [{ name: 'create_cat', targetVariant: 'Cat' }] } } },
+      ),
+    ).toEqual([
+      { fqName: 'Pets.getPet', ...get },
+      { fqName: 'Pets.ListPets', ...list },
+      { fqName: 'Pets.create_cat', ...create },
+      { fqName: 'Pets.list', ...list },
+    ]);
+  });
 });

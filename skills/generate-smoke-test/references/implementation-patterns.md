@@ -35,7 +35,8 @@ The complete structure for `smoke/sdk-{lang}.ts`:
 
 ```typescript
 import {
-  parseSpec,
+  loadSmokeSpec,
+  parseCliArgs,
   planOperations,
   generatePayload,
   generateQueryParams,
@@ -52,7 +53,12 @@ const ids = new IdRegistry();
 // Interception setup — see language table in SKILL.md Step 1
 
 async function main() {
-  const spec = await parseSpec(specPath);
+  // The IR `oagen verify` hands the runner as `--ir` — `--spec` parsed with
+  // the config's settings, as `generate` parses it and as the spec-only
+  // baseline lists it — else `--spec` parsed bare.
+  const args = parseCliArgs();
+  const spec = await loadSmokeSpec(args);
+  const sdkPath = args.sdkPath;
   const opsMap = loadManifestOperations(sdkPath); // from Step 2
   const client = initSdk(apiKey);
   const results: SmokeResults = { exchanges: [], errors: [], skipped: [] };
