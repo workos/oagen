@@ -456,14 +456,15 @@ function resolvePathItems(
 
 /**
  * The resolved `paths` map with every `operationId` that names nothing read
- * as absent: one with no ASCII letter or digit once a trailing overload
- * marker is stripped, which camel-cases to nothing as inferOperationName
- * reads it — `' '`, `'-'`, `'[1]'`. Its operation is read as one without an
- * `operationId`, as one declaring `''` always was: named from its method and
- * path, and renamed as a path-named operation when that name collides
- * (planOperations), its models named from its path, and given no
- * `Operation.operationId`, so `resolveOperations` derives its method name
- * from the path under either `operationNaming` (#526). An
+ * as absent: one with no ASCII letter or digit once its trailing overload
+ * markers are stripped (normalizeOperationIdForNaming), which camel-cases to
+ * nothing as inferOperationName reads it — `' '`, `'-'`, `'[1]'`, and
+ * `'[1][2]'`, since every marker at the end goes (#565). Its operation is
+ * read as one without an `operationId`, as one declaring `''` always was:
+ * named from its method and path, and renamed as a path-named operation when
+ * that name collides (planOperations), its models named from its path, and
+ * given no `Operation.operationId`, so `resolveOperations` derives its method
+ * name from the path under either `operationNaming` (#526). An
  * `operationIdTransform` is never called with it. A Path Item without one is
  * kept as it is; one with one is copied, its other operations kept as they
  * are.
@@ -1304,12 +1305,48 @@ interface ServiceSplit {
  * method handles multiple routes) from an operationId so derived names never
  * leak the bracketed digit. Without this, `authenticate[0]` would surface as
  * `authenticate0` in method names and `Authenticate0Request` in body model
- * names. Brackets at the end (or with trailing whitespace) are common in
- * NestJS-style backends; this regex is intentionally narrow to avoid eating
- * legitimate digits like `oauth2`.
+ * names. Every marker at the end goes, whitespace after each included, so an
+ * id that ends in several (`listPets[1][2]`, `listPets[2] [3]`) normalizes
+ * to `listPets` and never keeps the first marker's digit (`listPets1`), and
+ * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
+ * (dropNamelessOperationIds), as `[1]` does (#565). Brackets at the end (or
+ * with trailing whitespace) are common in NestJS-style backends; the rule is
+ * intentionally narrow to avoid eating legitimate digits like `oauth2`: a
+ * marker not at the end (`list[1]Pets`) is left as written, and so is the
+ * whitespace before the first (`listPets [1]` keeps `listPets `).
+ *
+ * A marker is `[`, one or more ASCII digits and `]`, with any whitespace
+ * after it (the code units `\s` matches); nothing else is one, so `[]`,
+ * `[1 ]`, `[ 1]` and `[1]-[2]` keep their last character. The id is read
+ * once, from its end backwards, one marker at a time. A regex of the repeated
+ * group (`/(?:\[\d+\]\s*)+$/`) retried the match from every marker of an id
+ * that ends in something else, quadratic in the number of markers: sixteen
+ * thousand of them before one letter stalled the parser for half a second,
+ * and the parser reads an `operationId` of any length.
  */
 function normalizeOperationIdForNaming(operationId: string): string {
-  return operationId.replace(/\[\d+\]\s*$/, '');
+  let end = operationId.length;
+  for (;;) {
+    // Whitespace is stripped only behind a marker: when none precedes it, it stays.
+    let i = end;
+    while (i > 0 && isWhitespace(operationId.charAt(i - 1))) i--;
+    if (i === 0 || operationId.charAt(i - 1) !== ']') break;
+    const digitsEnd = --i;
+    while (i > 0 && isAsciiDigit(operationId.charAt(i - 1))) i--;
+    if (i === digitsEnd || i === 0 || operationId.charAt(i - 1) !== '[') break;
+    end = i - 1;
+  }
+  return operationId.slice(0, end);
+}
+
+/** Whether one character is `0`–`9`: what `\d` matches. */
+function isAsciiDigit(char: string): boolean {
+  return char >= '0' && char <= '9';
+}
+
+/** Whether one UTF-16 code unit is whitespace: what `\s` matches, tested on that unit alone. */
+function isWhitespace(char: string): boolean {
+  return /\s/.test(char);
 }
 
 /**
@@ -5468,9 +5505,12 @@ export function derivePathBasedName(
  * (resolvePathModelBaseNames); an operation not there names them from its
  * own. `sharedWith` holds, for a path that `$ref`s the Operation Object of
  * another, the path whose models it shares. Reused means declared on more
- * than one Operation Object, which OpenAPI forbids: every such operation
- * would otherwise name its models alike (`CreateNoteRequest`), and the
- * merge would keep one body for all of them.
+ * than one Operation Object, which OpenAPI forbids — as written, or up to
+ * the trailing overload markers (normalizeOperationIdForNaming): `listPets[1]`
+ * and `listPets[2]` or `listPets[1][2]` take one name and one stem, so
+ * they are one id, reused, exactly as `listPets` declared twice is (#565).
+ * Every such operation would otherwise name its models alike
+ * (`CreateNoteRequest`), and the merge would keep one body for all of them.
  *
  * Each Operation Object claims the stem (operationIdModelBase) of the name
  * the first of its paths ends up with (planOperations): its `operationId`'s
@@ -5504,15 +5544,20 @@ function resolveReusedOperationIds(
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
       if (!op?.operationId) continue;
-      const entries = declaring.get(op.operationId) ?? [];
+      // Ids that strip to one (`listPets[1]`, `listPets[2]`, `listPets[1][2]`)
+      // take one name and one stem, so they are one id, reused.
+      const id = normalizeOperationIdForNaming(op.operationId);
+      const entries = declaring.get(id) ?? [];
       entries.push({ key: `${method} ${path}`, path, method, op });
-      declaring.set(op.operationId, entries);
+      declaring.set(id, entries);
     }
   }
   const reused = (entries: Array<{ op: OperationObject }>) => new Set(entries.map(({ op }) => op)).size > 1;
   // Every stem an `operationId` declared on one Operation Object holds.
   const held = new Set(
-    [...declaring].filter(([, entries]) => !reused(entries)).map(([operationId]) => operationIdModelBase(operationId)),
+    [...declaring.values()]
+      .filter((entries) => !reused(entries))
+      .map(([{ op }]) => operationIdModelBase(op.operationId!)),
   );
   const claims = [...declaring.values()]
     .filter(reused)

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractOperations } from '../../src/parser/operations.js';
+import { extractOperations, operationIdModelBase } from '../../src/parser/operations.js';
 import { parseSpec } from '../../src/parser/parse.js';
 import { resolveOperations } from '../../src/ir/operation-hints.js';
 import { defaultSdkBehavior } from '../../src/ir/sdk-behavior.js';
@@ -3501,6 +3501,310 @@ describe('extractOperations – an operationId that names nothing (issue #526)',
         path: ['list_pets', 'create_pet'],
         operationId: ['list_pets', 'create'],
       });
+    }
+  });
+});
+
+describe('#565', () => {
+  // `normalizeOperationIdForNaming` stripped one trailing overload marker, so
+  // an id ending in two kept the first one's digit: `listPets[1][2]` named
+  // `listPets1` and `[1][2]` named `1`, with a `1Response`. Now every marker
+  // at the end goes, whitespace after each included, so `[1][2]` names
+  // nothing exactly as `[1]` does (#526).
+  const responses = {
+    '200': {
+      description: 'OK',
+      content: { 'application/json': { schema: { type: 'object', properties: { id: { type: 'string' } } } } },
+    },
+  };
+
+  /** The method name of every operation, under each `operationNaming`. */
+  const methodNames = (services: Service[]) => {
+    const spec = {
+      name: 'Pets',
+      version: '1',
+      baseUrl: '',
+      services,
+      models: [],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+    return {
+      path: resolveOperations(spec, undefined, undefined, 'path').map((r) => r.methodName),
+      operationId: resolveOperations(spec, undefined, undefined, 'operationId').map((r) => r.methodName),
+    };
+  };
+
+  /** Only markers: bare, with whitespace between, after or before them, three of them, or behind punctuation only. */
+  const markersOnly = ['[1][2]', '[1] [2]', '[1][2] ', '[0][1][2]', ' [1][2]', '-[1][2]'];
+  /** Markers behind a name: two, two with whitespace between, trailing whitespace, three, a tab between. */
+  const named = ['listPets[1][2]', 'listPets[2] [3]', 'listPets[1] [2] ', 'listPets[0][1][2]', 'listPets[1]\t[2]'];
+
+  it('strips every trailing marker from the issue repro, in OAS 3.1 and 3.0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-565-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        for (const [file, operationId, expected] of [
+          ['marker.json', '[1]', { methodName: 'list_pets', models: ['PetsGetResponse'], name: 'list' }],
+          ['markers.json', '[1][2]', { methodName: 'list_pets', models: ['PetsGetResponse'], name: 'list' }],
+          [
+            'named-marker.json',
+            'listPets[1]',
+            { methodName: 'list_pets', models: ['ListPetsResponse'], name: 'listPets' },
+          ],
+          [
+            'named-markers.json',
+            'listPets[1][2]',
+            { methodName: 'list_pets', models: ['ListPetsResponse'], name: 'listPets' },
+          ],
+          [
+            'spaced-markers.json',
+            'listPets[2] [3]',
+            { methodName: 'list_pets', models: ['ListPetsResponse'], name: 'listPets' },
+          ],
+        ] as const) {
+          const specFile = join(dir, file);
+          const paths = { '/pets': { get: { operationId, responses } } };
+          await writeFile(specFile, JSON.stringify({ openapi, info: { title: 'Pets', version: '1' }, paths }));
+          const spec = await parseSpec(specFile);
+          // What the issue's script prints, under `operationNaming: 'operationId'`.
+          const [{ methodName, operation }] = resolveOperations(spec, undefined, undefined, 'operationId');
+          expect({ methodName, models: spec.models.map(({ name }) => name), name: operation.name }).toEqual(expected);
+          // Kept verbatim when the id names something, absent when it names nothing — as for one marker.
+          if (expected.name === 'list') expect(operation).not.toHaveProperty('operationId');
+          else expect(operation.operationId).toBe(operationId);
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads an operationId of nothing but markers exactly as one without an operationId', () => {
+    const object = (properties: Record<string, SchemaObject>): SchemaObject => ({ type: 'object', properties });
+    const json = (schema: SchemaObject) => ({ content: { 'application/json': { schema } } });
+    const paths = (operationId?: string) => ({
+      '/pets': {
+        post: {
+          ...(operationId === undefined ? {} : { operationId }),
+          requestBody: json(object({ name: { type: 'string' } })),
+          responses: {
+            '201': { description: 'Created', ...json(object({ id: { type: 'string' }, owner: object({}) })) },
+            '404': { description: 'Not found', ...json(object({ message: { type: 'string' } })) },
+          },
+        },
+      },
+    });
+
+    const pathNamed = extractOperations(paths());
+    // Named from the path: never `1Request`, `1Response` and `1Error404`.
+    expect(pathNamed.inlineModels.map((model) => model.name)).toEqual([
+      'PetsPostResponse',
+      'PetsPostResponseOwner',
+      'PetsPostRequest',
+      'PetsPostError404',
+    ]);
+    for (const operationId of markersOnly) {
+      const result = extractOperations(paths(operationId));
+      expect(result).toEqual(pathNamed);
+      expect(methodNames(result.services)).toEqual({ path: ['create_pet'], operationId: ['create_pet'] });
+    }
+  });
+
+  it('tells two such operations in one service apart by their paths, with no warning', () => {
+    const teamId = { name: 'teamId', in: 'path' as const, required: true, schema: { type: 'string' } };
+    for (const operationId of markersOnly) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { services } = extractOperations({
+          '/v1/notes': { get: { operationId, responses } },
+          '/v1/{teamId}/notes': { get: { operationId, parameters: [teamId], responses } },
+        });
+        // Not `1` and, renamed with a warning as a reused id, `12`: the operationId names neither.
+        expect(services[0].operations.map((op) => op.name)).toEqual(['list', 'listByTeamId']);
+        expect(methodNames(services)).toEqual({
+          path: ['list_notes', 'list_v1_notes'],
+          operationId: ['list_notes', 'list_v1_notes'],
+        });
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    }
+  });
+
+  it('derives one name from every spelling of the markers behind a name, keeping the id verbatim', () => {
+    for (const operationId of named) {
+      const { services, inlineModels } = extractOperations({ '/pets': { get: { operationId, responses } } });
+      const [operation] = services[0].operations;
+      expect(operation.name).toBe('listPets');
+      expect(operation.operationId).toBe(operationId);
+      expect(inlineModels.map((model) => model.name)).toEqual(['ListPetsResponse']);
+      expect(methodNames(services)).toEqual({ path: ['list_pets'], operationId: ['list_pets'] });
+    }
+  });
+
+  it('hands operationIdTransform the id with every marker stripped', () => {
+    for (const operationId of [
+      'PetsController_list[1][2]',
+      'PetsController_list[2] [3]',
+      'PetsController_list[1] [2] ',
+    ]) {
+      const seen: string[] = [];
+      const transform = (id: string) => {
+        seen.push(id);
+        return id.split('_').pop()!;
+      };
+      const { services } = extractOperations({ '/pets': { get: { operationId, responses } } }, transform);
+      expect(seen).toEqual(['PetsController_list']);
+      expect(services[0].operations.map((op) => [op.name, op.operationId])).toEqual([['list', operationId]]);
+    }
+  });
+
+  it('keeps a digit that is not a marker, and a marker that is not at the end', () => {
+    for (const [operationId, name, model] of [
+      ['oauth2[1][2]', 'oauth2', 'OAuth2Response'],
+      ['getV2[1] [2]', 'getV2', 'GetV2Response'],
+      ['top10[1][2]', 'top10', 'Top10Response'],
+      // Only markers at the end are overload markers, as before.
+      ['list[1]Pets', 'list1Pets', 'List1PetsResponse'],
+    ] as const) {
+      const { services, inlineModels } = extractOperations({ '/pets': { get: { operationId, responses } } });
+      expect(services[0].operations[0].name).toBe(name);
+      expect(inlineModels.map((m) => m.name)).toEqual([model]);
+    }
+  });
+
+  it('strips nothing but a marker, the whitespace after it included, whatever precedes it', () => {
+    for (const [operationId, normalized] of [
+      // Whitespace before the first marker is not after any marker, so it stays.
+      ['listPets [1]', 'listPets '],
+      // A marker behind punctuation, not whitespace, is not at the end.
+      ['listPets[1]-[2]', 'listPets[1]-'],
+      // One or more ASCII digits between the brackets, nothing else.
+      ['listPets[]', 'listPets[]'],
+      ['listPets[1 ]', 'listPets[1 ]'],
+      ['listPets[ 1]', 'listPets[ 1]'],
+      ['listPets[1]]', 'listPets[1]]'],
+      ['listPets[\u0661]', 'listPets[\u0661]'],
+      // Any whitespace after a marker: a no-break space, a line separator, a BOM.
+      ['listPets[1]\u00a0[2]', 'listPets'],
+      ['listPets[1]\u2028[2]\ufeff', 'listPets'],
+    ] as const) {
+      const seen: string[] = [];
+      const transform = (id: string) => {
+        seen.push(id);
+        return 'listPets';
+      };
+      extractOperations({ '/pets': { get: { operationId, responses } } }, transform);
+      expect(seen).toEqual([normalized]);
+    }
+  });
+
+  it('reads the markers of a long id once, from its end, however it ends', () => {
+    // A regex of the repeated group retried the match from every marker of an
+    // id ending in something else, quadratic in their number: sixteen thousand
+    // before an `X` took half a second. The backward scan reads them once.
+    const markers = '[1]'.repeat(20000);
+    const started = performance.now();
+    const named = operationIdModelBase(`${markers}X`);
+    const nameless = operationIdModelBase(markers);
+    const elapsed = performance.now() - started;
+    // Markers before a letter are not at the end, so each is kept and read as
+    // its digit, as `list[1]Pets` is `List1Pets`; markers alone strip to nothing.
+    expect(named).toBe(`${'1'.repeat(20000)}X`);
+    expect(nameless).toBe('');
+    expect(elapsed).toBeLessThan(50);
+
+    // Through the parser: the one is kept verbatim, the other read as no operationId.
+    const [kept] = extractOperations({ '/pets': { get: { operationId: `${markers}X`, responses } } }).services[0]
+      .operations;
+    expect(kept.operationId).toBe(`${markers}X`);
+    expect(kept.name).toBe(`${'1'.repeat(20000)}X`);
+    const stripped = extractOperations({ '/pets': { get: { operationId: markers, responses } } });
+    expect(stripped).toEqual(extractOperations({ '/pets': { get: { responses } } }));
+  });
+
+  // Two ids that strip to one (`listPets[1]`, `listPets[1][2]`) took one name
+  // and one model stem, but `resolveReusedOperationIds` grouped by the id as
+  // written, so neither claimed the stem and both named their response
+  // `ListPetsResponse`: the merge kept the larger definition for both. Now they
+  // are one id reused, read exactly as `listPets` declared twice is.
+  const object = (properties: Record<string, SchemaObject>) => ({
+    content: { 'application/json': { schema: { type: 'object', properties } as SchemaObject } },
+  });
+  const pet = { '200': { description: 'OK', ...object({ id: { type: 'string' } }) } };
+  const note = { '200': { description: 'OK', ...object({ title: { type: 'string' }, body: { type: 'string' } }) } };
+  /** Pairs that strip to `listPets`, and `listPets` declared twice, which they are read as. */
+  const pairs = [
+    ['listPets[1]', 'listPets[1][2]'],
+    ['listPets[1]', 'listPets[2]'],
+    ['listPets[2] [3]', 'listPets[1] '],
+    ['listPets', 'listPets'],
+  ] as const;
+
+  it('reads two ids that strip to one as a reused operationId, in OAS 3.1 and 3.0', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'oagen-565-'));
+    try {
+      for (const openapi of ['3.1.0', '3.0.3']) {
+        for (const [pets, notes] of pairs) {
+          const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+          try {
+            const specFile = join(dir, `${openapi}-${pairs.findIndex(([a]) => a === pets)}.json`);
+            const paths = {
+              '/pets': { get: { operationId: pets, responses: pet } },
+              '/notes': { get: { operationId: notes, responses: note } },
+            };
+            await writeFile(specFile, JSON.stringify({ openapi, info: { title: 'Pets', version: '1' }, paths }));
+            const spec = await parseSpec(specFile);
+            // In two services, both keep `listPets`; `/notes` sorts first and keeps
+            // the stem, so `/pets` names its response from its path — each its own
+            // fields, never one `ListPetsResponse` holding the larger shape for both.
+            const operations = spec.services.flatMap((service) => service.operations);
+            expect(operations.map((op) => [op.path, op.name, op.operationId, op.response])).toEqual([
+              ['/pets', 'listPets', pets, { kind: 'model', name: 'PetsGetResponse' }],
+              ['/notes', 'listPets', notes, { kind: 'model', name: 'ListPetsResponse' }],
+            ]);
+            expect(spec.models.map((model) => [model.name, model.fields.map((field) => field.name)])).toEqual([
+              ['PetsGetResponse', ['id']],
+              ['ListPetsResponse', ['title', 'body']],
+            ]);
+            expect(warn).not.toHaveBeenCalled();
+          } finally {
+            warn.mockRestore();
+          }
+        }
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the models of the one renamed within a service after its new name, as for a reused operationId', () => {
+    for (const [pets, all] of pairs) {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { services, inlineModels } = extractOperations({
+          '/pets': { get: { operationId: pets, responses: pet } },
+          '/pets/all': { get: { operationId: all, responses: note } },
+        });
+        expect(services.map((service) => service.name)).toEqual(['Pets']);
+        expect(services[0].operations.map((op) => [op.path, op.name, op.operationId, op.response])).toEqual([
+          ['/pets', 'listPets', pets, { kind: 'model', name: 'ListPetsResponse' }],
+          ['/pets/all', 'listPets2', all, { kind: 'model', name: 'ListPets2Response' }],
+        ]);
+        expect(inlineModels.map((model) => [model.name, model.fields.map((field) => field.name)])).toEqual([
+          ['ListPetsResponse', ['id']],
+          ['ListPets2Response', ['title', 'body']],
+        ]);
+        // The reused-id warning only: no second `ListPetsResponse` definition to merge.
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(
+          /both take the name "listPets" from their operationId; the latter is renamed "listPets2"/,
+        );
+      } finally {
+        warn.mockRestore();
+      }
     }
   });
 });

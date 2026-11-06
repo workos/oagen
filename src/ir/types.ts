@@ -274,11 +274,13 @@ export interface Operation {
   name: string;
   /**
    * The operation's `operationId`, verbatim, when the document declares one
-   * that names something: one with no ASCII letter or digit once a trailing
-   * overload marker is stripped (`' '`, `'-'`, `'[1]'`) is left out, as `''`
-   * is, and the operation is path-named. `name` is what the parser made of
-   * it (`operationIdTransform` applied); this says that `name` came from one
-   * at all, which is what `resolveOperations` reads to prefer it over the
+   * that names something: one with no ASCII letter or digit once its trailing
+   * overload markers are stripped — every `[N]` at the end, so `' '`, `'-'`,
+   * `'[1]'` and `'[1][2]'` alike — is left out, as `''` is, and the operation
+   * is path-named. `name` is what the parser made of it
+   * (`operationIdTransform` applied, after the markers are stripped:
+   * `listPets[1][2]` is `listPets`); this says that `name` came from one at
+   * all, which is what `resolveOperations` reads to prefer it over the
    * path-derived method name.
    */
   operationId?: string;
