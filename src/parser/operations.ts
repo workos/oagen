@@ -1366,12 +1366,43 @@ interface ServiceSplit {
  * to `listPets` and never keeps the first marker's digit (`listPets1`), and
  * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
  * (readOperationIds), as `[1]` does (#565). Brackets at the end (or
- * with trailing whitespace) are common in NestJS-style backends; this regex
- * is intentionally narrow to avoid eating legitimate digits like `oauth2`,
- * and a marker not at the end (`list[1]Pets`) is left as written.
+ * with trailing whitespace) are common in NestJS-style backends; the rule is
+ * intentionally narrow to avoid eating legitimate digits like `oauth2`: a
+ * marker not at the end (`list[1]Pets`) is left as written, and so is the
+ * whitespace before the first (`listPets [1]` keeps `listPets `).
+ *
+ * A marker is `[`, one or more ASCII digits and `]`, with any whitespace
+ * after it (the code units `\s` matches); nothing else is one, so `[]`,
+ * `[1 ]`, `[ 1]` and `[1]-[2]` keep their last character. The id is read
+ * once, from its end backwards, one marker at a time. A regex of the repeated
+ * group (`/(?:\[\d+\]\s*)+$/`) retried the match from every marker of an id
+ * that ends in something else, quadratic in the number of markers: sixteen
+ * thousand of them before one letter stalled the parser for half a second,
+ * and the parser reads an `operationId` of any length.
  */
 function normalizeOperationIdForNaming(operationId: string): string {
-  return operationId.replace(/(?:\[\d+\]\s*)+$/, '');
+  let end = operationId.length;
+  for (;;) {
+    // Whitespace is stripped only behind a marker: when none precedes it, it stays.
+    let i = end;
+    while (i > 0 && isWhitespace(operationId.charAt(i - 1))) i--;
+    if (i === 0 || operationId.charAt(i - 1) !== ']') break;
+    const digitsEnd = --i;
+    while (i > 0 && isAsciiDigit(operationId.charAt(i - 1))) i--;
+    if (i === digitsEnd || i === 0 || operationId.charAt(i - 1) !== '[') break;
+    end = i - 1;
+  }
+  return operationId.slice(0, end);
+}
+
+/** Whether one character is `0`–`9`: what `\d` matches. */
+function isAsciiDigit(char: string): boolean {
+  return char >= '0' && char <= '9';
+}
+
+/** Whether one UTF-16 code unit is whitespace: what `\s` matches, tested on that unit alone. */
+function isWhitespace(char: string): boolean {
+  return /\s/.test(char);
 }
 
 /**
