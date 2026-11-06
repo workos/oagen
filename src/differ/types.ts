@@ -1,4 +1,4 @@
-import type { Extensions, Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
+import type { AuthScheme, Extensions, Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
 import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
@@ -9,11 +9,13 @@ export interface DiffReport {
    * Cross-cutting events that a type signature does not show: a parameter
    * default changing observable runtime behavior for callers who never set it
    * explicitly (breaking), an IR node becoming or ceasing to be deprecated
-   * (additive), or the security requirements a request must satisfy changing
-   * (either). Surfaced separately so PR-description and changelog tooling
-   * can call them out even when the shapes in `changes` are otherwise
-   * unchanged. Every entry here mirrors a flag or nested entry on a change in
-   * `changes`, so the totals in `summary` count each event once.
+   * (additive), the security requirements a request must satisfy changing
+   * (either), or a security scheme definition those requirements name
+   * being added, removed or modified (either). Surfaced separately so
+   * PR-description and changelog tooling can call them out even when the
+   * shapes in `changes` are otherwise unchanged. Every entry here mirrors a
+   * flag, a nested entry or a security scheme change in `changes`, so the
+   * totals in `summary` count each event once.
    */
   behaviorChanges: BehaviorChange[];
   summary: {
@@ -26,7 +28,12 @@ export interface DiffReport {
   };
 }
 
-export type BehaviorChange = ParamDefaultChanged | DeprecatedChanged | SecurityChanged | ExtensionsChanged;
+export type BehaviorChange =
+  | ParamDefaultChanged
+  | DeprecatedChanged
+  | SecurityChanged
+  | SecuritySchemeChanged
+  | ExtensionsChanged;
 
 export interface ParamDefaultChanged {
   kind: 'param-default-changed';
@@ -122,6 +129,27 @@ export type SecurityNode =
   | { node: 'webhook'; name: string; httpMethod: string };
 
 /**
+ * A security scheme definition — `ApiSpec.auth`, the parsed
+ * `components.securitySchemes` — was added, removed or modified (#384).
+ * Mirrors every `security-scheme-added`, `security-scheme-removed` and
+ * `security-scheme-modified` change, one entry each, listed beside the
+ * `security-changed` entries: `oldScheme` is present when the old document
+ * declares the scheme and `newScheme` when the new one does, so an added
+ * scheme carries `newScheme` alone, a removed one `oldScheme` alone and a
+ * modified one both. The classification is copied from the change.
+ */
+export interface SecuritySchemeChanged {
+  kind: 'security-scheme-changed';
+  /** The key under `components.securitySchemes`, as the requirements name it. */
+  schemeName: string;
+  /** The definition as the old document declared it; absent when it did not. */
+  oldScheme?: AuthScheme;
+  /** The definition as the new document declares it; absent when it does not. */
+  newScheme?: AuthScheme;
+  classification: 'additive' | 'breaking';
+}
+
+/**
  * An IR node's `extensions` — the `x-*` keys of the object it was built
  * from — changed: a key added, removed or given another value (compared
  * deeply, key order aside; an absent key and an empty object are the
@@ -170,6 +198,9 @@ export type Change =
   | ServerRemoved
   | ServerModified
   | DocumentSecurityChanged
+  | SecuritySchemeAdded
+  | SecuritySchemeRemoved
+  | SecuritySchemeModified
   | WebhookAdded
   | WebhookRemoved
   | WebhookModified;
@@ -591,17 +622,24 @@ export interface OperationModified {
    * `201` that became a lone `200`, a `200` added beside a lone `201` (the
    * `200` is now the primary), a `201` that became the primary beside a
    * `200` whose body is no longer typed, or a `200` beside a `202` that
-   * became a `201` beside the `202`. Additive on its own: the old code
-   * may still be declared, as in the second case, and whether a bare status
-   * move breaks callers is left to a separate issue — this flag only says
-   * the move happened, so a changelog can. Only two lone primaries pair
-   * over the move, though: a primary replaced among several 2xx (the last
-   * case) no longer declares its old code, so its headers and media types
-   * are reported removed under that code, breaking, beside this flag, as
-   * they are for a `200` dropped beside a kept `202` (#408). Compared only
-   * while both sides carry a code, as `requestBodyRequired` is while both
-   * carry a body; an operation gaining or losing its only 2xx/3xx is not a
-   * move but `responseChanged`. Not mirrored into `behaviorChanges`.
+   * became a `201` beside the `202`. Breaking when the new spec no longer
+   * declares the code the old primary answered with — neither as its
+   * `responseStatusCode` nor among its `successResponses`; errors, `default`
+   * and ranges do not count — since a caller that checks the declared code
+   * (generated code, or the smoke helpers that read `responseStatusCode`)
+   * stops matching, and a redirect moving between temporary and permanent
+   * (`302` → `301`) changes what caches may do: the first, third and last
+   * cases, and a lone `200` that became a lone `204`. Additive when the old
+   * code is still declared, as in the second case: the `201` is still
+   * answered, so a caller built for it still works (#407). Only two lone
+   * primaries pair over the move, though: a primary replaced among several
+   * 2xx (the last case) no longer declares its old code, so its headers and
+   * media types are reported removed under that code, breaking, beside this
+   * flag, as they are for a `200` dropped beside a kept `202` (#408).
+   * Compared only while both sides carry a code, as `requestBodyRequired`
+   * is while both carry a body; an operation gaining or losing its only
+   * 2xx/3xx is not a move but `responseChanged`. Not mirrored into
+   * `behaviorChanges`.
    */
   responseStatusCodeChanged: boolean;
   /** Present exactly when `responseStatusCodeChanged`: the code on each side, old → new. */
@@ -1164,3 +1202,86 @@ export interface DocumentSecurityChanged {
    */
   classification: 'additive' | 'breaking';
 }
+
+/**
+ * A security scheme the new document declares under
+ * `components.securitySchemes` (`ApiSpec.auth`) and the old did not,
+ * matched by `schemeName` (#384). Additive: no request built for the old
+ * document carried it, and a requirement that starts naming it is reported
+ * as the requirement change it is (`security-changed`, `securityChanged`).
+ * Listed after the document's `security-changed` change and before the
+ * models, with the removed and modified schemes after it.
+ */
+export interface SecuritySchemeAdded {
+  kind: 'security-scheme-added';
+  /** The key under `components.securitySchemes`, as the requirements name it. */
+  schemeName: string;
+  /** The definition as the new document declares it. */
+  scheme: AuthScheme;
+  classification: 'additive';
+}
+
+/**
+ * A security scheme the old document declared under
+ * `components.securitySchemes` and the new does not (#384). Breaking when
+ * some request read it: the scheme is in use in the old document — named
+ * by the effective requirement list, `node.security ?? spec.security ??
+ * []`, of one of its operations or webhooks, so the document default counts
+ * only through a node that inherits it — or in the new document, which
+ * then requires what it does not define. Additive when nothing read it on
+ * either side, as a change to a server variable no template references is
+ * (#342): dropping a definition no request carries moves nothing on the
+ * wire.
+ */
+export interface SecuritySchemeRemoved {
+  kind: 'security-scheme-removed';
+  /** The key under `components.securitySchemes`, as the requirements name it. */
+  schemeName: string;
+  /** The definition as the old document declared it. */
+  scheme: AuthScheme;
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * A security scheme both documents declare whose definitions differ in
+ * anything but `description` (documentation is never a change, as
+ * everywhere in the differ) (#384). Breaking when its wire form changed —
+ * the `kind`; an `apiKey`'s `in` or `name`; an `oauth2` scheme's `flows`
+ * compared deeply, key order aside, with each flow's `scopes` map taken
+ * out, so a changed `authorizationUrl`, `tokenUrl` or `refreshUrl`, a flow
+ * added or removed, or a flow's other keys changing all count — and the
+ * scheme is in use in the new document (named by the effective requirement
+ * list of one of its operations or webhooks, as for a removed scheme): an
+ * SDK built for the old definition sends `X-Key` to a server that now reads
+ * `X-Api-Key`, and a webhook handler built for it checks a header the
+ * sender no longer carries. Additive when nothing in the new document uses
+ * it (no request carries the old form to the new server), or when only an
+ * `oauth2` flow's `scopes` map changed: the scopes a request needs are the
+ * requirement's, which `security-changed` already compares, so a scope
+ * added, removed or re-described in the definition moves nothing on the
+ * wire.
+ */
+export interface SecuritySchemeModified {
+  kind: 'security-scheme-modified';
+  /** The key under `components.securitySchemes`, as the requirements name it. */
+  schemeName: string;
+  /** The definition as the old document declared it. */
+  oldScheme: AuthScheme;
+  /** The definition as the new document declares it. */
+  newScheme: AuthScheme;
+  /**
+   * What changed, in words: `apiKey → http basic` (`http bearer`, `oauth2`)
+   * for a changed kind; `apiKey in header "X-Key" → in header "X-Api-Key"`
+   * for an `apiKey` whose location or name moved; `oauth2 flows changed`
+   * when an `oauth2` scheme's wire form moved; `oauth2 scopes changed` when
+   * only a flow's `scopes` map did.
+   */
+  details: string;
+  classification: 'additive' | 'breaking';
+}
+
+/**
+ * The changes `diffAuthSchemes` reports between two documents' `auth`
+ * lists: added, then removed, then modified, each in its document's order.
+ */
+export type SecuritySchemeChange = SecuritySchemeAdded | SecuritySchemeRemoved | SecuritySchemeModified;

@@ -483,7 +483,8 @@ export interface Operation {
    * guessing one from the HTTP method. The differ pairs a lone 2xx/3xx with
    * the other spec's entry of this code, so an entry added beside it is not
    * mistaken for it, and reports it moving while both specs carry one as
-   * `responseStatusCodeChanged`.
+   * `responseStatusCodeChanged`, breaking unless the new spec still declares
+   * the old code among its 2xx/3xx (#407).
    */
   responseStatusCode?: number;
   /**
