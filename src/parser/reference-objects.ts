@@ -1,7 +1,7 @@
 /**
  * Resolution of Reference Objects: `{ $ref: '#/components/<section>/<name>' }`
  * written where OpenAPI allows one in place of a Parameter, Request Body,
- * Response, Header or Example Object. The bundler never inlines internal refs
+ * Response, Header, Example or Security Scheme Object. The bundler never inlines internal refs
  * (`dereference: false`), so each reaches the parser as written and is
  * followed here, through one walk, with one reading of the text written
  * beside the `$ref`.
@@ -39,7 +39,13 @@ export function siblingDocsMode(openapiVersion: string | undefined): SiblingDocs
 }
 
 /** The `components` sections a Reference Object may point into. */
-export type ReferenceSection = 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'examples';
+export type ReferenceSection =
+  | 'parameters'
+  | 'requestBodies'
+  | 'responses'
+  | 'headers'
+  | 'examples'
+  | 'securitySchemes';
 
 /** A Reference Object as written, with the documentation OAS 3.1 lets it carry beside the `$ref`. */
 export interface ReferenceObject {
@@ -57,6 +63,7 @@ const REFERENCE_DOC_FIELDS: Record<ReferenceSection, readonly ReferenceDocField[
   responses: ['description'],
   headers: ['description'],
   examples: ['summary', 'description'],
+  securitySchemes: ['description'],
 };
 
 /**
