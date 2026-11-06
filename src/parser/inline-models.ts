@@ -1,4 +1,14 @@
-import type { Constraints, EnumRef, Extensions, ExternalDocs, Model, ModelRef, Field, TypeRef } from '../ir/types.js';
+import type {
+  Constraints,
+  EnumRef,
+  Extensions,
+  ExternalDocs,
+  Model,
+  ModelRef,
+  Field,
+  TypeRef,
+  UnionType,
+} from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
@@ -43,9 +53,12 @@ import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
 import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import {
+  carryDeferredMappingEntries,
   componentKeyOf,
   isPendingSchemaRef,
   markPendingSchemaRef,
+  pendingSiteLimitsOf,
+  recordPendingSiteLimits,
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
@@ -56,6 +69,7 @@ import {
   type ParameterObject,
   type SchemaOrContent,
 } from './operations.js';
+import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
@@ -170,13 +184,7 @@ export function mintedInlineNameEntries(
     // The one reading `schemaToTypeRef` makes of an `allOf` (`readInlineAllOf`).
     const reading = readInlineAllOf(s.allOf, s);
     if (reading === 'unwrapped') {
-      return mintedInlineNameEntries(
-        contextName,
-        allOfTypingMember(s.allOf) ?? s.allOf[0]!,
-        parentModelName,
-        reserved,
-        deep,
-      );
+      return mintedInlineNameEntries(contextName, annotatedTypingMember(s), parentModelName, reserved, deep);
     }
     if (reading !== 'merged') return [];
     if (!deep) return modelName();
@@ -1083,15 +1091,24 @@ type SiteDirection = 'sent' | 'received';
  * as `buildOperation` merges them, so a Path Item parameter the operation
  * overrides is no site — each written inline or through
  * `components/requestBodies` and `components/parameters`; what it receives
- * is every response it declares — a body at any status code, `default` or
- * range, and a header, inline or through `components/responses` and
- * `components/headers`, the `headers` map read as `extractResponseHeaders`
- * reads it: of two keys that differ in case alone, the later declaration
- * (#295), and never one keyed `Content-Type`, whatever its case, which
- * OpenAPI says to ignore (`isIgnoredResponseHeader`, #540) — so a
- * `Content-Type` header of `$ref: Pet` on `createPet`'s `204` leaves `Pet`
- * only sent, as the response without it does. A parameter or header is
- * read by the one schema that types it (`parameterTyping`): its `schema`,
+ * is every response `extractResponses` reads — a body and a header under a
+ * 200–599 status code, `default` or a `1XX`–`5XX` range, inline or through
+ * `components/responses` and `components/headers` — and nothing under a key
+ * the reader skips, each key classified as the reader classifies it
+ * (`classifyResponseKey`): a 1xx status code, which it keeps as written and
+ * types nothing of, an `x-` extension, a key OpenAPI does not define
+ * (`600`, `6XX`), warned about and ignored, and the later of two range keys
+ * that differ in case alone (`4xx` after `4XX`, `readFallbackResponse`) —
+ * so a `103` on `listNotes` with an `X-Pet` header or a body of `$ref: Pet`
+ * leaves `Pet` only sent, as the document without it does, while a `1XX`
+ * range with the same header receives it (#540 review). The `headers` map
+ * is read as `extractResponseHeaders` reads it: of two keys that differ in
+ * case alone, the later declaration (#295), and never one keyed
+ * `Content-Type`, whatever its case, which OpenAPI says to ignore
+ * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
+ * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
+ * parameter or header is read by the one schema that types it
+ * (`parameterTyping`): its `schema`,
  * else the schema of the `content` entry `selectParameterContent` picks, so
  * one the parser types as a string — a `content` map none of whose media
  * types is read, or a map beside a `schema`, which wins — reaches nothing.
@@ -1104,8 +1121,8 @@ type SiteDirection = 'sent' | 'received';
  * its responses type no body (`extractWebhookResponses`), and `callbacks`
  * are never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths` or a Responses Object stepped over and every `webhooks` key
- * read as a webhook. A schema
+ * of `paths` stepped over, a Responses Object's keys read as above and every
+ * `webhooks` key read as a webhook. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1236,9 +1253,26 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
         const responses = operation['responses'];
         if (webhooks || !isRecord(responses)) continue;
+        // Read as `extractResponses` reads the map, each key classified as
+        // the reader classifies it (`classifyResponseKey`): a 200–599 status
+        // code, `default` and a `1XX`–`5XX` range are read, body and headers
+        // alike, and of two range keys that differ in case alone (`4XX`
+        // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
+        // status code is kept as written and nothing of it typed, an `x-`
+        // key is an extension, and a key OpenAPI does not define (`600`,
+        // `6XX`) is warned about — once, by the reader — and ignored; none
+        // of those reaches a component (#540 review).
+        const ranges = new Set<string>();
         for (const [code, entry] of Object.entries(responses)) {
+          const key = classifyResponseKey(code);
+          if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
+          if (key.kind === 'status' && key.code < 200) continue;
+          if (key.kind === 'range') {
+            if (ranges.has(key.range)) continue;
+            ranges.add(key.range);
+          }
           const response = follow(entry, 'responses');
-          if (code.startsWith('x-') || !response) continue;
+          if (!response) continue;
           content(response['content'], 'received');
           const headers = response['headers'];
           if (!isRecord(headers)) continue;
@@ -1881,7 +1915,10 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
     case 'model': {
       const copy: ModelRef = { ...ref };
       if (isComponentModelRef(ref)) markComponentModelRef(copy);
-      if (isPendingSchemaRef(ref)) markPendingSchemaRef(copy);
+      if (isPendingSchemaRef(ref)) {
+        markPendingSchemaRef(copy);
+        recordPendingSiteLimits(copy, pendingSiteLimitsOf(ref));
+      }
       const key = inheritedModelRefs.get(ref);
       if (key !== undefined) recordInheritedRef(copy, key);
       return copy;
@@ -1901,14 +1938,24 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
         valueType: cloneTypeRef(ref.valueType),
         ...(ref.keyType ? { keyType: cloneTypeRef(ref.keyType) } : {}),
       };
-    case 'union':
-      return {
+    case 'union': {
+      const copy: UnionType = {
         ...ref,
         variants: ref.variants.map(cloneTypeRef),
         ...(ref.discriminator
           ? { discriminator: { ...ref.discriminator, mapping: { ...ref.discriminator.mapping } } }
           : {}),
       };
+      // A mapping entry deferred to a pointer variant (#539) follows the
+      // variant's copy, so the copy's mapping is settled with its own variants.
+      if (ref.discriminator && copy.discriminator) {
+        carryDeferredMappingEntries(
+          { variants: ref.variants, mapping: ref.discriminator.mapping },
+          { variants: copy.variants, mapping: copy.discriminator.mapping },
+        );
+      }
+      return copy;
+    }
     case 'literal':
     case 'primitive':
       return { ...ref };
@@ -2293,14 +2340,15 @@ export interface MergedAllOf {
   resolvedRefs: string[];
   /** The `$ref` members no component schema answers, each once, in order; they contribute nothing. */
   unresolvedRefs: string[];
+  /** The wrapper layer's text (`allOfWrapperLayer`): the wrapper's own, else the first annotating member's — a member that declares no type (#555 review); a typing member's stays on that member, a `$ref` member's on its component. */
   description: string | undefined;
-  /** The wrapper's own link, read like its description. */
+  /** The wrapper layer's link, read like its description. */
   externalDocs: ExternalDocs | undefined;
   /** The wrapper's own limits conjoined with its inline members' (a `$ref` member contributes only its sibling keywords). */
   constraints: Constraints | undefined;
-  /** `true` when the wrapper itself says `deprecated: true`; a member's flag is not read (a `$ref` member's stays on its model). */
+  /** `true` when the wrapper itself, or an annotating member, says `deprecated: true`; a typing member's flag is not read (a `$ref` member's stays on its model). */
   deprecated: boolean | undefined;
-  /** The wrapper's own extensions (`extensionsOf`), read like its link; a member's stay on that member, a `$ref` member's on its component. */
+  /** The wrapper layer's extensions (`extensionsOf`), read like its link; a typing member's stay on that member, a `$ref` member's on its component. */
   extensions: Extensions | undefined;
 }
 
@@ -2388,14 +2436,18 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     array, a primitive, an enum — `required` constrains nothing, and the
  *     member is the schema. Members beside it that declare no type of
  *     their own (`declaresType`: a `description`, a `deprecated`, a
- *     `maxLength`, an `x-*` key) add nothing to it either — they annotate
- *     or limit the schema, as the wrapper's own keywords do — so the one
- *     member that declares a type is the schema when every other member
- *     declares none (`allOfTypingMember`): `allOf: [{ type: 'string',
- *     enum: ['cat', 'dog'] }, { description: 'The kind of pet.' }]` is
- *     that enum, documented by the second member, exactly as `{ allOf:
- *     [{ type: 'string', enum: [...] }], description }` is
- *     (workos/oagen#555: it was `unknown`, the description lost with it).
+ *     `maxLength`, an `x-*` key, `items` that declare none themselves) add
+ *     nothing to it either — they annotate or limit the schema, as the
+ *     wrapper's own keywords do — so the one member that declares a type
+ *     is the schema when every other member declares none
+ *     (`allOfTypingMember`): `allOf: [{ type: 'string', enum: ['cat',
+ *     'dog'] }, { description: 'The kind of pet.' }]` is that enum,
+ *     documented by the second member, exactly as `{ allOf: [{ type:
+ *     'string', enum: [...] }], description }` is (workos/oagen#555: it
+ *     was `unknown`, the description lost with it), and `allOf: [{ type:
+ *     'array', items: { $ref: Owner } }, { items: { description } }]` is
+ *     an `Owner[]` whose items the second member documents
+ *     (`annotatedTypingMember`; the #555 review).
  *     Two members that each declare a type, neither of them properties —
  *     two primitives, say — are read as neither, and `allOfTypesSchema`
  *     leaves such a schema to its own keywords.
@@ -2451,11 +2503,16 @@ export function readInlineAllOf(
  * The one member of an `allOf` that declares a type of its own
  * (`declaresType`) when exactly one does, the others annotating or
  * limiting it — a `description`, `deprecated`, `readOnly`, an `example`, a
- * `maxLength`, an `x-*` key — which `readInlineAllOf` reads as the schema
- * (`'unwrapped'`, and `allOfTypesSchema` admits as an `allOf` that types
- * it). `undefined` when no member declares a type, or more than one does:
- * two inline objects merge, a `$ref` beside an inline object augments it,
- * and two primitives are read as neither (#555).
+ * `maxLength`, an `x-*` key, or `items` that declare no type themselves
+ * (`{ items: { description: 'An owner.' } }`, which documents the typing
+ * member's items: `annotatedTypingMember`) — which `readInlineAllOf` reads
+ * as the schema (`'unwrapped'`, and `allOfTypesSchema` admits as an `allOf`
+ * that types it). The member as written: the wrapper's keywords and the
+ * annotating members' land on it elsewhere (`annotatedTypingMember`,
+ * `unwrappedAllOfMember`, `allOfWrapperLayer`). `undefined` when no member
+ * declares a type, or more than one does: two inline objects merge, a
+ * `$ref` beside an inline object augments it, and two primitives — or an
+ * array beside `{ items: { type: 'string' } }` — are read as neither (#555).
  */
 export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObject | undefined {
   const typing = members.filter(declaresType);
@@ -2467,18 +2524,49 @@ export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObjec
  * (`declaresType`), in document order — each annotating or limiting the
  * schema rather than typing it, so what they write is the schema's own, as
  * a wrapper's keywords are: their limits conjoin (`extractConstraints`),
- * and their `description`, link, examples, flags, `default` and `x-*` keys
+ * their `description`, link, examples, flags, `default` and `x-*` keys
  * are the schema's wherever it declares none itself (`allOfWrapperLayer`,
- * `buildFieldFromSchema`, `extractParams`). Whatever the other members —
+ * `buildFieldFromSchema`, `extractParams`), and their `items` document the
+ * typing member's (`annotatedTypingMember`). Whatever the other members —
  * one typing member unwrapped (`allOfTypingMember`), a `$ref` read as the
  * reference, a merge — a member that declares no type documents the field
- * the schema is written on, never a model or component (#555: `allOf:
- * [{ $ref: Kind }, { description }]` was typed `Kind` with no description
- * on the field, and `{ deprecated: true }` or `{ readOnly: true }` beside
- * the `$ref` was dropped). Empty for a schema with no `allOf`.
+ * the schema is written on and the model built from the schema itself
+ * (`mergeAllOfMembers`, `extractAllOfModel`), never a component another
+ * member references (#555: `allOf: [{ $ref: Kind }, { description }]` was
+ * typed `Kind` with no description on the field, and `{ deprecated: true }`
+ * or `{ readOnly: true }` beside the `$ref` was dropped). Empty for a
+ * schema with no `allOf`.
  */
 export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
   return (schema.allOf ?? []).filter((member) => !declaresType(member));
+}
+
+/**
+ * The member an `allOf` read as `'unwrapped'` (`readInlineAllOf`) is typed
+ * and extracted as, as written: the one typing member
+ * (`allOfTypingMember`), or the first member where none types, its `items`
+ * — when it declares any — carrying what each annotating member's `items`
+ * write and they leave unset, the first such member's first
+ * (`withAnnotatedItems`, the reading `combineDeclarations` gives the same
+ * two declarations of one property; #431), so `allOf: [{ type: 'array',
+ * items: { $ref: Owner } }, { items: { description: 'An owner.' } }]` is
+ * `{ type: 'array', items: { $ref: Owner, description: 'An owner.' } }` —
+ * an `Owner[]` whose items the member documents, and an inline enum lifted
+ * from such items carries the text (#555 review: `items` counted as a
+ * type, so the member was a second typing member and the schema
+ * `unknown`). The wrapper's own keywords and the members' other keys are
+ * not read here: `unwrappedAllOfMember` carries the limits, flag and
+ * documentation, the type builder the layer's documentation
+ * (`allOfWrapperLayer`). Read by both, by `typesAsUnknown`,
+ * `mintedInlineNameEntries` and `resolveBareSchema`, so every site reads
+ * one member.
+ */
+export function annotatedTypingMember(wrapper: SchemaObject): SchemaObject {
+  const members = wrapper.allOf ?? [];
+  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  return annotatingAllOfMembers(wrapper)
+    .filter((other) => other !== member)
+    .reduce((typing, other) => withAnnotatedItems(typing, other), member);
 }
 
 /**
@@ -2494,8 +2582,16 @@ export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
  * says so, as `Field.deprecated` reads the levels of a field. The wrapper
  * itself when it has no annotating member. Read wherever a wrapper's
  * documentation lands on what it unwraps to (`unwrappedAllOfMember`, the
- * type builder's unwrapped branch) and wherever a wrapper's own text is
- * read as the schema's (`unwrapCollapsedWrappers`).
+ * type builder's unwrapped branch), wherever a wrapper's own text is
+ * read as the schema's (`unwrapCollapsedWrappers`), and by the model built
+ * from the wrapper itself — a component `allOf` (`extractAllOfModel`) or an
+ * inline merge (`mergeAllOfMembers`) — whose `description`, link,
+ * `deprecated` and `x-*` keys are the layer's, so `Owner: { allOf: [{ $ref:
+ * Base }, { properties: { name } }, { description: 'An owner.',
+ * deprecated: true }] }` is a deprecated `Owner` described "An owner.", as
+ * the same keys beside the `allOf` make it (#555 review: the model read the
+ * wrapper's own keys alone, and `oagen diff` between the two spellings
+ * reported `deprecatedChanged`).
  */
 export function allOfWrapperLayer(wrapper: SchemaObject): SchemaObject {
   const annotating = annotatingAllOfMembers(wrapper);
@@ -2533,8 +2629,9 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
 /**
  * The member of an `allOf` read as `'unwrapped'` (`readInlineAllOf`), read
  * as the schema itself: the lone member, or the one member that declares a
- * type among members that only annotate or limit it (`allOfTypingMember`;
- * #555). The wrapper's own keywords, conjoined with every member's, are the
+ * type among members that only annotate or limit it, its items documented
+ * by theirs (`annotatedTypingMember`; #555). The wrapper's own keywords,
+ * conjoined with every member's, are the
  * schema's limits (see `extractConstraints`), so they ride along with the
  * member and the model built from it carries the same constraints; its
  * `deprecated` is the wrapper layer's alone — the wrapper's own, or an
@@ -2550,8 +2647,7 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
  * stands in where no member declares a type, a shape no site unwraps.
  */
 export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
-  const members = wrapper.allOf ?? [];
-  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  const member = annotatedTypingMember(wrapper);
   // The wrapper layer's documentation — text, link, examples, extensions —
   // rides onto the member by the one wrapper rule (`withWrapperDocs`), the
   // wrapper's winning, as the type builder gives the same wrapper on a field.
@@ -2576,19 +2672,26 @@ export interface PropertyDeclarations {
 
 /**
  * Whether a declaration says what an instance is: a `type`, a `$ref`,
- * `properties`, `items`, an `enum` or `const`, a composition, or an
- * `additionalProperties`/`patternProperties` map. One that declares none —
- * a bare `description`, `title`, `example`, `deprecated`, `default`, or a
- * validation keyword on its own (`minimum: 1`) — annotates or constrains a
- * type another declaration gives, and is never read as the type itself
- * (`combineDeclarations`).
+ * `properties`, `items` that say so themselves, an `enum` or `const`, a
+ * composition, or an `additionalProperties`/`patternProperties` map. One
+ * that declares none — a bare `description`, `title`, `example`,
+ * `deprecated`, `default`, a validation keyword on its own (`minimum: 1`),
+ * or `items` that only document or limit an array's items (`items: {
+ * description }`, `items: {}`, read by this same test) — annotates or
+ * constrains a type another declaration gives, and is never read as the
+ * type itself (`combineDeclarations`, `allOfTypingMember`): `allOf:
+ * [{ type: 'array', items: { $ref: Owner } }, { items: { description: 'An
+ * owner.' } }]` is an `Owner[]` whose items the second member documents,
+ * as the same two declarations of one property are read (#431), not two
+ * typing members read as neither (#555 review: `items` counted as a type,
+ * and the schema was `unknown`).
  */
 export function declaresType(schema: SchemaObject): boolean {
   return (
     schema.type !== undefined ||
     schema.$ref !== undefined ||
     schema.properties !== undefined ||
-    schema.items !== undefined ||
+    (schema.items !== undefined && declaresType(schema.items)) ||
     schema.enum !== undefined ||
     schema.const !== undefined ||
     schema.allOf !== undefined ||
@@ -2635,9 +2738,12 @@ export function resetCombinedDeclarations(): void {
  * The first declaration that declares a type (`declaresType`) types the
  * property, whatever comes after it; a declaration that declares none never
  * does, before or after, and only fills in the keywords the typing one
- * leaves unset — so `has_more: { type: 'boolean' }` beside an `allOf`
- * member's `has_more: { description: 'More pages' }` is a described boolean
- * whichever is read first. Two typing declarations conjoin as JSON Schema
+ * leaves unset, its `items` — typeless too — those the typing one's items
+ * leave unset (`annotateDeclaration`) — so `has_more: { type: 'boolean' }`
+ * beside an `allOf` member's `has_more: { description: 'More pages' }` is
+ * a described boolean whichever is read first, and `data: { type: 'array',
+ * items: { $ref: Pet } }` beside `data: { items: { description: 'A pet' } }`
+ * a `Pet[]` whose items carry the text. Two typing declarations conjoin as JSON Schema
  * applies both: two inline objects (`isInlineObjectSchema`) merge their
  * properties — a name both declare by this same rule — and unite their
  * `required`, the later's other keywords (a `description`) over the
@@ -2685,10 +2791,44 @@ export function combineDeclarations(held: SchemaObject, next: SchemaObject): Sch
 
 /** What `combineDeclarations` returns, built anew on every call. */
 function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
-  if (!declaresType(held) && declaresType(next)) return { ...held, ...next };
+  if (!declaresType(held) && declaresType(next)) return annotateDeclaration(next, held);
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
-  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
-  return unset.length === 0 ? held : { ...Object.fromEntries(unset), ...held };
+  return annotateDeclaration(held, next);
+}
+
+/**
+ * `typing` with what `annotating` — a declaration that declares no type
+ * (`declaresType`), before or after it — writes and `typing` leaves unset
+ * filled in, the one reading `combineDeclarations` gives such a pair. Its
+ * `items`, which declare no type either, fill in the typing declaration's
+ * own items the same way (`withAnnotatedItems`) and supply none where it
+ * declares none: `{ type: 'array', items: { $ref: Pet } }` beside `{ items:
+ * { description: 'A pet' } }` is a `Pet[]` whose items carry the text,
+ * whichever is read first (#431), and `{ type: 'string' }` beside it stays
+ * a `string`. `typing` itself when nothing is added.
+ */
+function annotateDeclaration(typing: SchemaObject, annotating: SchemaObject): SchemaObject {
+  const { items: _items, ...keywords } = annotating;
+  const unset = Object.entries(keywords).filter(([key]) => !Object.hasOwn(typing, key));
+  const filled = unset.length === 0 ? typing : { ...Object.fromEntries(unset), ...typing };
+  return withAnnotatedItems(filled, annotating);
+}
+
+/**
+ * `typing` with its `items`, when it declares any, carrying what
+ * `annotating`'s `items` write and they leave unset
+ * (`combineDeclarations`: `annotating` declares no type, so neither do its
+ * items) — the reading of a typeless `items` beside a typed one wherever
+ * two declarations meet: a property two members declare
+ * (`annotateDeclaration`) and the one typing member of an `allOf` beside a
+ * member that only documents its items (`annotatedTypingMember`; #555
+ * review). `typing` itself when either declares no `items`, or the items
+ * gain nothing.
+ */
+function withAnnotatedItems(typing: SchemaObject, annotating: SchemaObject): SchemaObject {
+  if (typing.items === undefined || annotating.items === undefined) return typing;
+  const items = combineDeclarations(typing.items, annotating.items);
+  return items === typing.items ? typing : { ...typing, items };
 }
 
 /** Two typing declarations of one property, conjoined as `combineDeclarations` describes; `first` when they do not combine. */
@@ -3075,16 +3215,24 @@ export function mergeAllOfMembers(
   );
   // Limits conjoin the way properties merge, so the merged model declares what
   // an instance must satisfy; a `$ref` member's target keeps its own limits.
+  // The text, link, flag and extensions are the wrapper layer's: the
+  // wrapper's own, with an annotating member's — one that declares no type
+  // — where it declares none (`allOfWrapperLayer`; #555 review: `allOf:
+  // [{ properties: { a } }, { description: 'D', deprecated: true }]` built
+  // a model with neither, while the same keys beside the `allOf` were its
+  // own). A typing member's stay on that member, a `$ref` member's on its
+  // component.
+  const layer = allOfWrapperLayer(schema);
   return {
     properties,
     required,
     resolvedRefs,
     unresolvedRefs,
-    description: schema.description,
-    externalDocs: readExternalDocs(schema.externalDocs),
+    description: layer.description,
+    externalDocs: readExternalDocs(layer.externalDocs),
     constraints: extractConstraints(schema),
-    deprecated: schema.deprecated === true || undefined,
-    extensions: extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
+    deprecated: layer.deprecated === true || undefined,
+    extensions: extensionsOf(layer, SCHEMA_CONSUMED_EXTENSIONS),
   };
 }
 
@@ -3255,19 +3403,21 @@ export function unionOfDeclarations(declarations: readonly SchemaObject[]): Sche
     if (group) group.push(declaration);
     else groups.set(key, [declaration]);
   }
-  const shapes = [...groups.values()].map(shapeVariant);
+  // Each shape is its first declaration, the limits inside its items and
+  // values read by the agreement of every declaration of that shape
+  // (`withAgreedNestedLimits`), whether it is the one shape or one of
+  // several: a limit one array declaration's items write and another's
+  // leave out is no limit of the items whichever array is declared first,
+  // and whether or not an integer is declared beside them (#545 review).
+  const shapes = [...groups.values()].map((group) => withAgreedNestedLimits(shapeVariant(group), group));
   // One shape: the first declaration, carrying the agreed keywords and
-  // extensions in place of its own — inside its items and values too, for
-  // the limits their types carry.
+  // extensions in place of its own.
   if (shapes.length === 1) {
     const first = shapes[0]!;
     const disputed = new Set(
       LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
     );
-    return withAgreedExtensions(
-      withAgreedNestedLimits(disputed.size > 0 ? omitKeys(first, disputed) : first, declarations),
-      extensions,
-    );
+    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
   }
   const anyAdmitsNull = shapes.some(admitsNull);
   const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
@@ -3275,17 +3425,22 @@ export function unionOfDeclarations(declarations: readonly SchemaObject[]): Sche
 }
 
 /**
- * `shape`, the one declaration a single shape is typed from, with the
- * limits inside its array items and map values (`NESTED_DECLARATION_KEYWORDS`,
- * recursively) read by the same agreement as its own: a limit the items or
- * values of every declaration write the same way stays, one any declaration
- * leaves unset or writes otherwise is dropped (`agreedDeclarationKeys`).
- * The items' or values' type carries those limits (#545), and the value
- * takes one branch, so a `maxLength: 5` one declaration's items write and
- * another's leave out is no limit of the field's items; before, nothing in
- * the IR read them there. Every other lifted keyword written inside the
- * items or values — `readOnly`, `description`, `default`, … — stays the
- * first declaration's, as it did, since a field reads none of them there.
+ * `shape`, the declaration one shape is typed from (`shapeVariant`), with
+ * the limits inside its array items and map values
+ * (`NESTED_DECLARATION_KEYWORDS`, recursively) read by the agreement of
+ * `declarations`, the declarations of that shape, as a single shape's own
+ * are read by every declaration's: a limit the items or values of every
+ * declaration write the same way stays, one any declaration leaves unset
+ * or writes otherwise is dropped (`agreedDeclarationKeys`). The items' or
+ * values' type carries those limits (#545), and the value takes one
+ * branch, so a `maxLength: 5` one declaration's items write and another's
+ * leave out is no limit of the field's items; before, nothing in the IR
+ * read them there. Read per shape, so two array declarations beside an
+ * integer agree on their items as they would without it, whichever array
+ * comes first (#545 review: the first array's `pattern` was every item's).
+ * Every other lifted keyword written inside the items or values —
+ * `readOnly`, `description`, `default`, … — stays the first declaration's,
+ * as it did, since a field reads none of them there.
  */
 function withAgreedNestedLimits(shape: SchemaObject, declarations: readonly SchemaObject[]): SchemaObject {
   let out = shape;

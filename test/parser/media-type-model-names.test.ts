@@ -639,6 +639,7 @@ describe("a later 2xx's secondary body is named for its status code, as its prim
     });
   const modelsOf = (spec: ApiSpec) =>
     spec.models.map(({ fields, name }) => `${name} { ${fields.map((f) => f.name).join(', ')} }`);
+  const enumsOf = (spec: ApiSpec) => spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value).join(', ')}]`);
   /** Each change as the issue's script prints it, with the retyped media types, and the exit code `oagen diff` ends with. */
   const diff = (before: ApiSpec, after: ApiSpec) => {
     const { changes, summary } = diffSpecs(before, after);
@@ -781,28 +782,210 @@ describe("a later 2xx's secondary body is named for its status code, as its prim
       expect(yamlOf(spec)).toEqual(['200: none', `201: ${YAML}`, `202: ${YAML}202`]);
     });
 
-    it('steps a later body past a schema that owns its status-coded name by number, never onto the primary', async () => {
+    it('steps a later body past a schema that owns its status-coded name by a number under that code, never onto the primary', async () => {
       const owned = (...names: string[]) => ({
         schemas: Object.fromEntries(names.map((name) => [name, obj({ other: str })])),
       });
       const one = await parseDocument(same({}, owned(`${YAML}201`)));
-      expect(yamlOf(one)).toEqual([`200: ${YAML}`, `201: ${YAML}2`]);
-      expect(modelsOf(one)).toContain(`${YAML}2 { id }`);
+      expect(yamlOf(one)).toEqual([`200: ${YAML}`, `201: ${YAML}201No2`]);
+      expect(modelsOf(one)).toContain(`${YAML}201No2 { id }`);
 
       // The bare name, `…Response200` and `…Response201` all owned: the 200
-      // steps to `…Response2`, and the 201, the same shape, past it to
-      // `…Response3` rather than onto the 200's model.
+      // steps to `…Response2`, and the 201, the same shape, to
+      // `…Response201No2`, a numbered run of its own — never onto the 200's
+      // model, nor past it to `…Response3` (review).
       const all = await parseDocument(same({}, owned(YAML, `${YAML}200`, `${YAML}201`)));
-      expect(yamlOf(all)).toEqual([`200: ${YAML}2`, `201: ${YAML}3`]);
+      expect(yamlOf(all)).toEqual([`200: ${YAML}2`, `201: ${YAML}201No2`]);
       expect(modelsOf(all)).toEqual(
         expect.arrayContaining([
           `${YAML} { other }`,
           `${YAML}200 { other }`,
           `${YAML}201 { other }`,
           `${YAML}2 { id }`,
-          `${YAML}3 { id }`,
+          `${YAML}201No2 { id }`,
         ]),
       );
+      expect(modelsOf(all)).not.toContain(`${YAML}3 { id }`);
+    });
+
+    describe('review: the later run never meets the primary’s, and a later enum is named as a later object is', () => {
+      /** A response with `{ id }` under `application/json` and YAML keys that differ only in case, the third only when given. */
+      const caseOnlyKeys = (description: string, third?: Record<string, unknown>) => ({
+        description,
+        content: {
+          'application/json': { schema: obj({ id: str }) },
+          'application/yaml': yaml({ id: str }),
+          'Application/YAML': yaml({ id: str, tag: str }),
+          ...(third && { 'APPLICATION/YAML': yaml(third) }),
+        },
+      });
+      /** A response with `{ id }` under `application/json` and an inline enum of `members` under `application/yaml`. */
+      const jsonAndEnum = (members: string[], description = 'ok') => ({
+        description,
+        content: {
+          'application/json': { schema: obj({ id: str }) },
+          'application/yaml': { schema: { type: 'string', enum: members } },
+        },
+      });
+      const jsonType = (code = '') => `application/json → CreatePetResponse${code}`;
+      /** A response with `{ id }` under `application/json` alone. */
+      const json = () => ({ description: 'ok', content: { 'application/json': { schema: obj({ id: str }) } } });
+
+      it('keeps the 201’s numbered body when the 200 gains a third case-only key: the new body is the only change', async () => {
+        const before = await parseDocument(
+          createPet(openapi, { '200': caseOnlyKeys('ok'), '201': caseOnlyKeys('created') }),
+        );
+        const after = await parseDocument(
+          createPet(openapi, { '200': caseOnlyKeys('ok', { name: str }), '201': caseOnlyKeys('created') }),
+        );
+
+        // The 201's second YAML body is numbered under its status code, not
+        // `…Response2`, the stem the primary's bodies step to next.
+        expect(contentsOf(before)).toEqual([
+          `200: ${jsonType()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200`,
+          `201: ${jsonType('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
+        ]);
+        // The 200's third key takes `…Response2`; the 201's bodies are untouched.
+        expect(contentsOf(after)).toEqual([
+          `200: ${jsonType()}, application/yaml → ${YAML}, Application/YAML → ${YAML}200, APPLICATION/YAML → ${YAML}2`,
+          `201: ${jsonType('201')}, application/yaml → ${YAML}201, Application/YAML → ${YAML}201No2`,
+        ]);
+        expect(modelsOf(after)).toEqual([
+          'CreatePetResponse { id }',
+          'CreatePetResponse201 { id }',
+          `${YAML} { id }`,
+          `${YAML}200 { id, tag }`,
+          `${YAML}2 { name }`,
+          `${YAML}201 { id }`,
+          `${YAML}201No2 { id, tag }`,
+        ]);
+        expect(diff(before, after)).toEqual({
+          changes: [`additive model-added ${YAML}2`, 'additive operation-modified createPet'],
+          exit: 1,
+        });
+      });
+
+      it('keeps the 201’s numbered body when the 200’s stops fitting the component that owns the bare name: only the 200 retypes', async () => {
+        const owned = {
+          schemas: Object.fromEntries([YAML, `${YAML}200`, `${YAML}201`].map((name) => [name, obj({ other: str })])),
+        };
+        const before = await parseDocument(
+          createPet(openapi, { '200': jsonAndYaml({ other: str }), '201': jsonAndYaml({ id: str }, 'created') }, owned),
+        );
+        const after = await parseDocument(
+          createPet(
+            openapi,
+            { '200': jsonAndYaml({ id: str, extra: str }), '201': jsonAndYaml({ id: str }, 'created') },
+            owned,
+          ),
+        );
+
+        // The 200's body fits the component and shares its name; the 201's
+        // steps past the owned `…Response201` to `…Response201No2`.
+        expect(yamlOf(before)).toEqual([`200: ${YAML}`, `201: ${YAML}201No2`]);
+        // The 200's body no longer fits and steps to `…Response2`; the 201's stays.
+        expect(yamlOf(after)).toEqual([`200: ${YAML}2`, `201: ${YAML}201No2`]);
+        expect(modelsOf(after)).toEqual(expect.arrayContaining([`${YAML}2 { id, extra }`, `${YAML}201No2 { id }`]));
+        expect(diff(before, after)).toEqual({
+          changes: [
+            `additive model-added ${YAML}2`,
+            'breaking operation-modified createPet 200 retyped application/yaml',
+          ],
+          exit: 2,
+        });
+      });
+
+      it('names a later enum of other members for its own status code, as an object there is; one of the same members shares', async () => {
+        const enums = (members202: string[]) =>
+          createPet(openapi, {
+            '200': jsonAndEnum(['a', 'b']),
+            '201': jsonAndEnum(['a', 'b'], 'created'),
+            '202': jsonAndEnum(members202, 'accepted'),
+            '203': jsonAndEnum(['c', 'd'], 'non-authoritative'),
+          });
+        const spec = await parseDocument(enums(['c', 'd']));
+
+        expect(yamlOf(spec)).toEqual([`200: ${YAML}`, `201: ${YAML}201`, `202: ${YAML}202`, `203: ${YAML}202`]);
+        expect(enumsOf(spec)).toEqual([`${YAML} [a, b]`, `${YAML}201 [a, b]`, `${YAML}202 [c, d]`]);
+
+        // An object body in the 202's place takes the same name.
+        const objects = await parseDocument(same({ '202': jsonAndYaml({ c: str }, 'accepted') }));
+        expect(yamlOf(objects)).toEqual([`200: ${YAML}`, `201: ${YAML}201`, `202: ${YAML}202`]);
+
+        // A member added to the 202's enum changes that enum alone; the 203,
+        // no longer of its members, is named for itself — an enum of the
+        // members it had, which the differ pairs by shape, so nothing breaks.
+        const grown = await parseDocument(enums(['c', 'd', 'e']));
+        expect(yamlOf(grown)).toEqual([`200: ${YAML}`, `201: ${YAML}201`, `202: ${YAML}202`, `203: ${YAML}203`]);
+        expect(diff(spec, grown)).toEqual({
+          changes: [`additive enum-added ${YAML}203`, `additive enum-modified ${YAML}202`],
+          exit: 1,
+        });
+      });
+
+      it('never lets a later object take the stem of a later primitive or $ref body, which owns no name (Greptile)', async () => {
+        const components = { schemas: { Pet: obj({ name: str }) } };
+        const withYaml = (yaml?: unknown) => ({
+          description: 'created',
+          content: {
+            'application/json': { schema: obj({ id: str }) },
+            ...(yaml !== undefined && { 'application/yaml': { schema: yaml } }),
+          },
+        });
+        // The 201's YAML body removed: the 202's model must not move.
+        const without = await parseDocument(
+          createPet(
+            openapi,
+            { '200': json(), '201': withYaml(), '202': jsonAndYaml({ c: str }, 'accepted') },
+            components,
+          ),
+        );
+        expect(yamlOf(without)).toEqual(['200: none', '201: none', `202: ${YAML}202`]);
+
+        for (const yaml201 of [str, { type: 'array', items: str }, { $ref: '#/components/schemas/Pet' }]) {
+          const spec = await parseDocument(
+            createPet(
+              openapi,
+              { '200': json(), '201': withYaml(yaml201), '202': jsonAndYaml({ c: str }, 'accepted') },
+              components,
+            ),
+          );
+          // The 201's body is a string, an array of strings or `Pet`, never
+          // a model named `…Response201`; the 202's object is `…Response202`,
+          // not the free `…Response201`.
+          expect(yamlOf(spec)[2]).toBe(`202: ${YAML}202`);
+          expect(modelsOf(spec).filter((m) => m.includes('Yaml'))).toEqual([`${YAML}202 { c }`]);
+          expect(diff(spec, without)).toEqual({ changes: ['breaking operation-modified createPet'], exit: 2 });
+        }
+      });
+
+      it('never shares a later enum with a later object, nor the reverse: each is named for its status code', async () => {
+        const spec = await parseDocument(
+          same({
+            '202': jsonAndEnum(['a', 'b'], 'accepted'),
+            '203': jsonAndYaml({ id: str }, 'non-authoritative'),
+            '206': jsonAndEnum(['a', 'b'], 'partial'),
+          }),
+        );
+
+        // The 202's enum steps past the 201's model to `…Response202`; the
+        // 203, the 201's shape, shares `…Response201` past the enum; the
+        // 206, the 202's members, shares `…Response202`.
+        expect(yamlOf(spec)).toEqual([
+          `200: ${YAML}`,
+          `201: ${YAML}201`,
+          `202: ${YAML}202`,
+          `203: ${YAML}201`,
+          `206: ${YAML}202`,
+        ]);
+        expect(enumsOf(spec)).toEqual([`${YAML}202 [a, b]`]);
+        expect(modelsOf(spec)).toEqual([
+          'CreatePetResponse { id }',
+          'CreatePetResponse201 { id }',
+          `${YAML} { id }`,
+          `${YAML}201 { id }`,
+        ]);
+      });
     });
 
     it('leaves a component response, a 3xx, an error and a default entry named as before', async () => {

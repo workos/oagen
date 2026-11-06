@@ -100,10 +100,12 @@ export async function verifyCommand(opts: {
   const diagData: VerifyDiagnostics = {};
 
   // Parse as `generate` parses, and expand doc URLs as it does, so every IR
-  // verify reads — the compat scope, the retry's regeneration input and both
-  // staleness inputs — is the IR the SDK in `--output` was generated from
-  // (#567). Without `operationHints`, the `ListPetsResponse` a pagination
-  // hint makes generation write is scoped out of compat and never found stale.
+  // verify reads — the compat scope, the retry's regeneration input, both
+  // staleness inputs and the smoke step's baseline — is the IR the SDK in
+  // `--output` was generated from (#567). Without `operationHints`, the
+  // `ListPetsResponse` a pagination hint makes generation write is scoped out
+  // of compat and never found stale; without `operationIdTransform`, the
+  // spec-only baseline lists methods the SDK does not have.
   const parseAsGenerate = async (path: string): Promise<ApiSpec> => {
     const ir = await parseSpec(path, {
       operationIdTransform,
@@ -115,6 +117,8 @@ export async function verifyCommand(opts: {
     });
     return docUrl ? expandDocUrls(ir, docUrl) : ir;
   };
+  // `--spec`, parsed once for every step that reads it.
+  const parsedSpec = spec ? await parseAsGenerate(spec) : undefined;
 
   // Resolve compat options: CLI flags take precedence over config
   const effectiveFailOn: CompatFailLevel =
@@ -133,18 +137,16 @@ export async function verifyCommand(opts: {
     console.log(separator);
 
     const effectiveScope = scope ?? (spec ? 'spec-only' : 'full');
-    let parsedSpec;
-    if (effectiveScope === 'spec-only' && spec) {
-      parsedSpec = await parseAsGenerate(spec);
-    } else if (effectiveScope === 'spec-only') {
+    if (effectiveScope === 'spec-only' && !parsedSpec) {
       throw new CommandError('error: --scope spec-only requires --spec <path>', '', 1);
     }
+    const scopeSpec = effectiveScope === 'spec-only' ? parsedSpec : undefined;
 
     const compatFlow =
-      parsedSpec && maxRetries > 0
+      scopeSpec && maxRetries > 0
         ? await runOverlayRetryLoop({
             baseline,
-            parsedSpec,
+            parsedSpec: scopeSpec,
             outputDir: output,
             lang,
             maxRetries,
@@ -162,7 +164,7 @@ export async function verifyCommand(opts: {
             status: 'passed' as const,
             attempts: 0,
             patchedPerIteration: [],
-            compatResult: await runCompatCheck(baseline, output, lang, parsedSpec),
+            compatResult: await runCompatCheck(baseline, output, lang, scopeSpec),
           };
 
     const compatSummary = summarizeCompatCheck(compatFlow.compatResult);
@@ -180,7 +182,7 @@ export async function verifyCommand(opts: {
 
     if (diagnostics) {
       diagData.compatCheck = compatSummary;
-      if (parsedSpec && maxRetries > 0) {
+      if (scopeSpec && maxRetries > 0) {
         setRetryDiagnostics(
           diagData,
           compatFlow.attempts,
@@ -242,14 +244,13 @@ export async function verifyCommand(opts: {
     stepNum++;
   }
 
-  if (oldSpec && spec && apiSurface && baseline) {
+  if (oldSpec && parsedSpec && apiSurface && baseline) {
     console.log(`\n${separator}`);
     console.log(`Step ${stepNum}: Staleness detection`);
     console.log(separator);
 
     const oldParsedSpec = await parseAsGenerate(oldSpec);
-    const newParsedSpec = await parseAsGenerate(spec);
-    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, newParsedSpec, lang);
+    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, parsedSpec, lang);
 
     if (stalenessResult.violations.length > 0) {
       console.log(`Found ${stalenessResult.violations.length} stale symbol(s):`);
@@ -282,8 +283,12 @@ export async function verifyCommand(opts: {
   console.log(`Step ${stepNum}: Smoke test + diff`);
   console.log(separator);
 
+  // The smoke scripts get the IR `--spec` parses to (as `--ir`), so the
+  // spec-only baseline lists the operations `generate` reads rather than
+  // those of a bare parse (#567).
   const smokeResult = runSmokeCheck({
     spec,
+    parsedSpec,
     lang,
     output,
     rawResults,

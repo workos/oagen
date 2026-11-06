@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import { collectModelRefs, collectResponseBodyTypes, collectResponseHeaders } from '../../src/ir/types.js';
-import type { ApiSpec, Enum, Model, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, EnumRef, Model, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #305: the `<Name>Json` fold compared the models it would collapse by
@@ -1300,5 +1300,199 @@ describe('`<Name>Json` fold — names read per kind (issue #534)', () => {
       '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
       '[oagen] Renamed child "PetJsonJsonMode" → "PetJsonMode"',
     ]);
+  });
+  /** Every name a model and an enum of `spec` both hold. */
+  const sharedNames = (spec: ApiSpec): string[] =>
+    spec.models.map((m) => m.name).filter((name) => spec.enums.some((e) => e.name === name));
+
+  it.each(['3.0.3', '3.1.0'])(
+    'drops the entry of an inline enum whose only reference a folded `…Json` model carried, one step down a chain (OAS %s)',
+    async (openapi) => {
+      // The issue's `model.json` one step down (MichaelDeBoey): `PetJson.mode` is lifted as
+      // `PetJsonMode`, and its only reference gives way to `PetJsonJson.mode` as `PetJson` takes
+      // `PetJsonJson`'s shape. The guard read the entry as `PetMode`, but the apply phase dropped
+      // only an entry a kept reference was renamed from, so it stayed and the model
+      // `PetJsonJsonJsonMode` landed beside it. The fold now drops every lifted entry it leaves
+      // unreferenced, so the model alone holds `PetJsonMode`.
+      const base = doc(openapi, {
+        Pet: obj({ name: str }),
+        PetJson: obj({ name: str, mode: ball }),
+        PetJsonJson: obj({ name: str, mode: ball, json_mode: obj({ q: str }) }),
+      });
+      const chain = {
+        ...base,
+        paths: {
+          ...base.paths,
+          '/pets/json/json': {
+            get: {
+              operationId: 'getPetJsonJson',
+              responses: {
+                '200': { description: 'ok', content: { 'application/json': { schema: ref('PetJsonJson') } } },
+              },
+            },
+          },
+        },
+      };
+      const { spec, warnings } = await parseWithWarnings(`${openapi}-chain.json`, chain);
+      expect(warnings).toEqual([
+        merged,
+        '[oagen] Merged "PetJsonJson" into "Pet" (3 fields, superset)',
+        '[oagen] Renamed child "PetJsonJsonJsonMode" → "PetJsonMode"',
+        '[oagen] Folded enum "PetJsonJsonMode" into "PetMode"',
+        '[oagen] Folded enum "PetJsonMode" into "PetMode"',
+      ]);
+      expect(describeModels(spec)).toEqual(['Pet {name,mode,json_mode}', 'PetJsonMode {q}']);
+      expect(fieldType(spec, 'Pet', 'mode')).toBe('enum PetMode');
+      expect(fieldType(spec, 'Pet', 'json_mode')).toBe('model PetJsonMode');
+      expect(spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value)}]`)).toEqual(['PetMode [ball,rope]']);
+      expect(sharedNames(spec)).toEqual([]);
+      expect(describeResponses(spec)).toEqual(['getPet: Pet', 'getPetJson: Pet', 'getPetJsonJson: Pet']);
+      expect(unresolvedReferences(spec)).toEqual([]);
+    },
+  );
+
+  it.each(['3.0.3', '3.1.0'])(
+    'drops the entry of an inline enum whose only reference a collapsed child carried (OAS %s)',
+    async (openapi) => {
+      // Greptile's document: `PetJsonCarrier.mode` is lifted as `PetJsonCarrierMode`, and its only
+      // reference goes with `PetJsonCarrier` as it collapses onto `PetCarrier`, whose own `mode`
+      // reads to the same name. The entry goes with it, so the model `PetJsonJsonCarrierMode`,
+      // renamed `PetJsonCarrierMode`, is the only type under that name.
+      const { spec, warnings } = await parseWithWarnings(
+        `${openapi}-carrier.json`,
+        doc(openapi, {
+          Pet: obj({ name: str }),
+          PetCarrier: obj({ mode: ball }),
+          PetJson: obj({ name: str, carrier: ref('PetJsonCarrier'), json_carrier_mode: ref('PetJsonJsonCarrierMode') }),
+          PetJsonCarrier: obj({ mode: ball }),
+          PetJsonJsonCarrierMode: obj({ q: str }),
+        }),
+      );
+      expect(warnings).toEqual([
+        merged,
+        '[oagen] Collapsed child "PetJsonCarrier" into existing "PetCarrier"',
+        '[oagen] Renamed child "PetJsonJsonCarrierMode" → "PetJsonCarrierMode"',
+        '[oagen] Folded enum "PetJsonCarrierMode" into "PetCarrierMode"',
+      ]);
+      expect(describeModels(spec)).toEqual([
+        'Pet {name,carrier,json_carrier_mode}',
+        'PetCarrier {mode}',
+        'PetJsonCarrierMode {q}',
+      ]);
+      expect(fieldType(spec, 'Pet', 'carrier')).toBe('model PetCarrier');
+      expect(fieldType(spec, 'Pet', 'json_carrier_mode')).toBe('model PetJsonCarrierMode');
+      expect(fieldType(spec, 'PetCarrier', 'mode')).toBe('enum PetCarrierMode');
+      expect(spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value)}]`)).toEqual([
+        'PetCarrierMode [ball,rope]',
+      ]);
+      expect(sharedNames(spec)).toEqual([]);
+      expect(describeResponses(spec)).toEqual(['getPet: Pet', 'getPetJson: Pet']);
+      expect(unresolvedReferences(spec)).toEqual([]);
+    },
+  );
+
+  it('drops a lifted entry whose only reference the fold removes, noted under the twin that carries its reading, in the pass alone', () => {
+    const enumRef = (name: string): TypeRef => ({ kind: 'enum', name, values: ['ball', 'rope'] });
+    const lifted = (...names: string[]): Enum[] =>
+      names.map((name) => ({
+        name,
+        values: [
+          { name: 'BALL', value: 'ball' },
+          { name: 'ROPE', value: 'rope' },
+        ],
+      }));
+    const fold = (
+      models: Model[],
+      enums: Enum[],
+    ): { kept: Model[]; folded: Map<string, EnumRef>; warnings: string[] } => {
+      const folded = new Map<string, EnumRef>();
+      const warnings: string[] = [];
+      const warn = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+        warnings.push(args.map(String).join(' '));
+      });
+      try {
+        return { kept: collapseJsonSuffixModels(models, [], [], enums, new Set(), folded), folded, warnings };
+      } finally {
+        warn.mockRestore();
+      }
+    };
+    const notes = (folded: Map<string, EnumRef>): string[] => [...folded].map(([name, ref]) => `${name} → ${ref.name}`);
+
+    // Down a chain: `PetJson.mode` gives way to `PetJsonJson.mode`, and the entry `PetJsonMode`
+    // goes with it, noted under the reference `Pet.mode` ends with.
+    const chainEnums = lifted('PetJsonMode', 'PetJsonJsonMode');
+    const chain = fold(
+      [
+        { name: 'Pet', fields: [field('a')] },
+        { name: 'PetJson', fields: [field('a'), field('mode', enumRef('PetJsonMode'))] },
+        {
+          name: 'PetJsonJson',
+          fields: [
+            field('a'),
+            field('mode', enumRef('PetJsonJsonMode')),
+            field('jsonMode', modelRef('PetJsonJsonJsonMode')),
+          ],
+        },
+        { name: 'PetJsonJsonJsonMode', fields: [field('q')] },
+      ],
+      chainEnums,
+    );
+    expect(chain.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Merged "PetJsonJson" into "Pet" (3 fields, superset)',
+      '[oagen] Renamed child "PetJsonJsonJsonMode" → "PetJsonMode"',
+    ]);
+    expect(describeFolded(chain.kept)).toEqual(['Pet {a,mode,jsonMode:PetJsonMode}', 'PetJsonMode {q}']);
+    expect(chain.kept[0]?.fields[1]?.type).toEqual(enumRef('PetMode'));
+    expect(chainEnums).toEqual([]);
+    expect(notes(chain.folded)).toEqual(['PetJsonJsonMode → PetMode', 'PetJsonMode → PetMode']);
+    expect(chain.folded.get('PetJsonMode')).toBe(chain.kept[0]?.fields[1]?.type);
+
+    // A collapsed member: `PetJsonCarrier.mode` goes with `PetJsonCarrier`, and the entry with it,
+    // noted under `PetCarrier.mode`, which carries the name it reads to; the holder's own entry
+    // stays, referenced as before.
+    const carrierEnums = lifted('PetCarrierMode', 'PetJsonCarrierMode');
+    const carrier = fold(
+      [
+        { name: 'Pet', fields: [field('a')] },
+        { name: 'PetCarrier', fields: [field('mode', enumRef('PetCarrierMode'))] },
+        {
+          name: 'PetJson',
+          fields: [
+            field('a'),
+            field('carrier', modelRef('PetJsonCarrier')),
+            field('jsonCarrierMode', modelRef('PetJsonJsonCarrierMode')),
+          ],
+        },
+        { name: 'PetJsonCarrier', fields: [field('mode', enumRef('PetJsonCarrierMode'))] },
+        { name: 'PetJsonJsonCarrierMode', fields: [field('q')] },
+      ],
+      carrierEnums,
+    );
+    expect(carrier.warnings).toEqual([
+      '[oagen] Merged "PetJson" into "Pet" (3 fields, superset)',
+      '[oagen] Collapsed child "PetJsonCarrier" into existing "PetCarrier"',
+      '[oagen] Renamed child "PetJsonJsonCarrierMode" → "PetJsonCarrierMode"',
+    ]);
+    expect(describeFolded(carrier.kept)).toEqual([
+      'Pet {a,carrier:PetCarrier,jsonCarrierMode:PetJsonCarrierMode}',
+      'PetCarrier {mode}',
+      'PetJsonCarrierMode {q}',
+    ]);
+    expect(carrierEnums.map((e) => e.name)).toEqual(['PetCarrierMode']);
+    expect(notes(carrier.folded)).toEqual(['PetJsonCarrierMode → PetCarrierMode']);
+    expect(carrier.folded.get('PetJsonCarrierMode')).toBe(carrier.kept[1]?.fields[0]?.type);
+
+    // An entry no reference carried going in is not the fold's to drop: it stays, as a component
+    // enum does, while the entry the rename left unreferenced is dropped as before.
+    const strayEnums = lifted('Stray', 'PetJsonMode');
+    fold(
+      [
+        { name: 'Pet', fields: [field('a')] },
+        { name: 'PetJson', fields: [field('a'), field('mode', enumRef('PetJsonMode'))] },
+      ],
+      strayEnums,
+    );
+    expect(strayEnums.map((e) => e.name)).toEqual(['Stray']);
   });
 });

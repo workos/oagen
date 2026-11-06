@@ -18,7 +18,9 @@ import {
   allOfTypingMember,
   allOfWrapperLayer,
   annotatingAllOfMembers,
+  combineDeclarations,
   declaresInlineProperties,
+  declaresType,
   extractInlineModelsFromProperties,
   isInlineAllOfMember,
   mergeAllOfMembers,
@@ -1664,8 +1666,9 @@ describe('round 3: a model is built exactly when the reading names one', () => {
     });
     const models = modelsByName(ir);
     expect(fieldsOf(models['Holder'])).toEqual(['pet?: HolderPet']);
-    // Built with no fields; the `description` is a member's own, not the wrapper's, so the model carries none.
-    expect(models['HolderPet']).toMatchObject({ fields: [], description: undefined });
+    // Built with no fields; the `description` is the member's, which declares
+    // no type and so is part of the wrapper, as the model reads it (#555 review).
+    expect(models['HolderPet']).toMatchObject({ fields: [], description: 'Pet' });
     expect(fieldsOf(models['CreatePetRequest'])).toEqual([
       'sole?: CreatePetRequestSole',
       'besideRef?: CreatePetRequestBesideRef',
@@ -2755,6 +2758,262 @@ describe('an allOf of one typing member beside members that only annotate or lim
     expect(resolveBareSchema({ allOf: [{ type: 'boolean' }, text] })).toEqual({ type: 'boolean' });
     expect(resolveBareSchema({ allOf: [ref('Flag'), text] }, { Flag: { type: 'boolean' } })).toEqual({
       type: 'boolean',
+    });
+  });
+
+  // The review (workos/oagen#587): the docs say an annotating member is part
+  // of the wrapper, but the model built from the schema — a component
+  // `allOf` (`extractAllOfModel`) or an inline merge (`mergeAllOfMembers`) —
+  // read the wrapper's own keys alone, so `Owner: { allOf: [{ $ref: Base },
+  // { properties }, { description: 'An owner.', deprecated: true }] }` was a
+  // model with neither while the same keys beside the `allOf` were its own,
+  // and `oagen diff` between the spellings reported `deprecatedChanged`.
+  it.each(['3.1.0', '3.0.3'])(
+    'documents and flags the model built from the schema by its annotating members, as the field (the review, OAS %s)',
+    async (openapi) => {
+      const Base: SchemaObject = { type: 'object', properties: { id: { type: 'string' } } };
+      const named: SchemaObject = { type: 'object', properties: { name: { type: 'string' } } };
+      const lettered: SchemaObject = { type: 'object', properties: { a: { type: 'string' } } };
+      const annotation: SchemaObject = {
+        description: 'An owner.',
+        deprecated: true,
+        externalDocs: { url: 'https://example.com/owner' },
+        'x-internal': true,
+      };
+      const docOf = (
+        schemas: Record<string, SchemaObject>,
+        pet: Record<string, SchemaObject>,
+        body: SchemaObject,
+      ): Record<string, unknown> => {
+        const spec = petDoc(openapi, pet) as { paths: Record<string, unknown>; components: { schemas: object } };
+        return {
+          ...spec,
+          paths: {
+            ...spec.paths,
+            '/owners': { get: { operationId: 'getOwner', responses: { '200': jsonResponse(body) } } },
+          },
+          components: { schemas: { ...spec.components.schemas, Base, ...schemas } },
+        };
+      };
+      const member = await parseWithoutWarnings(
+        docOf(
+          {
+            Owner: { allOf: [ref('Base'), named, annotation] },
+            // The wrapper's own text wins; a blank one declares none, as under every wrapper.
+            Own: { allOf: [ref('Base'), named, { description: 'Member.' }], description: 'Own.' },
+            Blank: { allOf: [ref('Base'), named, { description: 'Member.' }], description: '' },
+            // `deprecated` from any annotating member; the text from the first that has one.
+            Flagged: { allOf: [ref('Base'), named, { description: 'A' }, { deprecated: true }, { description: 'B' }] },
+            // A typing member's own keys stay on that member.
+            Typed: { allOf: [ref('Base'), { ...named, description: 'The name part.', deprecated: true }] },
+          },
+          {
+            owner: ref('Owner'),
+            own: ref('Own'),
+            blank: ref('Blank'),
+            flagged: ref('Flagged'),
+            typed: ref('Typed'),
+            x: { allOf: [lettered, { description: 'D', deprecated: true, 'x-k': 'm' }] },
+          },
+          { allOf: [named, { deprecated: true, 'x-k': 'r' }] },
+        ),
+      );
+      const models = modelsByName(member);
+      expect(models['Owner']).toMatchObject({
+        description: 'An owner.',
+        deprecated: true,
+        externalDocs: { url: 'https://example.com/owner' },
+        extensions: { 'x-internal': true },
+      });
+      expect(fieldsOf(models['Owner'])).toEqual(['id?: string', 'name?: string']);
+      expect(models['Own']?.description).toBe('Own.');
+      expect(models['Blank']?.description).toBe('Member.');
+      expect(models['Flagged']).toMatchObject({ description: 'A', deprecated: true });
+      expect(models['Typed']?.description).toBeUndefined();
+      expect(models['Typed']?.deprecated).toBeUndefined();
+      // The inline merge: the field and the model it names read the member alike.
+      expect(shown(fieldOf(member, 'x'))).toEqual({ type: model('PetX'), description: 'D', deprecated: true });
+      expect(models['PetX']).toMatchObject({ description: 'D', deprecated: true, extensions: { 'x-k': 'm' } });
+      expect(fieldsOf(models['PetX'])).toEqual(['a?: string']);
+      // A merged response body carries the member's flag and keys as a component `allOf` does.
+      expect(opsOf(member)['getOwner']?.response).toEqual(model('GetOwnerResponse'));
+      expect(models['GetOwnerResponse']).toMatchObject({ deprecated: true, extensions: { 'x-k': 'r' } });
+      expectSound(member, ['Base', 'Blank', 'Flagged', 'Kind', 'Own', 'Owner', 'Pet', 'PetId', 'Typed']);
+
+      // `oagen diff` between the two spellings reports nothing, either way.
+      const beside = await parseWithoutWarnings(
+        docOf(
+          {
+            Owner: { allOf: [ref('Base'), named], ...annotation },
+            Own: { allOf: [ref('Base'), named], description: 'Own.' },
+            Blank: { allOf: [ref('Base'), named], description: 'Member.' },
+            Flagged: { allOf: [ref('Base'), named], description: 'A', deprecated: true },
+            Typed: { allOf: [ref('Base'), named] },
+          },
+          {
+            owner: ref('Owner'),
+            own: ref('Own'),
+            blank: ref('Blank'),
+            flagged: ref('Flagged'),
+            typed: ref('Typed'),
+            x: { allOf: [lettered], description: 'D', deprecated: true, 'x-k': 'm' },
+          },
+          { allOf: [named], deprecated: true, 'x-k': 'r' },
+        ),
+      );
+      expect(diffSpecs(beside, member).changes).toEqual([]);
+      expect(diffSpecs(member, beside).changes).toEqual([]);
+    },
+  );
+
+  // The review: `declaresType` counted `items`, so `{ items: { description }
+  // }` beside an array was a second typing member and the schema `unknown`
+  // with a warning, while `{ allOf: [array], items: { description } }` was
+  // the array. Items that declare no type themselves declare none for the
+  // member, and document the typing member's items as the same two
+  // declarations of one property do (#431).
+  it.each(['3.1.0', '3.0.3'])(
+    "reads a member whose items only document the array's items as annotating (the review, OAS %s)",
+    async (openapi) => {
+      const owners: SchemaObject = { type: 'array', items: ref('Owner') };
+      const itemsDoc: SchemaObject = { items: { description: 'An owner.' } };
+      const ir = await parseWithoutWarnings(
+        petDoc(openapi, {
+          owners: { allOf: [owners, itemsDoc] },
+          tags: { allOf: [{ type: 'array', items: kindEnum }, { items: { description: 'A tag.' } }, { minItems: 1 }] },
+          names: {
+            allOf: [
+              { type: 'array', items: { type: 'string', description: 'Own.' } },
+              { items: { description: 'Member.' }, description: 'The names.' },
+            ],
+          },
+        }),
+      );
+      expect(shown(fieldOf(ir, 'owners'))).toEqual({ type: { kind: 'array', items: model('Owner') } });
+      expect(shown(fieldOf(ir, 'tags'))).toEqual({
+        // The agreed limit is the array's too (#545).
+        type: {
+          kind: 'array',
+          items: { kind: 'enum', name: 'PetTags', values: ['cat', 'dog'] },
+          constraints: { minItems: 1 },
+        },
+        constraints: { minItems: 1 },
+      });
+      // The items' documentation rides onto the items: the enum lifted from them carries it.
+      expect(enumOf(ir, 'PetTags')).toMatchObject({ description: 'A tag.' });
+      expect(shown(fieldOf(ir, 'names'))).toEqual({ type: { kind: 'array', items: str }, description: 'The names.' });
+      expectSound(ir, ['Kind', 'Owner', 'Pet']);
+
+      // `oagen diff` against the wrapper spelling reports nothing.
+      const beside = await parseWithoutWarnings(
+        petDoc(openapi, {
+          owners: { allOf: [owners], ...itemsDoc },
+          tags: { allOf: [{ type: 'array', items: kindEnum }], minItems: 1 },
+          names: {
+            allOf: [{ type: 'array', items: { type: 'string', description: 'Own.' } }],
+            description: 'The names.',
+          },
+        }),
+      );
+      expect(diffSpecs(beside, ir).changes).toEqual([]);
+    },
+  );
+
+  it('decides items that declare no type once, for an allOf member and for two declarations of a property alike', () => {
+    const owners: SchemaObject = { type: 'array', items: ref('Owner') };
+    const itemsDoc: SchemaObject = { items: { description: 'An owner.' } };
+    const typedItems: SchemaObject = { items: { type: 'string' } };
+    expect(declaresType(itemsDoc)).toBe(false);
+    expect(declaresType({ items: {} })).toBe(false);
+    expect(declaresType(typedItems)).toBe(true);
+    expect(declaresType({ items: ref('Owner') })).toBe(true);
+    expect(declaresType({ type: 'array' })).toBe(true);
+
+    expect(allOfTypingMember([owners, itemsDoc])).toBe(owners);
+    expect(annotatingAllOfMembers({ allOf: [owners, itemsDoc] })).toEqual([itemsDoc]);
+    expect(readInlineAllOf([owners, itemsDoc])).toBe('unwrapped');
+    expect(classifyInlineSchema({ allOf: [owners, itemsDoc] })).toBe('allOf');
+    expect(typesAsUnknown({ allOf: [owners, itemsDoc] })).toBe(false);
+    expect(schemaToTypeRef({ allOf: [owners, itemsDoc] }, 'owners', 'Pet')).toEqual({
+      kind: 'array',
+      items: model('Owner'),
+    });
+    // Items that declare a type make a second typing member, read as neither, as before.
+    expect(allOfTypingMember([owners, typedItems])).toBeUndefined();
+    expect(readInlineAllOf([owners, typedItems])).toBe('reference');
+    expect(classifyInlineSchema({ allOf: [owners, typedItems] })).toBe('other');
+    expect(typesAsUnknown({ allOf: [owners, typedItems] })).toBe(true);
+
+    // The member's items carry what the annotating members' items write and
+    // they leave unset, the first member's first; a member with no items of
+    // its own takes none.
+    const later: SchemaObject = { items: { description: 'Later.', 'x-k': 'm' } };
+    expect(unwrappedAllOfMember({ allOf: [owners, itemsDoc, later] })).toEqual({
+      type: 'array',
+      items: { ...ref('Owner'), description: 'An owner.', 'x-k': 'm' },
+    });
+    expect(unwrappedAllOfMember({ allOf: [{ type: 'string' }, itemsDoc] })).toEqual({ type: 'string' });
+    expect(unwrappedAllOfMember({ allOf: [{ type: 'array' }, itemsDoc] })).toEqual({ type: 'array' });
+
+    // Two declarations of one property read the same pair the same way, in either order (#431).
+    const typed: SchemaObject = { type: 'array', items: { type: 'string', enum: ['a'] } };
+    const documented: SchemaObject = { items: { description: 'D' } };
+    const expected = { type: 'array', items: { type: 'string', enum: ['a'], description: 'D' } };
+    expect(combineDeclarations(typed, documented)).toEqual(expected);
+    expect(combineDeclarations(documented, typed)).toEqual(expected);
+    expect(combineDeclarations(typed, { ...documented, description: 'Outer' })).toEqual({
+      ...expected,
+      description: 'Outer',
+    });
+    expect(combineDeclarations({ type: 'string' }, documented)).toEqual({ type: 'string' });
+    expect(combineDeclarations(documented, { type: 'string' })).toEqual({ type: 'string' });
+    // A lone declaration keeps its identity when nothing is added.
+    expect(combineDeclarations(typed, { items: {} })).toBe(typed);
+  });
+
+  // Greptile on #587: the annotating members were folded as limit levels of
+  // their own, although `extractConstraints` already conjoins their limits
+  // with the schema's; folded first, a member's `pattern` or `multipleOf`
+  // won over the schema's own, which `combineConstraints` keeps.
+  it("keeps the schema's own pattern and multipleOf over a conflicting member's, as the base branch did (Greptile)", async () => {
+    const ir = await parseWithoutWarnings(
+      petDoc('3.1.0', {
+        pattern: { type: 'string', pattern: '^a', allOf: [{ pattern: 'b$' }] },
+        multiple: { type: 'integer', multipleOf: 2, allOf: [{ multipleOf: 3 }] },
+        described: { type: 'string', pattern: '^a', allOf: [{ pattern: 'b$' }, { description: 'Q' }] },
+        bounds: { type: 'string', minLength: 1, maxLength: 5, allOf: [{ minLength: 2, maxLength: 3 }] },
+        // Between members, document order: the typing member's first.
+        typing: {
+          allOf: [
+            { type: 'string', pattern: '^a' },
+            { pattern: 'b$', description: 'T' },
+          ],
+        },
+      }),
+    );
+    // The field's reading is its type's too (#545), the schema's own keyword winning on both.
+    const limited = (type: object, constraints: Record<string, unknown>) => ({ ...type, constraints });
+    expect(shown(fieldOf(ir, 'pattern'))).toEqual({
+      type: limited(str, { pattern: '^a' }),
+      constraints: { pattern: '^a' },
+    });
+    expect(shown(fieldOf(ir, 'multiple'))).toEqual({
+      type: limited(int, { multipleOf: 2 }),
+      constraints: { multipleOf: 2 },
+    });
+    expect(shown(fieldOf(ir, 'described'))).toEqual({
+      type: limited(str, { pattern: '^a' }),
+      constraints: { pattern: '^a' },
+      description: 'Q',
+    });
+    expect(shown(fieldOf(ir, 'bounds'))).toEqual({
+      type: limited(str, { minLength: 2, maxLength: 3 }),
+      constraints: { minLength: 2, maxLength: 3 },
+    });
+    expect(shown(fieldOf(ir, 'typing'))).toEqual({
+      type: limited(str, { pattern: '^a' }),
+      constraints: { pattern: '^a' },
+      description: 'T',
     });
   });
 });
