@@ -51,6 +51,7 @@ import {
   type ParameterObject,
   type SchemaOrContent,
 } from './operations.js';
+import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
@@ -1044,15 +1045,24 @@ type SiteDirection = 'sent' | 'received';
  * as `buildOperation` merges them, so a Path Item parameter the operation
  * overrides is no site — each written inline or through
  * `components/requestBodies` and `components/parameters`; what it receives
- * is every response it declares — a body at any status code, `default` or
- * range, and a header, inline or through `components/responses` and
- * `components/headers`, the `headers` map read as `extractResponseHeaders`
- * reads it: of two keys that differ in case alone, the later declaration
- * (#295), and never one keyed `Content-Type`, whatever its case, which
- * OpenAPI says to ignore (`isIgnoredResponseHeader`, #540) — so a
- * `Content-Type` header of `$ref: Pet` on `createPet`'s `204` leaves `Pet`
- * only sent, as the response without it does. A parameter or header is
- * read by the one schema that types it (`parameterTyping`): its `schema`,
+ * is every response `extractResponses` reads — a body and a header under a
+ * 200–599 status code, `default` or a `1XX`–`5XX` range, inline or through
+ * `components/responses` and `components/headers` — and nothing under a key
+ * the reader skips, each key classified as the reader classifies it
+ * (`classifyResponseKey`): a 1xx status code, which it keeps as written and
+ * types nothing of, an `x-` extension, a key OpenAPI does not define
+ * (`600`, `6XX`), warned about and ignored, and the later of two range keys
+ * that differ in case alone (`4xx` after `4XX`, `readFallbackResponse`) —
+ * so a `103` on `listNotes` with an `X-Pet` header or a body of `$ref: Pet`
+ * leaves `Pet` only sent, as the document without it does, while a `1XX`
+ * range with the same header receives it (#540 review). The `headers` map
+ * is read as `extractResponseHeaders` reads it: of two keys that differ in
+ * case alone, the later declaration (#295), and never one keyed
+ * `Content-Type`, whatever its case, which OpenAPI says to ignore
+ * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
+ * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
+ * parameter or header is read by the one schema that types it
+ * (`parameterTyping`): its `schema`,
  * else the schema of the `content` entry `selectParameterContent` picks, so
  * one the parser types as a string — a `content` map none of whose media
  * types is read, or a map beside a `schema`, which wins — reaches nothing.
@@ -1065,8 +1075,8 @@ type SiteDirection = 'sent' | 'received';
  * its responses type no body (`extractWebhookResponses`), and `callbacks`
  * are never read. A Path Item and every Reference Object are followed as the
  * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths` or a Responses Object stepped over and every `webhooks` key
- * read as a webhook. A schema
+ * of `paths` stepped over, a Responses Object's keys read as above and every
+ * `webhooks` key read as a webhook. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1197,9 +1207,26 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
         const responses = operation['responses'];
         if (webhooks || !isRecord(responses)) continue;
+        // Read as `extractResponses` reads the map, each key classified as
+        // the reader classifies it (`classifyResponseKey`): a 200–599 status
+        // code, `default` and a `1XX`–`5XX` range are read, body and headers
+        // alike, and of two range keys that differ in case alone (`4XX`
+        // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
+        // status code is kept as written and nothing of it typed, an `x-`
+        // key is an extension, and a key OpenAPI does not define (`600`,
+        // `6XX`) is warned about — once, by the reader — and ignored; none
+        // of those reaches a component (#540 review).
+        const ranges = new Set<string>();
         for (const [code, entry] of Object.entries(responses)) {
+          const key = classifyResponseKey(code);
+          if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
+          if (key.kind === 'status' && key.code < 200) continue;
+          if (key.kind === 'range') {
+            if (ranges.has(key.range)) continue;
+            ranges.add(key.range);
+          }
           const response = follow(entry, 'responses');
-          if (code.startsWith('x-') || !response) continue;
+          if (!response) continue;
           content(response['content'], 'received');
           const headers = response['headers'];
           if (!isRecord(headers)) continue;
