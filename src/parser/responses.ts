@@ -22,6 +22,7 @@ import {
   isArrayComponentRef,
   isNullSchema,
   collapsedNullableBranch,
+  referenceTypesAsUnknown,
   typesAsUnknown,
   warnOnUncarriedProperties,
   withWrapperDocs,
@@ -879,30 +880,40 @@ function directResourceReading(
 /**
  * Whether classification types a body as the bare `unknown` — the reading
  * `classifyAndExtractResponse` makes, without making it: a `$ref` is a
- * reference; the body is folded as classification folds it
- * (`foldSiblingProperties`, without the warning it then issues); a list
- * envelope and a single-resource wrapper are typed; and what is left takes
- * `extractDirectResource`'s own dispatch (`directResourceReading`): an
- * object, an `allOf` read as a reference or a merge, and an array are
- * typed, a lone `allOf` member is read as the member exactly as
- * `extractDirectResource` recurses into it, and a `typeRef` reading is
- * typed by `schemaToTypeRef` and is `unknown` exactly when `typesAsUnknown`
- * holds. The one answer a reader that must know before any body is read
- * asks (`bodyIsTyped`, choosing the primary response), so no shape is typed
- * by classification and unknown to it, or the reverse — `type: ['array']`
- * with items is an array to both.
+ * reference, typed as what it names — unknown exactly when it names a
+ * primitive component that declares no type, or an alias of one
+ * (`referenceTypesAsUnknown`; #569: `{ $ref: Anything }` beside `Anything:
+ * { description }` is `unknown`, as the same schema inline is); the body is
+ * folded as classification folds it (`foldSiblingProperties`, without the
+ * warning it then issues); a list envelope and a single-resource wrapper
+ * are typed; and what is left takes `extractDirectResource`'s own dispatch
+ * (`directResourceReading`): an object, an `allOf` read as a merge, and an
+ * array are typed, an `allOf` read as a reference is its `$ref` member
+ * (`referenceTypesAsUnknown` again), a lone `allOf` member is read as the
+ * member exactly as `extractDirectResource` recurses into it, and a
+ * `typeRef` reading is typed by `schemaToTypeRef` and is `unknown` exactly
+ * when `typesAsUnknown` holds. The one answer a reader that must know
+ * before any body is read asks (`bodyIsTyped`, choosing the primary
+ * response), so no shape is typed by classification and unknown to it, or
+ * the reverse — `type: ['array']` with items is an array to both.
  */
 export function bodyTypesAsUnknown(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
-  if (schema.$ref) return false;
+  if (schema.$ref) return referenceTypesAsUnknown(schema);
   const folded = foldSiblingProperties(schema);
   if (detectListEnvelope(folded).isEnvelope || isSingleResourceWrapper(folded)) return false;
   return directResourceTypesAsUnknown(folded, componentSchemas);
 }
 
-/** `bodyTypesAsUnknown` from `extractDirectResource`'s dispatch on, where its recursion into a lone `allOf` member lands. */
+/**
+ * `bodyTypesAsUnknown` from `extractDirectResource`'s dispatch on, where its
+ * recursion into a lone `allOf` member lands. A `reference` reading is typed
+ * by `schemaToTypeRef` as its `$ref` member, so it is unknown exactly when
+ * that reference is (`referenceTypesAsUnknown`; #569).
+ */
 function directResourceTypesAsUnknown(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
   const reading = directResourceReading(schema, componentSchemas);
   if (reading.kind === 'unwrapped') return directResourceTypesAsUnknown(reading.member, componentSchemas);
+  if (reading.kind === 'reference') return referenceTypesAsUnknown(schema);
   return reading.kind === 'typeRef' && typesAsUnknown(schema);
 }
 
