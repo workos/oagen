@@ -4361,6 +4361,45 @@ describe('#539', () => {
         ]);
       });
 
+      it('reads the one non-null member of a union collapsed to a nullable wrapper whole, never its own first variant', async () => {
+        captureWarnings();
+        const integer = { kind: 'primitive', type: 'integer' } as const;
+        const spec = await parse(
+          {
+            Cat: { type: 'object', properties: { kind: { type: 'string', enum: ['cat'] } } },
+            Dog: { type: 'object', properties: { kind: { type: 'string', enum: ['dog'] } } },
+            Shape: { oneOf: [ref('Cat'), ref('Dog')] },
+            Holder: {
+              type: 'object',
+              properties: {
+                maybe: { anyOf: [{ type: ['array', 'string'], items: { type: 'integer' } }, { type: 'null' }] },
+                shape: { anyOf: [ref('Shape'), { type: 'null' }] },
+                one: { oneOf: [{ type: 'object', properties: { a: { type: 'string' } } }] },
+                two: { oneOf: [ref('Cat'), ref('Dog'), { type: 'null' }] },
+              },
+            },
+          },
+          {
+            '/a/{id}': getOp('getMaybe', ref('Holder/properties/maybe/anyOf/0')),
+            '/b/{id}': getOp('getShape', ref('Holder/properties/shape/anyOf/0')),
+            '/c/{id}': getOp('getOne', ref('Holder/properties/one/oneOf/0')),
+            '/d/{id}': getOp('getTwo', ref('Holder/properties/two/oneOf/1')),
+          },
+          openapi,
+        );
+        const maybe = { kind: 'union', variants: [{ kind: 'array', items: integer }, string] };
+        expect(fieldOf(spec, 'Holder', 'maybe')?.type).toEqual({ kind: 'nullable', inner: maybe });
+        // The member of `anyOf: [X, null]` is the wrapper's inner type whole: a union of its own, or a named union.
+        expect(responseOf(spec, 'getMaybe')).toEqual(maybe);
+        expect(fieldOf(spec, 'Holder', 'shape')?.type).toEqual({ kind: 'nullable', inner: model('Shape') });
+        expect(responseOf(spec, 'getShape')).toEqual(model('Shape'));
+        // A union of one variant with no `null` beside it stays a union, so its member is indexed; so is one of several.
+        expect(responseOf(spec, 'getOne')).toEqual(model('HolderOne'));
+        expect(responseOf(spec, 'getTwo')).toEqual(model('Dog'));
+        expect(modelNames(spec)).toEqual(['Cat', 'Dog', 'Holder', 'HolderOne', 'Shape']);
+        expect(warnings).toEqual([]);
+      });
+
       it('decodes percent-escapes in a component key and in a property name as the bundler does (RFC 6901 §6)', async () => {
         captureWarnings();
         const spec = await parse(
