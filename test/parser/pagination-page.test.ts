@@ -1561,6 +1561,29 @@ describe('an explicit dataPath through the variants of a union (#556)', () => {
       );
     });
 
+    it('reads a node once per walk, so repeated references down a chain of unions do not multiply the work (Greptile)', () => {
+      // Twenty components, each an `anyOf` of two references to the next,
+      // ending on one object with `items`: every link doubles the routes.
+      const chain: Record<string, SchemaObject> = {
+        ...components,
+        End: object({ items: array(ref('Pet')), has_more: boolean }),
+      };
+      for (let link = 20; link >= 1; link--) {
+        const next = link === 20 ? 'End' : `Link${link + 1}`;
+        chain[`Link${link}`] = { anyOf: [ref(next), ref(next)] };
+      }
+      const started = performance.now();
+      expect(resolveDataPathArray(body(ref('Link1')), 'result.items', chain)).toEqual({ items: ref('Pet') });
+      const end = { kind: 'hasMore', path: 'result.has_more' } as const;
+      expect(endOfIterationProblem(end, { result: ref('Link1') }, chain)).toBeUndefined();
+      expect(performance.now() - started).toBeLessThan(1000);
+      // A leaf that lacks the array is still named, by the one route down to it.
+      const lacking = { ...chain, End: object({ total: integer }) };
+      expect(dataPathProblem(body(ref('Link1')), 'result.items', lacking)).toBe(
+        `${missing}: ${'variant 1 of the anyOf in '.repeat(19)}variant 1 of the anyOf at "result" declares no "items"`,
+      );
+    });
+
     it('types the items from the document through the union (resolveDataPathFromSchema)', () => {
       expect(
         resolveDataPathFromSchema(

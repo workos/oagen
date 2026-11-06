@@ -2987,7 +2987,7 @@ describe('an allOf of one typing member beside members that only annotate or lim
       }),
     );
     // The field's reading is its type's too (#545), the schema's own keyword winning on both.
-    const limited = (type: TypeRef, constraints: Record<string, unknown>) => ({ ...type, constraints });
+    const limited = (type: object, constraints: Record<string, unknown>) => ({ ...type, constraints });
     expect(shown(fieldOf(ir, 'pattern'))).toEqual({
       type: limited(str, { pattern: '^a' }),
       constraints: { pattern: '^a' },

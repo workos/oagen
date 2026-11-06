@@ -689,10 +689,13 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  * 'string', pattern: '^a', allOf: [{ pattern: 'b$' }] }` carries `^a`) —
  * and, for a reference to an array or primitive component, or to an alias
  * of an enum component, of every entry the reference passes
- * (`componentReference`: the wrappers and the members beside the `$ref`,
- * each alias, the component), conjoined from the component outward, as
- * JSON Schema applies every level at once and the wire enforces the
- * component's limit whatever is written beside the `$ref` (#512 review). A `$ref` to a model, named union or enum
+ * (`componentReference`: the wrappers and the members beside the `$ref`
+ * among `own`, then each alias and the component, each read once with its
+ * annotating members' limits — `limitEntries`; #588 review: as levels of
+ * their own, a member's `pattern` or `multipleOf` won over the alias's
+ * own), conjoined from the component outward, as JSON Schema applies every
+ * level at once and the wire enforces the component's limit whatever is
+ * written beside the `$ref` (#512 review). A `$ref` to a model, named union or enum
  * contributes none of the target's: that node carries its own. A JSON
  * Pointer `$ref` deeper into a component (#539) contributes none here
  * either, since what it lands on is typed after the fact: once
@@ -706,7 +709,7 @@ export function schemaConstraints(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
   const reference = componentReference(schema, componentSchemas);
-  return [...(reference?.own ?? [schema]), ...(reference?.entries ?? [])].reduceRight<Constraints | undefined>(
+  return [...(reference?.own ?? [schema]), ...(reference?.limitEntries ?? [])].reduceRight<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, extractConstraints(level)),
     undefined,
   );
@@ -2994,7 +2997,12 @@ function aliasEntryLevels(entry: SchemaObject): SchemaObject[] {
  * passes on its way to the declaration — the entry it names, each alias in
  * turn, the array or primitive component itself (`componentEntries`,
  * nearest first), each through the levels it declares the reference on
- * (`aliasEntryLevels`) — under its own. An enum component is no entry: the
+ * (`aliasEntryLevels`) for its documentation, and once, as one schema, for
+ * its limits (`limitEntries`: `extractConstraints` conjoins an entry's
+ * annotating members' limits with its own, the entry's `pattern` or
+ * `multipleOf` standing where a member's conflicts, as it reads a field's
+ * schema; #588 review: folded as levels, a member's `pattern: 'b$'` won
+ * over the alias's own `'^a'`) — under its own. An enum component is no entry: the
  * `Enum` carries what it declares, as it does for a bare `$ref` to it, so
  * the site reads the aliases alone and the enum's `example` as that `$ref`
  * reads it (`enumComponent`). A bare `$ref` reads all of it: text, flags,
@@ -3014,8 +3022,10 @@ function aliasEntryLevels(entry: SchemaObject): SchemaObject[] {
 export interface ComponentReference {
   /** The schemas on the way to the `$ref`, nearest first: the site's own and, under a wrapper, each wrapper, the members beside the `$ref` and the `$ref` schema with whatever is written beside it (`wrappedReference`). */
   own: SchemaObject[];
-  /** The levels of every entry the reference passes on its way to the array or primitive, nearest first (`componentEntries`, each entry with its annotating `allOf` members, `aliasEntryLevels`); for an alias of an enum, the aliases' alone. */
+  /** The levels of every entry the reference passes on its way to the array or primitive, nearest first (`componentEntries`, each entry with its annotating `allOf` members, `aliasEntryLevels`), which the site documents itself from; for an alias of an enum, the aliases' alone. */
   entries: SchemaObject[];
+  /** The entries themselves, nearest first, each once: what the site conjoins limits from, an entry's annotating members' read with its own by `extractConstraints` (#588 review: as levels of `entries`, a member's `pattern` or `multipleOf` won over the entry's own, which `combineConstraints` keeps); for an alias of an enum, the aliases alone. */
+  limitEntries: SchemaObject[];
   /** The enum component an alias chain ends at (#560), on the schema it declares its members on (`enumComponentDeclaration`), read for its `example`/`examples` as a bare `$ref` to it is, and by a parameter for the fallbacks it reads from any component a bare `$ref` names; absent for an array or primitive component, whose own declarations are among `entries`. */
   enumComponent?: SchemaObject;
   /** Whether the schema is the bare `$ref`, which reads the entries' documentation as well as their limits. */
@@ -3043,9 +3053,11 @@ export function componentReference(
   // members on (`enumComponentDeclaration`), as a bare `$ref` to it reads it.
   const last = entries[entries.length - 1];
   const enumComponent = declares === isEnumComponentSchema ? (enumComponentDeclaration(last) ?? last) : undefined;
+  const aliases = enumComponent ? entries.slice(0, -1) : entries;
   return {
     own: wrapped.levels,
-    entries: (enumComponent ? entries.slice(0, -1) : entries).flatMap(aliasEntryLevels),
+    entries: aliases.flatMap(aliasEntryLevels),
+    limitEntries: aliases,
     ...(enumComponent ? { enumComponent } : {}),
     bare: schema.$ref !== undefined,
   };

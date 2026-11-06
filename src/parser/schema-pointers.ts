@@ -16,7 +16,14 @@
  * alongside the document — from the component's own type
  * (`componentTypeRef`), through `properties/<name>` to that field's type,
  * `items` to the array's items, `additionalProperties` or
- * `patternProperties/<pattern>` to the map's values, `oneOf/<n>` or
+ * `patternProperties/<pattern>` to the map's values — when that schema is
+ * the one the map's values are typed from (`mapValueSchema`: a non-empty
+ * `additionalProperties`, else the first pattern; `additionalProperties:
+ * {}` types them `unknown`), so `patternProperties/^n` beside a first
+ * pattern `^s` names no type, never the other pattern's — or, for a model
+ * with named properties, to the catch-all `additionalProperties` field's
+ * values (`Box/additionalProperties` is `integer` for `Box: { properties:
+ * { id }, additionalProperties: { type: integer } }`), `oneOf/<n>` or
  * `anyOf/<n>` to the union's or the named union's n-th non-null variant,
  * and `allOf/<n>` to the member's own type: a `$ref` member's reference,
  * or, for the one member the `allOf` is read as (its one typing member
@@ -64,7 +71,17 @@
  * pointer variant is written as the model the variant settled to
  * (`settleDeferredMappingEntries`).
  */
-import type { Constraints, Model, ModelRef, Operation, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
+import type {
+  Constraints,
+  MapType,
+  Model,
+  ModelRef,
+  Operation,
+  Service,
+  TypeRef,
+  UnionType,
+  Webhook,
+} from '../ir/types.js';
 import {
   collectRequestBodyTypes,
   collectResponseBodyTypes,
@@ -81,7 +98,7 @@ import {
   withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
-import { allOfTypingMember, readInlineAllOf, replaceTypeRef } from './inline-models.js';
+import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
 import { paginatedItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
@@ -186,6 +203,15 @@ export function resolveSchemaPointers(
   return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
 }
 
+/** The map a model carries its `additionalProperties` values in: the last field named `additionalProperties` that is a map (`extractModel` pushes it after the named properties). */
+function catchAllField(model: Model | undefined): MapType | undefined {
+  for (let index = (model?.fields.length ?? 0) - 1; index >= 0; index--) {
+    const field = model!.fields[index]!;
+    if (field.name === 'additionalProperties' && field.type.kind === 'map') return field.type;
+  }
+  return undefined;
+}
+
 /** The model reference `variant` is, directly or under its nullable wrapper; `undefined` for any other variant. */
 function variantModelRef(variant: TypeRef): ModelRef | undefined {
   if (variant.kind === 'nullable') return variantModelRef(variant.inner);
@@ -287,7 +313,12 @@ export interface PointerStep {
  * to a schema (`schemaAtPointer`); a `oneOf`/`anyOf` step to the `null`
  * variant leads to no type (the IR carries it as nullability), nor does any
  * other keyword (`not`, `prefixItems`, `$defs`, …: the parser types nothing
- * under it), nor an `allOf` step that ends the pointer at an inline member
+ * under it), nor an `additionalProperties` or `patternProperties/<p>` step
+ * to a schema the map's values are not typed from (`mapValueSchema`: a
+ * non-empty `additionalProperties` wins, else the first pattern, and
+ * `additionalProperties: {}` types the values `unknown` on its own) or to
+ * a pattern beside named properties, which no field carries, nor an
+ * `allOf` step that ends the pointer at an inline member
  * the `allOf` is not read as (`readInlineAllOf`): the member declares into
  * the merged model, or only annotates the member the `allOf` is read as,
  * and has no type of its own — while an `allOf` step on the way through
@@ -308,9 +339,22 @@ export function pointerSteps(
     switch (keyword) {
       case 'properties':
       case 'items':
-      case 'additionalProperties':
-      case 'patternProperties':
         break;
+      case 'additionalProperties':
+      case 'patternProperties': {
+        // The IR types a map's values from one schema; a model with named
+        // properties carries a non-empty `additionalProperties` as its
+        // catch-all field and no pattern at all.
+        const represented = mapValueSchema(node);
+        const named = Object.keys(node.properties ?? {}).length > 0;
+        if (keyword === 'patternProperties' && named)
+          return { problem: `a schema with named properties types no "${keyword}/${name}" values` };
+        if (represented !== next && !(keyword === 'additionalProperties' && represented === null && !named))
+          return {
+            problem: `the values are typed from another schema than "${keyword}${name === undefined ? '' : `/${name}`}"`,
+          };
+        break;
+      }
       case 'oneOf':
       case 'anyOf':
         if (isNullSchema(next))
@@ -506,10 +550,21 @@ class PointerResolver {
           type = bare.items;
           break;
         case 'additionalProperties':
-        case 'patternProperties':
-          if (bare.kind !== 'map') return fail(`${describe(bare)} is no map to read "${keyword}" from`);
-          type = bare.valueType;
+        case 'patternProperties': {
+          if (bare.kind === 'map') {
+            type = bare.valueType;
+            break;
+          }
+          // A model with named properties carries its `additionalProperties`
+          // as a catch-all map field (`extractModel`), the last of its fields
+          // so named; its values are that field's. `pointerSteps` admits no
+          // pattern beside named properties.
+          const model = bare.kind === 'model' ? this.modelsByName.get(bare.name) : undefined;
+          const catchAll = keyword === 'additionalProperties' ? catchAllField(model) : undefined;
+          if (!catchAll) return fail(`${describe(bare)} is no map to read "${keyword}" from`);
+          type = catchAll.valueType;
           break;
+        }
         case 'oneOf':
         case 'anyOf': {
           // The IR carries a union's non-null variants only: the `null`
