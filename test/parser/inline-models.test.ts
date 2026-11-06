@@ -6566,4 +6566,46 @@ describe('#566', () => {
       await expectStable(spec, ir);
     },
   );
+
+  it.each(versions)(
+    'types a multi-type `Note.reply` (`type: [object, string]`, redeclared typeless) as the model on the path under OAS %s, every reference resolving',
+    async (openapi) => {
+      // Greptile on the cascaded head: `buildTypeRef` reads each type of the
+      // list from a copy of its own, which stood for nothing, so the type
+      // builder named `NoteReplyReplyReply` where the extractor, meeting the
+      // conjunction again, built nothing.
+      const cases: [string, string[], 'union' | 'nullable'][] = [
+        ['without null', ['object', 'string'], 'union'],
+        ['with null', ['object', 'string', 'null'], 'nullable'],
+      ];
+      for (const [label, type, kind] of cases) {
+        const spec = doc(
+          openapi,
+          note({ type, allOf: [ref('Note'), { properties: { reply: { description: 'x' } } }] }),
+        );
+        const ir = await parseWithoutWarnings(spec);
+        expect(summaries(ir), label).toEqual([
+          'Note {id, reply}',
+          'NoteReply {id, reply}',
+          'NoteReplyReply {id, reply}',
+        ]);
+        const types = fieldTypesByModel(ir.models);
+        // Each type of the list is read from its own copy, each standing for
+        // the field's declaration, so every one of them names the model on
+        // the path: `NoteReplyReply`'s own `reply` is `NoteReplyReply`.
+        const chain: [string, string][] = [
+          ['Note', 'NoteReply'],
+          ['NoteReply', 'NoteReplyReply'],
+          ['NoteReplyReply', 'NoteReplyReply'],
+        ];
+        for (const [owner, target] of chain) {
+          const reply = types[owner]?.['reply'] as TypeRef | undefined;
+          expect(reply?.kind, `${label}: ${owner}.reply`).toBe(kind);
+          expect([...new Set(reply ? collectModelRefs(reply) : [])], `${label}: ${owner}.reply`).toEqual([target]);
+        }
+        expectConsistent(ir, ['Note']);
+        await expectStable(spec, ir);
+      }
+    },
+  );
 });
