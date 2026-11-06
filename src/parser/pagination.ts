@@ -17,8 +17,10 @@ import {
   declaresNull,
   isArraySchema,
   isNullSchema,
+  nullableAxisBranch,
   resolveComponentSchemaRef,
   resolveSchemaName,
+  unionAxesOf,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
 } from './schemas.js';
@@ -586,7 +588,7 @@ function readFieldsNamed(
   // one a `$ref` member's component dispatches is left to that component.
   for (const union of unions) {
     if (!unionCounts(union, named, componentSchemas)) continue;
-    const fields = unionFields(union.schema, segment, componentSchemas, lookup);
+    const fields = unionFields(union, segment, componentSchemas, lookup);
     if (fields && fields.length > 0) return fields;
   }
   return undefined;
@@ -610,10 +612,9 @@ interface NamedField {
  * listed is `index` 3 whatever sits before it, as `variantLabel` names it),
  * and the union's keyword.
  */
-function variantsOf(union: SchemaObject): Array<{ step: VariantStep; variant: SchemaObject }> {
-  const keyword = union.oneOf ? 'oneOf' : 'anyOf';
-  return (union.oneOf ?? union.anyOf ?? []).flatMap((variant, index) =>
-    isNullSchema(variant) ? [] : [{ step: { index: index + 1, keyword }, variant }],
+function variantsOf(union: CollectedUnion): Array<{ step: VariantStep; variant: SchemaObject }> {
+  return union.variants.flatMap((variant, index) =>
+    isNullSchema(variant) ? [] : [{ step: { index: index + 1, keyword: union.keyword }, variant }],
   );
 }
 
@@ -630,7 +631,7 @@ function variantsOf(union: SchemaObject): Array<{ step: VariantStep; variant: Sc
  * carries the walk's completed lookups and cycle guard (`fieldsNamed`).
  */
 function unionFields(
-  union: SchemaObject,
+  union: CollectedUnion,
   segment: string,
   componentSchemas: Record<string, SchemaObject> | undefined,
   lookup: FieldLookup,
@@ -674,8 +675,7 @@ function unionFields(
 function unionCounts(union: CollectedUnion, named: boolean, componentSchemas?: Record<string, SchemaObject>): boolean {
   if (union.origin === null) return true;
   if (named && union.origin.direct) return true;
-  const variants = union.schema.oneOf ?? union.schema.anyOf ?? [];
-  return !componentUnionDispatches(variants, union.origin.name, componentSchemas, union.discriminator);
+  return !componentUnionDispatches(union.variants, union.origin.name, componentSchemas, union.discriminator);
 }
 
 function hasType(schema: SchemaObject, type: string): boolean {
@@ -826,7 +826,7 @@ export function collectObjectProperties(
   const unions: CollectedUnion[] = [];
   const seenRefs = new Set<string>();
   const seenNodes = new WeakSet<SchemaObject>();
-  let named = false;
+  let named: boolean | undefined;
 
   // The component a member's `$ref` names, as the model reads the member
   // (`CollectedUnion.origin`): the first reference the resolver followed
@@ -854,16 +854,51 @@ export function collectObjectProperties(
     if (seenNodes.has(s)) return;
     seenNodes.add(s);
     const followed = seenRefs.size;
-    const bare = resolveBareSchema(s, componentSchemas, seenRefs);
+    // A member's references are followed here first, recorded as the
+    // resolver records them, so a component writing both keywords is read
+    // per keyword below rather than collapsed by the resolver onto a
+    // nullable axis's one variant with the other axis lost.
+    let carrier = s;
+    while (depth > 0 && carrier.$ref) {
+      if (seenRefs.has(carrier.$ref)) return;
+      seenRefs.add(carrier.$ref);
+      const target = resolveComponentSchemaRef(carrier, componentSchemas);
+      if (!target) return;
+      carrier = target;
+    }
+    const bare =
+      depth > 0 && carrier.oneOf && carrier.anyOf ? carrier : resolveBareSchema(carrier, componentSchemas, seenRefs);
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
     // The node's own unions are its model's, whatever it resolves through;
     // a member's are read as the component its `$ref` names reads them.
-    if (depth === 0) named = seenRefs.size > followed;
+    named ??= seenRefs.size > followed;
     const origin = depth === 0 ? null : (inherited ?? memberOrigin(followed, depth));
-    if (bare.oneOf ?? bare.anyOf) {
-      unions.push({ schema: bare, origin, discriminator: bare.discriminator ?? wrapperDiscriminator });
+    const discriminator = bare.discriminator ?? wrapperDiscriminator;
+    if (depth === 0) {
+      // The node's own union is the one the type builder types it by: its
+      // `oneOf`, else its `anyOf` (`unionVariantsOf`).
+      const variants = bare.oneOf ?? bare.anyOf;
+      if (variants)
+        unions.push({ schema: bare, keyword: bare.oneOf ? 'oneOf' : 'anyOf', variants, origin, discriminator });
+    } else {
+      // A member's unions, one per keyword, as the merge reads them
+      // (`mergeAllOfMembers`, `unionAxesOf`); a nullable wrapper beside the
+      // other keyword is its one variant, read as one more member in the
+      // member's own capacity (`nullableAxisBranch`) — alone, the resolver
+      // collapsed it already (#398 review round 3: a member writing both was
+      // one union read by its `oneOf`, so a stop field only the `anyOf`'s
+      // variants declare, which the model has, resolved to no field).
+      for (const variants of unionAxesOf(bare)) {
+        const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
+        const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
+        if (branch) {
+          visit(branch, depth, origin, wrapperDiscriminator);
+          continue;
+        }
+        unions.push({ schema: bare, keyword, variants, origin, discriminator });
+      }
     }
     for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare));
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
@@ -875,7 +910,7 @@ export function collectObjectProperties(
   };
   visit(schema, 0, null);
 
-  return { properties, required, unions, named };
+  return { properties, required, unions, named: named ?? false };
 }
 
 /**
@@ -891,6 +926,8 @@ export function collectObjectProperties(
  */
 export interface CollectedUnion {
   schema: SchemaObject;
+  keyword: 'oneOf' | 'anyOf';
+  variants: SchemaObject[];
   origin: { name: string; direct: boolean } | null;
   discriminator?: SchemaObject['discriminator'];
 }
@@ -1098,7 +1135,7 @@ function variantLacking(
   const { unions, named } = collectObjectProperties(node, componentSchemas);
   for (const union of unions) {
     if (!unionCounts(union, named, componentSchemas)) continue;
-    for (const { step, variant } of variantsOf(union.schema)) {
+    for (const { step, variant } of variantsOf(union)) {
       if (fieldsNamed(variant, segment, componentSchemas, lookup)) continue;
       // Met again below itself: it declares nothing, and the step above names it.
       if (walking.has(variant)) return undefined;

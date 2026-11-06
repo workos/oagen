@@ -3674,6 +3674,159 @@ describe('#398', () => {
       },
     );
 
+    // Round 3 (Greptile): `$ref` variants whose tag is not written on the
+    // variant itself — inherited through an `allOf` `$ref` member, or a
+    // `$ref` to a const schema. The detection now reads the tags through
+    // the component map (#568's lookups), so the union dispatches and
+    // `oagen diff` sees a variant added or removed (it was flattened, and
+    // the diff saw a field change).
+    it.each(openapis)(
+      'dispatches $ref variants whose tag is inherited through an allOf $ref member, or is a $ref to a const schema, as tags written directly (OAS %s)',
+      async (openapi) => {
+        const tag = (value: string) => obj({ kind: { type: 'string', const: value } });
+        const spellings: Array<[string, Record<string, SchemaObject>]> = [
+          [
+            'inherited through an allOf $ref member',
+            {
+              CatTag: tag('cat'),
+              DogTag: tag('dog'),
+              BirdTag: tag('bird'),
+              Cat: { allOf: [ref('CatTag'), obj({ lives: str })] },
+              Dog: { allOf: [ref('DogTag'), obj({ breed: str })] },
+              Bird: { allOf: [ref('BirdTag'), obj({ wings: str })] },
+            },
+          ],
+          [
+            'a $ref to a const schema',
+            {
+              CatKind: { type: 'string', const: 'cat' },
+              DogKind: { type: 'string', const: 'dog' },
+              BirdKind: { type: 'string', const: 'bird' },
+              Cat: obj({ kind: ref('CatKind'), lives: str }),
+              Dog: obj({ kind: ref('DogKind'), breed: str }),
+              Bird: obj({ kind: ref('BirdKind'), wings: str }),
+            },
+          ],
+        ];
+        const petDoc = (schemas: Record<string, SchemaObject>, variants: SchemaObject[]) =>
+          doc(
+            openapi,
+            {
+              Base: obj({ id: str }, { required: ['id'] }),
+              ...schemas,
+              Pet: { allOf: [ref('Base'), { oneOf: variants }] },
+            },
+            { '/pets': getOp('getPet', ref('Pet')) },
+          );
+        for (const [label, schemas] of spellings) {
+          const { Bird: _bird, ...without } = schemas;
+          const ir = await parseWithoutWarnings(petDoc(without, [ref('Cat'), ref('Dog')]));
+          const models = modelsByName(ir);
+          expect(models['Pet']?.discriminator, label).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Cat', dog: 'Dog' },
+          });
+          expect(fieldsOf(models['Pet']), label).toEqual(['id: string']);
+          expectSound(ir, Object.keys(without).concat('Base', 'Pet'));
+          const withBird = await parseWithoutWarnings(petDoc(schemas, [ref('Cat'), ref('Dog'), ref('Bird')]));
+          expect(modelsByName(withBird)['Pet']?.discriminator?.mapping, label).toEqual({
+            cat: 'Cat',
+            dog: 'Dog',
+            bird: 'Bird',
+          });
+          const added = diffSpecs(ir, withBird).changes.find((c) => c.kind === 'model-modified' && c.name === 'Pet');
+          expect(added, label).toMatchObject({
+            classification: 'additive',
+            variantChanges: [{ kind: 'variant-added', variant: 'Bird', classification: 'additive' }],
+          });
+          const removed = diffSpecs(withBird, ir).changes.find((c) => c.kind === 'model-modified' && c.name === 'Pet');
+          expect(removed, label).toMatchObject({
+            classification: 'breaking',
+            variantChanges: [{ kind: 'variant-removed', variant: 'Bird', classification: 'breaking' }],
+          });
+        }
+        // An inline variant inheriting its tag the same way is named by it
+        // (`deriveDiscriminatedVariantName` reads through the map too), so
+        // the union dispatches and both variant models are built.
+        const inline = await parseWithoutWarnings(
+          petDoc({ CatTag: tag('cat'), DogTag: tag('dog') }, [
+            { allOf: [ref('CatTag'), obj({ lives: str })] },
+            { allOf: [ref('DogTag'), obj({ breed: str })] },
+          ]),
+        );
+        const inlineModels = modelsByName(inline);
+        expect(inlineModels['Pet']?.discriminator).toEqual({
+          property: 'kind',
+          mapping: { cat: 'PetCat', dog: 'PetDog' },
+        });
+        // The variant model carries the base and the variant's own members, as
+        // before: a `$ref` member among a dispatched inline variant's `allOf` is
+        // not flattened into it (nor is `Extra.color` beside a direct tag).
+        expect(typed(inlineModels['PetCat'])).toEqual(['id: string', 'lives?: string']);
+        expect(typed(inlineModels['PetDog'])).toEqual(['id: string', 'breed?: string']);
+        expectSound(inline, ['CatTag', 'DogTag', 'Base', 'Pet']);
+      },
+    );
+
+    // Round 3 (Greptile): a member writing both keywords in the pagination
+    // walk. The model reads both axes (round 1), so the walk collects one
+    // union per keyword and reads a nullable axis beside the other as its
+    // one variant, one more member (it collected the member as one union
+    // read by its `oneOf`, so a stop field only the `anyOf`'s variants
+    // declare, which the model has, resolved to no field).
+    it.each(openapis)(
+      'keeps an endOfIteration behind either keyword of a member writing both, as the model reads both (OAS %s)',
+      async (openapi) => {
+        const cursor = obj({ has_more: bool, next_after: str });
+        const page = obj({ has_more: bool, next_page: int });
+        const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+        const listPets = (meta: SchemaObject, path = 'meta.has_more') => ({
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: str }],
+              responses: { '200': jsonResponse(obj({ data: { type: 'array', items: str }, meta })) },
+              'x-pagination': { endOfIteration: { kind: 'hasMore', path } },
+            },
+          },
+        });
+        const metaBase = obj({ base: str });
+        const members: Array<[string, SchemaObject]> = [
+          ['one member', { oneOf: [obj({ a: str }), obj({ b: str })], anyOf: [cursor, page] }],
+          ['anyOf first', { anyOf: [obj({ a: str }), obj({ b: str })], oneOf: [cursor, page] }],
+          ['nullable oneOf beside the anyOf', { oneOf: [obj({ a: str }), { type: 'null' }], anyOf: [cursor, page] }],
+          ['nullable anyOf beside the oneOf', { anyOf: [obj({ a: str }), { type: 'null' }], oneOf: [cursor, page] }],
+        ];
+        for (const [label, member] of members) {
+          const ir = await parseWithoutWarnings(doc(openapi, {}, listPets({ allOf: [metaBase, member] })));
+          expect(opsOf(ir)['listPets']?.pagination?.endOfIteration, label).toEqual(endOfIteration);
+          expect(fieldsOf(modelsByName(ir)['Meta']), label).toContain('has_more?: boolean');
+        }
+        // The two keywords as two members read the same.
+        const split = await parseWithoutWarnings(
+          doc(
+            openapi,
+            {},
+            listPets({ allOf: [metaBase, { oneOf: [obj({ a: str }), obj({ b: str })] }, { anyOf: [cursor, page] }] }),
+          ),
+        );
+        expect(opsOf(split)['listPets']?.pagination?.endOfIteration).toEqual(endOfIteration);
+        // A field one of the `anyOf`'s variants lacks still resolves to none.
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const ir = await parseTempSpec(
+            doc(openapi, {}, listPets({ allOf: [metaBase, members[0]![1]] }, 'meta.next_after')),
+          );
+          expect(opsOf(ir)['listPets']?.pagination?.endOfIteration).toBeUndefined();
+          expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
+            expect.stringContaining('endOfIteration path "meta.next_after" does not resolve to a field'),
+          ]);
+        } finally {
+          warn.mockRestore();
+        }
+      },
+    );
+
     // Round 2 (Greptile): two variants inheriting one component. Each
     // variant is a conjunction of its own, with a cycle guard of its own, so
     // the component declares into both (the guard was shared across the
