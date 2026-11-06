@@ -723,7 +723,7 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * whose nullable wrappers are removed and sibling `properties` folded in
  * (`unwrapNullableSchema`), as `schemaToTypeRef` reads it.
  */
-function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
+export function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
   if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
   const reading = readInlineAllOf(schema.allOf, schema);
   if (reading === 'unwrapped') return unwrappedAllOfMember(schema, schema.allOf[0]);
