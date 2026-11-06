@@ -875,7 +875,11 @@ export function collectObjectProperties(
     // a member's are read as the component its `$ref` names reads them.
     named ??= seenRefs.size > followed;
     const origin = depth === 0 ? null : (inherited ?? memberOrigin(followed, depth));
-    const discriminator = bare.discriminator ?? wrapperDiscriminator;
+    // The `discriminator` declared for a union here: the schema's own, else
+    // the member's own written on a nullable wrapper the resolver collapsed
+    // (`carrier`), else the one handed down from above — as the readers read
+    // it, so `unionCounts` agrees with the model.
+    const discriminator = bare.discriminator ?? carrier.discriminator ?? wrapperDiscriminator;
     if (depth === 0) {
       // The node's own union is the one the type builder types it by: its
       // `oneOf`, else its `anyOf` (`unionVariantsOf`).
@@ -894,7 +898,7 @@ export function collectObjectProperties(
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
         if (branch) {
-          visit(branch, depth, origin, wrapperDiscriminator);
+          visit(branch, depth, origin, discriminator);
           continue;
         }
         unions.push({ schema: bare, keyword, variants, origin, discriminator });

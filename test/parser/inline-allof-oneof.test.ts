@@ -3867,6 +3867,99 @@ describe('#398', () => {
       },
     );
 
+    // Round 6 (Greptile): a member writing its own `discriminator` on a
+    // nullable wrapper around the union. The wrapper's one variant is read
+    // with that `discriminator` by the component reader, the variant
+    // builder, the inline merge and the pagination walk alike (the readers
+    // dropped it at the wrapper, so the union was flattened instead of
+    // dispatched, and the builder followed).
+    it.each(openapis)(
+      'dispatches by a discriminator a member writes on a nullable wrapper, at every site (OAS %s)',
+      async (openapi) => {
+        const mapping = (cat: string, dog: string) => ({
+          propertyName: 'kind',
+          mapping: { cat: `#/components/schemas/${cat}`, dog: `#/components/schemas/${dog}` },
+        });
+        const member: SchemaObject = {
+          oneOf: [{ oneOf: [ref('Cat'), ref('Dog')] }, { type: 'null' }],
+          discriminator: mapping('Cat', 'Dog'),
+        };
+        const pet: SchemaObject = { allOf: [base, member] };
+        const inline: SchemaObject = { allOf: [ref('Pet'), obj({ trace: str })] };
+        const ir = await parseWithoutWarnings(
+          doc(
+            openapi,
+            {
+              Cat: obj({ kind: str, lives: str }),
+              Dog: obj({ kind: str, breed: str }),
+              Pet: pet,
+              Holder: obj({ pet: inline }),
+            },
+            { '/pets': getOp('getPet', inline), '/holders': getOp('getHolder', ref('Holder')) },
+          ),
+        );
+        const models = modelsByName(ir);
+        expect(models['Pet']?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } });
+        expect(fieldsOf(models['Pet'])).toEqual(['name: string']);
+        for (const name of ['GetPetResponse', 'HolderPet']) {
+          expect(fieldsOf(models[name]), name).toEqual(['name: string', 'trace?: string']);
+          expect(models[name]?.discriminator, name).toBeUndefined();
+        }
+        // Every mapping target names a built model.
+        expectSound(ir, ['Cat', 'Dog', 'Pet', 'Holder']);
+        // The pagination walk leaves the union to the dispatcher as well: a
+        // stop field only the dispatched variants declare is not the model's.
+        const metaMember: SchemaObject = {
+          oneOf: [{ oneOf: [ref('CursorMeta'), ref('PageMeta')] }, { type: 'null' }],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: { cursor: '#/components/schemas/CursorMeta', page: '#/components/schemas/PageMeta' },
+          },
+        };
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const paged = await parseTempSpec(
+            doc(
+              openapi,
+              {
+                CursorMeta: obj({ kind: str, has_more: bool }),
+                PageMeta: obj({ kind: str, has_more: bool }),
+                MetaDispatcher: { allOf: [obj({ base: str }), metaMember] },
+              },
+              {
+                '/list': {
+                  get: {
+                    operationId: 'listPets',
+                    parameters: [{ name: 'after', in: 'query', schema: str }],
+                    responses: {
+                      '200': jsonResponse(
+                        obj({
+                          data: { type: 'array', items: str },
+                          meta: { allOf: [ref('MetaDispatcher'), obj({ trace_id: str })] },
+                        }),
+                      ),
+                    },
+                    'x-pagination': { endOfIteration: { kind: 'hasMore', path: 'meta.has_more' } },
+                  },
+                },
+              },
+            ),
+          );
+          expect(opsOf(paged)['listPets']?.pagination?.endOfIteration).toBeUndefined();
+          expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
+            expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field'),
+          ]);
+          expect(fieldsOf(modelsByName(paged)['Meta'])).toEqual(['base?: string', 'trace_id?: string']);
+          expect(modelsByName(paged)['MetaDispatcher']?.discriminator?.mapping).toEqual({
+            cursor: 'CursorMeta',
+            page: 'PageMeta',
+          });
+        } finally {
+          warn.mockRestore();
+        }
+      },
+    );
+
     // Round 4 (Greptile): a union nested in a variant. Each nested branch is
     // read as a conjunction of its own, settled before it joins the variant's
     // ledger, with a guard of its own (the branches were read into the

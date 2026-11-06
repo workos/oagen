@@ -5038,7 +5038,7 @@ function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): 
   return { ledger, required: new Set(), seen: new Set() };
 }
 
-/** How a member is read: the one variant axis not to read (the dispatcher base reads its axis for its own properties only), and the `discriminator` the `allOf` wrapper writes for a union among its members. */
+/** How a member is read: the one variant axis not to read (the dispatcher base reads its axis for its own properties only), and the `discriminator` written for a union among the members outside the member that carries it — on the `allOf` wrapper, or on a nullable wrapper around the union. */
 interface MemberReadingOptions {
   skipAxis?: readonly SchemaObject[];
   wrapperDiscriminator?: DiscriminatorKeyword;
@@ -5078,7 +5078,9 @@ interface MemberReadingOptions {
  * the member carries (`unionAxesOf`: a `oneOf` and an `anyOf` written
  * together are two) is a dispatcher when its variants pin one property to distinct
  * consts, or the document declares a `discriminator` for it — on the
- * member, or on the wrapper whose `allOf` the member sits in
+ * member, on a nullable wrapper the member writes around the union (handed
+ * down with the wrapper's one variant), or on the wrapper whose `allOf` the
+ * member sits in
  * (`wrapperDiscriminator`; `detectAllOfVariantDiscriminator`, which reads a
  * `$ref` variant's const from its component): its variants' properties are
  * not read, and the discriminator is returned (the first, when two axes
@@ -5132,7 +5134,12 @@ function readComponentAllOfMember(
   for (const [index, variants] of axes.entries()) {
     const branch = branches[index];
     if (branch) {
-      const wrapped = readComponentAllOfMember(name, branch, schemas, reading, options);
+      // The member's own `discriminator`, written on the wrapper, goes with
+      // the variant (#398 review round 6: the recursion passed the options
+      // unchanged, so a mapping on the wrapper never reached the union under
+      // it, which was flattened instead of dispatched).
+      const wrapperDiscriminator = resolved.discriminator ?? options.wrapperDiscriminator;
+      const wrapped = readComponentAllOfMember(name, branch, schemas, reading, { ...options, wrapperDiscriminator });
       discriminator ??= wrapped;
       continue;
     }
@@ -5516,10 +5523,11 @@ function followMemberRefs(
   return resolved;
 }
 
-/** One union a component's `allOf` member carries: the schema that writes it (for its `discriminator`) and its variants. */
+/** One union a component's `allOf` member carries: the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it. */
 interface MemberUnion {
   carrier: SchemaObject;
   variants: SchemaObject[];
+  discriminator?: DiscriminatorKeyword;
 }
 
 /**
@@ -5529,7 +5537,11 @@ interface MemberUnion {
  * nullable union wrapper (`nullableAxisBranch`) to its one non-null
  * variant, the two alternating — in the order the member reader reads
  * them: an axis that is no wrapper as it stands, a nullable axis as the
- * unions its one variant carries. None for a member that carries none, or
+ * unions its one variant carries, each with the `discriminator` declared
+ * for it on the way (the carrier's own, else the wrapper's around it, as
+ * the member reader hands a wrapper's down; #398 review round 6: a mapping
+ * on the wrapper was forgotten, and the builder flattened what the reader
+ * dispatched). None for a member that carries none, or
  * an `allOf` member (read as a component composed with `allOf`, never as
  * a variant axis). The one way the variant builder
  * (`extractDiscriminatedAllOfVariantModels`) finds a variant axis, so a
@@ -5548,6 +5560,7 @@ function memberUnions(
   member: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
   seen = new Set<SchemaObject>(),
+  wrapper?: DiscriminatorKeyword,
 ): MemberUnion[] {
   const carrier = followMemberRefs(member, schemas, seen);
   if (!carrier || carrier.allOf) return [];
@@ -5559,11 +5572,12 @@ function memberUnions(
     if (seen.has(carrier)) return [];
     seen.add(carrier);
   }
+  const discriminator = carrier.discriminator ?? wrapper;
   const unions: MemberUnion[] = [];
   for (const [index, variants] of axes.entries()) {
     const branch = branches[index];
-    if (branch) unions.push(...memberUnions(branch, schemas, seen));
-    else unions.push({ carrier, variants });
+    if (branch) unions.push(...memberUnions(branch, schemas, seen, discriminator));
+    else unions.push({ carrier, variants, discriminator });
   }
   return unions;
 }
@@ -5647,8 +5661,8 @@ function discriminatedVariantSchemas(
   // variant took the name of the flattened field's own model).
   const axisVariants = new Map<SchemaObject, SchemaObject[]>();
   for (const m of members) {
-    for (const { carrier, variants } of memberUnions(m, schemas)) {
-      const explicit = carrier.discriminator ?? wrapperDiscriminator;
+    for (const { variants, discriminator } of memberUnions(m, schemas)) {
+      const explicit = discriminator ?? wrapperDiscriminator;
       if (detectAllOfVariantDiscriminator(variants, fallbackName, schemas, explicit) === null) continue;
       axisVariants.set(m, variants);
       break;

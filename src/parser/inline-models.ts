@@ -3239,11 +3239,12 @@ export function mergeAllOfMembers(
     // as the component reader hands it on (`readComponentAllOfMember`), so a
     // union a `$ref` member's component dispatches under a nullable wrapper
     // is left to it here too (#398 review round 5: the merge followed the
-    // wrapper without it, and flattened the fields the component leaves out).
+    // wrapper without it, and flattened the fields the component leaves out)
+    // — the member's own, written on the wrapper, first (round 6).
     for (const variants of unionAxesOf(s)) {
       const branch = nullableAxisBranch(s, variants);
       if (branch) {
-        visit(branch, origin, wrapperDiscriminator);
+        visit(branch, origin, s.discriminator ?? wrapperDiscriminator);
         continue;
       }
       const explicit = s.discriminator ?? wrapperDiscriminator;
