@@ -682,6 +682,11 @@ export function extractOperations(
     modelOperationIds,
     sharedWith,
   );
+  // A stem two distinct `operationId`s clean to (`listNotes` and
+  // `listNotesByExternalId`, both `ListNotes`) qualifies neither operation's
+  // header and parameter models: each is qualified by its id as written
+  // instead (see headerOperationQualifier).
+  const contestedStems = contestedOperationIdStems(resolvedPaths, modelOperationIds, sharedWith);
 
   /** Every operation built, by its plan key (`${method} ${path}`). */
   const operationsByKey = new Map<string, Operation>();
@@ -772,6 +777,7 @@ export function extractOperations(
         registeredModels,
         registry,
         modelOperationIds.get(key),
+        contestedStems,
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
@@ -1366,12 +1372,43 @@ interface ServiceSplit {
  * to `listPets` and never keeps the first marker's digit (`listPets1`), and
  * one of nothing but markers (`[1][2]`) normalizes to `''` and names nothing
  * (readOperationIds), as `[1]` does (#565). Brackets at the end (or
- * with trailing whitespace) are common in NestJS-style backends; this regex
- * is intentionally narrow to avoid eating legitimate digits like `oauth2`,
- * and a marker not at the end (`list[1]Pets`) is left as written.
+ * with trailing whitespace) are common in NestJS-style backends; the rule is
+ * intentionally narrow to avoid eating legitimate digits like `oauth2`: a
+ * marker not at the end (`list[1]Pets`) is left as written, and so is the
+ * whitespace before the first (`listPets [1]` keeps `listPets `).
+ *
+ * A marker is `[`, one or more ASCII digits and `]`, with any whitespace
+ * after it (the code units `\s` matches); nothing else is one, so `[]`,
+ * `[1 ]`, `[ 1]` and `[1]-[2]` keep their last character. The id is read
+ * once, from its end backwards, one marker at a time. A regex of the repeated
+ * group (`/(?:\[\d+\]\s*)+$/`) retried the match from every marker of an id
+ * that ends in something else, quadratic in the number of markers: sixteen
+ * thousand of them before one letter stalled the parser for half a second,
+ * and the parser reads an `operationId` of any length.
  */
 function normalizeOperationIdForNaming(operationId: string): string {
-  return operationId.replace(/(?:\[\d+\]\s*)+$/, '');
+  let end = operationId.length;
+  for (;;) {
+    // Whitespace is stripped only behind a marker: when none precedes it, it stays.
+    let i = end;
+    while (i > 0 && isWhitespace(operationId.charAt(i - 1))) i--;
+    if (i === 0 || operationId.charAt(i - 1) !== ']') break;
+    const digitsEnd = --i;
+    while (i > 0 && isAsciiDigit(operationId.charAt(i - 1))) i--;
+    if (i === digitsEnd || i === 0 || operationId.charAt(i - 1) !== '[') break;
+    end = i - 1;
+  }
+  return operationId.slice(0, end);
+}
+
+/** Whether one character is `0`–`9`: what `\d` matches. */
+function isAsciiDigit(char: string): boolean {
+  return char >= '0' && char <= '9';
+}
+
+/** Whether one UTF-16 code unit is whitespace: what `\s` matches, tested on that unit alone. */
+function isWhitespace(char: string): boolean {
+  return /\s/.test(char);
 }
 
 /**
@@ -3078,6 +3115,8 @@ function buildOperation(
    * own.
    */
   modelOperationId?: string | null,
+  /** The stems more than one operation names its models from (`contestedOperationIdStems`), which qualify no header or parameter model. */
+  contestedStems: ReadonlySet<string> = new Set(),
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3165,7 +3204,7 @@ function buildOperation(
   const opContext = serviceName;
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext);
+  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext, contestedStems);
   // What the typing of a parameter, a response header or a secondary,
   // fallback or error body reads from the operation and the spec; a schema
   // deferred through it is typed once every operation has been read
@@ -3496,8 +3535,10 @@ function buildOperation(
   // what an operationIdTransform makes of the `operationId` renames no type,
   // unless the transform makes nothing of it, which reads the `operationId`
   // as absent (readOperationIds). The header and parameter models are
-  // qualified by the same stem (`headerOperationQualifier`, since #537), so
-  // the rule holds for every model the operation mints.
+  // qualified by the same stem (`headerOperationQualifier`, since #537) —
+  // or, when another operation's models are named from that stem too, by
+  // the id PascalCased before the cleaning, which no transform changes
+  // either — so the rule holds for every model the operation mints.
   const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
@@ -3550,19 +3591,46 @@ function responseTypeRefs(op: Operation): TypeRef[] {
  * beside `NoteListResponse`, whatever an `operationIdTransform` names the
  * operation — the operation's PascalCase name, before #537, renamed the
  * header and parameter models (`PetsListNotesXMeta`) with every change to
- * the transform while the bodies kept their names. A path-named operation
- * uses the path-derived stem, so a verb or singular change in
- * inferOperationName must not rename a generated type either. That stem's
- * leading service word is dropped when it ends on a word boundary, since the
- * model name already starts with the service:
- * `Notes` + `ByIdPinPost` + `XMeta`, beside `NotesByIdPinPostResponse`.
+ * the transform while the bodies kept their names. The stem must be the
+ * operation's own, though: when another operation's models are named from
+ * the same stem (`contestedStems`, see `contestedOperationIdStems`) — two
+ * distinct ids that `cleanSchemaName` makes alike, `listNotesByExternalId`
+ * beside `listNotes` (`ByExternalId` is a marker it strips), `Notes_List`
+ * beside `Note_List` (the leading word is singularized), `listNotesController`
+ * beside `listNotes` (`Controller` is stripped) — or when the stem names
+ * nothing (`ListItem` cleans to nothing), the operation is qualified by its
+ * id PascalCased before the cleaning instead (`toPascalCase` of the id, its
+ * overload markers stripped), which no transform changes either:
+ * `PetsListNotesByExternalIdXMeta` beside `listNotes`'s `PetsListNotesXMeta`,
+ * `PetsNotesListXMeta` beside `PetsNoteListXMeta`,
+ * `PetsListNotesControllerXMeta`, and `PetsListItemXMeta`. One qualifier
+ * for the two operations read as one to the shape registry and to
+ * `deferredNamingStem`'s `withinOperation` test, so the second one's
+ * clashing models fell to names that say nothing about the operation
+ * (`PetsXMeta200`, `PetsQueryFilter`, `PetsHeaderXTrace`), and which
+ * operation kept the qualified name followed document order. Whether a
+ * stem is contested depends on the document's `operationId`s alone, never
+ * on their order: an operation whose id PascalCases to its stem keeps its
+ * qualifier whatever operation is added beside it, while one whose id
+ * cleans to a different stem holds that stem only while no other operation
+ * does, and moves to its pre-clean id when one is added — its models still
+ * named for it, not stripped of it. A path-named operation uses the
+ * path-derived stem, so a verb or singular change in inferOperationName
+ * must not rename a generated type either. That stem's leading service word
+ * is dropped when it ends on a word boundary, since the model name already
+ * starts with the service: `Notes` + `ByIdPinPost` + `XMeta`, beside
+ * `NotesByIdPinPostResponse`.
  */
 function headerOperationQualifier(
   op: OperationObject,
   pathModelBaseName: string,
   serviceName: string | undefined,
+  contestedStems: ReadonlySet<string>,
 ): string {
-  if (op.operationId) return operationIdModelBase(op.operationId);
+  if (op.operationId) {
+    const stem = operationIdModelBase(op.operationId);
+    return stem && !contestedStems.has(stem) ? stem : toPascalCase(normalizeOperationIdForNaming(op.operationId));
+  }
   const parent = serviceName ? toPascalCase(serviceName) : '';
   const rest = pathModelBaseName.slice(parent.length);
   return parent && pathModelBaseName.startsWith(parent) && /^[A-Z0-9]/.test(rest) ? rest : pathModelBaseName;
@@ -5689,6 +5757,43 @@ function resolveReusedOperationIds(
     if (modelOperationIds.has(first)) modelOperationIds.set(key, modelOperationIds.get(first)!);
   }
   return { modelOperationIds, sharedWith };
+}
+
+/**
+ * The stems (operationIdModelBase) more than one Operation Object names its
+ * models from, which qualify no operation's header and parameter models
+ * (headerOperationQualifier). Read off the `operationId` each operation's
+ * models are named from — the one the reuse of its own left it, or its own
+ * (`modelOperationIds`) — with a path that shares another's Operation
+ * Object (`sharedWith`) and a second path onto one Path Item both reading
+ * as the one Operation Object they are, so an `operationId` declared once
+ * holds its stem alone however many paths reach it. `listNotes` and
+ * `listNotesByExternalId` both clean to `ListNotes` (`ByExternalId` is a
+ * marker cleanSchemaName strips), as `Notes_List` and `Note_List` do to
+ * `NoteList` and `listNotesController` and `listNotes` to `ListNotes`.
+ * Depends on the document's `operationId`s alone, never on their order.
+ */
+function contestedOperationIdStems(
+  paths: Record<string, PathItem>,
+  modelOperationIds: ReadonlyMap<string, string | null>,
+  sharedWith: ReadonlyMap<string, string>,
+): Set<string> {
+  const holders = new Map<string, Set<OperationObject>>();
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      if (!op) continue;
+      const key = `${method} ${path}`;
+      if (sharedWith.has(key)) continue;
+      const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
+      if (!operationId) continue;
+      const stem = operationIdModelBase(operationId);
+      const ops = holders.get(stem) ?? new Set<OperationObject>();
+      ops.add(op);
+      holders.set(stem, ops);
+    }
+  }
+  return new Set([...holders].filter(([, ops]) => ops.size > 1).map(([stem]) => stem));
 }
 
 /**
