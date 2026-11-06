@@ -2603,7 +2603,28 @@ export function combineDeclarations(held: SchemaObject, next: SchemaObject): Sch
 function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
   if (!declaresType(held) && declaresType(next)) return annotateDeclaration(next, held);
   if (declaresType(held) && declaresType(next)) return conjoinTypedDeclarations(held, next);
-  return annotateDeclaration(held, next);
+  return declaresType(held) ? annotateDeclaration(held, next) : mergeAnnotations(held, next);
+}
+
+/**
+ * Two declarations neither of which declares a type (`declaresType`), as
+ * one: `held`'s keys over `next`'s, their `items` — annotations both —
+ * combined by this same rule when both declare them, else whichever does.
+ * Together they annotate whatever typing declaration arrives after them
+ * (`annotateDeclaration`), so everything either writes is kept, `items`
+ * included: `{ description: 'Tags' }` then `{ items: { description: 'A
+ * tag' } }` then `{ type: 'array', items: { type: 'string', enum: [...]
+ * } }` is the array described "Tags" whose items carry "A tag", as the
+ * array first gives (#587 review: the second declaration's `items` were
+ * dropped as supplying none, before any declaration had items to
+ * annotate). `held` itself when nothing is added.
+ */
+function mergeAnnotations(held: SchemaObject, next: SchemaObject): SchemaObject {
+  const unset = Object.entries(next).filter(([key]) => !Object.hasOwn(held, key));
+  const items =
+    held.items !== undefined && next.items !== undefined ? combineDeclarations(held.items, next.items) : held.items;
+  if (unset.length === 0 && items === held.items) return held;
+  return { ...Object.fromEntries(unset), ...held, ...(items !== held.items && { items }) };
 }
 
 /**
@@ -2615,7 +2636,9 @@ function combineAfresh(held: SchemaObject, next: SchemaObject): SchemaObject {
  * declares none: `{ type: 'array', items: { $ref: Pet } }` beside `{ items:
  * { description: 'A pet' } }` is a `Pet[]` whose items carry the text,
  * whichever is read first (#431), and `{ type: 'string' }` beside it stays
- * a `string`. `typing` itself when nothing is added.
+ * a `string`. Two typeless declarations are first merged into one
+ * (`mergeAnnotations`), so their `items` wait for the typing declaration
+ * rather than being dropped. `typing` itself when nothing is added.
  */
 function annotateDeclaration(typing: SchemaObject, annotating: SchemaObject): SchemaObject {
   const { items: _items, ...keywords } = annotating;
