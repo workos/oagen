@@ -3011,4 +3011,65 @@ describe('an allOf of one typing member beside members that only annotate or lim
       description: 'T',
     });
   });
+
+  // Greptile on #587, second round: two typeless declarations of one
+  // property were merged by `annotateDeclaration`, which drops the
+  // annotating declaration's `items` as supplying none — before any typing
+  // declaration had items to annotate — so `{ description: 'Tags' }`, then
+  // `{ items: { description: 'A tag' } }`, then the array lost "A tag",
+  // while the array first kept it.
+  it.each(['3.1.0', '3.0.3'])(
+    'keeps the items annotation of two typeless declarations for the array that follows, in either order (Greptile, OAS %s)',
+    async (openapi) => {
+      const text: SchemaObject = { description: 'Tags' };
+      const itemsDoc: SchemaObject = { items: { description: 'A tag' } };
+      const array: SchemaObject = { type: 'array', items: { type: 'string', enum: ['a', 'b'] } };
+      const declaring = (tags: SchemaObject): SchemaObject => ({ type: 'object', properties: { tags } });
+      const docOf = (members: SchemaObject[]): Record<string, unknown> => {
+        const spec = petDoc(openapi, { list: ref('TagList') }) as { components: { schemas: object } };
+        return {
+          ...spec,
+          components: { schemas: { ...spec.components.schemas, TagList: { allOf: members.map(declaring) } } },
+        };
+      };
+      const tagsOf = (ir: ApiSpec) => {
+        const field = modelsByName(ir)['TagList']!.fields.find((f) => f.name === 'tags')!;
+        return { type: field.type, description: field.description, items: enumOf(ir, 'TagListTags')?.description };
+      };
+      const expected = {
+        type: { kind: 'array', items: { kind: 'enum', name: 'TagListTags', values: ['a', 'b'] } },
+        description: 'Tags',
+        items: 'A tag',
+      };
+      const orders: [string, SchemaObject[]][] = [
+        ['annotations first', [text, itemsDoc, array]],
+        ['items annotation first', [itemsDoc, text, array]],
+        ['array between', [text, array, itemsDoc]],
+        ['array first', [array, text, itemsDoc]],
+      ];
+      for (const [label, members] of orders) {
+        const ir = await parseWithoutWarnings(docOf(members));
+        expect(tagsOf(ir), label).toEqual(expected);
+        expectSound(ir, ['Kind', 'Owner', 'Pet', 'TagList']);
+      }
+      const [first, ...rest] = await Promise.all(orders.map(([, members]) => parseWithoutWarnings(docOf(members))));
+      for (const other of rest) expect(diffSpecs(first!, other).changes).toEqual([]);
+
+      // The pair of typeless declarations keeps both their keys and items for the typing one.
+      expect(combineDeclarations(text, itemsDoc)).toEqual({ description: 'Tags', items: { description: 'A tag' } });
+      expect(combineDeclarations(itemsDoc, text)).toEqual({ description: 'Tags', items: { description: 'A tag' } });
+      expect(combineDeclarations({ items: { description: 'A' } }, { items: { description: 'B', 'x-k': 'm' } })).toEqual(
+        {
+          items: { description: 'A', 'x-k': 'm' },
+        },
+      );
+      expect(combineDeclarations(combineDeclarations(text, itemsDoc), array)).toEqual({
+        ...array,
+        description: 'Tags',
+        items: { ...array.items, description: 'A tag' },
+      });
+      // A lone typeless declaration keeps its identity when nothing is added.
+      expect(combineDeclarations(text, { description: 'Other' })).toBe(text);
+    },
+  );
 });
