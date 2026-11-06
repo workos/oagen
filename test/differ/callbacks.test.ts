@@ -953,6 +953,50 @@ describe('#382', () => {
       },
     );
 
+    it.each([
+      { order: 'parameter before callbacks', parametersFirst: true },
+      { order: 'callbacks before parameter', parametersFirst: false },
+    ])(
+      "reports only the nested callback added when it asks for the name the parent's parameter model holds, $order (Greptile)",
+      async ({ parametersFirst }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const parameters = [
+          { name: 'confirmedPayload', in: 'query', schema: { type: 'object', properties: { at: { type: 'string' } } } },
+        ];
+        const confirmed = posting({}, { type: 'object', properties: { ok: { type: 'boolean' } } });
+        const petAdopted = (nested: boolean) => ({
+          '{$request.body#/callbackUrl}': {
+            post: {
+              ...(parametersFirst ? { parameters } : {}),
+              ...(nested ? { callbacks: { confirmed } } : {}),
+              ...(parametersFirst ? {} : { parameters }),
+              requestBody: { content: { 'application/json': { schema: petIdSchema } } },
+              responses: { '204': { description: 'Done' } },
+            },
+          },
+        });
+        const before = await parseDocument(document({ petAdopted: petAdopted(false) }));
+        const after = await parseDocument(document({ petAdopted: petAdopted(true) }));
+
+        // The parent is untouched: its parameter model keeps its name, so the
+        // only changes are the new payload model and the callback, both additive, exit 1.
+        const added = diffSpecs(before, after);
+        expect(added.changes.map((c) => [c.kind, c.classification])).toEqual([
+          ['model-added', 'additive'],
+          ['callback-added', 'additive'],
+        ]);
+        expect(added.changes[0]).toMatchObject({
+          name: expect.stringMatching(/^CreatePetPetAdoptedConfirmed[0-9A-Fa-f]{6}Payload$/),
+        });
+        expect(added.changes[1]).toMatchObject({ name: 'confirmed', parents: [identity], ...onOperation });
+        expect(added.summary).toMatchObject({ added: 2, modified: 0, removed: 0, breaking: 0, additive: 2 });
+        expect(diffSpecs(after, before).changes.map((c) => [c.kind, c.classification])).toEqual([
+          ['model-removed', 'breaking'],
+          ['callback-removed', 'breaking'],
+        ]);
+      },
+    );
+
     it("reports a callback payload field made required as breaking and made optional as additive, as a webhook's (Michael's finding 4)", async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const payload = (required: boolean) => ({

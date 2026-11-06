@@ -162,6 +162,15 @@ export interface WebhookEntry {
    * where the label stands in.
    */
   identity?: string;
+  /**
+   * How many callbacks sit between the declaring operation or webhook and
+   * this one: 0 for an operation's or webhook's own callback, 1 for one a
+   * callback operation declares, and so on. Orders the naming
+   * (`buildReceivedRequests`): a group is named at its shallowest member's
+   * depth, after every group shallower than it. Absent on a webhook, read
+   * as 0.
+   */
+  depth?: number;
 }
 
 /** What one stem mints for a webhook: its typed parameters and payload, and the models behind them. */
@@ -293,13 +302,23 @@ export interface BuiltReceivedRequests {
 }
 
 /**
- * Name, mint and build one batch of entries — the `webhooks` map's, or one
- * level of callbacks (`extractCallbacks`) — against `reserved`: the stems
- * are resolved over the whole batch (`resolveWebhookModelStems`), so the
- * outcome depends only on the document, never on the order its entries are
- * read in. Entries that resolve to one operation object and are named from
- * its operationId mint once and share the minting (`groupEntries`); every
- * other entry mints on its own.
+ * Name, mint and build one batch of entries — the `webhooks` map's, or
+ * every callback of the document (`extractCallbacks`) — against `reserved`.
+ * The entries are grouped first (`groupEntries`): those that resolve to one
+ * operation object and are named from its operationId, and key-named
+ * callbacks reading one object under one plain stem, mint once and share
+ * the minting, whatever depths their members sit at; every other entry
+ * mints on its own. The groups are then named in waves by their shallowest
+ * member's depth (`WebhookEntry.depth`, 0 for a webhook): every group with
+ * a member at depth 0 first, then those at depth 1, and so on, the stems
+ * of each wave resolved together (`resolveWebhookModelStems`) against the
+ * reserved names and every name the waves before minted, so an ancestor's
+ * names are settled before any descendant can collide with them — a nested
+ * callback asking for a name its parent's parameter or payload model holds
+ * is the one that steps aside, and adding it renames nothing above it —
+ * while a group that spans depths is one minting, named at its shallowest
+ * depth and reused by its deeper members (#382). The outcome depends only
+ * on the document, never on the order its entries are read in.
  *
  * The nodes come back in entry order, not group order: a shared
  * operation's second key keeps its own place. A group's owner takes the
@@ -320,15 +339,37 @@ export function buildReceivedRequests(
   siblingDocs: SiblingDocs,
 ): BuiltReceivedRequests {
   const { groups, groupOf } = groupEntries(entries);
-  const stems = resolveWebhookModelStems(groups, reserved, components, siblingDocs);
+  // Each group's wave: its shallowest member's depth.
+  const waveOf = new Map(
+    groups.map((group) => [group, Math.min(...group.entries.map((entry) => entry.depth ?? 0))] as const),
+  );
+  const waves = [...new Set(waveOf.values())].sort((a, b) => a - b);
+  // What every wave steps around: the reserved names, and the names and
+  // enums the waves before minted.
+  const all = new Set(reserved.all);
+  const enums = new Set(reserved.enums);
+  const stems = new Map<WebhookGroup, string>();
   const inlineModels: Model[] = [];
   const names = new Set<string>();
   const mintedByGroup = new Map<WebhookGroup, MintedWebhook>();
-  for (const group of groups) {
-    const minted = mintWebhook(group.owner, stems.get(group)!, components, reserved, siblingDocs);
-    inlineModels.push(...minted.inlineModels);
-    for (const name of minted.names) names.add(name);
-    mintedByGroup.set(group, minted);
+  for (const wave of waves) {
+    const waveGroups = groups.filter((group) => waveOf.get(group) === wave);
+    // One reserved set for the wave's resolution and its minting, so what
+    // the resolution minted is what is kept; the next wave reserves it.
+    const waveReserved: ReservedNames = { all: new Set(all), enums: new Set(enums) };
+    const waveStems = resolveWebhookModelStems(waveGroups, waveReserved, components, siblingDocs);
+    for (const group of waveGroups) {
+      const stem = waveStems.get(group)!;
+      const minted = mintWebhook(group.owner, stem, components, waveReserved, siblingDocs);
+      stems.set(group, stem);
+      mintedByGroup.set(group, minted);
+      inlineModels.push(...minted.inlineModels);
+      for (const name of minted.names) {
+        names.add(name);
+        all.add(name);
+      }
+      for (const name of mintedEnumNames(minted)) enums.add(name);
+    }
   }
 
   const built: BuiltReceivedRequests['built'] = [];
@@ -363,6 +404,29 @@ export function buildReceivedRequests(
   }
 
   return { built, inlineModels, inlineModelBundles, names };
+}
+
+/**
+ * Every inline enum name a minting produced — an enum reference carrying
+ * its `values`, in a minted model's field or in the shape's own references
+ * — which a later wave's model may not take (`ReservedNames.enums`).
+ */
+function mintedEnumNames(minted: MintedWebhook): Set<string> {
+  const names = new Set<string>();
+  const refs: TypeRef[] = [
+    ...minted.inlineModels.flatMap(collectModelTypeRefs),
+    ...[...minted.headerParams, ...minted.queryParams, ...minted.cookieParams].map((param) => param.type),
+    ...(minted.requestBody ? [minted.requestBody] : []),
+    ...(minted.requestBodyContents ?? []).map((content) => content.type),
+  ];
+  for (const ref of refs) {
+    walkTypeRef(ref, {
+      enum: (r) => {
+        if (r.values) names.add(r.name);
+      },
+    });
+  }
+  return names;
 }
 
 /**
@@ -487,7 +551,7 @@ function collectWebhookEntries(
 /** Where a path item's operations are read for (`readPathItemEntries`): the entry's key, how each method is labelled, and a callback's own fields. */
 export interface PathItemEntrySite extends Pick<
   WebhookEntry,
-  'kind' | 'name' | 'expression' | 'expressionCount' | 'parentStem'
+  'kind' | 'name' | 'expression' | 'expressionCount' | 'parentStem' | 'depth'
 > {
   /** The diagnostic label of one method's operation. */
   labelOf: (method: HttpMethod) => string;
@@ -549,6 +613,7 @@ export function readPathItemEntries(
     if (site.expression !== undefined) entry.expression = site.expression;
     if (site.expressionCount !== undefined) entry.expressionCount = site.expressionCount;
     if (site.parentStem !== undefined) entry.parentStem = site.parentStem;
+    if (site.depth !== undefined) entry.depth = site.depth;
     entries.push(entry);
   }
   return entries;

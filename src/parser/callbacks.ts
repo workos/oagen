@@ -29,7 +29,8 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other, in one batch (see `extractCallbacks`), so a collision hashes the
+ * each other — the groups spanning depths, ancestors named before their
+ * descendants (see `extractCallbacks`) — so a collision hashes the
  * NEW stem as a webhook's is hashed — from the callback's identity: its
  * owner's identity (an operation's operationId, else `METHOD /path`; a
  * shared callback operation's operationId) with the key, expression and
@@ -106,9 +107,17 @@ interface PendingCallback {
  * declares it (`settleStemOperationIds`). Each key-named entry's stem is
  * then prefixed with its owner's stem — an operation's or webhook's settled
  * one, a parent callback's plain stem before any collision hash
- * (`plainStemOf`), parents preceding children — and every entry is named,
- * minted and built in one batch (`buildReceivedRequests`), as the
- * `webhooks` map is. Entries reading one operation object and named from
+ * (`plainStemOf`), parents preceding children — and every entry is grouped,
+ * named, minted and built by `buildReceivedRequests`, as the `webhooks` map
+ * is, in two phases: the groups are formed over every entry of the
+ * document, then named in waves by their shallowest member's depth — every
+ * group with a member at depth 0 first, then those at depth 1, and so on —
+ * each wave stepping around every name the waves before minted, so an
+ * ancestor's names are settled before any descendant can collide with them
+ * (a new nested callback never renames its parent's parameter or payload
+ * model; it is the one that steps aside), while a group that spans depths
+ * is still one minting, named at its shallowest depth and reused by its
+ * deeper members. Entries reading one operation object and named from
  * its operationId form one group whatever their depths (a
  * `components/callbacks` entry an operation references directly and
  * another callback nests), and so do key-named entries reading one object
@@ -141,6 +150,7 @@ export function extractCallbacks(
       owner,
       stem,
       identity ?? label,
+      0,
       new Set(),
       pending,
       components,
@@ -180,11 +190,11 @@ export function extractCallbacks(
     entry.parentStem = isPending(owner) ? plainStemOf(owner.entry) : candidate.ownerStem!;
   }
 
-  // One batch for every callback of the document, as the `webhooks` map is
-  // one: entries reading one operation object under one plain stem form one
-  // group whatever their depths (`groupEntries`), every group is named
-  // against every other and against every name decided before, and each
-  // mints once.
+  // Every callback of the document at once, as the `webhooks` map is read:
+  // entries reading one operation object under one plain stem form one
+  // group whatever their depths (`groupEntries`); the groups are named in
+  // waves by their shallowest member's depth, each wave stepping around
+  // every name decided before it, and each mints once.
   const batch = buildReceivedRequests(
     pending.map(({ entry }) => entry),
     components,
@@ -231,6 +241,8 @@ function collectPendingCallbacks(
   owner: PendingCallback['owner'],
   ownerStem: string | undefined,
   ownerIdentity: string | undefined,
+  /** How many callbacks sit between the declaring operation or webhook and the ones read here (`WebhookEntry.depth`). */
+  depth: number,
   ancestors: ReadonlySet<object>,
   pending: PendingCallback[],
   components: WebhookComponents,
@@ -267,6 +279,7 @@ function collectPendingCallbacks(
           name: key,
           expression,
           expressionCount: expressions.length,
+          depth,
           labelOf: (method) => callbackContext(label, { name: key, expression, httpMethod: method }),
         },
         components,
@@ -282,6 +295,7 @@ function collectPendingCallbacks(
           candidate,
           undefined,
           undefined,
+          depth + 1,
           onPath,
           pending,
           components,

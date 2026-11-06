@@ -528,6 +528,71 @@ describe('#382', () => {
         });
 
         it.each([
+          { order: 'parameter before callbacks', parametersFirst: true },
+          { order: 'callbacks before parameter', parametersFirst: false },
+        ])(
+          "names an ancestor before its descendants, so a new nested callback steps around the parent's parameter model, $order (Greptile)",
+          async ({ parametersFirst }) => {
+            // `petAdopted` has an object query parameter `confirmedPayload`,
+            // minting `CreatePetPetAdoptedConfirmedPayload`; a nested
+            // `confirmed` callback with an inline body asks for the same name.
+            const parameters = [
+              {
+                name: 'confirmedPayload',
+                in: 'query',
+                schema: { type: 'object', properties: { at: { type: 'string' } } },
+              },
+            ];
+            const confirmed = callbackPosting({ type: 'object', properties: { ok: { type: 'boolean' } } });
+            const petAdopted = (nested: boolean) => ({
+              '{$request.body#/callbackUrl}': {
+                post: {
+                  ...(parametersFirst ? { parameters } : {}),
+                  ...(nested ? { callbacks: { confirmed } } : {}),
+                  ...(parametersFirst ? {} : { parameters }),
+                  requestBody: { content: { 'application/json': { schema: petIdSchema } } },
+                  responses: { '200': { description: 'OK' } },
+                },
+              },
+            });
+            const document = (nested: boolean) =>
+              documentWith(openapi, { '/pets': { post: opWith({ petAdopted: petAdopted(nested) }, 'createPet') } });
+            const parent = (spec: ApiSpec) => operations(spec)[0]!.callbacks![0]!;
+
+            const without = await parseJson(document(false));
+            expect(parent(without).queryParams[0]!.type).toMatchObject({
+              kind: 'model',
+              name: 'CreatePetPetAdoptedConfirmedPayload',
+            });
+            expect(modelNames(without).sort()).toEqual([
+              'CreatePetPetAdoptedConfirmedPayload',
+              'CreatePetPetAdoptedPayload',
+            ]);
+
+            const withNested = await parseJson(document(true));
+            // The parent's parameter and payload models keep their names; the
+            // new payload, named after them, steps around the parameter's.
+            expect(parent(withNested).queryParams[0]!.type).toMatchObject({
+              kind: 'model',
+              name: 'CreatePetPetAdoptedConfirmedPayload',
+            });
+            expect(parent(withNested).requestBody).toMatchObject({ kind: 'model', name: 'CreatePetPetAdoptedPayload' });
+            const nestedPayload = payloadNames(parent(withNested))[0]!;
+            expect(nestedPayload).toMatch(/^CreatePetPetAdoptedConfirmed[0-9A-Fa-f]{6}Payload$/);
+            expect(modelNames(withNested).sort()).toEqual(
+              ['CreatePetPetAdoptedConfirmedPayload', 'CreatePetPetAdoptedPayload', nestedPayload].sort(),
+            );
+            expect(
+              withNested.models
+                .find((m) => m.name === 'CreatePetPetAdoptedConfirmedPayload')!
+                .fields.map((f) => f.name),
+            ).toEqual(['at']);
+            expectResolved(withNested);
+            expect(warnings()).toEqual([]);
+          },
+        );
+
+        it.each([
           { order: 'path operation first', eventsFirst: true },
           { order: 'nesting operation first', eventsFirst: false },
         ])(
