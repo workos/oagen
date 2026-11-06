@@ -1874,4 +1874,44 @@ describe('#545', () => {
       );
     },
   );
+
+  it.each(['3.1.0', '3.0.3'] as const)(
+    'aligns a field’s and a parameter’s limits with a pointer to a schema that admits null, which settles into a nullable wrapper (OAS %s)',
+    async (openapi) => {
+      // Greptile's second review of #545: the settled reference was looked up
+      // after being unwrapped, so a pointer to `{ type: ['string', 'null'],
+      // maxLength: 8 }` put the limits on the field's inner type and none on
+      // the field; a parameter agreed only by its build-time fallback, which
+      // keeps a looser bound written beside the pointer.
+      const code = { $ref: '#/components/schemas/Owner/properties/code' };
+      const target =
+        openapi === '3.1.0'
+          ? { type: ['string', 'null'], pattern: OWN, maxLength: 8 }
+          : { type: 'string', nullable: true, pattern: OWN, maxLength: 8 };
+      const spec = await parse(
+        petsDoc(openapi, {
+          schemas: { Owner: { type: 'object', properties: { code: target } } },
+          parameters: [
+            { name: 'ownerCode', in: 'query', schema: code },
+            { name: 'shortCode', in: 'query', schema: { ...code, maxLength: 3 } },
+            { name: 'longCode', in: 'query', schema: { ...code, maxLength: 20 } },
+          ],
+          fields: { ownerCode: code, shortCode: { ...code, maxLength: 3 }, longCode: { ...code, maxLength: 20 } },
+        }),
+      );
+      const [getPet] = spec.services.flatMap((s) => s.operations);
+      const params = byName(getPet.queryParams);
+      const fields = byName(fieldsOf(spec, 'GetPetResponse'));
+      const owned = (limits: Constraints) => nullable(limited(string, { maxLength: 8, pattern: OWN, ...limits }));
+      for (const site of [params.ownerCode, fields.ownerCode, params.longCode, fields.longCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 8, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({}));
+      }
+      for (const site of [params.shortCode, fields.shortCode]) {
+        expect(site.constraints, site.name).toEqual({ maxLength: 3, pattern: OWN });
+        expect(site.type, site.name).toEqual(owned({ maxLength: 3 }));
+      }
+      expectOneReading(spec);
+    },
+  );
 });

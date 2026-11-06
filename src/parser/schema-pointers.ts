@@ -211,11 +211,24 @@ class PointerResolver {
    * the field or parameter and its type stay one reading, as they are for
    * a `$ref` to a primitive component (`Field.constraints`; #545 review).
    * A site whose pointer landed on a model or enum keeps what it wrote
-   * beside the `$ref`: that node carries its own.
+   * beside the `$ref`: that node carries its own. The settled reference is
+   * the site's type itself, or the inner type of a nullable wrapper the
+   * site wrote around the pointer (`oneOf: [{ $ref }, { type: 'null' }]`),
+   * and is looked up before it is unwrapped: a pointer to a schema that
+   * admits null (`{ type: ['string', 'null'], maxLength: 8 }`) settles into
+   * a nullable wrapper itself, whose inner type carries the limits
+   * (Greptile, #545 review round 2: the wrapper was unwrapped first, so
+   * such a field kept none of its own).
    */
   alignSiteLimits(site: LimitedSite): void {
-    const bare = site.type.kind === 'nullable' ? site.type.inner : site.type;
-    if (!this.settledRefs.has(bare) || bare.kind === 'model' || bare.kind === 'enum') return;
+    const settled = this.settledRefs.has(site.type)
+      ? site.type
+      : site.type.kind === 'nullable' && this.settledRefs.has(site.type.inner)
+        ? site.type.inner
+        : undefined;
+    if (!settled) return;
+    const bare = settled.kind === 'nullable' ? settled.inner : settled;
+    if (bare.kind === 'model' || bare.kind === 'enum') return;
     const limits = typeRefConstraints(bare);
     if (limits) site.constraints = { ...limits };
     else delete site.constraints;
