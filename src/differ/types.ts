@@ -376,6 +376,16 @@ export interface OperationModified {
   /**
    * The body stayed but its `requestBodyRequired` flipped. Optional → required
    * is breaking (callers must now send a body); required → optional is additive.
+   * Compared whenever both specs carry a body the parser keeps the flag on:
+   * one read as `requestBody`, or one carried in `requestBodyContents` alone
+   * — a body under `application/xml` or `application/*+json` alone, which an
+   * SDK offers through its contents and makes mandatory by the flag just the
+   * same — so the flip is reported for either reading, and for a body read
+   * one way in the old spec and the other way in the new (#528). A body
+   * appearing or disappearing takes its flag with it: one read as
+   * `requestBody` is `requestBodyChanged` instead, one carried in its
+   * contents alone is nothing. An absent flag on a carried body reads as
+   * optional, as it does in OpenAPI.
    */
   requestBodyRequiredChanged: boolean;
   /**
@@ -392,9 +402,11 @@ export interface OperationModified {
    * (`application/json` added beside a kept
    * `application/x-www-form-urlencoded`: existing callers keep sending the
    * form body). A body without media-type lists reads as breaking. Compared
-   * only while both specs carry a body, as `requestBodyRequiredChanged` is;
-   * a body appearing or disappearing takes its encoding with it and is
-   * `requestBodyChanged` alone. Reported beside
+   * only while both specs carry a `requestBody` — unlike
+   * `requestBodyRequiredChanged`, which a body carried in
+   * `requestBodyContents` alone also sets, no encoding is read from such a
+   * body; a body appearing or disappearing takes its encoding with it and
+   * is `requestBodyChanged` alone. Reported beside
    * `requestBodyContentTypesChanged`, which lists the media types callers
    * may choose from: a body moving from `application/json` to
    * `application/x-www-form-urlencoded` sets both (the JSON media type is
@@ -841,7 +853,15 @@ export interface WebhookModified {
   /**
    * True when the payload's type changed, or — both specs declaring a
    * payload — its encoding, its `requestBodyRequired` or the media types the
-   * sender may use did; `details` says which.
+   * sender may use did; `details` says which. The flag is compared whenever
+   * both specs carry a payload the parser keeps it on, read as `requestBody`
+   * or carried in `requestBodyContents` alone (one under `application/xml`
+   * alone, say), as an operation's `requestBodyRequiredChanged` is (#528);
+   * the encoding only while both carry a `requestBody`, since none is read
+   * from a payload carried in its contents alone; the media types whenever
+   * both carry a `requestBody` or declare `requestBodyContentTypes`, as the
+   * flag is, so a payload carried in its contents alone on either side still
+   * reports the media types the sender gained or lost.
    */
   requestBodyChanged: boolean;
   /**
@@ -852,9 +872,11 @@ export interface WebhookModified {
    * read from, with its shape — is not one the old spec declared with that
    * shape, so the handler decodes a wire format it never saw; additive when
    * the old spec already declared it. A payload without media-type lists
-   * reads as breaking. Compared only while both specs declare a payload, as
-   * on an operation: a payload appearing or disappearing is `payload added`
-   * / `payload removed` in `details` and carries neither field.
+   * reads as breaking. Compared only while both specs carry a `requestBody`,
+   * as on an operation: a payload appearing or disappearing is `payload
+   * added` / `payload removed` in `details` and carries neither field, and
+   * one carried in its contents alone on either side (no encoding is read
+   * from it) carries neither too, whatever its media types did.
    */
   oldRequestBodyEncoding?: RequestBodyEncoding;
   newRequestBodyEncoding?: RequestBodyEncoding;

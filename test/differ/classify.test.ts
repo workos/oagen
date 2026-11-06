@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { classifyFieldChange, classifyParamChange } from '../../src/differ/classify.js';
+import { classifyFieldChange, classifyParamChange, requestBodyRequiredCompared } from '../../src/differ/classify.js';
+import type { TypeRef } from '../../src/ir/types.js';
 
 describe('classifyFieldChange', () => {
   it('field-added optional is additive', () => {
@@ -98,5 +99,34 @@ describe('classifyParamChange', () => {
     expect(classifyParamChange('param-required-changed', 'filter', false)).toMatchObject({
       classification: 'additive',
     });
+  });
+});
+
+describe('requestBodyRequiredCompared (#528)', () => {
+  const pet: TypeRef = { kind: 'model', name: 'Pet' };
+  /** A body read as `requestBody`, as the parser builds one under `application/json`. */
+  const read = { requestBody: pet, requestBodyContentTypes: ['application/json'] };
+  /** A body carried in `requestBodyContents` alone, as the parser builds one under `application/xml`. */
+  const carried = { requestBodyContentTypes: ['application/xml'] };
+  /** A hand-built IR body with no media-type list. */
+  const bare = { requestBody: pet };
+  const none = {};
+
+  it('compares the flag while both sides carry a body, read as requestBody or carried in its contents alone', () => {
+    expect(requestBodyRequiredCompared(read, read)).toBe(true);
+    expect(requestBodyRequiredCompared(carried, carried)).toBe(true);
+    expect(requestBodyRequiredCompared(bare, bare)).toBe(true);
+    // Whichever way each side is read.
+    expect(requestBodyRequiredCompared(carried, read)).toBe(true);
+    expect(requestBodyRequiredCompared(read, carried)).toBe(true);
+    expect(requestBodyRequiredCompared(bare, carried)).toBe(true);
+  });
+
+  it('does not while either side carries none: the flag goes with the body', () => {
+    expect(requestBodyRequiredCompared(none, read)).toBe(false);
+    expect(requestBodyRequiredCompared(read, none)).toBe(false);
+    expect(requestBodyRequiredCompared(none, carried)).toBe(false);
+    expect(requestBodyRequiredCompared(carried, none)).toBe(false);
+    expect(requestBodyRequiredCompared(none, none)).toBe(false);
   });
 });

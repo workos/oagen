@@ -1,7 +1,12 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { diffOperations } from '../../src/differ/operations.js';
+import { diffSpecs } from '../../src/differ/diff.js';
+import { parseSpec } from '../../src/parser/parse.js';
 import { extractOperations } from '../../src/parser/operations.js';
-import type { Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, ResponseContent, TypeRef } from '../../src/ir/types.js';
 
 const listUsers: Operation = {
   name: 'listUsers',
@@ -1262,5 +1267,346 @@ describe('diffOperations — an operation gaining or losing its only 2xx/3xx, wh
     ]);
     expect(report(none, notFound)).toEqual(['operation-modified deletePets errorsChanged: additive']);
     expect(report(none, none)).toEqual([]);
+  });
+});
+
+describe('#528 — a required flag on a body carried in requestBodyContents alone', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The issue's `createPet`: a `{ name }` body under one media type, `required` as given, responding `204`. */
+  const document = (openapi: string, mediaType: string, required: boolean) => ({
+    openapi,
+    info: { title: 'Pets', version: '1' },
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: {
+            required,
+            content: { [mediaType]: { schema: { type: 'object', properties: { name: { type: 'string' } } } } },
+          },
+          responses: { '204': { description: 'no content' } },
+        },
+      },
+    },
+  });
+
+  async function parseDocument(doc: unknown): Promise<ApiSpec> {
+    const dir = mkdtempSync(join(tmpdir(), 'oagen-528-'));
+    try {
+      writeFileSync(join(dir, 'spec.json'), JSON.stringify(doc));
+      return await parseSpec(join(dir, 'spec.json'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const createPet = (spec: ApiSpec): Operation => spec.services[0]!.operations[0]!;
+
+  /** The issue's three pairs: JSON is read as `requestBody`, the other two are carried in `requestBodyContents` alone. */
+  const mediaTypes = [
+    ['json', 'application/json', true],
+    ['xml', 'application/xml', false],
+    ['range', 'application/*+json', false],
+  ] as const;
+
+  for (const openapi of ['3.0.3', '3.1.0']) {
+    describe(`OpenAPI ${openapi}`, () => {
+      for (const [name, mediaType, readAsRequestBody] of mediaTypes) {
+        it(`reports ${name} optional → required as breaking and required → optional as additive, as requestBodyRequiredChanged`, async () => {
+          vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const optional = await parseDocument(document(openapi, mediaType, false));
+          const required = await parseDocument(document(openapi, mediaType, true));
+          for (const [spec, flag] of [
+            [optional, false],
+            [required, true],
+          ] as const) {
+            expect(createPet(spec).requestBodyRequired).toBe(flag);
+            expect(createPet(spec).requestBodyContentTypes).toEqual([mediaType]);
+            expect(createPet(spec).requestBody !== undefined).toBe(readAsRequestBody);
+          }
+
+          const tightened = diffSpecs(optional, required);
+          expect(tightened.changes).toEqual([
+            expect.objectContaining({
+              kind: 'operation-modified',
+              operationName: 'createPet',
+              requestBodyChanged: false,
+              requestBodyRequiredChanged: true,
+              requestBodyEncodingChanged: false,
+              requestBodyContentTypesChanged: false,
+              classification: 'breaking',
+            }),
+          ]);
+          // One breaking change: `oagen diff` exits 2.
+          expect(tightened.summary).toMatchObject({ modified: 1, breaking: 1, additive: 0 });
+
+          const relaxed = diffSpecs(required, optional);
+          expect(relaxed.changes).toEqual([
+            expect.objectContaining({
+              kind: 'operation-modified',
+              operationName: 'createPet',
+              requestBodyChanged: false,
+              requestBodyRequiredChanged: true,
+              requestBodyEncodingChanged: false,
+              requestBodyContentTypesChanged: false,
+              classification: 'additive',
+            }),
+          ]);
+          // One additive change: `oagen diff` exits 1.
+          expect(relaxed.summary).toMatchObject({ modified: 1, breaking: 0, additive: 1 });
+
+          // An unchanged flag is no change: `oagen diff` exits 0.
+          expect(diffSpecs(required, required).changes).toEqual([]);
+          expect(diffSpecs(optional, optional).changes).toEqual([]);
+        });
+      }
+
+      it('compares the flag when one spec carries the body in its contents alone and the other reads it as requestBody', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const xmlOptional = await parseDocument(document(openapi, 'application/xml', false));
+        const xmlRequired = await parseDocument(document(openapi, 'application/xml', true));
+        const jsonOptional = await parseDocument(document(openapi, 'application/json', false));
+        const jsonRequired = await parseDocument(document(openapi, 'application/json', true));
+        // The inline JSON body is a `CreatePetRequest` model, reported as `model-added` / `model-removed`
+        // beside the operation; only the operation change is read here.
+        const operationChanges = (before: ApiSpec, after: ApiSpec) =>
+          diffSpecs(before, after).changes.filter((c) => c.kind === 'operation-modified');
+        // The flip is set beside what such a pair already reported: the body appearing as
+        // `requestBody` (or disappearing), and the media type swap.
+        for (const [before, after] of [
+          [xmlOptional, jsonRequired],
+          [jsonOptional, xmlRequired],
+          [xmlRequired, jsonOptional],
+          [jsonRequired, xmlOptional],
+        ]) {
+          expect(operationChanges(before, after)).toEqual([
+            expect.objectContaining({
+              kind: 'operation-modified',
+              requestBodyChanged: true,
+              requestBodyRequiredChanged: true,
+              requestBodyContentTypesChanged: true,
+              classification: 'breaking',
+            }),
+          ]);
+        }
+        // The same flag on both sides is no flip, whichever way each side is read.
+        for (const [before, after] of [
+          [xmlRequired, jsonRequired],
+          [jsonOptional, xmlOptional],
+        ]) {
+          expect(operationChanges(before, after)).toEqual([
+            expect.objectContaining({
+              kind: 'operation-modified',
+              requestBodyChanged: true,
+              requestBodyRequiredChanged: false,
+            }),
+          ]);
+        }
+      });
+    });
+  }
+
+  describe('diffOperations', () => {
+    const pet: TypeRef = { kind: 'model', name: 'Pet' };
+    const noBody: Operation = { ...getUser, httpMethod: 'post' };
+    /** `createPet` as the parser builds it for a body under `application/xml` alone: no `requestBody`, the flag kept beside the contents. */
+    const carried = (requestBodyRequired?: boolean): Operation => ({
+      ...noBody,
+      requestBodyContentTypes: ['application/xml'],
+      requestBodyContents: [{ contentType: 'application/xml', type: pet }],
+      ...(requestBodyRequired !== undefined ? { requestBodyRequired } : {}),
+    });
+    /** The same body under `application/json`, read as `requestBody`. */
+    const read = (requestBodyRequired: boolean): Operation => ({
+      ...noBody,
+      requestBody: pet,
+      requestBodyEncoding: 'json',
+      requestBodyContentType: 'application/json',
+      requestBodyContentTypes: ['application/json'],
+      requestBodyContents: [{ contentType: 'application/json', type: pet }],
+      requestBodyRequired,
+    });
+
+    it('reports a flip on a body carried in requestBodyContents alone, as on one read as requestBody', () => {
+      expect(diffOperations('Pets', [carried(false)], [carried(true)])).toEqual([
+        expect.objectContaining({
+          kind: 'operation-modified',
+          requestBodyChanged: false,
+          requestBodyRequiredChanged: true,
+          classification: 'breaking',
+        }),
+      ]);
+      expect(diffOperations('Pets', [carried(true)], [carried(false)])).toEqual([
+        expect.objectContaining({
+          kind: 'operation-modified',
+          requestBodyChanged: false,
+          requestBodyRequiredChanged: true,
+          classification: 'additive',
+        }),
+      ]);
+      expect(diffOperations('Pets', [carried(true)], [carried(true)])).toEqual([]);
+      expect(diffOperations('Pets', [carried(false)], [carried(false)])).toEqual([]);
+    });
+
+    it('reads an absent flag beside such a body as optional, as beside a requestBody', () => {
+      expect(diffOperations('Pets', [carried()], [carried(false)])).toEqual([]);
+      expect(diffOperations('Pets', [carried(false)], [carried()])).toEqual([]);
+      expect(diffOperations('Pets', [carried()], [carried(true)])).toEqual([
+        expect.objectContaining({ requestBodyRequiredChanged: true, classification: 'breaking' }),
+      ]);
+      expect(diffOperations('Pets', [carried(true)], [carried()])).toEqual([
+        expect.objectContaining({ requestBodyRequiredChanged: true, classification: 'additive' }),
+      ]);
+    });
+
+    it('compares the flag across the two readings, beside the body change', () => {
+      expect(diffOperations('Pets', [carried(false)], [read(true)])).toEqual([
+        expect.objectContaining({
+          requestBodyChanged: true,
+          requestBodyRequiredChanged: true,
+          classification: 'breaking',
+        }),
+      ]);
+      expect(diffOperations('Pets', [read(true)], [carried(false)])).toEqual([
+        expect.objectContaining({
+          requestBodyChanged: true,
+          requestBodyRequiredChanged: true,
+          classification: 'breaking',
+        }),
+      ]);
+      expect(diffOperations('Pets', [carried(true)], [read(true)])).toEqual([
+        expect.objectContaining({ requestBodyChanged: true, requestBodyRequiredChanged: false }),
+      ]);
+    });
+
+    it('leaves a body carried in requestBodyContents alone appearing or disappearing unreported: its flag goes with it', () => {
+      // As before this fix: there is no `requestBody` for `requestBodyChanged` to report, and a
+      // flag on one side alone is not a flip.
+      expect(diffOperations('Pets', [noBody], [carried(true)])).toEqual([]);
+      expect(diffOperations('Pets', [carried(true)], [noBody])).toEqual([]);
+    });
+  });
+
+  describe('#528 review — the media types of such a body are compared, its encoding is not', () => {
+    /** `createPet`'s body under the given media types, `required` on both sides. */
+    const documentWith = (openapi: string, content: Record<string, unknown>) => ({
+      openapi,
+      info: { title: 'Pets', version: '1' },
+      paths: {
+        '/pets': {
+          post: {
+            operationId: 'createPet',
+            requestBody: { required: true, content },
+            responses: { '204': { description: 'no content' } },
+          },
+        },
+      },
+    });
+    const object = { type: 'object', properties: { name: { type: 'string' } } };
+    const operationChanges = (before: ApiSpec, after: ApiSpec) =>
+      diffSpecs(before, after).changes.filter((c) => c.kind === 'operation-modified');
+
+    for (const openapi of ['3.0.3', '3.1.0']) {
+      it(`reports the media types a body carried in requestBodyContents alone gained or lost, with no encoding (OpenAPI ${openapi})`, async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const xml = await parseDocument(documentWith(openapi, { 'application/xml': { schema: object } }));
+        const xmlCsv = await parseDocument(
+          documentWith(openapi, { 'application/xml': { schema: object }, 'text/csv': { schema: { type: 'string' } } }),
+        );
+        // Neither side is read as `requestBody`, and no encoding is read from such a body.
+        for (const spec of [xml, xmlCsv]) {
+          expect(createPet(spec).requestBody).toBeUndefined();
+          expect(createPet(spec).requestBodyEncoding).toBeUndefined();
+        }
+        expect(createPet(xmlCsv).requestBodyContentTypes).toEqual(['application/xml', 'text/csv']);
+
+        const gained = operationChanges(xml, xmlCsv);
+        expect(gained).toEqual([
+          expect.objectContaining({
+            requestBodyChanged: false,
+            requestBodyRequiredChanged: false,
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+            requestBodyContentTypeChange: expect.objectContaining({ added: ['text/csv'], removed: [] }),
+            classification: 'additive',
+          }),
+        ]);
+        expect(gained[0]).not.toHaveProperty('oldRequestBodyEncoding');
+        expect(gained[0]).not.toHaveProperty('newRequestBodyEncoding');
+        expect(operationChanges(xmlCsv, xml)).toEqual([
+          expect.objectContaining({
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+            requestBodyContentTypeChange: expect.objectContaining({ added: [], removed: ['text/csv'] }),
+            classification: 'breaking',
+          }),
+        ]);
+      });
+
+      it(`compares no encoding across the two readings, though the body read as requestBody carries one (OpenAPI ${openapi})`, async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const xml = await parseDocument(documentWith(openapi, { 'application/xml': { schema: object } }));
+        const json = await parseDocument(documentWith(openapi, { 'application/json': { schema: object } }));
+        const form = await parseDocument(
+          documentWith(openapi, { 'application/x-www-form-urlencoded': { schema: object } }),
+        );
+        expect(createPet(json).requestBodyEncoding).toBe('json');
+        for (const [before, after] of [
+          [xml, json],
+          [json, xml],
+        ]) {
+          const [change] = operationChanges(before, after);
+          expect(change).toMatchObject({
+            requestBodyChanged: true,
+            requestBodyEncodingChanged: false,
+            requestBodyContentTypesChanged: true,
+          });
+          expect(change).not.toHaveProperty('oldRequestBodyEncoding');
+          expect(change).not.toHaveProperty('newRequestBodyEncoding');
+        }
+        // While both read the body as `requestBody`, the encoding is compared as before.
+        expect(operationChanges(json, form)).toEqual([
+          expect.objectContaining({
+            requestBodyEncodingChanged: true,
+            oldRequestBodyEncoding: 'json',
+            newRequestBodyEncoding: 'form-urlencoded',
+          }),
+        ]);
+      });
+    }
+
+    it('compares no encoding on a hand-built body carried in requestBodyContents alone, even one that carries an encoding', () => {
+      const pet: TypeRef = { kind: 'model', name: 'Pet' };
+      const carried = (encoding: Operation['requestBodyEncoding'], ...contentTypes: string[]): Operation => ({
+        ...getUser,
+        httpMethod: 'post',
+        requestBodyRequired: true,
+        requestBodyContentTypes: contentTypes,
+        requestBodyContents: contentTypes.map((contentType) => ({ contentType, type: pet })),
+        ...(encoding ? { requestBodyEncoding: encoding } : {}),
+      });
+      // A hand-built IR may set `requestBodyEncoding` beside a body with no `requestBody`; the parser never does.
+      expect(
+        diffOperations('Pets', [carried('text', 'application/xml')], [carried('binary', 'application/xml')]),
+      ).toEqual([]);
+      expect(
+        diffOperations(
+          'Pets',
+          [carried(undefined, 'application/xml')],
+          [carried(undefined, 'application/xml', 'text/csv')],
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          requestBodyChanged: false,
+          requestBodyEncodingChanged: false,
+          requestBodyContentTypesChanged: true,
+          requestBodyContentTypeChange: expect.objectContaining({ added: ['text/csv'] }),
+          classification: 'additive',
+        }),
+      ]);
+    });
   });
 });

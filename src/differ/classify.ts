@@ -172,6 +172,39 @@ export function requestBodyEncodingDetails(shift: RequestBodyEncodingShift): str
   return `encoding ${shift.oldRequestBodyEncoding ?? '<none>'} → ${shift.newRequestBodyEncoding ?? '<none>'}`;
 }
 
+/** The fields of an operation or a webhook that say whether it carries a request body. */
+export type RequestBodyCarrier = Pick<Operation, 'requestBody' | 'requestBodyContentTypes'>;
+
+/**
+ * Whether a node's `requestBodyRequired` is compared between the two specs:
+ * true while both sides carry a body the parser keeps the flag on — one
+ * read as `requestBody`, or one carried in `requestBodyContents` alone,
+ * whose media types (`requestBodyContentTypes`) are declared but none of
+ * them read (#474), a body under `application/xml` or `application/*+json`
+ * alone, say. An SDK that offers such a body through its contents makes
+ * the argument mandatory when the flag is `true`, so a flip on it is
+ * reported exactly as one on a body read as `requestBody` is (#528),
+ * whichever way each side is read: an old document's body carried in its
+ * contents and the new document's read as `requestBody`, with the flag on
+ * both, is compared too. A body appearing or disappearing, on either
+ * reading, takes its flag with it, as it takes its encoding
+ * (`requestBodyEncodingShift`): on one that is read as `requestBody` the
+ * body change is reported in its place, on one carried in its contents
+ * alone nothing is. An absent flag on a carried body reads as optional, as
+ * it does in OpenAPI; a webhook's is only ever `true`, so its absence
+ * never says the payload is gone. `diffOperations` and `diffWebhookBody`
+ * both read the flag through this function, so an operation's body and a
+ * webhook's payload are judged alike.
+ */
+export function requestBodyRequiredCompared(oldNode: RequestBodyCarrier, newNode: RequestBodyCarrier): boolean {
+  return carriesRequestBody(oldNode) && carriesRequestBody(newNode);
+}
+
+/** A body read as `requestBody`, or one carried in `requestBodyContents` alone (`requestBodyContentTypes` set). */
+function carriesRequestBody(node: RequestBodyCarrier): boolean {
+  return node.requestBody !== undefined || node.requestBodyContentTypes !== undefined;
+}
+
 export function classifyFieldChange(
   kind: FieldChange['kind'],
   fieldName: string,

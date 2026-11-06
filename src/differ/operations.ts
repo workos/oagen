@@ -41,6 +41,7 @@ import {
   extensionsShift,
   parameterNameShift,
   requestBodyEncodingShift,
+  requestBodyRequiredCompared,
   tagsShift,
 } from './classify.js';
 import {
@@ -115,18 +116,23 @@ export function diffOperations(
     const successGainedOrLost = (oldOp.responseStatusCode === undefined) !== (newOp.responseStatusCode === undefined);
     const responseChanged = !typeRefsEqual(oldOp.response, newOp.response) || successGainedOrLost;
     const requestBodyChanged = !requestBodiesEqual(oldOp.requestBody, newOp.requestBody);
-    // The required flag and the encoding are compared only while both sides
-    // carry a body (`requestBody`): a body appearing or disappearing is
-    // already `requestBodyChanged`, so it takes both with it. The parser also
-    // sets the flag on a body carried in `requestBodyContents` alone (one
-    // under `application/xml` alone, say); that flag is not compared either.
-    const bothCarryBody = !!oldOp.requestBody && !!newOp.requestBody;
-    // An absent flag reads as optional, as it does in OpenAPI.
+    // The required flag is compared whenever both sides carry a body the
+    // parser keeps it on — one read as `requestBody`, or one carried in
+    // `requestBodyContents` alone (under `application/xml` alone, say),
+    // which an SDK offers through its contents and makes mandatory by the
+    // flag just the same (#528) — read through `requestBodyRequiredCompared`,
+    // the function `diffWebhooks` reads a payload's flag with. A body
+    // appearing or disappearing takes the flag with it: one read as
+    // `requestBody` is already `requestBodyChanged`. An absent flag reads as
+    // optional, as it does in OpenAPI.
     const requestBodyRequiredChanged =
-      bothCarryBody && (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
+      requestBodyRequiredCompared(oldOp, newOp) &&
+      (oldOp.requestBodyRequired ?? false) !== (newOp.requestBodyRequired ?? false);
     // The wire format the SDK serializes the body as, read through the
     // function `diffWebhooks` reads a payload's encoding with, which
-    // compares only while both sides carry a body, likewise.
+    // compares only while both sides carry a `requestBody`: a body
+    // appearing or disappearing is already `requestBodyChanged`, so it
+    // takes its encoding with it.
     const encoding = requestBodyEncodingShift(oldOp, newOp);
     const requestBodyEncodingChanged = encoding !== undefined;
     // The media types callers may send the body as, only while both sides
