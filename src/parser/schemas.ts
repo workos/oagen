@@ -797,7 +797,7 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * whose nullable wrappers are removed and sibling `properties` folded in
  * (`unwrapNullableSchema`), as `schemaToTypeRef` reads it.
  */
-function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
+export function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefined {
   if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
   const reading = readInlineAllOf(schema.allOf, schema);
   if (reading === 'unwrapped') return unwrappedAllOfMember(schema);
@@ -2947,15 +2947,23 @@ export function buildFieldFromSchema(
   const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  // The field's own levels: its schema and, under it, each `allOf` member
-  // that declares no type and so only annotates or limits the field
-  // (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind }, { description
-  // }]` and `allOf: [{ type: 'string' }, { deprecated: true }]` read neither
-  // the text nor the flag) — nearest first, as `wrappedReference` orders
-  // them for a reference to an array or primitive component.
+  // The levels the field documents itself from: its schema and, under it,
+  // each `allOf` member that declares no type and so only annotates or
+  // limits the field (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind
+  // }, { description }]` and `allOf: [{ type: 'string' }, { deprecated: true
+  // }]` read neither the text nor the flag) — nearest first, as
+  // `wrappedReference` orders them for a reference to an array or primitive
+  // component.
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
-  const limitLevels = [...own, ...aliases];
+  // The limits: the field's schema — `extractConstraints` conjoins its
+  // annotating members' with its own, in document order — or every level on
+  // the way to an array or primitive component's `$ref`, and the component's
+  // entries. The annotating members are no level of their own here: folded
+  // first, a member's `pattern` or `multipleOf` would win over the schema's
+  // own, which `combineConstraints` keeps (#587 review: `{ type: 'string',
+  // pattern: '^a', allOf: [{ pattern: 'b$' }] }` carried `b$`).
+  const limitLevels = [...(reference?.own ?? [fieldSchema]), ...aliases];
   const { example, examples } = resolveExamples(
     [...own, ...(bare ? [...aliases, ...(refTarget ? [refTarget] : [])] : [])].map((level) => ({
       example: level.example,
@@ -4603,22 +4611,28 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     buildFieldFromSchema(entry.name, declaredComponentProperty(entry), name, requiredSet, schemas, siblings),
   );
 
+  // The text, link, flag and extensions are the wrapper layer's: the
+  // component's own, with an annotating member's — one that declares no
+  // type — where it declares none (`allOfWrapperLayer`), as the merged
+  // model's are (`mergeAllOfMembers`; #555 review: `Owner: { allOf: [{ $ref:
+  // Base }, { properties: { name } }, { description: 'An owner.',
+  // deprecated: true }] }` was a model with neither, while the same keys
+  // beside the `allOf` were its own, and `oagen diff` between the two
+  // reported `deprecatedChanged`). A typing member's stay on that member —
+  // a `$ref` member's flag on the referenced model, as `Field.deprecated`
+  // leaves it there on an allOf field.
+  const layer = allOfWrapperLayer(schema);
   return {
     name,
-    description: schema.description,
-    ...externalDocsEntry(schema.externalDocs),
+    description: layer.description,
+    ...externalDocsEntry(layer.externalDocs),
     fields,
     ...(discriminator ? { discriminator } : {}),
-    // Deprecation is the wrapper's own: a member's flag is not read — a `$ref`
-    // member's stays on the referenced model — as `Field.deprecated` ignores
-    // it on an allOf field.
-    ...deprecatedEntry(schema),
+    ...deprecatedEntry(layer),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
     // members keep theirs on the referenced model.
     ...constraintsEntry(schema),
-    // The wrapper's own extensions, as its flag and link: a member's stay on
-    // that member, a `$ref` member's on its component.
-    ...schemaExtensionsEntry(schema),
+    ...schemaExtensionsEntry(layer),
   };
 }
 
@@ -5383,14 +5397,15 @@ export function schemaToTypeRef(
       if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
     } else {
       // A single member, or the one member that types the schema beside
-      // members that only annotate or limit it (`allOfTypingMember`; #555),
-      // unwrapped. The wrapper is the schema the document wrote, and those
-      // members are part of it (`allOfWrapperLayer`), so its documentation
-      // rides onto the member — an inline enum lifted from it carries the
-      // wrapper's `description` and link (`withWrapperDocs`), and a model
-      // built from it the wrapper's link (`unwrappedAllOfMember`).
+      // members that only annotate or limit it, its items documented by a
+      // member's `items` that declare no type (`annotatedTypingMember`;
+      // #555), unwrapped. The wrapper is the schema the document wrote, and
+      // those members are part of it (`allOfWrapperLayer`), so its
+      // documentation rides onto the member — an inline enum lifted from it
+      // carries the wrapper's `description` and link (`withWrapperDocs`),
+      // and a model built from it the wrapper's link (`unwrappedAllOfMember`).
       return schemaToTypeRef(
-        withWrapperDocs(allOfTypingMember(schema.allOf) ?? schema.allOf[0], allOfWrapperLayer(schema)),
+        withWrapperDocs(annotatedTypingMember(schema), allOfWrapperLayer(schema)),
         contextName,
         parentModelName,
         siblingProperties,
@@ -5780,10 +5795,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
   const folded = foldSiblingProperties(schema);
   const kind = classifyInlineSchema(folded);
   if (kind === 'allOf' && folded.allOf) {
-    return (
-      readInlineAllOf(folded.allOf, folded) === 'unwrapped' &&
-      typesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0])
-    );
+    return readInlineAllOf(folded.allOf, folded) === 'unwrapped' && typesAsUnknown(annotatedTypingMember(folded));
   }
   if (kind !== 'other') return false;
   const typeStr = Array.isArray(folded.type) ? folded.type[0] : folded.type;
@@ -5793,6 +5805,7 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 import {
   allOfTypingMember,
   allOfWrapperLayer,
+  annotatedTypingMember,
   annotatingAllOfMembers,
   buildInlineModel,
   collectProperties,
