@@ -526,6 +526,53 @@ describe('#382', () => {
           expect(hookNames(ab)[0]).toMatch(/^OnNoteAddedNoteRead[0-9A-Fa-f]{6}Payload$/);
           expect(warnings()).toEqual([]);
         });
+
+        it.each([
+          { order: 'path operation first', eventsFirst: true },
+          { order: 'nesting operation first', eventsFirst: false },
+        ])(
+          'mints one model for a callback a path operation references directly and a callback operation of the same stem nests, $order (Greptile)',
+          async ({ eventsFirst }) => {
+            // `registerEvent` (POST /events) references `Read` directly; the
+            // callback operation `register_event` under `createPet`'s `events`
+            // nests the same reference. Both stems are `RegisterEvent`, so
+            // `read` is one group across depths and mints once.
+            const read = {
+              '{$request.body#/readUrl}': {
+                post: {
+                  requestBody: {
+                    content: {
+                      'application/json': { schema: { type: 'object', properties: { read: { type: 'boolean' } } } },
+                    },
+                  },
+                  responses: { '200': { description: 'OK' } },
+                },
+              },
+            };
+            const reference = { read: { $ref: '#/components/callbacks/Read' } };
+            const events = { post: opWith(reference, 'registerEvent') };
+            const createPet = {
+              post: opWith(
+                { events: callbackPosting(petIdSchema, { operationId: 'register_event', callbacks: reference }) },
+                'createPet',
+              ),
+            };
+            const paths = eventsFirst
+              ? { '/events': events, '/pets': createPet }
+              : { '/pets': createPet, '/events': events };
+            const spec = await parseJson(documentWith(openapi, paths, { components: { callbacks: { Read: read } } }));
+
+            expect(modelNames(spec).sort()).toEqual(['RegisterEventPayload', 'RegisterEventReadPayload']);
+            const byName = new Map(operations(spec).map((op) => [op.name, op]));
+            expect(payloadNames(byName.get('registerEvent')!)).toEqual(['RegisterEventReadPayload']);
+            expect(payloadNames(byName.get('createPet')!)).toEqual([
+              'RegisterEventPayload',
+              'RegisterEventReadPayload',
+            ]);
+            expectResolved(spec);
+            expect(warnings()).toEqual([]);
+          },
+        );
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {

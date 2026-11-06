@@ -29,7 +29,7 @@
  * several methods is qualified (`plainStem`). The stems of every callback
  * are decided against every model and enum name the document already
  * holds — components, the operations' models, the webhooks' — and against
- * each other, in rounds (see `extractCallbacks`), so a collision hashes the
+ * each other, in one batch (see `extractCallbacks`), so a collision hashes the
  * NEW stem as a webhook's is hashed — from the callback's identity: its
  * owner's identity (an operation's operationId, else `METHOD /path`; a
  * shared callback operation's operationId) with the key, expression and
@@ -57,17 +57,17 @@
  * about and skipped. An `x-` key inside a Callback Object is a
  * specification extension and is not an expression.
  */
-import type { Callback, Model, Operation, TypeRef, Webhook } from '../ir/types.js';
-import { callbackContext, collectModelTypeRefs, collectWebhookTypeRefs, walkTypeRef } from '../ir/types.js';
+import type { Callback, Model, Operation, Webhook } from '../ir/types.js';
+import { callbackContext } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
 import type { DeclaredCallbacks, PathItem } from './operations.js';
 import { resolveComponentRef, resolvePathItemRef } from './path-item-refs.js';
 import type { SiblingDocs } from './reference-objects.js';
 import {
   buildReceivedRequests,
+  plainStemOf,
   readPathItemEntries,
   settleStemOperationIds,
-  type ReservedNames,
   type WebhookComponents,
   type WebhookEntry,
 } from './webhooks.js';
@@ -79,21 +79,17 @@ export interface CallbackExtractionResult {
   inlineModelBundles: InlineModelBundle[];
 }
 
-/** One callback entry waiting to be named and built, with where it attaches and how deep it sits. */
+/** One callback entry waiting to be named and built, with where it attaches. */
 interface PendingCallback {
   entry: WebhookEntry;
-  /** The node the built `Callback` is appended to: the declaring operation or webhook, or the parent pending callback (once built). */
+  /** The node the built `Callback` is appended to: the declaring operation or webhook, or the parent pending callback. */
   owner: Operation | Webhook | PendingCallback;
-  /** The stem of `owner` when it is an operation or webhook; a parent callback's is read once it is built. */
+  /** The stem of `owner` when it is an operation or webhook; a parent callback's is its plain stem (`plainStemOf`). */
   ownerStem: string | undefined;
   /** The identity of `owner` when it is an operation or webhook (`DeclaredCallbacks.identity`); a parent callback's is its own. */
   ownerIdentity: string | undefined;
-  /** How many callbacks sit between the declaring operation or webhook and this one. */
-  depth: number;
-  /** The `Callback` built for this entry, once its round is built (see `extractCallbacks`). */
+  /** The `Callback` built for this entry, once the batch is built (see `extractCallbacks`). */
   node?: Callback;
-  /** The stem the models were named from, once its round is built. */
-  stem?: string;
 }
 
 /**
@@ -107,23 +103,24 @@ interface PendingCallback {
  * Every callback of the document, nested ones included, is collected
  * first (`collectPendingCallbacks`), so an operationId names a stem only
  * when exactly one callback operation object in the whole document
- * declares it (`settleStemOperationIds`). The entries are then named and
- * built in rounds. The first round takes every operationId-named entry,
- * whatever its depth — its stem owes nothing to its owner, so the entries
- * of one callback operation object reached at several depths (a
+ * declares it (`settleStemOperationIds`). Each key-named entry's stem is
+ * then prefixed with its owner's stem — an operation's or webhook's settled
+ * one, a parent callback's plain stem before any collision hash
+ * (`plainStemOf`), parents preceding children — and every entry is named,
+ * minted and built in one batch (`buildReceivedRequests`), as the
+ * `webhooks` map is. Entries reading one operation object and named from
+ * its operationId form one group whatever their depths (a
  * `components/callbacks` entry an operation references directly and
- * another callback nests) form one group, mint once and share one set of
- * models (`NotifyAdoptionPayload`), as two `webhooks` keys sharing a path
- * item do; a nested site is never named apart from a direct one — together
- * with the key-named entries at depth 0. Each later round takes the
- * key-named entries whose owner the rounds before built, since their stems
- * are prefixed with the owner's settled stem; every round reserves every
- * name the rounds before minted. A key-named callback such a shared
- * operation declares itself (`noteRead` under `NoteAdded`) is reached from
- * every site under one stem and one operation object, so its entries form
- * one group too (`groupEntries`) and mint once (`OnNoteAddedNoteReadPayload`),
- * however many sites reach it. Once every entry is built, the nodes are
- * attached to their owners in document order — `callbacks` key order,
+ * another callback nests), and so do key-named entries reading one object
+ * under one plain stem (`groupEntries`: `noteRead` declared by a shared
+ * `NoteAdded`; `Read` referenced by a path operation `registerEvent` and by
+ * a callback operation `register_event`, both `RegisterEvent`), so each
+ * mints once and every site references the one model
+ * (`NotifyAdoptionPayload`, `OnNoteAddedNoteReadPayload`,
+ * `RegisterEventReadPayload`) whichever site comes first; a nested site is
+ * never named apart from a direct one. Every group is named against every
+ * other and against every name decided before. Once every node exists,
+ * each is attached to its owner in document order — `callbacks` key order,
  * expression order within each Callback Object, then the path item's
  * method order.
  */
@@ -144,7 +141,6 @@ export function extractCallbacks(
       owner,
       stem,
       identity ?? label,
-      0,
       new Set(),
       pending,
       components,
@@ -174,44 +170,34 @@ export function extractCallbacks(
     });
   }
 
-  const all = new Set(reservedNames);
-  const enums = new Set(reservedEnumNames);
-  const built = new Set<PendingCallback>();
-  // Round one: every operationId-named entry, at any depth, and the
-  // key-named entries at depth 0; then, round by round, the key-named
-  // entries whose owner is built (`parentStem` needs its stem).
-  let round = pending.filter((candidate) => candidate.entry.stemOperationId !== undefined || candidate.depth === 0);
-  while (round.length > 0) {
-    for (const candidate of round) {
-      if (candidate.entry.stemOperationId !== undefined) continue;
-      candidate.entry.parentStem = isPending(candidate.owner) ? candidate.owner.stem! : candidate.ownerStem!;
-    }
-    const reserved: ReservedNames = { all, enums };
-    const batch = buildReceivedRequests(
-      round.map(({ entry }) => entry),
-      components,
-      reserved,
-      siblingDocs,
-    );
-    inlineModels.push(...batch.inlineModels);
-    inlineModelBundles.push(...batch.inlineModelBundles);
-    // The next round steps around everything this one minted: every model
-    // and enum name, and among them the enums (which no model may take).
-    for (const name of batch.names) all.add(name);
-    reserveInlineEnums(batch.inlineModels.flatMap(collectModelTypeRefs), enums);
-    for (const [index, { node, stem }] of batch.built.entries()) {
-      const candidate = round[index]!;
-      // The node `buildWebhook` made, with the expression after the key.
-      const { name, ...rest } = node;
-      const callback: Callback = { name, expression: candidate.entry.expression!, ...rest };
-      reserveInlineEnums(collectWebhookTypeRefs(callback), enums);
-      candidate.node = callback;
-      candidate.stem = stem;
-      built.add(candidate);
-    }
-    round = pending.filter(
-      (candidate) => !built.has(candidate) && isPending(candidate.owner) && built.has(candidate.owner),
-    );
+  // Each key-named entry's parent stem: the owner's settled stem for an
+  // operation or webhook, a parent callback's plain stem (before the
+  // collision hash the batch below may give it). Parents precede their
+  // children in `pending`, so a parent's own parent stem is set first.
+  for (const candidate of pending) {
+    const { entry, owner } = candidate;
+    if (entry.stemOperationId !== undefined) continue;
+    entry.parentStem = isPending(owner) ? plainStemOf(owner.entry) : candidate.ownerStem!;
+  }
+
+  // One batch for every callback of the document, as the `webhooks` map is
+  // one: entries reading one operation object under one plain stem form one
+  // group whatever their depths (`groupEntries`), every group is named
+  // against every other and against every name decided before, and each
+  // mints once.
+  const batch = buildReceivedRequests(
+    pending.map(({ entry }) => entry),
+    components,
+    { all: new Set(reservedNames), enums: new Set(reservedEnumNames) },
+    siblingDocs,
+  );
+  inlineModels.push(...batch.inlineModels);
+  inlineModelBundles.push(...batch.inlineModelBundles);
+  for (const [index, { node }] of batch.built.entries()) {
+    const candidate = pending[index]!;
+    // The node `buildWebhook` made, with the expression after the key.
+    const { name, ...rest } = node;
+    candidate.node = { name, expression: candidate.entry.expression!, ...rest };
   }
   // Attached once every node exists, in document order: `pending` is
   // collected depth-first, so an owner's callbacks come in key, expression
@@ -225,17 +211,6 @@ export function extractCallbacks(
 
 function isPending(owner: PendingCallback['owner']): owner is PendingCallback {
   return 'entry' in owner;
-}
-
-/** Add every inline enum name among `refs` (an enum reference carrying its `values`) to `enums`. */
-function reserveInlineEnums(refs: readonly TypeRef[], enums: Set<string>): void {
-  for (const ref of refs) {
-    walkTypeRef(ref, {
-      enum: (r) => {
-        if (r.values) enums.add(r.name);
-      },
-    });
-  }
 }
 
 /** The document's own `paths` and `webhooks` maps, which a callback path item's `$ref` may name. */
@@ -256,7 +231,6 @@ function collectPendingCallbacks(
   owner: PendingCallback['owner'],
   ownerStem: string | undefined,
   ownerIdentity: string | undefined,
-  depth: number,
   ancestors: ReadonlySet<object>,
   pending: PendingCallback[],
   components: WebhookComponents,
@@ -299,7 +273,7 @@ function collectPendingCallbacks(
         siblingDocs,
       );
       for (const entry of entries) {
-        const candidate: PendingCallback = { entry, owner, ownerStem, ownerIdentity, depth };
+        const candidate: PendingCallback = { entry, owner, ownerStem, ownerIdentity };
         pending.push(candidate);
         // The callback operation's own callbacks nest under it.
         collectPendingCallbacks(
@@ -308,7 +282,6 @@ function collectPendingCallbacks(
           candidate,
           undefined,
           undefined,
-          depth + 1,
           onPath,
           pending,
           components,

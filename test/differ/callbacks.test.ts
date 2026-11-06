@@ -884,6 +884,75 @@ describe('#382', () => {
       expect(nestedPayload(reversed)).toEqual(nestedPayload(first));
     });
 
+    it.each([
+      { order: 'path operation first', eventsFirst: true },
+      { order: 'nesting operation first', eventsFirst: false },
+    ])(
+      'reports only the callback added when a path operation gains a reference a callback operation of the same stem already nests, $order (Greptile)',
+      async ({ eventsFirst }) => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ok = { '200': { description: 'OK' } };
+        const reference = { read: { $ref: '#/components/callbacks/Read' } };
+        const document = (direct: boolean) => {
+          const events = {
+            post: { operationId: 'registerEvent', responses: ok, ...(direct ? { callbacks: reference } : {}) },
+          };
+          const createPet = {
+            post: {
+              operationId: 'createPet',
+              responses: ok,
+              callbacks: {
+                events: {
+                  '{$request.body#/eventsUrl}': {
+                    post: {
+                      operationId: 'register_event',
+                      ...posting({}, petIdSchema)['{$request.body#/callbackUrl}'].post,
+                      callbacks: reference,
+                    },
+                  },
+                },
+              },
+            },
+          };
+          return {
+            openapi,
+            info: { title: 'repro', version: '1' },
+            paths: eventsFirst ? { '/events': events, '/pets': createPet } : { '/pets': createPet, '/events': events },
+            components: {
+              callbacks: { Read: posting({}, { type: 'object', properties: { read: { type: 'boolean' } } }) },
+            },
+          };
+        };
+        const nestedOnly = await parseDocument(document(false));
+        const both = await parseDocument(document(true));
+        // One `RegisterEventReadPayload` on each side: the nested site and the
+        // direct site read one callback operation under one stem.
+        expect(nestedOnly.models.map((m) => m.name).sort()).toEqual([
+          'RegisterEventPayload',
+          'RegisterEventReadPayload',
+        ]);
+        expect(both.models.map((m) => m.name).sort()).toEqual(['RegisterEventPayload', 'RegisterEventReadPayload']);
+
+        // The direct reference is the one additive `callback-added`, exit 1; nothing is renamed.
+        const added = diffSpecs(nestedOnly, both);
+        expect(added.changes).toEqual([
+          {
+            kind: 'callback-added',
+            name: 'read',
+            expression: '{$request.body#/callbackUrl}',
+            httpMethod: 'post',
+            serviceName: 'Events',
+            operationName: 'registerEvent',
+            classification: 'additive',
+          },
+        ]);
+        expect(added.summary).toMatchObject({ added: 1, modified: 0, removed: 0, breaking: 0, additive: 1 });
+        expect(diffSpecs(both, nestedOnly).changes.map((c) => [c.kind, c.classification])).toEqual([
+          ['callback-removed', 'breaking'],
+        ]);
+      },
+    );
+
     it("reports a callback payload field made required as breaking and made optional as additive, as a webhook's (Michael's finding 4)", async () => {
       vi.spyOn(console, 'warn').mockImplementation(() => {});
       const payload = (required: boolean) => ({

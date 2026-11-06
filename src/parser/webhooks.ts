@@ -141,9 +141,12 @@ export interface WebhookEntry {
   expressionCount?: number;
   /**
    * The stem of the operation, webhook or callback that declares the
-   * callback (`DeclaredCallbacks.stem`), which a key-derived stem is
-   * prefixed with: `CreatePet` + `petAdopted` → `CreatePetPetAdopted`.
-   * Absent on a webhook, whose key stands alone.
+   * callback, which a key-derived stem is prefixed with: `CreatePet` +
+   * `petAdopted` → `CreatePetPetAdopted`. An operation's or webhook's
+   * settled stem (`DeclaredCallbacks.stem`); a parent callback's plain stem
+   * before any collision hash (`plainStemOf`), since every callback of the
+   * document is named in one batch. Absent on a webhook, whose key stands
+   * alone.
    */
   parentStem?: string;
   /**
@@ -797,6 +800,11 @@ function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupO
  * starting with a digit, gets the kind's noun in front (`Webhook`,
  * `Callback`).
  */
+/** The plain stem of `entry` — before any collision hash — which a nested callback's key-derived stem is prefixed with (`extractCallbacks`). */
+export function plainStemOf(entry: WebhookEntry): string {
+  return plainStem(entry, '');
+}
+
 function plainStem(entry: WebhookEntry, disambiguator: string): string {
   const operationId = entry.stemOperationId;
   const expression = !operationId && (entry.expressionCount ?? 1) > 1 ? toPascalCase(entry.expression ?? '') : '';
