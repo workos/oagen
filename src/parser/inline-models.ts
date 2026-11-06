@@ -17,6 +17,7 @@ import {
   markComponentModelRef,
   arraySchemaOf,
   declaresNull,
+  derivedCopy,
   isInlineObjectSchema,
   isNullSchema,
   nullableUnionBranch,
@@ -27,6 +28,7 @@ import {
   nameInlineVariantEntries,
   nameInlineVariants,
   resolveSchemaName,
+  sourceDeclaration,
   titleMappedVariantNames,
   variantMemberSchemas,
   foldSiblingProperties,
@@ -117,8 +119,10 @@ export interface MintedInlineName {
  * inside, re-entering their own properties as `materializeMergedAllOf`
  * does. One reached again is the same conjunction built once more
  * (`combinedDeclarations`), for which the extractor builds nothing
- * (workos/oagen#566), so the walk mints nothing for it either. Empty
- * between walks.
+ * (workos/oagen#566), so the walk mints nothing for it either. Keyed as
+ * `materializingMergedAllOf` is, by the declaration a schema stands for
+ * (`sourceDeclaration`), so a merge under a nullable wrapper is met once
+ * however often the wrapper is stripped. Empty between walks.
  */
 const mintingMergedAllOf = new Set<SchemaObject>();
 
@@ -178,13 +182,14 @@ export function mintedInlineNameEntries(
     // declares the property too and the two conjoin. A merge already on the
     // path of this walk mints nothing more, as the extractor types it as the
     // model it is building and builds nothing for the re-entry (#566).
-    if (mintingMergedAllOf.has(s)) return [];
-    mintingMergedAllOf.add(s);
+    const declaration = sourceDeclaration(s);
+    if (mintingMergedAllOf.has(declaration)) return [];
+    mintingMergedAllOf.add(declaration);
     try {
       const own = mergeAllOfMembers(s, documentComponentSchemas()).properties.filter((p) => p.origin === null);
       return modelName(Object.fromEntries(own.map((p) => [p.name, p.schema])));
     } finally {
-      mintingMergedAllOf.delete(s);
+      mintingMergedAllOf.delete(declaration);
     }
   }
   const variants = kind === 'union' ? (s.oneOf ?? s.anyOf) : undefined;
@@ -2520,7 +2525,10 @@ export function unwrappedAllOfMember(wrapper: SchemaObject): SchemaObject {
   // rides onto the member by the one wrapper rule (`withWrapperDocs`), the
   // wrapper's winning, as the type builder gives the same wrapper on a field.
   const layer = allOfWrapperLayer(wrapper);
-  return withWrapperDocs(withWrapperDeprecation({ ...member, ...extractConstraints(wrapper) }, layer), layer);
+  // The copy stands for the member it was spread from (`derivedCopy`), so a
+  // reader that guards by identity meets a merge under the wrapper once.
+  const limited = derivedCopy({ ...member, ...extractConstraints(wrapper) }, member);
+  return withWrapperDocs(withWrapperDeprecation(limited, layer), layer);
 }
 
 /**
@@ -2568,7 +2576,9 @@ export function declaresType(schema: SchemaObject): boolean {
  * workos/oagen#531) and the extraction of a merged `allOf` whose merge
  * reaches its own conjunction (`materializeMergedAllOf`; workos/oagen#566)
  * each end at a conjunction they have already read because it is the same
- * object. Keyed by the declarations themselves, which the document owns;
+ * object — or a copy standing for it, once a wrapper it keeps is stripped
+ * (`sourceDeclaration`). Keyed by the declarations themselves, which the
+ * document owns;
  * what a pair combines into depends on the document's components
  * (`composesObject`), so the memo is reset with them
  * (`resetCombinedDeclarations`).
@@ -2628,9 +2638,11 @@ export function resetCombinedDeclarations(): void {
  * adds nothing to it, so a lone declaration keeps its identity. The same two
  * declarations combine into the same object throughout the document
  * (`combinedDeclarations`), so a reader that guards by identity meets a
- * conjunction once, however often the merges build it (workos/oagen#551
- * memoized the title walk alone; workos/oagen#566: the extractor still got
- * a new object from every merge, and re-entered it without end).
+ * conjunction once, however often the merges build it — through whatever
+ * wrapper it strips from it, the copy read as the conjunction
+ * (`sourceDeclaration`) — (workos/oagen#551 memoized the title walk alone;
+ * workos/oagen#566: the extractor still got a new object from every merge,
+ * and re-entered it without end).
  */
 export function combineDeclarations(held: SchemaObject, next: SchemaObject): SchemaObject {
   let byNext = combinedDeclarations.get(held);
@@ -3229,7 +3241,15 @@ function withoutNull(schema: SchemaObject): SchemaObject {
  * typeless `reply: { description }` and the array `replies` forms, and two
  * components that do this to each other, end the same way; workos/oagen#566:
  * each merge built a new conjunction that was re-entered under a longer name
- * without end). Shared by the field extractor and `extractInlineModelDeep`,
+ * without end). The path is keyed by the declaration a schema stands for
+ * (`sourceDeclaration`), not by the schema handed in, so the same holds
+ * under a nullable wrapper of any spelling, or a single-member `allOf`
+ * wrapper: a typeless redeclaration annotates the conjunction without
+ * stripping the wrapper, every unwrap of it makes a copy
+ * (`unwrapNullableField`), and the copy is read as the declaration it was
+ * spread from (workos/oagen#566 review: the guard never met the same copy
+ * twice, and a nullable `Note.reply` beside `reply: { description }` still
+ * overflowed). Shared by the field extractor and `extractInlineModelDeep`,
  * so a field nested under a discriminated component variant is built exactly
  * as the same field anywhere else.
  */
@@ -3240,9 +3260,12 @@ export function materializeMergedAllOf(
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): void {
   // Already being built on this path: the reference that named this
-  // re-entry resolves to the model under construction (see above).
-  if (materializingMergedAllOf.has(schema)) return;
-  materializingMergedAllOf.set(schema, name);
+  // re-entry resolves to the model under construction (see above). The
+  // path is keyed by the declaration `schema` stands for, so a copy a
+  // stripped wrapper left is the merge it was spread from.
+  const declaration = sourceDeclaration(schema);
+  if (materializingMergedAllOf.has(declaration)) return;
+  materializingMergedAllOf.set(declaration, name);
   try {
     const merged = mergeAllOfMembers(schema, componentSchemas);
     results.push(buildMergedModel(name, merged, componentSchemas));
@@ -3253,7 +3276,7 @@ export function materializeMergedAllOf(
     const mergedSiblings = new Map(merged.properties.map((p) => [p.name, p.schema]));
     extractInlineModelsFromProperties({ properties: own }, results, name, componentSchemas, mergedSiblings);
   } finally {
-    materializingMergedAllOf.delete(schema);
+    materializingMergedAllOf.delete(declaration);
   }
 }
 
@@ -3265,13 +3288,29 @@ export function materializeMergedAllOf(
  * conjunction built once more (`combinedDeclarations`), so the field is
  * typed as the model on the path (`materializingMergedAllOfName`, read by
  * `schemaToTypeRef`) and the re-entry builds nothing (workos/oagen#566).
- * Empty between extractions.
+ *
+ * The identity rule: a merge is the declaration that carries its `allOf` —
+ * a document's own object, or the conjunction `combineDeclarations`
+ * memoizes for two of them — and every schema is keyed by the declaration
+ * it stands for (`sourceDeclaration`), so a copy a reader spreads from one
+ * — a nullable wrapper stripped, sibling properties folded, a wrapper's
+ * documentation or limits carried onto the branch it collapses to
+ * (`derivedCopy`, at each such site) — is the declaration it was spread
+ * from, and the extractor and the type builder meet one key for a merge
+ * whichever wrapper each strips. A transform that memoizes its copy per
+ * declaration composes with the rule, since the one copy is itself a
+ * stable key; one that records its copy resolves to the declaration. Under
+ * a nullable wrapper the two spellings that flag the schema (`nullable:
+ * true`, `type: ['object', 'null']`) key the field's declaration itself,
+ * and a `oneOf: [{ allOf }, { type: 'null' }]` or single-member `allOf`
+ * wrapper keys the branch or member that carries the `allOf`, which the
+ * wrapper and a conjunction annotating it share. Empty between extractions.
  */
 let materializingMergedAllOf = new Map<SchemaObject, string>();
 
-/** The name `materializeMergedAllOf` is building the model for `schema` under, on the path the extraction is inside; `undefined` off it. */
+/** The name `materializeMergedAllOf` is building the model for the declaration `schema` stands for under (`sourceDeclaration`), on the path the extraction is inside; `undefined` off it. */
 export function materializingMergedAllOfName(schema: SchemaObject): string | undefined {
-  return materializingMergedAllOf.get(schema);
+  return materializingMergedAllOf.get(sourceDeclaration(schema));
 }
 
 /**
