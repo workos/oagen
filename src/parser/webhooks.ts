@@ -1085,24 +1085,37 @@ function groupIdentity(group: WebhookGroup): StemIdentity {
  * parted by the method qualifier (`PetAdoptedB4A950Post`,
  * `PetAdoptedB4A950Put`), as they always were, prefixed or not. A key or
  * operationId that spells a prefixed text as written — a webhook keyed
- * `key:petAdopted` beside that pair — hashes the string `petAdopted`'s key
- * hashes, and names apart all the same: its stem starts with the word the
- * prefix PascalCases to (`KeyPetAdopted`, `OperationIdPetAdopted`), so
- * every name it mints starts with `KeyPetAdopted<hash>` and every name
- * `petAdopted`'s mints with `PetAdopted<hash>`, and no name coincides
- * (`KeyPetAdopted15Fe0FPayload` beside `PetAdopted15Fe0FPayload`); nothing
- * else in the batch is moved by it. The rule reads the batch's texts
- * alone, never their order.
+ * `key:petAdopted` beside that pair — would hash the string `petAdopted`'s
+ * key hashes, and a name can coincide: a `petAdopted` payload variant
+ * pinning `kind: key` is named `KeyPetAdopted<hash>Payload`, the literal
+ * key's own payload name, at every length of one hash. So a group whose
+ * text as written spells a prefixed text hashes its own prefixed text too
+ * (`key:key:petAdopted`), and so on until no text does — one more group
+ * each time, never the rest of the batch — which parts them
+ * (`KeyPetAdopted130B64Payload` beside the variant
+ * `KeyPetAdopted15Fe0FPayload`). The rule reads the batch's texts alone,
+ * never their order.
  */
 function groupIdentities(groups: WebhookGroup[]): Map<WebhookGroup, string> {
   const identities = new Map(groups.map((group) => [group, groupIdentity(group)] as const));
+  const prefixed = ({ source, text }: StemIdentity): string => `${source}:${text}`;
   // The sources each text is held under: one, or both.
   const sources = new Map<string, Set<IdentitySource>>();
   for (const { source, text } of identities.values()) sources.set(text, new Set(sources.get(text)).add(source));
+  // The groups hashing their prefixed text: those of a text held under
+  // both sources, then every group whose text as written spells a
+  // prefixed text, until none does.
+  const moved = new Set(groups.filter((group) => sources.get(identities.get(group)!.text)!.size > 1));
+  for (;;) {
+    const taken = new Set([...moved].map((group) => prefixed(identities.get(group)!)));
+    const spelled = groups.filter((group) => !moved.has(group) && taken.has(identities.get(group)!.text));
+    if (spelled.length === 0) break;
+    for (const group of spelled) moved.add(group);
+  }
   return new Map(
     groups.map((group) => {
-      const { source, text } = identities.get(group)!;
-      return [group, sources.get(text)!.size > 1 ? `${source}:${text}` : text];
+      const identity = identities.get(group)!;
+      return [group, moved.has(group) ? prefixed(identity) : identity.text];
     }),
   );
 }

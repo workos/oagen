@@ -430,7 +430,7 @@ describe('#599', () => {
         ['minItems', 1],
         ['maxItems', 1],
         ['uniqueItems', true],
-        ['minContains', 1],
+        ['minContains', 2],
         ['maxContains', 1],
         ['minProperties', 1],
         ['maxProperties', 1],
@@ -440,6 +440,29 @@ describe('#599', () => {
         expect(keywordTightened(keyword, undefined, value), `${keyword} added`).toBe(true);
         expect(keywordTightened(keyword, value, undefined), `${keyword} removed`).toBe(false);
       }
+    });
+
+    it('reads a lower bound added at its default, or a dependentRequired that requires nothing, as rejecting nothing (#659 review round 2)', () => {
+      for (const keyword of ['minLength', 'minItems', 'minProperties'] as const) {
+        expect(keywordTightened(keyword, undefined, 0), `${keyword}: 0 added`).toBe(false);
+        expect(keywordTightened(keyword, 0, undefined), `${keyword}: 0 removed`).toBe(false);
+        expect(keywordTightened(keyword, undefined, 1), `${keyword}: 1 added`).toBe(true);
+        expect(keywordTightened(keyword, 0, 1), `${keyword} 0 → 1`).toBe(true);
+      }
+      // `contains` must match once by default, so `minContains: 1` restates it and `0` loosens it.
+      expect(keywordTightened('minContains', undefined, 1)).toBe(false);
+      expect(keywordTightened('minContains', undefined, 0)).toBe(false);
+      expect(keywordTightened('minContains', undefined, 2)).toBe(true);
+      expect(keywordTightened('minContains', 1, undefined)).toBe(false);
+      expect(keywordTightened('dependentRequired', undefined, { a: [] })).toBe(false);
+      expect(keywordTightened('dependentRequired', undefined, { a: [], b: ['c'] })).toBe(true);
+      expect(keywordTightened('dependentRequired', { a: [] }, { a: [], b: [] })).toBe(false);
+      // An upper bound, a pattern, a multiple or uniqueness added admits fewer values than none.
+      expect(keywordTightened('maxLength', undefined, 0)).toBe(true);
+      expect(keywordTightened('uniqueItems', undefined, true)).toBe(true);
+      expect(keywordTightened('uniqueItems', undefined, false)).toBe(false);
+      expect(constraintsTightened(undefined, { minLength: 0, minItems: 0 })).toBe(false);
+      expect(constraintsTightened(undefined, { minLength: 0, maxLength: 5 })).toBe(true);
     });
 
     it('reads an upper bound lowered and a lower bound raised as tightened, the reverse moves as loosened', () => {
@@ -1680,6 +1703,80 @@ describe('#599', () => {
       expect(await exitCodeOf(exclusive31, inclusive31)).toBe(1);
       expect(await exitCodeOf(inclusive31, exclusive31)).toBe(2);
     });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`reports a default-valued lower bound added as additive, exit 1, on a field, a parameter and a model (OpenAPI ${openapi}; round 2)`, async () => {
+        const doc = (declared: boolean) =>
+          petsDoc(
+            openapi,
+            {
+              Pet: petWith(
+                {
+                  name: { type: 'string', ...(declared ? { minLength: 0 } : {}) },
+                  tags: { type: 'array', items: { type: 'string' }, ...(declared ? { minItems: 0 } : {}) },
+                },
+                declared ? { minProperties: 0, dependentRequired: { name: [] } } : {},
+              ),
+            },
+            {
+              getPet: {
+                parameters: [
+                  { name: 'petId', in: 'path', required: true, schema: { type: 'string' } },
+                  { name: 'limit', in: 'query', schema: { type: 'integer', ...(declared ? { minimum: 0 } : {}) } },
+                ],
+              },
+            },
+          );
+        const report = diffSpecs(await parse('old', doc(false)), await parse('new', doc(true)));
+        expect(report.changes).toMatchObject([
+          {
+            kind: 'model-modified',
+            name: 'Pet',
+            fieldChanges: [
+              {
+                kind: 'field-constraints-changed',
+                fieldName: 'name',
+                classification: 'additive',
+                details: 'minLength <unset> → 0',
+              },
+              {
+                kind: 'field-constraints-changed',
+                fieldName: 'tags',
+                classification: 'additive',
+                details: 'minItems <unset> → 0',
+              },
+            ],
+            constraintsChanged: true,
+            newConstraints: { minProperties: 0, dependentRequired: { name: [] } },
+            details: 'minProperties <unset> → 0; dependentRequired <unset> → {"name":[]}',
+            classification: 'additive',
+          },
+          {
+            kind: 'operation-modified',
+            operationName: 'getPet',
+            // A numeric bound has no default: `minimum: 0` added rejects every negative value.
+            paramChanges: [
+              {
+                kind: 'param-constraints-changed',
+                paramName: 'limit',
+                classification: 'breaking',
+                details: 'minimum <unset> → 0',
+              },
+            ],
+            classification: 'breaking',
+          },
+        ]);
+        const withoutLimit = (declared: boolean) =>
+          petsDoc(openapi, {
+            Pet: petWith(
+              { name: { type: 'string', ...(declared ? { minLength: 0 } : {}) } },
+              declared ? { minProperties: 0 } : {},
+            ),
+          });
+        expect(await exitCodeOf(withoutLimit(false), withoutLimit(true))).toBe(1);
+        expect(await exitCodeOf(withoutLimit(true), withoutLimit(false))).toBe(1);
+      });
+    }
 
     it('compares a chain of nested unions once per pair of types, however deep', () => {
       // Each level: a union of the next level and an integer; the leaf a string with `maxLength`.
