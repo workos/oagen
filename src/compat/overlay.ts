@@ -404,23 +404,30 @@ function buildModelNameMap(
         const methodOverlay = lookup.methodByOperation.get(httpKey);
         if (!methodOverlay) continue;
 
+        // The response and the body under any nullable wrapper: a `$ref` to
+        // a component that admits `null`, like the same object written
+        // inline, is `nullable<model>` (#615), and the SDK's return and
+        // parameter types name that model all the same.
+        const response = op.response.kind === 'nullable' ? op.response.inner : op.response;
+        const body = op.requestBody?.kind === 'nullable' ? op.requestBody.inner : op.requestBody;
+
         // Match response model → SDK return type
-        if (op.response.kind === 'model' && !mapped.has(op.response.name)) {
+        if (response.kind === 'model' && !mapped.has(response.name)) {
           const sdkTypeName = hints.extractReturnTypeName(methodOverlay.returnType);
           if (sdkTypeName && surface.interfaces[sdkTypeName]) {
-            lookup.modelNameByIR.set(op.response.name, sdkTypeName);
-            mapped.add(op.response.name);
+            lookup.modelNameByIR.set(response.name, sdkTypeName);
+            mapped.add(response.name);
             usedSdkNames.add(sdkTypeName);
           }
         }
 
         // Match request body model → SDK param type
-        if (op.requestBody?.kind === 'model' && !mapped.has(op.requestBody.name)) {
+        if (body?.kind === 'model' && !mapped.has(body.name)) {
           for (const param of methodOverlay.params) {
             const sdkTypeName = hints.extractParamTypeName(param.type);
             if (sdkTypeName && surface.interfaces[sdkTypeName]) {
-              lookup.modelNameByIR.set(op.requestBody.name, sdkTypeName);
-              mapped.add(op.requestBody.name);
+              lookup.modelNameByIR.set(body.name, sdkTypeName);
+              mapped.add(body.name);
               usedSdkNames.add(sdkTypeName);
               break;
             }
