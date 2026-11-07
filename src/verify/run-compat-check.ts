@@ -12,15 +12,29 @@ import type { LanguageId } from '../compat/ir.js';
 import { getDefaultPolicy, mergePolicy } from '../compat/policy.js';
 import type { CompatPolicyHints } from '../compat/policy.js';
 import type { ApiSpec } from '../ir/types.js';
+import type { OperationResolution } from '../ir/operation-hints.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatCheckResult } from './types.js';
 
+/**
+ * Extract the generated SDK in `outputDir` and diff it against `baseline`.
+ *
+ * With a `spec`, the baseline is scoped to the symbols the spec derives
+ * (`specDerivedNames`, `specDerivedMethodPaths`, `filterSurface`), read as
+ * `generate` writes them under the `resolution`'s `mountRules`,
+ * `operationHints` and `operationNaming` — the settings `generate` resolved
+ * the SDK's operations with. Under `mountRules: { Pets: 'Animals' }` the
+ * `Animals` class is in scope with the methods its operations resolve to, so
+ * a method the SDK lost from it is reported removed; read from the IR as
+ * parsed, `Animals` was no name the spec derived and the loss passed.
+ */
 export async function runCompatCheck(
   baseline: ApiSurface,
   outputDir: string,
   lang: string,
   spec?: ApiSpec,
   policyOverrides?: Partial<CompatPolicyHints>,
+  resolution?: OperationResolution,
 ): Promise<CompatCheckResult> {
   const extractor = getExtractor(lang);
   const candidate = await extractor.extract(outputDir);
@@ -29,9 +43,9 @@ export async function runCompatCheck(
   let scopedToSpec = false;
   let scopedSymbolCount: number | undefined;
   if (spec) {
-    const allowed = specDerivedNames(spec, extractor.hints);
+    const allowed = specDerivedNames(spec, extractor.hints, resolution);
     const fieldPaths = specDerivedFieldPaths(spec, extractor.hints);
-    const methodPaths = specDerivedMethodPaths(spec);
+    const methodPaths = specDerivedMethodPaths(spec, resolution);
     const enumVals = specDerivedEnumValues(spec);
     scopedBaseline = filterSurface(baseline, allowed, { fieldPaths, methodPaths, enumValues: enumVals });
     scopedToSpec = true;
