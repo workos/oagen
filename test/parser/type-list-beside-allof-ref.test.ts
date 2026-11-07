@@ -255,6 +255,28 @@ describe('#616', () => {
     }
   });
 
+  it('keeps a composition whole on a copy, never trimmed to the members that apply (Greptile, round 1)', async () => {
+    // The array copy keeps the whole `allOf` — the merge the extractor
+    // builds, `NoteAuthor { name }` — not the `items` member alone, which
+    // would reference items no extractor builds a model for.
+    const items = { type: 'object', properties: { id: string } };
+    const merged = await parseJson(
+      document('3.1.0', { type: ['array', 'string'], allOf: [{ properties: { name: string } }, { items }] }, {}),
+    );
+    expect(author(merged).type).toEqual(union({ kind: 'model', name: 'NoteAuthor' }, primitive('string')));
+    expect(fieldOf(merged, 'NoteAuthor', 'name').type).toEqual(primitive('string'));
+    expect(modelNames(merged)).toEqual(['Note', 'NoteAuthor']);
+
+    // A copy declaring `items` of its own keeps the `allOf` beside them, as
+    // the schema as a whole reads it: the reference, every one resolving.
+    const beside = await parseJson(
+      document('3.1.0', { ...authorOf(['array', 'string']), items }, { Owner: untypedOwner }),
+    );
+    expect(author(beside).type).toEqual(union(owner, primitive('string')));
+    expect(modelNames(beside)).toEqual(['Note', 'Owner']);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('answers `typesAsUnknown` for a list as the type it builds: bare `unknown` exactly when every copy is', async () => {
     expect(typesAsUnknown({ type: ['weird', 'weirder'] })).toBe(true);
     expect(typesAsUnknown({ type: ['weird', 'string'] })).toBe(false);

@@ -6536,17 +6536,27 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  * (`TYPE_FAMILY_KEYWORDS`), so the `object` copy of `{ type: ['object',
  * 'string'], properties }` is the object with those properties and the
  * `string` copy is `{ type: 'string' }` — `NoteAuthor | string` for the
- * issue's `inline.json`. A composition is read the same way, member by
- * member: a member that declares a type excluding `type` (`declaredTypes`:
- * its own, its component's, its own composition's) admits no instance of
- * it, so an `allOf` with such a member leaves no copy at all (`undefined`),
- * as does a `oneOf`/`anyOf` whose every variant is one; a member that says
- * nothing about an instance of `type` (`appliesToType`) is left off the
- * copy — the `allOf` without it, or no `allOf` once no member types the
- * copy, the members annotating it (`annotatingAllOfMembers`' test) going
- * with the last typing one; a `oneOf`/`anyOf` is kept whole while any
- * variant applies, so the union it types keeps the shape the document
- * wrote, and left off when none does. So `Note.author: { type: ['object',
+ * issue's `inline.json`. A composition is read against `type` member by
+ * member, and kept or left off whole: a member that declares a type
+ * excluding `type` (`declaredTypes`: its own, its component's, its own
+ * composition's) admits no instance of it, so an `allOf` with such a
+ * member leaves no copy at all (`undefined`), as does a `oneOf`/`anyOf`
+ * whose every variant is one; a composition some member of which says
+ * something about an instance of `type` (`appliesToType`) stays on the
+ * copy as written — never trimmed to those members, since the extractor
+ * reads the schema's composition whole (a merge, a reference) and a copy
+ * reading a composition of its own would reference a model nobody builds
+ * (Greptile, #616 review: `allOf: [{ properties: { name } }, { items }]`
+ * beside `['array', 'string']` was `array<NoteAuthor>` for an array copy
+ * keeping the `items` member alone, while the extractor merged
+ * `NoteAuthor { name }`); a composition no member of which says anything
+ * about an instance of `type` is left off the copy when the copy is then
+ * a bare type — a primitive, an enum, a literal, an object or array
+ * declaring no schema of its own (`declaresOwnSchemas`) — and kept
+ * otherwise, read as the schema as a whole is read, so `{ type: ['array',
+ * 'string'], items, allOf: [{ $ref: Owner }] }` is `Owner | string`, the
+ * reference the `allOf` beside the items is, not an array of items no
+ * extractor builds. So `Note.author: { type: ['object',
  * 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string` when `Owner`
  * declares `properties` and no `type` — its `properties` say nothing of a
  * string — and `Owner` alone when `Owner` is `type: 'object'`, which no
@@ -6573,14 +6583,30 @@ function typeListCopy(
     if (members === undefined || members.length === 0) continue;
     const excluding = members.filter((member) => !admitsType(member, type)).length;
     if (keyword === 'allOf' ? excluding > 0 : excluding === members.length) return undefined;
-    const applying = members.filter((member) => appliesToType(member, type));
-    if (applying.length === 0) {
-      delete copy[keyword];
-    } else if (keyword === 'allOf' && applying.length < members.filter(declaresType).length) {
-      copy.allOf = members.filter((member) => !declaresType(member) || appliesToType(member, type));
-    }
+    // Kept or left off whole, never trimmed to the members that apply.
+    if (!members.some((member) => appliesToType(member, type)) && !declaresOwnSchemas(copy)) delete copy[keyword];
   }
   return derivedCopy(copy, schema);
+}
+
+/** The keywords under which a schema declares schemas of its own — an inline object, items, values — that an extractor builds models for. */
+const OWN_SCHEMA_KEYWORDS: readonly string[] = [
+  'properties',
+  'additionalProperties',
+  'patternProperties',
+  'items',
+  'prefixItems',
+  'contains',
+];
+
+/**
+ * Whether `copy` declares a schema of its own (`OWN_SCHEMA_KEYWORDS`), so
+ * that a composition left off it would leave the copy typed by those
+ * schemas alone — items, values, properties the extractor, reading the
+ * composition beside them, never builds a model for (`typeListCopy`).
+ */
+function declaresOwnSchemas(copy: SchemaObject): boolean {
+  return OWN_SCHEMA_KEYWORDS.some((keyword) => copy[keyword] !== undefined);
 }
 
 /**
