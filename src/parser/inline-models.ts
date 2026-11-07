@@ -94,8 +94,9 @@ export function extendsParentName(baseName: string, cleanParent: string): boolea
  * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
  * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
  * named like its parent is qualified too — Reply + Reply → ReplyReply, as
- * Reply + Replies names its items — never left as the parent's own name,
- * which the component holds (workos/oagen#621).
+ * Reply + Replies names its items on its own (beside each other the field
+ * holds ReplyReply and the items step to ReplyRepliesItem) — never left as
+ * the parent's own name, which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
@@ -2999,7 +3000,10 @@ export function resetCombinedDeclarations(): void {
  * wrappers as written is `unknown` to them; a part the first already has
  * — the same object, or a `$ref` to a component it names
  * (`namesOneComponent`) — adds nothing, so two `$ref`s naming one
- * component, or a `$ref` beside its own wrapper, keep the first; and a
+ * component, or a `$ref` beside its own wrapper, keep the first (a first
+ * of several parts the readers would type non-null where every part
+ * admits `null` is rebuilt as the conjunction, so the admission is the
+ * same in either order); and a
  * pair whose members the readers would not all read — one that is no
  * `$ref`, no inline object member (`isInlineAllOfMember`) and no
  * annotating or limiting member (`declaresType`): an `allOf` of `$ref`s
@@ -3149,9 +3153,19 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       if (!members.some((present) => present === member || namesOneComponent(present, member))) members.push(member);
     }
     const required = [...new Set([...held.required, ...added.required])];
+    // `null` exactly when both declarations admit it, as JSON Schema
+    // applies both (workos/oagen#653 review: the conjunction admitted none,
+    // so `Meta | null` beside a nullable inline `allOf` lost its `null`).
+    const nullable = conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second);
     // Nothing added — two `$ref`s naming one component, a `$ref` beside its
-    // own wrapper — keeps the first, as a lone declaration does.
-    if (members.length === held.members.length && required.length === held.required.length) return first;
+    // own wrapper — keeps the first, as a lone declaration does; a first of
+    // several parts that the readers would type non-null where every part
+    // admits `null` (a bare `allOf` of nullable `$ref`s, which an inline
+    // merge types with no `null` of its own) is rebuilt as the conjunction
+    // instead, so the admission is the same in either member order (the
+    // #653 review's round 6).
+    const addsNothing = members.length === held.members.length && required.length === held.required.length;
+    if (addsNothing && (held.members.length === 1 || !nullable || declaresNull(first))) return first;
     // The readers read a member that is a `$ref` or an inline object member
     // (`isInlineAllOfMember`), or one that declares no type and only
     // annotates or limits the schema (`declaresType`; `allOfWrapperLayer`,
@@ -3167,10 +3181,6 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member) || !declaresType(member)) &&
       members.some((member) => member.$ref !== undefined || declaresInlineProperties(member));
     if (!readable) return first;
-    // `null` exactly when both declarations admit it, as JSON Schema
-    // applies both (workos/oagen#653 review: the conjunction admitted none,
-    // so `Meta | null` beside a nullable inline `allOf` lost its `null`).
-    const nullable = conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second);
     return {
       ...declarationKeywords(first),
       ...declarationKeywords(second),
@@ -3188,8 +3198,10 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * `nullable: true` beside a `type`, a nullable `oneOf`/`anyOf` wrapper, an
  * `allOf` read as one member that does), through a `$ref` to a component
  * that does (`componentSchemaOf`, as `componentTypeRef` wraps such a
- * reference), or as an `allOf` whose every member does, as JSON Schema
- * applies them all. A `type` of its own that names no `null` rejects it,
+ * reference), or as an `allOf` whose every typing member does
+ * (`declaresType`: a member that only annotates or limits the schema says
+ * nothing of `null`), as JSON Schema applies them all. A `type` of its
+ * own that names no `null` rejects it,
  * whatever it composes (`{ type: 'object', allOf: [{ $ref: Nullable }] }`),
  * and an inline object with no `type` admits none, as the type builder
  * reads it. The one reading a conjunction settles its own `null` admission
@@ -3216,8 +3228,13 @@ function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = n
       const target = componentSchemaOf(schema.$ref);
       return target !== undefined && conjunctionAdmitsNull(target, path);
     }
-    const members = schema.allOf ?? [];
-    return members.length > 0 && members.every((member) => conjunctionAdmitsNull(member, path));
+    // A member that declares no type (`declaresType`) only annotates or
+    // limits the schema and says nothing of `null`, so it has no say here
+    // (the #653 review's round 6: `{ allOf: [{ $ref: B }, { $ref: C }, {
+    // description }] }` beside a nullable `$ref` rejected `null` for the
+    // description's sake).
+    const typing = (schema.allOf ?? []).filter(declaresType);
+    return typing.length > 0 && typing.every((member) => conjunctionAdmitsNull(member, path));
   } finally {
     path.delete(schema);
   }
@@ -3769,9 +3786,11 @@ const LIFTED_LIMIT_KEYWORDS: readonly string[] = [
  * `unionOfDeclarations` lifts onto a combined declaration when every
  * declaration agrees on them, and which therefore make no shape of their
  * own there, at a declaration's top level or inside its array items and
- * map values (`withoutLiftedKeywords`).
+ * map values (`withoutLiftedKeywords`); the request-body fold carries the
+ * same keywords onto the discriminator it rebuilds, by the same agreement
+ * (`flattenDiscriminatedUnionBody`, through `levelSettings`).
  */
-const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'readOnly',
   'writeOnly',
   'deprecated',
@@ -3783,6 +3802,37 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   ...LIFTED_LIMIT_KEYWORDS,
 ];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+
+/**
+ * The lifted keywords (`LIFTED_DECLARATION_KEYWORDS`) and `x-*` keys a
+ * field reads off `levels`, nearest first, as `buildFieldFromSchema` reads
+ * a declaration's levels — its schema and the `allOf` members that only
+ * annotate it, then what a `$ref` reaches — folded into one declaration:
+ * `readOnly`, `writeOnly` and `deprecated` are set when any level says so,
+ * every other keyword and key as the nearest level that declares it
+ * writes it. So declarations read through different wrappers can be
+ * compared by `agreedDeclarationKeys` and `agreedExtensions` as written
+ * ones are: the request-body fold reads each variant's discriminator
+ * declaration this way (`pinnedDeclarationLayers`) and carries onto the
+ * discriminator it rebuilds the settings every variant agrees on (#607
+ * review: only `description` was carried, so two variants both writing
+ * `kind: { allOf: [{ const }], readOnly: true }` folded to a `kind` that
+ * was not read-only, where unfolded each variant's own field was).
+ */
+export function levelSettings(levels: readonly SchemaObject[]): SchemaObject {
+  const settings: Record<string, unknown> = {};
+  for (const level of levels) {
+    for (const [key, value] of Object.entries(level)) {
+      if (value === undefined) continue;
+      if (key === 'readOnly' || key === 'writeOnly' || key === 'deprecated') {
+        if (value === true) settings[key] = true;
+      } else if ((LIFTED_DECLARATION_KEYWORD_SET.has(key) || key.startsWith('x-')) && !Object.hasOwn(settings, key)) {
+        settings[key] = value;
+      }
+    }
+  }
+  return settings as SchemaObject;
+}
 
 /**
  * The keywords under which a declaration nests the one schema its array
