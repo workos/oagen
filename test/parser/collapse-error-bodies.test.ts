@@ -1440,11 +1440,11 @@ describe('#515', () => {
       const b = await parseWithoutWarnings(reversed);
       expect(modelNames(a)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
       expect(modelNames(b)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
-      expect(enumValues(b, 'ErrorBodyStatus')).toEqual(['404', '410']);
+      expect(enumValues(b, 'ErrorBodyStatus404Or410')).toEqual(['404', '410']);
       expect(diffOf(a, b).changes).toEqual([]);
       // Two bodies listing the same values in either order are one shape,
-      // and share one enum on the shared model, named from the field (#612),
-      // rather than a union of two.
+      // and share one enum on the shared model, named from the field and its
+      // values (#612), rather than a union of two.
       const both = await parseWithoutWarnings({
         ...doc({
           ...getOp('pets', { '404': { description: 'nf', content: json(status([404, 410])) } }),
@@ -1454,8 +1454,8 @@ describe('#515', () => {
       });
       expect(modelNames(both)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
       const field = both.models.find((m) => m.name === 'ErrorBodyWithStatus404Or410')!.fields[1];
-      expect(field.type).toEqual({ kind: 'enum', name: 'ErrorBodyStatus', values: [404, 410] });
-      expect(both.enums.map((e) => e.name)).toEqual(['ErrorBodyStatus']);
+      expect(field.type).toEqual({ kind: 'enum', name: 'ErrorBodyStatus404Or410', values: [404, 410] });
+      expect(both.enums.map((e) => e.name)).toEqual(['ErrorBodyStatus404Or410']);
       expectSound(both);
     },
   );
