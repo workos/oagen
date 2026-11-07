@@ -416,7 +416,7 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
-/** Field properties that only document a field — its extensions included; two shapes that differ in these alone are one shape. */
+/** Field properties that only document a field — its extensions included — or say where it comes from (`inheritedFrom`, the base a component's field is taken from; #591); two shapes that differ in these alone are one shape. */
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'name',
   'description',
@@ -424,13 +424,15 @@ const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'example',
   'examples',
   'extensions',
+  'inheritedFrom',
 ]);
-/** Model properties outside its shape: the name, its documentation (description, link, extensions), and the fields (fingerprinted on their own). */
+/** Model properties outside its shape: the name, its documentation (description, link, extensions), its provenance (`bases`, the components a composed component is built on; #591), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
   'name',
   'description',
   'externalDocs',
   'extensions',
+  'bases',
   'fields',
 ]);
 /** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readModelName`. */

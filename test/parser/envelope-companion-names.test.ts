@@ -533,13 +533,18 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
     });
 
     it('refuses on every property of `Field` but its documentation and type, so a new property cannot be forgotten', () => {
-      // Every property a `Field` can carry beside its name, documentation and
-      // type, each with a value: a property added to `Field` must be added
-      // here (the type is `Required`), and is then checked below on both
-      // predicates — `fieldAdmits`, which every component fold reads, and
-      // the companion pass, which reads `fieldPropertiesAdmit` on its own.
+      // Every property a `Field` can carry beside its name, documentation,
+      // provenance (`inheritedFrom`, the base a component's field is taken
+      // from: not shape, #591) and type, each with a value: a property added
+      // to `Field` must be added here (the type is `Required`), and is then
+      // checked below on both predicates — `fieldAdmits`, which every
+      // component fold reads, and the companion pass, which reads
+      // `fieldPropertiesAdmit` on its own.
       const every: Required<
-        Omit<Field, 'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples' | 'extensions'>
+        Omit<
+          Field,
+          'name' | 'type' | 'description' | 'externalDocs' | 'example' | 'examples' | 'extensions' | 'inheritedFrom'
+        >
       > = {
         domainName: 'cursor',
         required: true,
@@ -650,8 +655,9 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
 
     it('refuses on every property of `Model` but its identity, fields and union structure, so a new property cannot be forgotten', () => {
       // Every property a `Model` can carry beside its name, documentation,
-      // fields and named-union parts, each with a value: a property added to
-      // `Model` must be added here (the type is `Required`), and is then
+      // provenance (`bases`, the components it is composed from: not shape,
+      // #591), fields and named-union parts, each with a value: a property
+      // added to `Model` must be added here (the type is `Required`), and is then
       // checked below on every predicate — `modelPropertiesAdmit` and
       // `modelAdmits`, which every component fold reads, and the companion
       // pass, which reads `modelPropertiesAdmit` on its own. The flag is the
@@ -664,6 +670,7 @@ describe('resolveEnvelopeCompanionNames – deprecated', () => {
           | 'description'
           | 'externalDocs'
           | 'extensions'
+          | 'bases'
           | 'fields'
           | 'variants'
           | 'compositionKind'

@@ -1270,6 +1270,44 @@ export interface Model {
    */
   deprecated?: boolean;
   fields: Field[];
+  /**
+   * The components a composed component's `allOf` names, one `{ kind:
+   * 'model' }` reference per `$ref` member, in document order, each once:
+   * `Pet: { allOf: [{ $ref: Animal }], properties: { nickname } }` has
+   * `bases: [Animal]`, `allOf: [{ $ref: Animal }, { $ref: Owned }]` has
+   * `[Animal, Owned]`. Each model names only its direct bases: with
+   * `Animal: { allOf: [{ $ref: Living }], … }`, `Animal.bases` is
+   * `[Living]` and `Pet.bases` stays `[Animal]`, since `Animal` already
+   * covers `Living`. A member is read to the component its reference
+   * chain lands on, as the inline merge records a property's origin
+   * (`mergeAllOfMembers`): a bare alias (`Hop: { $ref: Animal }`) or a
+   * nullable alias (`Alias: { oneOf: [{ $ref: Animal }, { type: 'null' }]
+   * }`) declares nothing of its own, so the base is `Animal`, while an
+   * `allOf` component (`Hop: { allOf: [{ $ref: Animal }] }`) is a model of
+   * its own and the base, with `Animal` among its own. A `$ref` member
+   * naming an enum, array or primitive component — which builds no model
+   * and contributes nothing to the fields — is no base; a member read
+   * again (`allOf: [{ $ref: A }, { $ref: A }]`, a component naming itself)
+   * is read once. A `$ref` member naming a named union — flattened into
+   * the fields or dispatched, as the union's own model reads it — is a
+   * base like any other model. Present exactly when at least one base is
+   * named, on a model built from a component schema (a dispatcher
+   * included); never on a model built from an inline `allOf` — a request
+   * or response body, a field — nor on a dispatcher's variant models.
+   * `fields` stays complete, the inherited fields included, in the order
+   * the members are read, so an emitter that reads neither this key nor
+   * `Field.inheritedFrom` sees the model it always saw; one that reads
+   * them may write `Pet` as `Animal & { nickname?: string }` or `interface
+   * Pet extends Animal` (see `Field.inheritedFrom`). Provenance, not
+   * shape: two models that differ only here are one shape to the differ
+   * and to the parser's fingerprints, and `collectModelTypeRefs` leaves
+   * the references out, while `renameModelRefs` repoints them,
+   * `validateModelRefs` checks them and reachability for emission
+   * (`collectReferencedNames`) chases them, so the base of an emitted
+   * model is emitted; `collectFieldDependencies` does not list them — an
+   * emitter that writes `extends` imports the base itself.
+   */
+  bases?: TypeRef[];
   /** Generic type parameters. Empty/undefined for non-generic models. */
   typeParams?: TypeParam[];
   /**
@@ -1344,6 +1382,37 @@ export interface Field {
   domainName?: string;
   type: TypeRef;
   required: boolean;
+  /**
+   * The direct base — an entry of `Model.bases` — this field is taken from
+   * unchanged, as a `{ kind: 'model' }` reference; absent when the model
+   * declares the field itself, or when a declaration of its own — written
+   * beside the `allOf` or in an inline member, before or after the `$ref`
+   * — changes what the base declares, by any key: its type, its
+   * `description`, a `nullable` or `deprecated` flip, or its `required`
+   * (the model requiring a field the base leaves optional). A declaration
+   * the merge sets aside — a later typing one, which the first typing
+   * declaration outranks (`declareProperty`) — changes nothing, and the
+   * field stays the base's. `Pet: { allOf: [{ $ref: Animal }], required:
+   * [name], properties: { name: { type: 'string', enum: [rex, max] },
+   * nickname } }` over `Animal { name?, species? }` carries `name` and
+   * `nickname` without it and `species` with `inheritedFrom: Animal`, so
+   * an emitter can write `Pet` as `Animal & { name: PetName; nickname?:
+   * string }`; `Pet: { allOf: [{ $ref: Animal }], required: [species] }`
+   * carries `species` without it. A field a base inherits in turn names
+   * the direct base: with `Animal: { allOf: [{ $ref: Living }] }`,
+   * `Living`'s `born` is on `Pet` with `inheritedFrom: Animal`. A field
+   * a base's flattened `oneOf`/`anyOf` variants declare is the model's own
+   * (optional on both, with no origin), as a field the model's own
+   * variants declare is. Unchanged means as the document declares it: the
+   * field's `type` is still built under this model's name, so an inline
+   * object `Animal.meta` declares is `AnimalMeta` on `Animal` and
+   * `PetMeta` on `Pet` — the same shape — with `inheritedFrom: Animal`.
+   * Only on a field of a model that carries `bases`. Provenance, not
+   * shape: two fields that differ only here are one shape to the differ
+   * and to the fingerprints; `renameModelRefs` repoints it and
+   * `validateModelRefs` checks it.
+   */
+  inheritedFrom?: TypeRef;
   /**
    * The field schema's own `description`; for a bare `$ref` to an array or
    * primitive component — which names no model to carry the component's
@@ -1711,6 +1780,12 @@ export function mapTypeRef<T>(
  * service assignment, ref rewriting and validation, dependency collection,
  * inline-enum promotion, fingerprinting) goes through this so a type reached
  * only through a named union's variant is treated the way a field type is.
+ * A model's `bases` and its fields' `inheritedFrom` name the models it is
+ * built on, not types it owns — provenance, not shape (#591) — and are left
+ * out, so the fingerprints and the differ read a model with and without
+ * them as one shape; `renameModelRefs`, `validateModelRefs` and
+ * reachability for emission (`collectReferencedNames`) reach them on their
+ * own.
  */
 export function collectModelTypeRefs(model: Model): TypeRef[] {
   return [...model.fields.map((field) => field.type), ...(model.variants ?? [])];
@@ -1849,7 +1924,9 @@ function renameMappingTargets(mapping: Record<string, string>, renames: Readonly
  * Rename the models a model refers to: every `model` ref in its fields' types
  * and its union variants that `renames` maps and `admit` accepts is pointed
  * at the new name (`renameTypeRefModels`, so a union's mapping inside a field
- * follows its variant), and the model's own `discriminator.mapping` is
+ * follows its variant) — its `bases` and its fields' `inheritedFrom` with
+ * them, so a base renamed or folded away is named by its new name (#591)
+ * — and the model's own `discriminator.mapping` is
  * rewritten with it: without an `admit`, every target `renames` maps, by
  * name — whether it names a variant, a model outside the variants a
  * document's own mapping sends a value to, or a member an allOf+oneOf
@@ -1868,7 +1945,11 @@ export function renameModelRefs(
   admit?: (ref: ModelRef) => boolean,
 ): boolean {
   let moved = false;
-  for (const field of model.fields) if (renameTypeRefModels(field.type, renames, admit)) moved = true;
+  for (const field of model.fields) {
+    if (renameTypeRefModels(field.type, renames, admit)) moved = true;
+    if (field.inheritedFrom && renameTypeRefModels(field.inheritedFrom, renames, admit)) moved = true;
+  }
+  for (const base of model.bases ?? []) if (renameTypeRefModels(base, renames, admit)) moved = true;
   const mapping = model.discriminator?.mapping;
   if (model.variants) {
     if (renameVariants(model.variants, mapping, renames, admit)) moved = true;

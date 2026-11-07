@@ -5030,23 +5030,168 @@ export function unionAxesOf(schema: SchemaObject): SchemaObject[][] {
 interface ComponentReading {
   ledger: Map<string, PropertyDeclarations>;
   required: Set<string>;
+  /**
+   * Who requires each name in `required`: the origin of every
+   * always-applying `required` list that names it — a base, by name, or
+   * `null` for the component's own list and an inline member's — read
+   * beside a declaration's origin to tell a field left as its base
+   * declares it (`Field.inheritedFrom`) from one the model requires on its
+   * own (`inheritedBase`; #591).
+   */
+  requiredBy: Map<string, Set<string | null>>;
+  /**
+   * The bases the reading lands on (`Model.bases`): one `model` reference
+   * per component a `$ref` member's declarations are recorded under
+   * (`noteBase`), each once, in the order first met.
+   */
+  bases: ModelRef[];
   seen: Set<SchemaObject>;
 }
 
 /** A fresh `ComponentReading`, into `ledger` when given. */
 function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): ComponentReading {
-  return { ledger, required: new Set(), seen: new Set() };
+  return { ledger, required: new Set(), requiredBy: new Map(), bases: [], seen: new Set() };
 }
 
-/** How a member is read: the one variant axis not to read (the dispatcher base reads its axis for its own properties only), and the `discriminator` written for a union among the members outside the member that carries it — on the `allOf` wrapper, or on a nullable wrapper around the union. */
+/**
+ * The component a declaration is recorded under — the `{ name, schema }`
+ * `declareProperty` keeps as a declaration's origin, with the
+ * `components/schemas` key it was reached by, which `componentTypeRef`
+ * resolves (`noteBase`).
+ */
+interface ComponentOrigin {
+  key: string;
+  name: string;
+  schema: SchemaObject;
+}
+
+/**
+ * How a member is read: the one variant axis not to read (the dispatcher
+ * base reads its axis for its own properties only), the `discriminator`
+ * written for a union among the members outside the member that carries it
+ * — on the `allOf` wrapper, or on a nullable wrapper around the union —
+ * and the component whose own chain the member is read inside (`origin`:
+ * a `$ref` member's component, handed down to that component's members
+ * and nullable branches), under which its declarations are recorded
+ * (`memberOrigin`); absent at the top level, where a `$ref` member's
+ * declarations are its own component's and an inline member's are the
+ * model's own.
+ */
 interface MemberReadingOptions {
   skipAxis?: readonly SchemaObject[];
   wrapperDiscriminator?: DiscriminatorKeyword;
+  origin?: ComponentOrigin;
+}
+
+/**
+ * The component a member's declarations are recorded under — the origin
+ * `declareProperty` keeps per declaration, decided as the inline merge
+ * decides it (`mergeAllOfMembers`; #591): the component a `$ref` member's
+ * chain lands on (`landing.key`), a bare alias passed on the way declaring
+ * nothing of its own (`Hop: { $ref: Animal }` lands on `Animal`); the
+ * enclosing base (`enclosing`) for a member of a base's own `allOf` chain
+ * — the base's model carries everything reached inside it, a `$ref`
+ * member of its included, so `Living`'s `born` under `Animal: { allOf: [{
+ * $ref: Living }] }` is `Animal`'s — and for an inline member or branch
+ * read inside any base; a nullable alias (`Alias: { oneOf: [{ $ref:
+ * Animal }, { type: 'null' }] }`) is no `allOf` component and declares
+ * nothing of its own, so the `$ref` its branch names starts an origin of
+ * its own, as a reference inside a bare alias does. `null` for an inline
+ * member at the top level: the model's own.
+ */
+function memberOrigin(landing: MemberLanding, enclosing: ComponentOrigin | undefined): ComponentOrigin | null {
+  if (enclosing?.schema.allOf) return enclosing;
+  if (landing.key !== undefined) {
+    return { key: landing.key, name: resolveSchemaName(landing.key), schema: landing.resolved };
+  }
+  return enclosing ?? null;
+}
+
+/**
+ * Record `origin` among the reading's bases (`Model.bases`), once, when it
+ * is a model component: a `$ref` to it is typed as a model
+ * (`componentTypeRef`, read through the nullability a component carries),
+ * not as an enum, an array or a primitive, which build no model and
+ * contribute nothing to the fields. Called where a `$ref` member lands on
+ * a component that is more than a nullable wrapper
+ * (`declaresOnlyNullable`), so a base that declares nothing is still
+ * named, and wherever a declaration or a `required` name is recorded under
+ * an origin (`declareUnder`, `noteRequired`), so the origin every
+ * `inheritedFrom` names is a base.
+ */
+function noteBase(reading: ComponentReading, origin: ComponentOrigin): void {
+  if (reading.bases.some((base) => base.name === origin.name)) return;
+  const ref = componentTypeRef(origin.key);
+  const inner = ref.kind === 'nullable' ? ref.inner : ref;
+  if (inner.kind === 'model') reading.bases.push(inner);
+}
+
+/** Record `name` as required by `origin`'s list (`required`, `requiredBy`), the base noted (`noteBase`). */
+function noteRequired(reading: ComponentReading, name: string, origin: ComponentOrigin | null): void {
+  reading.required.add(name);
+  let by = reading.requiredBy.get(name);
+  if (!by) reading.requiredBy.set(name, (by = new Set()));
+  by.add(origin?.name ?? null);
+  if (origin) noteBase(reading, origin);
+}
+
+/** Declare `name` as always-applying under `origin` (`declareProperty`), the base noted (`noteBase`). */
+function declareUnder(
+  reading: ComponentReading,
+  name: string,
+  schema: SchemaObject,
+  origin: ComponentOrigin | null,
+): void {
+  declareProperty(reading.ledger, name, schema, origin, false);
+  if (origin) noteBase(reading, origin);
+}
+
+/**
+ * Whether a schema is only a nullable wrapper — every union it writes a
+ * `null` variant beside one other (`nullableAxisBranch`), with no `allOf`,
+ * no property and no `required` of its own — which declares nothing
+ * itself: its one variant is read in its place (`readComponentAllOfMember`)
+ * and names the base when it is a `$ref` (`memberOrigin`), so the wrapper
+ * is not noted as one on landing (`noteBase`).
+ */
+function declaresOnlyNullable(schema: SchemaObject): boolean {
+  if (schema.allOf || hasFoldableProperties(schema) || (schema.required?.length ?? 0) > 0) return false;
+  const axes = unionAxesOf(schema);
+  return axes.length > 0 && axes.every((variants) => nullableAxisBranch(schema, variants) !== undefined);
+}
+
+/**
+ * The base an entry's field is taken from unchanged (`Field.inheritedFrom`),
+ * or none: the origin of the always-applying declaration the entry settled
+ * on — a declaration of the model's own that changes it, before or after
+ * the base's, makes the entry the model's own (`declareProperty`) — when it
+ * is among the model's bases and the model requires the field only as that
+ * base does (`requiredBy`): a field the model requires on its own, which
+ * the base leaves optional, is changed.
+ */
+function inheritedBase(entry: PropertyDeclarations, reading: ComponentReading): ModelRef | undefined {
+  const origin = entry.unconditional?.origin;
+  if (!origin || !reading.bases.some((base) => base.name === origin.name)) return undefined;
+  if (reading.required.has(entry.name) && !reading.requiredBy.get(entry.name)?.has(origin.name)) return undefined;
+  return inheritedRef(origin.name);
+}
+
+/** A `model` reference to the base `name`, marked as a component's (`markComponentModelRef`) so a pass that renames inline models leaves it as written. */
+function inheritedRef(name: string): ModelRef {
+  const ref: ModelRef = { kind: 'model', name };
+  markComponentModelRef(ref);
+  return ref;
 }
 
 /**
  * Read one member of a component's `allOf` into `reading`, each
- * declaration with its provenance (`declareProperty`). A `$ref` member is
+ * declaration with its provenance (`declareProperty`): the component the
+ * member's chain lands on for a `$ref` member, the base for a member read
+ * inside a base's own chain, the model's own for an inline member
+ * (`memberOrigin`, `options.origin`; #591) — the components landed on
+ * noted as the model's bases (`noteBase`) and each `required` name by the
+ * origin that lists it (`noteRequired`), so `extractAllOfModel` can tell
+ * a field taken from a base unchanged. A `$ref` member is
  * resolved to its component, through a chain of references; a component
  * met again on the chain declares nothing more. An `allOf` member — a
  * component composed with `allOf`, or an inline wrapper — is read by
@@ -5104,20 +5249,26 @@ function readComponentAllOfMember(
   reading: ComponentReading,
   options: MemberReadingOptions = {},
 ): AllOfDiscriminator | undefined {
-  const { ledger, required, seen } = reading;
-  const resolved = followMemberRefs(member, schemas, seen);
-  if (!resolved) return undefined;
+  const { ledger, seen } = reading;
+  const landing = followMemberRefChain(member, schemas, seen);
+  if (!landing) return undefined;
+  const { resolved } = landing;
+  // The component the member's declarations are recorded under
+  // (`memberOrigin`); a landing that sets it is a base of the model, unless
+  // it is only a nullable wrapper, whose one variant names the base.
+  const origin = memberOrigin(landing, options.origin);
+  if (origin !== null && origin !== options.origin && !declaresOnlyNullable(resolved)) noteBase(reading, origin);
   if (resolved.allOf) {
-    readComponentAllOf(name, resolved, schemas, reading);
+    readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined);
     return undefined;
   }
   // The member's own `properties` and `required` always apply, whether or
   // not a `oneOf`/`anyOf` sits beside them (workos/oagen#359 review: a
   // member `{ properties: { x }, oneOf: […] }`, inline or a `$ref` to such a
   // component, lost `x`, while the same schema as a body kept it).
-  for (const r of resolved.required ?? []) required.add(r);
+  for (const r of resolved.required ?? []) noteRequired(reading, r, origin);
   for (const [key, value] of Object.entries(resolved.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, false);
+    if (value) declareUnder(reading, key, value, origin);
   }
   // A nullable wrapper is its one non-null variant, read as one more member
   // in this member's own capacity — decided per axis (`nullableAxisBranch`),
@@ -5139,7 +5290,11 @@ function readComponentAllOfMember(
       // unchanged, so a mapping on the wrapper never reached the union under
       // it, which was flattened instead of dispatched).
       const wrapperDiscriminator = resolved.discriminator ?? options.wrapperDiscriminator;
-      const wrapped = readComponentAllOfMember(name, branch, schemas, reading, { ...options, wrapperDiscriminator });
+      const wrapped = readComponentAllOfMember(name, branch, schemas, reading, {
+        ...options,
+        wrapperDiscriminator,
+        origin: origin ?? undefined,
+      });
       discriminator ??= wrapped;
       continue;
     }
@@ -5170,7 +5325,9 @@ function readComponentAllOfMember(
  * Read a composed component schema — its own `properties` and `required`
  * first, then its `allOf` members, then a typing union written beside them
  * (`componentAllOfMembers`), each through `readComponentAllOfMember` — into
- * `reading`, and return the discriminator a direct member's
+ * `reading`, under `origin` when the schema is a base's read inside the
+ * model's chain (its members' declarations and its `required` are then
+ * that base's; #591), and return the discriminator a direct member's
  * `oneOf`/`anyOf` declares, if any. A `discriminator` the schema writes
  * beside its `allOf` with no union beside it is the one a union among its
  * members dispatches by (`Pet: { allOf: [{ $ref: Base }, { oneOf: [...] }],
@@ -5185,18 +5342,21 @@ function readComponentAllOf(
   schema: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
   reading: ComponentReading = newComponentReading(),
+  origin?: ComponentOrigin,
 ): AllOfDiscriminator | undefined {
   if (reading.seen.has(schema)) return undefined;
   reading.seen.add(schema);
   let discriminator: AllOfDiscriminator | undefined;
   const wrapperDiscriminator = wrapperDiscriminatorOf(schema);
   for (const member of componentAllOfMembers(schema)) {
-    discriminator = readComponentAllOfMember(name, member, schemas, reading, { wrapperDiscriminator }) ?? discriminator;
+    discriminator =
+      readComponentAllOfMember(name, member, schemas, reading, { wrapperDiscriminator, origin }) ?? discriminator;
   }
   // The component's own `required`: carried by its own member when it
   // declares properties, and read here when it only names inherited ones
-  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`).
-  for (const r of schema.required ?? []) reading.required.add(r);
+  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`) — the model's
+  // own list at the top level, a base's inside its chain (`origin`).
+  for (const r of schema.required ?? []) noteRequired(reading, r, origin ?? null);
   return discriminator;
 }
 
@@ -5241,7 +5401,14 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * first as one more member and a typing union written beside them last
  * (`componentAllOfMembers`); a `$ref` member's component is read the same
  * way, its own properties and then its members, so a chain
- * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
+ * (`Puppy → Dog → Pet`) carries every level's own properties. The
+ * components the `$ref` members land on are the model's `bases`, in
+ * document order, each once (`noteBase`: a model component, through a
+ * bare or nullable alias; an enum, array or primitive component is none),
+ * and a field whose declaration is a base's as written, which the model
+ * requires only as that base does, carries that base as `inheritedFrom`
+ * (`inheritedBase`; #591) — `fields` complete and in order either way,
+ * so a reader of neither key sees the model it always saw. Every field is
  * typed under the component's own name with one sibling set
  * (`collectProperties`), from the one declaration
  * `declaredComponentProperty` picks: the always-applying declaration
@@ -5268,9 +5435,18 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
   const reading = newComponentReading();
   const discriminator = readComponentAllOf(name, schema, schemas, reading);
   const requiredSet = reading.required;
-  const fields = [...reading.ledger.values()].map((entry) =>
-    buildFieldFromSchema(entry.name, declaredComponentProperty(entry), name, requiredSet, schemas, siblings),
-  );
+  const fields = [...reading.ledger.values()].map((entry) => {
+    const field = buildFieldFromSchema(
+      entry.name,
+      declaredComponentProperty(entry),
+      name,
+      requiredSet,
+      schemas,
+      siblings,
+    );
+    const base = inheritedBase(entry, reading);
+    return base ? { ...field, inheritedFrom: base } : field;
+  });
 
   // The text, link, flag and extensions are the wrapper layer's: the
   // component's own, with an annotating member's — one that declares no
@@ -5288,6 +5464,7 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
     description: layer.description,
     ...externalDocsEntry(layer.externalDocs),
     fields,
+    ...(reading.bases.length > 0 ? { bases: reading.bases } : {}),
     ...(discriminator ? { discriminator } : {}),
     ...deprecatedEntry(layer),
     // The wrapper's own keywords conjoined with its inline members'; `$ref`
@@ -5511,16 +5688,33 @@ function followMemberRefs(
   schemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
 ): SchemaObject | undefined {
+  return followMemberRefChain(member, schemas, seen)?.resolved;
+}
+
+/** Where a member's reference chain lands (`followMemberRefs`), with the key of the last component it resolves through — the one whose model carries what the member declares (`memberOrigin`); no key for an inline member, or a chain of pointers into components alone (#539). */
+interface MemberLanding {
+  resolved: SchemaObject;
+  key?: string;
+}
+
+/** `followMemberRefs` with the landing's component key (`MemberLanding`). */
+function followMemberRefChain(
+  member: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+  seen: Set<SchemaObject>,
+): MemberLanding | undefined {
   let resolved = member;
+  let key: string | undefined;
   const chain = new Set<SchemaObject>();
   while (resolved.$ref) {
     const target = schemaRefTarget(resolved.$ref, schemas);
     if (!target) break;
     if (seen.has(target) || chain.has(target)) return undefined;
     chain.add(target);
+    key = componentKeyOf(resolved.$ref) ?? key;
     resolved = target;
   }
-  return resolved;
+  return { resolved, key };
 }
 
 /** One union a component's `allOf` member carries: the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it. */

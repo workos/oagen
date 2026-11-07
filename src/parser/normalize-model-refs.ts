@@ -44,9 +44,14 @@ export function validateModelRefs(spec: ApiSpec): void {
   for (const model of spec.models) {
     for (const field of model.fields) {
       walkRef(field.type, `${model.name}.${field.name}`);
+      if (field.inheritedFrom) walkRef(field.inheritedFrom, `${model.name}.${field.name}.inheritedFrom`);
     }
     for (const variant of model.variants ?? []) {
       walkRef(variant, `${model.name}.variants`);
+    }
+    // The bases a composed component names (`Model.bases`; #591).
+    for (const base of model.bases ?? []) {
+      walkRef(base, `${model.name}.bases`);
     }
   }
 
