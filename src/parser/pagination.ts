@@ -429,23 +429,53 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * (MichaelDeBoey): the union was tested as one schema, so such a `has_more`
  * ended no iteration at the top level and an explicit `endOfIteration`
  * naming it was rejected as "not a boolean field", while `meta.has_more`
- * through the same union was accepted. A union met again below itself
- * fits nothing. The one test for a field detection names and for one an
- * override names.
+ * through the same union was accepted. A union reached again through
+ * another variant — `Flag`, an `anyOf` of boolean consts, declared `{
+ * $ref: Flag }` in one variant and `{ anyOf: [{ $ref: Flag }, { type:
+ * 'boolean' }] }` in the other — is a shared reference, tested once and
+ * read in each (`DeclarationWalk.done`; PR #643 review round 7: one `seen`
+ * set served both variants, so the second reading was taken for a cycle,
+ * the stop rule dropped and the override rejected, while `meta.has_more`
+ * through the same declarations passed); only a union met again below
+ * itself, on the way down (`DeclarationWalk.path`), fits nothing, which
+ * ends a component that reaches itself. The one test for a field
+ * detection names and for one an override names.
  */
 function endDeclarationFits(
   kind: PaginationEndOfIteration['kind'],
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-  seen: Set<SchemaObject> = new Set(),
+  walk: DeclarationWalk = { path: new Set(), done: new Map() },
 ): boolean {
   const bare = resolveBareSchema(schema, componentSchemas);
   if (endFieldFits(kind, bare)) return true;
   const variants = bare.oneOf ?? bare.anyOf;
-  if (!variants || !unionTypesSchema(variants) || seen.has(bare)) return false;
-  seen.add(bare);
+  if (!variants || !unionTypesSchema(variants)) return false;
+  const known = walk.done.get(bare);
+  if (known !== undefined) return known;
+  if (walk.path.has(bare)) return false;
+  walk.path.add(bare);
   const nonNull = variants.filter((variant) => !isNullSchema(variant));
-  return nonNull.length > 0 && nonNull.every((variant) => endDeclarationFits(kind, variant, componentSchemas, seen));
+  const fits =
+    nonNull.length > 0 && nonNull.every((variant) => endDeclarationFits(kind, variant, componentSchemas, walk));
+  walk.path.delete(bare);
+  walk.done.set(bare, fits);
+  return fits;
+}
+
+/**
+ * The bookkeeping of one declaration's test (`endDeclarationFits`): the
+ * unions on the way down (`path`), so a union met again below itself fits
+ * nothing and the test ends where the document repeats, and the unions
+ * tested so far with their result (`done`), so a union reached again
+ * through another variant — a shared reference, not a cycle — is tested
+ * once. A result reached by closing a cycle is kept: a union that reaches
+ * one on the way down reaches it from anywhere, since the way down came
+ * through it.
+ */
+interface DeclarationWalk {
+  path: Set<SchemaObject>;
+  done: Map<SchemaObject, boolean>;
 }
 
 /**

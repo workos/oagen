@@ -746,5 +746,52 @@ describe('#622', () => {
         });
       },
     );
+
+    it.each(openapis)(
+      'reads a union two variants share as a shared reference, not a cycle, and still ends on one that reaches itself (Greptile; OAS %s)',
+      async (openapi) => {
+        // `Flag` is an `anyOf` of boolean consts; one variant declares
+        // `has_more` as `{ $ref: Flag }`, the other as `anyOf: [{ $ref: Flag
+        // }, { type: 'boolean' }]`. Both are booleans, but one `seen` set
+        // served both variants, so `Flag`'s second reading was taken for a
+        // cycle: no stop field at the top level, the override rejected,
+        // while `meta.has_more` through the same declarations passed.
+        const flag = { $ref: '#/components/schemas/Flag' };
+        const schemas = {
+          Flag: {
+            anyOf: [
+              { type: 'boolean', const: true },
+              { type: 'boolean', const: false },
+            ],
+          },
+          Loop: { anyOf: [{ $ref: '#/components/schemas/Loop' }, { type: 'boolean' }] },
+        };
+        const vRef = object({ has_more: flag });
+        const vUnion = object({ has_more: { anyOf: [flag, { type: 'boolean' }] } });
+        const top = { allOf: [dataMember], oneOf: [vRef, vUnion] };
+        const meta = object(
+          { data: petArray, meta: { allOf: [object({ trace_id: string })], oneOf: [vRef, vUnion] } },
+          ['data'],
+        );
+        for (const [label, body, path] of [
+          ['top', top, 'has_more'],
+          ['meta', meta, 'meta.has_more'],
+        ] as const) {
+          const detected = await parseQuiet(listPets(body, openapi, {}, schemas));
+          expect(onlyOperation(detected).pagination?.endOfIteration, label).toEqual(stopsOn(path));
+          const overridden = await parseQuiet(listPets(body, openapi, hasMore(path), schemas));
+          expect(onlyOperation(overridden).pagination, label).toEqual(onlyOperation(detected).pagination);
+        }
+        // A union that reaches itself fits nothing, and the test ends there.
+        const loop = object({ data: petArray, has_more: { $ref: '#/components/schemas/Loop' } }, ['data']);
+        expect(
+          onlyOperation(await parseQuiet(listPets(loop, openapi, {}, schemas))).pagination?.endOfIteration,
+        ).toBeUndefined();
+        const { warnings } = await parseWarning(listPets(loop, openapi, hasMore('has_more'), schemas));
+        expect(warnings).toEqual([
+          expect.stringContaining('endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires'),
+        ]);
+      },
+    );
   });
 });
