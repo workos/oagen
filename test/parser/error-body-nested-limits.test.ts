@@ -421,5 +421,84 @@ describe('#611', () => {
         });
       }
     });
+
+    it('merges every variant of one shape the bodies list apart into one, so no limit survives on one that another lacks', async () => {
+      // MichaelDeBoey on #639, finding 1 (`repro.json`): the shared `^[a-z]+$` was kept on one variant and the
+      // differing patterns dropped from the other, leaving `oneOf: [{ string, pattern: '^[a-z]+$' }, string]`, which
+      // rejects "abc" though both bodies accept it. The shape's variants now merge as one: a plain `string`.
+      const lower = { type: 'string', pattern: '^[a-z]+$' };
+      const digits = { type: 'string', pattern: '^[0-9]+$' };
+      const upper = { type: 'string', pattern: '^[A-Z]+$' };
+      const repro = await parse(
+        doc(version, { ...getOp('pets', oneOf(lower, digits)), ...getOp('notes', oneOf(lower, upper)) }),
+      );
+      expect(repro.warnings).toEqual([]);
+      expect(modelNames(repro.ir)).toEqual(['ErrorBodyWithTags', 'Pet']);
+      expect(errorOf(repro.ir, 'getPets')).toBe('ErrorBodyWithTags');
+      expect(tagsOf(repro.ir, 'ErrorBodyWithTags')).toEqual(string);
+      // The same two variants listed in either order are one shape with the same limits: both kept, in the first
+      // member's order (`GetNotesError404`, by name).
+      const same = await parse(
+        doc(version, { ...getOp('pets', oneOf(lower, digits)), ...getOp('notes', oneOf(digits, lower)) }),
+      );
+      expect(same.warnings).toEqual([]);
+      expect(tagsOf(same.ir, 'ErrorBodyWithTags')).toEqual(
+        unionOf(
+          { kind: 'primitive', type: 'string', constraints: { pattern: '^[0-9]+$' } },
+          { kind: 'primitive', type: 'string', constraints: { pattern: '^[a-z]+$' } },
+        ),
+      );
+      // Array variants of one shape listed apart merge into one carrying the limits every one of them wrote, level
+      // by level: the `minItems` all four share stays, the items' limits go.
+      const arrays = await parse(
+        doc(version, {
+          ...getOp(
+            'pets',
+            oneOf(list(short, { minItems: 1 }), list({ type: 'string', maxLength: 3 }, { minItems: 1 })),
+          ),
+          ...getOp(
+            'notes',
+            oneOf(list(short, { minItems: 1 }), list({ type: 'string', maxLength: 4 }, { minItems: 1 })),
+          ),
+        }),
+      );
+      expect(arrays.warnings).toEqual([]);
+      expect(tagsOf(arrays.ir, 'ErrorBodyWithTagsList')).toEqual(listOf(string, { minItems: 1 }));
+      // Another shape beside them is read on its own: the integer keeps its limit while the strings merge.
+      const beside = await parse(
+        doc(version, {
+          ...getOp('pets', oneOf(lower, digits, { type: 'integer', minimum: 1 })),
+          ...getOp('notes', oneOf(lower, upper, { type: 'integer', minimum: 1 })),
+        }),
+      );
+      expect(beside.warnings).toEqual([]);
+      expect(tagsOf(beside.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(
+        unionOf(string, { kind: 'primitive', type: 'integer', constraints: { minimum: 1 } }),
+      );
+    });
+
+    it("keeps or drops a level's limits as a whole, as a field's own are", async () => {
+      // MichaelDeBoey on #639, finding 2 (`pattern.json`): items `{ maxLength: 2, pattern: '^a' }` beside
+      // `{ maxLength: 3, pattern: '^a' }` carry no limit at all, the shared `pattern` included — the rule a field's
+      // own limits follow (#598), stated for each level of a type in ir-types.md.
+      const pattern = await parse(
+        doc(version, {
+          ...getOp('pets', list({ type: 'string', maxLength: 2, pattern: '^a' })),
+          ...getOp('notes', list({ type: 'string', maxLength: 3, pattern: '^a' })),
+        }),
+      );
+      expect(pattern.warnings).toEqual([]);
+      expect(modelNames(pattern.ir)).toEqual(['ErrorBodyWithTagsList', 'Pet']);
+      expect(tagsOf(pattern.ir, 'ErrorBodyWithTagsList')).toEqual(listOf(string));
+      const field = await parse(
+        doc(version, {
+          ...getOp('pets', { type: 'string', maxLength: 2, pattern: '^a' }),
+          ...getOp('notes', { type: 'string', maxLength: 3, pattern: '^a' }),
+        }),
+      );
+      expect(field.warnings).toEqual([]);
+      expect(tagsField(field.ir, 'ErrorBodyWithTags').constraints).toBeUndefined();
+      expect(tagsOf(field.ir, 'ErrorBodyWithTags')).toEqual(string);
+    });
   });
 });
