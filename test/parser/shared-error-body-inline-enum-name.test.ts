@@ -392,6 +392,46 @@ describe('#612', () => {
   );
 
   it.each(VERSIONS)(
+    "the string rule's enum keeps its name when an array under the same field lists the same values (#648 review), under OAS %s",
+    async (version) => {
+      // `status` pinned to strings in one body takes `ErrorBodyStatus`; an
+      // array of the same strings under `status` in another is a lone set
+      // whose bare name is held, so it is spelled — and the rename walk
+      // reads by field and values, so it must leave the string rule's enum,
+      // which lists the same values, under the name it claimed.
+      const pinnedStatus = obj({ message: str, status: { type: 'string', enum: ['a', 'b'] } });
+      const listedStatus = obj({
+        message: str,
+        status: { type: 'array', items: { type: 'string', enum: ['a', 'b'] } },
+      });
+      const oldDoc = doc(version, pets(nf(pinnedStatus)));
+      const newDoc = doc(version, { ...pets(nf(pinnedStatus)), ...notes(nf(listedStatus)) });
+      const oldSpec = await parseWithoutWarnings(oldDoc);
+      const newSpec = await parseWithoutWarnings(newDoc);
+      for (const spec of [oldSpec, newSpec]) {
+        expect(fieldType(spec, 'ErrorBodyWithStatus', 'status')).toEqual({
+          kind: 'enum',
+          name: 'ErrorBodyStatus',
+          values: ['a', 'b'],
+        });
+        expect(enumValues(spec, 'ErrorBodyStatus')).toEqual(['a', 'b']);
+        expectEnumsSound(spec);
+      }
+      expect(fieldType(newSpec, 'ErrorBodyWithStatusList', 'status')).toEqual({
+        kind: 'array',
+        items: { kind: 'enum', name: 'ErrorBodyStatusAOrB', values: ['a', 'b'] },
+      });
+      expect(enumNames(newSpec)).toEqual(['ErrorBodyStatus', 'ErrorBodyStatusAOrB']);
+      expect(changes(oldSpec, newSpec)).toEqual([
+        'additive model-added ErrorBodyWithStatusList',
+        'additive enum-added ErrorBodyStatusAOrB',
+        'additive service-added Notes',
+      ]);
+      expect(await diffExitCode(oldDoc, newDoc)).toBe(1);
+    },
+  );
+
+  it.each(VERSIONS)(
     'a name an enum of the same members holds is shared; one anything else holds sends the set to its spelled name; a spelled name taken leaves the bodies as they are, under OAS %s',
     async (version) => {
       const bodies = { ...pets(nf(statusBody)), ...notes(nf(statusBody)) };
