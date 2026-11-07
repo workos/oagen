@@ -309,11 +309,18 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
  * `Enum` (`extractEnum`), and a `$ref` to any resolves to an `EnumRef`,
  * under `nullable` for the wrapper; the same schemas written inline
  * collapse to an inline enum (`schemaToTypeRef`), so the spellings have
- * one shape wherever they appear. A `oneOf` with any other variant — a
- * `$ref`, an object, a number const — is a named union, as before, and so
- * is a `oneOf` of one variant with no `null` variant (OAS 3.0 `nullable:
- * true` beside it declares nothing, as beside any schema without a
- * `type`): the same schema inline is a union of one. The `allOf` and
+ * one shape wherever they appear. The wrapper's OAS 3.0 form — `nullable:
+ * true` beside a `oneOf`/`anyOf` of one variant, since a `null` variant
+ * cannot be written there (`flaggedNullableUnionBranch`: `Color: { oneOf:
+ * [{ type: 'string', enum }], nullable: true }`) — is the same nullable
+ * enum: the flag is read beside a union, where every `$ref` to the
+ * component is nullable as it is for a named union
+ * (`isNullableUnionSchema`), so the two spellings of one document give
+ * one IR and `oagen diff` between them reports nothing (#606 review). A
+ * `oneOf` with any other variant — a `$ref`, an object, a number const —
+ * is a named union, as before, and so is a `oneOf` of one variant with
+ * neither a `null` variant nor the flag: the same schema inline is a
+ * union of one. The `allOf` and
  * wrapper spellings name no enum component, so neither is an alias of one
  * (`isEnumComponentAlias`; #588 review and #606: each was read as an
  * alias, and its enum lifted as `UnknownEnum`).
@@ -370,9 +377,13 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * type: 'null' }] }` and `Color: { oneOf: [{ type: 'string', enum }, {
  * type: 'null' }] }` are the enums `Kind`, `Size` (with its text) and
  * `Color`, each nullable, as the same schemas inline are `nullable<enum>`.
- * A `oneOf` of one variant with no `null` variant is no wrapper — OAS 3.0
- * `nullable: true` beside it declares nothing — and stays the named union
- * of one it was. A component with `properties` beside the `allOf` or the
+ * The OAS 3.0 form of the wrapper, `nullable: true` beside a `oneOf` or
+ * `anyOf` of one variant (`flaggedNullableUnionBranch`), is read the
+ * same way, so `Color: { oneOf: [{ type: 'string', enum }], nullable: true
+ * }` is the nullable enum `Color` in a 3.0.3 document as the `null`
+ * variant makes it in a 3.1.0 one (#606 review). A `oneOf` of one variant
+ * with neither a `null` variant nor the flag is no wrapper and stays the
+ * named union of one it was. A component with `properties` beside the `allOf` or the
  * wrapper is a model, as it is everywhere. Read wherever an enum component
  * is read as a whole: `extractEnum`, the nullability pass of
  * `extractSchemas`, and what a bare `$ref` to it hands a field or
@@ -386,6 +397,31 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * and this reader did not, so `Kind` and `Size` above were aliases of
  * nothing and `UnknownEnum`, `UnknownEnum2` again.
  */
+/**
+ * The one variant of a `oneOf`/`anyOf` written with OAS 3.0 `nullable:
+ * true` beside it and no `null` variant — `Color: { oneOf: [{ type:
+ * 'string', enum }], nullable: true }` — or `undefined`: no union, a union
+ * under an `allOf`, no `nullable: true`, more than one variant, or a
+ * `null` variant (`nullableUnionBranch` reads that wrapper). The OAS 3.0
+ * form of the nullable wrapper `nullableUnionBranch` collapses, since a
+ * `null` variant cannot be written there: beside a `oneOf`/`anyOf` the
+ * flag is read — every `$ref` to the component is nullable, as it is for
+ * a named union (`isNullableUnionSchema`) — unlike beside an `allOf` or
+ * any other schema without a `type`, where it declares nothing. Read
+ * where a component is read as an enum (`enumComponentDeclaration`; #606
+ * review: the 3.1 spelling read as the enum `Color` while this one stayed
+ * a `Color {}` model carrying `ColorVariant1`, so `oagen diff` from the
+ * 3.0.3 document to the 3.1.0 one exited 2). A `oneOf` of one variant
+ * with neither a `null` variant nor the flag is no wrapper: the union of
+ * one it always was, as the same schema inline is.
+ */
+function flaggedNullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
+  if (schema.nullable !== true || schema.allOf) return undefined;
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (variants === undefined || variants.length !== 1 || isNullSchema(variants[0]!)) return undefined;
+  return variants[0];
+}
+
 export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
   if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return schema;
   // A `$ref` is the reference, whatever sits beside it — the type builder
@@ -394,14 +430,16 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   // enum }, { type: 'null' }] }` passed as a wrapper that unwrapped to
   // itself, and this reader recursed without end.
   if (schema.$ref || Object.keys(schema.properties ?? {}).length > 0) return undefined;
-  // A nullable wrapper: its one branch (`nullableUnionBranch`), read in
-  // turn with this level's layer on it as `unwrapNullableField` lays a
-  // wrapper's on what it unwraps to — the limits, the text, link, examples
-  // and keys, the `deprecated` in place of the branch's own — one level at
-  // a time, so a nested wrapper is read as a wrapper of its own and its
-  // `default` stands where this level declares none (#606 review); this
-  // level's `default` over the branch's, and its nullability as the enum's.
-  const branch = nullableUnionBranch(schema);
+  // A nullable wrapper — a `null` variant beside one branch, or the OAS
+  // 3.0 form, `nullable: true` beside a union of one variant
+  // (`flaggedNullableUnionBranch`) — read in turn with this level's layer
+  // on it as `unwrapNullableField` lays a wrapper's on what it unwraps to
+  // — the limits, the text, link, examples and keys, the `deprecated` in
+  // place of the branch's own — one level at a time, so a nested wrapper
+  // is read as a wrapper of its own and its `default` stands where this
+  // level declares none (#606 review); this level's `default` over the
+  // branch's, and its nullability as the enum's.
+  const branch = nullableUnionBranch(schema) ?? flaggedNullableUnionBranch(schema);
   if (branch !== undefined) {
     const limited = derivedCopy({ ...branch, ...extractConstraints(schema) }, branch);
     const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, schema), schema));
