@@ -2965,8 +2965,11 @@ export function resetCombinedDeclarations(): void {
  * was conjoined, so these pairs kept the first and `result` had the
  * component's fields or the inline ones by member order) — while two
  * `$ref`s naming one component (`namesOneComponent`) add nothing to each
- * other, so the first stands, and a `$ref` to an array, an enum, a
- * primitive or a union component is no object to conjoin. Any other pair
+ * other, so the first stands, a `$ref` to a component that dispatches a
+ * union describes an object too, its conjunction read as the same `allOf`
+ * written by hand (the shared fields, the union left to the component:
+ * `mergeAllOfMembers`, workos/oagen#429), and a `$ref` to an array, an
+ * enum, a primitive or a union component is no object to conjoin. Any other pair
  * — an object beside a string, say — keeps the first as written, with no
  * warning, as two arrays of different items do. Returns `held` itself when `next`
  * adds nothing to it, so a lone declaration keeps its identity. The same two

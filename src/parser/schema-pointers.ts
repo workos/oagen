@@ -80,9 +80,12 @@
  * (`paginatedItemType`), so a paginated response pointing at an array of
  * strings yields strings; an explicit `dataPath` whose walk through the IR
  * crossed a pending reference — that response, or a field on the way — is
- * walked again from the settled types, so the iterator yields the model the
- * pointed schema's items are built as, never a copy read from the document
- * (`settleDeferredDataPathItemType`; #608); and a discriminator mapping
+ * walked again from the settled types, under every nullable wrapper the
+ * site settled into, so the iterator yields the model the pointed schema's
+ * items are built as, never a copy read from the document
+ * (`settleDeferredDataPathItemType`; #608; a path that forks at a union on
+ * the way was read from the document at extraction, as any union's is);
+ * and a discriminator mapping
  * entry that named a pointer variant is written as the model the variant
  * settled to (`settleDeferredMappingEntries`).
  */
