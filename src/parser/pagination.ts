@@ -1154,6 +1154,39 @@ export function resolveDataPathArray(
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): { items: SchemaObject } | { problem: string } {
+  const walked = walkDataPathArray(schema, dataPath, componentSchemas);
+  return 'items' in walked ? { items: walked.items } : walked;
+}
+
+/**
+ * Whether an explicit `dataPath` goes on through the variants of a union on
+ * its way to the array — the body itself, or an object on the way, being a
+ * `oneOf`/`anyOf` or having one among its `allOf` members (`fieldsNamed`) —
+ * so that the path lands on one array per variant. Each variant's model
+ * then types inline items under a name of its own, and only the document
+ * can type them once, under the path-derived name (#556), so an override
+ * whose IR walk crossed a pending pointer reference reads the document at
+ * extraction for such a path rather than deferring to the settle, where the
+ * IR walk would find the variants' arrays disagreeing by name
+ * (`resolveOverrideItemType`; Greptile, #608 review). A `null` variant set
+ * aside as a nullable wrapper is no fork. `false` for a path that lands on
+ * no array.
+ */
+export function dataPathForks(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): boolean {
+  const walked = walkDataPathArray(schema, dataPath, componentSchemas);
+  return 'items' in walked && walked.forked;
+}
+
+/** The walk `resolveDataPathArray` makes, saying too whether the path went on through a union's variants (`forked`). */
+function walkDataPathArray(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { items: SchemaObject; forked: boolean } | { problem: string } {
   const missing = `dataPath "${dataPath}" does not resolve to an array in the response`;
   const segments = dataPath.split('.');
   // The path to the first union the walk went on through (`''` for the body
@@ -1200,7 +1233,7 @@ export function resolveDataPathArray(
         `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeItems))}`,
     };
   }
-  return { items: items[0] };
+  return { items: items[0], forked: union !== undefined };
 }
 
 /**
@@ -1347,8 +1380,9 @@ function describeSchema(schema: SchemaObject): string {
 
 /**
  * Resolve a dotted `dataPath` against the IR rather than the document: walk
- * from the response type through model fields, unwrapping nullables, and
- * return the element type of the array the path lands on. `models` is where
+ * from the response type through model fields, under every nullable wrapper
+ * (`containersOf`), and return the element type of the array the path lands
+ * on. `models` is where
  * each model along the way is looked up by name, so the item type is exactly
  * the one the parser already assigned — the very `TypeRef` object the field
  * holds, which later renaming passes repoint in place. A `union` on the way
@@ -1412,7 +1446,7 @@ export function walkDataPathItemType(
     }
     reached = [...next.values()];
   }
-  const targets = reached.map((type) => (type.kind === 'nullable' ? type.inner : type));
+  const targets = reached.map(underNullable);
   if (targets.some(isPendingModelRef)) return { pending: true };
   const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
@@ -1512,14 +1546,35 @@ export function settleDeferredDataPathItemType(
 
 /**
  * The types a `dataPath` segment is looked up in below `type`: the type
- * under a nullable wrapper, or each variant of a union there, under its own
- * wrapper — and, for a variant that is itself a union, each of its variants
- * in turn, however deep, as the document walk reads a nested union's
- * variants (`fieldsNamed`).
+ * under every nullable wrapper — a site settled from a pointer to a schema
+ * that admits null wears two, `nullable<nullable<HolderResult>>` for `oneOf:
+ * [{ $ref: …/Holder/properties/result }, { type: null }]` to a nullable
+ * `result` (#545; Greptile, #608 review) — or each variant of a
+ * `oneOf`/`anyOf` union there, under its own wrappers, and, for a variant
+ * that is itself a union, each of its variants in turn, however deep, as the
+ * document walk reads a nested union's variants (`fieldsNamed`). Of a union
+ * a type list produced (`type: ['object', 'string']`, one variant per type
+ * and no `compositionKind`), the variants that are models: the document
+ * walk reads such a schema's `properties` whatever else the list names
+ * (`objectProperties`), and a pointer steps through it to the member that
+ * carries the keyword (#539), so the IR walk reads the object member too
+ * rather than failing on the string member and minting a copy of the
+ * items the object member's model holds.
  */
 function containersOf(type: TypeRef): TypeRef[] {
-  const bare = type.kind === 'nullable' ? type.inner : type;
-  return bare.kind === 'union' ? bare.variants.flatMap(containersOf) : [bare];
+  const bare = underNullable(type);
+  if (bare.kind !== 'union') return [bare];
+  const members = bare.variants.flatMap(containersOf);
+  if (bare.compositionKind) return members;
+  const models = members.filter((member) => member.kind === 'model');
+  return models.length > 0 ? models : members;
+}
+
+/** `type` under every nullable wrapper it wears. */
+function underNullable(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  return bare;
 }
 
 /** A key two `TypeRef`s share exactly when they are one type to look a field up in: a model's or enum's name, else the TypeRef's shape. */
