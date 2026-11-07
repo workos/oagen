@@ -3039,7 +3039,7 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * the union a named union as before. So does an `allOf` whose members only
  * annotate or limit the schema — `New: { allOf: [{ description: 'A new
  * pet.' }], oneOf: [{ $ref: Pet }, { $ref: Toy }] }`, `allOf: [{
- * minProperties: 1 }]`, `allOf: []` — beside a typing union with no
+ * minProperties: 1 }]`, `allOf: []` — beside one typing union with no
  * properties of its own: such an `allOf` does not type the schema, by the
  * one predicate `foldSiblingUnions` reads an inline schema by
  * (`allOfTypesSchema`), so the union is the keyword that types it, and the
@@ -3050,14 +3050,22 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * optional fields with no variants, while the same schema inline was the
  * union). An `allOf` that only annotates or limits with no typing union
  * beside it still composes, as it did — a fieldless model, unless the
- * component is read as a primitive (`isPrimitiveComponentSchema`).
+ * component is read as a primitive (`isPrimitiveComponentSchema`) — and so
+ * does one beside both a typing `oneOf` and a typing `anyOf`: two axes a
+ * named union cannot carry (`compositionKind` names one), read as two
+ * members, each flattened or dispatched on its own, as they were (#613
+ * review: read as a named union, the component kept the `oneOf` alone).
  */
 function composesComponentModel(schema: SchemaObject): boolean {
   // A component written as a bare `$ref` composes one member, the reference (#618).
   if (schema.$ref !== undefined) return true;
-  const unionBeside = besideUnionMembers(schema).length > 0;
-  if (schema.allOf === undefined) return hasFoldableProperties(schema) && unionBeside;
-  return allOfTypesSchema(schema.allOf) || hasFoldableProperties(schema) || !unionBeside;
+  const unions = besideUnionMembers(schema).length;
+  if (schema.allOf === undefined) return hasFoldableProperties(schema) && unions > 0;
+  // One typing union beside an `allOf` that only annotates or limits the
+  // schema, with no properties of its own, is the named union; a `oneOf`
+  // and an `anyOf` written together are two axes a named union cannot
+  // carry, so they stay two members, as they were (#613 review).
+  return allOfTypesSchema(schema.allOf) || hasFoldableProperties(schema) || unions !== 1;
 }
 
 /**
@@ -5437,8 +5445,15 @@ function readComponentAllOfMember(
   // The member's own `properties` and `required` always apply, whether or
   // not a `oneOf`/`anyOf` sits beside them (workos/oagen#359 review: a
   // member `{ properties: { x }, oneOf: […] }`, inline or a `$ref` to such a
-  // component, lost `x`, while the same schema as a body kept it).
-  for (const r of resolved.required ?? []) required.add(r);
+  // component, lost `x`, while the same schema as a body kept it), and so
+  // does the `required` list of an `allOf` member that only annotates or
+  // limits the member (`annotatingAllOfMembers`) — the one `allOf` a member
+  // read here can carry, beside its union (#613 review: `{ allOf: [{
+  // required: ['id'] }], oneOf: [...] }` read here lost `id` from the
+  // required set, which the composed reading had kept).
+  for (const level of [resolved, ...annotatingAllOfMembers(resolved)]) {
+    for (const r of level.required ?? []) required.add(r);
+  }
   for (const [key, value] of Object.entries(resolved.properties ?? {})) {
     if (value) declareProperty(ledger, key, value, null, false);
   }
