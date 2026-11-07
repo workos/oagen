@@ -95,6 +95,7 @@ import {
   extractInlineModelsFromProperties,
   isInheritedModelRef,
   shapeFingerprint,
+  takeModelDocumentation,
   withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -7403,11 +7404,12 @@ function undescribedBodyType(): TypeRef {
  * body's model of a kept name resolves to the kept definition when the two
  * are the same shape but for the model's own `deprecated`
  * (`shapeFingerprint`), the kept definition — the primary's, its
- * references and documentation with it — going live when any copy is, so
- * a live 202 body identical to a deprecated 200 body types both as a live
- * `Pet`, as a deprecated 202 beside a live 200 does, and the model is
- * deprecated only when every copy is; and to the kept definition with a
- * warning when they differ in a field (#630).
+ * references with it — going live when any copy is and documented as the
+ * first live copy is, so a live 202 body identical to a deprecated 200
+ * body types both as a live `Pet` carrying the 202's `description`, as a
+ * deprecated 202 beside a live 200 does, and the model is deprecated only
+ * when every copy is; and to the kept definition with a warning when they
+ * differ in a field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -7801,9 +7803,11 @@ function extractResponses(
   // definition going live when only the flag tells the two apart, as a live
   // copy owns a shared name across operations in the merge passes, so a
   // live 202 body identical to a deprecated 200 body keeps a live `Pet`
-  // with the 200's references and documentation, deprecating either copy
-  // leaves no trace, and the model is deprecated only when every copy is
-  // (#630); only a clash on a model the stem does not name — a field more,
+  // with the 200's references and the 202's documentation (`description`,
+  // `externalDocs`, extensions: the first live copy's in status order, as
+  // the merge passes keep a live copy's definition), deprecating either
+  // copy leaves no trace, and the model is deprecated only when every copy
+  // is (#630); only a clash on a model the stem does not name — a field more,
   // a field's own flag, a limit — is still resolved to the kept definition,
   // with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
@@ -7845,11 +7849,14 @@ function extractResponses(
       } else if (kept.model.deprecated && !model.deprecated) {
         // Identical but for the model's own flag: the shared model is live
         // while any copy is (#630). The kept definition stays — its
-        // references (an explicit `$ref` the primary wrote where this body
-        // nests an inline object of the same name, repointed apart by the
-        // merge passes) and its documentation with it — and only its flag
-        // goes; the live copy's object never replaces it.
+        // references with it: an explicit `$ref` the primary wrote where
+        // this body nests an inline object of the same name, repointed
+        // apart by the merge passes — and goes live, documented as this
+        // first live copy is (`takeModelDocumentation`), as the merge passes
+        // keep a live copy's definition across operations; the live copy's
+        // object never replaces it.
         delete kept.model.deprecated;
+        takeModelDocumentation(kept.model, model);
       }
     }
   }
