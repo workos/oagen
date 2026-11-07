@@ -623,10 +623,13 @@ describe('#591', () => {
           ['name', false, undefined],
           ['id', false, undefined],
         ]);
-        expect(modelNamed(cyclicSpec, 'Animal').bases).toEqual([model('Pet')]);
+        // `Animal` was built on the `Pet` of the document; the `Pet` that
+        // ends carries `extra`, which `Animal` does not, so it is no base of
+        // `Animal` as the models end either (`settleBases`).
+        expect(modelNamed(cyclicSpec, 'Animal').bases).toBeUndefined();
         expect(outline(modelNamed(cyclicSpec, 'Animal'))).toEqual([
           ['name', false, undefined],
-          ['id', false, 'Pet'],
+          ['id', false, undefined],
         ]);
       });
 
@@ -682,6 +685,27 @@ describe('#591', () => {
         expect(modelNamed(chainedSpec, 'Mid').bases).toBeUndefined();
         expect(outline(modelNamed(chainedSpec, 'PetChild'))).toEqual([['x', false, undefined]]);
         expect(outline(modelNamed(chainedSpec, 'Mid'))).toEqual([['x', false, undefined]]);
+      });
+
+      it('a fold that loosens a base after the model took its fields leaves the field the model’s own and the base no base (Greptile, round five)', async () => {
+        const schemas = {
+          Animal: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } },
+          AnimalJson: { type: 'object', properties: { name: { type: 'string' }, extra: { type: 'string' } } },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const paths = { ...issuePaths, '/animals/{animalId}/json': getting('getAnimalJson', 'animalId', 'AnimalJson') };
+        const spec = await parseJson(documentWith(openapi, schemas, paths));
+        expect(spec.models.map((m) => m.name)).toEqual(['Animal', 'Pet']);
+        expect(outline(modelNamed(spec, 'Animal'))).toEqual([
+          ['name', false, undefined],
+          ['extra', false, undefined],
+        ]);
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toBeUndefined();
+        expect(outline(pet)).toEqual([
+          ['nickname', false, undefined],
+          ['name', true, undefined],
+        ]);
       });
 
       it('a cyclic document leaves neither component a base of the other, their fields their own', async () => {

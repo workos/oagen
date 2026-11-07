@@ -1387,11 +1387,15 @@ export interface Model {
    * are one, the first kept (`renameModelRefs`). A `…Json`
    * component folded onto its base carries its bases with its fields,
    * less one whose own chain reaches the folded model, which would close
-   * a cycle (see `collapseJsonSuffixModels`); and no model's chain of
-   * bases reaches itself once the parser is done (`dropCircularBases`): a
-   * base that does — in a cyclic document, or once a fold collapsed it
-   * onto a kept model of the same shape — is dropped, and the fields it
-   * lent are the model's own. A `$ref` member naming a named union — flattened into
+   * a cycle (see `collapseJsonSuffixModels`); and the parser's last pass
+   * (`settleBases`) settles both keys against the models as they end: no
+   * model's chain of bases reaches itself — a base that does, in a cyclic
+   * document or once a fold collapsed it onto a kept model of the same
+   * shape, is dropped — a base stays a base only while every field it
+   * ends with is on the model, and a field carries `inheritedFrom` only
+   * while the base's field is the one the model carries, so a fold that
+   * loosens a base after the model took its fields leaves the field the
+   * model's own. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
@@ -2028,50 +2032,6 @@ function renameMappingTargets(mapping: Record<string, string>, renames: Readonly
   for (const [value, target] of Object.entries(mapping)) {
     const renamed = renames.get(target);
     if (renamed !== undefined) mapping[value] = renamed;
-  }
-}
-
-/**
- * Drop, from every model in `models`, each base whose own chain of bases —
- * read through `models` by name — reaches the model itself, and the
- * `inheritedFrom` of the fields that base lent, which are then the model's
- * own; `bases` goes when none is left, `fields` stay as they are. A model
- * is no base of its own, and an emitter writing `extends` from a cycle
- * would not compile, so no model's chain of bases reaches itself once the
- * parser is done (#591, Greptile review): a cyclic document (`A: { allOf:
- * [{ $ref: B }] }`, `B: { allOf: [{ $ref: A }] }`) leaves both without
- * bases, and a `…Json` fold that collapses a base onto a kept model of the
- * same shape (`PetJsonChild` onto `PetChild: { allOf: [{ $ref:
- * PetJsonChild }] }` as `PetJson` folds onto `Pet`) leaves `PetChild` with
- * `x` as its own, through a longer chain (`PetChild` on `Mid` on
- * `PetJsonChild`) too. Decided on the graph as it stands before anything is
- * dropped, so the outcome does not depend on the models' order. Run by the
- * parser after every rename (`parseSpec`).
- */
-export function dropCircularBases(models: readonly Model[]): void {
-  const byName = new Map(models.map((model) => [model.name, model]));
-  const reaches = (from: string, target: string, visiting: Set<string>): boolean => {
-    if (from === target) return true;
-    if (visiting.has(from)) return false;
-    visiting.add(from);
-    return (byName.get(from)?.bases ?? []).some((ref) => ref.kind === 'model' && reaches(ref.name, target, visiting));
-  };
-  const circular = new Map<Model, Set<string>>();
-  for (const model of models) {
-    const names = new Set<string>();
-    for (const ref of model.bases ?? []) {
-      if (ref.kind === 'model' && reaches(ref.name, model.name, new Set())) names.add(ref.name);
-    }
-    if (names.size > 0) circular.set(model, names);
-  }
-  for (const [model, names] of circular) {
-    const bases = model.bases ?? [];
-    const kept = bases.filter((ref) => !(ref.kind === 'model' && names.has(ref.name)));
-    if (kept.length > 0) bases.splice(0, bases.length, ...kept);
-    else delete model.bases;
-    for (const field of model.fields) {
-      if (field.inheritedFrom?.kind === 'model' && names.has(field.inheritedFrom.name)) delete field.inheritedFrom;
-    }
   }
 }
 

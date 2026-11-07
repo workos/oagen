@@ -1,5 +1,4 @@
 import type { ApiSpec, AuthScheme, EnumRef, Model } from '../ir/types.js';
-import { dropCircularBases } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -32,6 +31,7 @@ import {
 } from './collect-inline-enums.js';
 import { assignParameterGroupWrapperNames } from './parameter-group-names.js';
 import { validateModelRefs } from './normalize-model-refs.js';
+import { settleBases } from './settle-bases.js';
 import { resolveSchemaPointers } from './schema-pointers.js';
 import { collapseErrorBodies } from './collapse-error-bodies.js';
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
@@ -475,9 +475,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // shape, so this can only run once every referenced type is resolvable.
   assignParameterGroupWrapperNames(result);
 
-  // No model's chain of bases reaches itself: a cyclic document, or a fold
-  // that collapsed a base onto a kept model of the same shape (#591).
-  dropCircularBases(result.models);
+  // `bases` and `inheritedFrom` as the models end: no chain of bases
+  // reaching its own model, each base once, and no base or inherited field
+  // a fold has since changed under the model (#591).
+  settleBases(result.models);
 
   validateModelRefs(result);
 

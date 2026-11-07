@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  collectFieldDependencies,
-  collectModelTypeRefs,
-  dropCircularBases,
-  renameModelRefs,
-} from '../../src/ir/types.js';
+import { collectFieldDependencies, collectModelTypeRefs, renameModelRefs } from '../../src/ir/types.js';
 import type { Model, ModelRef, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -82,62 +77,6 @@ describe('#591', () => {
     expect(m.bases).toBe(bases);
     expect(m.bases).toEqual([model('Bar'), model('Other')]);
     expect(m.fields.map((f) => f.inheritedFrom)).toEqual([model('Bar'), model('Bar')]);
-  });
-
-  it('dropCircularBases drops every base whose chain reaches the model, whatever the order, and keeps the rest', () => {
-    const build = (): Model[] => [
-      {
-        name: 'A',
-        fields: [
-          { name: 'a', type: string, required: false },
-          { name: 'b', type: string, required: false, inheritedFrom: model('B') },
-        ],
-        bases: [model('B'), model('Other')],
-      },
-      {
-        name: 'B',
-        fields: [
-          { name: 'b', type: string, required: false },
-          { name: 'a', type: string, required: false, inheritedFrom: model('A') },
-        ],
-        bases: [model('A')],
-      },
-      {
-        name: 'Self',
-        fields: [{ name: 'x', type: string, required: false, inheritedFrom: model('Self') }],
-        bases: [model('Self')],
-      },
-      {
-        name: 'Chain',
-        fields: [{ name: 'c', type: string, required: false, inheritedFrom: model('Mid') }],
-        bases: [model('Mid')],
-      },
-      {
-        name: 'Mid',
-        fields: [{ name: 'c', type: string, required: false, inheritedFrom: model('Chain') }],
-        bases: [model('Chain')],
-      },
-      { name: 'Other', fields: [{ name: 'o', type: string, required: false }] },
-      {
-        name: 'Fine',
-        fields: [{ name: 'o', type: string, required: false, inheritedFrom: model('Other') }],
-        bases: [model('Other')],
-      },
-    ];
-    for (const models of [build(), build().reverse()]) {
-      dropCircularBases(models);
-      const byName = new Map(models.map((m) => [m.name, m]));
-      const of = (name: string) => ({
-        bases: byName.get(name)!.bases,
-        inherited: byName.get(name)!.fields.map((f) => f.inheritedFrom),
-      });
-      expect(of('A')).toEqual({ bases: [model('Other')], inherited: [undefined, undefined] });
-      expect(of('B')).toEqual({ bases: undefined, inherited: [undefined, undefined] });
-      expect(of('Self')).toEqual({ bases: undefined, inherited: [undefined] });
-      expect(of('Chain')).toEqual({ bases: undefined, inherited: [undefined] });
-      expect(of('Mid')).toEqual({ bases: undefined, inherited: [undefined] });
-      expect(of('Fine')).toEqual({ bases: [model('Other')], inherited: [model('Other')] });
-    }
   });
 
   it('renameModelRefs leaves a base or inheritedFrom an admit rejects as written', () => {
