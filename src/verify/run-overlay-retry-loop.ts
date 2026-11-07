@@ -80,7 +80,10 @@ export async function runOverlayRetryLoop(opts: {
 }): Promise<OverlayRetryResult> {
   const { baseline, parsedSpec, outputDir, lang, maxRetries, namespace, onRetry } = opts;
   // The compat scope reads the classes and methods the same settings resolve
-  // the operations to, so each check compares the SDK `generate` wrote (#600).
+  // the operations to, so each check compares the SDK `generate` wrote (#600),
+  // and the overlay of the attempt, so a baseline method it keeps (the
+  // manifest's `fetchAll` for `GET /pets`, or one a patch restored) stays in
+  // scope under its own name.
   const resolution: OperationResolution = {
     operationHints: opts.operationHints,
     mountRules: opts.mountRules,
@@ -96,7 +99,7 @@ export async function runOverlayRetryLoop(opts: {
   const patchedPerIteration: number[] = [];
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution);
+    const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution, overlay);
     if (compatResult.passed) {
       return {
         status: 'passed',
@@ -161,7 +164,7 @@ export async function runOverlayRetryLoop(opts: {
     });
   }
 
-  const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution);
+  const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution, overlay);
   return {
     status: 'max-retries',
     attempts: maxRetries,

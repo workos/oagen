@@ -359,22 +359,36 @@ describe('#607', () => {
         expect(diffOf(old, spec).changes).toEqual(['breaking model-modified Pet', 'breaking enum-removed PetKind']);
       });
 
-      it('an allOf+oneOf dispatcher names its variants from a const behind an allOf and dispatches on it', async () => {
+      it('an allOf+oneOf dispatcher names its variants from a const behind an allOf, a $ref or an alias and dispatches on it', async () => {
         const inline = (kind: Doc, extra: Record<string, Doc>): Doc => ({
           type: 'object',
           properties: { kind, ...extra },
         });
-        const document = (spelled: 'allOf' | 'const'): Doc => {
-          const k = (value: string): Doc => (spelled === 'allOf' ? { allOf: [c(value)] } : c(value));
+        type Spelled = 'allOf' | 'const' | 'ref' | 'alias';
+        const document = (spelled: Spelled): Doc => {
+          const k = (value: string, name: string): Doc =>
+            spelled === 'allOf'
+              ? { allOf: [c(value)] }
+              : spelled === 'ref'
+                ? ref(`${name}Kind`)
+                : spelled === 'alias'
+                  ? ref(`${name}Alias`)
+                  : c(value);
+          // The const components and their aliases are declared in every
+          // spelling, so the documents differ in the variants' `kind` alone.
           return doc(openapi, {
+            CatKind: c('cat'),
+            DogKind: c('dog'),
+            CatAlias: ref('CatKind'),
+            DogAlias: ref('DogKind'),
             Owner: { type: 'object', properties: { pet: ref('Pet') } },
             Pet: {
               allOf: [
                 { type: 'object', properties: { id: { type: 'string' } } },
                 {
                   oneOf: [
-                    inline(k('cat'), { lives: { type: 'integer' } }),
-                    inline(k('dog'), { bark: { type: 'string' } }),
+                    inline(k('cat', 'Cat'), { lives: { type: 'integer' } }),
+                    inline(k('dog', 'Dog'), { bark: { type: 'string' } }),
                   ],
                 },
               ],
@@ -382,18 +396,42 @@ describe('#607', () => {
             },
           });
         };
-        const spec = await parseJson(document('allOf'));
         const old = await parseJson(document('const'));
-        expect(model(spec, 'Pet').discriminator).toEqual({
-          property: 'kind',
-          mapping: { cat: 'PetCat', dog: 'PetDog' },
-        });
-        expect(model(spec, 'Pet').fields.map(({ name }) => name)).toEqual(['id']);
-        expect(model(spec, 'PetCat').fields.map(({ name }) => name)).toEqual(['id', 'kind', 'lives']);
-        expect(model(spec, 'PetDog').fields.map(({ name }) => name)).toEqual(['id', 'kind', 'bark']);
-        expect(fieldType(spec, 'PetCat', 'kind')).toEqual({ kind: 'literal', value: 'cat' });
-        expect(spec.models.map(({ name }) => name).sort()).toEqual(old.models.map(({ name }) => name).sort());
-        expect(diffOf(old, spec)).toEqual({ changes: [], exit: 0 });
+        // A bare `$ref` to the const component, and a bare alias of one, were
+        // read as written by the dispatcher's naming before, so the base
+        // flattened `Pet` into one model with `kind`, `lives` and `bark`
+        // (Michael's review of #656); they dispatch as the const does now.
+        for (const spelled of ['allOf', 'ref', 'alias'] as const) {
+          const spec = await parseJson(document(spelled));
+          expect(model(spec, 'Pet').discriminator, spelled).toEqual({
+            property: 'kind',
+            mapping: { cat: 'PetCat', dog: 'PetDog' },
+          });
+          expect(
+            model(spec, 'Pet').fields.map(({ name }) => name),
+            spelled,
+          ).toEqual(['id']);
+          expect(
+            model(spec, 'PetCat').fields.map(({ name }) => name),
+            spelled,
+          ).toEqual(['id', 'kind', 'lives']);
+          expect(
+            model(spec, 'PetDog').fields.map(({ name }) => name),
+            spelled,
+          ).toEqual(['id', 'kind', 'bark']);
+          // The variant's `kind` is the literal — in OAS 3.0 the one-value
+          // enum component a `$ref` names, through an alias too.
+          const viaEnum = spelled !== 'allOf' && openapi === '3.0.3';
+          expect(fieldType(spec, 'PetCat', 'kind'), spelled).toEqual(
+            viaEnum ? { kind: 'enum', name: 'CatKind' } : { kind: 'literal', value: 'cat' },
+          );
+          expect(spec.models.map(({ name }) => name).sort(), spelled).toEqual(
+            old.models.map(({ name }) => name).sort(),
+          );
+          expect(diffOf(old, spec).changes, spelled).toEqual(
+            viaEnum ? ['breaking model-modified PetCat', 'breaking model-modified PetDog'] : [],
+          );
+        }
       });
 
       it('a member pinning the property behind an allOf outranks the open declaration another member makes, in either order', async () => {
@@ -506,6 +544,14 @@ describe('#607', () => {
       };
       folded(old, 'const');
       folded(await parseJson(document([{ allOf: [c('email')] }, { allOf: [c('sms')] }])), 'allOf of the const');
+      // A bare `$ref` to the const component was read as written before, so
+      // the base kept the body a union of two models (Michael's review of
+      // #656); it folds as the const does now.
+      folded(
+        await parseJson(document([ref('EmailKind'), ref('SmsKind')], { EmailKind: c('email'), SmsKind: c('sms') })),
+        'a bare $ref to the const component',
+        openapi === '3.0.3' ? ['additive enum-added EmailKind', 'additive enum-added SmsKind'] : [],
+      );
       folded(
         await parseJson(
           document([{ allOf: [ref('EmailKind')], description: 'Email.' }, ref('SmsKind')], {

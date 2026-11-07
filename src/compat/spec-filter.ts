@@ -6,7 +6,7 @@ import {
   collectRequestBodyTypes,
   collectResponseBodyTypes,
 } from '../ir/types.js';
-import type { ApiSurface, LanguageHints } from './types.js';
+import type { ApiSurface, LanguageHints, OverlayLookup } from './types.js';
 import { resolveOperations } from '../ir/operation-hints.js';
 import type { OperationResolution, ResolvedOperation } from '../ir/operation-hints.js';
 
@@ -162,13 +162,33 @@ export function specDerivedFieldPaths(spec: ApiSpec, hints: LanguageHints): Set<
  * spells it (snake_case) and matched with underscores stripped and case folded
  * (see {@link normalizeMemberName}), so a Node `getPet`, a Ruby `get_pet` and a
  * .NET `GetPet` all read `Pets.get_pet`.
+ *
+ * With an `overlay` — the one `generate --api-surface` writes with, built by
+ * `buildOverlayLookup` from the baseline and the `.oagen-manifest.json` in the
+ * output directory — the paths also hold every baseline method the overlay
+ * maps to one of the spec's operations (`methodByOperation`: `GET /pets` →
+ * `Animals.fetchAll`), spelled as the baseline spells it: `generate` writes
+ * that name rather than the resolved one, so without it `filterSurface`
+ * dropped the method and an SDK that renamed it passed. A mapped method whose
+ * route the spec does not declare (`GET /legacy` → `Animals.legacy`) is not
+ * added; the spec derives nothing for it.
  */
-export function specDerivedMethodPaths(spec: ApiSpec, resolution?: OperationResolution): Set<string> {
+export function specDerivedMethodPaths(
+  spec: ApiSpec,
+  resolution?: OperationResolution,
+  overlay?: Pick<OverlayLookup, 'methodByOperation'>,
+): Set<string> {
   const paths = new Set<string>();
   for (const r of resolveAsGenerate(spec, resolution)) {
     paths.add(`${r.mountOn}.${r.methodName}`);
     for (const wrapper of r.wrappers ?? []) paths.add(`${r.mountOn}.${wrapper.name}`);
     paths.add(`${r.mountOn}.${r.operation.name}`);
+  }
+  if (overlay) {
+    const routes = specDerivedHttpKeys(spec);
+    for (const [httpKey, method] of overlay.methodByOperation) {
+      if (routes.has(httpKey)) paths.add(`${method.className}.${method.methodName}`);
+    }
   }
   return paths;
 }

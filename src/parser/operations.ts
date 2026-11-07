@@ -33,6 +33,7 @@ import {
   splitWords,
   cleanSchemaName,
   stripListItemMarkers,
+  singularizeLeadingWord,
   singularizePathSegment,
   numberedName,
   numberedProperty,
@@ -103,6 +104,7 @@ import {
   extractInlineModelsFromProperties,
   isInheritedModelRef,
   shapeFingerprint,
+  takeModelDocumentation,
   withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -6059,20 +6061,30 @@ function resolveReusedOperationIds(
  * kept the first definition for both, so one operation was typed with
  * fields it does not take, and which one followed the order of the paths.
  *
- * Of the Operation Objects that contest a stem, the one whose `operationId`
- * is the stem's own spelling — the stem with its first letter lowered,
- * `createPet` for `CreatePet`, read with the overload markers at its end
- * stripped (normalizeOperationIdForNaming) — keeps the stem and the plain
- * names, and every other one names its models from its path
- * (`PetDraftsPostRequest`), exactly as a reused id's later operation does
- * (resolveReusedOperationIds); when none is spelled so (`create_pet`
- * beside `CreatePet`), or more than one is — which the reuse pass leaves no
- * room for, since one id as written names the models of one Operation
- * Object — every one of them does. So adding `create_pet` beside `createPet`
- * adds two models and renames none of `createPet`'s, whatever the order of
- * the paths: the outcome depends on the document's `operationId`s alone.
- * Whether the contested bodies agree in shape takes no part, so that a
- * change to one body never renames its model.
+ * Of the Operation Objects that contest a stem, the one the cleaning moved
+ * least keeps the stem and the plain names, and every other one names its
+ * models from its path (`PetDraftsPostRequest`), exactly as a reused id's
+ * later operation does (resolveReusedOperationIds). An id the cleaning
+ * stripped a marker or a backend word from (`listNotesByExternalId`,
+ * `createPetController`) never keeps a contested stem. Among the rest, one
+ * whose PascalCase form — read with the overload markers at its end
+ * stripped (normalizeOperationIdForNaming) — is the stem as written
+ * (`createPet`, `create_pet` and `CreatePet` alike for `CreatePet`;
+ * `list_notes` or `ListNotes` for `ListNotes`) outranks one whose leading
+ * word was only singularized (`Notes_List`, `NotesList` to `NoteList`), so
+ * `Note_List` keeps `NoteList` beside `Notes_List`, and `Notes_List` keeps
+ * it beside `Notes_ListByExternalId`. A tie — ids that differ in case or
+ * separators alone, `createPet` beside `create_pet` or `CreatePet` — goes
+ * to the one written in camelCase (the id is its own PascalCase form with
+ * the first letter lowered) when there is exactly one, and to none when
+ * there is none (`create_pet` beside `CreatePet`); two cannot be, since one
+ * id as written names the models of one Operation Object once the reuse
+ * pass has run. So adding `create_pet` beside `createPet`, or
+ * `list_notes_by_external_id` beside `list_notes`, adds models and renames
+ * none of the existing operation's, whatever the order of the paths and
+ * whatever case the document writes its ids in: the outcome depends on the
+ * document's `operationId`s alone. Whether the contested bodies agree in
+ * shape takes no part, so that a change to one body never renames its model.
  *
  * Read off the `operationId` each operation's models are named from
  * (`modelOperationIds`: the one the reuse of its own left it, or its own),
@@ -6098,8 +6110,13 @@ function resolveContestedOperationIdStems(
     method: HttpMethod;
     rootLength: number;
   }
-  /** Each Operation Object whose models the stem would name, with the id they are read from and the paths that reach it. */
-  const holders = new Map<string, Map<OperationObject, { id: string; sites: Site[] }>>();
+  /** An Operation Object whose models a stem would name: the id they are read from, its PascalCase form, and the paths that reach it. */
+  interface Holder {
+    id: string;
+    pascal: string;
+    sites: Site[];
+  }
+  const holders = new Map<string, Map<OperationObject, Holder>>();
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
@@ -6109,20 +6126,28 @@ function resolveContestedOperationIdStems(
       const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
       if (!operationId) continue;
       const stem = operationIdModelBase(operationId);
-      const ops = holders.get(stem) ?? new Map<OperationObject, { id: string; sites: Site[] }>();
-      const holder = ops.get(op) ?? { id: normalizeOperationIdForNaming(operationId), sites: [] };
+      const ops = holders.get(stem) ?? new Map<OperationObject, Holder>();
+      const id = normalizeOperationIdForNaming(operationId);
+      const holder = ops.get(op) ?? { id, pascal: toPascalCase(id), sites: [] };
       holder.sites.push({ key, path, method, rootLength: plan.operations.get(key)!.rootLength });
       ops.set(op, holder);
       holders.set(stem, ops);
     }
   }
+  /** How far the cleaning moved an id from its stem: not at all, its leading word singularized, or a marker or backend word stripped. */
+  const distance = ({ pascal }: Holder, stem: string) =>
+    pascal === stem ? 0 : singularizeLeadingWord(pascal) === stem ? 1 : 2;
+  /** Whether an id is written in camelCase: its own PascalCase form with the first letter lowered. */
+  const camelCased = ({ id, pascal }: Holder) => id === pascal.charAt(0).toLowerCase() + pascal.slice(1);
   for (const [stem, ops] of holders) {
     if (ops.size < 2) continue;
-    const spelling = stem.charAt(0).toLowerCase() + stem.slice(1);
-    const kept = [...ops.values()].filter(({ id }) => id === spelling).length === 1;
-    for (const { id, sites } of ops.values()) {
-      if (kept && id === spelling) continue;
-      const [first, ...rest] = sites.sort(compareOperationOrder);
+    const least = Math.min(...[...ops.values()].map((holder) => distance(holder, stem)));
+    const nearest = least < 2 ? [...ops.values()].filter((holder) => distance(holder, stem) === least) : [];
+    const camel = nearest.filter(camelCased);
+    const keeper = nearest.length === 1 ? nearest[0] : camel.length === 1 ? camel[0] : undefined;
+    for (const holder of ops.values()) {
+      if (holder === keeper) continue;
+      const [first, ...rest] = holder.sites.sort(compareOperationOrder);
       modelOperationIds.set(first.key, null);
       for (const { key } of rest) {
         modelOperationIds.set(key, null);
@@ -6490,11 +6515,13 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * it (`ListOwnersItem` beside `HolderResultItem`; #608), so the item type
  * is a placeholder the settle decides from the settled types
  * (`settleDeferredDataPathItemType`) — unless the path goes on through the
- * variants of a union on its way (`dataPathForks`): each variant's model
- * types inline items under a name of its own, so the document answers now,
- * under the path-derived name, as it does for a union the IR already holds
- * (#556), and a `$ref` or primitive the variants share is the one type the
- * settle would find. The document (`schema`, classified under
+ * variants of a union to more than one array (`dataPathForks`): each
+ * variant's model types inline items under a name of its own, so the
+ * document answers now, under the path-derived name, as it does for such a
+ * union the IR already holds (#556), and a `$ref` or primitive the variants
+ * share is the one type the settle would find; variants that all hold one
+ * pointer land on one array and are settled like any other path. The
+ * document (`schema`, classified under
  * `contextName`) answers otherwise only when the path crosses a model the
  * parser has not materialized, minting inline items under a path-derived
  * name.
@@ -6802,7 +6829,11 @@ function resolveComponentResponseModelNames(
  * `extractResponses` chooses it by (`primaryResponseEntry`), a `$ref` among
  * the entries resolved to read it, and the request body by the rule
  * `extractRequestBody` picks its content by (`selectRequestBodyContent`), a
- * `$ref` into `components/requestBodies` resolved to read it. A 2xx or a
+ * `$ref` into `components/requestBodies` resolved to read it, and typed
+ * exactly as the operation will type it (`typePickedRequestBody`): an array
+ * body's items are `<Op>Request` itself and nest `<Op>RequestFooPostRequest`,
+ * which a response reading reserved as `<Op>RequestItem…` and so missed
+ * (Greptile, #655). A 2xx or a
  * body schema written as a `$ref` mints under its component's name or not
  * at all, and an operation that names its models from its path steps past
  * the components itself (`resolvePathModelBaseNames`), so neither reserves
@@ -6836,11 +6867,15 @@ function operationBodyModelNames(
         } catch {
           requestBody = undefined;
         }
-        const requestSchema = selectRequestBodyContent(requestBody)?.schema;
-        if (requestSchema && !requestSchema.$ref) {
-          names.push(
-            ...bodyModelNames(requestSchema, operationIdModelName(operationId, 'Request'), componentSchemas, settle),
-          );
+        const selected = selectRequestBodyContent(requestBody);
+        if (selected) {
+          // Typed exactly as `extractRequestBody` will type it, under the id
+          // the models are named from: an array body's items are
+          // `<Op>Request` itself, where a response reading names them
+          // `<Op>RequestItem` and misses what they nest.
+          const requestModels: Model[] = [];
+          typePickedRequestBody(selected, { ...op, operationId }, '', requestModels, componentSchemas);
+          names.push(...requestModels.map((model) => model.name));
         }
         const entries = Object.entries(op.responses ?? {}).flatMap(([statusCode, response]) => {
           const responseKey = classifyResponseKey(statusCode);
@@ -7582,11 +7617,12 @@ function undescribedBodyType(): TypeRef {
  * body's model of a kept name resolves to the kept definition when the two
  * are the same shape but for the model's own `deprecated`
  * (`shapeFingerprint`), the kept definition — the primary's, its
- * references and documentation with it — going live when any copy is, so
- * a live 202 body identical to a deprecated 200 body types both as a live
- * `Pet`, as a deprecated 202 beside a live 200 does, and the model is
- * deprecated only when every copy is; and to the kept definition with a
- * warning when they differ in a field (#630).
+ * references with it — going live when any copy is and documented as the
+ * first live copy is, so a live 202 body identical to a deprecated 200
+ * body types both as a live `Pet` carrying the 202's `description`, as a
+ * deprecated 202 beside a live 200 does, and the model is deprecated only
+ * when every copy is; and to the kept definition with a warning when they
+ * differ in a field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -7980,9 +8016,11 @@ function extractResponses(
   // definition going live when only the flag tells the two apart, as a live
   // copy owns a shared name across operations in the merge passes, so a
   // live 202 body identical to a deprecated 200 body keeps a live `Pet`
-  // with the 200's references and documentation, deprecating either copy
-  // leaves no trace, and the model is deprecated only when every copy is
-  // (#630); only a clash on a model the stem does not name — a field more,
+  // with the 200's references and the 202's documentation (`description`,
+  // `externalDocs`, extensions: the first live copy's in status order, as
+  // the merge passes keep a live copy's definition), deprecating either
+  // copy leaves no trace, and the model is deprecated only when every copy
+  // is (#630); only a clash on a model the stem does not name — a field more,
   // a field's own flag, a limit — is still resolved to the kept definition,
   // with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
@@ -8024,11 +8062,14 @@ function extractResponses(
       } else if (kept.model.deprecated && !model.deprecated) {
         // Identical but for the model's own flag: the shared model is live
         // while any copy is (#630). The kept definition stays — its
-        // references (an explicit `$ref` the primary wrote where this body
-        // nests an inline object of the same name, repointed apart by the
-        // merge passes) and its documentation with it — and only its flag
-        // goes; the live copy's object never replaces it.
+        // references with it: an explicit `$ref` the primary wrote where
+        // this body nests an inline object of the same name, repointed
+        // apart by the merge passes — and goes live, documented as this
+        // first live copy is (`takeModelDocumentation`), as the merge passes
+        // keep a live copy's definition across operations; the live copy's
+        // object never replaces it.
         delete kept.model.deprecated;
+        takeModelDocumentation(kept.model, model);
       }
     }
   }

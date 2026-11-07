@@ -447,14 +447,27 @@ const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'examples',
   'extensions',
 ]);
-/** Model properties outside its shape: the name, its documentation (description, link, extensions), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
-  'name',
-  'description',
-  'externalDocs',
-  'extensions',
-  'fields',
-]);
+/** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold reads from the copy it keeps (`takeModelDocumentation`). */
+const MODEL_DOC_KEYS = ['description', 'externalDocs', 'extensions'] as const satisfies readonly (keyof Model)[];
+/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'fields']);
+
+/**
+ * Give `into` the documentation of `from` — every `MODEL_DOC_KEYS` property,
+ * one `from` lacks removed — leaving its name, fields, flag, structure and
+ * references as they are. What the within-operation merge does to the kept
+ * definition when a later copy identical but for the model's own
+ * `deprecated` is live (`extractResponses`, #630): the shared model is then
+ * documented as that live copy is, as the merge passes keep a live copy's
+ * definition whole across operations (`settleSharedNames`), so a description
+ * written for the deprecated copy never documents a model that is not.
+ */
+export function takeModelDocumentation(into: Model, from: Model): void {
+  for (const key of MODEL_DOC_KEYS) {
+    if (from[key] === undefined) delete into[key];
+    else Object.assign(into, { [key]: from[key] });
+  }
+}
 /** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readModelName`. */
 const MODEL_STRUCTURE_KEYS: ReadonlySet<string> = new Set(['variants', 'compositionKind', 'discriminator']);
 /** Model properties outside `modelPropertiesKey`: the identity, the fields and the union structure, each read on its own. */
@@ -2956,8 +2969,16 @@ export function resetCombinedDeclarations(): void {
  * of both in document order, which every reader reads as any inline
  * `allOf` (`mergeAllOfMembers`, `collectObjectProperties`), carrying the
  * keywords a field reads from either (`declarationKeywords`, the later's
- * over the earlier's) and the nullability an inline `allOf` of two
- * members has, which is none — so `result: { $ref: PetPage }` beside
+ * over the earlier's) and `null` exactly when every declaration admits it
+ * (`conjunctionAdmitsNull`: a type list naming `null`, OAS 3.0 `nullable:
+ * true` beside a `type`, a `$ref` to a component that admits it, an
+ * `allOf` whose every member does), as JSON Schema applies both — `Meta |
+ * null` beside a nullable inline `allOf`, a second nullable `$ref` or a
+ * nullable inline object is `PetPageResult | null`, beside a declaration
+ * that rejects `null` is `PetPageResult`, in either member order
+ * (workos/oagen#653 review: the conjunction admitted none, and two inline
+ * objects took the later's `type` or either's `nullable: true`) — so
+ * `result: { $ref: PetPage }` beside
  * `result: { properties: { total_pages } }` is a `PetPage` that also has
  * `total_pages`, whichever is read first (workos/oagen#432: the first was
  * kept, so `result` had `items` or `total_pages`, never both, and a
@@ -2971,7 +2992,8 @@ export function resetCombinedDeclarations(): void {
  * the conjunction are the parts of both (`conjunctionMembers`): a
  * declaration that is a bare `allOf` — nothing beside it but the lifted
  * keywords, a `required` the conjunction hoists, `type: 'object'` or a
- * nullable spelling — is spliced open into its members, so `{ allOf: [{
+ * nullable spelling, a `title` or another annotation that constrains
+ * nothing (`splicesOpen`) — is spliced open into its members, so `{ allOf: [{
  * $ref: A }] }` beside `{ allOf: [{ $ref: B }] }` is `{ allOf: [{ $ref: A
  * }, { $ref: B }] }`, which the readers type, where the `allOf` of the two
  * wrappers as written is `unknown` to them; a part the first already has
@@ -2979,8 +3001,9 @@ export function resetCombinedDeclarations(): void {
  * (`namesOneComponent`) — adds nothing, so two `$ref`s naming one
  * component, or a `$ref` beside its own wrapper, keep the first; and a
  * pair whose members the readers would not all read — one that is no
- * `$ref` and no inline object member (`isInlineAllOfMember`): an `allOf`
- * of `$ref`s under a `title` or a `discriminator` — keeps the first too,
+ * `$ref`, no inline object member (`isInlineAllOfMember`) and no
+ * annotating or limiting member (`declaresType`): an `allOf` of `$ref`s
+ * under a `discriminator` or `additionalProperties` — keeps the first too,
  * as before, rather than lose a part to the reference reading
  * (workos/oagen#653 review). A `$ref` to a component that dispatches a
  * union describes an object too, its conjunction read as the same `allOf`
@@ -3081,7 +3104,24 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       properties[key] = held ? combineDeclarations(held, schema) : schema;
     }
     const required = [...new Set([...(first.required ?? []), ...(second.required ?? [])])];
-    return { ...first, ...second, properties, ...(required.length > 0 && { required }) };
+    // `null` exactly when both admit it (`conjunctionAdmitsNull`), in the
+    // one spelling, whichever side wrote it and however (workos/oagen#653
+    // review: the later's `type` or either's `nullable: true` won, so one
+    // nullable object beside a plain one was nullable by member order).
+    const { nullable: _firstFlag, ...firstBare } = first;
+    const { nullable: _secondFlag, ...secondBare } = second;
+    const typed = first.type !== undefined || second.type !== undefined;
+    return {
+      ...firstBare,
+      ...secondBare,
+      properties,
+      ...(conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second)
+        ? { type: ['object', 'null'] }
+        : typed
+          ? { type: 'object' }
+          : {}),
+      ...(required.length > 0 && { required }),
+    };
   }
   const firstArray = arraySchemaOf(first);
   const secondArray = firstArray && arraySchemaOf(second);
@@ -3113,20 +3153,29 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // own wrapper — keeps the first, as a lone declaration does.
     if (members.length === held.members.length && required.length === held.required.length) return first;
     // The readers read a member that is a `$ref` or an inline object member
-    // (`isInlineAllOfMember`), and type the `allOf` by one that is a `$ref`
+    // (`isInlineAllOfMember`), or one that declares no type and only
+    // annotates or limits the schema (`declaresType`; `allOfWrapperLayer`,
+    // `extractConstraints`), and type the `allOf` by one that is a `$ref`
     // or declares properties inline (`allOfTypesSchema`). A member that is
-    // neither — a composition no splicing opens, an `allOf` of `$ref`s
-    // under a `title` or a `discriminator` — would be dropped by the
-    // reference reading or leave the conjunction `unknown`, so such a pair
-    // keeps the first, as before (workos/oagen#653 review).
+    // none of these — a composition no splicing opens, an `allOf` of
+    // `$ref`s under a `discriminator` or `additionalProperties` — would be
+    // dropped by the reference reading or leave the conjunction `unknown`,
+    // so such a pair keeps the first, as before (workos/oagen#653 review;
+    // round 5: `{ description }` spliced out of a wrapper failed this
+    // test, and the pair kept the first where the base merged both).
     const readable =
-      members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member)) &&
+      members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member) || !declaresType(member)) &&
       members.some((member) => member.$ref !== undefined || declaresInlineProperties(member));
     if (!readable) return first;
+    // `null` exactly when both declarations admit it, as JSON Schema
+    // applies both (workos/oagen#653 review: the conjunction admitted none,
+    // so `Meta | null` beside a nullable inline `allOf` lost its `null`).
+    const nullable = conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second);
     return {
       ...declarationKeywords(first),
       ...declarationKeywords(second),
       allOf: members,
+      ...(nullable && { type: ['object', 'null'] }),
       ...(required.length > 0 && { required }),
     };
   }
@@ -3134,16 +3183,64 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
 }
 
 /**
+ * Whether a declaration of an object admits `null`, as the type builder
+ * types it: on its own (`declaresNull`: a type list naming `null`, OAS 3.0
+ * `nullable: true` beside a `type`, a nullable `oneOf`/`anyOf` wrapper, an
+ * `allOf` read as one member that does), through a `$ref` to a component
+ * that does (`componentSchemaOf`, as `componentTypeRef` wraps such a
+ * reference), or as an `allOf` whose every member does, as JSON Schema
+ * applies them all. A `type` of its own that names no `null` rejects it,
+ * whatever it composes (`{ type: 'object', allOf: [{ $ref: Nullable }] }`),
+ * and an inline object with no `type` admits none, as the type builder
+ * reads it. The one reading a conjunction settles its own `null` admission
+ * by (`conjoinTypedDeclarations`: `null` exactly when every declaration
+ * admits it), so `Meta | null` beside a nullable inline `allOf`, a second
+ * nullable `$ref` or a nullable inline object is nullable, and beside a
+ * declaration that rejects `null` is not, in either member order
+ * (workos/oagen#653 review). A schema met again on the path being read
+ * (`path`: the schemas above it, not every schema read so far) admits
+ * none, which ends a component that names itself, through a hop or
+ * outright, while a component two members name is read for each — `{
+ * allOf: [{ $ref: A }, { $ref: A }] }` beside `{ $ref: B }`, both
+ * nullable, is nullable (the #653 review's round 4: the second `$ref` met
+ * `A` in a shared seen set and read it as a cycle, so the conjunction lost
+ * its `null`).
+ */
+function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  if (path.has(schema)) return false;
+  if (declaresNull(schema)) return true;
+  if (schema.type !== undefined) return false;
+  path.add(schema);
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      return target !== undefined && conjunctionAdmitsNull(target, path);
+    }
+    const members = schema.allOf ?? [];
+    return members.length > 0 && members.every((member) => conjunctionAdmitsNull(member, path));
+  } finally {
+    path.delete(schema);
+  }
+}
+
+/**
  * The parts a declaration brings to a conjunction
  * (`conjoinTypedDeclarations`), with the `required` it writes beside them:
  * its own `allOf` members, each read the same way, when nothing is written
  * beside the `allOf` that the conjunction does not carry itself — the
- * keywords it lifts (`declarationKeywords`, the declaration's own; a
- * wrapper nested inside it documents no field), a `required`, which JSON
+ * keywords it lifts (`declarationKeywords`: the declaration's own ride on
+ * the conjunction; a wrapper nested inside it keeps its own as a member
+ * that declares no type, which the readers conjoin onto the schema as the
+ * wrapper's own keywords: the limits with the stricter bound winning,
+ * `extractConstraints`, the documentation where the schema writes none,
+ * `allOfWrapperLayer`), a `required`, which JSON
  * Schema applies to the instance at any depth of a conjunction, so the
- * conjunction carries it, and `type: 'object'` or a nullable spelling of
- * it, which say what the members already compose (the conjunction admits
- * no `null`) — else the declaration itself. JSON Schema reads `{ allOf:
+ * conjunction carries it, `type: 'object'` or a nullable spelling of it,
+ * which say what the members already compose (the conjunction settles its
+ * own `null` admission from every declaration: `conjunctionAdmitsNull`),
+ * and an annotation that constrains nothing, a `title` or a `$comment`
+ * (`splicesOpen`), which names no field once spliced — else the
+ * declaration itself. JSON Schema reads `{ allOf:
  * [A, B] }` and `{ allOf: [{ allOf: [A] }, B] }` alike, but the readers
  * read a member that is a `$ref` or declares properties inline, so a
  * wrapper around a `$ref` is spliced open: `{ allOf: [{ $ref: A }] }`
@@ -3157,15 +3254,27 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
 function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
   const members: SchemaObject[] = [];
   const required: string[] = [];
-  const splice = (schema: SchemaObject): void => {
+  const splice = (schema: SchemaObject, nested: boolean): void => {
     if (!splicesOpen(schema)) {
       members.push(schema);
       return;
     }
     for (const name of schema.required ?? []) if (!required.includes(name)) required.push(name);
-    for (const member of schema.allOf ?? []) splice(member);
+    // A wrapper spliced open inside the declaration keeps what it wrote
+    // for the field — its limits, documentation and extensions — as a
+    // member that declares no type, which the readers conjoin onto the
+    // schema as they do the wrapper's own keywords (`extractConstraints`,
+    // the stricter bound winning; `allOfWrapperLayer`, where the schema
+    // writes none itself). The declaration's own ride on the conjunction
+    // (`declarationKeywords`; workos/oagen#653 review, round 5: `{ allOf:
+    // [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
+    if (nested) {
+      const keywords = declarationKeywords(schema);
+      if (Object.keys(keywords).length > 0) members.push(keywords);
+    }
+    for (const member of schema.allOf ?? []) splice(member, true);
   };
-  splice(declaration);
+  splice(declaration, false);
   return { members, required };
 }
 
@@ -3173,10 +3282,14 @@ function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[
  * Whether a declaration is a bare `allOf` a conjunction splices open
  * (`conjunctionMembers`): every keyword beside the `allOf` is one the
  * conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
- * an `x-*` extension, `required`, `nullable`, or a `type` naming `object`
- * alone or beside `null`. One that also writes a `title`, a
- * `discriminator`, a `oneOf`/`anyOf`, `properties` or anything else says
- * more than its members do, and stays a member as written.
+ * an `x-*` extension, `required`, `nullable`, a `type` naming `object`
+ * alone or beside `null`, or an annotation that constrains nothing — a
+ * `title`, a `$comment`, an `xml` — which accepts the same instances as
+ * its members do (workos/oagen#653 review: a `title` kept the wrapper
+ * closed, so the pair kept the first by member order). One that also
+ * writes a `discriminator`, `additionalProperties`, a `oneOf`/`anyOf`,
+ * `properties` or anything else says more than its members do, and stays
+ * a member as written.
  */
 function splicesOpen(schema: SchemaObject): boolean {
   if (schema.allOf === undefined) return false;
@@ -3186,6 +3299,9 @@ function splicesOpen(schema: SchemaObject): boolean {
       key === 'allOf' ||
       key === 'required' ||
       key === 'nullable' ||
+      key === 'title' ||
+      key === '$comment' ||
+      key === 'xml' ||
       (key === 'type' &&
         (value === 'object' || (Array.isArray(value) && value.every((t) => t === 'object' || t === 'null')))) ||
       LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
