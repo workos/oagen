@@ -5266,9 +5266,13 @@ function mappingTargetModelName(target: string): string {
  * a pointer variant's — an unnamed member, pending until settled — follows
  * the variant, to the model it settles to (`ZooDog`; `ShelterDog` for
  * `dog: Hound` beside the variant `Shelter/properties/dog`, as the pointer
- * spelling gives); a hop that is a named member's names that member's
- * model now (`Hound` when `$ref: Hound` is the variant, `Cat` for an alias
- * of `Cat` beside `$ref: Cat`); a chain no member holds ends at a pointer,
+ * spelling gives), or, where the site holds no variants (a dispatcher), a
+ * pending reference of that pointer's own, settled at the mapping site; a
+ * hop that is a named member's names that member's model now, spelled as
+ * the site spells the member's own `$ref` (`memberSpelling`: `Hound` when
+ * `$ref: Hound` is the variant, for the target `Hound` and for the pointer
+ * `Shelter/properties/dog` it aliases alike; `Cat` for an alias of `Cat`
+ * beside `$ref: Cat`); a chain no member holds ends at a pointer,
  * followed by a pending reference of the target's own (`pendingSchemaRef`),
  * settled at the mapping site to the model the pointed schema is built as
  * (`ShelterDog`), or left as written after a warning when it names no
@@ -5340,11 +5344,24 @@ function deferPointerMappingEntries(
     if (index >= 0) {
       const member = members[index]!;
       const variant = variants[index];
-      if (member.name === null && variant !== undefined && isPendingVariant(variant)) {
+      if (member.name === null) {
+        // An unnamed member is a pointer's: the entry follows the pending
+        // variant built for it, or, where the site holds no variants (a
+        // dispatcher), a pending reference of that pointer's own (Greptile,
+        // #619 review round 5: the hop was written as a name instead).
         redirectToPointer(chain[hop]!.ref);
-        deferMappingEntry(mapping, value, variant);
+        deferMappingEntry(
+          mapping,
+          value,
+          variant !== undefined && isPendingVariant(variant)
+            ? variant
+            : (redirected[0] ?? pendingSchemaRef(chain[hop]!.ref)),
+        );
       } else {
-        nameNow(spell(chain[hop]!.ref));
+        // A named member: the entry names its model, spelled as the site
+        // spells the member's own `$ref` — never the hop's, which may be a
+        // pointer the member aliases (`$ref: Hound` for `Shelter/properties/dog`).
+        nameNow(memberSpelling(member, member.name, schemas, spell));
       }
       continue;
     }
@@ -5355,6 +5372,22 @@ function deferPointerMappingEntries(
     }
     nameNow(spell(last.ref));
   }
+}
+
+/**
+ * How `spell` writes a named member's model into the mapping: as the
+ * member's own `$ref` to a component — written on the member, or wrapped
+ * by it (`wrappedVariantReference`) — else as `name`, the model name it
+ * carries (an inline variant's, or a title's).
+ */
+function memberSpelling(
+  member: UnionMember,
+  name: string,
+  schemas: Record<string, SchemaObject> | undefined,
+  spell: (target: string) => string,
+): string {
+  const ref = member.raw.$ref ?? wrappedVariantReference(member.raw, schemas)?.$ref;
+  return typeof ref === 'string' && componentKeyOf(ref) !== undefined ? spell(ref) : name;
 }
 
 /**
