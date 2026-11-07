@@ -277,6 +277,99 @@ describe('#627', () => {
         expect(fieldsOf(spec, 'PetsPostRequest')).toEqual(['name']);
         expect(fieldsOf(spec, 'ArchivedPetsPostRequest')).toEqual(['name']);
       });
+
+      // Greptile (round 1): a losing operation's path prefix can extend the
+      // winner's stem, and then its `…Response` is exactly a name the
+      // winner's response nests. `resolvePathModelBaseNames` reserved the
+      // stem alone, which never reached such a name — on this branch, or on
+      // `main` for an operation without an `operationId` — so the merge kept
+      // one shape for both. Now a prefix that extends an operation's stem
+      // reserves every name the operations' bodies mint and is hashed.
+      describe('a path prefix that extends the stem (Greptile, round 1)', () => {
+        /** `createPet`, whose response nests a `drafts_get_response` object and whose request body nests a `foo_post_request` object. */
+        const createPetNesting = {
+          operationId: 'createPet',
+          requestBody: json(body({ name: str, foo_post_request: body({ tag: str }) })),
+          responses: {
+            '201': { description: 'Created', ...json(body({ status: str, drafts_get_response: body({ id: str }) })) },
+          },
+        };
+        /** `GET /create/pet/response/drafts`, returning `{ draftId: integer }`. */
+        const draftsGet = (operationId?: string) => ({
+          ...(operationId ? { operationId } : {}),
+          responses: { '200': { description: 'ok', ...json(body({ draftId: int })) } },
+        });
+        /** `POST /create/pet/request/foo`, taking `{ draftId: integer }`. */
+        const fooPost = (operationId?: string) => ({
+          ...(operationId ? { operationId } : {}),
+          requestBody: json(body({ draftId: int })),
+          responses: { '204': { description: 'ok' } },
+        });
+        const hashed = (stem: string, method: string, suffix: string) =>
+          new RegExp(`^${stem}[0-9A-Fa-f]{6}${method}${suffix}$`);
+        const operationAt = (spec: ApiSpec, path: string) =>
+          spec.services.flatMap((s) => s.operations).find((op) => op.path === path)!;
+
+        it('hashes the loser’s prefix instead of naming its response after a model the winner’s response nests, in either order', async () => {
+          const pets = { '/pets': { post: createPetNesting } };
+          const drafts = { '/create/pet/response/drafts': { get: draftsGet('create_pet') } };
+          for (const [label, paths] of [
+            ['pets-first', { ...pets, ...drafts }],
+            ['drafts-first', { ...drafts, ...pets }],
+          ] as const) {
+            const spec = await parse(`extends-${label}`, document(openapi, paths));
+            // `CreatePetResponseDraftsGet` extends `CreatePet`, so the
+            // path-named `create_pet` is hashed and keeps its own fields.
+            const response = nameOf(operationAt(spec, '/create/pet/response/drafts').response);
+            expect(response, label).toMatch(hashed('CreatePetResponseDrafts', 'Get', 'Response'));
+            expect(fieldsOf(spec, response), label).toEqual(['draftId']);
+            // `createPet`'s nested model keeps its name and its fields.
+            expect(fieldsOf(spec, 'CreatePetResponseDraftsGetResponse'), label).toEqual(['id']);
+            expect(fieldsOf(spec, 'CreatePetResponse'), label).toEqual(['status', 'drafts_get_response']);
+            expect(spec.models, label).toHaveLength(5);
+          }
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('reserves the names the winner’s request body nests the same way', async () => {
+          const spec = await parse(
+            'extends-request',
+            document(openapi, {
+              '/pets': { post: createPetNesting },
+              '/create/pet/request/foo': { post: fooPost('create_pet') },
+            }),
+          );
+          const request = nameOf(operationAt(spec, '/create/pet/request/foo').requestBody);
+          expect(request).toMatch(hashed('CreatePetRequestFoo', 'Post', 'Request'));
+          expect(fieldsOf(spec, request)).toEqual(['draftId']);
+          expect(fieldsOf(spec, 'CreatePetRequestFooPostRequest')).toEqual(['tag']);
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('hashes an operation without an `operationId` whose prefix extends the stem the same way', async () => {
+          const spec = await parse(
+            'extends-no-id',
+            document(openapi, {
+              '/pets': { post: createPetNesting },
+              '/create/pet/response/drafts': { get: draftsGet() },
+            }),
+          );
+          const response = nameOf(operationAt(spec, '/create/pet/response/drafts').response);
+          expect(response).toMatch(hashed('CreatePetResponseDrafts', 'Get', 'Response'));
+          expect(fieldsOf(spec, response)).toEqual(['draftId']);
+          expect(fieldsOf(spec, 'CreatePetResponseDraftsGetResponse')).toEqual(['id']);
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('leaves a prefix that does not extend the stem plain', async () => {
+          const spec = await parse(
+            'extends-not',
+            document(openapi, { '/pets': { post: createPetNesting }, '/drafts': { get: draftsGet('create_pet') } }),
+          );
+          expect(nameOf(operationAt(spec, '/drafts').response)).toBe('DraftsGetResponse');
+          expect(warn).not.toHaveBeenCalled();
+        });
+      });
     });
   }
 });
