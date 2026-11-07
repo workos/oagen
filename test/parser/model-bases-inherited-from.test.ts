@@ -822,6 +822,36 @@ describe('#591', () => {
         expect(show(own)).toEqual([['tag', false, 'PetTag', undefined]]);
       });
 
+      it('a discriminated union of inline objects the base declares is inherited under the model’s own variant names (Greptile, after the merge)', async () => {
+        const schemas = {
+          Animal: {
+            type: 'object',
+            properties: {
+              meta: {
+                oneOf: [
+                  { type: 'object', properties: { kind: { type: 'string', enum: ['cat'] }, meow: { type: 'string' } } },
+                  { type: 'object', properties: { kind: { type: 'string', enum: ['dog'] }, bark: { type: 'string' } } },
+                ],
+              },
+            },
+          },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const spec = await parseJson(documentWith(openapi, schemas));
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toEqual([ANIMAL]);
+        const meta = pet.fields.find((f) => f.name === 'meta')!;
+        expect(meta.inheritedFrom).toEqual(ANIMAL);
+        expect(meta.type).toMatchObject({
+          kind: 'union',
+          variants: [model('PetMeta'), model('DogPetMeta')],
+          discriminator: { property: 'kind', mapping: { cat: 'PetMeta', dog: 'DogPetMeta' } },
+        });
+        expect(modelNamed(spec, 'Animal').fields[0]!.type).toMatchObject({
+          discriminator: { property: 'kind', mapping: { cat: 'AnimalMeta', dog: 'DogAnimalMeta' } },
+        });
+      });
+
       it('an inline enum the base declares is inherited under the model’s own enum name (Greptile, round six)', async () => {
         const schemas = {
           Kind: { type: 'string', enum: ['cat', 'dog'] },

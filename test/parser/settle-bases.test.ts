@@ -217,6 +217,60 @@ describe('#591 settleBases', () => {
     ).toEqual(dropped);
   });
 
+  it('reads a discriminated union’s mapping targets by their final shapes, a component target by name (Greptile, after the merge)', () => {
+    const literal = (value: string): TypeRef => ({ kind: 'literal', value });
+    const union = (prefix: string): TypeRef => ({
+      kind: 'union',
+      variants: [model(`${prefix}Meta`), model(`Dog${prefix}Meta`)],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { cat: `${prefix}Meta`, dog: `Dog${prefix}Meta` } },
+    });
+    const variants = (prefix: string, bark: Field = field('bark')): Model[] => [
+      { name: `${prefix}Meta`, fields: [field('kind', { type: literal('cat') }), field('meow')] },
+      { name: `Dog${prefix}Meta`, fields: [field('kind', { type: literal('dog') }), bark] },
+    ];
+    const over = (dogBark: Field) => {
+      const pet: Model = {
+        name: 'Pet',
+        fields: [field('meta', { type: union('Pet'), inheritedFrom: model('Animal') })],
+        bases: [model('Animal')],
+      };
+      settleBases([
+        { name: 'Animal', fields: [field('meta', { type: union('Animal') })] },
+        pet,
+        ...variants('Pet'),
+        ...variants('Animal', dogBark),
+      ]);
+      return outline(pet);
+    };
+    expect(over(field('bark'))).toEqual({ bases: [model('Animal')], inherited: [model('Animal')] });
+    expect(over(field('bark', { required: true }))).toEqual({ bases: undefined, inherited: [undefined] });
+    // A component among the targets is the same model on both sides, by name.
+    const cat: ModelRef = model('Cat');
+    const catAgain: ModelRef = model('Cat');
+    markComponentModelRef(cat);
+    markComponentModelRef(catAgain);
+    const withComponent = (prefix: string, ref: ModelRef): TypeRef => ({
+      kind: 'union',
+      variants: [ref, model(`Dog${prefix}Meta`)],
+      compositionKind: 'oneOf',
+      discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: `Dog${prefix}Meta` } },
+    });
+    const pet: Model = {
+      name: 'Pet',
+      fields: [field('meta', { type: withComponent('Pet', cat), inheritedFrom: model('Animal') })],
+      bases: [model('Animal')],
+    };
+    settleBases([
+      { name: 'Animal', fields: [field('meta', { type: withComponent('Animal', catAgain) })] },
+      pet,
+      { name: 'Cat', fields: [] },
+      ...variants('Pet'),
+      ...variants('Animal'),
+    ]);
+    expect(outline(pet)).toEqual({ bases: [model('Animal')], inherited: [model('Animal')] });
+  });
+
   it('reads a component reference as written, so one the model’s field names and the base’s does not is another type', () => {
     const shared: ModelRef = model('PetShared');
     const sharedAgain: ModelRef = model('PetShared');

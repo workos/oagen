@@ -9,7 +9,7 @@ import type {
   TypeRef,
   UnionType,
 } from '../ir/types.js';
-import { assertNever } from '../ir/types.js';
+import { assertNever, walkTypeRef } from '../ir/types.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import { stableStringify } from './inline-models.js';
 import { isComponentModelRef } from './schemas.js';
@@ -35,8 +35,9 @@ import { isComponentModelRef } from './schemas.js';
  *    either as the model's own declaration — which overrides the base's,
  *    as `overrides.json`'s `name` does — or as the same field: same keys,
  *    same values, the type read as its final shape, an inline model built
- *    under either model (`PetMeta`, `AnimalMeta`) as it ends, an inline
- *    enum by its values, a component by name (`sameField`) — so the model
+ *    under either model (`PetMeta`, `AnimalMeta`) as it ends, a union's
+ *    variants and mapping targets the same way, an inline enum by its
+ *    values, a component by name (`sameField`) — so the model
  *    is its own fields plus its bases', and an emitter writing `extends`
  *    or an intersection of the bases types every field as `fields` does.
  *    Two bases declaring one property differently keep at most the one
@@ -180,9 +181,10 @@ function sameType(a: TypeRef, b: TypeRef, byName: ReadonlyMap<string, Model>, se
     }
     case 'union': {
       const other = b as UnionType;
-      const { variants: _va, ...restA } = a;
-      const { variants: _vb, ...restB } = other;
+      const { variants: _va, discriminator: discriminatorA, ...restA } = a;
+      const { variants: _vb, discriminator: discriminatorB, ...restB } = other;
       if (stableStringify(restA) !== stableStringify(restB)) return false;
+      if (!sameDiscriminator(discriminatorA, discriminatorB, a.variants, other.variants, byName, seen)) return false;
       return sameTypes(a.variants, other.variants, byName, seen);
     }
     case 'enum': {
@@ -213,6 +215,56 @@ function sameTypes(
   return a.length === b.length && a.every((type, index) => sameType(type, b[index]!, byName, seen));
 }
 
+/** A `discriminator` as a union or a model carries it. */
+type Discriminator = NonNullable<UnionType['discriminator']>;
+
+/**
+ * Whether two discriminators dispatch alike: the same property and the
+ * same keys, each key's target the same final shape — an inline variant
+ * built under either model (`PetMeta` beside `AnimalMeta`, `DogPetMeta`
+ * beside `DogAnimalMeta`) as it ends (`sameModel`), a component by name
+ * (`componentNames`: the component references among the variants) — so a
+ * mapping that names its targets by the model they were built under
+ * compares as the variants do, not as strings (Greptile review, on the
+ * merge after the maintainer's round).
+ */
+function sameDiscriminator(
+  a: Discriminator | undefined,
+  b: Discriminator | undefined,
+  variantsA: readonly TypeRef[],
+  variantsB: readonly TypeRef[],
+  byName: ReadonlyMap<string, Model>,
+  seen: ComparedPairs,
+): boolean {
+  if (a === undefined || b === undefined) return a === b;
+  if (a.property !== b.property) return false;
+  const keys = Object.keys(a.mapping).sort();
+  if (stableStringify(keys) !== stableStringify(Object.keys(b.mapping).sort())) return false;
+  const components = new Set([...componentNames(variantsA), ...componentNames(variantsB)]);
+  return keys.every((key) => {
+    const nameA = a.mapping[key]!;
+    const nameB = b.mapping[key]!;
+    if (nameA === nameB) return true;
+    if (components.has(nameA) || components.has(nameB)) return false;
+    const modelA = byName.get(nameA);
+    const modelB = byName.get(nameB);
+    return modelA !== undefined && modelB !== undefined && sameModel(modelA, modelB, byName, seen);
+  });
+}
+
+/** The names of the component models referenced among `variants`, under any wrapper. */
+function componentNames(variants: readonly TypeRef[]): string[] {
+  const names: string[] = [];
+  for (const variant of variants) {
+    walkTypeRef(variant, {
+      model: (ref) => {
+        if (isComponentModelRef(ref)) names.push(ref.name);
+      },
+    });
+  }
+  return names;
+}
+
 /** Whether two sets of limits are one. */
 function sameLimits(a: unknown, b: unknown): boolean {
   return stableStringify(a ?? null) === stableStringify(b ?? null);
@@ -238,9 +290,24 @@ function sameModel(a: Model, b: Model, byName: ReadonlyMap<string, Model>, seen:
   if (pairs?.has(b)) return true;
   if (!pairs) seen.set(a, (pairs = new Set()));
   pairs.add(b);
-  const { name: _nameA, bases: _basesA, fields: fieldsA, variants: variantsA, ...restA } = a;
-  const { name: _nameB, bases: _basesB, fields: fieldsB, variants: variantsB, ...restB } = b;
+  const {
+    name: _nameA,
+    bases: _basesA,
+    fields: fieldsA,
+    variants: variantsA,
+    discriminator: discriminatorA,
+    ...restA
+  } = a;
+  const {
+    name: _nameB,
+    bases: _basesB,
+    fields: fieldsB,
+    variants: variantsB,
+    discriminator: discriminatorB,
+    ...restB
+  } = b;
   if (stableStringify(restA) !== stableStringify(restB)) return false;
+  if (!sameDiscriminator(discriminatorA, discriminatorB, variantsA ?? [], variantsB ?? [], byName, seen)) return false;
   if (fieldsA.length !== fieldsB.length) return false;
   const byField = new Map(fieldsB.map((field) => [field.name, field]));
   for (const field of fieldsA) {
