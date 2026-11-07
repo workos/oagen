@@ -446,3 +446,34 @@ describe('snippets/shared: collectWrapperArgs', () => {
     expect(() => collectWrapperArgs(wrapper, ctx, examples)).toThrow(/exposes unknown field "email"/);
   });
 });
+
+describe('snippets/shared: collectSnippetArgs with a nullable request body (#615)', () => {
+  it('expands the required fields of a body typed `nullable<model>`, as a `$ref` to a component that admits null is', () => {
+    const op = makeOp({
+      httpMethod: 'post',
+      requestBody: { kind: 'nullable', inner: { kind: 'model', name: 'Req' } },
+    });
+    const service: Service = { name: 'X', operations: [op] };
+    const spec = makeSpec(
+      [service],
+      [
+        {
+          name: 'Req',
+          fields: [
+            { name: 'name', type: { kind: 'primitive', type: 'string' }, required: true },
+            { name: 'note', type: { kind: 'primitive', type: 'string' }, required: false },
+          ],
+        },
+      ],
+    );
+    const ctx: EmitterContext = {
+      namespace: 'workos',
+      namespacePascal: 'WorkOS',
+      spec,
+      resolvedOperations: [makeResolved(op, service)],
+    };
+    const { args } = collectSnippetArgs(ctx.resolvedOperations![0]!, ctx, createExampleBuilder(spec));
+    expect(args.map((a) => [a.source, a.wireName, a.field?.name])).toEqual([['body', 'name', 'name']]);
+    expect(typeof args[0]?.value).toBe('string');
+  });
+});
