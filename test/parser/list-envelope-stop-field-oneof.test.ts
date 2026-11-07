@@ -347,6 +347,41 @@ describe('#622', () => {
         }
       },
     );
+
+    it.each(openapis)(
+      "leaves what is written beside a $ref member's reference unread, as the model and the walk do (PR #643 review; OAS %s)",
+      async (openapi) => {
+        // The model and the companion walk read a `$ref` member as its
+        // component and nothing beside the reference, so a `data` every
+        // sibling variant declares, or one sibling `properties` declare,
+        // marks no envelope: the body is the model the sibling-less
+        // document builds. Read beside the reference, it marked an envelope
+        // the walk had no `data` in, and the response was `string[]`.
+        const schemas = { Base: object({ id: string }) };
+        const ints = { type: 'array', items: integer };
+        const base = { $ref: '#/components/schemas/Base' };
+        const plain = await parseQuiet(
+          listPets({ allOf: [object({ has_more: boolean }), base] }, openapi, {}, schemas),
+        );
+        expect(shown(plain)).toMatchObject({
+          dataPath: undefined,
+          models: ['Pet { name? }', 'Base { id? }', 'ListPetsResponse { has_more?, id? }'],
+          response: 'ListPetsResponse',
+        });
+        const siblings: Record<string, unknown> = {
+          oneOf: { ...base, oneOf: [object({ data: ints }), object({ data: ints })] },
+          anyOf: { ...base, anyOf: [object({ data: ints }), object({ data: ints })] },
+          properties: { ...base, properties: { data: ints } },
+        };
+        for (const [label, member] of Object.entries(siblings)) {
+          const ir = await parseQuiet(
+            listPets({ allOf: [object({ has_more: boolean }), member] }, openapi, {}, schemas),
+          );
+          expect(shown(ir), label).toEqual(shown(plain));
+          expect(onlyOperation(ir).response, label).toEqual(onlyOperation(plain).response);
+        }
+      },
+    );
   });
 
   describe('the rule: a stop field counts when every variant declares it with one shape', () => {
