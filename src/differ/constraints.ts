@@ -77,22 +77,33 @@ const NUMERIC_BOUNDS: ReadonlySet<keyof Constraints> = new Set([
   'exclusiveMaximum',
 ]);
 
+/**
+ * The two keywords that only bound what `contains` matches, which the IR
+ * does not carry (an emitter has nothing to type from it), so the differ
+ * cannot tell whether they apply: without `contains` they constrain
+ * nothing, and the parser keeps them either way. A change to one is
+ * reported in `details` but never tightened or loosened (Greptile, #659
+ * review round 4); an IR that carries `contains` could judge them as
+ * `minItems` / `maxItems` are.
+ */
+const CONTAINS_BOUNDS: ReadonlySet<keyof Constraints> = new Set(['minContains', 'maxContains']);
+
 /** Keywords that bound a value from above on their own: lowered is tighter, raised looser. */
-const UPPER_BOUNDS: ReadonlySet<keyof Constraints> = new Set(['maxLength', 'maxItems', 'maxContains', 'maxProperties']);
+const UPPER_BOUNDS: ReadonlySet<keyof Constraints> = new Set(['maxLength', 'maxItems', 'maxProperties']);
 
 /**
  * Keywords that bound a value from below on their own, each with the value
  * its absence means (JSON Schema's default: a string, an array or an
- * object may be empty, and `contains` must match once), read in its place
- * on either side: raised is tighter and lowered looser, so one added at its
- * default — `minLength: 0`, which the parser keeps as written — rejects
- * nothing (Greptile, #659 review round 2) and `minContains: 0` removed
- * requires one match again (round 3).
+ * object may be empty), read in its place on either side: raised is
+ * tighter and lowered looser, so one added at its default — `minLength:
+ * 0`, which the parser keeps as written — rejects nothing (Greptile, #659
+ * review round 2) and one removed from below its default would require
+ * more again (round 3; only `minContains` has a default above `0`, and it
+ * is `CONTAINS_BOUNDS`).
  */
 const LOWER_BOUNDS: ReadonlyMap<keyof Constraints, number> = new Map([
   ['minLength', 0],
   ['minItems', 0],
-  ['minContains', 1],
   ['minProperties', 0],
 ]);
 
@@ -238,14 +249,17 @@ export function constraintsTightened(before: Constraints | undefined, after: Con
 
 /**
  * Whether a keyword's move from `oldValue` to `newValue` rejects a value the
- * old declaration admitted. A lower bound (`minLength`, `minItems`,
- * `minProperties`, `minContains`; `LOWER_BOUNDS`) is read on each side as
- * the value its absence means when it is absent — JSON Schema's default,
- * `0`, and `1` for `minContains` — and is tightened when the new reading
- * is above the old: raised, added above its default, or removed from
- * below it (`minContains: 0` removed requires one match again; Greptile,
- * #659 review round 3), while one added at or removed from its default
- * (`minLength: 0`) is reported but rejects nothing (round 2).
+ * old declaration admitted. `minContains` and `maxContains` never do, as
+ * far as the IR can tell (`CONTAINS_BOUNDS`): they bound what `contains`
+ * matches, which the IR does not carry, and constrain nothing without it,
+ * so a change to them is reported but never tightened (Greptile, #659
+ * review round 4). A lower bound (`minLength`, `minItems`,
+ * `minProperties`; `LOWER_BOUNDS`) is read on each side as the value its
+ * absence means when it is absent — JSON Schema's default, `0` — and is
+ * tightened when the new reading is above the old: raised, added above its
+ * default, or removed from below it (round 3), while one added at or
+ * removed from its default (`minLength: 0`) is reported but rejects
+ * nothing (round 2).
  * `dependentRequired` is read as an empty map when absent and is tightened
  * when a property requires a name it did not — one newly listed with
  * names, or the keyword added with any — even if another loses one, so
@@ -260,6 +274,7 @@ export function constraintsTightened(before: Constraints | undefined, after: Con
  * `constraintsTightened`.
  */
 export function keywordTightened(keyword: keyof Constraints, oldValue: unknown, newValue: unknown): boolean {
+  if (CONTAINS_BOUNDS.has(keyword)) return false;
   if (NUMERIC_BOUNDS.has(keyword)) {
     return constraintsTightened({ [keyword]: oldValue } as Constraints, { [keyword]: newValue } as Constraints);
   }
