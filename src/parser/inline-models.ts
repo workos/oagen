@@ -25,6 +25,7 @@ import {
   wrapperDiscriminatorOf,
   constraintsEntry,
   deprecatedEntry,
+  combineConstraints,
   extractConstraints,
   isComponentModelRef,
   markComponentModelRef,
@@ -3806,28 +3807,36 @@ export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   ...LIFTED_LIMIT_KEYWORDS,
 ];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+const LIFTED_LIMIT_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_LIMIT_KEYWORDS);
 
 /**
  * The lifted keywords (`LIFTED_DECLARATION_KEYWORDS`) and `x-*` keys a
  * field reads off `levels`, nearest first, as `buildFieldFromSchema` reads
  * a declaration's levels — its schema and the `allOf` members that only
  * annotate it, then what a `$ref` reaches — folded into one declaration:
- * `readOnly`, `writeOnly` and `deprecated` are set when any level says so,
- * every other keyword and key as the nearest level that declares it
- * writes it. So declarations read through different wrappers can be
- * compared by `agreedDeclarationKeys` and `agreedExtensions` as written
- * ones are: the request-body fold reads each variant's discriminator
- * declaration this way (`pinnedDeclarationLayers`) and carries onto the
- * discriminator it rebuilds the settings every variant agrees on (#607
- * review: only `description` was carried, so two variants both writing
- * `kind: { allOf: [{ const }], readOnly: true }` folded to a `kind` that
- * was not read-only, where unfolded each variant's own field was).
+ * `readOnly`, `writeOnly` and `deprecated` are set when any level says so;
+ * the limits conjoin across the levels, the stricter bound winning and the
+ * nearer level's `pattern` or `multipleOf` standing, as `schemaConstraints`
+ * reads a field's (`combineConstraints` over each level's
+ * `extractConstraints`, from the farthest level outward; #607 review: the
+ * nearest level's limit was taken as written, so `kind: { maxLength: 20,
+ * allOf: [{ const: … }, { maxLength: 5 }] }` on every variant folded to
+ * `maxLength: 20`, where each variant's own field has `5`); every other
+ * keyword and key is as the nearest level that declares it writes it. So
+ * declarations read through different wrappers can be compared by
+ * `agreedDeclarationKeys` and `agreedExtensions` as written ones are: the
+ * request-body fold reads each variant's discriminator declaration this
+ * way (`pinnedDeclarationLayers`) and carries onto the discriminator it
+ * rebuilds the settings every variant agrees on (#607 review: only
+ * `description` was carried, so two variants both writing `kind: { allOf:
+ * [{ const }], readOnly: true }` folded to a `kind` that was not read-only,
+ * where unfolded each variant's own field was).
  */
 export function levelSettings(levels: readonly SchemaObject[]): SchemaObject {
   const settings: Record<string, unknown> = {};
   for (const level of levels) {
     for (const [key, value] of Object.entries(level)) {
-      if (value === undefined) continue;
+      if (value === undefined || LIFTED_LIMIT_KEYWORD_SET.has(key)) continue;
       if (key === 'readOnly' || key === 'writeOnly' || key === 'deprecated') {
         if (value === true) settings[key] = true;
       } else if ((LIFTED_DECLARATION_KEYWORD_SET.has(key) || key.startsWith('x-')) && !Object.hasOwn(settings, key)) {
@@ -3835,7 +3844,11 @@ export function levelSettings(levels: readonly SchemaObject[]): SchemaObject {
       }
     }
   }
-  return settings as SchemaObject;
+  const limits = levels.reduceRight<Constraints | undefined>(
+    (conjoined, level) => combineConstraints(conjoined, extractConstraints(level)),
+    undefined,
+  );
+  return { ...settings, ...limits } as SchemaObject;
 }
 
 /**
