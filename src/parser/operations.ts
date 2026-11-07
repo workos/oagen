@@ -6794,7 +6794,11 @@ function resolveComponentResponseModelNames(
  * `extractResponses` chooses it by (`primaryResponseEntry`), a `$ref` among
  * the entries resolved to read it, and the request body by the rule
  * `extractRequestBody` picks its content by (`selectRequestBodyContent`), a
- * `$ref` into `components/requestBodies` resolved to read it. A 2xx or a
+ * `$ref` into `components/requestBodies` resolved to read it, and typed
+ * exactly as the operation will type it (`typePickedRequestBody`): an array
+ * body's items are `<Op>Request` itself and nest `<Op>RequestFooPostRequest`,
+ * which a response reading reserved as `<Op>RequestItem…` and so missed
+ * (Greptile, #655). A 2xx or a
  * body schema written as a `$ref` mints under its component's name or not
  * at all, and an operation that names its models from its path steps past
  * the components itself (`resolvePathModelBaseNames`), so neither reserves
@@ -6828,11 +6832,15 @@ function operationBodyModelNames(
         } catch {
           requestBody = undefined;
         }
-        const requestSchema = selectRequestBodyContent(requestBody)?.schema;
-        if (requestSchema && !requestSchema.$ref) {
-          names.push(
-            ...bodyModelNames(requestSchema, operationIdModelName(operationId, 'Request'), componentSchemas, settle),
-          );
+        const selected = selectRequestBodyContent(requestBody);
+        if (selected) {
+          // Typed exactly as `extractRequestBody` will type it, under the id
+          // the models are named from: an array body's items are
+          // `<Op>Request` itself, where a response reading names them
+          // `<Op>RequestItem` and misses what they nest.
+          const requestModels: Model[] = [];
+          typePickedRequestBody(selected, { ...op, operationId }, '', requestModels, componentSchemas);
+          names.push(...requestModels.map((model) => model.name));
         }
         const entries = Object.entries(op.responses ?? {}).flatMap(([statusCode, response]) => {
           const responseKey = classifyResponseKey(statusCode);
