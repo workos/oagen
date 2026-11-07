@@ -1535,6 +1535,118 @@ describe('#599', () => {
     });
   });
 
+  describe('#659 review round 6 (Greptile, after the wave-seven base merge) — a literal admits one value', () => {
+    const literal = (value: string | number | boolean | null, constraints?: Constraints): TypeRef => ({
+      kind: 'literal',
+      value,
+      ...(constraints ? { constraints } : {}),
+    });
+    const site = (type: TypeRef) => ({ type });
+    const tightened = (before: TypeRef, after: TypeRef): boolean | undefined =>
+      constraintsShift(site(before), site(after))?.tightened;
+
+    it('tightens only when the new limits reject the literal the old admitted, reporting the change as written', () => {
+      // The review's document.
+      expect(constraintsShift(site(literal('abc', { maxLength: 5 })), site(literal('abc', { maxLength: 3 })))).toEqual({
+        oldConstraints: { maxLength: 5 },
+        newConstraints: { maxLength: 3 },
+        details: 'maxLength 5 → 3',
+        tightened: false,
+      });
+      expect(tightened(literal('abc', { maxLength: 5 }), literal('abc', { maxLength: 2 }))).toBe(true);
+      expect(tightened(literal('abc'), literal('abc', { minLength: 3 }))).toBe(false);
+      expect(tightened(literal('abc'), literal('abc', { minLength: 4 }))).toBe(true);
+      // Length in code points: two astral characters are two, not four.
+      expect(tightened(literal('😀😀'), literal('😀😀', { maxLength: 2 }))).toBe(false);
+      expect(tightened(literal('😀😀'), literal('😀😀', { maxLength: 1 }))).toBe(true);
+      // A limit the old document already failed: nothing was admitted, so nothing is rejected now.
+      expect(tightened(literal('abc', { maxLength: 2 }), literal('abc', { maxLength: 1 }))).toBe(false);
+      // A number literal against its bounds and an integer multiple.
+      expect(tightened(literal(10, { maximum: 20 }), literal(10, { maximum: 10 }))).toBe(false);
+      expect(tightened(literal(10, { maximum: 20 }), literal(10, { exclusiveMaximum: 10 }))).toBe(true);
+      expect(tightened(literal(10), literal(10, { minimum: 10, multipleOf: 5 }))).toBe(false);
+      expect(tightened(literal(10), literal(10, { multipleOf: 3 }))).toBe(true);
+      // A pattern, or a multiple the differ cannot evaluate exactly, is judged as on any string or number.
+      expect(tightened(literal('abc'), literal('abc', { pattern: '^a' }))).toBe(true);
+      expect(tightened(literal('abc', { pattern: '^a' }), literal('abc'))).toBe(false);
+      expect(tightened(literal(0.3), literal(0.3, { multipleOf: 0.1 }))).toBe(true);
+      expect(tightened(literal(0.3, { multipleOf: 0.1 }), literal(0.3))).toBe(false);
+      // A boolean literal: no keyword constrains it.
+      expect(tightened(literal(true), literal(true, { maxLength: 1 }))).toBe(false);
+      // Under a nullable wrapper too.
+      expect(
+        tightened({ kind: 'nullable', inner: literal('abc', { maxLength: 5 }) }, literal('abc', { maxLength: 3 })),
+      ).toBe(false);
+    });
+
+    it('judges an enum reference the IR carries the values of member by member', () => {
+      const kind = (constraints?: Constraints) => ({
+        type: { kind: 'enum', name: 'Kind', values: ['a', 'bb'] } as TypeRef,
+        ...(constraints ? { constraints } : {}),
+      });
+      expect(constraintsShift(kind({ maxLength: 5 }), kind({ maxLength: 2 }))).toMatchObject({ tightened: false });
+      expect(constraintsShift(kind({ maxLength: 5 }), kind({ maxLength: 1 }))).toMatchObject({ tightened: true });
+      expect(constraintsShift(kind(), kind({ minLength: 1 }))).toMatchObject({ tightened: false });
+      // Without the values, an enum reference is judged keyword by keyword.
+      const unknown = (constraints?: Constraints) => ({
+        type: { kind: 'enum', name: 'Kind' } as TypeRef,
+        ...(constraints ? { constraints } : {}),
+      });
+      expect(constraintsShift(unknown({ maxLength: 5 }), unknown({ maxLength: 2 }))).toMatchObject({ tightened: true });
+    });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`exits 1 for a limit a const or single-member enum still satisfies, 2 for one it fails, on a field and a parameter (OpenAPI ${openapi})`, async () => {
+        for (const [form, pin] of [
+          ['const', { const: 'abc' }],
+          ['enum', { enum: ['abc'] }],
+        ] as const) {
+          const doc = (maxLength: number) =>
+            petsDoc(
+              openapi,
+              { Pet: petWith({ kind: { type: 'string', ...pin, maxLength } }) },
+              {
+                getPet: { parameters: [{ name: 'kind', in: 'query', schema: { type: 'string', ...pin, maxLength } }] },
+              },
+            );
+          const oldSpec = await parse('old', doc(5));
+          expect(
+            oldSpec.models.find((m) => m.name === 'Pet')?.fields.find((f) => f.name === 'kind')?.type,
+            form,
+          ).toMatchObject({
+            kind: 'literal',
+            value: 'abc',
+          });
+          const report = diffSpecs(oldSpec, await parse('new', doc(3)));
+          expect(fieldChangesOf(report.changes, 'Pet'), form).toEqual([
+            {
+              kind: 'field-constraints-changed',
+              fieldName: 'kind',
+              classification: 'additive',
+              oldConstraints: { maxLength: 5 },
+              newConstraints: { maxLength: 3 },
+              details: 'maxLength 5 → 3',
+            },
+          ]);
+          expect(paramChangesOf(report.changes, 'getPet'), form).toMatchObject([
+            {
+              kind: 'param-constraints-changed',
+              paramName: 'kind',
+              classification: 'additive',
+              details: 'maxLength 5 → 3',
+            },
+          ]);
+          expect(report.summary, form).toMatchObject({ breaking: 0, additive: 2 });
+          expect(await exitCodeOf(doc(5), doc(3)), form).toBe(1);
+          expect(await exitCodeOf(doc(3), doc(5)), form).toBe(1);
+          // The limit rejects the literal: breaking.
+          expect(await exitCodeOf(doc(5), doc(2)), form).toBe(2);
+          expect(await exitCodeOf(doc(2), doc(5)), form).toBe(1);
+        }
+      });
+    }
+  });
+
   describe('#659 review round 5 (Greptile, after the wave-two base merge)', () => {
     const integer = (constraints?: Constraints): TypeRef => ({
       kind: 'primitive',
