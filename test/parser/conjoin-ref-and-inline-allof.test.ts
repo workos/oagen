@@ -705,6 +705,36 @@ describe('#571', () => {
           nullableResult,
           'LoopItem',
         ],
+        // A member that declares no type says nothing of `null` (Greptile,
+        // round 6: a description member made the conjunction reject it).
+        [
+          'a nullable $ref then nullable $refs beside a description',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refMeta), declaring({ allOf: [refListing, { ...refMeta }, { description: 'Details' }] })],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'nullable $refs beside a description then a nullable $ref',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring({ allOf: [refListing, { ...refMeta }, { description: 'Details' }] }), declaring(refMeta)],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'a nullable $ref then nullable $refs beside a limit',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refMeta), declaring({ allOf: [refListing, { minProperties: 1 }] })],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'a nullable $ref then a plain $ref beside a description',
+          { Meta: NullableMeta, Listing: inlineObject },
+          [declaring(refMeta), declaring({ allOf: [refListing, { description: 'Details' }] })],
+          plainResult,
+          'ListingItem',
+        ],
       ] as const) {
         const spec = await parseJson(pageDocument(openapi, members, schemas));
         expect(modelNamed(spec, 'PetPage')?.fields[0]?.type, label).toEqual(type);
