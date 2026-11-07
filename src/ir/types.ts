@@ -1391,13 +1391,19 @@ export interface Model {
    * (`settleBases`) settles both keys against the models as they end: no
    * model's chain of bases reaches itself — a base that does, in a cyclic
    * document or once a fold collapsed it onto a kept model of the same
-   * shape, is dropped — a base stays a base only while every field it
-   * ends with is on the model, and a field carries `inheritedFrom` only
-   * while the base's field is the one the model carries — every key, the
-   * type read as its final shape, an inline model built under either
-   * model as it ends and an inline enum by its values — so a fold that
-   * loosens a base, or a model nested under it, after the model took its
-   * fields leaves the field the model's own. A `$ref` member naming a named union — flattened into
+   * shape, is dropped — and a base stays a base only while every field
+   * it ends with is on the model either as the model's own declaration,
+   * which overrides the base's, or as the same field, the base's
+   * declaration and not another's (every key; the type as its final
+   * shape, an inline model built under either model as it ends and an
+   * inline enum by its values), so the model is its own fields plus its
+   * bases' and an emitter writing `extends` or an intersection types
+   * every field as `fields` does: two bases declaring one property
+   * differently (`Tagged.tag: string` beside `Kinded.tag: enum [cat,
+   * dog]`) keep at most the one whose declaration the model carries, the
+   * other's fields the model's own, and a fold that loosens a base, or a
+   * model nested under it, after the model took its fields drops that
+   * base. A field carries `inheritedFrom` only while its base stays. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher

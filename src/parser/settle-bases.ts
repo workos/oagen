@@ -31,18 +31,27 @@ import { isComponentModelRef } from './schemas.js';
  *    plays no part.
  * 2. A base named twice is one base, the first kept: a rename can send two
  *    bases to one name (`Bar` beside a `BarJson` folded onto it).
- * 3. A base is a base only while every field it ends with is on the model,
- *    and a field carries `inheritedFrom` only while the base's field is the
- *    one the model carries: same keys, same values, the type read as its
- *    final shape — an inline model built under either model (`PetMeta`,
- *    `AnimalMeta`) as it ends, an inline enum by its values, a component
- *    by name (`sameField`). A fold that loosens a base after the
- *    model took its fields — `AnimalJson` declaring `name` optional beside
- *    `extra`, folded onto an `Animal` requiring `name`, under `Pet: { allOf:
- *    [{ $ref: Animal }] }` — leaves `Pet.name` required and `Pet` without
- *    `extra`, so `Animal` is no base of `Pet` as it ends and `name` is
- *    `Pet`'s own; an emitter writing `Pet extends Animal` would otherwise
- *    make `name` optional and add `extra`.
+ * 3. A base is a base only while every field it ends with is on the model
+ *    either as the model's own declaration — which overrides the base's,
+ *    as `overrides.json`'s `name` does — or as the same field: same keys,
+ *    same values, the type read as its final shape, an inline model built
+ *    under either model (`PetMeta`, `AnimalMeta`) as it ends, an inline
+ *    enum by its values, a component by name (`sameField`) — so the model
+ *    is its own fields plus its bases', and an emitter writing `extends`
+ *    or an intersection of the bases types every field as `fields` does.
+ *    Two bases declaring one property differently keep at most the one
+ *    whose declaration the model carries: `Pet: { allOf: [{ $ref: Tagged
+ *    }, { $ref: Kinded }] }` with `Tagged.tag: string` and `Kinded.tag:
+ *    enum [cat, dog]` ends `Pet { tag?: string, kind? }` on `Tagged`
+ *    alone, `kind` its own (#591 review: `Tagged & Kinded` types `tag` as
+ *    the enum, and `interface Pet extends Tagged, Kinded {}` does not
+ *    compile); the other way round, on `Kinded` alone with `tag: PetTag`.
+ *    A fold that loosens a base after the model took its fields —
+ *    `AnimalJson` declaring `name` optional beside `extra`, folded onto an
+ *    `Animal` requiring `name`, under `Pet: { allOf: [{ $ref: Animal }] }`
+ *    — leaves `Pet.name` required, so `Animal` is no base of `Pet` as it
+ *    ends and `name` is `Pet`'s own. A field carries `inheritedFrom` only
+ *    while its base stays.
  *
  * A base no model carries (a dangling reference) is left for
  * `validateModelRefs` to report.
@@ -53,21 +62,30 @@ export function settleBases(models: readonly Model[]): void {
   for (const model of models) {
     if (!model.bases) continue;
     dedupeBases(model);
-    const entries = model.bases.slice();
-    for (const base of entries) {
+    // Whether each field is the model's own (no origin) or taken from a
+    // base, as the model stands before any base is dropped here, so the
+    // outcome does not depend on the order of the bases.
+    const origins = new Map(
+      model.fields.map((field) => [
+        field.name,
+        field.inheritedFrom?.kind === 'model' ? field.inheritedFrom.name : null,
+      ]),
+    );
+    const carried = (field: Field): boolean => {
+      const own = model.fields.find((candidate) => candidate.name === field.name);
+      if (!own) return false;
+      return origins.get(field.name) === null || sameField(own, field, byName, new Map());
+    };
+    const dropped: string[] = [];
+    for (const base of model.bases) {
       const target = base.kind === 'model' ? byName.get(base.name) : undefined;
-      if (!target) continue;
-      if (target.fields.some((field) => !model.fields.some((own) => own.name === field.name))) {
-        dropBase(model, target.name);
-        continue;
-      }
-      for (const field of model.fields) {
-        if (field.inheritedFrom?.kind !== 'model' || field.inheritedFrom.name !== target.name) continue;
-        const inherited = target.fields.find((own) => own.name === field.name);
-        if (!inherited || !sameField(field, inherited, byName, new Map())) {
-          delete field.inheritedFrom;
-        }
-      }
+      if (target && !target.fields.every(carried)) dropped.push(target.name);
+    }
+    for (const name of dropped) dropBase(model, name);
+    // A field inherited from no base that stays is the model's own.
+    const remaining = new Set(model.bases.flatMap((ref) => (ref.kind === 'model' ? [ref.name] : [])));
+    for (const field of model.fields) {
+      if (field.inheritedFrom?.kind === 'model' && !remaining.has(field.inheritedFrom.name)) delete field.inheritedFrom;
     }
     if (model.bases.length === 0) delete model.bases;
   }

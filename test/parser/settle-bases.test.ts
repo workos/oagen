@@ -4,10 +4,12 @@ import { markComponentModelRef } from '../../src/parser/schemas.js';
 import type { Field, Model, ModelRef, TypeRef } from '../../src/ir/types.js';
 
 /**
- * Issue #591 (Greptile review, rounds four and five): the parser's last
- * pass settles `Model.bases` and `Field.inheritedFrom` against the models
- * as they end — no chain of bases reaching its own model, each base once,
- * no base or inherited field a fold has since changed under the model.
+ * Issue #591 (Greptile review, rounds four to seven, and the maintainer's
+ * review): the parser's last pass settles `Model.bases` and
+ * `Field.inheritedFrom` against the models as they end — no chain of
+ * bases reaching its own model, each base once, a base kept only while
+ * every field it ends with is on the model as the model's own declaration
+ * or as the same field, so the model is its own fields plus its bases'.
  */
 
 const string: TypeRef = { kind: 'primitive', type: 'string' };
@@ -55,10 +57,11 @@ describe('#591 settleBases', () => {
     expect(outline(m)).toEqual({ bases: [model('Bar'), model('Baz')], inherited: [model('Bar')] });
   });
 
-  it('clears inheritedFrom when the base’s field differs by any key, and drops a base that ends with a field the model lacks', () => {
+  it('drops a base when a field it ends with is missing on the model or differs by any key, and keeps one the model carries', () => {
     const cases: Array<[string, Field, Field, boolean]> = [
       ['required', field('name', { required: true }), field('name'), false],
       ['nullable', field('name'), field('name', { type: { kind: 'nullable', inner: string } }), false],
+      ['format', field('name', { type: { kind: 'primitive', type: 'string', format: 'uuid' } }), field('name'), false],
       ['description', field('name'), field('name', { description: 'The name.' }), false],
       ['deprecated', field('name'), field('name', { deprecated: true }), false],
       ['constraints', field('name', { constraints: { maxLength: 3 } }), field('name'), false],
@@ -72,73 +75,54 @@ describe('#591 settleBases', () => {
     for (const [label, own, theirs, kept] of cases) {
       const pet: Model = {
         name: 'Pet',
-        fields: [{ ...own, inheritedFrom: model('Animal') }],
+        fields: [{ ...own, inheritedFrom: model('Animal') }, field('tail', { inheritedFrom: model('Animal') })],
         bases: [model('Animal')],
       };
-      settleBases([{ name: 'Animal', fields: [theirs] }, pet]);
-      expect(outline(pet), label).toEqual({
-        bases: [model('Animal')],
-        inherited: [kept ? model('Animal') : undefined],
-      });
+      settleBases([{ name: 'Animal', fields: [theirs, field('tail')] }, pet]);
+      expect(outline(pet), label).toEqual(
+        kept
+          ? { bases: [model('Animal')], inherited: [model('Animal'), model('Animal')] }
+          : { bases: undefined, inherited: [undefined, undefined] },
+      );
     }
-    const pet: Model = {
+    const missing: Model = {
       name: 'Pet',
       fields: [field('name', { inheritedFrom: model('Animal') })],
       bases: [model('Animal'), model('Owned')],
     };
-    settleBases([{ name: 'Animal', fields: [field('name'), field('extra')] }, { name: 'Owned', fields: [] }, pet]);
-    expect(outline(pet)).toEqual({ bases: [model('Owned')], inherited: [undefined] });
+    settleBases([{ name: 'Animal', fields: [field('name'), field('extra')] }, { name: 'Owned', fields: [] }, missing]);
+    expect(outline(missing)).toEqual({ bases: [model('Owned')], inherited: [undefined] });
   });
 
-  it('reads an inline model built under the inheriting model as the base’s, and a component reference as written', () => {
-    const petMeta: ModelRef = model('PetMeta');
-    const animalMeta: ModelRef = model('AnimalMeta');
-    const shared: ModelRef = model('PetShared');
-    const sharedAgain: ModelRef = model('PetShared');
-    markComponentModelRef(shared);
-    markComponentModelRef(sharedAgain);
-    const pet: Model = {
+  it('keeps a base whose field the model overrides with a declaration of its own, and drops one another base’s declaration outranked (review)', () => {
+    const kinded: TypeRef = { kind: 'enum', name: 'KindedTag', values: ['cat', 'dog'] };
+    // `overrides.json`: the model's own `name` overrides `Animal`'s.
+    const own: Model = {
       name: 'Pet',
-      fields: [
-        field('meta', { type: petMeta, inheritedFrom: model('Animal') }),
-        field('shared', { type: shared, inheritedFrom: model('Animal') }),
-        field('items', { type: { kind: 'array', items: petMeta }, inheritedFrom: model('Animal') }),
-      ],
+      fields: [field('name', { required: true, type: kinded }), field('species', { inheritedFrom: model('Animal') })],
       bases: [model('Animal')],
     };
-    const animal: Model = {
-      name: 'Animal',
-      fields: [
-        field('meta', { type: animalMeta }),
-        field('shared', { type: sharedAgain }),
-        field('items', { type: { kind: 'array', items: animalMeta } }),
-      ],
-    };
-    settleBases([
-      animal,
-      pet,
-      { name: 'PetMeta', fields: [] },
-      { name: 'AnimalMeta', fields: [] },
-      { name: 'PetShared', fields: [] },
-    ]);
-    expect(outline(pet)).toEqual({
-      bases: [model('Animal')],
-      inherited: [model('Animal'), model('Animal'), model('Animal')],
-    });
-    // A component reference is read as written, so one the model's field
-    // names and the base's does not keeps the field the model's own.
-    const own: ModelRef = model('PetShared');
-    markComponentModelRef(own);
-    const other: Model = {
-      name: 'Pet',
-      fields: [field('shared', { type: own, inheritedFrom: model('Animal') })],
-      bases: [model('Animal')],
-    };
-    settleBases([{ name: 'Animal', fields: [field('shared', { type: model('AnimalShared') })] }, other]);
-    expect(outline(other)).toEqual({ bases: [model('Animal')], inherited: [undefined] });
+    settleBases([{ name: 'Animal', fields: [field('name'), field('species')] }, own]);
+    expect(outline(own)).toEqual({ bases: [model('Animal')], inherited: [undefined, model('Animal')] });
+    // The review's document: the model carries `Tagged`'s `tag`, so
+    // `Kinded` is no base and `kind` is the model's own — in either order.
+    const tagged: Model = { name: 'Tagged', fields: [field('tag')] };
+    const kindedModel: Model = { name: 'Kinded', fields: [field('tag', { type: kinded }), field('kind')] };
+    for (const order of [
+      [model('Tagged'), model('Kinded')],
+      [model('Kinded'), model('Tagged')],
+    ]) {
+      const pet: Model = {
+        name: 'Pet',
+        fields: [field('tag', { inheritedFrom: model('Tagged') }), field('kind', { inheritedFrom: model('Kinded') })],
+        bases: [...order],
+      };
+      settleBases([tagged, kindedModel, pet]);
+      expect(outline(pet)).toEqual({ bases: [model('Tagged')], inherited: [model('Tagged'), undefined] });
+    }
   });
 
-  it('reads an inline model under either model as it ends, so a nested change clears inheritedFrom and an unchanged one keeps it (Greptile, round six)', () => {
+  it('reads an inline model under either model as it ends, so a nested change drops the base and an unchanged one keeps it (Greptile, round six)', () => {
     const inherit = (metaFields: Field[]) => {
       const pet: Model = {
         name: 'Pet',
@@ -154,14 +138,16 @@ describe('#591 settleBases', () => {
         { name: 'AnimalMetaDeep', fields: [field('d')] },
       ];
       settleBases(models);
-      return pet.fields[0]!.inheritedFrom;
+      return outline(pet);
     };
+    const kept = { bases: [model('Animal')], inherited: [model('Animal')] };
+    const dropped = { bases: undefined, inherited: [undefined] };
     // The same final shape, two levels down, under either name.
     expect(inherit([field('name', { required: true }), field('deep', { type: model('AnimalMetaDeep') })])).toEqual(
-      model('Animal'),
+      kept,
     );
     // A fold loosened `AnimalMeta` alone (`AnimalMetaJson` onto it).
-    expect(inherit([field('name'), field('extra'), field('deep', { type: model('AnimalMetaDeep') })])).toBeUndefined();
+    expect(inherit([field('name'), field('extra'), field('deep', { type: model('AnimalMetaDeep') })])).toEqual(dropped);
     // A change two levels down.
     const deepPet: Model = {
       name: 'Pet',
@@ -176,7 +162,7 @@ describe('#591 settleBases', () => {
       { name: 'PetMetaDeep', fields: [field('d')] },
       { name: 'AnimalMetaDeep', fields: [field('d', { required: true })] },
     ]);
-    expect(deepPet.fields[0]!.inheritedFrom).toBeUndefined();
+    expect(outline(deepPet)).toEqual(dropped);
     // A model that reaches itself is read once on the way.
     const loopPet: Model = {
       name: 'Pet',
@@ -189,37 +175,73 @@ describe('#591 settleBases', () => {
       { name: 'PetNode', fields: [field('next', { type: { kind: 'nullable', inner: model('PetNode') } })] },
       { name: 'AnimalNode', fields: [field('next', { type: { kind: 'nullable', inner: model('AnimalNode') } })] },
     ]);
-    expect(loopPet.fields[0]!.inheritedFrom).toEqual(model('Animal'));
+    expect(outline(loopPet)).toEqual(kept);
   });
 
   it('reads an inline enum by its values, a component enum by name (Greptile, round six)', () => {
     const inline = (name: string, values: string[]): TypeRef => ({ kind: 'enum', name, values });
+    const over = (own: Field, theirs: Field) => {
+      const pet: Model = {
+        name: 'Pet',
+        fields: [{ ...own, inheritedFrom: model('Animal') }],
+        bases: [model('Animal')],
+      };
+      settleBases([{ name: 'Animal', fields: [theirs] }, pet]);
+      return outline(pet);
+    };
+    const kept = { bases: [model('Animal')], inherited: [model('Animal')] };
+    const dropped = { bases: undefined, inherited: [undefined] };
+    expect(
+      over(
+        field('status', { type: inline('PetStatus', ['a', 'b']) }),
+        field('status', { type: inline('AnimalStatus', ['a', 'b']) }),
+      ),
+    ).toEqual(kept);
+    expect(
+      over(
+        field('mood', { type: inline('PetMood', ['x']) }),
+        field('mood', { type: inline('AnimalMood', ['x', 'y']) }),
+      ),
+    ).toEqual(dropped);
+    expect(
+      over(
+        field('kind', { type: { kind: 'enum', name: 'Kind' } }),
+        field('kind', { type: { kind: 'enum', name: 'Kind' } }),
+      ),
+    ).toEqual(kept);
+    expect(
+      over(
+        field('other', { type: { kind: 'enum', name: 'PetOther' } }),
+        field('other', { type: { kind: 'enum', name: 'AnimalOther' } }),
+      ),
+    ).toEqual(dropped);
+  });
+
+  it('reads a component reference as written, so one the model’s field names and the base’s does not is another type', () => {
+    const shared: ModelRef = model('PetShared');
+    const sharedAgain: ModelRef = model('PetShared');
+    markComponentModelRef(shared);
+    markComponentModelRef(sharedAgain);
     const pet: Model = {
       name: 'Pet',
-      fields: [
-        field('status', { type: inline('PetStatus', ['a', 'b']), inheritedFrom: model('Animal') }),
-        field('mood', { type: inline('PetMood', ['x']), inheritedFrom: model('Animal') }),
-        field('kind', { type: { kind: 'enum', name: 'Kind' }, inheritedFrom: model('Animal') }),
-        field('other', { type: { kind: 'enum', name: 'PetOther' }, inheritedFrom: model('Animal') }),
-      ],
+      fields: [field('shared', { type: shared, inheritedFrom: model('Animal') })],
       bases: [model('Animal')],
     };
     settleBases([
-      {
-        name: 'Animal',
-        fields: [
-          field('status', { type: inline('AnimalStatus', ['a', 'b']) }),
-          field('mood', { type: inline('AnimalMood', ['x', 'y']) }),
-          field('kind', { type: { kind: 'enum', name: 'Kind' } }),
-          field('other', { type: { kind: 'enum', name: 'AnimalOther' } }),
-        ],
-      },
+      { name: 'Animal', fields: [field('shared', { type: sharedAgain })] },
       pet,
+      { name: 'PetShared', fields: [] },
     ]);
-    expect(outline(pet)).toEqual({
+    expect(outline(pet)).toEqual({ bases: [model('Animal')], inherited: [model('Animal')] });
+    const own: ModelRef = model('PetShared');
+    markComponentModelRef(own);
+    const other: Model = {
+      name: 'Pet',
+      fields: [field('shared', { type: own, inheritedFrom: model('Animal') })],
       bases: [model('Animal')],
-      inherited: [model('Animal'), undefined, model('Animal'), undefined],
-    });
+    };
+    settleBases([{ name: 'Animal', fields: [field('shared', { type: model('AnimalShared') })] }, other]);
+    expect(outline(other)).toEqual({ bases: undefined, inherited: [undefined] });
   });
 
   it('leaves a base no model carries for validateModelRefs', () => {

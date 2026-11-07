@@ -708,7 +708,7 @@ describe('#591', () => {
         ]);
       });
 
-      it('a fold that changes a model nested under the base leaves the field the model’s own, the base still a base (Greptile, round six)', async () => {
+      it('a fold that changes a model nested under the base takes the base off the model, its fields the model’s own (Greptile, round six; review)', async () => {
         const schemas = {
           Animal: {
             type: 'object',
@@ -726,7 +726,7 @@ describe('#591', () => {
         ]);
         expect(outline(modelNamed(spec, 'PetMeta'))).toEqual([['name', true, undefined]]);
         const pet = modelNamed(spec, 'Pet');
-        expect(pet.bases).toEqual([ANIMAL]);
+        expect(pet.bases).toBeUndefined();
         expect(pet.fields.map((f) => [f.name, refName(f.type) ?? f.type.kind, refName(f.inheritedFrom)])).toEqual([
           ['nickname', 'primitive', undefined],
           ['meta', 'PetMeta', undefined],
@@ -764,6 +764,62 @@ describe('#591', () => {
           ['name', 'primitive', 'Animal'],
         ]);
         expect(spec.models.map((m) => m.name).filter((name) => name.startsWith('PetMeta')).length).toBe(6);
+      });
+
+      it('two bases declaring one property differently keep only the one whose declaration the model carries (review)', async () => {
+        const tagged = { type: 'object', properties: { tag: { type: 'string' } } };
+        const kinded = {
+          type: 'object',
+          properties: { tag: { type: 'string', enum: ['cat', 'dog'] }, kind: { type: 'string' } },
+        };
+        const agreeing = { type: 'object', properties: { tag: { type: 'string' }, kind: { type: 'string' } } };
+        const paths = { '/pets/{petId}': getting('getPet', 'petId', 'Pet') };
+        const show = (m: Model) =>
+          m.fields.map((f) => [
+            f.name,
+            f.required,
+            f.type.kind === 'model' || f.type.kind === 'enum' ? f.type.name : f.type.kind,
+            refName(f.inheritedFrom),
+          ]);
+        const parsePet = async (schemas: Record<string, unknown>) =>
+          modelNamed(await parseJson(documentWith(openapi, schemas, paths)), 'Pet');
+        // The review's document: `Tagged`'s `tag` is the model's, so `Kinded` is no base.
+        const first = await parsePet({ Tagged: tagged, Kinded: kinded, Pet: { allOf: [R('Tagged'), R('Kinded')] } });
+        expect(first.bases).toEqual([model('Tagged')]);
+        expect(show(first)).toEqual([
+          ['tag', false, 'primitive', 'Tagged'],
+          ['kind', false, 'primitive', undefined],
+        ]);
+        // The other way round: `Kinded`'s enum is the model's, so `Tagged` is no base.
+        const second = await parsePet({ Tagged: tagged, Kinded: kinded, Pet: { allOf: [R('Kinded'), R('Tagged')] } });
+        expect(second.bases).toEqual([model('Kinded')]);
+        expect(show(second)).toEqual([
+          ['tag', false, 'PetTag', 'Kinded'],
+          ['kind', false, 'primitive', 'Kinded'],
+        ]);
+        // Two bases that agree on `tag` are both bases.
+        const agree = await parsePet({ Tagged: tagged, Kinded: agreeing, Pet: { allOf: [R('Tagged'), R('Kinded')] } });
+        expect(agree.bases).toEqual([model('Tagged'), model('Kinded')]);
+        expect(show(agree)).toEqual([
+          ['tag', false, 'primitive', 'Tagged'],
+          ['kind', false, 'primitive', 'Kinded'],
+        ]);
+        // A difference that only shows in `format` is a difference.
+        const uuid = { type: 'object', properties: { id: { type: 'string', format: 'uuid' } } };
+        const plain = { type: 'object', properties: { id: { type: 'string' }, kind: { type: 'string' } } };
+        const formats = await parsePet({ Tagged: uuid, Kinded: plain, Pet: { allOf: [R('Tagged'), R('Kinded')] } });
+        expect(formats.bases).toEqual([model('Tagged')]);
+        expect(show(formats)).toEqual([
+          ['id', false, 'primitive', 'Tagged'],
+          ['kind', false, 'primitive', undefined],
+        ]);
+        // The model's own declaration overrides a base's, which stays: `overrides.json`.
+        const own = await parsePet({
+          Tagged: tagged,
+          Pet: { allOf: [R('Tagged')], properties: { tag: { type: 'string', enum: ['cat', 'dog'] } } },
+        });
+        expect(own.bases).toEqual([model('Tagged')]);
+        expect(show(own)).toEqual([['tag', false, 'PetTag', undefined]]);
       });
 
       it('an inline enum the base declares is inherited under the model’s own enum name (Greptile, round six)', async () => {
