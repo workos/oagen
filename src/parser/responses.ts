@@ -398,11 +398,17 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * the variants are read only for an `allOf` the parser merges (PR #643
  * review: a lone union member was read as a merge here, detected as an
  * envelope, and extracted off a walk that saw no field — `string[]` with
- * no companions). A `$ref` member, and a nullable wrapper a member writes
- * (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the member by
- * the companion walk and the model), are not read here, as before: a body
- * whose array or companion sits in one is the wrapper an explicit
- * `dataPath` keeps (workos/oagen#308).
+ * no companions). A `$ref` member — and whatever is written beside its
+ * `$ref` (`{ $ref: Base, oneOf: [A, B] }`, `{ $ref: Base, properties }`),
+ * which the model (`mergeAllOfMembers`) and the companion walk
+ * (`collectObjectProperties`) ignore for the component the reference names
+ * (PR #643 review round 2: a union beside the `$ref` was read here, so a
+ * `data` every variant declared marked an envelope the walk had no `data`
+ * in, and the response was `string[]`) — and a nullable wrapper a member
+ * writes (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the
+ * member by the companion walk and the model) are not read here, as
+ * before: a body whose array or companion sits in one is the wrapper an
+ * explicit `dataPath` keeps (workos/oagen#308).
  */
 function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema), and
@@ -416,6 +422,9 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
     classifyInlineSchema(schema) === 'allOf' &&
     readInlineAllOf(schema.allOf, schema, componentSchemas) === 'merged';
   for (const sub of schema.allOf ?? []) {
+    // A `$ref` member is its component, whatever is written beside the
+    // reference, as the model and the walk read it.
+    if (sub.$ref) continue;
     if (sub.properties) propSources.push(sub.properties);
     if (!merges) continue;
     for (const variants of unionAxesOf(sub)) {
