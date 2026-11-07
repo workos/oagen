@@ -6156,10 +6156,17 @@ function discriminatedVariantSchemas(
     const skipAxis = axisVariants.get(subSchema);
     if (skipAxis) {
       // The axis: its branches are handled below, its own keywords bind all
-      // of them, and its own `properties` and `required` are base fields
-      // every variant carries (read without its variants).
+      // of them — the keywords of its own level, an `allOf` member that only
+      // annotates or limits it included (`annotatingAllOfMembers`; #613
+      // review: `{ allOf: [{ maxProperties: 3 }], oneOf: [cat, dog] }` as a
+      // member built `HolderCat` and `HolderDog` without the limit, where
+      // `{ maxProperties: 3, oneOf: [...] }` carried it onto both) — and its
+      // own `properties` and `required` are base fields every variant
+      // carries (read without its variants).
       readComponentAllOfMember(fallbackName, subSchema, schemas, reading, { skipAxis, wrapperDiscriminator });
-      baseConstraints = combineConstraints(baseConstraints, ownConstraints(subSchema));
+      for (const level of [subSchema, ...annotatingAllOfMembers(subSchema)]) {
+        baseConstraints = combineConstraints(baseConstraints, ownConstraints(level));
+      }
       continue;
     }
     // Any other member, a union that is not an axis included: read as the
