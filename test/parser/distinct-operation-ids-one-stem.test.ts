@@ -370,6 +370,112 @@ describe('#627', () => {
           expect(warn).not.toHaveBeenCalled();
         });
       });
+
+      // Michael (round 1): only the camelCase spelling of the stem could keep
+      // it, so a document that writes its ids in snake_case or PascalCase
+      // path-named both contestants, and adding the operation with the
+      // marker renamed the plain one's models (`ListNotesResponse` →
+      // `NotesGetResponse`, `oagen diff` exit `2`). Now the contestant the
+      // cleaning moved least keeps the stem, whatever case it is written in:
+      // an id a marker or backend word was stripped from never keeps it, one
+      // left as written outranks one only singularized, and a tie goes to
+      // the camelCase spelling when there is exactly one.
+      describe('the contestant the cleaning moved least keeps the stem, in any case (Michael, round 1)', () => {
+        /** A `GET` returning an object of `properties`, in the service `tag` names or the path's. */
+        const listing = (operationId: string, properties: Record<string, Schema>, tag?: string) => ({
+          operationId,
+          ...(tag ? { tags: [tag] } : {}),
+          responses: { '200': { description: 'ok', ...json(body(properties)) } },
+        });
+        /** Michael's `old.json`: `GET /notes` (`first`) returning `{ title }`. */
+        const notes = (first: string, tag?: string) => ({ '/notes': { get: listing(first, { title: str }, tag) } });
+        /** What `new.json` adds: `GET /notes/external` (`second`) returning `{ externalId }`, or `{ title }` too. */
+        const external = (second: string, sameShape = false, tag?: string) => ({
+          '/notes/external': { get: listing(second, sameShape ? { title: str } : { externalId: str }, tag) },
+        });
+        const responseAt = (spec: ApiSpec, path: string) =>
+          nameOf(spec.services.flatMap((s) => s.operations).find((op) => op.path === path)!.response);
+
+        it('keeps the plain id’s models when a marker id is added, additively, in snake_case, PascalCase, beside `Controller` and singularized', async () => {
+          for (const [first, second, response] of [
+            ['list_notes', 'list_notes_by_external_id', 'ListNotesResponse'],
+            ['ListNotes', 'ListNotesByExternalId', 'ListNotesResponse'],
+            ['CreatePet', 'CreatePetController', 'CreatePetResponse'],
+            ['Notes_List', 'Notes_ListByExternalId', 'NoteListResponse'],
+          ] as const) {
+            const oldFile = await write(`${first}-old`, document(openapi, notes(first)));
+            const old = await parseSpec(oldFile);
+            expect(responseAt(old, '/notes'), first).toBe(response);
+            for (const [order, paths] of [
+              ['plain-first', { ...notes(first), ...external(second) }],
+              ['marker-first', { ...external(second), ...notes(first) }],
+            ] as const) {
+              const label = `${first}-${order}`;
+              const newFile = await write(label, document(openapi, paths));
+              const next = await parseSpec(newFile);
+              expect(responseAt(next, '/notes'), label).toBe(response);
+              expect(responseAt(next, '/notes/external'), label).toBe('NotesExternalGetResponse');
+              expect(fieldsOf(next, response), label).toEqual(['title']);
+              expect(fieldsOf(next, 'NotesExternalGetResponse'), label).toEqual(['externalId']);
+              const diff = diffSpecs(old, next);
+              expect(
+                diff.changes.map((change) => change.kind),
+                label,
+              ).toEqual(['model-added', 'operation-added']);
+              expect(modelChanges(old, next), label).toEqual(['model-added NotesExternalGetResponse']);
+              expect(diff.summary.breaking, label).toBe(0);
+              expect(await exitCodeOf(oldFile, newFile), label).toBe(1);
+            }
+          }
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('is additive for bodies of one shape too', async () => {
+          const oldFile = await write('same-old', document(openapi, notes('list_notes')));
+          const newFile = await write(
+            'same-new',
+            document(openapi, { ...notes('list_notes'), ...external('list_notes_by_external_id', true) }),
+          );
+          const old = await parseSpec(oldFile);
+          const next = await parseSpec(newFile);
+          expect(responseAt(next, '/notes')).toBe('ListNotesResponse');
+          expect(responseAt(next, '/notes/external')).toBe('NotesExternalGetResponse');
+          expect(modelChanges(old, next)).toEqual(['model-added NotesExternalGetResponse']);
+          expect(await exitCodeOf(oldFile, newFile)).toBe(1);
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('ranks an id left as written over one only singularized, breaks a tie by the camelCase spelling, and path-names every id a marker was stripped from', async () => {
+          // `Note_List` PascalCases to `NoteList` as written; `Notes_List`
+          // was singularized to it, so `Note_List` keeps the stem.
+          const exact = await parse(
+            'exact',
+            document(openapi, { ...notes('Notes_List', 'Notes'), ...external('Note_List', false, 'External') }),
+          );
+          expect(responseAt(exact, '/notes')).toBe('NotesGetResponse');
+          expect(responseAt(exact, '/notes/external')).toBe('NoteListResponse');
+          // `notesList` and `Notes_List` were both singularized; the one
+          // written in camelCase keeps the stem.
+          const camel = await parse(
+            'camel',
+            document(openapi, { ...notes('Notes_List', 'Notes'), ...external('notesList', false, 'External') }),
+          );
+          expect(responseAt(camel, '/notes')).toBe('NotesGetResponse');
+          expect(responseAt(camel, '/notes/external')).toBe('NoteListResponse');
+          // Two ids a marker was stripped from never keep the stem, however
+          // they are written: both are path-named.
+          const markers = await parse(
+            'markers',
+            document(openapi, {
+              ...notes('listNotesByExternalId', 'Notes'),
+              ...external('list_notes_by_external_id', false, 'External'),
+            }),
+          );
+          expect(responseAt(markers, '/notes')).toBe('NotesGetResponse');
+          expect(responseAt(markers, '/notes/external')).toBe('NotesExternalGetResponse');
+          expect(warn).not.toHaveBeenCalled();
+        });
+      });
     });
   }
 });
