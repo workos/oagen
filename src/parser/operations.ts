@@ -4927,7 +4927,9 @@ function typePickedRequestBody(
  * text, default, examples, link, limits and `x-*` keys a field reads
  * (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off its levels as
  * `buildFieldFromSchema` reads a field's (`levelSettings` over
- * `pinnedDeclarationLayers`), so two variants writing `kind: { allOf: [{
+ * `pinnedDeclarationLayers`; the limits conjoined across the levels as
+ * `schemaConstraints` reads a field's, the stricter bound winning), so two
+ * variants writing `kind: { allOf: [{
  * const: … }], readOnly: true }` fold to a read-only `kind`, as each
  * variant's own field is (#607 review: `description` alone was carried,
  * and the fold of a body whose variants all wrote `readOnly: true` dropped

@@ -653,6 +653,56 @@ describe('#607', () => {
         expect(viaRef.description).toBeUndefined();
         expect(viaRef.extensions).toBeUndefined();
       }
+      // Limits conjoin across a declaration's levels as a field's do, the
+      // stricter bound winning, before the variants are compared (Greptile
+      // review of #656, round 5: the nearest level's limit was taken, so a
+      // wrapper's `maxLength: 20` over a member's `5` folded to `20`).
+      const limited = async (kinds: [Doc, Doc], schemas: Record<string, Doc>, label: string) =>
+        (await kindOf(kinds, schemas, label)).constraints;
+      const wrapped = (value: string, outer: number, inner: number): Doc => ({
+        maxLength: outer,
+        allOf: [c(value), { maxLength: inner }],
+      });
+      expect(await limited([wrapped('email', 20, 5), wrapped('sms', 20, 5)], {}, 'wrapper 20, member 5')).toEqual({
+        maxLength: 5,
+      });
+      expect(await limited([wrapped('email', 5, 20), wrapped('sms', 5, 20)], {}, 'wrapper 5, member 20')).toEqual({
+        maxLength: 5,
+      });
+      expect(
+        await limited(
+          [
+            { ...c('email'), minLength: 2, maxLength: 5 },
+            { ...c('sms'), minLength: 2, maxLength: 5 },
+          ],
+          {},
+          'as written',
+        ),
+      ).toEqual({ minLength: 2, maxLength: 5 });
+      // Through a `$ref`: a const component's limit conjoins with the one
+      // written beside the reference, as a primitive component's does (OAS
+      // 3.1); an enum component's stays on the `Enum` (OAS 3.0).
+      expect(
+        await limited(
+          [
+            { ...ref('EmailKind'), maxLength: 20 },
+            { ...ref('SmsKind'), maxLength: 20 },
+          ],
+          { EmailKind: { ...c('email'), maxLength: 5 }, SmsKind: { ...c('sms'), maxLength: 5 } },
+          'beside a $ref',
+        ),
+      ).toEqual({ maxLength: openapi === '3.1.0' ? 5 : 20 });
+      // A limit the variants disagree on is nobody's.
+      expect(
+        await limited(
+          [
+            { allOf: [c('email')], maxLength: 5 },
+            { allOf: [c('sms')], maxLength: 7 },
+          ],
+          {},
+          'disagreeing',
+        ),
+      ).toBeUndefined();
       // A setting one variant alone writes is nobody's.
       const disagreeing = await kindOf(
         [{ allOf: [c('email')], readOnly: true, description: 'Email.', 'x-note': 1 }, { allOf: [c('sms')] }],
