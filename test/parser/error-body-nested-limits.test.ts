@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import type { ApiSpec, Field, Model, TypeRef } from '../../src/ir/types.js';
+import type { ApiSpec, Constraints, Field, Model, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #611: `componentAccepts` compared a field's limits at the top of its
@@ -36,7 +36,11 @@ const nullable = (version: Version, schema: Doc): Doc =>
 const string: TypeRef = { kind: 'primitive', type: 'string' };
 const shortString: TypeRef = { kind: 'primitive', type: 'string', constraints: { maxLength: 2 } };
 const integer: TypeRef = { kind: 'primitive', type: 'integer' };
-const listOf = (items: TypeRef, own: Partial<TypeRef> = {}): TypeRef => ({ kind: 'array', items, ...own });
+const listOf = (items: TypeRef, constraints?: Constraints): TypeRef => ({
+  kind: 'array',
+  items,
+  ...(constraints && { constraints }),
+});
 const mapOf = (valueType: TypeRef): TypeRef => ({ kind: 'map', valueType });
 const unionOf = (...variants: TypeRef[]): TypeRef => ({ kind: 'union', variants, compositionKind: 'oneOf' });
 const nullOr = (inner: TypeRef): TypeRef => ({ kind: 'nullable', inner });
@@ -248,7 +252,7 @@ describe('#611', () => {
       );
       expect(itemsDiffer.warnings).toEqual([]);
       expect(tagsField(itemsDiffer.ir, 'ErrorBodyWithTagsList').constraints).toEqual({ minItems: 1 });
-      expect(tagsOf(itemsDiffer.ir, 'ErrorBodyWithTagsList')).toEqual(listOf(string, { constraints: { minItems: 1 } }));
+      expect(tagsOf(itemsDiffer.ir, 'ErrorBodyWithTagsList')).toEqual(listOf(string, { minItems: 1 }));
       // A nested array's items, a map's values and a `oneOf` variant the same way.
       const nested = await parse(
         doc(version, { ...getOp('pets', list(list(short))), ...getOp('notes', list(list(str))) }),
