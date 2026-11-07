@@ -395,6 +395,125 @@ describe('#608', () => {
       });
     });
 
+    describe("MichaelDeBoey's review", () => {
+      // A fork *before* the pointer: `{ oneOf: [A, B] }`, each variant with a
+      // `kind` of its own and `result` the same pointer, so every variant
+      // lands on the one array `Holder.result.items` is. No fork to read the
+      // document for: the settled walk agrees on `HolderResultItem`, as it
+      // does on `ResultItem` when both hold `$ref: Result`.
+      const variant = (kind: string, result: unknown) => object({ kind: { type: 'string', enum: [kind] }, result });
+      const ab = (result: unknown) => ({ A: variant('a', result), B: variant('b', result) });
+
+      it("settles a fork whose variants all hold one pointer onto the pointed schema's item model, minting no copy", async () => {
+        const ir = await parseJson(
+          spec(openapi, listOwners({ oneOf: [ref('A'), ref('B')] }, 'result.items'), { Holder, ...ab(pointer) }),
+        );
+        expectIterates(ir, 'result.items', 'HolderResult', 'items', 'HolderResultItem');
+        expect(models(ir)).toEqual([
+          'Holder { result: HolderResult }',
+          'A { kind: literal, result: HolderResult }',
+          'B { kind: literal, result: HolderResult }',
+          'HolderResult { items: HolderResultItem[] }',
+          'HolderResultItem { name: string }',
+        ]);
+        // The control: `result` a component, both variants `$ref: Result`.
+        const control = await parseJson(
+          spec(openapi, listOwners({ oneOf: [ref('A'), ref('B')] }, 'result.items'), {
+            Holder: object({ result: ref('Result') }),
+            Result: result,
+            ...ab(ref('Result')),
+          }),
+        );
+        expectIterates(control, 'result.items', 'Result', 'items', 'ResultItem');
+        expect(models(control).map((line) => line.split(' ')[0])).toEqual(['Holder', 'Result', 'A', 'B', 'ResultItem']);
+      });
+
+      it('one level down, through an anyOf (page.result.items), minting no ListOwnersPageResultItem', async () => {
+        const ir = await parseJson(
+          spec(openapi, listOwners(object({ page: { anyOf: [ref('A'), ref('B')] } }), 'page.result.items'), {
+            Holder,
+            ...ab(pointer),
+          }),
+        );
+        expectIterates(ir, 'page.result.items', 'HolderResult', 'items', 'HolderResultItem');
+        expect(models(ir)).toEqual([
+          'Holder { result: HolderResult }',
+          'A { kind: literal, result: HolderResult }',
+          'B { kind: literal, result: HolderResult }',
+          'HolderResult { items: HolderResultItem[] }',
+          'ListOwnersResponse { page: union }',
+          'HolderResultItem { name: string }',
+        ]);
+      });
+
+      it('and when two pointers resolve to one component, as the variants written inline do', async () => {
+        const twoPointers = await parseJson(
+          spec(openapi, listOwners({ oneOf: [ref('A'), ref('B')] }, 'result.items'), {
+            Holder: object({ result: ref('Result') }),
+            Other: object({ result: ref('Result') }),
+            Result: result,
+            A: variant('a', pointer),
+            B: variant('b', ref('Other/properties/result')),
+          }),
+        );
+        expectIterates(twoPointers, 'result.items', 'Result', 'items', 'ResultItem');
+        expect(models(twoPointers).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Other',
+          'Result',
+          'A',
+          'B',
+          'ResultItem',
+        ]);
+        const inline = await parseJson(
+          spec(openapi, listOwners({ oneOf: [variant('a', pointer), variant('b', pointer)] }, 'result.items'), {
+            Holder,
+          }),
+        );
+        expectIterates(inline, 'result.items', 'HolderResult', 'items', 'HolderResultItem');
+        expect(models(inline).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'HolderResult',
+          'ListOwnersResponse',
+          'BListOwnersResponse',
+          'HolderResultItem',
+        ]);
+      });
+
+      it('still reads the document where the variants reach distinct arrays — a pointer beside an inline array, or two pointers to two schemas (#556)', async () => {
+        const beside = await parseJson(
+          spec(openapi, listOwners({ oneOf: [ref('A'), ref('B')] }, 'result.items'), {
+            Holder,
+            A: variant('a', pointer),
+            B: variant('b', result),
+          }),
+        );
+        expect(onlyOperation(beside).pagination?.itemType).toEqual({ kind: 'model', name: 'ListOwnersResultItem' });
+        expect(models(beside).map((line) => line.split(' ')[0])).toContain('ListOwnersResultItem');
+        const two = await parseJson(
+          spec(openapi, listOwners({ oneOf: [ref('A'), ref('B')] }, 'result.items'), {
+            Holder,
+            Other: object({ result }),
+            A: variant('a', pointer),
+            B: variant('b', ref('Other/properties/result')),
+          }),
+        );
+        expect(onlyOperation(two).pagination?.itemType).toEqual({ kind: 'model', name: 'ListOwnersResultItem' });
+        expect(models(two).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Other',
+          'A',
+          'B',
+          'OtherResult',
+          'HolderResult',
+          'ListOwnersResultItem',
+          'HolderResultItem',
+          'OtherResultItem',
+        ]);
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
+
     it('without an override, the pointer response still yields the settled response itself (#539)', async () => {
       const ir = await parseJson(spec(openapi, listOwners(pointer, undefined), { Holder }));
       const op = onlyOperation(ir);
@@ -485,10 +604,10 @@ describe('#608', () => {
     it('tells a path that forks at a union from one that does not (dataPathForks)', () => {
       const idItem: SchemaObject = { type: 'object', properties: { id: { type: 'string' } } };
       const result: SchemaObject = { type: 'object', properties: { items: { type: 'array', items: idItem } } };
-      const components: Record<string, SchemaObject> = {
-        A: result,
-        B: { ...result, properties: { ...result.properties, total: { type: 'integer' } } },
-      };
+      // Two components of one shape, each with an array of its own, as a document declares them.
+      const other: SchemaObject = structuredClone(result);
+      other.properties = { ...other.properties, total: { type: 'integer' } };
+      const components: Record<string, SchemaObject> = { A: result, B: other };
       const body = (r: SchemaObject): SchemaObject => ({ type: 'object', properties: { result: r } });
       expect(dataPathForks(body(result), 'result.items', components)).toBe(false);
       expect(
@@ -508,6 +627,38 @@ describe('#608', () => {
       // A `null` variant set aside as a nullable wrapper is no fork; a path that lands on no array forks nowhere.
       expect(dataPathForks(body({ oneOf: [result, { type: 'null' }] }), 'result.items', components)).toBe(false);
       expect(dataPathForks(body(result), 'result.nope', components)).toBe(false);
+      // Variants landing on one array are no fork: one pointer held by both, or two pointers to one component
+      // (MichaelDeBoey, #651 review); two pointers to two schemas are.
+      const pointer = { $ref: '#/components/schemas/Holder/properties/result' };
+      const holders: Record<string, SchemaObject> = {
+        Holder: { type: 'object', properties: { result } },
+        Other: { type: 'object', properties: { result: { $ref: '#/components/schemas/Result' } } },
+        Owner: { type: 'object', properties: { result: { $ref: '#/components/schemas/Result' } } },
+        Result: result,
+        Apart: { type: 'object', properties: { result: structuredClone(result) } },
+      };
+      const variants = (...results: SchemaObject[]) => ({
+        oneOf: results.map((r) => ({ type: 'object', properties: { result: r } })),
+      });
+      expect(dataPathForks(variants(pointer, pointer), 'result.items', holders)).toBe(false);
+      expect(
+        dataPathForks(
+          variants(
+            { $ref: '#/components/schemas/Other/properties/result' },
+            { $ref: '#/components/schemas/Owner/properties/result' },
+          ),
+          'result.items',
+          holders,
+        ),
+      ).toBe(false);
+      expect(
+        dataPathForks(
+          variants(pointer, { $ref: '#/components/schemas/Apart/properties/result' }),
+          'result.items',
+          holders,
+        ),
+      ).toBe(true);
+      expect(dataPathForks(variants(pointer, structuredClone(result)), 'result.items', holders)).toBe(true);
     });
 
     it('keeps every other failure undefined, as before, so the document answers', () => {

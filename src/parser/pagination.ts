@@ -22,6 +22,7 @@ import {
   resolveComponentSchemaRef,
   resolveSchemaName,
   unionAxesOf,
+  unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
 } from './schemas.js';
@@ -394,17 +395,58 @@ function classifyEndField(
         ? 'totalCount'
         : undefined;
   if (!kind) return undefined;
-  return endFieldFits(kind, resolveBareSchema(schema, componentSchemas)) ? kind : undefined;
+  return endDeclarationFits(kind, schema, componentSchemas) ? kind : undefined;
 }
 
 /**
  * Whether a stop field's bare schema (`resolveBareSchema`) has the type its
  * kind is tested against: a `boolean` for `hasMore`, an `integer` or
- * `number` for `totalPages` and `totalCount`, under a type list too. The one
- * test for a field detection names and for one an override names.
+ * `number` for `totalPages` and `totalCount`, under a type list too. The
+ * test `endDeclarationFits` applies to a declaration, or to each variant
+ * of one.
  */
 function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObject): boolean {
   return kind === 'hasMore' ? hasType(schema, 'boolean') : isNumeric(schema);
+}
+
+/**
+ * Whether a stop field's declaration fits its kind: its bare schema
+ * (`resolveBareSchema`) has the kind's type (`endFieldFits`) — `total: {
+ * type: 'integer', anyOf: [{ maximum: 100 }, { minimum: 200 }] }` is the
+ * integer its own `type` says, the union only limiting it, as
+ * `classifyInlineSchema` reads such a schema (PR #643 review round 5:
+ * every union was walked, so the limits were tested without the `type`,
+ * the detected stop rule disappeared and an explicit `endOfIteration`
+ * naming the field was rejected) — or, where it declares no such type, it
+ * is a `oneOf`/`anyOf` that is what types it (`unionTypesSchema`: a
+ * variant carries a typing keyword) and each non-null variant's
+ * declaration fits in turn. The declaration the model types a property
+ * only variants declare as is such a union when the variants' declarations
+ * differ (`unionOfDeclarations`: `has_more: { type: 'boolean', const: true
+ * }` in one variant and `{ type: 'boolean', const: false }` in the other,
+ * or `{ $ref: Flag }` beside `{ type: 'boolean' }`), so it is tested as the
+ * override walk tests the field it lands on one level down, in every
+ * variant (`endOfIterationProblem`, `fieldsAtPath`) — PR #643 review
+ * (MichaelDeBoey): the union was tested as one schema, so such a `has_more`
+ * ended no iteration at the top level and an explicit `endOfIteration`
+ * naming it was rejected as "not a boolean field", while `meta.has_more`
+ * through the same union was accepted. A union met again below itself
+ * fits nothing. The one test for a field detection names and for one an
+ * override names.
+ */
+function endDeclarationFits(
+  kind: PaginationEndOfIteration['kind'],
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+  seen: Set<SchemaObject> = new Set(),
+): boolean {
+  const bare = resolveBareSchema(schema, componentSchemas);
+  if (endFieldFits(kind, bare)) return true;
+  const variants = bare.oneOf ?? bare.anyOf;
+  if (!variants || !unionTypesSchema(variants) || seen.has(bare)) return false;
+  seen.add(bare);
+  const nonNull = variants.filter((variant) => !isNullSchema(variant));
+  return nonNull.length > 0 && nonNull.every((variant) => endDeclarationFits(kind, variant, componentSchemas, seen));
 }
 
 /**
@@ -424,11 +466,11 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * non-null variant of a `oneOf`/`anyOf` that object is or has among its
  * `allOf` members, a variant that is itself a union through each of its
  * own in turn), so it lands on one field per variant; each must fit
- * `end.kind` by the test
- * detection applies to a field it names (`endFieldFits`), under
- * `resolveBareSchema` as a detected one is. With no `properties` — an
- * operation whose primary response declares no body — the path resolves to
- * nothing.
+ * `end.kind` by the test detection applies to a field it names
+ * (`endDeclarationFits`: under `resolveBareSchema` as a detected one is,
+ * and, for a declaration that is itself a union of the variants'
+ * declarations, in each variant). With no `properties` — an operation
+ * whose primary response declares no body — the path resolves to nothing.
  *
  * The text is the reason alone; the caller names the override's source and
  * the operation, and says what it does about it.
@@ -440,7 +482,7 @@ export function endOfIterationProblem(
 ): string | undefined {
   const fields = properties && fieldsAtPath({ properties }, end.path, componentSchemas);
   if (!fields) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
-  if (fields.every((field) => endFieldFits(end.kind, resolveBareSchema(field, componentSchemas)))) return undefined;
+  if (fields.every((field) => endDeclarationFits(end.kind, field, componentSchemas))) return undefined;
   const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
   return `endOfIteration path "${end.path}" is not ${expected} field, as kind "${end.kind}" requires`;
 }
@@ -1161,17 +1203,27 @@ export function resolveDataPathArray(
 }
 
 /**
- * Whether an explicit `dataPath` goes on through the variants of a union on
- * its way to the array — the body itself, or an object on the way, being a
- * `oneOf`/`anyOf` or having one among its `allOf` members (`fieldsNamed`) —
- * so that the path lands on one array per variant. Each variant's model
- * then types inline items under a name of its own, and only the document
- * can type them once, under the path-derived name (#556), so an override
- * whose IR walk crossed a pending pointer reference reads the document at
+ * Whether an explicit `dataPath` lands on more than one array: it went on
+ * through the variants of a union on its way — the body itself, or an
+ * object on the way, being a `oneOf`/`anyOf` or having one among its
+ * `allOf` members (`fieldsNamed`) — and the variants reach distinct arrays,
+ * their `items` distinct schemas in the document. Each variant's model then
+ * types inline items under a name of its own, and only the document can
+ * type them once, under the path-derived name (#556), so an override whose
+ * IR walk crossed a pending pointer reference reads the document at
  * extraction for such a path rather than deferring to the settle, where the
  * IR walk would find the variants' arrays disagreeing by name
- * (`resolveOverrideItemType`; Greptile, #608 review). A `null` variant set
- * aside as a nullable wrapper is no fork. `false` for a path that lands on
+ * (`resolveOverrideItemType`; Greptile, #608 review). Variants that reach
+ * one array are no fork — every variant holding the same pointer (`{ oneOf:
+ * [A, B] }`, both `result: { $ref: '#/components/schemas/Holder/properties/
+ * result' }`, with `dataPath: 'result.items'`), or pointers that resolve to
+ * one component, as `resolveBareSchema` follows them — since the one schema
+ * is built as one model where it stands and the settled walk agrees on its
+ * items (`HolderResultItem`), exactly as both holding `$ref: Result` agree
+ * on `ResultItem` (MichaelDeBoey, #651 review); the arrays are told apart
+ * by their `items` object rather than their own, which a nullable array
+ * component unwraps to afresh at each reading. A `null` variant set aside
+ * as a nullable wrapper is no fork either. `false` for a path that lands on
  * no array.
  */
 export function dataPathForks(
@@ -1183,7 +1235,7 @@ export function dataPathForks(
   return 'items' in walked && walked.forked;
 }
 
-/** The walk `resolveDataPathArray` makes, saying too whether the path went on through a union's variants (`forked`). */
+/** The walk `resolveDataPathArray` makes, saying too whether the path landed on more than one array (`forked`; see `dataPathForks`). */
 function walkDataPathArray(
   schema: SchemaObject,
   dataPath: string,
@@ -1235,7 +1287,7 @@ function walkDataPathArray(
         `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeItems))}`,
     };
   }
-  return { items: items[0], forked: union !== undefined };
+  return { items: items[0], forked: new Set(items).size > 1 };
 }
 
 /**

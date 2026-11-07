@@ -638,7 +638,7 @@ describe('fieldHints from config reach every command that parses a spec (#507)',
     const result = await run(['--config', config, 'resolve', '--spec', withClash, '--format', 'json']);
     expect(result.code).toBe(0);
     expect(result.stderr).toContain(
-      'would be named "ErrorBodyWithMessageAsDetail", which component schema "ErrorBodyWithMessageAsDetail" already holds — keeping model "GetPetError404" as it is',
+      'would be named "ErrorBodyWithMessageAsDetail", which component schema "ErrorBodyWithMessageAsDetail" { unrelated?: string } already holds — keeping model "GetPetError404" as it is',
     );
   });
 
