@@ -80,8 +80,20 @@ const NUMERIC_BOUNDS: ReadonlySet<keyof Constraints> = new Set([
 /** Keywords that bound a value from above on their own: lowered is tighter, raised looser. */
 const UPPER_BOUNDS: ReadonlySet<keyof Constraints> = new Set(['maxLength', 'maxItems', 'maxContains', 'maxProperties']);
 
-/** Keywords that bound a value from below on their own: raised is tighter, lowered looser. */
-const LOWER_BOUNDS: ReadonlySet<keyof Constraints> = new Set(['minLength', 'minItems', 'minContains', 'minProperties']);
+/**
+ * Keywords that bound a value from below on their own, each with the value
+ * it has when absent (JSON Schema's default: a string, an array or an
+ * object may be empty, and `contains` must match once): raised above it is
+ * tighter, lowered looser, and one added at its default — `minLength: 0`,
+ * which the parser keeps as written — rejects nothing (Greptile, #659
+ * review round 2).
+ */
+const LOWER_BOUNDS: ReadonlyMap<keyof Constraints, number> = new Map([
+  ['minLength', 0],
+  ['minItems', 0],
+  ['minContains', 1],
+  ['minProperties', 0],
+]);
 
 /**
  * One level of a site where the limits differ: the path to it (`''` for the
@@ -225,31 +237,37 @@ export function constraintsTightened(before: Constraints | undefined, after: Con
 
 /**
  * Whether a keyword's move from `oldValue` to `newValue` rejects a value the
- * old declaration admitted. A keyword added is tightened and one removed
- * loosened, whichever it is: every keyword admits fewer values than none. A
- * changed upper bound is tightened when lowered and a changed lower bound
- * when raised; a changed `pattern` or `multipleOf` is tightened, since the
- * new value admits other values than the old in general (a pattern
- * rewritten, a multiple the old one does not divide); `uniqueItems` is
- * tightened when it becomes `true`; `dependentRequired` when a property
- * gains a name or a property is listed that was not, even if another loses
- * one — something was tightened, so a value can be rejected. One of the
- * four numeric bounds is judged on its own here, as if its twin were absent
- * on both sides; a level is judged with the twins together by
- * `constraintsTightened`.
+ * old declaration admitted. A keyword removed is loosened, whichever it is,
+ * and one added is tightened unless it declares what its absence already
+ * meant: a lower bound added at its default (`minLength: 0`, `minItems:
+ * 0`, `minProperties: 0`, `minContains: 1`; `LOWER_BOUNDS`) or a
+ * `dependentRequired` whose properties require nothing (`{ a: [] }`)
+ * rejects nothing, so it is reported but not tightened, while an upper
+ * bound, a `pattern`, a `multipleOf` or `uniqueItems: true` added admits
+ * fewer values than none. A changed upper bound is tightened when lowered
+ * and a changed lower bound when raised; a changed `pattern` or
+ * `multipleOf` is tightened, since the new value admits other values than
+ * the old in general (a pattern rewritten, a multiple the old one does not
+ * divide); `uniqueItems` is tightened when it becomes `true`;
+ * `dependentRequired` when a property gains a name or a property is listed
+ * that was not, even if another loses one — something was tightened, so a
+ * value can be rejected. One of the four numeric bounds is judged on its
+ * own here, as if its twin were absent on both sides; a level is judged
+ * with the twins together by `constraintsTightened`.
  */
 export function keywordTightened(keyword: keyof Constraints, oldValue: unknown, newValue: unknown): boolean {
   if (NUMERIC_BOUNDS.has(keyword)) {
     return constraintsTightened({ [keyword]: oldValue } as Constraints, { [keyword]: newValue } as Constraints);
   }
   if (newValue === undefined) return false;
-  if (oldValue === undefined) return true;
-  if (UPPER_BOUNDS.has(keyword)) return (newValue as number) < (oldValue as number);
-  if (LOWER_BOUNDS.has(keyword)) return (newValue as number) > (oldValue as number);
-  if (keyword === 'uniqueItems') return newValue === true;
+  const floor = LOWER_BOUNDS.get(keyword);
+  if (floor !== undefined) return (newValue as number) > ((oldValue as number | undefined) ?? floor);
   if (keyword === 'dependentRequired') {
-    return dependentRequiredTightened(oldValue as DependentRequired, newValue as DependentRequired);
+    return dependentRequiredTightened((oldValue as DependentRequired | undefined) ?? {}, newValue as DependentRequired);
   }
+  if (oldValue === undefined) return keyword !== 'uniqueItems' || newValue === true;
+  if (UPPER_BOUNDS.has(keyword)) return (newValue as number) < (oldValue as number);
+  if (keyword === 'uniqueItems') return newValue === true;
   // `pattern` and `multipleOf`: changed is tightened.
   return true;
 }
