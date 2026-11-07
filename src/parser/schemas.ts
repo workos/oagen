@@ -880,7 +880,9 @@ export function unwrapNullableSchema(
  * at least one was and exactly one variant remains. The single definition of
  * a nullable union wrapper on the model side, shared by `unwrapNullableSchema`
  * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
- * under `allOf` (which `schemaToTypeRef` gives precedence), no `null`
+ * under an `allOf` that types the schema (which `schemaToTypeRef` gives
+ * precedence; one that only annotates or limits it is part of the wrapper,
+ * `nullableAxisBranch`), no `null`
  * variant, more than one non-null variant, or a union of consts read as an
  * enum (`inlineEnumSpelling`) — here, one string const beside `null` and an
  * `enum:` list that makes it one. The type builder decides that enum before
@@ -913,13 +915,25 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
  * (#398 review: the member was read through `nullableUnionBranch`, which
  * reads one keyword, so the `oneOf`'s wrapper collapsed and the `anyOf`
  * was never read: `NewPet { name, a }` as one member, `{ name, a, b, c }`
- * as two). `undefined` for an axis under an `allOf`, with no `null`
- * variant, with more than one non-null variant, or read as an enum — the
- * enum spelling decided on the axis alone (`axisAlone`) when the schema
- * writes both keywords.
+ * as two). `undefined` for an axis under an `allOf` that types the schema
+ * (`allOfTypesSchema`; one whose members only annotate or limit it is
+ * part of the wrapper, #613), with no `null` variant, with more than one
+ * non-null variant, or read as an enum — the enum spelling decided on the
+ * axis alone (`axisAlone`) when the schema writes both keywords.
  */
 export function nullableAxisBranch(schema: SchemaObject, variants: readonly SchemaObject[]): SchemaObject | undefined {
-  if (schema.allOf) return undefined;
+  // An `allOf` that types the schema takes precedence over the union beside
+  // it (`classifyInlineSchema`), which folds in as a member
+  // (`foldSiblingUnions`); one whose members only annotate or limit the
+  // schema is part of the wrapper, and the axis collapses as it does with
+  // no `allOf` at all (#613: any `allOf` kept `{ allOf: [{ description }],
+  // oneOf: [{ $ref: Pet }, { type: 'null' }] }` from collapsing, so as a
+  // member of a composed model `Pet` was flattened as a branch, and as a
+  // component wrapping a `$ref` to an array component it was a union of
+  // one, where the description beside the `oneOf` gave `Pet`
+  // always-applying and an alias of the array). The branch keeps the
+  // wrapper's own keys, as it did: the members' are not carried onto it.
+  if (schema.allOf && allOfTypesSchema(schema.allOf)) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
   if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
   return inlineEnumSpelling(axisAlone(schema, variants))?.spelling === 'const-union' ? undefined : nonNull[0];
@@ -2684,7 +2698,12 @@ const TYPING_KEYWORDS: readonly string[] = [
  * typing members none of which declares properties — two primitives: the
  * schema is then typed from its own keywords, and `extractConstraints`
  * still conjoins the members' limits onto the field and the model it
- * builds.
+ * builds. The one predicate for whether an `allOf` types a schema, at
+ * every site that asks: `classifyInlineSchema`, `foldSiblingUnions` for a
+ * union written beside an inline schema's `allOf`, and
+ * `composesComponentModel` for one beside a component's (#613), so a union
+ * beside an `allOf` that only annotates — `{ allOf: [{ description }],
+ * oneOf: [...] }` — is the union inline and as a component alike.
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
   if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
@@ -2829,10 +2848,17 @@ function foldAfresh(schema: SchemaObject): SchemaObject {
  * and a response body dropped the union while a request body built the
  * union from the variants alone, without the base. Read by
  * `foldSiblingProperties` before the schema's own `properties` are folded
- * in, and by `componentAllOfMembers` for a component schema, so the two
- * agree. A union of bare limits beside the `allOf`, or a union beside an
- * `allOf` of bare limits, is left as written: the one keyword that types
- * the schema is read as before. The copy stands for the schema it was
+ * in, and by `componentAllOfMembers` for a component schema — one
+ * predicate, `allOfTypesSchema`, deciding at both sites whether the
+ * `allOf` types the schema (`composesComponentModel`) — so the two agree.
+ * A union of bare limits beside the `allOf`, or a union beside an `allOf`
+ * whose members only annotate or limit the schema (`allOf: [{ description
+ * }]`, `allOf: [{ minProperties: 1 }]`, `allOf: []`), is left as written:
+ * the one keyword that types the schema is read as before, so `{ allOf:
+ * [{ description: 'A new pet.' }], oneOf: [{ $ref: Pet }, { $ref: Toy }]
+ * }` is the union of `Pet` and `Toy` inline and, as a component, the named
+ * union `New` (#613: the component read the union as a member beside any
+ * `allOf` and flattened it). The copy stands for the schema it was
  * spread from (`derivedCopy`), as every fold's does, so the fold of its
  * own properties that follows chains back to the document's declaration.
  */
@@ -2867,7 +2893,8 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
 
 /**
  * Whether a component schema's model is composed (`extractAllOfModel`,
- * reading `componentAllOfMembers`): it writes an `allOf`, or a typing
+ * reading `componentAllOfMembers`): it writes an `allOf` that types it
+ * (`allOfTypesSchema`) or one beside properties of its own, or a typing
  * `oneOf`/`anyOf` beside properties of its own (#429: `Pet: { properties:
  * { id }, oneOf: [{ ownerId }, { shelterId }] }` is the object and one of
  * the variants, so its model flattens or dispatches the union as an
@@ -2877,11 +2904,27 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * no properties beside it is a named union (`isNamedUnionSchema`), an
  * enum, an array or a primitive component, never composed here; an empty
  * `properties: {}` declares nothing (`hasFoldableProperties`), so it leaves
- * the union a named union as before.
+ * the union a named union as before. So does an `allOf` whose members only
+ * annotate or limit the schema — `New: { allOf: [{ description: 'A new
+ * pet.' }], oneOf: [{ $ref: Pet }, { $ref: Toy }] }`, `allOf: [{
+ * minProperties: 1 }]`, `allOf: []` — beside a typing union with no
+ * properties of its own: such an `allOf` does not type the schema, by the
+ * one predicate `foldSiblingUnions` reads an inline schema by
+ * (`allOfTypesSchema`), so the union is the keyword that types it, and the
+ * component is the named union `New` of `Pet` and `Toy` that `{
+ * description: 'A new pet.', oneOf: [...] }` is, the members part of its
+ * wrapper (#613: any `allOf` made the component composed, and the union
+ * was flattened into `New { name?, toy? }`, the variants' properties as
+ * optional fields with no variants, while the same schema inline was the
+ * union). An `allOf` that only annotates or limits with no typing union
+ * beside it still composes, as it did — a fieldless model, unless the
+ * component is read as a primitive (`isPrimitiveComponentSchema`).
  */
 function composesComponentModel(schema: SchemaObject): boolean {
   if (schema.$ref) return false;
-  return schema.allOf !== undefined || (hasFoldableProperties(schema) && besideUnionMembers(schema).length > 0);
+  const unionBeside = besideUnionMembers(schema).length > 0;
+  if (schema.allOf === undefined) return hasFoldableProperties(schema) && unionBeside;
+  return allOfTypesSchema(schema.allOf) || hasFoldableProperties(schema) || !unionBeside;
 }
 
 /**
@@ -2914,9 +2957,18 @@ function hasFoldableProperties(schema: SchemaObject): boolean {
  * `foldSiblingUnions` folds it for an inline schema (#398, #429): the
  * component is the base and one of the variants, dispatched or flattened
  * after every always-applying member, whether the union sits beside an
- * `allOf` (`NewPet: { allOf: [base], oneOf: [...] }`) or beside the
- * component's own `properties` alone (`Pet: { properties: { id }, oneOf:
- * [...] }`, read as a composed model by `composesComponentModel`). Shared
+ * `allOf` that types the schema (`NewPet: { allOf: [base], oneOf: [...]
+ * }`) or beside the component's own `properties` alone (`Pet: {
+ * properties: { id }, oneOf: [...] }`, read as a composed model by
+ * `composesComponentModel`) — and by the predicate `foldSiblingUnions`
+ * folds by, `allOfTypesSchema`: a union beside an `allOf` whose members
+ * only annotate or limit the schema, with no properties of its own, is
+ * no member here but the named union the component is
+ * (`isNamedUnionSchema`), so `New: { allOf: [{ description: 'A new pet.'
+ * }], oneOf: [{ $ref: Pet }, { $ref: Toy }] }` composes nothing and is the
+ * union of `Pet` and `Toy` inline and as the component alike (#613: the
+ * union was appended beside any `allOf`, and the component flattened to
+ * `New { name?, toy? }`). Shared
  * by `extractAllOfModel`, at every level of a `$ref` chain, and by
  * `extractDiscriminatedAllOfVariantModels`, whose dispatcher base carries
  * them into every variant. Empty for a component that composes nothing.
@@ -3706,15 +3758,25 @@ function extractModel(name: string, schema: SchemaObject, schemas?: Record<strin
   // fields, the way the same schema written inline keeps them on its union
   // TypeRef (`namedUnionEntry`). `fields` is untouched, so a consumer that
   // does not read `variants` sees the model it always did.
+  // The text, link, flag and extensions are the wrapper layer's: the
+  // component's own, with an annotating `allOf` member's where it declares
+  // none (`allOfWrapperLayer`), as a composed model's are
+  // (`extractAllOfModel`). The one `allOf` a component read here can carry
+  // is one whose members only annotate or limit it, beside a typing union
+  // (`composesComponentModel`; #613): `New: { allOf: [{ description: 'A new
+  // pet.' }], oneOf: [...] }` is described "A new pet." as `{ description:
+  // 'A new pet.', oneOf: [...] }` is, and the members' limits conjoin with
+  // the component's own (`extractConstraints`).
+  const layer = allOfWrapperLayer(schema);
   return {
     name,
-    description: schema.description,
-    ...externalDocsEntry(schema.externalDocs),
+    description: layer.description,
+    ...externalDocsEntry(layer.externalDocs),
     fields,
-    ...deprecatedEntry(schema),
+    ...deprecatedEntry(layer),
     ...namedUnionEntry(name, schema, schemas),
     ...constraintsEntry(schema),
-    ...schemaExtensionsEntry(schema),
+    ...schemaExtensionsEntry(layer),
   };
 }
 
@@ -3775,10 +3837,18 @@ interface NamedUnionPlan {
 
 /**
  * True when a component schema is a named union: a `oneOf`/`anyOf` with no
- * `allOf` and no `properties` of its own. A `oneOf` beside `properties` is
- * a composed model instead (`composesComponentModel`): the properties are
- * its base and the union is flattened or dispatched after them, as it is
- * beside an `allOf` (#429). A component that is only a nullable wrapper
+ * `allOf` that types the schema and no `properties` of its own. A `oneOf`
+ * beside `properties` is a composed model instead
+ * (`composesComponentModel`): the properties are its base and the union is
+ * flattened or dispatched after them, as it is beside an `allOf` that
+ * types the schema (#429). An `allOf` whose members only annotate or limit
+ * the schema (`allOfTypesSchema`: `allOf: [{ description }]`, `allOf: [{
+ * minProperties: 1 }]`, `allOf: []`) composes nothing, so a union beside
+ * it is a named union, the members part of its wrapper — `New: { allOf:
+ * [{ description: 'A new pet.' }], oneOf: [{ $ref: Pet }, { $ref: Toy }]
+ * }` is the union of `Pet` and `Toy` that `{ description: 'A new pet.',
+ * oneOf: [...] }` is, and that the same schema is inline (#613: it was a
+ * composed model, flattened). A component that is only a nullable wrapper
  * around one plain inline object — `oneOf: [{ type: object, … }, { type:
  * 'null' }]` — is not a named union either: its merged fields already are
  * the object (an inline wrapper collapses to `nullable<model>`, not to a
@@ -3788,10 +3858,12 @@ interface NamedUnionPlan {
  * would be lost.
  */
 function isNamedUnionSchema(schema: SchemaObject): boolean {
-  if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
+  if (composesComponentModel(schema) || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
-  // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`), not a union.
-  if (isConstUnionEnumSchema(schema)) return false;
+  // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`),
+  // not a union — beside an annotating `allOf` too, which the enum reading
+  // does not read through, so that component stays the fieldless model it was.
+  if (constUnionEnumMembers(schema) !== null) return false;
   const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullSchema(v));
   return !(nonNull.length === 1 && isPlainObjectSchema(nonNull[0]));
 }
@@ -5107,7 +5179,17 @@ function readComponentAllOfMember(
   const { ledger, required, seen } = reading;
   const resolved = followMemberRefs(member, schemas, seen);
   if (!resolved) return undefined;
-  if (resolved.allOf) {
+  // A member that writes an `allOf` composing it — one that types it, one
+  // beside properties of its own, or one with no typing union beside it —
+  // is read as a component is; a typing union beside an `allOf` whose
+  // members only annotate or limit it is the union, read below as a member
+  // writing the union alone is (#613: any `allOf` sent the member here,
+  // where `componentAllOfMembers` now composes nothing of it, so `{ allOf:
+  // [{ description }], oneOf: [...] }`, inline or a `$ref` to such a
+  // component, would have declared nothing). A member with no `allOf` is
+  // read below whatever else it writes, as it was: a dispatcher it carries
+  // beside its own properties is the model's (#429).
+  if (resolved.allOf !== undefined && composesComponentModel(resolved)) {
     readComponentAllOf(name, resolved, schemas, reading);
     return undefined;
   }
@@ -5541,9 +5623,12 @@ interface MemberUnion {
  * for it on the way (the carrier's own, else the wrapper's around it, as
  * the member reader hands a wrapper's down; #398 review round 6: a mapping
  * on the wrapper was forgotten, and the builder flattened what the reader
- * dispatched). None for a member that carries none, or
- * an `allOf` member (read as a component composed with `allOf`, never as
- * a variant axis). The one way the variant builder
+ * dispatched). None for a member that carries none, or a member whose
+ * `allOf` composes it (`composesComponentModel`: read as a component
+ * composed with `allOf`, never as a variant axis — a union beside an
+ * `allOf` that only annotates or limits the member is an axis, as the
+ * member reader reads it; #613).
+ * The one way the variant builder
  * (`extractDiscriminatedAllOfVariantModels`) finds a variant axis, so a
  * union the member reader detects as a dispatcher is the union whose
  * variant models are built, whichever wrapper it sits under
@@ -5563,7 +5648,11 @@ function memberUnions(
   wrapper?: DiscriminatorKeyword,
 ): MemberUnion[] {
   const carrier = followMemberRefs(member, schemas, seen);
-  if (!carrier || carrier.allOf) return [];
+  // A carrier whose `allOf` composes it is read as a component
+  // (`readComponentAllOfMember`, by the same predicate), never as a variant
+  // axis; a union beside an `allOf` that only annotates it is the axis it
+  // is written alone (#613).
+  if (!carrier || (carrier.allOf !== undefined && composesComponentModel(carrier))) return [];
   const axes = unionAxesOf(carrier);
   const branches = axes.map((variants) => nullableAxisBranch(carrier, variants));
   // The wrapper is recorded as read, as the member reader records it, so a
