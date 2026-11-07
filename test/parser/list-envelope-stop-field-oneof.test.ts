@@ -668,5 +668,48 @@ describe('#622', () => {
         expect(diffSpecs(oneIr, membersIr).changes).toEqual([]);
       },
     );
+
+    it.each(openapis)(
+      'tests the outer declaration first, walking a union only where it is what types the field (Greptile; OAS %s)',
+      async (openapi) => {
+        // `total: { type: 'integer', anyOf: [{ maximum: 100 }, { minimum:
+        // 200 }] }` is the integer its `type` says, the union only limiting
+        // it; walking every union tested the limits without the `type`,
+        // dropped the detected stop rule and rejected an explicit
+        // `endOfIteration` naming the field.
+        const limited = { type: 'integer', anyOf: [{ maximum: 100 }, { minimum: 200 }] };
+        const totalCount = { 'x-pagination': { endOfIteration: { kind: 'totalCount', path: 'total' } } };
+        const flat = object({ data: petArray, total: limited }, ['data']);
+        const detected = await parseQuiet(listPets(flat, openapi));
+        expect(onlyOperation(detected).pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+        const overridden = await parseQuiet(listPets(flat, openapi, totalCount));
+        expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(detected).pagination);
+        // As the variants' declarations too: their union carries no type of
+        // its own, so each is tested, and each is the integer its `type` says.
+        const split = { allOf: [dataMember], oneOf: [object({ total: limited }), object({ total: integer })] };
+        for (const extra of [{}, totalCount]) {
+          const ir = await parseQuiet(listPets(split, openapi, extra));
+          expect(onlyOperation(ir).pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+        }
+        // The boolean consts of finding 1 are still read through their union.
+        const consts = {
+          allOf: [dataMember],
+          oneOf: [
+            object({ has_more: { type: 'boolean', const: true } }),
+            object({ has_more: { type: 'boolean', const: false } }),
+          ],
+        };
+        expect(onlyOperation(await parseQuiet(listPets(consts, openapi))).pagination?.endOfIteration).toEqual(
+          stopsOn('has_more'),
+        );
+        // A union of bare limits beside another type leaves the field that type.
+        const text = object({ data: petArray, total: { type: 'string', anyOf: [{ maxLength: 3 }] } }, ['data']);
+        const { ir, warnings } = await parseWarning(listPets(text, openapi, totalCount));
+        expect(onlyOperation(ir).pagination?.endOfIteration).toBeUndefined();
+        expect(warnings).toEqual([
+          expect.stringContaining('endOfIteration path "total" is not an integer or number field'),
+        ]);
+      },
+    );
   });
 });

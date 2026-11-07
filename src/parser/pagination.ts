@@ -21,6 +21,7 @@ import {
   resolveComponentSchemaRef,
   resolveSchemaName,
   unionAxesOf,
+  unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
 } from './schemas.js';
@@ -409,8 +410,15 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
 
 /**
  * Whether a stop field's declaration fits its kind: its bare schema
- * (`resolveBareSchema`) has the kind's type (`endFieldFits`), or it is a
- * `oneOf`/`anyOf` of more than one non-null variant and each variant's
+ * (`resolveBareSchema`) has the kind's type (`endFieldFits`) — `total: {
+ * type: 'integer', anyOf: [{ maximum: 100 }, { minimum: 200 }] }` is the
+ * integer its own `type` says, the union only limiting it, as
+ * `classifyInlineSchema` reads such a schema (PR #643 review round 5:
+ * every union was walked, so the limits were tested without the `type`,
+ * the detected stop rule disappeared and an explicit `endOfIteration`
+ * naming the field was rejected) — or, where it declares no such type, it
+ * is a `oneOf`/`anyOf` that is what types it (`unionTypesSchema`: a
+ * variant carries a typing keyword) and each non-null variant's
  * declaration fits in turn. The declaration the model types a property
  * only variants declare as is such a union when the variants' declarations
  * differ (`unionOfDeclarations`: `has_more: { type: 'boolean', const: true
@@ -432,11 +440,12 @@ function endDeclarationFits(
   seen: Set<SchemaObject> = new Set(),
 ): boolean {
   const bare = resolveBareSchema(schema, componentSchemas);
-  const variants = (bare.oneOf ?? bare.anyOf)?.filter((variant) => !isNullSchema(variant));
-  if (!variants || variants.length === 0) return endFieldFits(kind, bare);
-  if (seen.has(bare)) return false;
+  if (endFieldFits(kind, bare)) return true;
+  const variants = bare.oneOf ?? bare.anyOf;
+  if (!variants || !unionTypesSchema(variants) || seen.has(bare)) return false;
   seen.add(bare);
-  return variants.every((variant) => endDeclarationFits(kind, variant, componentSchemas, seen));
+  const nonNull = variants.filter((variant) => !isNullSchema(variant));
+  return nonNull.length > 0 && nonNull.every((variant) => endDeclarationFits(kind, variant, componentSchemas, seen));
 }
 
 /**
