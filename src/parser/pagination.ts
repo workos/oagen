@@ -4,6 +4,7 @@ import type {
   TypeRef,
   Parameter,
   Model,
+  ModelRef,
   PaginationMeta,
   PaginationEndOfIteration,
   PaginationStrategy,
@@ -1516,11 +1517,12 @@ export function walkDataPathItemType(
   dataPath: string,
   models: readonly Model[],
 ): { itemType: TypeRef } | { pending: true } | undefined {
+  const reader = new ContainerReader(models);
   let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const containers = new Map<string, TypeRef>();
     for (const type of reached) {
-      for (const container of containersOf(type, models)) containers.set(typeRefKey(container), container);
+      for (const container of reader.containersOf(type)) containers.set(typeRefKey(container), container);
     }
     if ([...containers.values()].some(isPendingModelRef)) return { pending: true };
     const next = new Map<string, TypeRef>();
@@ -1532,7 +1534,7 @@ export function walkDataPathItemType(
     }
     reached = [...next.values()];
   }
-  const targets = reached.flatMap((type) => containersOf(type, models));
+  const targets = reached.flatMap((type) => reader.containersOf(type));
   if (targets.some(isPendingModelRef)) return { pending: true };
   const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
@@ -1631,17 +1633,18 @@ export function settleDeferredDataPathItemType(
 }
 
 /**
- * The types a `dataPath` segment is looked up in below `type`: the type
- * under every nullable wrapper — a site settled from a pointer to a schema
- * that admits null wears two, `nullable<nullable<HolderResult>>` for `oneOf:
- * [{ $ref: …/Holder/properties/result }, { type: null }]` to a nullable
- * `result` (#545; Greptile, #608 review) — or each variant of a
- * `oneOf`/`anyOf` union there, under its own wrappers, and, for a variant
- * that is itself a union, each of its variants in turn, however deep, as the
- * document walk reads a nested union's variants (`fieldsNamed`). Of a union
- * a type list produced (`type: ['object', 'string']`, one variant per type
- * and no `compositionKind`), the variants that are models: the document
- * walk reads such a schema's `properties` whatever else the list names
+ * One walk's reading of the types a `dataPath` segment is looked up in
+ * below a type (`containersOf`): the type under every nullable wrapper — a
+ * site settled from a pointer to a schema that admits null wears two,
+ * `nullable<nullable<HolderResult>>` for `oneOf: [{ $ref:
+ * …/Holder/properties/result }, { type: null }]` to a nullable `result`
+ * (#545; Greptile, #608 review) — or each variant of a `oneOf`/`anyOf`
+ * union there, under its own wrappers, and, for a variant that is itself a
+ * union, each of its variants in turn, however deep, as the document walk
+ * reads a nested union's variants (`fieldsNamed`). Of a union a type list
+ * produced (`type: ['object', 'string']`, one variant per type and no
+ * `compositionKind`), the variants that are models: the document walk
+ * reads such a schema's `properties` whatever else the list names
  * (`objectProperties`), and a pointer steps through it to the member that
  * carries the keyword (#539), so the IR walk reads the object member too
  * rather than failing on the string member and minting a copy of the
@@ -1652,22 +1655,69 @@ export function settleDeferredDataPathItemType(
  * document walk reads the component's `oneOf`/`anyOf` members — a pointer
  * settled to `nullable<Page>` reads `Result`'s fields, rather than failing
  * on `Page`'s none and typing the iterator `unknown` (Greptile, #608
- * review); a named union that reaches itself through its variants is read
- * once (`seen`).
+ * review).
+ *
+ * Each named union model is expanded once per walk, however many routes
+ * reach it (`memo`), and the types read are kept distinct as they are
+ * collected (`typeRefKey`): expanded once per route, twenty-five
+ * components each an `anyOf` of two references to the next expanded the
+ * last 2^25 times, and a document of a few hundred lines took seconds, or
+ * the memory, before the caller deduped (Greptile, #608 review) — as the
+ * document walk reads each schema once per segment (`fieldsNamed`). A
+ * model met again while being expanded (a union reaching itself through
+ * its variants) contributes nothing more on that route, and a model
+ * expanded while such a cycle was open above it is not memoized, since its
+ * reading would depend on the route (`closed`, as `fieldsNamed` keeps its
+ * memo).
  */
-function containersOf(type: TypeRef, models: readonly Model[], seen: ReadonlySet<string> = new Set()): TypeRef[] {
-  const bare = underNullable(type);
-  if (bare.kind === 'model') {
-    const variants = models.find((m) => m.name === bare.name)?.variants;
-    if (!variants || seen.has(bare.name)) return [bare];
-    const within = new Set(seen).add(bare.name);
-    return variants.flatMap((variant) => containersOf(variant, models, within));
+class ContainerReader {
+  private readonly memo = new Map<string, TypeRef[]>();
+  /** The named union models being expanded, outermost first. */
+  private readonly stack: string[] = [];
+  /** The lowest depth in `stack` a cycle closed at during the expansion under way; `Infinity` for none. */
+  private closed = Infinity;
+
+  constructor(private readonly models: readonly Model[]) {}
+
+  containersOf(type: TypeRef): TypeRef[] {
+    const bare = underNullable(type);
+    if (bare.kind === 'model') return this.namedUnionContainers(bare);
+    if (bare.kind !== 'union') return [bare];
+    const members = this.distinct(bare.variants);
+    if (bare.compositionKind) return members;
+    const modelMembers = members.filter((member) => member.kind === 'model');
+    return modelMembers.length > 0 ? modelMembers : members;
   }
-  if (bare.kind !== 'union') return [bare];
-  const members = bare.variants.flatMap((variant) => containersOf(variant, models, seen));
-  if (bare.compositionKind) return members;
-  const modelMembers = members.filter((member) => member.kind === 'model');
-  return modelMembers.length > 0 ? modelMembers : members;
+
+  /** `ref` itself for a model with fields; a named union's variants' containers, read once. */
+  private namedUnionContainers(ref: ModelRef): TypeRef[] {
+    const done = this.memo.get(ref.name);
+    if (done) return done;
+    const variants = this.models.find((m) => m.name === ref.name)?.variants;
+    if (!variants) return [ref];
+    const above = this.stack.indexOf(ref.name);
+    if (above !== -1) {
+      this.closed = Math.min(this.closed, above);
+      return [];
+    }
+    const depth = this.stack.push(ref.name) - 1;
+    const outer = this.closed;
+    this.closed = Infinity;
+    const containers = this.distinct(variants);
+    this.stack.pop();
+    if (this.closed >= depth) this.memo.set(ref.name, containers);
+    this.closed = Math.min(outer, this.closed);
+    return containers;
+  }
+
+  /** The containers of each of `types`, one per `typeRefKey`. */
+  private distinct(types: readonly TypeRef[]): TypeRef[] {
+    const out = new Map<string, TypeRef>();
+    for (const type of types) {
+      for (const container of this.containersOf(type)) out.set(typeRefKey(container), container);
+    }
+    return [...out.values()];
+  }
 }
 
 /** `type` under every nullable wrapper it wears. */

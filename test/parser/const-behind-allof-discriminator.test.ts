@@ -653,6 +653,41 @@ describe('#607', () => {
         expect(viaRef.description).toBeUndefined();
         expect(viaRef.extensions).toBeUndefined();
       }
+      // Under a wrapper the declaration documents itself: an `allOf` read as
+      // the reference, or a nullable wrapper around it, takes none of the
+      // component's flags, text or keys, as the variant's own field takes
+      // none (Greptile review of #656, round 6: the settings were read
+      // through every hop of the pin walk, so two variants wrapping a `$ref`
+      // to read-only const components folded to a read-only `kind`, and the
+      // required field was left out of request examples); what the wrapper
+      // itself writes is carried.
+      const flagged = { EmailKind: { ...c('email'), ...settings }, SmsKind: { ...c('sms'), ...settings } };
+      const wrappedRefs: Array<[string, [Doc, Doc]]> = [
+        ['an allOf read as the reference', [{ allOf: [ref('EmailKind')] }, { allOf: [ref('SmsKind')] }]],
+        [
+          'a nullable wrapper around the reference',
+          [{ oneOf: [ref('EmailKind'), { type: 'null' }] }, { oneOf: [ref('SmsKind'), { type: 'null' }] }],
+        ],
+      ];
+      for (const [label, kinds] of wrappedRefs) {
+        const field = await kindOf(kinds, flagged, label);
+        expect(field, label).toMatchObject({ required: true });
+        expect(field.readOnly, label).toBeUndefined();
+        expect(field.deprecated, label).toBeUndefined();
+        expect(field.description, label).toBeUndefined();
+        expect(field.extensions, label).toBeUndefined();
+      }
+      const onWrapper = await kindOf(
+        [
+          { allOf: [ref('EmailKind')], readOnly: true, description: 'Wrap.' },
+          { allOf: [ref('SmsKind')], readOnly: true, description: 'Wrap.' },
+        ],
+        flagged,
+        'the wrapper itself',
+      );
+      expect(onWrapper).toMatchObject({ required: true, readOnly: true, description: 'Wrap.' });
+      expect(onWrapper.deprecated).toBeUndefined();
+      expect(onWrapper.extensions).toBeUndefined();
       // Limits conjoin across a declaration's levels as a field's do, the
       // stricter bound winning, before the variants are compared (Greptile
       // review of #656, round 5: the nearest level's limit was taken, so a
@@ -690,6 +725,19 @@ describe('#607', () => {
           ],
           { EmailKind: { ...c('email'), maxLength: 5 }, SmsKind: { ...c('sms'), maxLength: 5 } },
           'beside a $ref',
+        ),
+      ).toEqual({ maxLength: openapi === '3.1.0' ? 5 : 20 });
+      // Under a wrapper the limits still conjoin from the component, as the
+      // wire enforces them whatever is written beside the `$ref` (OAS 3.1;
+      // an enum component's stay on the `Enum` in 3.0).
+      expect(
+        await limited(
+          [
+            { allOf: [ref('EmailKind')], maxLength: 20 },
+            { allOf: [ref('SmsKind')], maxLength: 20 },
+          ],
+          { EmailKind: { ...c('email'), maxLength: 5 }, SmsKind: { ...c('sms'), maxLength: 5 } },
+          'under a wrapper',
         ),
       ).toEqual({ maxLength: openapi === '3.1.0' ? 5 : 20 });
       // A limit the variants disagree on is nobody's.
