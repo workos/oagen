@@ -3179,20 +3179,30 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * admits it), so `Meta | null` beside a nullable inline `allOf`, a second
  * nullable `$ref` or a nullable inline object is nullable, and beside a
  * declaration that rejects `null` is not, in either member order
- * (workos/oagen#653 review). A schema met again admits none, which ends a
- * component that names itself.
+ * (workos/oagen#653 review). A schema met again on the path being read
+ * (`path`: the schemas above it, not every schema read so far) admits
+ * none, which ends a component that names itself, through a hop or
+ * outright, while a component two members name is read for each — `{
+ * allOf: [{ $ref: A }, { $ref: A }] }` beside `{ $ref: B }`, both
+ * nullable, is nullable (the #653 review's round 4: the second `$ref` met
+ * `A` in a shared seen set and read it as a cycle, so the conjunction lost
+ * its `null`).
  */
-function conjunctionAdmitsNull(schema: SchemaObject, seen: Set<SchemaObject> = new Set()): boolean {
-  if (seen.has(schema)) return false;
-  seen.add(schema);
+function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  if (path.has(schema)) return false;
   if (declaresNull(schema)) return true;
   if (schema.type !== undefined) return false;
-  if (schema.$ref !== undefined) {
-    const target = componentSchemaOf(schema.$ref);
-    return target !== undefined && conjunctionAdmitsNull(target, seen);
+  path.add(schema);
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      return target !== undefined && conjunctionAdmitsNull(target, path);
+    }
+    const members = schema.allOf ?? [];
+    return members.length > 0 && members.every((member) => conjunctionAdmitsNull(member, path));
+  } finally {
+    path.delete(schema);
   }
-  const members = schema.allOf ?? [];
-  return members.length > 0 && members.every((member) => conjunctionAdmitsNull(member, seen));
 }
 
 /**

@@ -655,6 +655,56 @@ describe('#571', () => {
           nullableResult,
           'PetPageResultItem',
         ],
+        // A component two members name is read for each, not as a cycle
+        // (Greptile, round 4: a shared seen set read the second `$ref` as one).
+        [
+          'a $ref written twice then a nullable $ref',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring({ allOf: [refMeta, { ...refMeta }] }), declaring(refListing)],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'a nullable $ref then a $ref written twice',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refListing), declaring({ allOf: [refMeta, { ...refMeta }] })],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'a $ref beside its own wrapper then a nullable $ref',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring({ allOf: [refMeta, { allOf: [{ ...refMeta }] }] }), declaring(refListing)],
+          nullableResult,
+          'ListingItem',
+        ],
+        // A component that names itself, outright or through a hop, ends the
+        // reading where it repeats and admits none; a nullable one admits it.
+        [
+          'a nullable $ref then a component that extends itself',
+          { Meta: NullableMeta, Loop: { allOf: [{ $ref: '#/components/schemas/Loop' }, inlineObject] } },
+          [declaring(refMeta), declaring({ $ref: '#/components/schemas/Loop' })],
+          plainResult,
+          'LoopItem',
+        ],
+        [
+          'a nullable $ref then a component that extends itself through a hop',
+          {
+            Meta: NullableMeta,
+            Loop: { allOf: [{ $ref: '#/components/schemas/Hop' }, inlineObject] },
+            Hop: { allOf: [{ $ref: '#/components/schemas/Loop' }] },
+          },
+          [declaring(refMeta), declaring({ $ref: '#/components/schemas/Loop' })],
+          plainResult,
+          'LoopItem',
+        ],
+        [
+          'a nullable $ref then a nullable component that extends itself',
+          { Meta: NullableMeta, Loop: nul({ allOf: [{ $ref: '#/components/schemas/Loop' }, inlineObject] }) },
+          [declaring(refMeta), declaring({ $ref: '#/components/schemas/Loop' })],
+          nullableResult,
+          'LoopItem',
+        ],
       ] as const) {
         const spec = await parseJson(pageDocument(openapi, members, schemas));
         expect(modelNamed(spec, 'PetPage')?.fields[0]?.type, label).toEqual(type);
