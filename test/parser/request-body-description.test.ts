@@ -1000,7 +1000,9 @@ describe('request body descriptions (issue #316)', () => {
         // every site (#398), so beside a `$ref` the body is the merged model
         // the same schema is on a field; beside an `allOf` of a typeless
         // member, which types nothing, the `oneOf` is built as written, the
-        // `allOf` aside, as it was before #535.
+        // `allOf` aside, as it was before #535 — unless it is a `oneOf` of
+        // consts read as an enum, which is the enum the same schema is on a
+        // field, the typeless `allOf` aside (#603).
         it('builds a nullable oneOf beside a typing allOf as the merged model, and beside a typeless allOf as the union of one variant it was (#398)', async () => {
           const nickname = { type: 'object', properties: { nickname: { type: 'string' } } };
           const spec = await parseDocument(
@@ -1040,12 +1042,16 @@ describe('request body descriptions (issue #316)', () => {
           });
           expect(models.get('AddTextRequest')?.fields.map((f) => f.name)).toEqual(['nickname']);
           expect(ops.addText).not.toHaveProperty('requestBodyDescription');
-          // The #535 shape beside a typeless `allOf`: a union of the one literal, not the nullable enum.
+          // The #535 shape beside a typeless `allOf`: the nullable enum the
+          // same schema is on a field, the `allOf` typing nothing (#603: it
+          // was built as a union of the one literal, the member's text lost).
           expect(ops.addEnum.requestBody).toEqual({
             kind: 'nullable',
-            inner: { kind: 'union', variants: [{ kind: 'literal', value: 'draft' }] },
+            inner: { kind: 'enum', name: 'AddEnumRequest', values: ['draft'] },
           });
-          expect(spec.enums.map((e) => e.name)).not.toContain('AddEnumRequest');
+          expect(spec.enums.find((e) => e.name === 'AddEnumRequest')?.values).toEqual([
+            { name: 'DRAFT', value: 'draft', description: 'Only drafts are accepted.' },
+          ]);
           expect(ops.addEnum).not.toHaveProperty('requestBodyDescription');
           expectSound(spec);
         });

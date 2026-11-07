@@ -21,6 +21,7 @@ import {
   deprecatedEntry,
   foldSiblingProperties,
   isArrayComponentRef,
+  isArrayPointerRef,
   isNullSchema,
   collapsedNullableBranch,
   nullableAxisBranch,
@@ -31,6 +32,7 @@ import {
   withSchemaConstraints,
   withWrapperDocs,
 } from './schemas.js';
+import { isPendingVariant } from './schema-refs.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
 import {
   collectProperties,
@@ -444,15 +446,18 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
 
   // Find array properties — typed, `items` with no `type`, or either under a
   // nullable wrapper of any spelling or an `allOf` read as its member
-  // (`arraySchemaOf`), or a `$ref` to an array component under such wrappers
+  // (`arraySchemaOf`), a `$ref` to an array component under such wrappers
   // (`isArrayComponentRef`), which `schemaToTypeRef` types as the array the
-  // component declares — and non-array companion properties
+  // component declares, or a pointer deeper into a component that lands on
+  // a schema typed as an array where it stands (`isArrayPointerRef`; #609),
+  // which the settle types as that array — and non-array companion
+  // properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (arraySchemaOf(propSchema) || isArrayComponentRef(propSchema)) {
+    if (arraySchemaOf(propSchema) || isArrayComponentRef(propSchema) || isArrayPointerRef(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -519,17 +524,27 @@ function extractListResponse(
   // The property's own text, as `buildFieldFromSchema` keeps it for every
   // companion beside it; an item schema's description belongs to the item.
   const dataDescription = dataProp?.description;
-  // The data array's type when it is a `$ref` to an array component: the
-  // array the component declares, with the component's own nullability.
+  // The data array's type when it is a `$ref` typed as an array: the array
+  // a component declares, with the component's own nullability, or the
+  // array a pointer deeper into a component settles to.
   let dataType: TypeRef | undefined;
-  if (dataProp && isArrayComponentRef(dataProp)) {
+  if (dataProp && (isArrayComponentRef(dataProp) || isArrayPointerRef(dataProp))) {
     // A `$ref` to an array component, under any nullable wrapper, is the
     // array the component declares, its items named under the component
     // (`<Component>Item…`) and already materialized by the component pass —
-    // nothing is minted here, and `<Operation>Item` stays free.
+    // nothing is minted here, and `<Operation>Item` stays free. A pointer
+    // deeper into a component (#609) is a reference settled once every
+    // model is built (`resolveSchemaPointers`), to the array the schema it
+    // lands on is typed as where it stands, its items the model that
+    // schema's items built (`HolderOwner` for `Holder/properties/owners`),
+    // never a copy of it: until then the response is the pending reference,
+    // and the item type is that very reference, so the settle rereads the
+    // item type from the settled array (`visitOperation`), as it does for a
+    // body that is the pointer.
     dataType = schemaToTypeRef(dataProp, contextName);
     const array = dataType.kind === 'nullable' ? dataType.inner : dataType;
     if (array.kind === 'array') itemTypeRef = array.items;
+    else if (isPendingVariant(dataType)) itemTypeRef = dataType;
   } else {
     // The array under whatever nullable wrapper or `allOf` the data property
     // wears (`arraySchemaOf`); its items, whatever their shape, are typed and
@@ -1080,9 +1095,13 @@ function extractDirectResource(
     if (merged.properties.length > 0) {
       // The rebuilt schema carries the wrapper's limits, conjoined with its
       // inline members', so it still declares what an instance must satisfy,
-      // the wrapper's own link and its own `deprecated` flag, as a component
-      // `allOf` model carries them; a member's stay on that member (a `$ref`
-      // member's on its component).
+      // and the wrapper layer's text, link, `deprecated` flag and `x-*` keys
+      // — the wrapper's own, else an annotating member's — as a component
+      // `allOf` model and a field's merge carry them; a member's stay on
+      // that member (a `$ref` member's on its component). So the model built
+      // below is described as the same schema's request-body model is
+      // (#604: the text alone was left off, and `CreatePetResponse` had none
+      // while `CreatePetRequest` did).
       const rebuilt = mergedObjectSchema(merged);
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it

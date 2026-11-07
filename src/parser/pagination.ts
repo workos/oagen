@@ -1685,10 +1685,16 @@ function warn(message: string): void {
 
 /**
  * The type an iterator yields from `response`: the items of a top-level
- * array, under a nullable wrapper too (an OAS 3.0 `nullable: true` array
- * response is `nullable<array<T>>`), else the response itself.
+ * array, under every nullable wrapper it wears too — one for an OAS 3.0
+ * `nullable: true` array response (`nullable<array<T>>`), two for a
+ * nullable site settled from a pointer to a schema that admits null
+ * (`{ oneOf: [{ $ref: '#/components/schemas/Holder/properties/owners' },
+ * { type: 'null' }] }` to `owners: { type: ['array', 'null'] }`, which the
+ * settle leaves as `nullable<nullable<array<T>>>`; #609) — else the
+ * response itself.
  */
 export function paginatedItemType(response: TypeRef): TypeRef {
-  const inner = response.kind === 'nullable' ? response.inner : response;
+  let inner = response;
+  while (inner.kind === 'nullable') inner = inner.inner;
   return inner.kind === 'array' ? inner.items : response;
 }
