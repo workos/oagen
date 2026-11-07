@@ -193,3 +193,90 @@ describe('buildOverlayLookup — operation-based model name mapping', () => {
     expect(lookup.modelNameByIR.has('GetUserRequest')).toBe(false);
   });
 });
+
+describe('buildOverlayLookup — a nullable response or request body (#615)', () => {
+  it('maps the model under a `nullable` wrapper by the operation, as a `$ref` to a component that admits null is typed', () => {
+    // One-field models whose IR names differ from the SDK's: neither the
+    // exact-name pass nor the Jaccard fallback can map them, so only the
+    // operation-based pass can — and it must read through the wrapper.
+    const surface = emptySurface({
+      classes: {
+        Organizations: {
+          name: 'Organizations',
+          methods: {
+            update: [
+              {
+                name: 'update',
+                params: [{ name: 'options', type: 'UpdateOrganizationOptions', optional: false }],
+                returnType: 'Organization',
+                async: true,
+              },
+            ],
+          },
+          properties: {},
+          constructorParams: [],
+        },
+      },
+      interfaces: {
+        Organization: {
+          name: 'Organization',
+          fields: { id: { name: 'id', type: 'string', optional: false } },
+          extends: [],
+        },
+        UpdateOrganizationOptions: {
+          name: 'UpdateOrganizationOptions',
+          fields: { name: { name: 'name', type: 'string', optional: false } },
+          extends: [],
+        },
+      },
+    });
+
+    const manifest: ManifestEntry[] = [
+      {
+        operationId: 'updateOrganization',
+        sdkResourceProperty: 'organizations',
+        sdkMethodName: 'update',
+        httpMethod: 'PUT',
+        path: '/organizations',
+        pathParams: [],
+        bodyFields: ['name'],
+        queryFields: [],
+      },
+    ];
+
+    const spec: ApiSpec = {
+      name: 'Test',
+      version: '1.0.0',
+      baseUrl: 'https://api.test.com',
+      services: [
+        {
+          name: 'Organizations',
+          operations: [
+            {
+              name: 'update',
+              httpMethod: 'put',
+              path: '/organizations',
+              pathParams: [],
+              queryParams: [],
+              headerParams: [],
+              requestBody: { kind: 'nullable', inner: { kind: 'model', name: 'OrgPatch' } },
+              response: { kind: 'nullable', inner: { kind: 'model', name: 'Org' } },
+              errors: [],
+              injectIdempotencyKey: false,
+            },
+          ],
+        },
+      ],
+      models: [
+        { name: 'Org', fields: [{ name: 'id', type: { kind: 'primitive', type: 'string' }, required: true }] },
+        { name: 'OrgPatch', fields: [{ name: 'name', type: { kind: 'primitive', type: 'string' }, required: true }] },
+      ],
+      enums: [],
+      sdk: defaultSdkBehavior(),
+    };
+
+    const lookup = buildOverlayLookup(surface, manifest, spec);
+    expect(lookup.modelNameByIR.get('Org')).toBe('Organization');
+    expect(lookup.modelNameByIR.get('OrgPatch')).toBe('UpdateOrganizationOptions');
+  });
+});

@@ -202,7 +202,10 @@ const SINGULAR_SAFE_LIST = new Set([
  * - the `es` of a sibilant stem is dropped — `-sses`, `-uses` after a
  *   consonant, `-iases`, `-xes`, `-ches`, `-shes` (`addresses` → `address`,
  *   `statuses` → `status`, `aliases` → `alias`, `boxes` → `box`, `batches` →
- *   `batch`, `hashes` → `hash`);
+ *   `batch`, `hashes` → `hash`) — except `-aches` after a consonant, which
+ *   is an `-ache` noun's plain `s` (`caches` → `cache`, `headaches` →
+ *   `headache`, `mustaches` → `mustache`; an `-ach` noun has a vowel before
+ *   the `a`, `coaches` → `coach`, `beaches` → `beach`);
  * - any other `s` is a plain plural `s` (`notes` → `note`, `causes` →
  *   `cause`, `licenses` → `license`, `responses` → `response`, `releases` →
  *   `release`, `warehouses` → `warehouse`).
@@ -225,6 +228,10 @@ function stripPluralSuffix(word: string): string {
   // `releases`): no English noun ends in `-iase`, so `aliases` and `biases`
   // are `-ias` nouns.
   if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower) || lower.endsWith('iases')) return word.slice(0, -2);
+  // An `-ache` noun (`caches`, `headaches`, `mustaches`) is the `-aches` word
+  // with a consonant before the `a`; an `-ach` noun has a vowel there
+  // (`coaches`, `beaches`, `approaches`) and drops its `es` below.
+  if (/[^aeiou]aches$/.test(lower)) return word.slice(0, -1);
   if (lower.endsWith('xes') || lower.endsWith('ches') || lower.endsWith('shes')) return word.slice(0, -2);
   return word.slice(0, -1);
 }
@@ -240,25 +247,41 @@ function stripPluralSuffix(word: string): string {
  * noun spell its singular alike: `Directories` → `Directory`, `Organizations`
  * → `Organization`, `Statuses` → `Status`, `Addresses` → `Address`, `Boxes`
  * → `Box`, `Batches` → `Batch`, `Causes` → `Cause`, `Licenses` → `License`,
- * `Responses` → `Response`, `Analyses` → `Analysis` (#620; before it, every
- * `-ses` word lost its `es` — `Caus`, `Licens`, `Respons` — and every other
- * `-es` word only its `s` — `Boxe`, `Batche`). What is read as a plural at
- * all is decided here, not by the path segment's guards: a safe-listed word
- * (`Status`, `Address`, `Series`, …), a word of four letters or fewer
- * (`Pets`, `Tags`, `Bus`, `Gas`, `News`, `Axes` are kept as they are, since
- * a short word is as likely a singular) and a word ending in `ss` (`Class`)
- * are never singularized, and neither is a `-ysis` word, the singular the
- * `-yses` rule writes (`Analysis`); any other `-us` or `-is` word is read as
- * a plural, as it always was (`Menus` → `Menu`, `Emojis` → `Emoji`, at the
- * price of `Campus` → `Campu`).
+ * `Responses` → `Response`, `Analyses` → `Analysis`, `Caches` → `Cache`
+ * (#620; before it, every `-ses` word lost its `es` — `Caus`, `Licens`,
+ * `Respons` — and every other `-es` word only its `s` — `Boxe`, `Batche`).
+ * What is read as a plural at all is decided here, not by the path
+ * segment's guards: a safe-listed word (`Status`, `Address`, `Series`, …)
+ * and its `-es` plural (`Canvases` → `Canvas`, `Radiuses` → `Radius`,
+ * whatever the suffix rules would make of them), a word of four letters or
+ * fewer (`Pets`, `Tags`, `Bus`, `Gas`, `News`, `Axes` are kept as they are,
+ * since a short word is as likely a singular) and a word ending in `ss`
+ * (`Class`) are never singularized, and neither is a `-ysis` word, the
+ * singular the `-yses` rule writes (`Analysis`); any other `-us` or `-is`
+ * word is read as a plural, as it always was (`Menus` → `Menu`, `Emojis` →
+ * `Emoji`, at the price of `Campus` → `Campu`). The suffix rules' limits
+ * are the ones documented on `singularizePathSegment`, and reach a model
+ * name as they reach an operation's: `Gases` → `Gase`, `Lenses` → `Lense`,
+ * `Atlases` → `Atlase`, `Niches` → `Nich`, `Diagnoses` → `Diagnose` (where
+ * the two-branch rule before #620 happened to give `Gas`, `Lens`, `Atlas`
+ * and `Niche`). Every singular the `-ies`, `-yses` and sibilant rules write
+ * is returned as it is when passed back in, so `cleanSchemaName` is
+ * idempotent on it; the `-us` a consonant + `-uses` plural gives is not,
+ * since a `-us` word is read as a plural (`Bonuses` → `Bonus` → `Bonu`,
+ * `Campuses` → `Campus` → `Campu`, `Viruses` → `Virus` → `Viru`, as on
+ * every version before this one).
  */
 export function singularize(word: string): string {
   if (SINGULAR_SAFE_LIST.has(word) || word.length <= 4) return word;
   // `-ss` is never a plural (`Class`), and neither is `-ysis`, the singular
-  // the `-yses` rule writes (`Analysis`), so every singular this function
-  // produces is returned as it is when passed back in, as cleanSchemaName
-  // requires.
+  // the `-yses` rule writes (`Analysis`), so the singulars the suffix rules
+  // write are returned as they are when passed back in, as cleanSchemaName
+  // requires — all but the `-us` a consonant + `-uses` plural gives, which
+  // is read as a plural again (`Bonuses` → `Bonus` → `Bonu`).
   if (!word.endsWith('s') || word.endsWith('ss') || word.endsWith('ysis')) return word;
+  // A safe-listed word's `-es` plural is that word (`Canvases` → `Canvas`,
+  // `Radiuses` → `Radius`), whatever the suffix rules would make of it.
+  if (word.endsWith('es') && SINGULAR_SAFE_LIST.has(word.slice(0, -2))) return word.slice(0, -2);
   return stripPluralSuffix(word);
 }
 
@@ -267,7 +290,7 @@ export function singularize(word: string): string {
  * one item of a collection: `pets` → `pet`, `api_keys` → `api_key`,
  * `directories` → `directory`, `addresses` → `address`, `statuses` → `status`,
  * `aliases` → `alias`, `analyses` → `analysis`, `boxes` → `box`, `batches` →
- * `batch`, `responses` → `response`.
+ * `batch`, `caches` → `cache`, `responses` → `response`.
  *
  * Suffix rules only (`stripPluralSuffix`, the rules `singularize` applies to
  * a model name's word, so `/causes/{id}` and a `causes` field spell one
@@ -285,7 +308,10 @@ export function singularize(word: string): string {
  * Deliberately not handled — a resource that stems wrong should carry an
  * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
  * words whose singular keeps the `ie` (`cookies` → `cooky`), `-oes` (`heroes`
- * → `heroe`), `-ches` nouns ending in `-che` (`caches` → `cach`), `-uses`
+ * → `heroe`), `-ches` nouns ending in `-che` other than a consonant + `-ache`
+ * (`niches` → `nich`, `avalanches` → `avalanch`, `tranches` → `tranch`,
+ * where `caches` → `cache` and `branches` → `branch` are the common
+ * readings), `-uses`
  * nouns ending in `-use` (`excuses` → `excus`), `-zes` plurals of a doubled
  * `z` (`quizzes` → `quizze`, where `sizes` → `size` is the common reading),
  * `-ases` nouns ending in `-as`
@@ -321,6 +347,9 @@ export function singularizePathSegment(segment: string): string {
  * 4. Singularize leading resource word
  *
  * Must be idempotent: `cleanSchemaName(cleanSchemaName(x)) === cleanSchemaName(x)`
+ * — which holds for every name but one whose leading word is a consonant +
+ * `-uses` plural, since `singularize` reads the `-us` it writes as a plural
+ * again (`Bonuses` → `Bonus` → `Bonu`; see singularize).
  */
 /** Strip `.js` extensions from import/export specifiers for dedup comparison. */
 export function normalizeJsExtension(text: string): string {
