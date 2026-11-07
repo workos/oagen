@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import type { ApiSpec, Field, Model, Operation, PaginationMeta, TypeRef } from '../../src/ir/types.js';
 import {
+  dataPathForks,
   dataPathWalkStart,
   deferDataPathItemType,
   isDeferredDataPathItemType,
@@ -13,6 +14,7 @@ import {
   walkDataPathItemType,
 } from '../../src/parser/pagination.js';
 import { pendingSchemaRef } from '../../src/parser/schema-refs.js';
+import type { SchemaObject } from '../../src/parser/schemas.js';
 
 /**
  * Issue #608: an explicit `dataPath` on a response written as a `$ref`
@@ -102,9 +104,10 @@ describe('#608', () => {
   /** Every model with its fields, as the issue's script prints them (`HolderResult { items: HolderResultItem[] }`). */
   const models = (ir: ApiSpec): string[] =>
     ir.models.map(({ fields, name }) => `${name} { ${fields.map((f) => `${f.name}: ${show(f.type)}`).join(', ')} }`);
-  /** The `items` TypeRef of the array `model.<field>` holds — the object itself. */
+  /** The `items` TypeRef of the array `model.<field>` holds, under any nullable wrapper — the object itself. */
   const itemsOf = (ir: ApiSpec, model: string, field: string): TypeRef | undefined => {
-    const type = ir.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.type;
+    let type = ir.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.type;
+    while (type?.kind === 'nullable') type = type.inner;
     return type?.kind === 'array' ? type.items : undefined;
   };
   /** The iterator yields `itemType`, the very TypeRef the array `model.<field>` holds, and nothing was warned about. */
@@ -307,6 +310,91 @@ describe('#608', () => {
       ]);
     });
 
+    describe('Greptile review round 1', () => {
+      /** `Holder.result` a `oneOf` of two components that declare `items` alike beside companions of their own. */
+      const unionOf = (items: unknown) => ({
+        A: object({ items: array(items), cursor: { type: 'string' } }),
+        B: object({ items: array(items), total: { type: 'integer' } }),
+        Holder: object({ result: { oneOf: [ref('A'), ref('B')] } }),
+      });
+      const idItem = object({ id: { type: 'string' } });
+
+      it('reads a path that forks at a union from the document at extraction, as for a union the IR already holds (#556)', async () => {
+        // Each variant's model types the inline items under a name of its own
+        // (`AItem`, `BItem`), so the document types them once under the
+        // path-derived name — the pointer response exactly as `$ref: Holder`.
+        const root = await parseJson(spec(openapi, listOwners(pointer, 'items'), unionOf(idItem)));
+        expect(onlyOperation(root).pagination).toMatchObject({
+          dataPath: 'items',
+          itemType: { kind: 'model', name: 'ListOwnersItem' },
+        });
+        expect(models(root)).toEqual([
+          'A { items: AItem[], cursor: string }',
+          'B { items: BItem[], total: integer }',
+          'Holder { result: union }',
+          'BItem { id: string }',
+          'AItem { id: string }',
+          'ListOwnersItem { id: string }',
+        ]);
+        const plain = await parseJson(spec(openapi, listOwners(ref('Holder'), 'result.items'), unionOf(idItem)));
+        expect(onlyOperation(plain).pagination?.itemType).toEqual({ kind: 'model', name: 'ListOwnersResultItem' });
+        const oneDown = await parseJson(
+          spec(openapi, listOwners(object({ result: pointer }), 'result.items'), unionOf(idItem)),
+        );
+        expect(onlyOperation(oneDown).pagination?.itemType).toEqual({ kind: 'model', name: 'ListOwnersResultItem' });
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('yields the component or primitive the variants share, minting nothing', async () => {
+        const component = await parseJson(
+          spec(openapi, listOwners(pointer, 'items'), { Pet: idItem, ...unionOf(ref('Pet')) }),
+        );
+        expect(onlyOperation(component).pagination?.itemType).toEqual({ kind: 'model', name: 'Pet' });
+        expect(models(component).map((line) => line.split(' ')[0])).toEqual(['Pet', 'A', 'B', 'Holder']);
+        const primitive = await parseJson(spec(openapi, listOwners(pointer, 'items'), unionOf({ type: 'string' })));
+        expect(onlyOperation(primitive).pagination?.itemType).toEqual({ kind: 'primitive', type: 'string' });
+        expect(models(primitive).map((line) => line.split(' ')[0])).toEqual(['A', 'B', 'Holder']);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('walks under every nullable wrapper the settled site wears — two for a nullable pointer to a nullable schema', async () => {
+        const nullable = (schema: Record<string, unknown>) =>
+          openapi === '3.1.0' ? { ...schema, type: ['object', 'null'] } : { ...schema, nullable: true };
+        const nullableRef = (schema: unknown) =>
+          openapi === '3.1.0' ? { oneOf: [schema, { type: 'null' }] } : { allOf: [schema], nullable: true };
+        const Holder = object({ result: nullable(object({ items: array(idItem) })) });
+        const ir = await parseJson(spec(openapi, listOwners(nullableRef(pointer), 'items'), { Holder }));
+        const op = onlyOperation(ir);
+        expectIterates(ir, 'items', 'HolderResult', 'items', 'HolderResultItem');
+        expect(show(op.response)).toBe(openapi === '3.1.0' ? 'HolderResult??' : 'HolderResult?');
+        expect(models(ir)).toEqual([
+          'Holder { result: HolderResult? }',
+          'HolderResult { items: HolderResultItem[] }',
+          'HolderResultItem { id: string }',
+        ]);
+      });
+
+      it('and where the path lands on a doubly nullable array', async () => {
+        const nullableArray =
+          openapi === '3.1.0'
+            ? { type: ['array', 'null'], items: idItem }
+            : { type: 'array', items: idItem, nullable: true };
+        const nullableRef = (schema: unknown) =>
+          openapi === '3.1.0' ? { oneOf: [schema, { type: 'null' }] } : { allOf: [schema], nullable: true };
+        const ir = await parseJson(
+          spec(openapi, listOwners(object({ result: nullableRef(pointer) }), 'result'), {
+            Holder: object({ result: nullableArray }),
+          }),
+        );
+        expectIterates(ir, 'result', 'ListOwnersResponse', 'result', 'HolderResult');
+        expect(models(ir)).toEqual([
+          'Holder { result: HolderResult[]? }',
+          'HolderResult { id: string }',
+          `ListOwnersResponse { result: HolderResult[]${openapi === '3.1.0' ? '??' : '?'} }`,
+        ]);
+      });
+    });
+
     it('without an override, the pointer response still yields the settled response itself (#539)', async () => {
       const ir = await parseJson(spec(openapi, listOwners(pointer, undefined), { Holder }));
       const op = onlyOperation(ir);
@@ -315,6 +403,29 @@ describe('#608', () => {
       expect(models(ir)).toEqual([...holderModels, 'HolderResultItem { name: string }']);
       expect(warn).not.toHaveBeenCalled();
     });
+  });
+
+  it('reads the object member of a type list on the path, through a pointer and in a plain body alike (OAS 3.1)', async () => {
+    // `type: ['object', 'string']` is a union of one variant per type; the
+    // document walk reads its `properties`, so the IR walk reads the object
+    // member's model rather than failing on the string member — no
+    // `ListOwnersResultItem` copy for the plain body either.
+    const idItem = object({ id: { type: 'string' } });
+    const result = object({ items: array(idItem) }, { type: ['object', 'string'] });
+    const viaPointer = await parseJson(spec('3.1.0', listOwners(pointer, 'items'), { Holder: object({ result }) }));
+    expectIterates(viaPointer, 'items', 'HolderResult', 'items', 'HolderResultItem');
+    expect(models(viaPointer)).toEqual([
+      'Holder { result: union }',
+      'HolderResult { items: HolderResultItem[] }',
+      'HolderResultItem { id: string }',
+    ]);
+    const plain = await parseJson(spec('3.1.0', listOwners(object({ result }), 'result.items'), {}));
+    expectIterates(plain, 'result.items', 'ListOwnersResponseResult', 'items', 'ListOwnersResponseResultItem');
+    expect(models(plain)).toEqual([
+      'ListOwnersResponse { result: union }',
+      'ListOwnersResponseResult { items: ListOwnersResponseResultItem[] }',
+      'ListOwnersResponseResultItem { id: string }',
+    ]);
   });
 
   describe('the IR walk and the settle', () => {
@@ -347,6 +458,56 @@ describe('#608', () => {
         const root = union(...variants);
         expect(walkDataPathItemType(root, 'items', pool), JSON.stringify(variants)).toEqual({ pending: true });
       }
+    });
+
+    it('looks under every nullable wrapper on the way and where the path lands, and through a type list to its object member', () => {
+      const twice = (inner: TypeRef): TypeRef => ({ kind: 'nullable', inner: { kind: 'nullable', inner } });
+      const doubly = [model('Doubly', { result: twice(named('Result')) }), model('Result', { items: twice(petArray) })];
+      expect(walkDataPathItemType(twice(named('Doubly')), 'result.items', doubly)).toEqual({ itemType: named('Pet') });
+      expect(walkDataPathItemType(named('Doubly'), 'result', [model('Doubly', { result: twice(petArray) })])).toEqual({
+        itemType: named('Pet'),
+      });
+      expect(walkDataPathItemType(twice(pending()), 'items', pool)).toEqual({ pending: true });
+      // A type list's union carries no `compositionKind`; its object member is read, the string member stepped past.
+      const typeList: TypeRef = { kind: 'union', variants: [named('Result'), { kind: 'primitive', type: 'string' }] };
+      expect(walkDataPathItemType(typeList, 'items', pool)).toEqual({ itemType: named('Pet') });
+      expect(
+        walkDataPathItemType(named('Listed'), 'result.items', [model('Listed', { result: typeList }), ...pool]),
+      ).toEqual({
+        itemType: named('Pet'),
+      });
+      // A `oneOf` with a non-model variant still fails, as every variant must declare the segment (#556).
+      expect(
+        walkDataPathItemType(union(named('Result'), { kind: 'primitive', type: 'string' }), 'items', pool),
+      ).toBeUndefined();
+    });
+
+    it('tells a path that forks at a union from one that does not (dataPathForks)', () => {
+      const idItem: SchemaObject = { type: 'object', properties: { id: { type: 'string' } } };
+      const result: SchemaObject = { type: 'object', properties: { items: { type: 'array', items: idItem } } };
+      const components: Record<string, SchemaObject> = {
+        A: result,
+        B: { ...result, properties: { ...result.properties, total: { type: 'integer' } } },
+      };
+      const body = (r: SchemaObject): SchemaObject => ({ type: 'object', properties: { result: r } });
+      expect(dataPathForks(body(result), 'result.items', components)).toBe(false);
+      expect(
+        dataPathForks(
+          body({ oneOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }] }),
+          'result.items',
+          components,
+        ),
+      ).toBe(true);
+      expect(
+        dataPathForks(
+          { anyOf: [{ $ref: '#/components/schemas/A' }, { $ref: '#/components/schemas/B' }] },
+          'items',
+          components,
+        ),
+      ).toBe(true);
+      // A `null` variant set aside as a nullable wrapper is no fork; a path that lands on no array forks nowhere.
+      expect(dataPathForks(body({ oneOf: [result, { type: 'null' }] }), 'result.items', components)).toBe(false);
+      expect(dataPathForks(body(result), 'result.nope', components)).toBe(false);
     });
 
     it('keeps every other failure undefined, as before, so the document answers', () => {

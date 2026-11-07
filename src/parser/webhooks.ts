@@ -1083,32 +1083,28 @@ function groupIdentity(group: WebhookGroup): StemIdentity {
  * only its stems. The entries of one key with several methods are several
  * groups holding one text under one source; they hash one string and are
  * parted by the method qualifier (`PetAdoptedB4A950Post`,
- * `PetAdoptedB4A950Put`), as they always were, prefixed or not. Should a
- * prefixed text itself spell another group's text as written — a webhook
- * keyed `key:petAdopted` beside that pair — every group hashes its
- * prefixed text, which a key and an operationId never share. Each step
- * reads the batch's texts alone, never their order.
+ * `PetAdoptedB4A950Put`), as they always were, prefixed or not. A key or
+ * operationId that spells a prefixed text as written — a webhook keyed
+ * `key:petAdopted` beside that pair — hashes the string `petAdopted`'s key
+ * hashes, and names apart all the same: its stem starts with the word the
+ * prefix PascalCases to (`KeyPetAdopted`, `OperationIdPetAdopted`), so
+ * every name it mints starts with `KeyPetAdopted<hash>` and every name
+ * `petAdopted`'s mints with `PetAdopted<hash>`, and no name coincides
+ * (`KeyPetAdopted15Fe0FPayload` beside `PetAdopted15Fe0FPayload`); nothing
+ * else in the batch is moved by it. The rule reads the batch's texts
+ * alone, never their order.
  */
 function groupIdentities(groups: WebhookGroup[]): Map<WebhookGroup, string> {
   const identities = new Map(groups.map((group) => [group, groupIdentity(group)] as const));
-  const prefixed = ({ source, text }: StemIdentity): string => `${source}:${text}`;
   // The sources each text is held under: one, or both.
   const sources = new Map<string, Set<IdentitySource>>();
   for (const { source, text } of identities.values()) sources.set(text, new Set(sources.get(text)).add(source));
-  const underBoth = ({ text }: StemIdentity): boolean => sources.get(text)!.size > 1;
-  // The texts held under both sources prefixed, the rest as written ...
-  const parted = new Map(
+  return new Map(
     groups.map((group) => {
-      const identity = identities.get(group)!;
-      return [group, underBoth(identity) ? prefixed(identity) : identity.text];
+      const { source, text } = identities.get(group)!;
+      return [group, sources.get(text)!.size > 1 ? `${source}:${text}` : text];
     }),
   );
-  // ... unless a prefixed text spells another group's text as written: then every text prefixed.
-  const asWritten = new Set(
-    [...identities.values()].filter((identity) => !underBoth(identity)).map(({ text }) => text),
-  );
-  const spelled = [...identities.values()].some((identity) => underBoth(identity) && asWritten.has(prefixed(identity)));
-  return spelled ? new Map(groups.map((group) => [group, prefixed(identities.get(group)!)])) : parted;
 }
 
 /**

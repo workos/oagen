@@ -296,5 +296,72 @@ describe('#571', () => {
       expect(list?.pagination?.itemType).toEqual({ kind: 'model', name: 'ListPetsResponseResultItem' });
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('reads a $ref to a component that dispatches a union beside another object as the same allOf written by hand (Greptile review)', async () => {
+      // `Choice` is `Base & (Cat | Dog)`, dispatched on `kind`. Two members
+      // declaring `result` as `$ref: Choice` and `$ref: Meta` are conjoined
+      // as `{ allOf: [{ $ref: Choice }, { $ref: Meta }] }`, read exactly as
+      // a document that writes that `allOf` on the field: the merge carries
+      // the fields both parts share and leaves the union `Choice` dispatches
+      // to `Choice` (#429), in either member order and whichever spelling
+      // the second declaration uses. Before, the `$ref` first kept `Choice`
+      // and dropped `total_pages`; `Meta` first kept `Meta` and dropped `id`
+      // and the choice both.
+      const str = { type: 'string' };
+      const pin = (value: string) =>
+        openapi === '3.0.3' ? { type: 'string', enum: [value] } : { type: 'string', const: value };
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const animals = {
+        Base: { type: 'object', properties: { id: str }, required: ['id'] },
+        Cat: { type: 'object', properties: { kind: pin('cat'), lives: str }, required: ['kind'] },
+        Dog: { type: 'object', properties: { kind: pin('dog'), breed: str }, required: ['kind'] },
+        Choice: { allOf: [ref('Base'), { oneOf: [ref('Cat'), ref('Dog')] }], discriminator: { propertyName: 'kind' } },
+        Meta,
+      };
+      const holderDocument = (Holder: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/holders/{id}': {
+            get: {
+              operationId: 'getHolder',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: { '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        components: { schemas: { ...animals, Holder } },
+      });
+      const holderFields = (spec: ApiSpec) =>
+        modelNamed(spec, 'Holder')?.fields.map((f) => `${f.name}: ${show(f.type)}`);
+      const choiceModels = (spec: ApiSpec) => spec.models.filter((model) => model.name.startsWith('Choice'));
+      const written = await parseJson(
+        holderDocument({ type: 'object', properties: { result: { allOf: [ref('Choice'), ref('Meta')] } } }),
+      );
+      expect(holderFields(written)).toEqual(['result: HolderResult']);
+      expect(modelNamed(written, 'HolderResult')?.fields.map((f) => f.name)).toEqual(['id', 'total_pages']);
+      for (const [label, members] of [
+        ['Choice then Meta', [declaring(ref('Choice')), declaring(ref('Meta'))]],
+        ['Meta then Choice', [declaring(ref('Meta')), declaring(ref('Choice'))]],
+        [
+          'Choice then an inline allOf',
+          [
+            declaring(ref('Choice')),
+            declaring({ allOf: [{ type: 'object', properties: { total_pages: { type: 'integer' } } }] }),
+          ],
+        ],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(holderFields(spec), label).toEqual(['result: HolderResult']);
+        expect(
+          modelNamed(spec, 'HolderResult')
+            ?.fields.map((f) => f.name)
+            .sort(),
+          label,
+        ).toEqual(['id', 'total_pages']);
+        expect(choiceModels(spec), label).toEqual(choiceModels(written));
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
