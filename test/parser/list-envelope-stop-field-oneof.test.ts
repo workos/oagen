@@ -433,7 +433,7 @@ describe('#622', () => {
     );
   });
 
-  describe('the rule: a stop field counts when every variant declares it with one shape', () => {
+  describe("the rule: a stop field counts when every variant declares it with the kind's type", () => {
     const someVariants = { allOf: [dataMember], oneOf: [withHasMore, object({ total: integer })] };
     const disagreeing = { allOf: [dataMember], oneOf: [withHasMore, object({ has_more: string })] };
     const hasMore = { kind: 'hasMore', path: 'has_more' };
@@ -583,5 +583,133 @@ describe('#622', () => {
       const union = { oneOf: [object({ has_more: boolean }), object({ has_more: boolean })] } as SchemaObject;
       expect(resolveSchemaPath({ properties: { meta: union } }, 'meta.has_more', components)).toBeUndefined();
     });
+  });
+
+  describe("MichaelDeBoey's review of PR #643", () => {
+    const hasMore = (path: string) => ({ 'x-pagination': { endOfIteration: { kind: 'hasMore', path } } });
+    const stopsOn = (path: string) => ({ kind: 'hasMore', path });
+
+    it.each(openapis)(
+      "tests each variant's declaration of a stop field at the top level, as the walk does one level down (finding 1; OAS %s)",
+      async (openapi) => {
+        // `top.json`: `has_more` a `const: true` boolean in one variant and a
+        // `const: false` one in the other; `meta.json`: the same union as a
+        // flattened `meta` companion. Their `oneOf` was tested as one schema
+        // at the top level — no stop field, and the override rejected as
+        // "not a boolean field" — while `meta.has_more` was accepted.
+        const vTrue = object({ has_more: { type: 'boolean', const: true }, next: string });
+        const vFalse = object({ has_more: { type: 'boolean', const: false } });
+        const top = { allOf: [dataMember], oneOf: [vTrue, vFalse] };
+        const meta = object(
+          { data: petArray, meta: { allOf: [object({ trace_id: string })], oneOf: [vTrue, vFalse] } },
+          ['data'],
+        );
+        for (const [label, body, path] of [
+          ['top.json', top, 'has_more'],
+          ['meta.json', meta, 'meta.has_more'],
+        ] as const) {
+          const detected = await parseQuiet(listPets(body, openapi));
+          expect(onlyOperation(detected).pagination?.endOfIteration, label).toEqual(stopsOn(path));
+          expect(shown(detected).response, label).toBe('Pet[]');
+          const overridden = await parseQuiet(listPets(body, openapi, hasMore(path)));
+          expect(onlyOperation(overridden).pagination, label).toEqual(onlyOperation(detected).pagination);
+        }
+        // As `{ data, has_more: { type: 'boolean', const: true } }` written flat already does.
+        const flatConst = await parseQuiet(
+          listPets(object({ data: petArray, has_more: { type: 'boolean', const: true } }, ['data']), openapi),
+        );
+        expect(onlyOperation(flatConst).pagination?.endOfIteration).toEqual(stopsOn('has_more'));
+        // `{ $ref: Flag }` beside `{ type: 'boolean' }`: each declaration fits.
+        const flag = {
+          allOf: [dataMember],
+          oneOf: [object({ has_more: { $ref: '#/components/schemas/Flag' } }), object({ has_more: boolean })],
+        };
+        const schemas = { Flag: { type: 'boolean' } };
+        expect(
+          onlyOperation(await parseQuiet(listPets(flag, openapi, {}, schemas))).pagination?.endOfIteration,
+        ).toEqual(stopsOn('has_more'));
+        expect(
+          onlyOperation(await parseQuiet(listPets(flag, openapi, hasMore('has_more'), schemas))).pagination
+            ?.endOfIteration,
+        ).toEqual(stopsOn('has_more'));
+        // A variant typing it otherwise still fits nothing, at either level.
+        const vString = object({ has_more: string });
+        const mixed = { allOf: [dataMember], oneOf: [vTrue, vString] };
+        expect(onlyOperation(await parseQuiet(listPets(mixed, openapi))).pagination?.endOfIteration).toBeUndefined();
+        const { warnings } = await parseWarning(listPets(mixed, openapi, hasMore('has_more')));
+        expect(warnings).toEqual([
+          expect.stringContaining('endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires'),
+        ]);
+      },
+    );
+
+    it.each(openapis)(
+      'reads a nullable union beside the allOf as its one non-null variant, as the model does (finding 2; OAS %s)',
+      async (openapi) => {
+        // `one.json`: `allOf: [{ data }]` beside `oneOf: [{ has_more }, null]`;
+        // `two.json`: the same with a second non-null variant. The nullable
+        // axis was skipped by detection, so `one.json` stayed the model
+        // `ListPetsResponse { data, has_more }` while `two.json` was a list.
+        const nul = openapi === '3.1.0' ? { type: 'null' } : { enum: [null] };
+        const one = { allOf: [dataMember], oneOf: [object({ has_more: boolean }), nul] };
+        const two = {
+          allOf: [dataMember],
+          oneOf: [object({ has_more: boolean }), object({ has_more: boolean, total: integer }), nul],
+        };
+        const members = { allOf: [dataMember, object({ has_more: boolean })] };
+        const oneIr = await parseQuiet(listPets(one, openapi));
+        const twoIr = await parseQuiet(listPets(two, openapi));
+        const membersIr = await parseQuiet(listPets(members, openapi));
+        expect(shown(oneIr)).toEqual({ ...expected, envelopeFields: ['has_more?: boolean'] });
+        expect(shown(oneIr)).toEqual(shown(membersIr));
+        expect(onlyOperation(oneIr).pagination).toEqual(onlyOperation(membersIr).pagination);
+        expect(shown(twoIr)).toEqual(expected);
+        expect(diffSpecs(membersIr, oneIr).changes).toEqual([]);
+        expect(diffSpecs(oneIr, membersIr).changes).toEqual([]);
+      },
+    );
+
+    it.each(openapis)(
+      'tests the outer declaration first, walking a union only where it is what types the field (Greptile; OAS %s)',
+      async (openapi) => {
+        // `total: { type: 'integer', anyOf: [{ maximum: 100 }, { minimum:
+        // 200 }] }` is the integer its `type` says, the union only limiting
+        // it; walking every union tested the limits without the `type`,
+        // dropped the detected stop rule and rejected an explicit
+        // `endOfIteration` naming the field.
+        const limited = { type: 'integer', anyOf: [{ maximum: 100 }, { minimum: 200 }] };
+        const totalCount = { 'x-pagination': { endOfIteration: { kind: 'totalCount', path: 'total' } } };
+        const flat = object({ data: petArray, total: limited }, ['data']);
+        const detected = await parseQuiet(listPets(flat, openapi));
+        expect(onlyOperation(detected).pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+        const overridden = await parseQuiet(listPets(flat, openapi, totalCount));
+        expect(onlyOperation(overridden).pagination).toEqual(onlyOperation(detected).pagination);
+        // As the variants' declarations too: their union carries no type of
+        // its own, so each is tested, and each is the integer its `type` says.
+        const split = { allOf: [dataMember], oneOf: [object({ total: limited }), object({ total: integer })] };
+        for (const extra of [{}, totalCount]) {
+          const ir = await parseQuiet(listPets(split, openapi, extra));
+          expect(onlyOperation(ir).pagination?.endOfIteration).toEqual({ kind: 'totalCount', path: 'total' });
+        }
+        // The boolean consts of finding 1 are still read through their union.
+        const consts = {
+          allOf: [dataMember],
+          oneOf: [
+            object({ has_more: { type: 'boolean', const: true } }),
+            object({ has_more: { type: 'boolean', const: false } }),
+          ],
+        };
+        expect(onlyOperation(await parseQuiet(listPets(consts, openapi))).pagination?.endOfIteration).toEqual(
+          stopsOn('has_more'),
+        );
+        // A union of bare limits beside another type leaves the field that type.
+        const text = object({ data: petArray, total: { type: 'string', anyOf: [{ maxLength: 3 }] } }, ['data']);
+        const { ir, warnings } = await parseWarning(listPets(text, openapi, totalCount));
+        expect(onlyOperation(ir).pagination?.endOfIteration).toBeUndefined();
+        expect(warnings).toEqual([
+          expect.stringContaining('endOfIteration path "total" is not an integer or number field'),
+        ]);
+      },
+    );
   });
 });
