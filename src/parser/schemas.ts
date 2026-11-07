@@ -93,9 +93,10 @@ let activeEnumSchemaNames: Set<string> = new Set();
 let activeNullableEnumSchemaNames: Set<string> = new Set();
 
 /**
- * Resolved names of the model components that admit `null`, so that, as for
- * a nullable enum, a `$ref` to one of these resolves to `nullable(model)`
- * (`componentTypeRef`): a named union with a `null` variant, an OAS 3.1
+ * The `components/schemas` keys of the model components that admit `null`,
+ * so that, as for a nullable enum, a `$ref` to one of these resolves to
+ * `nullable(model)` (`componentTypeRef`): a named union with a `null`
+ * variant, an OAS 3.1
  * `type` list with `'null'` or OAS 3.0 `nullable: true`
  * (`isNullableUnionSchema`) — the null variant is not a member
  * (`unionMembers` drops it), so the reference carries it and the IR says
@@ -113,11 +114,14 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  * `allOf` on a field is typed — while an `allOf` that merges a typing
  * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
  * properties }] }`) is the object its merged fields describe, bare, as it
- * is on a field (`isNullableModelComponentEntry`). Keyed by resolved name,
- * as `activeEnumSchemaNames` is, since the reference is minted by that
- * name.
+ * is on a field (`isNullableModelComponentEntry`). Keyed by the component
+ * key the `$ref` names, as the array, primitive and alias components are,
+ * never by the resolved name the reference is minted with: `Note: { type:
+ * ['object', 'null'], properties }` and `note: { type: 'object', properties
+ * }` resolve to one model `Note`, and only `{ $ref: Note }` admits `null`
+ * — `{ $ref: note }` is the bare model (#641 review).
  */
-let activeNullableModelSchemaNames: Set<string> = new Set();
+let activeNullableModelComponentKeys: Set<string> = new Set();
 
 /**
  * What one extraction remembers about its named unions, so each is planned
@@ -1435,7 +1439,7 @@ export function extractSchemas(
   // call schemaToTypeRef during extraction).
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableModelSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
   // to one is the primitive, literal, union of primitives or `unknown` it
@@ -1476,7 +1480,7 @@ export function extractSchemas(
       !activePrimitiveComponentKeys.has(name) &&
       !activeEnumAliasKeys.has(name)
     ) {
-      activeNullableModelSchemaNames.add(resolved);
+      activeNullableModelComponentKeys.add(name);
     }
   }
 
@@ -1655,7 +1659,7 @@ export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableModelSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeComponentSchemaKeys = new Set();
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
@@ -2412,7 +2416,7 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
 /**
  * Whether a `components/schemas` entry that becomes a `Model` admits
  * `null`, so that a `$ref` to it is wrapped in `nullable`
- * (`componentTypeRef`, through `activeNullableModelSchemaNames`): a named
+ * (`componentTypeRef`, through `activeNullableModelComponentKeys`): a named
  * union with a `null` variant (`isNullableUnionSchema`); an object
  * component whose own schema `schemaToTypeRef` wraps when it is written
  * inline (`declaresNull`: an OAS 3.1 `type` list naming `'null'`, OAS 3.0
@@ -6200,7 +6204,7 @@ export function markComponentModelRef(ref: ModelRef): void {
  * `oneOf`/`anyOf` wrapper, a single-member `allOf` around one of these —
  * is wrapped in `nullable` here, since the enum or model built for it
  * carries no wrapper (`activeNullableEnumSchemaNames`,
- * `activeNullableModelSchemaNames`; #615: `PetOwner: { type: ['object',
+ * `activeNullableModelComponentKeys`; #615: `PetOwner: { type: ['object',
  * 'null'], properties }` named by a bare `$ref` was `PetOwner`, while
  * `Pet.owner` written inline, and the JSON Pointer `#/components/schemas/
  * Pet/properties/owner` to it, were `nullable<PetOwner>`). An alias of
@@ -6256,12 +6260,13 @@ export function componentTypeRef(key: string): TypeRef {
   // Likewise a model component that admits `null` — a named union with a
   // `null` variant, or an object component that declares it (#615): neither
   // the variant nor the declaration is a member of the model, so the
-  // reference carries the nullability. The model reference itself is
-  // recorded as a component's (`componentModelRefs`) whether or not it is
-  // wrapped.
+  // reference carries the nullability — read by the key the `$ref` names,
+  // since two keys can resolve to one model and only the one that admits
+  // `null` wraps its references. The model reference itself is recorded as
+  // a component's (`componentModelRefs`) whether or not it is wrapped.
   const modelRef: ModelRef = { kind: 'model', name: resolved };
   componentModelRefs.add(modelRef);
-  return activeNullableModelSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
+  return activeNullableModelComponentKeys.has(key) ? { kind: 'nullable', inner: modelRef } : modelRef;
 }
 
 /**

@@ -395,4 +395,53 @@ describe('#615', () => {
       expect(diffSpecs(extracted, inline).changes, openapi).toEqual([]);
     }
   });
+
+  // Two keys can resolve to one model (`Note` / `note`, or `Notes` / `Note`
+  // through singularization). The nullability is the key's, as the `$ref`
+  // names it: only the key that admits `null` wraps its references, so a
+  // reference to the other never gains a `null` its schema does not admit
+  // (Greptile, #641 review).
+  describe.each(VERSIONS)('two keys that resolve to one name, on OAS %s', (openapi) => {
+    const nullableNote =
+      openapi === '3.1.0'
+        ? { type: ['object', 'null'], properties: { text: { type: 'string' } } }
+        : { type: 'object', nullable: true, properties: { text: { type: 'string' } } };
+    const plainNote = { type: 'object', properties: { text: { type: 'string' } } };
+
+    it.each([
+      ['`Note` admits null, `note` does not', { Note: nullableNote, note: plainNote }, 'Note', 'note'],
+      ['`note` admits null, `Note` does not', { note: nullableNote, Note: plainNote }, 'note', 'Note'],
+      ['`Notes` admits null, `Note` does not', { Notes: nullableNote, Note: plainNote }, 'Notes', 'Note'],
+    ])('wraps a `$ref` by the key it names when %s', async (_label, schemas, nullableKey, plainKey) => {
+      const spec = await parse(
+        doc(openapi, {
+          ...schemas,
+          // A named union pair, read by key as well.
+          Shape: { oneOf: [ref('A'), ref('B'), { type: 'null' }] },
+          shape: { oneOf: [ref('A'), ref('B')] },
+          A: { type: 'object', properties: { a: { type: 'string' } } },
+          B: { type: 'object', properties: { b: { type: 'string' } } },
+          Holder: {
+            type: 'object',
+            properties: {
+              admits_null: ref(nullableKey),
+              plain: ref(plainKey),
+              shape_with_null: ref('Shape'),
+              shape_plain: ref('shape'),
+            },
+          },
+        }),
+      );
+      expect(Object.fromEntries(modelOf(spec, 'Holder')!.fields.map((f) => [f.name, f.type]))).toEqual({
+        admits_null: nullable(model('Note')),
+        plain: model('Note'),
+        shape_with_null: nullable(model('Shape')),
+        shape_plain: model('Shape'),
+      });
+      // One model either way, the fields it always had.
+      expect(spec.models.map((m) => m.name)).toEqual(['Note', 'Shape', 'A', 'B', 'Holder']);
+      expect(fieldNames(spec, 'Note')).toEqual(['text']);
+      expect(warnings()).toEqual([]);
+    });
+  });
 });
