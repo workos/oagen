@@ -78,8 +78,10 @@
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
  * (`paginatedItemType`), so a paginated response pointing at an array of
- * strings yields strings; and a discriminator mapping entry that named a
- * pointer variant is written as the model the variant settled to
+ * strings yields strings; and a discriminator mapping entry written as a
+ * pointer is written as the model the schema it points at is built as — a
+ * pointer variant's, settled by the walk, or, for a target outside the
+ * variants, one settled here at the mapping site
  * (`settleDeferredMappingEntries`).
  */
 import type {
@@ -167,22 +169,29 @@ function underNullableWrappers(type: TypeRef): TypeRef {
  * `discriminator` — so the rename reaches the mapping entry naming the
  * variant with the variant (`renameVariants`), as it does for a union a
  * site minted; a bare reference would be repointed alone and leave the
- * mapping naming the old name.
+ * mapping naming the old name. A mapping entry written as a pointer
+ * outside the union's variants (`dog: Shelter/properties/dog` beside a
+ * variant `Zoo/properties/dog`; #619) is settled here too, at the mapping
+ * site, to the model the schema it points at is built as (`ShelterDog`),
+ * and the union — an allOf+oneOf dispatcher's mapping alone, since it
+ * holds no variants — is returned as a view with each such reference
+ * appended to its variants, so the rename reaches the entry as it reaches
+ * a variant's.
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
   schemas: Record<string, SchemaObject> | undefined,
 ): TypeRef[] {
   const resolver = new PointerResolver(sites.models, schemas);
-  /** Every discriminated union met, the named union models' as views; their variants are settled once the walk is done. */
-  const unions: UnionType[] = [];
+  /** Every discriminated union met — the named union models' and the dispatchers' as views — with the site it was met at; their mapping entries are settled once the walk is done. */
+  const unions: Array<{ union: UnionType; context: string }> = [];
   const visit = (ref: TypeRef, context: string): void => {
     walkTypeRef(ref, {
       model: (reference) => {
         if (isPendingSchemaRef(reference)) resolver.settle(reference, context, new Set());
       },
     });
-    collectDiscriminatedUnions(ref, unions);
+    collectDiscriminatedUnions(ref, context, unions);
   };
   /** A field's or parameter's type settled, then its own limits aligned with the type's (`alignSiteLimits`). */
   const visitSite = (site: LimitedSite, context: string): void => {
@@ -193,12 +202,17 @@ export function resolveSchemaPointers(
   for (const model of sites.models) {
     for (const field of model.fields) visitSite(field, `${model.name}.${field.name}`);
     for (const variant of model.variants ?? []) visit(variant, `${model.name}.variants`);
-    if (model.variants && model.discriminator) {
+    // A named union's variants and mapping, or an allOf+oneOf dispatcher's
+    // mapping alone (a dispatcher holds no variants), as a view.
+    if (model.discriminator) {
       unions.push({
-        kind: 'union',
-        variants: model.variants,
-        ...(model.compositionKind ? { compositionKind: model.compositionKind } : {}),
-        discriminator: model.discriminator,
+        union: {
+          kind: 'union',
+          variants: model.variants ?? [],
+          ...(model.compositionKind ? { compositionKind: model.compositionKind } : {}),
+          discriminator: model.discriminator,
+        },
+        context: model.name,
       });
     }
   }
@@ -209,19 +223,25 @@ export function resolveSchemaPointers(
     visitReceived(webhook, `webhooks.${webhook.name}.${webhook.httpMethod}`, visit, visitSite);
   }
 
-  // Every variant is settled: a mapping entry that named a pointer variant
-  // takes the model it settled to, and a union holding a settled variant
-  // stands in for it among the references returned.
+  // Every variant is settled: a mapping entry written as a pointer takes
+  // the model the schema it points at is built as — a variant's, settled
+  // by the walk, or a target of its own, settled now at the mapping site —
+  // and a union holding a settled variant, or an entry settled to a model,
+  // stands in for them among the references returned, the entries' own
+  // references appended to its variants.
   const bare = new Set(resolver.settled);
   const roots: TypeRef[] = [];
-  for (const union of unions) {
-    settleDeferredMappingEntries(union.discriminator?.mapping);
+  for (const { union, context } of unions) {
+    const targets = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
+      resolver.settle(target, `${context}.discriminator.mapping.${value}`, new Set(), 'leaving the entry as written'),
+    );
     const own = union.variants
       .map(variantModelRef)
       .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
-    if (own.length === 0) continue;
+    const named = targets.filter((target) => variantModelRef(target) !== undefined);
+    if (own.length === 0 && named.length === 0) continue;
     for (const ref of own) bare.delete(ref);
-    roots.push(union);
+    roots.push(named.length === 0 ? union : { ...union, variants: [...union.variants, ...named] });
   }
   return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
 }
@@ -241,22 +261,26 @@ function variantModelRef(variant: TypeRef): ModelRef | undefined {
   return variant.kind === 'model' ? variant : undefined;
 }
 
-/** Collect every discriminated union under `ref` into `out`, the nested ones first. */
-function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
+/** Collect every discriminated union under `ref`, met at `context`, into `out`, the nested ones first. */
+function collectDiscriminatedUnions(
+  ref: TypeRef,
+  context: string,
+  out: Array<{ union: UnionType; context: string }>,
+): void {
   switch (ref.kind) {
     case 'union':
-      for (const variant of ref.variants) collectDiscriminatedUnions(variant, out);
-      if (ref.discriminator) out.push(ref);
+      for (const variant of ref.variants) collectDiscriminatedUnions(variant, context, out);
+      if (ref.discriminator) out.push({ union: ref, context });
       break;
     case 'array':
-      collectDiscriminatedUnions(ref.items, out);
+      collectDiscriminatedUnions(ref.items, context, out);
       break;
     case 'nullable':
-      collectDiscriminatedUnions(ref.inner, out);
+      collectDiscriminatedUnions(ref.inner, context, out);
       break;
     case 'map':
-      if (ref.keyType) collectDiscriminatedUnions(ref.keyType, out);
-      collectDiscriminatedUnions(ref.valueType, out);
+      if (ref.keyType) collectDiscriminatedUnions(ref.keyType, context, out);
+      collectDiscriminatedUnions(ref.valueType, context, out);
       break;
     default:
       break;
@@ -506,19 +530,21 @@ class PointerResolver {
    * cycle, reported and typed `unknown`. The `$ref`s, not the references:
    * an array component's items are built afresh at every read
    * (`componentTypeRef`), so the reference met on the way back is never
-   * the one the walk started from, while its `$ref` is.
+   * the one the walk started from, while its `$ref` is. `outcome` is what
+   * a warning says becomes of the site when the pointer names no type:
+   * typed `unknown`, which the reference is settled to, unless the site
+   * reads the reference for a name alone — a mapping entry, left as
+   * written.
    */
-  settle(pending: ModelRef, context: string, stack: Set<string>): void {
+  settle(pending: ModelRef, context: string, stack: Set<string>, outcome = 'typing the site as unknown'): void {
     if (!isPendingSchemaRef(pending)) return;
     const ref = pending.name;
     let type: TypeRef | undefined;
     if (stack.has(ref)) {
-      console.warn(
-        `[oagen] Warning: Circular schema $ref chain starting at "${ref}" in ${context} — typing the site as unknown`,
-      );
+      console.warn(`[oagen] Warning: Circular schema $ref chain starting at "${ref}" in ${context} — ${outcome}`);
     } else {
       stack.add(ref);
-      type = this.resolve(ref, context, stack);
+      type = this.resolve(ref, context, stack, outcome);
       stack.delete(ref);
     }
     settlePendingSchemaRef(pending);
@@ -570,12 +596,10 @@ class PointerResolver {
     else delete site.constraints;
   }
 
-  /** The type `ref` names, or `undefined` after one warning saying why it names none. */
-  private resolve(ref: string, context: string, stack: Set<string>): TypeRef | undefined {
+  /** The type `ref` names, or `undefined` after one warning saying why it names none and what becomes of the site (`outcome`, as `settle` takes it). */
+  private resolve(ref: string, context: string, stack: Set<string>, outcome: string): TypeRef | undefined {
     const fail = (reason: string): undefined => {
-      console.warn(
-        `[oagen] Warning: Unresolved schema $ref "${ref}" in ${context}: ${reason} — typing the site as unknown`,
-      );
+      console.warn(`[oagen] Warning: Unresolved schema $ref "${ref}" in ${context}: ${reason} — ${outcome}`);
       return undefined;
     };
     const tokens = schemaRefTokens(ref);
