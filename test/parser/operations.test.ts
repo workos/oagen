@@ -4402,8 +4402,9 @@ describe('#537', () => {
           qualified('listNotesController', 'ByIdNotesControllerGet', 'PetsByIdNotesControllerGetResponse'),
         ]);
         // The leading word is singularized, so `Notes_List` and `Note_List`
-        // both clean to `NoteList`; neither is spelled `noteList`, so both
-        // are path-named.
+        // both clean to `NoteList`; `Note_List` PascalCases to the stem as
+        // written and keeps it, `Notes_List` was singularized and is
+        // path-named.
         const singular = await parse(
           dir,
           `singular-${label}`,
@@ -4416,7 +4417,7 @@ describe('#537', () => {
         expect(names(singular), openapi).toEqual([
           bareGetPet,
           qualified('notesList', 'ByIdNotesGet', 'PetsByIdNotesGetResponse'),
-          qualified('noteList', 'ByIdNoteGet', 'PetsByIdNoteGetResponse'),
+          qualified('noteList', 'NoteList', 'NoteListResponse'),
         ]);
         // `ListItem` is a marker the cleaning strips whole, so the stem
         // names nothing and qualified nothing (`PetsXMeta200`); the id as

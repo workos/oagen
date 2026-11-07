@@ -126,35 +126,44 @@ describe('#606', () => {
     expect(fieldsOf(reversed, 'Pet').map(typed)).toEqual(fieldsOf(spec, 'Pet').map(typed));
   });
 
-  it('keeps the OAS 3.0.3 spelling — nullable: true beside a oneOf/anyOf of one variant — reading as before: a named union of one', async () => {
-    const spec = await parse(
-      { Pet: pet(), ...wrapped30, Plain: kindEnum, MaybePlain: { oneOf: [{ allOf: [ref('Plain')] }], nullable: true } },
-      getPet,
-      '3.0.3',
-    );
+  it('reads the OAS 3.0.3 spelling — nullable: true beside a oneOf/anyOf of one variant — as the same nullable enums (review)', async () => {
+    const spec = await parse({ Pet: pet(), ...wrapped30 }, getPet, '3.0.3');
 
     expectNoUnknownEnum(spec);
-    // `nullable: true` beside the `oneOf` declares nothing (no `type`), and a
-    // `oneOf` of one variant is a union of one, inline and as a component: the
-    // model carries the enum as its `…Variant1`, and a `$ref` to it is the
-    // model under the `nullable` the union admits.
-    expect(names(spec)).toEqual({
-      enums: ['Plain', 'KindVariant1', 'SizeVariant1', 'ColorVariant1'],
-      models: ['Pet', 'Kind', 'Size', 'Color', 'MaybePlain'],
-    });
+    // A `null` variant cannot be written in OAS 3.0, so `nullable: true`
+    // beside the `oneOf`/`anyOf` of one variant is the wrapper's 3.0 form: the
+    // flag is read beside a union (every `$ref` to the component is nullable,
+    // as it is for a named union), so the component is the nullable enum here
+    // as the `null` variant makes it in 3.1 — no `Kind {}` model carrying
+    // `KindVariant1` (the reading before this fix, and before #588).
+    expect(names(spec)).toEqual({ enums: ['Kind', 'Size', 'Color'], models: ['Pet'] });
     expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
-      { name: 'kind', type: nullable(modelRef('Kind')), required: true },
-      { name: 'size', type: nullable(modelRef('Size')), required: true },
-      { name: 'color', type: nullable(modelRef('Color')), required: true },
+      { name: 'kind', type: nullable(enumRef('Kind')), required: true },
+      { name: 'size', type: nullable(enumRef('Size')), required: true },
+      { name: 'color', type: nullable(enumRef('Color')), required: true },
     ]);
-    const variants = (name: string) => spec.models.find((m) => m.name === name)?.variants;
-    expect(variants('Kind')).toEqual([{ kind: 'enum', name: 'KindVariant1', values: ['cat', 'dog'] }]);
-    expect(variants('Size')).toEqual([{ kind: 'enum', name: 'SizeVariant1', values: ['large', 'small'] }]);
-    expect(variants('Color')).toEqual([{ kind: 'enum', name: 'ColorVariant1', values: ['black', 'white'] }]);
-    expect(spec.enums.find((e) => e.name === 'SizeVariant1')?.description).toBe('The size of the pet.');
-    // Nor is the same wrapper around a `$ref` an alias in this spelling: a
-    // union of one whose variant is the enum.
-    expect(variants('MaybePlain')).toEqual([enumRef('Plain')]);
+    expect(
+      spec.enums.map(({ name, description, values }) => ({ name, description, values: values.map((v) => v.value) })),
+    ).toEqual([
+      { name: 'Kind', description: undefined, values: ['cat', 'dog'] },
+      { name: 'Size', description: 'The size of the pet.', values: ['large', 'small'] },
+      { name: 'Color', description: undefined, values: ['black', 'white'] },
+    ]);
+  });
+
+  it('reports nothing between the 3.0.3 document and the 3.1.0 one (oagen diff exits 0, in either direction; review)', async () => {
+    // The reviewer's document: `Color` written with `nullable: true` beside the
+    // `oneOf` in 3.0.3 and with a `null` variant in 3.1.0, `Pet.color` a `$ref`
+    // to it — and `Kind`'s `allOf` spelling the same way.
+    const before = await parse({ Pet: pet(), ...wrapped30 }, getPet, '3.0.3');
+    const after = await parse({ Pet: pet(), ...wrapped }, getPet, '3.1.0');
+
+    expectNoUnknownEnum(before);
+    expectNoUnknownEnum(after);
+    expect(names(before)).toEqual(names(after));
+    expect(fieldsOf(before, 'Pet').map(typed)).toEqual(fieldsOf(after, 'Pet').map(typed));
+    expect(diffSpecs(before, after)).toMatchObject({ changes: [], behaviorChanges: [] });
+    expect(diffSpecs(after, before)).toMatchObject({ changes: [], behaviorChanges: [] });
   });
 
   it('reports nothing between Kind written as Color is and Kind written with the allOf (oagen diff exits 0, in either direction)', async () => {
@@ -459,24 +468,34 @@ describe('#606', () => {
     ]);
   });
 
-  it('reads a oneOf of one variant with no null variant as the union of one it was, and properties beside the wrapper as the model they make', async () => {
-    const spec = await parse({
-      Pet: pet(),
-      Kind: { oneOf: [{ allOf: [kindEnum] }] },
-      Size: wrapped.Size,
-      Color: { ...wrapped.Color, properties: { id: { type: 'string' } } },
-    });
+  it.each([
+    ['3.1.0', wrapped],
+    ['3.0.3', wrapped30],
+  ] as const)(
+    'reads a oneOf of one variant with neither a null variant nor nullable: true as the union of one it was, and properties beside the wrapper as the model they make (OAS %s)',
+    async (openapi, spelled) => {
+      const spec = await parse(
+        {
+          Pet: pet(),
+          Kind: { oneOf: [{ allOf: [kindEnum] }] },
+          Size: spelled.Size,
+          Color: { ...spelled.Color, properties: { id: { type: 'string' } } },
+        },
+        getPet,
+        openapi,
+      );
 
-    expectNoUnknownEnum(spec);
-    expect(names(spec).enums).toEqual(['Size', 'KindVariant1']);
-    expect(names(spec).models).toEqual(['Pet', 'Kind', 'Color']);
-    expect(fieldsOf(spec, 'Pet').map(typed).slice(0, 2)).toEqual([
-      { name: 'kind', type: modelRef('Kind'), required: true },
-      { name: 'size', type: nullable(enumRef('Size')), required: true },
-    ]);
-    expect(spec.models.find((m) => m.name === 'Kind')?.variants).toEqual([
-      { kind: 'enum', name: 'KindVariant1', values: ['cat', 'dog'] },
-    ]);
-    expect(fieldsOf(spec, 'Color').map((f) => f.name)).toEqual(['id']);
-  });
+      expectNoUnknownEnum(spec);
+      expect(names(spec).enums).toEqual(['Size', 'KindVariant1']);
+      expect(names(spec).models).toEqual(['Pet', 'Kind', 'Color']);
+      expect(fieldsOf(spec, 'Pet').map(typed).slice(0, 2)).toEqual([
+        { name: 'kind', type: modelRef('Kind'), required: true },
+        { name: 'size', type: nullable(enumRef('Size')), required: true },
+      ]);
+      expect(spec.models.find((m) => m.name === 'Kind')?.variants).toEqual([
+        { kind: 'enum', name: 'KindVariant1', values: ['cat', 'dog'] },
+      ]);
+      expect(fieldsOf(spec, 'Color').map((f) => f.name)).toEqual(['id']);
+    },
+  );
 });
