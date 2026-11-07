@@ -514,6 +514,111 @@ describe('#608', () => {
       });
     });
 
+    describe('Greptile review of the merge: a nullable named union on the way', () => {
+      // `Holder.result` is `$ref: Page`, `Page` a nullable union of one
+      // `$ref: Result`: a model with the one variant `Result` and no fields.
+      // The settled response is `nullable<Page>`, and the walk reads `Page`
+      // through its variants to `Result.items`, as the document walk reads
+      // the component's `oneOf` members — `ResultItem`, no copy, no `unknown`.
+      const Result = object({ items: array(object({ name: { type: 'string' } })) });
+      const nullableUnionOf = (name: string) =>
+        openapi === '3.1.0' ? { oneOf: [ref(name), { type: 'null' }] } : { oneOf: [ref(name)], nullable: true };
+      const pageSchemas = { Holder: object({ result: ref('Page') }), Page: nullableUnionOf('Result'), Result };
+
+      it('iterates ResultItem through the pointer, through a nested named union, and from a plain $ref: Page or $ref: Holder body alike', async () => {
+        const viaPointer = await parseJson(spec(openapi, listOwners(pointer, 'items'), pageSchemas));
+        expectIterates(viaPointer, 'items', 'Result', 'items', 'ResultItem');
+        expect(show(onlyOperation(viaPointer).response)).toBe('Page?');
+        expect(models(viaPointer).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Page',
+          'Result',
+          'ResultItem',
+        ]);
+        const nested = await parseJson(
+          spec(openapi, listOwners(pointer, 'items'), {
+            Holder: object({ result: ref('Outer') }),
+            Outer: nullableUnionOf('Page'),
+            Page: nullableUnionOf('Result'),
+            Result,
+          }),
+        );
+        expectIterates(nested, 'items', 'Result', 'items', 'ResultItem');
+        expect(models(nested).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Outer',
+          'Page',
+          'Result',
+          'ResultItem',
+        ]);
+        // The IR already held these; the walk now reads them too, so no `ListOwnersItem` / `ListOwnersResultItem` copy.
+        const plainPage = await parseJson(spec(openapi, listOwners(ref('Page'), 'items'), pageSchemas));
+        expectIterates(plainPage, 'items', 'Result', 'items', 'ResultItem');
+        expect(models(plainPage).map((line) => line.split(' ')[0])).toEqual(['Holder', 'Page', 'Result', 'ResultItem']);
+        const plainHolder = await parseJson(spec(openapi, listOwners(ref('Holder'), 'result.items'), pageSchemas));
+        expectIterates(plainHolder, 'result.items', 'Result', 'items', 'ResultItem');
+        expect(models(plainHolder).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Page',
+          'Result',
+          'ResultItem',
+        ]);
+      });
+
+      it('reads a named union of two variants as an inline one: the document for inline items alike, the component they share', async () => {
+        const forked = await parseJson(
+          spec(openapi, listOwners(pointer, 'items'), {
+            Holder: object({ result: ref('Page') }),
+            Page: { oneOf: [ref('A'), ref('B')] },
+            A: object({ items: array(object({ id: { type: 'string' } })), cursor: { type: 'string' } }),
+            B: object({ items: array(object({ id: { type: 'string' } })), total: { type: 'integer' } }),
+          }),
+        );
+        expect(onlyOperation(forked).pagination?.itemType).toEqual({ kind: 'model', name: 'ListOwnersItem' });
+        expect(models(forked).map((line) => line.split(' ')[0])).toEqual([
+          'Holder',
+          'Page',
+          'A',
+          'B',
+          'BItem',
+          'AItem',
+          'ListOwnersItem',
+        ]);
+        const shared = await parseJson(
+          spec(openapi, listOwners(pointer, 'items'), {
+            Pet: object({ id: { type: 'string' } }),
+            Holder: object({ result: ref('Page') }),
+            Page: { oneOf: [ref('A'), ref('B')] },
+            A: object({ items: array(ref('Pet')), cursor: { type: 'string' } }),
+            B: object({ items: array(ref('Pet')), total: { type: 'integer' } }),
+          }),
+        );
+        expect(onlyOperation(shared).pagination?.itemType).toEqual({ kind: 'model', name: 'Pet' });
+        expect(models(shared).map((line) => line.split(' ')[0])).toEqual(['Pet', 'Holder', 'Page', 'A', 'B']);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      if (openapi === '3.0.3') {
+        it('the OAS 3.0 allOf spelling merges Page into a model of its own, whose items it iterates as before', async () => {
+          const ir = await parseJson(
+            spec(openapi, listOwners(pointer, 'items'), {
+              Holder: object({ result: ref('Page') }),
+              Page: { allOf: [ref('Result')], nullable: true },
+              Result,
+            }),
+          );
+          expectIterates(ir, 'items', 'Page', 'items', 'PageItem');
+          expect(models(ir).map((line) => line.split(' ')[0])).toEqual([
+            'Holder',
+            'Page',
+            'Result',
+            'ResultItem',
+            'PageItem',
+          ]);
+        });
+      }
+    });
+
     it('without an override, the pointer response still yields the settled response itself (#539)', async () => {
       const ir = await parseJson(spec(openapi, listOwners(pointer, undefined), { Holder }));
       const op = onlyOperation(ir);
@@ -659,6 +764,40 @@ describe('#608', () => {
         ),
       ).toBe(true);
       expect(dataPathForks(variants(pointer, structuredClone(result)), 'result.items', holders)).toBe(true);
+    });
+
+    it('reads a named union model through its variants, on the way and where the path lands, and a self-reaching one once', () => {
+      const page: Model = { name: 'Page', fields: [], variants: [named('Result')], compositionKind: 'oneOf' };
+      const withPage = [model('Holder', { result: { kind: 'nullable', inner: named('Page') } }), page, ...pool];
+      expect(walkDataPathItemType({ kind: 'nullable', inner: named('Page') }, 'items', withPage)).toEqual({
+        itemType: named('Pet'),
+      });
+      expect(walkDataPathItemType(named('Holder'), 'result.items', withPage)).toEqual({ itemType: named('Pet') });
+      const landing: Model = { name: 'Pages', fields: [], variants: [petArray], compositionKind: 'oneOf' };
+      expect(
+        walkDataPathItemType(named('Landing'), 'result', [model('Landing', { result: named('Pages') }), landing]),
+      ).toEqual({ itemType: named('Pet') });
+      const twoVariants: Model = {
+        name: 'Either',
+        fields: [],
+        variants: [named('Result'), named('Other')],
+        compositionKind: 'anyOf',
+      };
+      expect(
+        walkDataPathItemType(named('Either'), 'items', [twoVariants, model('Other', { items: petArray }), ...pool]),
+      ).toEqual({
+        itemType: named('Pet'),
+      });
+      expect(
+        walkDataPathItemType(named('Either'), 'items', [twoVariants, model('Other', { total: named('Pet') }), ...pool]),
+      ).toBeUndefined();
+      const loop: Model = {
+        name: 'Loop',
+        fields: [],
+        variants: [{ kind: 'nullable', inner: named('Loop') }],
+        compositionKind: 'oneOf',
+      };
+      expect(walkDataPathItemType(named('Loop'), 'items', [loop, ...pool])).toBeUndefined();
     });
 
     it('keeps every other failure undefined, as before, so the document answers', () => {
