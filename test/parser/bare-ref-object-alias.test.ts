@@ -514,4 +514,124 @@ describe('#618', () => {
       expect(warnings()).toEqual([]);
     });
   });
+
+  describe('what an alias writes beside its `$ref` (Greptile, #618 review)', () => {
+    /** `Cat` with `name` optional, so a `required` written beside a `$ref` to it is the only thing that makes `name` required. */
+    const unrequired = { type: 'object', properties: { name: str } };
+    const extra = { type: 'object', properties: { extra: str } };
+
+    it.each(['3.1.0', '3.0.3'])(
+      'reads `required` beside an intermediate `$ref` at every hop and in a merge, as beside an `allOf`, on OAS %s',
+      async (openapi) => {
+        // Greptile's case: `B.name` was required, `A.name` optional.
+        const spec = await expectSpellingsAgree(openapi, (spelling) => ({
+          Cat: unrequired,
+          B: aliasOf('Cat', spelling, { required: ['name'] }),
+          A: ref('B'),
+          A2: { allOf: [ref('B')] },
+          Holder: {
+            type: 'object',
+            properties: { a: ref('A'), viaA: { allOf: [ref('A'), extra] }, viaB: { allOf: [ref('B'), extra] } },
+          },
+        }));
+        expect(fieldsOf(modelByName(spec, 'Cat'))).toEqual(['name?: string']);
+        for (const name of ['B', 'A', 'A2']) expect(fieldsOf(modelByName(spec, name)), name).toEqual(['name: string']);
+        expect(fieldsOf(modelByName(spec, 'HolderViaA'))).toEqual(['name: string', 'extra?: string']);
+        expect(fieldsOf(modelByName(spec, 'HolderViaB'))).toEqual(['name: string', 'extra?: string']);
+        expect(warnings()).toEqual([]);
+      },
+    );
+
+    it('reads `required` beside a `$ref` member of an `allOf`, as beside a nested `allOf` of the reference', async () => {
+      const schemas = (member: Record<string, unknown>) => ({
+        Cat: unrequired,
+        Dog: { allOf: [member] },
+        Holder: { type: 'object', properties: { d: ref('Dog'), merged: { allOf: [member, extra] } } },
+      });
+      const asRef = await parseJson(documentWith('3.1.0', schemas({ ...ref('Cat'), required: ['name'] })));
+      const asAllOf = await parseJson(documentWith('3.1.0', schemas({ allOf: [ref('Cat')], required: ['name'] })));
+      expect(fieldsOf(modelByName(asRef, 'Dog'))).toEqual(['name: string']);
+      expect(fieldsOf(modelByName(asRef, 'HolderMerged'))).toEqual(['name: string', 'extra?: string']);
+      expect(asRef.models).toEqual(asAllOf.models);
+      expectSound(asRef);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('reads a union beside an intermediate `$ref` as beside an `allOf`: flattened, never a variant axis of the alias', async () => {
+      const spec = await expectSpellingsAgree('3.1.0', (spelling) => ({
+        Cat: unrequired,
+        B: aliasOf('Cat', spelling, {
+          oneOf: [
+            { type: 'object', properties: { a: str } },
+            { type: 'object', properties: { b: str } },
+          ],
+        }),
+        A: ref('B'),
+        Holder: { type: 'object', properties: { a: ref('A'), merged: { allOf: [ref('A'), extra] } } },
+      }));
+      expect(fieldsOf(modelByName(spec, 'B'))).toEqual(['name?: string', 'a?: string', 'b?: string']);
+      expect(fieldsOf(modelByName(spec, 'A'))).toEqual(['name?: string', 'a?: string', 'b?: string']);
+      expect(modelByName(spec, 'A')?.discriminator).toBeUndefined();
+      expect(fieldsOf(modelByName(spec, 'HolderMerged'))).toEqual([
+        'name?: string',
+        'a?: string',
+        'b?: string',
+        'extra?: string',
+      ]);
+      expect(spec.models.map((m) => m.name).sort()).toEqual(['A', 'B', 'Cat', 'Holder', 'HolderMerged']);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('reads a `discriminator` beside an intermediate `$ref` as beside an `allOf`', async () => {
+      const kinds = {
+        Cat: { type: 'object', properties: { name: str, kind: { const: 'cat' } } },
+        Dog: { type: 'object', properties: { name: str, kind: { const: 'dog' } } },
+        Pet: { oneOf: [ref('Cat'), ref('Dog')] },
+      };
+      const discriminator = {
+        propertyName: 'kind',
+        mapping: { feline: '#/components/schemas/Cat', canine: '#/components/schemas/Dog' },
+      };
+      const spec = await expectSpellingsAgree('3.1.0', (spelling) => ({
+        ...kinds,
+        B: aliasOf('Pet', spelling, { discriminator }),
+        A: ref('B'),
+        Holder: { type: 'object', properties: { a: ref('A'), b: ref('B') } },
+      }));
+      // `B` dispatches by the keyword written beside its `$ref`, as it does
+      // beside an `allOf`; `A` leaves the dispatch to `B`, as an alias of
+      // any dispatcher does (above).
+      expect(modelByName(spec, 'B')?.discriminator).toEqual({
+        property: 'kind',
+        mapping: { feline: 'Cat', canine: 'Dog' },
+      });
+      expect(modelByName(spec, 'A')?.discriminator).toBeUndefined();
+      expect(fieldsOf(modelByName(spec, 'A'))).toEqual(fieldsOf(modelByName(spec, 'B')));
+      expect(warnings()).toEqual([]);
+    });
+
+    it('still ends a cycle through an alias that writes `required` beside its `$ref`, reported once per component', async () => {
+      const file = await write(
+        documentWith('3.1.0', {
+          A: { type: 'object' },
+          B: { type: 'object' },
+          Holder: { type: 'object', properties: { a: ref('A'), b: ref('B') } },
+        }),
+      );
+      const spec = await parseSpec(file, {
+        transformSpec: (doc) => {
+          const { schemas } = doc.components as { schemas: Record<string, unknown> };
+          Object.assign(schemas, { A: ref('B'), B: { ...ref('A'), required: ['x'] } });
+          return doc;
+        },
+      });
+      expect(fieldsOf(modelByName(spec, 'A'))).toEqual([]);
+      expect(fieldsOf(modelByName(spec, 'B'))).toEqual([]);
+      expectSound(spec);
+      expect(warnings().map((w: string) => w.slice(0, 40))).toEqual([
+        '[oagen] Warning: Component schema "A" is',
+        '[oagen] Warning: Component schema "B" is',
+      ]);
+    });
+  });
 });

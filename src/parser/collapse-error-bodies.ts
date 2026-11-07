@@ -359,6 +359,11 @@ function fold(
   const canonical = new Map<string, string>(); // group key → shared name
   const absorbed = new Set<string>(); // group keys folded onto a component of their shape
   const seeds = new Set<string>(); // the models of the groups left as they are
+  // The deprecated bodies a live component took, announced once the fold
+  // is known to be kept: a name a group cannot take — a model's, or an
+  // inline enum's spelled name (#612) — makes the pass run again
+  // (`frozen`), and the same bodies fold again then.
+  const deprecatedFolds: Array<{ name: string; deprecated: Model[] }> = [];
   // Mark `left` as the models of a group left as it is, and say so.
   const leaving = (left: readonly Model[]): string => {
     for (const member of left) seeds.add(member.name);
@@ -397,7 +402,7 @@ function fold(
         // deprecated inline copy a live component admits is (#441, #629):
         // the body's flag has no carrier once the body folds.
         const deprecated = members.filter((member) => member.deprecated);
-        if (deprecated.length > 0) warnDeprecatedFold(name, deprecated, `component schema "${name}"`);
+        if (deprecated.length > 0) deprecatedFolds.push({ name, deprecated });
         canonical.set(key, name);
         absorbed.add(key);
         return;
@@ -456,7 +461,7 @@ function fold(
   // values, named from the same pool as the models so neither takes the
   // other's name; a field whose enum name is taken stays a plain string —
   // said once no inline enum below leaves a body as it is, which discards
-  // this attempt.
+  // this attempt, as the deprecated folds are announced.
   const warnings: string[] = [];
   const enumNamesByField = new Map<string, string>();
   const widened = new Set<string>();
@@ -517,6 +522,8 @@ function fold(
     }
   }
   if (seeds.size > 0) return { models: input.models, frozen: frozenClosure(seeds, errorOnly, byName) };
+  for (const { name, deprecated } of deprecatedFolds)
+    warnDeprecatedFold(name, deprecated, `component schema "${name}"`);
   for (const message of warnings) console.warn(message);
 
   // Build the shared models.
@@ -525,23 +532,16 @@ function fold(
   const sharedModels: Model[] = [];
   for (const [key, members] of orderedGroups) {
     if (absorbed.has(key)) continue;
-    sharedModels.push(
-      buildSharedModel(
-        canonical.get(key)!,
-        members,
-        pinnedByKey.get(key)!,
-        enumValuesByField,
-        enumNamesByField,
-        renames,
-      ),
-    );
-  }
-
-  // The inline enums the shared fields list take the names claimed above;
-  // the per-operation names the parser minted them under go with the models
-  // the fold removes.
-  for (const model of sharedModels) {
+    const pinned = pinnedByKey.get(key)!;
+    const model = buildSharedModel(canonical.get(key)!, members, pinned, enumValuesByField, enumNamesByField, renames);
+    // The inline enums the shared fields list take the names claimed above,
+    // read by field and values — so the fields the string rule built are
+    // left alone: its enum holds every value the bodies pin, under the
+    // name it claimed, whatever an array or map under the same field
+    // elsewhere lists — and the per-operation names the parser minted them
+    // under go with the models the fold removes.
     for (const field of model.fields) {
+      if (pinned.has(field.name)) continue;
       walkTypeRef(field.type, {
         enum: (ref) => {
           const name = ref.values && inlineEnumNames.get(inlineEnumKey(field.name, ref.values));
@@ -549,6 +549,7 @@ function fold(
         },
       });
     }
+    sharedModels.push(model);
   }
 
   // Rewrite every error site, then fold the unions whose variants became one.
@@ -1327,7 +1328,9 @@ function sharedModelDeprecated(name: string, members: readonly Model[]): boolean
  * component of the name (`claim`) — as a deprecated inline copy a live
  * declared model admits is announced everywhere else (`deprecatedFoldWarning`):
  * the body's flag has no carrier once the body folds, so the readers of
- * its site lose the notice (#629).
+ * its site lose the notice (#629). Printed only once `fold` knows its
+ * result is kept, after every group has claimed a name, so a pass that
+ * runs again announces each fold once.
  */
 function warnDeprecatedFold(name: string, deprecated: readonly Model[], live: string): void {
   const list = deprecated.map((member) => `"${member.name}"`).join(', ');
@@ -1377,7 +1380,11 @@ function sharedDeprecated(name: string, members: readonly Model[], field: string
  * map's values, a union's variants — the limits every member that wrote
  * that level agrees on, each level kept or dropped on its own
  * (`agreedLimits`; #611), since two types that differ only in a limit are
- * one shape (`stripAllConstraints`), never two members of a union.
+ * one shape (`limitlessShape`), as are two unions that list one set of
+ * variants in different orders, never two members of a union; and a union
+ * whose variants are left alike once their limits are dropped keeps one of
+ * them, a lone survivor standing for the union (`simplifyType`), so no
+ * `oneOf` of two plain strings, which admits nothing, is ever written.
  */
 function sharedFieldType(
   siblings: readonly Field[],
@@ -1410,15 +1417,17 @@ function sharedFieldType(
   // An inline enum reads by its sorted values, as the key reads it, and not
   // by the name the parser minted it under per operation: two members that
   // list the same values, in any order, share one enum, which `fold` names
-  // from the field once the shared models are built (#612); and
-  // a type reads without its limits at any level, so two members that
-  // differ only in a limit on an array's items share one type, carrying the
-  // limits they agree on.
+  // from the field once the shared models are built (#612); a type reads
+  // without its limits at any level, so two members that differ
+  // only in a limit on an array's items share one type, carrying the limits
+  // they agree on; and a union reads with its variants sorted, as the key
+  // reads them, so two members that list them in different orders share
+  // one union (`limitlessShape`).
   const alike = new Map<string, TypeRef[]>();
   for (const sibling of siblings) {
     const own = normalizeInlineEnums(rewritten(sibling.type, renames), true);
     const type = constraints === undefined ? stripConstraints(own) : own;
-    const key = stableJson(normalizeInlineEnums(stripAllConstraints(type), false));
+    const key = stableJson(limitlessShape(type));
     const group = alike.get(key);
     if (group) group.push(type);
     else alike.set(key, [type]);
@@ -1431,12 +1440,19 @@ function sharedFieldType(
 }
 
 /**
- * One type for `types`, which read alike but for the limits they carry
- * (`stripAllConstraints`): the first, with the limits at every level — its
- * own, its items', its values' and keys', its variants' — kept where every
- * one of them writes the same and dropped where they differ (#611), as the
- * shared model keeps a field's own (`buildSharedModel`); a new tree
- * wherever something is dropped, the first itself when nothing is.
+ * One type for `types`, which read alike but for the limits they carry and
+ * the order of their variants (`limitlessShape`): the first, with the
+ * limits at every level — its own, its items', its values' and keys', its
+ * variants' — kept where every one of them writes the same and dropped
+ * where they differ (#611), as the shared model keeps a field's own
+ * (`buildSharedModel`); a new tree wherever something is dropped, the
+ * first itself when nothing is. A union's variants pair by shape, not by
+ * position — each member's ordered by their limitless reading, then by
+ * their full reading where two share a shape, so the pairing depends on
+ * no member's order — the result keeping the first member's order; and
+ * two variants left alike once their limits are dropped are one, a lone
+ * survivor standing for the union (`simplifyType`), since a `oneOf` of two
+ * plain strings admits nothing.
  */
 function agreedLimits(types: readonly TypeRef[]): TypeRef {
   const first = types[0];
@@ -1461,8 +1477,20 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
       };
     }
     case 'union': {
-      const unions = of('union');
-      return { ...top, variants: top.variants.map((_, i) => agreedLimits(unions.map((type) => type.variants[i]))) };
+      const ordered = of('union').map((union) =>
+        union.variants
+          .map((variant, index) => ({
+            variant,
+            index,
+            key: `${stableJson(limitlessShape(variant))}\n${stableJson(variant)}`,
+          }))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+      );
+      const variants = [...top.variants];
+      ordered[0].forEach(({ index }, position) => {
+        variants[index] = agreedLimits(ordered.map((member) => member[position].variant));
+      });
+      return simplifyType({ ...top, variants });
     }
     default:
       return top;
@@ -1616,26 +1644,40 @@ function stripConstraints(type: TypeRef): TypeRef {
   }
 }
 
-/** `type` without the validation keywords it carries at any level — its own, its items', values', keys' and variants' — as a new tree. */
-function stripAllConstraints(type: TypeRef): TypeRef {
+/**
+ * `type` as the merge reads a shape (#611): without the validation keywords
+ * at any level — its own, its items', values', keys' and variants' — every
+ * inline enum unnamed with its values sorted (`normalizeInlineEnums`), and
+ * a union's variants sorted by this reading, as the model key sorts them
+ * (`ModelKeys.type`), so that neither a limit nor the order the variants
+ * are listed in tells two members apart; a new tree.
+ */
+function limitlessShape(type: TypeRef): TypeRef {
   switch (type.kind) {
     case 'nullable':
-      return { kind: 'nullable', inner: stripAllConstraints(type.inner) };
+      return { kind: 'nullable', inner: limitlessShape(type.inner) };
+    case 'enum':
+      return normalizeInlineEnums(type, false);
     case 'array': {
       const { constraints: _constraints, ...rest } = type;
-      return { ...rest, items: stripAllConstraints(type.items) };
+      return { ...rest, items: limitlessShape(type.items) };
     }
     case 'map': {
       const { constraints: _constraints, keyType, ...rest } = type;
       return {
         ...rest,
-        valueType: stripAllConstraints(type.valueType),
-        ...(keyType && { keyType: stripAllConstraints(keyType) }),
+        valueType: limitlessShape(type.valueType),
+        ...(keyType && { keyType: limitlessShape(keyType) }),
       };
     }
     case 'union': {
       const { constraints: _constraints, ...rest } = type;
-      return { ...rest, variants: type.variants.map(stripAllConstraints) };
+      const variants = type.variants
+        .map((variant) => limitlessShape(variant))
+        .map((variant) => ({ variant, key: stableJson(variant) }))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        .map(({ variant }) => variant);
+      return { ...rest, variants };
     }
     default:
       return stripConstraints(type);
