@@ -274,8 +274,8 @@ describe('#580', () => {
     });
 
     // Colliding itself — `key_pet_adopted` is `KeyPetAdopted` too — it
-    // would hash `key:petAdopted`, the very string `petAdopted` hashes, so
-    // it hashes its own prefixed text, `key:key:petAdopted`, instead.
+    // hashes `key:petAdopted`, the very string `petAdopted` hashes, and
+    // names apart all the same, since the two share no name.
     const colliding = { 'key:petAdopted': posting('literalId'), key_pet_adopted: posting('underscoreId'), ...pair };
     const collidingReversed = {
       ...pairReversed,
@@ -283,16 +283,16 @@ describe('#580', () => {
       'key:petAdopted': posting('literalId'),
     };
 
-    it('hashes its own prefixed text when it collides, never the string the pair hashes', async () => {
+    it('hashes the string the pair hashes when it collides, and names apart', async () => {
       const spec = await parseJson(documentWith('3.1.0', colliding));
       expect(payloads(spec)).toEqual([
-        ['key:petAdopted', undefined, 'KeyPetAdopted130B64Payload'],
+        ['key:petAdopted', undefined, 'KeyPetAdopted15Fe0FPayload'],
         ['key_pet_adopted', undefined, 'KeyPetAdopted70A5A5Payload'],
         ['petAdopted', undefined, 'PetAdopted15Fe0FPayload'],
         ['noteAdded', 'petAdopted', 'PetAdoptedB0Ca6APayload'],
       ]);
       expect(modelFields(spec)).toEqual([
-        ['KeyPetAdopted130B64Payload', ['literalId']],
+        ['KeyPetAdopted15Fe0FPayload', ['literalId']],
         ['KeyPetAdopted70A5A5Payload', ['underscoreId']],
         ['PetAdopted15Fe0FPayload', ['petId']],
         ['PetAdoptedB0Ca6APayload', ['noteId']],
@@ -310,7 +310,8 @@ describe('#580', () => {
     // whose second variant pins `kind: key`, so that variant is named
     // `KeyPetAdopted<hash>Payload` — the literal key's own payload name.
     // Hashing one string, the two would never part and one payload would
-    // be dropped; the literal key hashing `key:key:petAdopted` parts them.
+    // be dropped; sharing that name, the literal key — the one of the two
+    // not yet prefixed — hashes `key:key:petAdopted`, which parts them.
     const unionPayload = {
       oneOf: [
         { type: 'object', properties: { kind: { const: 'adopted' }, petId: { type: 'string' } } },
@@ -357,6 +358,54 @@ describe('#580', () => {
       const second = await parseJson(documentWith('3.1.0', variantReversed), 'second.json');
       expect(orderFree(second)).toEqual(orderFree(first));
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    // Greptile's second document: the `kind: key` variant of a `petAdopted`
+    // query parameter `post_payload` is `KeyPetAdopted<hash>PostPayload`,
+    // the payload name of the literal key's `post` body, whose stem
+    // `KeyPetAdoptedPost` carries the method after the hash. Sharing that
+    // name hashing one string, the literal key's `post` puts its source in
+    // front; its `put`, sharing no name with anything, stays plain.
+    const postPayloadParam = {
+      name: 'post_payload',
+      in: 'query',
+      schema: {
+        oneOf: [
+          { type: 'object', properties: { kind: { const: 'adopted' }, a: { type: 'string' } } },
+          { type: 'object', properties: { kind: { const: 'key' }, b: { type: 'string' } } },
+        ],
+      },
+    };
+    const withParam = { post: { ...posting('petId').post, parameters: [postPayloadParam] } };
+    const literalBodies = { post: posting('literalPostId').post, put: posting('literalPutId').post };
+    const parameterVariant = {
+      petAdopted: withParam,
+      noteAdded: posting('noteId', 'petAdopted'),
+      'key:petAdopted': literalBodies,
+    };
+    const parameterVariantReversed = {
+      'key:petAdopted': literalBodies,
+      noteAdded: posting('noteId', 'petAdopted'),
+      petAdopted: withParam,
+    };
+
+    describe.each(['3.1.0', '3.0.3'])('on OpenAPI %s', (openapi) => {
+      it("keeps the literal key's post body apart from a parameter variant of the pair named like it", async () => {
+        const first = await parseJson(documentWith(openapi, parameterVariant), 'first.json');
+        const second = await parseJson(documentWith(openapi, parameterVariantReversed), 'second.json');
+        for (const spec of [first, second]) {
+          expect(modelFields(spec)).toEqual([
+            ['KeyPetAdopted130B64PostPayload', ['literalPostId']],
+            ['KeyPetAdopted15Fe0FPostPayload', ['kind', 'b']],
+            ['KeyPetAdoptedPutPayload', ['literalPutId']],
+            ['PetAdopted15Fe0FPayload', ['petId']],
+            ['PetAdopted15Fe0FPostPayload', ['kind', 'a']],
+            ['PetAdoptedB0Ca6APayload', ['noteId']],
+          ]);
+        }
+        expect(orderFree(second)).toEqual(orderFree(first));
+        expect(warn).not.toHaveBeenCalled();
+      });
     });
   });
 
