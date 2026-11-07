@@ -451,16 +451,223 @@ describe('#571', () => {
         expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name: 'A' });
         expect(modelNamed(spec, 'HolderResult'), label).toBeUndefined();
       }
-      // A wrapper that says more than its members — a `title` — stays a
-      // member as written, which the readers would drop, so the pair keeps
-      // the first, as before.
+      // A `title` is an annotation like a `description`: the wrapper
+      // accepts the same instances as its members, so it is spliced open
+      // too (MichaelDeBoey: a titled wrapper kept the pair on the first, by
+      // member order).
       const titled = await parseJson(
         holderDocument({
           allOf: [declaring(wrapped('A', { title: 'An A' })), declaring(wrapped('B', { title: 'A B' }))],
         }),
       );
-      expect(resultOf(titled)?.type).toEqual({ kind: 'model', name: 'A' });
-      expect(modelNamed(titled, 'HolderResult')).toBeUndefined();
+      expect(resultOf(titled)?.type).toEqual({ kind: 'model', name: 'HolderResult' });
+      expect(resultFields(titled)).toEqual(['a', 'b']);
+      // A wrapper that says more than its members — a `discriminator` —
+      // stays a member as written, which the readers would drop, so the
+      // pair keeps the first, as before.
+      for (const [label, members, name] of [
+        [
+          'dispatcher wrapper then wrapper',
+          [declaring(wrapped('A', { discriminator: { propertyName: 'kind' } })), declaring(wrapped('B'))],
+          'A',
+        ],
+        [
+          'wrapper then dispatcher wrapper',
+          [declaring(wrapped('B')), declaring(wrapped('A', { discriminator: { propertyName: 'kind' } }))],
+          'B',
+        ],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name });
+        expect(modelNamed(spec, 'HolderResult'), label).toBeUndefined();
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('conjoins a titled wrapper around a $ref beside a $ref, in either order, with the dataPath accepted (MichaelDeBoey)', async () => {
+      // `{ title: 'Paging', allOf: [{ $ref: Meta }] }` beside `{ $ref:
+      // Listing }` was `Meta` in one order and `Listing` in the other, and
+      // the `result.items` override was rejected in the first.
+      const Listing = inlineObject;
+      const titled = { title: 'Paging', allOf: [refMeta] };
+      const refListing = { $ref: '#/components/schemas/Listing' };
+      for (const [label, members, fields] of [
+        ['titled wrapper then $ref', [declaring(titled), declaring(refListing)], ['total_pages', 'items']],
+        ['$ref then titled wrapper', [declaring(refListing), declaring(titled)], ['items', 'total_pages']],
+      ] as const) {
+        const spec = await parseJson(pageDocument(openapi, members, { Listing }));
+        expect(shapes(spec), label).toEqual([
+          'Meta { total_pages: integer }',
+          'Listing { items: ListingItem[] }',
+          'PetPage { result: PetPageResult }',
+          'ListingItem { name: string }',
+          `PetPageResult { ${fields.map((f) => (f === 'items' ? 'items: ListingItem[]' : 'total_pages: integer')).join(', ')} }`,
+        ]);
+        const { pagination } = onlyOperation(spec);
+        expect(pagination?.dataPath, label).toBe('result.items');
+        expect(pagination?.endOfIteration, label).toEqual({ kind: 'totalPages', path: 'result.total_pages' });
+        expect(pagination?.itemType, label).toEqual({ kind: 'model', name: 'ListingItem' });
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('admits null on the conjunction exactly when every declaration does, in either order (MichaelDeBoey)', async () => {
+      // `Meta` admits `null` and so does the inline `allOf` beside it, so
+      // the `allOf` of both does: `PetPageResult | null`, where the base
+      // gave `Meta | null` and the first fix `PetPageResult`. Two nullable
+      // `$ref`s and two nullable inline objects alike; one declaration that
+      // rejects `null` makes the conjunction reject it, whichever it is.
+      const nul = (schema: Record<string, unknown>) =>
+        openapi === '3.0.3' ? { ...schema, type: 'object', nullable: true } : { ...schema, type: ['object', 'null'] };
+      const NullableMeta = nul({ properties: { total_pages: { type: 'integer' } } });
+      const NullableListing = nul({ properties: { items: petArray } });
+      const refListing = { $ref: '#/components/schemas/Listing' };
+      const nullableAllOf = nul({ allOf: [inlineObject] });
+      const nullableInline = nul({ properties: { items: petArray } });
+      const nullableTotal = nul({ properties: { total_pages: { type: 'integer' } } });
+      const plainTotal = { type: 'object', properties: { total_pages: { type: 'integer' } } };
+      const nullableResult = { kind: 'nullable', inner: { kind: 'model', name: 'PetPageResult' } };
+      const plainResult = { kind: 'model', name: 'PetPageResult' };
+      for (const [label, schemas, members, type, itemType] of [
+        [
+          'nullable $ref then nullable allOf',
+          { Meta: NullableMeta },
+          [declaring(refMeta), declaring(nullableAllOf)],
+          nullableResult,
+          'PetPageResultItem',
+        ],
+        [
+          'nullable allOf then nullable $ref',
+          { Meta: NullableMeta },
+          [declaring(nullableAllOf), declaring(refMeta)],
+          nullableResult,
+          'PetPageResultItem',
+        ],
+        [
+          'two nullable $refs',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refMeta), declaring(refListing)],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'two nullable $refs, swapped',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refListing), declaring(refMeta)],
+          nullableResult,
+          'ListingItem',
+        ],
+        [
+          'two nullable inline objects',
+          { Meta },
+          [declaring(nullableTotal), declaring(nullableInline)],
+          nullableResult,
+          'PetPageResultItem',
+        ],
+        [
+          'nullable $ref then a wrapper around a nullable $ref',
+          { Meta: NullableMeta, Listing: NullableListing },
+          [declaring(refMeta), declaring({ allOf: [refListing] })],
+          nullableResult,
+          'ListingItem',
+        ],
+        // One declaration rejects `null`: the conjunction does, in either order.
+        [
+          'plain $ref then nullable allOf',
+          { Meta },
+          [declaring(refMeta), declaring(nullableAllOf)],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'nullable $ref then plain allOf',
+          { Meta: NullableMeta },
+          [declaring(refMeta), declaring(inlineAllOf())],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'plain allOf then nullable $ref',
+          { Meta: NullableMeta },
+          [declaring(inlineAllOf()), declaring(refMeta)],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'nullable $ref then plain $ref',
+          { Meta: NullableMeta, Listing: inlineObject },
+          [declaring(refMeta), declaring(refListing)],
+          plainResult,
+          'ListingItem',
+        ],
+        [
+          'nullable inline then plain inline',
+          { Meta },
+          [declaring(nullableTotal), declaring(inlineObject)],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'plain inline then nullable inline',
+          { Meta },
+          [declaring(plainTotal), declaring(nullableInline)],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'typed wrapper around a nullable $ref then nullable allOf',
+          { Meta: NullableMeta },
+          [declaring({ type: 'object', allOf: [refMeta] }), declaring(nullableAllOf)],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        // Three members: one that rejects `null` anywhere among them.
+        [
+          'nullable, nullable, plain',
+          { Meta: NullableMeta },
+          [
+            declaring(refMeta),
+            declaring(nullableAllOf),
+            declaring({ type: 'object', properties: { has_more: { type: 'boolean' } } }),
+          ],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'plain, nullable, nullable',
+          { Meta: NullableMeta },
+          [
+            declaring({ type: 'object', properties: { has_more: { type: 'boolean' } } }),
+            declaring(refMeta),
+            declaring(nullableAllOf),
+          ],
+          plainResult,
+          'PetPageResultItem',
+        ],
+        [
+          'three nullable',
+          { Meta: NullableMeta },
+          [
+            declaring(refMeta),
+            declaring(nullableAllOf),
+            declaring(nul({ properties: { has_more: { type: 'boolean' } } })),
+          ],
+          nullableResult,
+          'PetPageResultItem',
+        ],
+      ] as const) {
+        const spec = await parseJson(pageDocument(openapi, members, schemas));
+        expect(modelNamed(spec, 'PetPage')?.fields[0]?.type, label).toEqual(type);
+        expect(
+          modelNamed(spec, 'PetPageResult')
+            ?.fields.map((f) => f.name)
+            .sort(),
+          label,
+        ).toEqual(members.length === 3 ? ['has_more', 'items', 'total_pages'] : ['items', 'total_pages']);
+        const { pagination } = onlyOperation(spec);
+        expect(pagination?.dataPath, label).toBe('result.items');
+        expect(pagination?.itemType, label).toEqual({ kind: 'model', name: itemType });
+      }
       expect(warn).not.toHaveBeenCalled();
     });
   });
