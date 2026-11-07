@@ -22,13 +22,14 @@ import type { ApiSpec } from '../../src/ir/types.js';
 
 const info = { title: 'repro', version: '1' };
 
+/** A JSON request body carrying `schema`. */
+function bodyOfSchema(schema: unknown) {
+  return { content: { 'application/json': { schema } } };
+}
+
 /** A JSON request body: an object with the one required string property `prop`. */
 function bodyOf(prop: string) {
-  return {
-    content: {
-      'application/json': { schema: { type: 'object', required: [prop], properties: { [prop]: { type: 'string' } } } },
-    },
-  };
+  return bodyOfSchema({ type: 'object', required: [prop], properties: { [prop]: { type: 'string' } } });
 }
 
 /** A path item whose POST sends `{ [prop]: string }`, declaring `operationId` when given. */
@@ -271,8 +272,8 @@ describe('#580', () => {
     });
 
     // Colliding itself — `key_pet_adopted` is `KeyPetAdopted` too — it
-    // hashes `key:petAdopted`, the very string `petAdopted` hashes, and the
-    // two still name apart (`KeyPetAdopted15Fe0F` beside `PetAdopted15Fe0F`).
+    // would hash `key:petAdopted`, the very string `petAdopted` hashes, so
+    // it hashes its own prefixed text, `key:key:petAdopted`, instead.
     const colliding = { 'key:petAdopted': posting('literalId'), key_pet_adopted: posting('underscoreId'), ...pair };
     const collidingReversed = {
       ...pairReversed,
@@ -280,16 +281,16 @@ describe('#580', () => {
       'key:petAdopted': posting('literalId'),
     };
 
-    it('hashes the string the prefixed key hashes when it collides, and names apart', async () => {
+    it('hashes its own prefixed text when it collides, never the string the pair hashes', async () => {
       const spec = await parseJson(documentWith('3.1.0', colliding));
       expect(payloads(spec)).toEqual([
-        ['key:petAdopted', undefined, 'KeyPetAdopted15Fe0FPayload'],
+        ['key:petAdopted', undefined, 'KeyPetAdopted130B64Payload'],
         ['key_pet_adopted', undefined, 'KeyPetAdopted70A5A5Payload'],
         ['petAdopted', undefined, 'PetAdopted15Fe0FPayload'],
         ['noteAdded', 'petAdopted', 'PetAdoptedB0Ca6APayload'],
       ]);
       expect(modelFields(spec)).toEqual([
-        ['KeyPetAdopted15Fe0FPayload', ['literalId']],
+        ['KeyPetAdopted130B64Payload', ['literalId']],
         ['KeyPetAdopted70A5A5Payload', ['underscoreId']],
         ['PetAdopted15Fe0FPayload', ['petId']],
         ['PetAdoptedB0Ca6APayload', ['noteId']],
@@ -301,6 +302,59 @@ describe('#580', () => {
       const first = await parseJson(documentWith('3.1.0', colliding), 'first.json');
       const second = await parseJson(documentWith('3.1.0', collidingReversed), 'second.json');
       expect(orderFree(second)).toEqual(orderFree(first));
+    });
+
+    // Greptile's document (PR #652): `petAdopted`'s payload is a `oneOf`
+    // whose second variant pins `kind: key`, so that variant is named
+    // `KeyPetAdopted<hash>Payload` — the literal key's own payload name.
+    // Hashing one string, the two would never part and one payload would
+    // be dropped; the literal key hashing `key:key:petAdopted` parts them.
+    const unionPayload = {
+      oneOf: [
+        { type: 'object', properties: { kind: { const: 'adopted' }, petId: { type: 'string' } } },
+        { type: 'object', properties: { kind: { const: 'key' }, keyId: { type: 'string' } } },
+      ],
+    };
+    const postingUnion = {
+      post: { requestBody: bodyOfSchema(unionPayload), responses: { '200': { description: 'OK' } } },
+    };
+    const variant = {
+      petAdopted: postingUnion,
+      noteAdded: posting('noteId', 'petAdopted'),
+      'key:petAdopted': posting('literalId'),
+    };
+    const variantReversed = {
+      'key:petAdopted': posting('literalId'),
+      noteAdded: posting('noteId', 'petAdopted'),
+      petAdopted: postingUnion,
+    };
+
+    it("keeps the literal key's payload apart from a variant of the pair named like it", async () => {
+      const spec = await parseJson(documentWith('3.1.0', variant));
+      expect(payloads(spec)).toEqual([
+        ['petAdopted', undefined, undefined],
+        ['noteAdded', 'petAdopted', 'PetAdoptedB0Ca6APayload'],
+        ['key:petAdopted', undefined, 'KeyPetAdopted130B64Payload'],
+      ]);
+      const union = spec.webhooks?.[0]?.requestBody;
+      expect(union?.kind === 'union' ? union.variants : undefined).toEqual([
+        { kind: 'model', name: 'PetAdopted15Fe0FPayload' },
+        { kind: 'model', name: 'KeyPetAdopted15Fe0FPayload' },
+      ]);
+      expect(modelFields(spec)).toEqual([
+        ['KeyPetAdopted130B64Payload', ['literalId']],
+        ['KeyPetAdopted15Fe0FPayload', ['kind', 'keyId']],
+        ['PetAdopted15Fe0FPayload', ['kind', 'petId']],
+        ['PetAdoptedB0Ca6APayload', ['noteId']],
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("reads identical IR in both key orders with the variant named like the literal key's payload", async () => {
+      const first = await parseJson(documentWith('3.1.0', variant), 'first.json');
+      const second = await parseJson(documentWith('3.1.0', variantReversed), 'second.json');
+      expect(orderFree(second)).toEqual(orderFree(first));
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 
