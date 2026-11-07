@@ -198,6 +198,32 @@ describe('#605', () => {
     },
   );
 
+  // The review (#637): the Deprecation "Source per node" entry for `Field`
+  // said an `allOf` member's flag is not read, which holds for a typing
+  // member's alone; an annotating member's is read, on a field as on a header.
+  it.each(VERSIONS)(
+    "reads an annotating member's flag on a field as on a header, and leaves a typing member's on that member (the review, OAS %s)",
+    async (openapi) => {
+      const annotated = { allOf: [{ type: 'integer' }, { deprecated: true }] };
+      const typed = { allOf: [{ type: 'integer', deprecated: true }] };
+      const { spec, warnings } = await parseDoc(
+        petsDoc(
+          openapi,
+          { 'X-Notes': { schema: annotated }, 'X-Typed': { schema: typed } },
+          { components: { schemas: { Pet: { type: 'object', properties: { notes: annotated, typed } } } } },
+        ),
+      );
+      expect(warnings).toEqual([]);
+      const flags = (entries: ReadonlyArray<{ name: string; deprecated?: boolean }>): string[] =>
+        entries.map(({ name, deprecated }) => `${name}: ${deprecated}`);
+      expect(flags(spec.models.find(({ name }) => name === 'Pet')?.fields ?? [])).toEqual([
+        'notes: true',
+        'typed: undefined',
+      ]);
+      expect(flags(headersOf(spec))).toEqual(['X-Notes: true', 'X-Typed: undefined']);
+    },
+  );
+
   it.each(VERSIONS)(
     'reads the member as a field, a parameter and the model or enum built from the schema already do (OAS %s)',
     async (openapi) => {
