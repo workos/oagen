@@ -500,5 +500,55 @@ describe('#611', () => {
       expect(tagsField(field.ir, 'ErrorBodyWithTags').constraints).toBeUndefined();
       expect(tagsOf(field.ir, 'ErrorBodyWithTags')).toEqual(string);
     });
+
+    it('reads a oneOf as anyOf when the merge widens a variant beside one of its value kind, so nothing both bodies admit is rejected', async () => {
+      // Greptile on #639 (round 4): `^b` and `^c` differ, so the string is widened to any string, which now also
+      // matches "a", the literal's own value, and an exclusive `oneOf` would reject what both bodies admit.
+      const a = version === '3.0.3' ? { type: 'string', enum: ['a'] } : { const: 'a' };
+      const literal: TypeRef = { kind: 'literal', value: 'a' };
+      const overlap = await parse(
+        doc(version, {
+          ...getOp('pets', oneOf({ type: 'string', pattern: '^b' }, a)),
+          ...getOp('notes', oneOf({ type: 'string', pattern: '^c' }, a)),
+        }),
+      );
+      expect(overlap.warnings).toEqual([]);
+      expect(modelNames(overlap.ir)).toEqual(['ErrorBodyWithTags', 'Pet']);
+      expect(tagsOf(overlap.ir, 'ErrorBodyWithTags')).toEqual({
+        kind: 'union',
+        variants: [string, literal],
+        compositionKind: 'anyOf',
+      });
+      // An integer widened beside a number the same way: `0` matched the number alone in both bodies.
+      const numbers = await parse(
+        doc(version, {
+          ...getOp('pets', oneOf({ type: 'integer', minimum: 1 }, { type: 'number' })),
+          ...getOp('notes', oneOf({ type: 'integer', minimum: 2 }, { type: 'number' })),
+        }),
+      );
+      expect(numbers.warnings).toEqual([]);
+      expect(tagsOf(numbers.ir, 'ErrorBodyWithTagsIntegerOrTagsNumber')).toEqual({
+        kind: 'union',
+        variants: [integer, { kind: 'primitive', type: 'number' }],
+        compositionKind: 'anyOf',
+      });
+      // A string widened beside an integer can match nothing the integer matches: the `oneOf` stays.
+      const disjoint = await parse(
+        doc(version, { ...getOp('pets', oneOf(short, int)), ...getOp('notes', oneOf(int, str)) }),
+      );
+      expect(disjoint.warnings).toEqual([]);
+      expect(tagsOf(disjoint.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(unionOf(integer, string));
+      // Nothing widened: the `oneOf` keeps its variants and their limits, in either order.
+      const same = await parse(
+        doc(version, {
+          ...getOp('pets', oneOf({ type: 'string', pattern: '^b' }, a)),
+          ...getOp('notes', oneOf(a, { type: 'string', pattern: '^b' })),
+        }),
+      );
+      expect(same.warnings).toEqual([]);
+      expect(tagsOf(same.ir, 'ErrorBodyWithTags')).toEqual(
+        unionOf(literal, { kind: 'primitive', type: 'string', constraints: { pattern: '^b' } }),
+      );
+    });
   });
 });
