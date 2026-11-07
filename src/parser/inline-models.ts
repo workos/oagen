@@ -73,10 +73,28 @@ import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
+ * Whether `baseName` already carries `cleanParent` as its leading part and
+ * adds something after it (`PetOwner` or `PetsItem` under `Pet`), so that
+ * qualifying it would only double the parent (`PetPetOwner`). A name that is
+ * the parent's own (`Reply` under `Reply`, `Pet` under `Pet`) adds nothing
+ * and is not one: it is qualified like any other field's, never left as the
+ * name the component holds (workos/oagen#621). The one test for every
+ * inline name minted under a parent — a model's (`qualifyInlineModelName`)
+ * and an enum's (`inlineEnumName`, `mintedInlineNameEntries`).
+ */
+export function extendsParentName(baseName: string, cleanParent: string): boolean {
+  return baseName.length > cleanParent.length && baseName.startsWith(cleanParent);
+}
+
+/**
  * Qualify an inline model name with the parent schema name.
  * If `parentName` is provided and the field name doesn't already start with
- * the parent, the result is `${parentName}${PascalField}` with the trailing
- * word singularized (e.g., Connection + Domains → ConnectionDomain).
+ * the parent and add something after it (`extendsParentName`: Pet + PetOwner
+ * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
+ * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
+ * named like its parent is qualified too — Reply + Reply → ReplyReply, as
+ * Reply + Replies names its items — never left as the parent's own name,
+ * which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
@@ -84,7 +102,7 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // are clean, for response models as much as component ones.
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
-  if (baseName.startsWith(cleanParent)) return baseName;
+  if (extendsParentName(baseName, cleanParent)) return baseName;
   // Singularize the trailing PascalCase word of the combined name.
   // Split baseName into leading words + trailing word, singularize trailing.
   const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
@@ -177,7 +195,10 @@ export function mintedInlineNameEntries(
   const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     return [
-      { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
+      {
+        name: cleanParent && !extendsParentName(base, cleanParent) ? `${cleanParent}${base}` : base,
+        contextFree: false,
+      },
     ];
   };
   if (kind === 'allOf' && s.allOf) {
@@ -971,7 +992,12 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * nothing: the Paths Object's (an extension by the specification, which
  * `extractOperations` steps over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification, which `extractCallbacks` steps over). Decided from the document's content
+ * the specification, which `extractCallbacks` steps over). An object
+ * written as a `$ref` — a parameter, request body, response or header, a
+ * path item or a callback — is stepped over whole, as the readers step
+ * over it, so a union under a `content` or `headers` written beside the
+ * `$ref` is under no root and contests nothing, whether the ref resolves
+ * or not (#601). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
  * document, before any union is named (`extractSchemas`), so the union
  * TypeRef and every extractor read the same decision. `undefined` clears
@@ -1050,10 +1076,23 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * (#382). A `$ref` entry
  * anywhere carries no schema of its own: the target is a component, or
  * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
- * read under its own map. A `schema` is yielded and not entered, so one
- * shared by two sites is yielded for each; every other object is entered once, which
- * ends the walk on a document that refers back to itself. `example`,
- * `examples`, `links` and extensions are never entered.
+ * read under its own map, and the object around the `$ref` is stepped
+ * over whole, as the readers step over it — a Parameter, Header, Request
+ * Body or Response Object written as a Reference Object, whose every other
+ * key OpenAPI says to ignore (`followReference`, #562), a Path Item's
+ * `$ref` entry, whose target is taken whole (`resolvePathItemRef`), and a
+ * Callback Object's (`resolveCallbackRef`) — so a `schema`, `content` or
+ * `headers` written beside the `$ref` is never read, whether the ref
+ * resolves or not, at every site that takes one: on an operation, a
+ * webhook or a callback, and as a `components` entry itself (#601: a
+ * titled union under a `content` beside a `404`'s `$ref` contested the
+ * `Tag` of a component's `collar` and renamed it `TagPetCollar`, though
+ * the parser typed nothing from it). A `$ref` key holding `undefined` is
+ * no reference, as `followReference` reads it. A `schema` is yielded and
+ * not entered, so one shared by two sites is yielded for each; every other
+ * object is entered once, which ends the walk on a document that refers
+ * back to itself. `example`, `examples`, `links` and extensions are never
+ * entered.
  */
 function schemaRootsOf(
   document: Record<string, unknown>,
@@ -1093,31 +1132,43 @@ function schemaRootsOf(
     schema(value['schema']);
     named(value['encoding'], encoding);
   };
+  /**
+   * Whether `value` is written as a reference: a `$ref` with a value, which
+   * the readers follow to its target and read nothing else of, so every
+   * key beside it is stepped over (#601). A `$ref` holding `undefined` is
+   * no reference, as `followReference` reads it.
+   */
+  const isReference = (value: Record<string, unknown>): boolean => value['$ref'] !== undefined;
   /** A Parameter Object or a Header Object: the same schema sites. */
   const parameter = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     schema(value['schema']);
     named(value['content'], mediaType);
   };
   const requestBody = (value: unknown): void => {
-    if (enter(value)) named(value['content'], mediaType);
+    if (enter(value) && !isReference(value)) named(value['content'], mediaType);
   };
   const response = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     named(value['headers'], parameter);
     named(value['content'], mediaType);
   };
   const pathItem = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     listed(value['parameters'], parameter);
     for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
+  };
+  /** A Callback Object: an expression or an `x-` extension per key, each a Path Item; one written as a reference is stepped over. */
+  const callback = (value: unknown): void => {
+    if (isRecord(value) && isReference(value)) return;
+    keyed(value, pathItem);
   };
   const operation = (value: unknown): void => {
     if (!enter(value)) return;
     listed(value['parameters'], parameter);
     requestBody(value['requestBody']);
     keyed(value['responses'], response);
-    named(value['callbacks'], (callback) => keyed(callback, pathItem));
+    named(value['callbacks'], callback);
   };
 
   // `paths` steps over `x-` extensions, as `extractOperations` does; every
@@ -1130,7 +1181,7 @@ function schemaRootsOf(
     named(components['requestBodies'], requestBody);
     named(components['headers'], parameter);
     named(components['pathItems'], pathItem);
-    named(components['callbacks'], (callback) => keyed(callback, pathItem));
+    named(components['callbacks'], callback);
   }
   return roots;
 }
@@ -3782,18 +3833,28 @@ function typedOutsideMerges<T>(build: () => T): T {
 
 /**
  * The merged shape as one object schema, for a site that builds its model
- * from a schema rather than from the merged list (`extractDirectResource`,
- * `extractInlineModelDeep`): every property under its name in merged order,
- * the collected `required`, and the wrapper's own `deprecated`, limits and
- * link, as `buildMergedModel` carries them — a member's stay on that member,
- * a `$ref` member's on its component. The wrapper's `description` is left
- * off, as both sites left it off the schemas they rebuilt before.
+ * from a schema rather than from the merged list (`extractDirectResource`:
+ * the primary success body and each further success code's — every other
+ * body site builds from the list): every property under its name in
+ * merged order, the collected `required`, the wrapper's limits conjoined
+ * with its inline members', and the wrapper layer's `description`,
+ * `deprecated`, link and `x-*` keys, exactly as `buildMergedModel` carries
+ * them onto the model a field's merge builds — a member's stay on that
+ * member, a `$ref` member's on its component. So the model built from the
+ * schema (`buildInlineModel`) is documented as the model built from the
+ * list is: a response body `{ allOf: [{ $ref: Base }, { properties: { name
+ * } }, { description: 'A pet.' }] }` is described "A pet.", as the same
+ * schema is as a request body, a field, a secondary media type's or an
+ * error body (#604: the text alone was left off here, kept off from before
+ * the merge read the wrapper layer at all, so `CreatePetResponse` had none
+ * while `CreatePetRequest` did).
  */
 export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
   return {
     type: 'object',
     properties: Object.fromEntries(merged.properties.map((p) => [p.name, p.schema])),
     required: merged.required,
+    ...(merged.description !== undefined ? { description: merged.description } : {}),
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
