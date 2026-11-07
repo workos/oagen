@@ -73,10 +73,28 @@ import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
+ * Whether `baseName` already carries `cleanParent` as its leading part and
+ * adds something after it (`PetOwner` or `PetsItem` under `Pet`), so that
+ * qualifying it would only double the parent (`PetPetOwner`). A name that is
+ * the parent's own (`Reply` under `Reply`, `Pet` under `Pet`) adds nothing
+ * and is not one: it is qualified like any other field's, never left as the
+ * name the component holds (workos/oagen#621). The one test for every
+ * inline name minted under a parent — a model's (`qualifyInlineModelName`)
+ * and an enum's (`inlineEnumName`, `mintedInlineNameEntries`).
+ */
+export function extendsParentName(baseName: string, cleanParent: string): boolean {
+  return baseName.length > cleanParent.length && baseName.startsWith(cleanParent);
+}
+
+/**
  * Qualify an inline model name with the parent schema name.
  * If `parentName` is provided and the field name doesn't already start with
- * the parent, the result is `${parentName}${PascalField}` with the trailing
- * word singularized (e.g., Connection + Domains → ConnectionDomain).
+ * the parent and add something after it (`extendsParentName`: Pet + PetOwner
+ * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
+ * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
+ * named like its parent is qualified too — Reply + Reply → ReplyReply, as
+ * Reply + Replies names its items — never left as the parent's own name,
+ * which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
@@ -84,7 +102,7 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // are clean, for response models as much as component ones.
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
-  if (baseName.startsWith(cleanParent)) return baseName;
+  if (extendsParentName(baseName, cleanParent)) return baseName;
   // Singularize the trailing PascalCase word of the combined name.
   // Split baseName into leading words + trailing word, singularize trailing.
   const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
@@ -177,7 +195,10 @@ export function mintedInlineNameEntries(
   const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     return [
-      { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
+      {
+        name: cleanParent && !extendsParentName(base, cleanParent) ? `${cleanParent}${base}` : base,
+        contextFree: false,
+      },
     ];
   };
   if (kind === 'allOf' && s.allOf) {
@@ -3771,18 +3792,28 @@ function typedOutsideMerges<T>(build: () => T): T {
 
 /**
  * The merged shape as one object schema, for a site that builds its model
- * from a schema rather than from the merged list (`extractDirectResource`,
- * `extractInlineModelDeep`): every property under its name in merged order,
- * the collected `required`, and the wrapper's own `deprecated`, limits and
- * link, as `buildMergedModel` carries them — a member's stay on that member,
- * a `$ref` member's on its component. The wrapper's `description` is left
- * off, as both sites left it off the schemas they rebuilt before.
+ * from a schema rather than from the merged list (`extractDirectResource`:
+ * the primary success body and each further success code's — every other
+ * body site builds from the list): every property under its name in
+ * merged order, the collected `required`, the wrapper's limits conjoined
+ * with its inline members', and the wrapper layer's `description`,
+ * `deprecated`, link and `x-*` keys, exactly as `buildMergedModel` carries
+ * them onto the model a field's merge builds — a member's stay on that
+ * member, a `$ref` member's on its component. So the model built from the
+ * schema (`buildInlineModel`) is documented as the model built from the
+ * list is: a response body `{ allOf: [{ $ref: Base }, { properties: { name
+ * } }, { description: 'A pet.' }] }` is described "A pet.", as the same
+ * schema is as a request body, a field, a secondary media type's or an
+ * error body (#604: the text alone was left off here, kept off from before
+ * the merge read the wrapper layer at all, so `CreatePetResponse` had none
+ * while `CreatePetRequest` did).
  */
 export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
   return {
     type: 'object',
     properties: Object.fromEntries(merged.properties.map((p) => [p.name, p.schema])),
     required: merged.required,
+    ...(merged.description !== undefined ? { description: merged.description } : {}),
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),
