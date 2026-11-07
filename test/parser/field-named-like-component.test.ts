@@ -312,6 +312,30 @@ describe('#621', () => {
       });
     });
 
+    describe('a `reply` field beside a `replies` array (#635 review)', () => {
+      // On its own, `replies` names its items `ReplyReply`; beside `reply`,
+      // the field holds that name and the items step to `ReplyRepliesItem`.
+      it.each(orders)(
+        'hands `ReplyReply` to the field and names the items `ReplyRepliesItem`, with no warning, properties %s',
+        async (_order, reversed) => {
+          const replies = { type: 'array', items: { type: 'object', properties: { body: str } } };
+          const entries: Array<[string, unknown]> = [
+            ['reply', text],
+            ['replies', replies],
+          ];
+          const spec = await parseJson(
+            componentDoc(openapi, 'Reply', { Reply: { type: 'object', properties: schemasIn(reversed, entries) } }),
+          );
+          expect(modelNames(spec).sort()).toEqual(['Reply', 'ReplyRepliesItem', 'ReplyReply']);
+          expect(fieldType(spec, 'Reply', 'reply')).toEqual(model('ReplyReply'));
+          expect(fieldType(spec, 'Reply', 'replies')).toEqual({ kind: 'array', items: model('ReplyRepliesItem') });
+          expect(fieldNames(spec, 'ReplyReply')).toEqual(['text']);
+          expect(fieldNames(spec, 'ReplyRepliesItem')).toEqual(['body']);
+          expect(warnings()).toEqual([]);
+        },
+      );
+    });
+
     describe('when a component already holds `ReplyReply`', () => {
       const reply = { type: 'object', properties: { reply: text } };
 

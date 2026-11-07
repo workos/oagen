@@ -75,6 +75,7 @@ import {
   isNullSchema,
   nonObjectVariantContexts,
   pinnedDeclarationAdmitsNull,
+  pinnedDeclarationLayers,
   pinnedDeclarationValue,
   rehearse,
   unwrapCollapsedWrappers,
@@ -97,6 +98,8 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  LIFTED_DECLARATION_KEYWORDS,
+  levelSettings,
   allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
@@ -4919,10 +4922,19 @@ function typePickedRequestBody(
  * variant beside one pinning `sms` folds to a `kind` typed
  * `nullable<enum>`, as the variant's own field is `nullable<literal>`
  * (#607 review: the fold rebuilt the field without `null`, as it had
- * dropped a `nullable: true` or a type list before). The declaration as
- * written still documents its value — its own `description` and
- * `deprecated`, the wrapper's for a wrapped const. Gating on an *explicit*
- * `discriminator` keeps undiscriminated `oneOf` bodies untouched.
+ * dropped a `nullable: true` or a type list before). The rebuilt field
+ * carries the settings every variant's declaration agrees on — the flags,
+ * text, default, examples, link, limits and `x-*` keys a field reads
+ * (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off its levels as
+ * `buildFieldFromSchema` reads a field's (`levelSettings` over
+ * `pinnedDeclarationLayers`), so two variants writing `kind: { allOf: [{
+ * const: … }], readOnly: true }` fold to a read-only `kind`, as each
+ * variant's own field is (#607 review: `description` alone was carried,
+ * and the fold of a body whose variants all wrote `readOnly: true` dropped
+ * the flag, so `buildForModel` put the field into request examples). The
+ * declaration as written still documents its value — its own `description`
+ * and `deprecated`, the wrapper's for a wrapped const. Gating on an
+ * *explicit* `discriminator` keeps undiscriminated `oneOf` bodies untouched.
  */
 function flattenDiscriminatedUnionBody(
   schema: SchemaObject,
@@ -4955,6 +4967,11 @@ function flattenDiscriminatedUnionBody(
   }
 
   const variantCount = variants.length;
+  // The discriminator's declarations as a field reads each — off its
+  // levels, through the wrappers and references the pin is read through —
+  // so declarations spelled differently are compared alike.
+  const settingsOf = (declared: readonly SchemaObject[]): SchemaObject[] =>
+    declared.map((dp) => levelSettings(pinnedDeclarationLayers(dp, componentSchemas)));
   // Every declaration each property receives, in variant order; the first
   // types the field, and the extensions are the ones every declaration
   // agrees on (`agreedExtensions`, the one rule for a property several
@@ -4990,12 +5007,19 @@ function flattenDiscriminatedUnionBody(
           // repeated shape (`shapeVariant`; workos/oagen#501: the flag was
           // dropped). A lone value stays a one-value `enum`, a literal, where
           // a `oneOf` of one const would be a union. The enum and the field
-          // carry the text and keys every declaration agrees on
+          // carry the settings every declaration agrees on — the flags,
+          // text, default, examples, link, limits and `x-*` keys a field
+          // reads (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off
+          // its levels as a field reads them (`levelSettings` over
+          // `pinnedDeclarationLayers`: the declaration, its annotating
+          // members, then what a `$ref` or a wrapper leads to) —
           // (workos/oagen#446: the first variant's text, which documents one
-          // value, was the enum's). `null` is admitted when any variant
-          // admits it beside its value — the flag on the one-value enum, a
-          // `{ type: 'null' }` variant among the consts, the spellings the
-          // type builder reads as `nullable`.
+          // value, was the enum's; #607 review: `description` alone was
+          // carried, so a `readOnly` every variant wrote was dropped).
+          // `null` is admitted when any variant admits it beside its value
+          // — the flag on the one-value enum, a `{ type: 'null' }` variant
+          // among the consts, the spellings the type builder reads as
+          // `nullable`.
           {
             type: 'string',
             ...(pins.size === 1
@@ -5010,8 +5034,8 @@ function flattenDiscriminatedUnionBody(
                     ...(admitsNull ? [{ type: 'null' }] : []),
                   ],
                 }),
-            ...agreedDeclarationKeys(declared, ['description']),
-            ...agreedExtensions(declared),
+            ...agreedDeclarationKeys(settingsOf(declared), LIFTED_DECLARATION_KEYWORDS),
+            ...agreedExtensions(settingsOf(declared)),
           }
         : withAgreedExtensions(declared[0]!, agreedExtensions(declared));
   }
