@@ -1183,4 +1183,63 @@ describe('#600', () => {
       '  [staleness] warning: Animals — Class "Animals" is no longer defined in the OpenAPI spec',
     );
   });
+
+  it('keeps a baseline method the overlay maps to a spec operation in scope, under its own name', async () => {
+    // `generate --api-surface` wrote `Animals.fetchAll` for `GET /pets`, the
+    // name the manifest in `--output` maps the route to, through the overlay;
+    // the SDK renamed it `listPets`. The method paths for `Animals` were
+    // `list_all`, `list`, `get_pet` and `get`, so `filterSurface` dropped
+    // `fetchAll` from the baseline and the rename passed at `2/2`.
+    const overlay = (routes: Record<string, string>) => ({
+      methodByOperation: new Map(
+        Object.entries(routes).map(([httpKey, methodName]) => [
+          httpKey,
+          { className: 'Animals', methodName, params: [], returnType: 'Pet' },
+        ]),
+      ),
+      httpKeyByMethod: new Map(Object.entries(routes).map(([httpKey, m]) => [`Animals.${m}`, httpKey])),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+      modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
+    });
+    const spec = write('pets.json', petsDoc);
+    const apiSurface = write(
+      'baseline.json',
+      makeSurface({ classes: { Animals: animals('fetchAll', 'getPet', 'legacy') }, interfaces }),
+    );
+    mockExtract.mockResolvedValue(makeSurface({ classes: { Animals: animals('listPets', 'getPet') }, interfaces }));
+    const opts = {
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 0,
+      ...settings,
+    };
+
+    // A route the spec does not declare keeps nothing in scope: `legacy` is
+    // hand-written, and `fetchAll` matches no resolved name.
+    mockBuildOverlayLookup.mockReturnValue(overlay({ 'GET /legacy': 'legacy' }));
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith('Compat: passed');
+
+    mockBuildOverlayLookup.mockReturnValue(overlay({ 'GET /pets': 'fetchAll', 'GET /pets/{id}': 'getPet' }));
+    await expect(verifyCommand(opts)).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: Animals.fetchAll — Symbol "Animals.fetchAll" was removed',
+    );
+    // Built as `generate --api-surface` builds it: from the baseline, the
+    // manifest in `--output` (none here), the spec and the language's hints.
+    expect(mockBuildOverlayLookup).toHaveBeenLastCalledWith(
+      JSON.parse(readFileSync(apiSurface, 'utf-8')),
+      undefined,
+      expect.objectContaining({ services: expect.any(Array) }),
+      expect.objectContaining({ derivedModelNames: expect.any(Function) }),
+    );
+  });
 });

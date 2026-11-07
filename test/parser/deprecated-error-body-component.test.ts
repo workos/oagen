@@ -12,13 +12,15 @@ import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
  * was typed as a deprecated model, and a component whose `message` was
  * deprecated took bodies whose `message` was live, so their field read as
  * deprecated. `componentAccepts` read neither the component's `deprecated`
- * nor its fields'. Now the fold reads the flags as every other inline-model
- * comparison does: a deprecated component takes no body (#441), a field's
- * `deprecated` is shape — in the key, in the name
- * (`ErrorBodyWithDeprecatedMessage`) and in what a component must match —
- * and a body's own flag is read apart from its shape, the shared model
- * deprecated only when every body is, a deprecated body folding onto a live
- * model with a warning.
+ * nor its fields'. Now a deprecated component takes no body (#441), and a
+ * component takes a body only where it deprecates no field the body keeps
+ * live; a live component, or a live field of one, takes a deprecated body
+ * or a body's deprecated field with a warning. Neither the body's own flag
+ * nor a field's is shape: the shared model, and each of its fields, is
+ * deprecated only when every body agrees, so a flag flip never moves a
+ * body (the review's findings 1 and 2), and the warning that leaves a
+ * body as it is prints the component's shape, so it says what differs
+ * (finding 3).
  */
 
 type Doc = Record<string, unknown>;
@@ -41,6 +43,15 @@ const deprecatedMessageBody = (): Doc => obj({ message: { ...str, deprecated: tr
 /** `{ message, hint? }`, `hint` deprecated or live. */
 const hintedBody = (deprecatedHint: boolean): Doc =>
   obj({ message: str, hint: deprecatedHint ? { ...str, deprecated: true } : str }, ['message']);
+/** The review's finding 2: `{ message, detail: { reason } }`, all required, `detail` deprecated or live. */
+const detailBody = (deprecatedDetail: boolean): Doc =>
+  obj({ message: str, detail: obj({ reason: str }, ['reason'], deprecatedDetail ? { deprecated: true } : {}) });
+/** The review's finding 2 with `errors: [{ code }]` items instead, the array deprecated or live. */
+const errorsBody = (deprecatedErrors: boolean): Doc =>
+  obj({
+    message: str,
+    errors: { type: 'array', items: obj({ code: str }), ...(deprecatedErrors ? { deprecated: true } : {}) },
+  });
 
 /** `GET /<name>s` (`get<Name>`) returning `{ name? }` on `200` and `body` on `404` — the issue's operations. */
 function getOp(name: string, body: Doc = messageBody()): Doc {
@@ -81,12 +92,20 @@ const errorTypes = (spec: ApiSpec): string[] =>
   spec.services
     .flatMap((service) => service.operations)
     .map((op) => `${op.name} ${op.errors[0].statusCode}: ${refName(op.errors[0].type)}`);
-/** `ErrorBody (deprecated) { message }` per model, in list order — what the issue's script prints. */
+/** `ErrorBody (deprecated) { message }` per model, in list order — what the issue's script prints, a field's model or item model named after it. */
 const modelShapes = (spec: ApiSpec): string[] =>
   spec.models.map(
     ({ deprecated, fields, name }) =>
       `${name}${deprecated ? ' (deprecated)' : ''} { ${fields
-        .map((field) => `${field.name}${field.deprecated ? ' (deprecated)' : ''}`)
+        .map((field) => {
+          const nested =
+            field.type.kind === 'model'
+              ? `: ${field.type.name}`
+              : field.type.kind === 'array' && field.type.items.kind === 'model'
+                ? `: ${field.type.items.name}[]`
+                : '';
+          return `${field.name}${field.deprecated ? ' (deprecated)' : ''}${nested}`;
+        })
         .join(', ')} }`,
   );
 /** The exit code `oagen diff` gives a diff (`src/cli/diff.ts`): 2 on a breaking change, 1 on any other change, 0 on none. */
@@ -114,13 +133,20 @@ function describeDiff(oldSpec: ApiSpec, newSpec: ApiSpec): { changes: string[]; 
   };
 }
 
+/** The warning that leaves the issue's two bodies as they are, `holder` printing the component's flag and shape (finding 3). */
 const leftAsTheyAre = (holder: string, shape = '{ message: string }') =>
   `[oagen] Warning: The shared error body ${shape} would be named "ErrorBody", which ${holder} already holds — keeping models "GetNoteError404", "GetPetError404" as they are; give the two the same shape, or rename one`;
+const deprecatedComponent = 'deprecated component schema "ErrorBody" { message: string }';
+const deprecatedFieldComponent = 'component schema "ErrorBody" { message (deprecated): string }';
+
+const versions = ['3.0.3', '3.1.0'] as const;
 
 describe('#629', () => {
   type Order = 'pets-first' | 'notes-first';
-  const ops = (order: Order): Doc =>
-    order === 'pets-first' ? { ...getOp('pet'), ...getOp('note') } : { ...getOp('note'), ...getOp('pet') };
+  const ops = (order: Order, body: Doc = messageBody()): Doc =>
+    order === 'pets-first'
+      ? { ...getOp('pet', body), ...getOp('note', body) }
+      : { ...getOp('note', body), ...getOp('pet', body) };
   /** The issue's `repro.json`: `getPet` and `getNote`, each with an inline `{ message }` 404, beside a deprecated `ErrorBody` component of that shape. */
   const repro = (openapi: string, order: Order = 'pets-first'): Doc =>
     doc(ops(order), { ErrorBody: messageBody({ deprecated: true }) }, openapi);
@@ -130,7 +156,7 @@ describe('#629', () => {
   /** The issue's `old.json`: the same, `ErrorBody` live. */
   const old = (openapi: string): Doc => doc(ops('pets-first'), { ErrorBody: messageBody() }, openapi);
 
-  describe.each(['3.0.3', '3.1.0'] as const)('under OAS %s', (openapi) => {
+  describe.each(versions)('under OAS %s', (openapi) => {
     it('a deprecated `ErrorBody` component takes no live body: each keeps a live model of its own, as beside a component of another shape', async () => {
       const { spec, warnings } = await parse(repro(openapi));
       expect(errorTypes(spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: GetNoteError404']);
@@ -141,10 +167,10 @@ describe('#629', () => {
         'GetPetError404 { message }',
         'GetNoteError404 { message }',
       ]);
-      expect(warnings).toEqual([leftAsTheyAre('deprecated component schema "ErrorBody"')]);
+      expect(warnings).toEqual([leftAsTheyAre(deprecatedComponent)]);
     });
 
-    it('a component whose `message` is deprecated takes no body whose `message` is live, as it takes no body of another shape', async () => {
+    it('a component whose `message` is deprecated takes no body whose `message` is live, the warning printing which side deprecates it', async () => {
       const { spec, warnings } = await parse(field(openapi));
       expect(errorTypes(spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: GetNoteError404']);
       expect(modelShapes(spec)).toEqual([
@@ -154,7 +180,7 @@ describe('#629', () => {
         'GetPetError404 { message }',
         'GetNoteError404 { message }',
       ]);
-      expect(warnings).toEqual([leftAsTheyAre('component schema "ErrorBody"')]);
+      expect(warnings).toEqual([leftAsTheyAre(deprecatedFieldComponent)]);
     });
 
     it('a live `ErrorBody` of the shape still takes both bodies (`old.json`)', async () => {
@@ -215,67 +241,125 @@ describe('#629', () => {
         ],
       });
     });
+
+    it('deprecating `message` on every `{ message }` body, or on a lone one, is one additive `field-deprecated-changed`, exit 1 (the review’s finding 1)', async () => {
+      for (const paths of [
+        [ops('pets-first'), ops('pets-first', deprecatedMessageBody())],
+        [getOp('pet'), getOp('pet', deprecatedMessageBody())],
+      ]) {
+        const before = await parse(doc(paths[0], {}, openapi));
+        const after = await parse(doc(paths[1], {}, openapi));
+        expect(after.warnings).toEqual([]);
+        expect(errorTypes(after.spec)).toEqual(errorTypes(before.spec));
+        expect(errorTypes(after.spec)[0]).toBe('getPet 404: ErrorBody');
+        expect(modelShapes(after.spec)).toContain('ErrorBody { message (deprecated) }');
+        expect(describeDiff(before.spec, after.spec)).toEqual({
+          exitCode: 1,
+          changes: ['model-modified ErrorBody: additive', '  field-deprecated-changed message: additive'],
+        });
+      }
+    });
+
+    it('a nested body shared by a live parent and one whose field is deprecated keeps its name, and the live parent its type (the review’s finding 2)', async () => {
+      const before = await parse(doc(ops('pets-first', detailBody(false)), {}, openapi));
+      const after = await parse(
+        doc({ ...getOp('pet', detailBody(false)), ...getOp('note', detailBody(true)) }, {}, openapi),
+      );
+      expect(before.warnings).toEqual([]);
+      expect(errorTypes(after.spec)).toEqual([
+        'getPet 404: ErrorBodyWithReasonDetail',
+        'getNote 404: ErrorBodyWithReasonDetail',
+      ]);
+      expect(modelShapes(after.spec).filter((shape) => shape.startsWith('ErrorBody'))).toEqual([
+        'ErrorBodyWithReasonDetail { message, detail: ErrorBodyWithReasonDetailDetail }',
+        'ErrorBodyWithReasonDetailDetail { reason }',
+      ]);
+      expect(after.warnings).toEqual([
+        '[oagen] Warning: The shared error body "ErrorBodyWithReasonDetailDetail" is declared deprecated by "GetNoteError404Detail" and live by "GetPetError404Detail" — keeping it live',
+        '[oagen] Warning: The shared error body "ErrorBodyWithReasonDetail" has "detail" declared deprecated by "GetNoteError404" and live by "GetPetError404" — keeping it live',
+      ]);
+      expect(describeDiff(before.spec, after.spec)).toEqual({ exitCode: 0, changes: [] });
+      // `errors: [{ code }]` items instead, the array deprecated on one body.
+      const items = await parse(doc(ops('pets-first', errorsBody(false)), {}, openapi));
+      const itemsAfter = await parse(
+        doc({ ...getOp('pet', errorsBody(false)), ...getOp('note', errorsBody(true)) }, {}, openapi),
+      );
+      expect(errorTypes(itemsAfter.spec)).toEqual([
+        'getPet 404: ErrorBodyWithCodeErrors',
+        'getNote 404: ErrorBodyWithCodeErrors',
+      ]);
+      expect(modelShapes(itemsAfter.spec).filter((shape) => shape.startsWith('ErrorBody'))).toEqual([
+        'ErrorBodyWithCodeError { code }',
+        'ErrorBodyWithCodeErrors { message, errors: ErrorBodyWithCodeError[] }',
+      ]);
+      expect(itemsAfter.warnings).toEqual([
+        '[oagen] Warning: The shared error body "ErrorBodyWithCodeErrors" has "errors" declared deprecated by "GetNoteError404" and live by "GetPetError404" — keeping it live',
+      ]);
+      expect(describeDiff(items.spec, itemsAfter.spec)).toEqual({ exitCode: 0, changes: [] });
+    });
   });
 
-  describe('a field’s `deprecated` is shape, as it is wherever an inline model is compared', () => {
-    it('a body whose `message` is deprecated and one whose `message` is live are two models, `ErrorBodyWithDeprecatedMessage` beside `ErrorBody`, in either order', async () => {
+  describe('a field’s `deprecated` is settled among the bodies of a shape as the body’s own is', () => {
+    it('a body whose `message` is deprecated beside one whose `message` is live folds onto one live `ErrorBody`, announced, in either order, and `oagen diff` reports nothing', async () => {
+      const live = await parse(doc(ops('pets-first')));
       for (const paths of [
         { ...getOp('pet', deprecatedMessageBody()), ...getOp('note') },
         { ...getOp('note'), ...getOp('pet', deprecatedMessageBody()) },
       ]) {
         const { spec, warnings } = await parse(doc(paths));
-        expect(warnings).toEqual([]);
-        expect([...errorTypes(spec)].sort()).toEqual([
-          'getNote 404: ErrorBody',
-          'getPet 404: ErrorBodyWithDeprecatedMessage',
+        expect([...errorTypes(spec)].sort()).toEqual(['getNote 404: ErrorBody', 'getPet 404: ErrorBody']);
+        expect(modelShapes(spec)).toContain('ErrorBody { message }');
+        expect(warnings).toEqual([
+          '[oagen] Warning: The shared error body "ErrorBody" has "message" declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
         ]);
-        expect(modelShapes(spec).filter((shape) => shape.startsWith('ErrorBody'))).toEqual([
-          'ErrorBody { message }',
-          'ErrorBodyWithDeprecatedMessage { message (deprecated) }',
-        ]);
+        expect(describeDiff(live.spec, spec)).toEqual({ exitCode: 0, changes: [] });
       }
     });
 
-    it('two bodies that deprecate `message` share `ErrorBodyWithDeprecatedMessage`, which a live component of that name and shape takes', async () => {
-      const paths = { ...getOp('pet', deprecatedMessageBody()), ...getOp('note', deprecatedMessageBody()) };
+    it('two bodies that deprecate `message` share `ErrorBody` with the flag, which a component of that name and shape takes', async () => {
+      const paths = ops('pets-first', deprecatedMessageBody());
       const shared = await parse(doc(paths));
       expect(shared.warnings).toEqual([]);
-      expect(errorTypes(shared.spec)).toEqual([
-        'getPet 404: ErrorBodyWithDeprecatedMessage',
-        'getNote 404: ErrorBodyWithDeprecatedMessage',
-      ]);
-      expect(modelShapes(shared.spec)).toContain('ErrorBodyWithDeprecatedMessage { message (deprecated) }');
-      const component = await parse(doc(paths, { ErrorBodyWithDeprecatedMessage: deprecatedMessageBody() }));
+      expect(errorTypes(shared.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
+      expect(modelShapes(shared.spec)).toContain('ErrorBody { message (deprecated) }');
+      const component = await parse(doc(paths, { ErrorBody: deprecatedMessageBody() }));
       expect(component.warnings).toEqual([]);
-      expect(errorTypes(component.spec)).toEqual([
-        'getPet 404: ErrorBodyWithDeprecatedMessage',
-        'getNote 404: ErrorBodyWithDeprecatedMessage',
-      ]);
+      expect(errorTypes(component.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
       expect(modelShapes(component.spec)).toEqual([
-        'ErrorBodyWithDeprecatedMessage { message (deprecated) }',
+        'ErrorBody { message (deprecated) }',
         'GetPetResponse { name }',
         'GetNoteResponse { name }',
       ]);
     });
 
-    it('a component takes a body only when it flags each optional field as the body does, in either direction', async () => {
+    it('a live component, or a live field of one, takes a body’s deprecated field with a warning; a field the component deprecates takes no live one', async () => {
+      const liveComponent = await parse(doc(ops('pets-first', deprecatedMessageBody()), { ErrorBody: messageBody() }));
+      expect(errorTypes(liveComponent.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
+      expect(modelShapes(liveComponent.spec)).toEqual([
+        'ErrorBody { message }',
+        'GetPetResponse { name }',
+        'GetNoteResponse { name }',
+      ]);
+      expect(liveComponent.warnings).toEqual([
+        '[oagen] Warning: The shared error body "ErrorBody" has "message" declared deprecated by "GetNoteError404", "GetPetError404" and live by component schema "ErrorBody" — keeping it live',
+      ]);
       const liveHint = await parse(
         doc({ ...getOp('pet', hintedBody(true)), ...getOp('note') }, { ErrorBody: hintedBody(false) }),
       );
-      expect(errorTypes(liveHint.spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: ErrorBody']);
+      expect(errorTypes(liveHint.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
       expect(liveHint.warnings).toEqual([
-        '[oagen] Warning: The shared error body { message: string, hint? (deprecated): string } would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one',
+        '[oagen] Warning: The shared error body "ErrorBody" has "hint" declared deprecated by "GetPetError404" and live by component schema "ErrorBody" — keeping it live',
       ]);
       const deprecatedHint = await parse(
         doc({ ...getOp('pet', hintedBody(false)), ...getOp('note') }, { ErrorBody: hintedBody(true) }),
       );
       expect(errorTypes(deprecatedHint.spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: ErrorBody']);
       expect(deprecatedHint.warnings).toEqual([
-        '[oagen] Warning: The shared error body { message: string, hint?: string } would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one',
+        '[oagen] Warning: The shared error body { message: string, hint?: string } would be named "ErrorBody", which component schema "ErrorBody" { message: string, hint? (deprecated): string } already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one',
       ]);
     });
 
-    it('an optional field’s flag is not shape: it is kept when every body that carries the field agrees, and dropped with a warning when they do not', async () => {
+    it('an optional field’s flag is kept when every body that carries the field agrees, and dropped with a warning when they do not', async () => {
       const carried = await parse(doc({ ...getOp('pet', hintedBody(true)), ...getOp('note') }));
       expect(carried.warnings).toEqual([]);
       expect(errorTypes(carried.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
@@ -284,7 +368,7 @@ describe('#629', () => {
       expect(errorTypes(disagreeing.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
       expect(modelShapes(disagreeing.spec)).toContain('ErrorBody { message, hint }');
       expect(disagreeing.warnings).toEqual([
-        '[oagen] Warning: The shared error body "ErrorBody" keeps "hint" live: its bodies flag it apart ("GetNoteError404" live, "GetPetError404" deprecated); deprecate it on every body, or on none',
+        '[oagen] Warning: The shared error body "ErrorBody" has "hint" declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
       ]);
     });
   });
@@ -327,10 +411,7 @@ describe('#629', () => {
         '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetTagError404" and live by component schema "ErrorBody" — keeping it live',
       ]);
       const ontoDeprecated = await parse(
-        doc(
-          { ...getOp('pet', messageBody({ deprecated: true })), ...getOp('note', messageBody({ deprecated: true })) },
-          { ErrorBody: messageBody({ deprecated: true }) },
-        ),
+        doc(ops('pets-first', messageBody({ deprecated: true })), { ErrorBody: messageBody({ deprecated: true }) }),
       );
       expect(errorTypes(ontoDeprecated.spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: GetNoteError404']);
       expect(modelShapes(ontoDeprecated.spec)).toEqual([
@@ -340,14 +421,14 @@ describe('#629', () => {
         'GetPetError404 (deprecated) { message }',
         'GetNoteError404 (deprecated) { message }',
       ]);
-      expect(ontoDeprecated.warnings).toEqual([leftAsTheyAre('deprecated component schema "ErrorBody"')]);
+      expect(ontoDeprecated.warnings).toEqual([leftAsTheyAre(deprecatedComponent)]);
     });
 
     it('announces a deprecated body a live component takes once, when a name another group cannot take makes the fold run again', async () => {
       // `{ code, message }` asks for `ErrorBodyWithCode`, which a component
       // of another shape holds, so the pass leaves that body and runs again
       // without it; the deprecated `{ message }` folds onto `ErrorBody` in
-      // both runs and is announced once (the review's finding).
+      // both runs and is announced once (the Greptile review's finding).
       const { spec, warnings } = await parse(
         doc(
           { ...getOp('pet', messageBody({ deprecated: true })), ...getOp('note', obj({ code: str, message: str })) },
@@ -357,7 +438,7 @@ describe('#629', () => {
       expect(errorTypes(spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: GetNoteError404']);
       expect(modelShapes(spec)).toContain('ErrorBody { message }');
       expect(warnings).toEqual([
-        '[oagen] Warning: The shared error body { code: string, message: string } would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" already holds — keeping model "GetNoteError404" as it is; give the two the same shape, or rename one',
+        '[oagen] Warning: The shared error body { code: string, message: string } would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" { reason: string } already holds — keeping model "GetNoteError404" as it is; give the two the same shape, or rename one',
         '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetPetError404" and live by component schema "ErrorBody" — keeping it live',
       ]);
     });
@@ -376,7 +457,7 @@ describe('#629', () => {
       ]);
       expect(modelShapes(spec).filter((shape) => shape.startsWith('ErrorBody'))).toEqual([
         'ErrorBodyWithCodeFieldError { code, field }',
-        'ErrorBodyWithCodeFieldErrors { message, errors }',
+        'ErrorBodyWithCodeFieldErrors { message, errors: ErrorBodyWithCodeFieldError[] }',
       ]);
       expect(warnings).toEqual([
         '[oagen] Warning: The shared error body "ErrorBodyWithCodeFieldError" is declared deprecated by "GetNoteError404Error" and live by "GetPetError404Error" — keeping it live',

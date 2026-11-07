@@ -1,4 +1,4 @@
-import type { ApiSurface, LanguageHints, Violation } from './types.js';
+import type { ApiSurface, LanguageHints, OverlayLookup, Violation } from './types.js';
 import type { ApiSpec } from '../ir/types.js';
 import type { OperationResolution } from '../ir/operation-hints.js';
 import {
@@ -28,7 +28,11 @@ import {
  * `Animals.listAll` under `operationHints: { 'GET /pets': { name: 'list_all' } }`
  * once the new spec drops `GET /pets`, whether or not another service still
  * mounts on `Animals`. A class the new spec no longer names is reported once,
- * at the class level, not again per method.
+ * at the class level, not again per method. With the `overlay` `generate
+ * --api-surface` writes with, a baseline method it maps to an operation
+ * (`.oagen-manifest.json`: `GET /pets` → `Animals.fetchAll`) is keyed under
+ * that name too, so it is stale once the new spec drops the route (see
+ * `specDerivedMethodPaths`).
  */
 export function detectStaleSymbols(
   liveSurface: ApiSurface,
@@ -36,6 +40,7 @@ export function detectStaleSymbols(
   newSpec: ApiSpec,
   hints: LanguageHints,
   resolution?: OperationResolution,
+  overlay?: Pick<OverlayLookup, 'methodByOperation'>,
 ): Violation[] {
   const violations: Violation[] = [];
 
@@ -123,8 +128,8 @@ export function detectStaleSymbols(
   // IR's service and operation names, and a removed service yields none at
   // all, so the methods of a service merged onto a surviving mount target
   // were never found.
-  const oldMembers = memberKeysByClass(specDerivedMethodPaths(oldSpec, resolution));
-  const newMembers = memberKeysByClass(specDerivedMethodPaths(newSpec, resolution));
+  const oldMembers = memberKeysByClass(specDerivedMethodPaths(oldSpec, resolution, overlay));
+  const newMembers = memberKeysByClass(specDerivedMethodPaths(newSpec, resolution, overlay));
 
   for (const [className, members] of oldMembers) {
     // A class the new spec no longer names is reported above, once.

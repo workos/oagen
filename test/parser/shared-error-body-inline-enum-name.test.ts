@@ -14,10 +14,12 @@ import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
 // name (`ListPetsError404Status`), so adding an operation whose name sorted
 // first swapped the enum for a new one and `oagen diff` reported it as
 // breaking. Every inline enum a shared body's field lists is now named from
-// the field, as a pinned string field's is (`ErrorBodyStatus`), one enum
-// per field name and value set; when the shared bodies list a field of one
-// name to two or more value sets, each set's enum spells its values
-// (`ErrorBodyStatus404Or410` beside `ErrorBodyStatus500Or503`).
+// the field and its values (`ErrorBodyStatus404Or410`, `ErrorBodyCodesAOrB`),
+// one enum per field name and value set, so the name depends on nothing
+// else in the document and adding an operation never renames one — a bare
+// `ErrorBodyStatus` was tried first and dropped on review, since a second
+// value set, a string-pinned `status` or an `errorCode` beside `error_code`
+// each moved it (PR #648 review).
 
 type Doc = Record<string, unknown>;
 const VERSIONS = ['3.0.3', '3.1.0'] as const;
@@ -113,15 +115,17 @@ const changes = (a: ApiSpec, b: ApiSpec): string[] =>
     return `${change.classification} ${change.kind} ${name}`.trim();
   });
 
-/** Every inline enum a model's field references is lifted once under that name with those values, and none keeps an operation's name. */
+/** Every inline enum a model's field references is lifted once under that name with those values (a shared component enum keeps its declared order), and none keeps an operation's name. */
 function expectEnumsSound(spec: ApiSpec): void {
-  const lifted = new Map(spec.enums.map((e) => [e.name, e.values.map((v) => v.value)]));
+  const sorted = (values: readonly (string | number)[] | undefined): (string | number)[] | undefined =>
+    values && [...values].sort((a, b) => String(a).localeCompare(String(b)));
+  const lifted = new Map(spec.enums.map((e) => [e.name, sorted(e.values.map((v) => v.value))]));
   expect(new Set(lifted.keys()).size).toBe(spec.enums.length);
   for (const model of spec.models) {
     for (const field of model.fields) {
       walkTypeRef(field.type, {
         enum: (ref) => {
-          expect(lifted.get(ref.name), `${model.name}.${field.name} → ${ref.name}`).toEqual(ref.values);
+          expect(lifted.get(ref.name), `${model.name}.${field.name} → ${ref.name}`).toEqual(sorted(ref.values));
           expect(ref.name).not.toMatch(/^List(Pets|Notes)/);
         },
       });
@@ -131,7 +135,7 @@ function expectEnumsSound(spec: ApiSpec): void {
 
 describe('#612', () => {
   it.each(VERSIONS)(
-    "the issue's repro: the shared body's `status` keeps one `ErrorBodyStatus` when `listNotes` is added, and the diff is additive (exit 1), under OAS %s",
+    "the issue's repro: the shared body's `status` keeps one `ErrorBodyStatus404Or410` when `listNotes` is added, and the diff is additive (exit 1), under OAS %s",
     async (version) => {
       const oldDoc = doc(version, pets(nf(statusBody)));
       const newDoc = doc(version, { ...pets(nf(statusBody)), ...notes(nf(statusBody)) });
@@ -141,11 +145,11 @@ describe('#612', () => {
         expect(modelNames(spec)).toEqual(['ErrorBodyWithStatus404Or410']);
         expect(fieldType(spec, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
           kind: 'enum',
-          name: 'ErrorBodyStatus',
+          name: 'ErrorBodyStatus404Or410',
           values: [404, 410],
         });
-        expect(enumNames(spec)).toEqual(['ErrorBodyStatus']);
-        expect(enumValues(spec, 'ErrorBodyStatus')).toEqual([404, 410]);
+        expect(enumNames(spec)).toEqual(['ErrorBodyStatus404Or410']);
+        expect(enumValues(spec, 'ErrorBodyStatus404Or410')).toEqual([404, 410]);
         expectEnumsSound(spec);
       }
       expect(changes(oldSpec, newSpec)).toEqual(['additive service-added Notes']);
@@ -154,7 +158,7 @@ describe('#612', () => {
   );
 
   it.each(VERSIONS)(
-    'a `number` enum, an optional `status?` and a string enum under array items are named from the field the same way, under OAS %s',
+    'a `number` enum, an optional `status?` and a string enum under array items are named from the field and their values the same way, under OAS %s',
     async (version) => {
       const cases: Array<{
         body: Doc;
@@ -168,24 +172,24 @@ describe('#612', () => {
           body: obj({ message: str, ratio: { type: 'number', enum: [1.5, 2.5] } }),
           model: 'ErrorBodyWithRatio1Point5Or2Point5',
           field: 'ratio',
-          type: { kind: 'enum', name: 'ErrorBodyRatio', values: [1.5, 2.5] },
-          enumName: 'ErrorBodyRatio',
+          type: { kind: 'enum', name: 'ErrorBodyRatio1Point5Or2Point5', values: [1.5, 2.5] },
+          enumName: 'ErrorBodyRatio1Point5Or2Point5',
           values: [1.5, 2.5],
         },
         {
           body: obj({ message: str, status }, ['message']),
           model: 'ErrorBody',
           field: 'status',
-          type: { kind: 'enum', name: 'ErrorBodyStatus', values: [404, 410] },
-          enumName: 'ErrorBodyStatus',
+          type: { kind: 'enum', name: 'ErrorBodyStatus404Or410', values: [404, 410] },
+          enumName: 'ErrorBodyStatus404Or410',
           values: [404, 410],
         },
         {
           body: obj({ message: str, codes: { type: 'array', items: { type: 'string', enum: ['a', 'b'] } } }),
           model: 'ErrorBodyWithCodesList',
           field: 'codes',
-          type: { kind: 'array', items: { kind: 'enum', name: 'ErrorBodyCodes', values: ['a', 'b'] } },
-          enumName: 'ErrorBodyCodes',
+          type: { kind: 'array', items: { kind: 'enum', name: 'ErrorBodyCodesAOrB', values: ['a', 'b'] } },
+          enumName: 'ErrorBodyCodesAOrB',
           values: ['a', 'b'],
         },
       ];
@@ -208,7 +212,7 @@ describe('#612', () => {
   );
 
   it.each(VERSIONS)(
-    'an enum through a nullable wrapper, under map values and on a nested body is named from its field too, under OAS %s',
+    'an enum through a nullable wrapper, under map values and on a nested body is named from its field and values too, under OAS %s',
     async (version) => {
       const nullableStatus =
         version === '3.0.3'
@@ -235,18 +239,18 @@ describe('#612', () => {
       const spec = await parseWithoutWarnings(doc(version, bodies));
       expect(fieldType(spec, 'ErrorBodyWithNullableStatus404Or410', 'status')).toEqual({
         kind: 'nullable',
-        inner: { kind: 'enum', name: 'ErrorBodyStatus', values: [404, 410] },
+        inner: { kind: 'enum', name: 'ErrorBodyStatus404Or410', values: [404, 410] },
       });
       expect(fieldType(spec, 'ErrorBodyWithLevels', 'levels')).toEqual({
         kind: 'map',
-        valueType: { kind: 'enum', name: 'ErrorBodyLevels', values: [1, 2] },
+        valueType: { kind: 'enum', name: 'ErrorBodyLevels1Or2', values: [1, 2] },
       });
       expect(fieldType(spec, 'ErrorBodyWithLevel1Or2DetailDetail', 'level')).toEqual({
         kind: 'enum',
-        name: 'ErrorBodyLevel',
+        name: 'ErrorBodyLevel1Or2',
         values: [1, 2],
       });
-      expect(enumNames(spec)).toEqual(['ErrorBodyLevel', 'ErrorBodyLevels', 'ErrorBodyStatus']);
+      expect(enumNames(spec)).toEqual(['ErrorBodyLevel1Or2', 'ErrorBodyLevels1Or2', 'ErrorBodyStatus404Or410']);
       expectEnumsSound(spec);
     },
   );
@@ -273,10 +277,10 @@ describe('#612', () => {
         expect(modelNames(spec)).toEqual(['ErrorBodyWithStatus404Or410']);
         expect(fieldType(spec, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
           kind: 'enum',
-          name: 'ErrorBodyStatus',
+          name: 'ErrorBodyStatus404Or410',
           values: [404, 410],
         });
-        expect(enumNames(spec)).toEqual(['ErrorBodyStatus']);
+        expect(enumNames(spec)).toEqual(['ErrorBodyStatus404Or410']);
         expectEnumsSound(spec);
       }
       expect(changes(petsFirst, notesFirst)).toEqual([]);
@@ -308,25 +312,20 @@ describe('#612', () => {
   );
 
   it.each(VERSIONS)(
-    'two value sets under one field name: each enum spells its values, a function of the sets alone, and a second set renames the first, under OAS %s',
+    "the reviewer's documents: a second value set, a string-pinned `status` and an `errorCode` beside `error_code` each add an enum and rename none (exit 1), under OAS %s",
     async (version) => {
-      const status500 = { type: 'integer', enum: [500, 503] };
-      const oneSet = doc(version, pets(nf(statusBody)));
-      const twoSets = doc(version, { ...pets(nf(statusBody)), ...notes(nf(obj({ message: str, status: status500 }))) });
-      const twoSetsSwapped = doc(version, {
-        ...pets(nf(obj({ message: str, status: status500 }))),
-        ...notes(nf(statusBody)),
-      });
-      const one = await parseWithoutWarnings(oneSet);
-      const two = await parseWithoutWarnings(twoSets);
-      const swapped = await parseWithoutWarnings(twoSetsSwapped);
+      const oldDoc = doc(version, pets(nf(statusBody)));
+      const oldSpec = await parseWithoutWarnings(oldDoc);
+      const was = { kind: 'enum', name: 'ErrorBodyStatus404Or410', values: [404, 410] };
+      // A later body listing `status` to [500, 503], in either order of operations.
+      const status500 = obj({ message: str, status: { type: 'integer', enum: [500, 503] } });
+      const secondSet = doc(version, { ...pets(nf(statusBody)), ...notes(nf(status500)) });
+      const secondSetSwapped = doc(version, { ...pets(nf(status500)), ...notes(nf(statusBody)) });
+      const two = await parseWithoutWarnings(secondSet);
+      const swapped = await parseWithoutWarnings(secondSetSwapped);
       for (const spec of [two, swapped]) {
         expect(modelNames(spec)).toEqual(['ErrorBodyWithStatus404Or410', 'ErrorBodyWithStatus500Or503']);
-        expect(fieldType(spec, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
-          kind: 'enum',
-          name: 'ErrorBodyStatus404Or410',
-          values: [404, 410],
-        });
+        expect(fieldType(spec, 'ErrorBodyWithStatus404Or410', 'status')).toEqual(was);
         expect(fieldType(spec, 'ErrorBodyWithStatus500Or503', 'status')).toEqual({
           kind: 'enum',
           name: 'ErrorBodyStatus500Or503',
@@ -335,21 +334,82 @@ describe('#612', () => {
         expect(enumNames(spec)).toEqual(['ErrorBodyStatus404Or410', 'ErrorBodyStatus500Or503']);
         expectEnumsSound(spec);
       }
-      // The stated consequence: the lone set's enum takes its spelled name.
-      const renamed = [
+      const added = [
         'additive model-added ErrorBodyWithStatus500Or503',
-        'breaking model-modified ErrorBodyWithStatus404Or410',
-        'additive enum-added ErrorBodyStatus404Or410',
         'additive enum-added ErrorBodyStatus500Or503',
-        'breaking enum-removed ErrorBodyStatus',
         'additive service-added Notes',
       ];
-      expect(changes(one, two)).toEqual(renamed);
+      expect(changes(oldSpec, two)).toEqual(added);
       // Swapped, `listPets` itself changes bodies; the models and enums move the same way.
-      expect(changes(one, swapped).filter((change) => !/ operation-/.test(change))).toEqual(renamed);
-      expect(await diffExitCode(oneSet, twoSets)).toBe(2);
-      // A union of two inline enums under one field is two sets of it; a
-      // field that ends in a digit spells its values behind `No`.
+      expect(changes(oldSpec, swapped).filter((change) => !/ operation-/.test(change))).toEqual(added);
+      expect(await diffExitCode(oldDoc, secondSet)).toBe(1);
+      // Two bodies pinning `status` to strings: the string rule's `ErrorBodyStatus` joins, the integer one stays.
+      const pinnedDoc = doc(version, {
+        ...pets(nf(statusBody)),
+        ...notes(nf(obj({ message: str, status: { type: 'string', const: 'gone' } }))),
+        '/tags': { get: op('listTags', nf(obj({ message: str, status: { type: 'string', const: 'lost' } }))) },
+      });
+      const pinned = await parseWithoutWarnings(pinnedDoc);
+      expect(modelNames(pinned)).toEqual(['ErrorBodyWithStatus', 'ErrorBodyWithStatus404Or410']);
+      expect(fieldType(pinned, 'ErrorBodyWithStatus404Or410', 'status')).toEqual(was);
+      expect(fieldType(pinned, 'ErrorBodyWithStatus', 'status')).toEqual({
+        kind: 'enum',
+        name: 'ErrorBodyStatus',
+        values: ['gone', 'lost'],
+      });
+      expect(enumNames(pinned)).toEqual(['ErrorBodyStatus', 'ErrorBodyStatus404Or410']);
+      expectEnumsSound(pinned);
+      expect(changes(oldSpec, pinned)).toEqual([
+        'additive model-added ErrorBodyWithStatus',
+        'additive enum-added ErrorBodyStatus',
+        'additive service-added Notes',
+        'additive service-added Tags',
+      ]);
+      expect(await diffExitCode(oldDoc, pinnedDoc)).toBe(1);
+      // `errorCode` beside `error_code`: both spell `ErrorCode`, and each set keeps its own name.
+      const errorCodeDoc = (extra: Doc): Doc =>
+        doc(version, { ...pets(nf(obj({ message: str, error_code: { type: 'integer', enum: [1, 2] } }))), ...extra });
+      const oldCodes = errorCodeDoc({});
+      const newCodes = errorCodeDoc(notes(nf(obj({ message: str, errorCode: { type: 'integer', enum: [3, 4] } }))));
+      const oldCodesSpec = await parseWithoutWarnings(oldCodes);
+      const newCodesSpec = await parseWithoutWarnings(newCodes);
+      const wasCode = { kind: 'enum', name: 'ErrorBodyErrorCode1Or2', values: [1, 2] };
+      expect(fieldType(oldCodesSpec, 'ErrorBodyWithErrorCode1Or2', 'error_code')).toEqual(wasCode);
+      expect(fieldType(newCodesSpec, 'ErrorBodyWithErrorCode1Or2', 'error_code')).toEqual(wasCode);
+      expect(fieldType(newCodesSpec, 'ErrorBodyWithErrorCode3Or4', 'errorCode')).toEqual({
+        kind: 'enum',
+        name: 'ErrorBodyErrorCode3Or4',
+        values: [3, 4],
+      });
+      expect(enumNames(newCodesSpec)).toEqual(['ErrorBodyErrorCode1Or2', 'ErrorBodyErrorCode3Or4']);
+      expectEnumsSound(newCodesSpec);
+      expect(changes(oldCodesSpec, newCodesSpec)).toEqual([
+        'additive model-added ErrorBodyWithErrorCode3Or4',
+        'additive enum-added ErrorBodyErrorCode3Or4',
+        'additive service-added Notes',
+      ]);
+      expect(await diffExitCode(oldCodes, newCodes)).toBe(1);
+      // The same values under the two spellings share the one enum they spell.
+      const sameCodes = errorCodeDoc(
+        notes(nf(obj({ message: str, errorCode: { type: 'integer', enum: [1, 2] }, hint: str }))),
+      );
+      const sameCodesSpec = await parseWithoutWarnings(sameCodes);
+      expect(modelNames(sameCodesSpec)).toEqual(['ErrorBodyWithErrorCode1Or2', 'ErrorBodyWithErrorCode1Or2Hint']);
+      expect(fieldType(sameCodesSpec, 'ErrorBodyWithErrorCode1Or2', 'error_code')).toEqual(wasCode);
+      expect(fieldType(sameCodesSpec, 'ErrorBodyWithErrorCode1Or2Hint', 'errorCode')).toEqual(wasCode);
+      expect(enumNames(sameCodesSpec)).toEqual(['ErrorBodyErrorCode1Or2']);
+      expectEnumsSound(sameCodesSpec);
+      expect(changes(oldCodesSpec, sameCodesSpec)).toEqual([
+        'additive model-added ErrorBodyWithErrorCode1Or2Hint',
+        'additive service-added Notes',
+      ]);
+      expect(await diffExitCode(oldCodes, sameCodes)).toBe(1);
+    },
+  );
+
+  it.each(VERSIONS)(
+    'a `oneOf` of two inline enums under one field is two enums of it, and a field that ends in a digit spells its values behind `No`, under OAS %s',
+    async (version) => {
       const unionBody = obj({
         message: str,
         status: {
@@ -394,11 +454,11 @@ describe('#612', () => {
   it.each(VERSIONS)(
     "the string rule's enum keeps its name when an array under the same field lists the same values (#648 review), under OAS %s",
     async (version) => {
-      // `status` pinned to strings in one body takes `ErrorBodyStatus`; an
-      // array of the same strings under `status` in another is a lone set
-      // whose bare name is held, so it is spelled — and the rename walk
-      // reads by field and values, so it must leave the string rule's enum,
-      // which lists the same values, under the name it claimed.
+      // `status` pinned to strings in one body takes the string rule's
+      // `ErrorBodyStatus`; an array of the same strings under `status` in
+      // another spells its values — and the rename walk reads by field and
+      // values, so it must leave the string rule's enum, which lists the
+      // same values, under the name it claimed.
       const pinnedStatus = obj({ message: str, status: { type: 'string', enum: ['a', 'b'] } });
       const listedStatus = obj({
         message: str,
@@ -432,50 +492,35 @@ describe('#612', () => {
   );
 
   it.each(VERSIONS)(
-    'a name an enum of the same members holds is shared; one anything else holds sends the set to its spelled name; a spelled name taken leaves the bodies as they are, under OAS %s',
+    'a name an enum of the same members holds is shared; one anything else holds leaves the bodies as they are, with a warning, under OAS %s',
     async (version) => {
       const bodies = { ...pets(nf(statusBody)), ...notes(nf(statusBody)) };
-      // A component `ErrorBodyStatus` listing the same values is the field's enum.
-      const shared = await parseWithoutWarnings(doc(version, bodies, { ErrorBodyStatus: status }));
+      // A component `ErrorBodyStatus404Or410` listing the same values, in any order, is the field's enum.
+      const shared = await parseWithoutWarnings(
+        doc(version, bodies, { ErrorBodyStatus404Or410: { type: 'integer', enum: [410, 404] } }),
+      );
       expect(fieldType(shared, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
         kind: 'enum',
-        name: 'ErrorBodyStatus',
+        name: 'ErrorBodyStatus404Or410',
         values: [404, 410],
       });
-      expect(enumNames(shared)).toEqual(['ErrorBodyStatus']);
-      expect(enumValues(shared, 'ErrorBodyStatus')).toEqual([404, 410]);
+      expect(enumNames(shared)).toEqual(['ErrorBodyStatus404Or410']);
+      expect(enumValues(shared, 'ErrorBodyStatus404Or410')).toEqual([410, 404]);
       expectEnumsSound(shared);
-      // One of other members sends the set to its spelled name, silently: the name is a function of the shape.
+      // A component `ErrorBodyStatus` of any members is no concern of the spelled name.
       const other = { type: 'string', enum: ['q', 'r'] };
-      const spelled = await parseWithoutWarnings(doc(version, bodies, { ErrorBodyStatus: other }));
-      expect(fieldType(spelled, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
+      const bare = await parseWithoutWarnings(doc(version, bodies, { ErrorBodyStatus: other }));
+      expect(fieldType(bare, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
         kind: 'enum',
         name: 'ErrorBodyStatus404Or410',
         values: [404, 410],
       });
-      expect(enumNames(spelled)).toEqual(['ErrorBodyStatus', 'ErrorBodyStatus404Or410']);
-      expect(enumValues(spelled, 'ErrorBodyStatus')).toEqual(['q', 'r']);
-      expectEnumsSound(spelled);
-      // The string rule holding the bare name — another body pins `status` to strings — does the same.
-      const pinned = await parseWithoutWarnings(
-        doc(version, { ...pets(nf(statusBody)), ...notes(nf(obj({ message: str, status: other }))) }),
-      );
-      expect(modelNames(pinned)).toEqual(['ErrorBodyWithStatus', 'ErrorBodyWithStatus404Or410']);
-      expect(fieldType(pinned, 'ErrorBodyWithStatus', 'status')).toEqual({
-        kind: 'enum',
-        name: 'ErrorBodyStatus',
-        values: ['q', 'r'],
-      });
-      expect(fieldType(pinned, 'ErrorBodyWithStatus404Or410', 'status')).toEqual({
-        kind: 'enum',
-        name: 'ErrorBodyStatus404Or410',
-        values: [404, 410],
-      });
-      expect(enumNames(pinned)).toEqual(['ErrorBodyStatus', 'ErrorBodyStatus404Or410']);
-      expectEnumsSound(pinned);
-      // The spelled name taken too: the bodies that list the set stay as the parser materialized them, with a warning.
+      expect(enumNames(bare)).toEqual(['ErrorBodyStatus', 'ErrorBodyStatus404Or410']);
+      expect(enumValues(bare, 'ErrorBodyStatus')).toEqual(['q', 'r']);
+      expectEnumsSound(bare);
+      // The name taken by an enum of other members: the bodies that list the set stay as the parser materialized them, with a warning.
       const frozen = await parseWithWarnings(
-        doc(version, bodies, { ErrorBodyStatus: other, ErrorBodyStatus404Or410: { type: 'string', enum: ['z', 'w'] } }),
+        doc(version, bodies, { ErrorBodyStatus404Or410: { type: 'string', enum: ['z', 'w'] } }),
         [
           /The inline enum the shared error body \{ message: string, status: ListNotesError404Status \} lists for "status" would be named "ErrorBodyStatus404Or410", which enum "ErrorBodyStatus404Or410" already holds — keeping models "ListNotesError404", "ListPetsError404" as they are; rename one/,
         ],
@@ -487,11 +532,32 @@ describe('#612', () => {
         values: [404, 410],
       });
       expect(enumNames(frozen)).toEqual([
-        'ErrorBodyStatus',
         'ErrorBodyStatus404Or410',
         'ListNotesError404Status',
         'ListPetsError404Status',
       ]);
+      // Two sets that spell one name with other members — `[1, 2]` beside
+      // `['1', '2']`, both `1Or2` — the set that sorts first keeps it.
+      const ambiguous = await parseWithWarnings(
+        doc(version, {
+          ...pets(nf(obj({ message: str, status: { type: 'integer', enum: [1, 2] } }))),
+          ...notes(nf(obj({ message: str, status: { type: 'array', items: { type: 'string', enum: ['1', '2'] } } }))),
+        }),
+        [
+          /The inline enum the shared error body \{ message: string, status: ListPetsError404Status \} lists for "status" would be named "ErrorBodyStatus1Or2", which the shared enum "ErrorBodyStatus1Or2" already holds — keeping model "ListPetsError404" as it is; rename one/,
+        ],
+      );
+      expect(modelNames(ambiguous)).toEqual(['ErrorBodyWithStatusList', 'ListPetsError404']);
+      expect(fieldType(ambiguous, 'ErrorBodyWithStatusList', 'status')).toEqual({
+        kind: 'array',
+        items: { kind: 'enum', name: 'ErrorBodyStatus1Or2', values: ['1', '2'] },
+      });
+      expect(fieldType(ambiguous, 'ListPetsError404', 'status')).toEqual({
+        kind: 'enum',
+        name: 'ListPetsError404Status',
+        values: [1, 2],
+      });
+      expect(enumNames(ambiguous)).toEqual(['ErrorBodyStatus1Or2', 'ListPetsError404Status']);
     },
   );
 });
