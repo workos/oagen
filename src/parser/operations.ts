@@ -6687,6 +6687,9 @@ function operationBodyModelNames(
           // warns about it once when it reads it (#617).
           if (!isResponseEntry(response)) return [];
           const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
+          // A ref whose chain ends on a component that is no object is left
+          // out, as the operation leaves it out (#617).
+          if (resolved === undefined) return [];
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
         const primaryCode = primaryResponseEntry(entries, componentSchemas)?.code;
@@ -6718,9 +6721,10 @@ function componentResponseBodySchema(
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
   const component = componentResponses[componentName];
-  // A component that is not an object (`Bad: "oops"`) declares no body; a
-  // `$ref` to it is reported by the operation that writes it, as a ref
-  // nothing answers (#617).
+  // A component that is not an object (`Bad: "oops"`) declares no body, and
+  // neither does one whose chain ends on such a component; a `$ref` to
+  // either is reported by the operation that writes it, as the malformed
+  // entry it is (#617).
   if (!isResponseEntry(component)) return undefined;
   const resolved = resolveResponseRef<ResponseObject>(
     component as ResponseObject | ReferenceObject,
@@ -6729,7 +6733,7 @@ function componentResponseBodySchema(
     'override',
     'silent',
   );
-  return primaryBodySchema(resolved).schema;
+  return resolved === undefined ? undefined : primaryBodySchema(resolved).schema;
 }
 
 /**
@@ -6776,7 +6780,8 @@ function bodyModelNames(
  * bodies of one operation with one key are one body, named alike
  * (`stepSecondaryBody`) — a 202 identical to the 201 but for the flag
  * shares `CreatePetResponse201`, and the merge in `extractResponses` keeps
- * the live definition (#630) — and the reservation of a later body's names
+ * the 201's definition, live while either copy is (#630) — and the
+ * reservation of a later body's names
  * (`operationBodyModelNames`) asks the same question of the same schema.
  * Read silently (`rehearse`): the body reports its problems once, when it is
  * read.
@@ -7142,6 +7147,9 @@ function readFallbackResponse(
     `${key} response of ${sink.opLabel}`,
     sink.ctx.refSiblingDescriptions,
   );
+  // A ref whose chain ends on a component that is no object is left out,
+  // after the warning, as an inline entry that is no object is (#617).
+  if (resolved === undefined) return;
   // A ref into `components/responses` names the body after the component,
   // as it does at a status code, so every operation that returns the
   // component — at any status, `default` or a range — shares one model; its
@@ -7410,11 +7418,12 @@ function undescribedBodyType(): TypeRef {
  * them mint. Every 2xx body's models are kept, merged by name: a later
  * body's model of a kept name resolves to the kept definition when the two
  * are the same shape but for the model's own `deprecated`
- * (`shapeFingerprint`), the live definition kept whichever status code
- * declares it — a live 202 body identical to a deprecated 200 body types
- * both as a live `Pet`, as a deprecated 202 beside a live 200 does, and the
- * model is deprecated only when every copy is — and to the kept definition
- * with a warning when they differ in a field (#630).
+ * (`shapeFingerprint`), the kept definition — the primary's, its
+ * references and documentation with it — going live when any copy is, so
+ * a live 202 body identical to a deprecated 200 body types both as a live
+ * `Pet`, as a deprecated 202 beside a live 200 does, and the model is
+ * deprecated only when every copy is; and to the kept definition with a
+ * warning when they differ in a field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -7507,40 +7516,45 @@ function extractResponses(
   // warned about once and read as absent, as for an operation that declares
   // none (#617).
   if (responses !== undefined && !isResponsesObject(responses, opLabel)) responses = undefined;
-  // An entry that is not an object — `200: "oops"`, `null`, `7`, `true`,
-  // `[]` — is no Response Object and no Reference Object, so no branch
-  // below could read it: it is warned about once, naming the operation and
-  // the key, and left out, and the operation is read from its other entries
-  // (#617). Only a key a branch reads is checked: an `x-` key is an
-  // extension, which may hold anything, and a key OpenAPI does not define
-  // is reported on its own (`readFallbackResponse`), whatever it holds.
-  const entries = Object.entries(responses ?? {}).filter(([key, raw]) => {
-    const kind = classifyResponseKey(key).kind;
-    return kind === 'extension' || kind === 'unrecognized' || isResponseEntry(raw, `${key} response of ${opLabel}`);
-  });
-
-  // Every 2xx, 3xx and error entry is resolved once, here, and the loop
-  // below reads it from this map. The bundler leaves `$ref:
+  // One pass over the map decides what the loop below reads, in document
+  // order. An entry that is not an object — `200: "oops"`, `null`, `7`,
+  // `true`, `[]` — is no Response Object and no Reference Object, so no
+  // branch below could read it: it is warned about once, naming the
+  // operation and the key, and left out, and the operation is read from its
+  // other entries (#617). Only a key a branch reads is checked: an `x-` key
+  // is an extension, which may hold anything, and a key OpenAPI does not
+  // define is reported on its own (`readFallbackResponse`), whatever it
+  // holds. Every 2xx, 3xx and error entry is then resolved once, here, and
+  // the loop reads it from `resolvedResponses`. The bundler leaves `$ref:
   // '#/components/responses/…'` in place, and a Reference Object has no
   // `headers` or `content` of its own to read, so the ref is resolved before
   // either is — its sibling `description` read by `ctx.refSiblingDescriptions`,
-  // an unresolvable one warned about once. Only a status code one of the
-  // branches below reads is resolved: `default`, a `2XX` range and an `x-`
-  // extension are left as written, as nothing here reads them, and a 1xx is
-  // read as written too.
+  // an unresolvable one warned about once, and one whose chain ends on a
+  // component that is no object (`Gone: []`) left out exactly as the inline
+  // entry is, after the same warning (`resolveResponseRef`). Only a status
+  // code one of the branches below reads is resolved here: `default` and a
+  // `2XX` range are resolved as they are read (`readFallbackResponse`), an
+  // `x-` extension is left as written, as nothing here reads it, and a 1xx
+  // is read as written too.
+  const entries: Array<[string, ResponseObject]> = [];
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of entries) {
-    const responseKey = classifyResponseKey(statusCode);
-    if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
-    resolvedResponses.set(
-      statusCode,
-      resolveResponseRef<ResponseObject>(
-        rawResponse,
-        ctx.componentResponses,
-        `${statusCode} response of ${opLabel}`,
-        ctx.refSiblingDescriptions,
-      ),
-    );
+  for (const [key, raw] of Object.entries(responses ?? {})) {
+    const responseKey = classifyResponseKey(key);
+    if (responseKey.kind !== 'extension' && responseKey.kind !== 'unrecognized') {
+      const site = `${key} response of ${opLabel}`;
+      if (!isResponseEntry(raw, site)) continue;
+      if (responseKey.kind === 'status' && responseKey.code >= 200) {
+        const resolved = resolveResponseRef<ResponseObject>(
+          raw,
+          ctx.componentResponses,
+          site,
+          ctx.refSiblingDescriptions,
+        );
+        if (resolved === undefined) continue;
+        resolvedResponses.set(key, resolved);
+      }
+    }
+    entries.push([key, raw]);
   }
 
   // The override is accepted or rejected once, before any body is
@@ -7799,14 +7813,15 @@ function extractResponses(
   // its `successResponses` entry keeps the shape its status code declared
   // under a name no other status code's body decides. A model of a later
   // body the kept one shares (`shapeFingerprint`: the model's own
-  // `deprecated` apart) resolves to the kept definition silently — the live
-  // one when the two differ in the flag, whichever status code declares it,
-  // as the merge passes keep a live copy's definition across operations, so
-  // a live 202 body identical to a deprecated 200 body keeps a live `Pet`,
-  // deprecating either copy leaves no trace, and the model is deprecated
-  // only when every copy is (#630); only a clash on a model the stem does
-  // not name — a field more, a field's own flag, a limit — is still resolved
-  // to the kept definition, with a warning. The
+  // `deprecated` apart) resolves to the kept definition silently — the kept
+  // definition going live when only the flag tells the two apart, as a live
+  // copy owns a shared name across operations in the merge passes, so a
+  // live 202 body identical to a deprecated 200 body keeps a live `Pet`
+  // with the 200's references and documentation, deprecating either copy
+  // leaves no trace, and the model is deprecated only when every copy is
+  // (#630); only a clash on a model the stem does not name — a field more,
+  // a field's own flag, a limit — is still resolved to the kept definition,
+  // with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
@@ -7844,12 +7859,13 @@ function extractResponses(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
         );
       } else if (kept.model.deprecated && !model.deprecated) {
-        // Identical but for the model's own flag: the live copy owns the
-        // name, whichever status code declares it (#630). Every kept model
-        // was pushed when it was kept, so it is replaced in place and keeps
-        // the primary's position.
-        inlineModels[inlineModels.indexOf(kept.model)] = model;
-        keptByName.set(model.name, { model, status });
+        // Identical but for the model's own flag: the shared model is live
+        // while any copy is (#630). The kept definition stays — its
+        // references (an explicit `$ref` the primary wrote where this body
+        // nests an inline object of the same name, repointed apart by the
+        // merge passes) and its documentation with it — and only its flag
+        // goes; the live copy's object never replaces it.
+        delete kept.model.deprecated;
       }
     }
   }
@@ -7966,8 +7982,9 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * (`deferredNamingStem`, `later`: `CreatePetApplicationYamlResponse201`), a
  * candidate being taken when no name it would give is kept under another
  * shape (`shapeFingerprint`: the kept model's own `deprecated` apart, so a
- * copy identical but for the flag takes the name and the caller keeps the
- * live definition, #630), or owned in the spec-wide registry by a component
+ * copy identical but for the flag takes the name and the caller folds it
+ * onto the kept definition, live while any copy is, #630), or owned in the
+ * spec-wide registry by a component
  * or another operation, under a shape the owner does not share
  * (`ownerShares`), nor is a component response's body,
  * whichever operation returning it is read first (`CardResponse3` for `card`'s
@@ -8015,7 +8032,7 @@ function stepSecondaryBody(
     // steps past it whether or not an operation returning it came first.
     if (ownBody?.componentBodies.has(name)) return true;
     // A kept model's shape is read with its own `deprecated` apart: a copy
-    // identical to it but for the flag is folded onto the live definition by
+    // identical to it but for the flag is folded onto the kept definition by
     // the caller (#630), not stepped past.
     const keptModel = kept.get(name)?.model;
     if (keptModel && shapeFingerprint(keptModel) !== shapeFingerprint(model)) return true;

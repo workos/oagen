@@ -28,7 +28,7 @@
  * referenced item whole. A Schema Object's `$ref` is JSON Schema's, whose
  * siblings the field extractor reads (`Field.description`).
  */
-import { resolveComponentRef } from './path-item-refs.js';
+import { componentRefEntry } from './path-item-refs.js';
 
 /** Whether text written beside a `$ref` overrides the referenced component's (OAS 3.1) or is ignored (OAS 3.0). */
 export type SiblingDocs = 'override' | 'ignore';
@@ -90,6 +90,14 @@ export interface FollowedReference<T> {
   value: T;
   /** The `$ref` the walk stopped at, for a failure (`String()` of a malformed one); absent when resolved. */
   ref?: string;
+  /**
+   * For `unresolved` only: the entry the section does hold under the ref's
+   * name when it is no object — `null`, a string, a number, a boolean or an
+   * array — and so answers nothing, with the name decoded, so a reader can
+   * report it as the malformed entry it is rather than as missing (#617).
+   * Absent when the section holds nothing under that name at all.
+   */
+  found?: { name: string; value: unknown };
 }
 
 /**
@@ -98,7 +106,8 @@ export interface FollowedReference<T> {
  * say how the walk ended. What a failure means — fail the parse, drop the
  * node, read the ref as written — is each caller's own; the walk itself
  * never reports. A `$ref` key holding `undefined` is no reference, and a
- * component that is not an object answers nothing.
+ * component that is not an object — an array included — answers nothing:
+ * the walk ends `unresolved` on the ref, handing the entry back as `found`.
  */
 export function followReference<T extends object>(
   raw: T | ReferenceObject,
@@ -110,7 +119,11 @@ export function followReference<T extends object>(
   const seen = new Set<string>();
   const kept: Partial<Record<ReferenceDocField, string>> = {};
   let current: object = raw;
-  const ended = (outcome: ReferenceOutcome, ref?: string): FollowedReference<T> => {
+  const ended = (
+    outcome: ReferenceOutcome,
+    ref?: string,
+    found?: FollowedReference<T>['found'],
+  ): FollowedReference<T> => {
     let value: object;
     if (outcome === 'resolved') {
       value = Object.keys(kept).length === 0 ? current : { ...current, ...kept };
@@ -127,7 +140,12 @@ export function followReference<T extends object>(
       const reference: Record<string, unknown> = { $ref: (current as { $ref: unknown }).$ref, ...kept };
       value = holdsExactly(current, reference) ? current : reference;
     }
-    return { outcome, value: value as T, ...(ref !== undefined ? { ref } : {}) };
+    return {
+      outcome,
+      value: value as T,
+      ...(ref !== undefined ? { ref } : {}),
+      ...(found !== undefined ? { found } : {}),
+    };
   };
 
   while ('$ref' in current) {
@@ -144,11 +162,18 @@ export function followReference<T extends object>(
     if (typeof ref !== 'string') return ended('malformed', String(ref));
     if (seen.has(ref)) return ended('circular', ref);
     seen.add(ref);
-    const resolved = resolveComponentRef(ref, section, components);
-    if (!resolved || typeof resolved !== 'object') return ended('unresolved', ref);
-    current = resolved;
+    const entry = componentRefEntry(ref, section, components);
+    if (entry === undefined) return ended('unresolved', ref);
+    // The section holds the name, but no object: nothing to walk into. The
+    // entry travels with the outcome so a reader can say what it found.
+    if (!isRecord(entry.value)) return ended('unresolved', ref, entry);
+    current = entry.value;
   }
   return ended('resolved');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Whether `object` holds exactly `entries`, key for key and value for value, so it can stand for them as it is. */
