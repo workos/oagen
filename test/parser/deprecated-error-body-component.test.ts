@@ -343,6 +343,25 @@ describe('#629', () => {
       expect(ontoDeprecated.warnings).toEqual([leftAsTheyAre('deprecated component schema "ErrorBody"')]);
     });
 
+    it('announces a deprecated body a live component takes once, when a name another group cannot take makes the fold run again', async () => {
+      // `{ code, message }` asks for `ErrorBodyWithCode`, which a component
+      // of another shape holds, so the pass leaves that body and runs again
+      // without it; the deprecated `{ message }` folds onto `ErrorBody` in
+      // both runs and is announced once (the review's finding).
+      const { spec, warnings } = await parse(
+        doc(
+          { ...getOp('pet', messageBody({ deprecated: true })), ...getOp('note', obj({ code: str, message: str })) },
+          { ErrorBody: messageBody(), ErrorBodyWithCode: obj({ reason: str }) },
+        ),
+      );
+      expect(errorTypes(spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: GetNoteError404']);
+      expect(modelShapes(spec)).toContain('ErrorBody { message }');
+      expect(warnings).toEqual([
+        '[oagen] Warning: The shared error body { code: string, message: string } would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" already holds — keeping model "GetNoteError404" as it is; give the two the same shape, or rename one',
+        '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetPetError404" and live by component schema "ErrorBody" — keeping it live',
+      ]);
+    });
+
     it('a nested error body’s own flag is settled among its twins the same way', async () => {
       const item = (deprecated: boolean): Doc =>
         obj({ code: str, field: str }, ['code', 'field'], deprecated ? { deprecated: true } : {});

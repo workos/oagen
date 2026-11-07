@@ -1711,7 +1711,9 @@ function extractWebhookResponses(
     // code, and skipped, as on an operation (#617). Only a status code is
     // checked, since only one is read.
     if (!isResponseEntry(raw, `${code} response of ${label}`)) continue;
-    const description = presentText(resolveResponseDescription(raw, componentResponses, code, label, siblingDocs));
+    const read = resolveResponseDescription(raw, componentResponses, code, label, siblingDocs);
+    if (read.skip) continue;
+    const description = presentText(read.description);
     result.push({ statusCode: responseKey.code, ...(description !== undefined ? { description } : {}) });
   }
   return result;
@@ -1725,7 +1727,12 @@ function extractWebhookResponses(
  * `$ref` that is not a string, or a ref nothing answers is warned about and
  * the walk's last object read as written, by the same rule: the text beside
  * the refs under `'override'`, none under `'ignore'`. The warning says
- * whether that leaves a description beside the status code.
+ * whether that leaves a description beside the status code. A chain that
+ * ends on a `components/responses` entry that is no object (`Gone: []`) is
+ * the inline case behind a pointer: it goes through `isResponseEntry` as an
+ * inline entry does, warned about naming the component and the site, and
+ * `{ skip: true }` tells the caller to skip the status code, as an
+ * operation skips the entry (#617).
  */
 function resolveResponseDescription(
   raw: Record<string, unknown>,
@@ -1733,8 +1740,13 @@ function resolveResponseDescription(
   code: string,
   label: string,
   siblingDocs: SiblingDocs,
-): string | undefined {
+): { skip: true } | { skip?: undefined; description?: string } {
   const followed = followReference<{ description?: unknown }>(raw, 'responses', componentResponses, siblingDocs);
+  if (followed.outcome === 'unresolved' && followed.found !== undefined) {
+    const { name, value } = followed.found;
+    if (!isResponseEntry(value, `components/responses/${name} (the ${code} response of ${label})`))
+      return { skip: true };
+  }
   const { description } = followed.value;
   const text = typeof description === 'string' ? description : undefined;
   const keeping =
@@ -1749,5 +1761,5 @@ function resolveResponseDescription(
         `no matching entry under components/responses. Keeping ${keeping}.`,
     );
   }
-  return text;
+  return { description: text };
 }
