@@ -6760,7 +6760,13 @@ function buildTypeRef(
     // limits are the union's (`schemaToTypeRef` attaches them to it), not
     // each variant's: a variant is the same schema read as one of its
     // types, so the limits are read from the union, once, for whichever
-    // type the value takes (#545). The variants are built without them
+    // type the value takes (#545) — or, once the list collapses to one
+    // variant, from that type where it can carry them: a model or enum
+    // reference carries none, as the same limits beside a bare `$ref` carry
+    // none (Greptile, #616 review: `items: { type: ['object', 'string'],
+    // allOf: [{ $ref: Owner }], minProperties: 2 }` is `Owner[]`, as
+    // `items: { allOf: [{ $ref: Owner }], minProperties: 2 }` is). The
+    // variants are built without them
     // (`buildTypeRef`); what they nest — items, values — carries its own.
     // Each per-type copy stands for the schema it was spread from
     // (`derivedCopy`), so a merge the schema carries (`allOf` beside `type:
