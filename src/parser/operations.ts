@@ -109,7 +109,9 @@ import {
   resolveOverrideParams,
   applyPaginationOverride,
   dataPathProblem,
-  resolveDataPathItemType,
+  dataPathWalkStart,
+  deferDataPathItemType,
+  walkDataPathItemType,
 } from './pagination.js';
 import {
   BODY_READINGS,
@@ -6274,9 +6276,18 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * model is reused and follows any later renaming), or the response model's
  * fields, through the models a component's fields mint too (`result.items`
  * through a `result` two `allOf` members of `PetPage` conjoin yields the
- * items `PetPageResult` holds) — and the document (`schema`, classified
- * under `contextName`) answers when the path crosses a model the parser has
- * not materialized, minting inline items under a path-derived name.
+ * items `PetPageResult` holds), the walk starting where `dataPathWalkStart`
+ * says. A walk that crosses a reference `resolveSchemaPointers` has yet to
+ * settle — the response written as a `$ref` deeper into a component
+ * (`#/components/schemas/Holder/properties/result`), or a field on the way
+ * written so — answers nothing yet: the model the pointed schema's items
+ * are built as exists, and reading the document now would mint a copy of
+ * it (`ListOwnersItem` beside `HolderResultItem`; #608), so the item type
+ * is a placeholder the settle decides from the settled types
+ * (`settleDeferredDataPathItemType`). The document (`schema`, classified
+ * under `contextName`) answers only when the path crosses a model the
+ * parser has not materialized, minting inline items under a path-derived
+ * name.
  */
 function resolveOverrideItemType(
   result: ResponseExtractionResult,
@@ -6294,17 +6305,10 @@ function resolveOverrideItemType(
     ...(result.envelopeCompanions ?? []).flatMap((companion) => companion.models),
     ...componentModels,
   ];
-  let fromIr: TypeRef | undefined;
-  if (result.envelopeFields) {
-    // The envelope was unwrapped, so its companions — not `result.response`,
-    // which is already the data array — are where the path starts.
-    const [head, ...rest] = dataPath.split('.');
-    const companion = result.envelopeFields.find((field) => field.name === head);
-    if (companion) fromIr = resolveDataPathItemType(companion.type, rest.join('.'), pool);
-  } else {
-    fromIr = resolveDataPathItemType(result.response, dataPath, pool);
-  }
-  if (fromIr) return { itemType: fromIr, inlineModels: [] };
+  const start = dataPathWalkStart(result.response, result.envelopeFields, dataPath);
+  const walked = start && walkDataPathItemType(start.root, start.path, pool);
+  if (walked && 'itemType' in walked) return { itemType: walked.itemType, inlineModels: [] };
+  if (walked?.pending) return { itemType: deferDataPathItemType(), inlineModels: [] };
 
   return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas, settle);
 }
@@ -7350,7 +7354,7 @@ function extractResponses(
   itemType?: TypeRef;
   envelopeFields?: Field[];
   endOfIteration?: PaginationEndOfIteration;
-  /** Element type of the array the override's `dataPath` names; unset when the override was rejected or names none. */
+  /** Element type of the array the override's `dataPath` names — a placeholder the settle decides when the walk crossed a pending reference (`deferDataPathItemType`; #608); unset when the override was rejected or names none. */
   overrideItemType?: TypeRef;
   /**
    * Why the override cannot apply to the primary response — a `dataPath`
@@ -7731,9 +7735,11 @@ function extractResponses(
   // iterator yields from, so its element type — not the wrapper — must
   // become `itemType`. It is resolved against the primary body, whose models
   // (companions included) are the ones retained above, so the item type it
-  // selects always has its model. An accepted `dataPath` reached an array in
-  // the body the decision was made against, which is this one: a body an
-  // array is reached in is typed, and the lowest typed 2xx is the primary.
+  // selects always has its model — or is a placeholder until the settle, when
+  // the path crosses a pending reference (`resolveOverrideItemType`). An
+  // accepted `dataPath` reached an array in the body the decision was made
+  // against, which is this one: a body an array is reached in is typed, and
+  // the lowest typed 2xx is the primary.
   const primarySchema = primaryStatus === undefined ? undefined : bodySchemas.get(primaryStatus);
   if (
     primaryStatus !== undefined &&

@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type {
+  Field,
   TypeRef,
   Parameter,
   Model,
@@ -9,7 +10,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { componentKeyOf } from './schema-refs.js';
+import { componentKeyOf, isPendingSchemaRef } from './schema-refs.js';
 import {
   allOfReadAsMember,
   classifyInlineSchema,
@@ -1218,16 +1219,43 @@ function describeSchema(schema: SchemaObject): string {
  * path, not once per way of reaching it (PR #585 review: a `next.next.….
  * items` path doubled the work at every segment). An empty `dataPath` means
  * `root` itself is the array. `undefined` when a segment is missing, a model
- * is unknown, the path does not end on an array, or the variants disagree;
- * the document walk then answers (`resolveDataPathFromSchema`).
+ * is unknown, the path does not end on an array, or the variants disagree —
+ * and when the walk crosses a reference `resolveSchemaPointers` has yet to
+ * settle, which `walkDataPathItemType` tells apart from the rest; the
+ * document walk then answers (`resolveDataPathFromSchema`).
  */
-export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
+export function resolveDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): TypeRef | undefined {
+  const walked = walkDataPathItemType(root, dataPath, models);
+  return walked && 'itemType' in walked ? walked.itemType : undefined;
+}
+
+/**
+ * The walk `resolveDataPathItemType` makes, telling a path the IR cannot
+ * resolve yet from one it does not resolve: `{ pending: true }` when a type
+ * the walk reaches — the root, a field's type on the way, a variant of a
+ * union there, or the type the path lands on, under its nullable wrapper —
+ * is a reference a schema `$ref` deeper into a component left pending
+ * (`pendingSchemaRef`; #539), which names no model until
+ * `resolveSchemaPointers` settles it. Every type a segment reaches is
+ * checked for one before any field is looked up, so the answer never
+ * depends on which variant of a union is read first.
+ */
+export function walkDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): { itemType: TypeRef } | { pending: true } | undefined {
   let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const containers = new Map<string, TypeRef>();
     for (const type of reached) {
       for (const container of containersOf(type)) containers.set(typeRefKey(container), container);
     }
+    if ([...containers.values()].some(isPendingModelRef)) return { pending: true };
     const next = new Map<string, TypeRef>();
     for (const container of containers.values()) {
       if (container.kind !== 'model') return undefined;
@@ -1237,12 +1265,102 @@ export function resolveDataPathItemType(root: TypeRef, dataPath: string, models:
     }
     reached = [...next.values()];
   }
-  const items = reached.map((type) => {
-    const target = type.kind === 'nullable' ? type.inner : type;
-    return target.kind === 'array' ? target.items : undefined;
-  });
+  const targets = reached.map((type) => (type.kind === 'nullable' ? type.inner : type));
+  if (targets.some(isPendingModelRef)) return { pending: true };
+  const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
-  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first)) ? first : undefined;
+  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first))
+    ? { itemType: first }
+    : undefined;
+}
+
+/** Whether `type` is a model reference `resolveSchemaPointers` has yet to settle (#539). */
+function isPendingModelRef(type: TypeRef): boolean {
+  return type.kind === 'model' && isPendingSchemaRef(type);
+}
+
+/**
+ * Where an explicit `dataPath` is walked from in the IR, and the path left
+ * to walk from there: the response itself, unless the response was unwrapped
+ * on a list envelope (`envelopeFields` present) — it is then the data array,
+ * and the path starts at the companion its first segment names, with the
+ * rest of the path; `undefined` when the segment names no companion, and the
+ * document answers. The one choice for the walk at extraction
+ * (`resolveOverrideItemType`) and the walk at the settle
+ * (`settleDeferredDataPathItemType`), so the two read one path.
+ */
+export function dataPathWalkStart(
+  response: TypeRef,
+  envelopeFields: readonly Field[] | undefined,
+  dataPath: string,
+): { root: TypeRef; path: string } | undefined {
+  if (!envelopeFields) return { root: response, path: dataPath };
+  const [head, ...rest] = dataPath.split('.');
+  const companion = envelopeFields.find((field) => field.name === head);
+  return companion && { root: companion.type, path: rest.join('.') };
+}
+
+/**
+ * The iterator item types an explicit `dataPath` has yet to decide (#608):
+ * each a placeholder, typed `unknown`, standing in `PaginationMeta.itemType`
+ * from extraction until the settle. The walk from the response crossed a
+ * reference a schema `$ref` deeper into a component left pending — the
+ * response itself written as `{ $ref: '#/components/schemas/Holder/
+ * properties/result' }`, or a field on the way — so the model the pointed
+ * schema's items are built as (`HolderResultItem`, which
+ * `HolderResult.items` holds) exists but cannot be reached from the response
+ * yet; reading the document instead minted a second copy of it under the
+ * path-derived name (`ListOwnersItem`). The path is walked again once every
+ * reference is settled (`settleDeferredDataPathItemType`), so the iterator
+ * yields the very type the settled response's field holds, as it does when
+ * the response is a `$ref` to the component (`ResultItem` for `Result`).
+ */
+const deferredDataPathItemTypes = new WeakSet<TypeRef>();
+
+/** A placeholder item type for a `dataPath` the settle decides (`settleDeferredDataPathItemType`). */
+export function deferDataPathItemType(): TypeRef {
+  const placeholder: TypeRef = { kind: 'primitive', type: 'unknown' };
+  deferredDataPathItemTypes.add(placeholder);
+  return placeholder;
+}
+
+/** Whether `type` is a placeholder `deferDataPathItemType` built, awaiting the settle. */
+export function isDeferredDataPathItemType(type: TypeRef): boolean {
+  return deferredDataPathItemTypes.has(type);
+}
+
+/**
+ * Decide the item type `pagination.dataPath` names, now that `response`,
+ * the envelope's companions and every model's fields are settled
+ * (`resolveSchemaPointers`): the path is walked from where it was walked at
+ * extraction (`dataPathWalkStart`), through `models` — every model built —
+ * and `pagination.itemType` becomes the very `TypeRef` the array's field
+ * holds, which a later rename repoints in place. A path the settled types
+ * reach no array through yields `unknown`, with a warning: the override
+ * was accepted on the document walk, which reads through the pointer, but
+ * the pointer was typed `unknown` where it stands (an inline `allOf`
+ * member the `allOf` is not read as, a chain of pointers that reaches
+ * itself), and the iterator cannot yield a model the response does not
+ * hold. `context` names the operation as the settle names its sites
+ * (`Owners.listOwners`).
+ */
+export function settleDeferredDataPathItemType(
+  pagination: PaginationMeta,
+  response: TypeRef,
+  models: readonly Model[],
+  context: string,
+): void {
+  const { dataPath } = pagination;
+  const start = dataPath === undefined ? undefined : dataPathWalkStart(response, pagination.envelopeFields, dataPath);
+  const itemType = start && resolveDataPathItemType(start.root, start.path, models);
+  if (itemType) {
+    pagination.itemType = itemType;
+    return;
+  }
+  warn(
+    `dataPath "${dataPath}" on ${context} reaches no array in the response once its schema $ref is settled — typing the iterator's items as unknown`,
+  );
+  pagination.itemType = { kind: 'primitive', type: 'unknown' };
 }
 
 /**

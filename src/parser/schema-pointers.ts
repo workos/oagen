@@ -78,9 +78,13 @@
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
  * (`paginatedItemType`), so a paginated response pointing at an array of
- * strings yields strings; and a discriminator mapping entry that named a
- * pointer variant is written as the model the variant settled to
- * (`settleDeferredMappingEntries`).
+ * strings yields strings; an explicit `dataPath` whose walk through the IR
+ * crossed a pending reference — that response, or a field on the way — is
+ * walked again from the settled types, so the iterator yields the model the
+ * pointed schema's items are built as, never a copy read from the document
+ * (`settleDeferredDataPathItemType`; #608); and a discriminator mapping
+ * entry that named a pointer variant is written as the model the variant
+ * settled to (`settleDeferredMappingEntries`).
  */
 import type {
   Callback,
@@ -112,7 +116,7 @@ import {
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
-import { paginatedItemType } from './pagination.js';
+import { isDeferredDataPathItemType, paginatedItemType, settleDeferredDataPathItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
@@ -203,7 +207,9 @@ export function resolveSchemaPointers(
     }
   }
   for (const service of sites.services) {
-    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
+    for (const op of service.operations) {
+      visitOperation(op, `${service.name}.${op.name}`, visit, visitSite, sites.models);
+    }
   }
   for (const webhook of sites.webhooks) {
     visitReceived(webhook, `webhooks.${webhook.name}.${webhook.httpMethod}`, visit, visitSite);
@@ -274,13 +280,17 @@ function collectDiscriminatedUnions(ref: TypeRef, out: UnionType[]): void {
  * variant schemas (`extractBodyParameterGroups`), so a member written as a
  * pointer holds a pending reference of its own. A parameter, a group member
  * or an envelope field goes through `visitSite`, which aligns its own
- * limits with its settled type's too.
+ * limits with its settled type's too. The iterator's item type an explicit
+ * `dataPath` deferred (`deferDataPathItemType`) is decided once the
+ * response and the envelope fields are settled, by walking the path through
+ * `models`, every model built (`settleDeferredDataPathItemType`; #608).
  */
 function visitOperation(
   op: Operation,
   context: string,
   visit: (ref: TypeRef, context: string) => void,
   visitSite: (site: LimitedSite, context: string) => void,
+  models: readonly Model[],
 ): void {
   for (const p of [
     ...op.pathParams,
@@ -296,16 +306,26 @@ function visitOperation(
   // reference it was — the response itself, since no reference is an array
   // — so it is chosen again from the settled response: an array's items, as
   // `detectPagination` reads any response (`paginatedItemType`). Only the
-  // item type taken from the response itself is reread; one an override or
-  // an envelope decided stands.
+  // item type taken from the response itself is reread that way; one an
+  // envelope decided stands, and one an explicit `dataPath` deferred is
+  // decided below.
   const responseWasPending = isPendingVariant(op.response);
   visit(op.response, `${context}.response`);
   if (responseWasPending && op.pagination && op.pagination.itemType === op.response) {
     op.pagination.itemType = paginatedItemType(op.response);
   }
   for (const entry of op.successResponses ?? []) visit(entry.type, `${context}.successResponses.${entry.statusCode}`);
-  if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
   for (const field of op.pagination?.envelopeFields ?? []) visitSite(field, `${context}.pagination.${field.name}`);
+  // An explicit `dataPath` whose walk crossed a pending reference at
+  // extraction — the response itself, a companion or a field on the way —
+  // left a placeholder (`deferDataPathItemType`): with the response, the
+  // companions and every model's fields settled, the path is walked again
+  // through the IR, so the iterator yields the model the pointed schema's
+  // items are built as, never a copy read from the document (#608).
+  if (op.pagination && isDeferredDataPathItemType(op.pagination.itemType)) {
+    settleDeferredDataPathItemType(op.pagination, op.response, models, context);
+  }
+  if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
   for (const error of op.errors) if (error.type) visit(error.type, `${context}.errors.${error.statusCode}`);
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
