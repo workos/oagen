@@ -108,7 +108,10 @@ const enumValues = (spec: ApiSpec, name: string): (string | number)[] | undefine
 const fieldType = (spec: ApiSpec, model: string, field: string): TypeRef | undefined =>
   spec.models.find((m) => m.name === model)?.fields.find((f) => f.name === field)?.type;
 const changes = (a: ApiSpec, b: ApiSpec): string[] =>
-  diffSpecs(a, b).changes.map(({ classification, kind, name }) => `${classification} ${kind} ${name ?? ''}`.trim());
+  diffSpecs(a, b).changes.map((change) => {
+    const name = 'name' in change && typeof change.name === 'string' ? change.name : '';
+    return `${change.classification} ${change.kind} ${name}`.trim();
+  });
 
 /** Every inline enum a model's field references is lifted once under that name with those values, and none keeps an operation's name. */
 function expectEnumsSound(spec: ApiSpec): void {
