@@ -329,3 +329,78 @@ describe('resolveResponseModelName', () => {
     ).toBeNull();
   });
 });
+
+// A `$ref` to a component that admits `null` is `nullable<model>` wherever it
+// stands (#615) — an array's items, a union's variant, a pagination item type
+// — and the plan reads the model through that wrapper, as it already read a
+// nullable response.
+describe('planOperation with nullable items (#615)', () => {
+  it('unpaginated array of `nullable<model>` → isArrayResponse true, with the model name', () => {
+    const plan = planOperation(
+      makeOp({
+        response: { kind: 'array', items: { kind: 'nullable', inner: { kind: 'model', name: 'PetOwner' } } },
+      }),
+    );
+    expect(plan.isArrayResponse).toBe(true);
+    expect(plan.responseModelName).toBe('PetOwner');
+    expect(plan.isModelResponse).toBe(true);
+  });
+
+  it('nullable array of `nullable<model>` → the same', () => {
+    const plan = planOperation(
+      makeOp({
+        response: {
+          kind: 'nullable',
+          inner: { kind: 'array', items: { kind: 'nullable', inner: { kind: 'model', name: 'PetOwner' } } },
+        },
+      }),
+    );
+    expect(plan.responseModelName).toBe('PetOwner');
+    expect(plan.isModelResponse).toBe(true);
+    // Not a bare `type: array` response: emitters read the wrapper from `op.response`.
+    expect(plan.isArrayResponse).toBe(false);
+  });
+
+  it('array of `nullable<primitive>` → isArrayResponse false, no model', () => {
+    const plan = planOperation(
+      makeOp({
+        response: { kind: 'array', items: { kind: 'nullable', inner: { kind: 'primitive', type: 'string' } } },
+      }),
+    );
+    expect(plan.isArrayResponse).toBe(false);
+    expect(plan.responseModelName).toBeNull();
+  });
+
+  it('paginated list whose itemType is `nullable<model>` → paginatedItemModelName set', () => {
+    const plan = planOperation(
+      makeOp({
+        pagination: {
+          strategy: 'cursor',
+          param: 'after',
+          dataPath: 'data',
+          itemType: { kind: 'nullable', inner: { kind: 'model', name: 'PetOwner' } },
+        },
+        response: { kind: 'model', name: 'PetOwnerList' },
+      }),
+    );
+    expect(plan.isPaginated).toBe(true);
+    expect(plan.paginatedItemModelName).toBe('PetOwner');
+    expect(plan.responseModelName).toBe('PetOwnerList');
+    expect(plan.isArrayResponse).toBe(false);
+  });
+
+  it('union whose only model variant is `nullable<model>` → that model', () => {
+    const plan = planOperation(
+      makeOp({
+        response: {
+          kind: 'union',
+          variants: [
+            { kind: 'primitive', type: 'string' },
+            { kind: 'nullable', inner: { kind: 'model', name: 'PetOwner' } },
+          ],
+        },
+      }),
+    );
+    expect(plan.responseModelName).toBe('PetOwner');
+  });
+});
