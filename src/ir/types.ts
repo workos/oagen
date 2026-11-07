@@ -1226,7 +1226,18 @@ export interface TypeParam {
  * component admits null (#512, #569). What either component and its
  * aliases declare beside the items or the type — text, link, flags,
  * limits, `default`, `x-*` keys — is read by a field that names it with a
- * bare `$ref` (`Field`). The inline schemas the parser materializes — request bodies,
+ * bare `$ref` (`Field`). A component that is only a `$ref` to a component
+ * that becomes a model — `CatAlias: { $ref: Cat }`, with or without
+ * `description`, `deprecated`, `externalDocs`, limits or `x-*` keys beside
+ * the `$ref`, which are the alias's own — is a model of its own carrying
+ * `Cat`'s fields, `required` and discriminator, exactly as `CatAlias: {
+ * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases and into a
+ * component that itself composes; a `$ref` to it resolves to the alias
+ * (`{ kind: 'model', name: 'CatAlias' }`), never to `Cat`, at every site,
+ * and as a union variant it pins what `Cat` pins (#618: it was a model with
+ * no fields). A chain of bare `$ref`s that returns to itself names nothing:
+ * each such component is a model with no fields, reported once. The inline
+ * schemas the parser materializes — request bodies,
  * responses, union variants, nested objects, array items, map values — are
  * models too.
  */

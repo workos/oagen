@@ -1692,7 +1692,11 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Every property the object described by `schema` exposes, by name: its own
  * `properties`, those of its `allOf` members (following a member's `$ref`
- * into `schemas` when given, as `extractAllOfModel` does), those of a
+ * into `schemas` when given, as `extractAllOfModel` does), those of the
+ * component a schema that is itself a bare `$ref` names — a component alias
+ * (`CatAlias: { $ref: Cat }`), read as `allOf: [{ $ref: Cat }]` is (#618),
+ * followed through a chain of aliases when `schemas` is given, so the
+ * alias's fields are typed with `Cat`'s sibling set — those of a
  * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
  * member it wraps (`nullableAxisBranch`, per keyword, the definition the
  * model walks resolve a member by, so a nullable `$ref` member's component
@@ -1734,7 +1738,9 @@ export function collectProperties(
       else for (const variant of axis) visit(variant, true, true);
     }
   };
-  visit(schema, false, false);
+  // The root's own `$ref` is followed as a member's is: the root is a
+  // component alias, read as the `allOf` of that reference (#618).
+  visit(schema, true, false);
   return new Map(
     [...ledger.values()].map((entry) => [
       entry.name,
@@ -3165,11 +3171,13 @@ function readVariant(
  * component answers contributes nothing and is listed in `unresolvedRefs`.
  * The component tagged is the one whose own model carries the field under
  * its name: an `allOf` component that inherits it stays the origin of
- * everything reached inside its chain (`DogMeta`), while a bare alias
- * (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref: Base
- * }, { type: 'null' }] }`) or a chain of either declares nothing of its own
- * and builds no model, so a reference met inside one starts its own origin
- * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
+ * everything reached inside its chain (`DogMeta`), and so does a bare
+ * alias (`Hop: { $ref: Base }`), whose model is built as `allOf: [{ $ref:
+ * Base }]`'s is and carries the field as `HopMeta` (#618), while a nullable
+ * alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null' }] }`) declares
+ * nothing of its own and builds no model, so a reference met inside one
+ * starts its own origin (`Base.meta` stays `BaseMeta`; workos/oagen#308
+ * round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for each `oneOf`/`anyOf` it carries (`unionAxesOf`:
  * a member writing both carries two, a nullable wrapper among them decided
@@ -3284,18 +3292,21 @@ export function mergeAllOfMembers(
       // carries them under its name. A ref inside an `allOf` component's own
       // chain stays that component's: its model inherits through its
       // members, nullable ones included, and types their fields under its
-      // own name (`DogMeta`). Any other component met on the way declares
-      // nothing of its own that this reference adds to — a bare alias
-      // (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref:
-      // Base }, { type: 'null' }] }`), a chain of either — and builds no
-      // model for the fields, so the reference starts its own origin, as a
-      // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
-      // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
-      // A pointer deeper into a component (#539) names a schema and no
-      // model of its own, so it declares as a member written inline does:
-      // under the origin at hand.
+      // own name (`DogMeta`); so does one inside a bare alias's (`Hop: {
+      // $ref: Base }`), whose model is built as `allOf: [{ $ref: Base }]`'s
+      // is and types the field `HopMeta` (#618). Any other component met on
+      // the way declares nothing of its own that this reference adds to —
+      // a nullable alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null'
+      // }] }`), a chain of them — and builds no model for the fields, so
+      // the reference starts its own origin, as a top-level ref member does
+      // (workos/oagen#308 round 4: `HolderValue.meta` named `AliasMeta`,
+      // which nothing built, where `BaseMeta` exists). A pointer deeper into
+      // a component (#539) names a schema and no model of its own, so it
+      // declares as a member written inline does: under the origin at hand.
       const owner =
-        origin?.schema.allOf || key === undefined ? origin : { name: resolveSchemaName(key), schema: target };
+        origin?.schema.allOf || origin?.schema.$ref !== undefined || key === undefined
+          ? origin
+          : { name: resolveSchemaName(key), schema: target };
       visit(target, owner);
       return;
     }
