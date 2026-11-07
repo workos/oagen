@@ -236,23 +236,30 @@ describe('#580', () => {
   });
 
   describe('a key that spells a prefixed text', () => {
-    // `key:petAdopted` as written is what `petAdopted` hashes once prefixed,
-    // so every stem of the batch hashes its prefixed text; the pair's two
-    // stems are the only ones hashed and keep their names.
-    const literal = { 'key:petAdopted': posting('literalId'), ...pair };
-    const literalReversed = { ...pairReversed, 'key:petAdopted': posting('literalId') };
+    // `key:petAdopted` as written is what `petAdopted`'s key hashes once
+    // prefixed. Its stem starts with `Key`, so it can mint no name
+    // `petAdopted`'s stem mints, hash alike or not, and it moves nothing
+    // else: `pet_adopted` beside them keeps the hash of its key as written.
+    const literal = { 'key:petAdopted': posting('literalId'), ...pair, pet_adopted: posting('otherId') };
+    const literalReversed = {
+      pet_adopted: posting('otherId'),
+      ...pairReversed,
+      'key:petAdopted': posting('literalId'),
+    };
 
-    it('still parts every webhook', async () => {
+    it('still parts every webhook and moves nothing outside the pair', async () => {
       const spec = await parseJson(documentWith('3.1.0', literal));
       expect(payloads(spec)).toEqual([
         ['key:petAdopted', undefined, 'KeyPetAdoptedPayload'],
         ['petAdopted', undefined, 'PetAdopted15Fe0FPayload'],
         ['noteAdded', 'petAdopted', 'PetAdoptedB0Ca6APayload'],
+        ['pet_adopted', undefined, 'PetAdoptedF79708Payload'],
       ]);
       expect(modelFields(spec)).toEqual([
         ['KeyPetAdoptedPayload', ['literalId']],
         ['PetAdopted15Fe0FPayload', ['petId']],
         ['PetAdoptedB0Ca6APayload', ['noteId']],
+        ['PetAdoptedF79708Payload', ['otherId']],
       ]);
       expect(warn).not.toHaveBeenCalled();
     });
@@ -260,6 +267,39 @@ describe('#580', () => {
     it('reads identical IR in both key orders', async () => {
       const first = await parseJson(documentWith('3.1.0', literal), 'first.json');
       const second = await parseJson(documentWith('3.1.0', literalReversed), 'second.json');
+      expect(orderFree(second)).toEqual(orderFree(first));
+    });
+
+    // Colliding itself — `key_pet_adopted` is `KeyPetAdopted` too — it
+    // hashes `key:petAdopted`, the very string `petAdopted` hashes, and the
+    // two still name apart (`KeyPetAdopted15Fe0F` beside `PetAdopted15Fe0F`).
+    const colliding = { 'key:petAdopted': posting('literalId'), key_pet_adopted: posting('underscoreId'), ...pair };
+    const collidingReversed = {
+      ...pairReversed,
+      key_pet_adopted: posting('underscoreId'),
+      'key:petAdopted': posting('literalId'),
+    };
+
+    it('hashes the string the prefixed key hashes when it collides, and names apart', async () => {
+      const spec = await parseJson(documentWith('3.1.0', colliding));
+      expect(payloads(spec)).toEqual([
+        ['key:petAdopted', undefined, 'KeyPetAdopted15Fe0FPayload'],
+        ['key_pet_adopted', undefined, 'KeyPetAdopted70A5A5Payload'],
+        ['petAdopted', undefined, 'PetAdopted15Fe0FPayload'],
+        ['noteAdded', 'petAdopted', 'PetAdoptedB0Ca6APayload'],
+      ]);
+      expect(modelFields(spec)).toEqual([
+        ['KeyPetAdopted15Fe0FPayload', ['literalId']],
+        ['KeyPetAdopted70A5A5Payload', ['underscoreId']],
+        ['PetAdopted15Fe0FPayload', ['petId']],
+        ['PetAdoptedB0Ca6APayload', ['noteId']],
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it('reads identical IR in both key orders when it collides', async () => {
+      const first = await parseJson(documentWith('3.1.0', colliding), 'first.json');
+      const second = await parseJson(documentWith('3.1.0', collidingReversed), 'second.json');
       expect(orderFree(second)).toEqual(orderFree(first));
     });
   });
