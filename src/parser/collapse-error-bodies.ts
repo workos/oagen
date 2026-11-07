@@ -118,6 +118,22 @@
  * the response's own `description` stays on the `errors[]` entry, where it
  * always was.
  *
+ * Every other inline enum a shared body's field lists — an integer or
+ * number `enum`, a string `enum` under array items or map values or in a
+ * union, through a nullable wrapper, on a nested body — is named from the
+ * field the same way, never from the operation whose body happened to sort
+ * first (#612): `ErrorBody<Field>` (`ErrorBodyStatus` for
+ * `status: { type: integer, enum: [404, 410] }`) when the shared bodies
+ * list one value set for the field, shared by every shared body whose field
+ * of that name lists those values; else, for each of the sets, the values
+ * spelled as the model's token spells them (`ErrorBodyStatus404Or410`
+ * beside `ErrorBodyStatus500Or503`), so the name is a function of the
+ * document's value sets alone and adding, removing or renaming an operation
+ * moves no enum. A name an enum of the same members already holds is
+ * shared; one anything else holds sends a lone set to its spelled name; and
+ * a spelled name anything else holds leaves the bodies that list the set as
+ * they are, with a warning, as a taken model name does.
+ *
  * The references are rewritten in place, so the `contents` entry that shared
  * its `type` with the entry's `type` keeps sharing it. A `oneOf` of variants
  * that fold onto one model is no longer a union: duplicate variants are
@@ -134,6 +150,7 @@ import {
   collectOperationTypeRefs,
   collectWebhookTypeRefs,
   renameTypeRefModels,
+  walkTypeRef,
 } from '../ir/types.js';
 import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
@@ -261,8 +278,9 @@ interface NamingContext {
 /**
  * One attempt at folding the error-only models `errorOnly`: the model list
  * with every group folded, or — when a shared name is taken by something of
- * another shape — the names of the models to leave as they are, so the
- * caller can try again without them.
+ * another shape, or an inline enum's spelled name by anything (#612) — the
+ * names of the models to leave as they are, so the caller can try again
+ * without them.
  */
 function fold(
   errorOnly: ReadonlySet<string>,
@@ -319,12 +337,21 @@ function fold(
   const canonical = new Map<string, string>(); // group key → shared name
   const absorbed = new Set<string>(); // group keys folded onto a component of their shape
   const seeds = new Set<string>(); // the models of the groups left as they are
-  const leave = (name: string, holder: string, left: readonly Model[]): void => {
+  // Mark `left` as the models of a group left as it is, and say so.
+  const leaving = (left: readonly Model[]): string => {
     for (const member of left) seeds.add(member.name);
     const list = left.map((member) => `"${member.name}"`).join(', ');
-    const kept = left.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
+    return left.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
+  };
+  const leave = (name: string, holder: string, left: readonly Model[]): void => {
     console.warn(
-      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${kept}; give the two the same shape, or rename one`,
+      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; give the two the same shape, or rename one`,
+    );
+  };
+  // An inline enum whose spelled name is taken leaves its bodies the same way (#612).
+  const leaveEnum = (field: string, name: string, holder: string, left: readonly Model[]): void => {
+    console.warn(
+      `[oagen] Warning: The inline enum the shared error body ${shapeOf(left[0])} lists for "${field}" would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; rename one`,
     );
   };
   const claim = (name: string, key: string, members: readonly Model[]): void => {
@@ -395,30 +422,14 @@ function fold(
       claim(bodyName(members[0], pinnedByKey.get(key)!, naming), key, members);
     }
   }
-  if (seeds.size > 0) {
-    // A model left as it is keeps its fields, so everything it reaches stays
-    // too; and a shared parent would reference one member's child and strand
-    // the others', so everything that reaches a frozen model stays as well.
-    const errorOnlyClosure = (roots: readonly string[]): string[] =>
-      [...closure(roots, byName)].filter((name) => errorOnly.has(name));
-    const frozen = new Set(errorOnlyClosure([...seeds]));
-    for (let grew = true; grew;) {
-      grew = false;
-      for (const name of errorOnly) {
-        if (frozen.has(name)) continue;
-        const reached = errorOnlyClosure([name]);
-        if (reached.some((other) => frozen.has(other))) {
-          for (const other of reached) frozen.add(other);
-          grew = true;
-        }
-      }
-    }
-    return { models: input.models, frozen };
-  }
+  if (seeds.size > 0) return { models: input.models, frozen: frozenClosure(seeds, errorOnly, byName) };
 
   // The shared enums, one per field name some group pins to two or more
   // values, named from the same pool as the models so neither takes the
-  // other's name; a field whose enum name is taken stays a plain string.
+  // other's name; a field whose enum name is taken stays a plain string —
+  // said once no inline enum below leaves a body as it is, which discards
+  // this attempt.
+  const warnings: string[] = [];
   const enumNamesByField = new Map<string, string>();
   const widened = new Set<string>();
   for (const [key] of orderedGroups) {
@@ -441,11 +452,44 @@ function fold(
         continue;
       }
       widened.add(field);
-      console.warn(
+      warnings.push(
         `[oagen] Warning: The values error bodies pin "${field}" to would be the shared enum "${base}", which ${holder} already holds — keeping those fields plain strings`,
       );
     }
   }
+
+  // Every other inline enum a shared body's field lists is named from the
+  // field as the string enum is, never from the operation whose body sorted
+  // first (#612): `ErrorBody<Field>` when the shared bodies list one value
+  // set for the field, else each set's values spelled as the model's token
+  // spells them, the sets taken in value order so the outcome depends on
+  // the document alone. A name an enum of the same members holds is shared;
+  // one anything else holds sends a lone set to its spelled name; a spelled
+  // name anything else holds leaves the bodies that list the set as they
+  // are, like a taken model name.
+  const inlineEnumNames = new Map<string, string>();
+  for (const [field, sets] of inlineEnumSets(orderedGroups, pinnedByKey, absorbed)) {
+    const word = toPascalCase(field);
+    for (const { values, groups } of sets.values()) {
+      const spelled = `${ERROR_BODY_BASE}${enumValuesToken(word, values)}`;
+      const members = values.map((value) => ({ name: String(value), value }));
+      let chosen: string | undefined;
+      for (const candidate of sets.size === 1 ? [`${ERROR_BODY_BASE}${word}`, spelled] : [spelled]) {
+        if (existingEnums.some((e) => e.name === candidate && sameEnumShape(e.values, members))) {
+          chosen = candidate;
+          break;
+        }
+        if (holders.has(candidate)) continue;
+        holders.set(candidate, `the shared enum "${candidate}"`);
+        chosen = candidate;
+        break;
+      }
+      if (chosen !== undefined) inlineEnumNames.set(inlineEnumKey(field, values), chosen);
+      else for (const left of groups) leaveEnum(field, spelled, holders.get(spelled)!, left);
+    }
+  }
+  if (seeds.size > 0) return { models: input.models, frozen: frozenClosure(seeds, errorOnly, byName) };
+  for (const message of warnings) console.warn(message);
 
   // Build the shared models.
   const renames = new Map<string, string>();
@@ -463,6 +507,20 @@ function fold(
         renames,
       ),
     );
+  }
+
+  // The inline enums the shared fields list take the names claimed above;
+  // the per-operation names the parser minted them under go with the models
+  // the fold removes.
+  for (const model of sharedModels) {
+    for (const field of model.fields) {
+      walkTypeRef(field.type, {
+        enum: (ref) => {
+          const name = ref.values && inlineEnumNames.get(inlineEnumKey(field.name, ref.values));
+          if (name !== undefined) ref.name = name;
+        },
+      });
+    }
   }
 
   // Rewrite every error site, then fold the unions whose variants became one.
@@ -528,6 +586,35 @@ function closure(roots: readonly string[], byName: ReadonlyMap<string, Model>): 
     for (const ref of collectModelTypeRefs(model)) stack.push(...collectModelRefs(ref));
   }
   return reached;
+}
+
+/**
+ * Every error-only model that stays with the models of the groups left as
+ * they are (`seeds`): a model left as it is keeps its fields, so everything
+ * it reaches stays too; and a shared parent would reference one member's
+ * child and strand the others', so everything that reaches a frozen model
+ * stays as well.
+ */
+function frozenClosure(
+  seeds: ReadonlySet<string>,
+  errorOnly: ReadonlySet<string>,
+  byName: ReadonlyMap<string, Model>,
+): Set<string> {
+  const errorOnlyClosure = (roots: readonly string[]): string[] =>
+    [...closure(roots, byName)].filter((name) => errorOnly.has(name));
+  const frozen = new Set(errorOnlyClosure([...seeds]));
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const name of errorOnly) {
+      if (frozen.has(name)) continue;
+      const reached = errorOnlyClosure([name]);
+      if (reached.some((other) => frozen.has(other))) {
+        for (const other of reached) frozen.add(other);
+        grew = true;
+      }
+    }
+  }
+  return frozen;
 }
 
 /**
@@ -947,12 +1034,21 @@ function scalarToken(word: string, type: TypeRef): string {
       return typeof type.value === 'string' ? word : valueToken(word, type.value);
     case 'enum':
       if (!type.values || isStringValuedInlineEnum(type)) return word;
-      return sortedEnumValues(type.values)
-        .map((value, i) => valueToken(i === 0 ? word : 'Or', value))
-        .join('');
+      return enumValuesToken(word, type.values);
     default:
       return word;
   }
+}
+
+/**
+ * `word` followed by an inline enum's values, sorted as the key sorts them
+ * (`sortedEnumValues`) and joined with `Or`, each spelled as a literal's is
+ * (`valueToken`): `Status404Or410`, `CodesAOrB`, `V2No3Or4`.
+ */
+function enumValuesToken(word: string, values: readonly (string | number)[]): string {
+  return sortedEnumValues(values)
+    .map((value, i) => valueToken(i === 0 ? word : 'Or', value))
+    .join('');
 }
 
 /** `word` followed by a literal's value: `True`, `False`, `Null`, a number with `-` as `Minus` and `.` as `Point`, a string in PascalCase. */
@@ -1124,9 +1220,11 @@ function sharedDomainName(name: string, members: readonly Model[], field: string
  * when that name is taken); one value every member pins stays that literal;
  * one value beside free strings is a string; and the field admits `null`
  * when any member's does. Any other type every member wrote alike is that
- * type, its references to folded models repointed; an optional field the
- * members type differently is the union of the types they wrote, sorted so
- * the order does not depend on the members' (`unionOf`). The type carries
+ * type, its references to folded models repointed and every inline enum in
+ * it, read by its sorted values, named by `fold` from the field once the
+ * shared models are built (#612); an optional field the members type
+ * differently is the union of the types they wrote, sorted so the order
+ * does not depend on the members' (`unionOf`). The type carries
  * the limits the field does: `constraints`, the ones every member wrote,
  * or none when they differ.
  */
@@ -1160,7 +1258,8 @@ function sharedFieldType(
   }
   // An inline enum reads by its sorted values, as the key reads it, and not
   // by the name the parser minted it under per operation: two members that
-  // list the same values, in any order, share the first member's enum.
+  // list the same values, in any order, share one enum, which `fold` names
+  // from the field once the shared models are built (#612).
   const seen = new Map<string, TypeRef>();
   for (const sibling of siblings) {
     const own = normalizeInlineEnums(rewritten(sibling.type, renames), true);
@@ -1185,6 +1284,61 @@ function sortedEnumValues(values: readonly (string | number)[]): (string | numbe
     if (typeof b === 'number') return 1;
     return a < b ? -1 : a > b ? 1 : 0;
   });
+}
+
+/** One value set an inline enum lists under a field, sorted (`sortedEnumValues`), and the groups whose field lists it. */
+interface InlineEnumSet {
+  values: (string | number)[];
+  groups: Model[][];
+}
+
+/** A field and a value set as one key: `[404, 410]` and `[410, 404]` under `status` read as one, `[1]` and `["1"]` as two. */
+function inlineEnumKey(field: string, values: readonly (string | number)[]): string {
+  return JSON.stringify([field, sortedEnumValues(values)]);
+}
+
+/**
+ * Every value set an inline enum lists under a field of a group to be
+ * built — through a nullable wrapper, array items, map values and union
+ * variants, on every member, since an optional field's type may differ by
+ * member — by field name, each with the groups whose field lists it, less
+ * the fields the string rule reads whole (`pinnedValues`), the groups a
+ * component absorbs, and an enum that lists no value. The fields are sorted
+ * by name and the sets by their values, so the order the names are claimed
+ * in is the document's value sets' alone (#612).
+ */
+function inlineEnumSets(
+  groups: ReadonlyArray<readonly [string, Model[]]>,
+  pinnedByKey: ReadonlyMap<string, ReadonlyMap<string, PinnedValues>>,
+  absorbed: ReadonlySet<string>,
+): Map<string, Map<string, InlineEnumSet>> {
+  const byField = new Map<string, Map<string, InlineEnumSet>>();
+  for (const [key, members] of groups) {
+    if (absorbed.has(key)) continue;
+    const pinned = pinnedByKey.get(key)!;
+    for (const member of members) {
+      for (const field of member.fields) {
+        if (pinned.has(field.name)) continue;
+        walkTypeRef(field.type, {
+          enum: (ref) => {
+            if (!ref.values || ref.values.length === 0) return;
+            const values = sortedEnumValues(ref.values);
+            const sets = byField.get(field.name) ?? new Map<string, InlineEnumSet>();
+            const setKey = JSON.stringify(values);
+            const set = sets.get(setKey) ?? { values, groups: [] };
+            if (!set.groups.includes(members)) set.groups.push(members);
+            sets.set(setKey, set);
+            byField.set(field.name, sets);
+          },
+        });
+      }
+    }
+  }
+  const byString = ([a]: readonly [string, unknown], [b]: readonly [string, unknown]): number =>
+    a < b ? -1 : a > b ? 1 : 0;
+  return new Map(
+    [...byField.entries()].sort(byString).map(([field, sets]) => [field, new Map([...sets.entries()].sort(byString))]),
+  );
 }
 
 /**
