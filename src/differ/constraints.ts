@@ -37,7 +37,7 @@ export interface ConstraintsShift {
    * `variants[1].variants[0].maxLength`).
    */
   details: string;
-  /** Whether the limits tightened at some level (`constraintsTightened`): a value the old limits admitted can now be rejected. */
+  /** Whether the limits tightened at some level (`levelTightened`): a value the old limits admitted can now be rejected. */
   tightened: boolean;
 }
 
@@ -122,6 +122,8 @@ interface LevelShift {
   after?: Constraints;
   readBefore?: Constraints;
   readAfter?: Constraints;
+  /** Whether the level tightened (`levelTightened`): a value the old limits admitted can now be rejected. */
+  tightened: boolean;
 }
 
 /** A `LevelShift` for two sides written `before` / `after` on types `oldType` / `newType`, each read for its own type (`readLimits`). */
@@ -132,7 +134,95 @@ function levelShift(
   oldType: TypeRef | undefined,
   newType: TypeRef | undefined,
 ): LevelShift {
-  return { path, before, after, readBefore: readLimits(before, oldType), readAfter: readLimits(after, newType) };
+  const readBefore = readLimits(before, oldType);
+  const readAfter = readLimits(after, newType);
+  return { path, before, after, readBefore, readAfter, tightened: levelTightened(readBefore, readAfter, newType) };
+}
+
+/**
+ * Whether one level tightened from `readBefore` to `readAfter` (each as
+ * `readLimits` reads them) for a value of `newType`. A type that admits a
+ * known set of values — a literal (`const`, or a single-member `enum`),
+ * which admits exactly its value, or an enum reference the IR carries the
+ * `values` of (`admittedValues`) — tightened only when some value the old
+ * limits admitted the new reject (`admits`): `{ const: 'abc', maxLength:
+ * 5 }` → `maxLength: 3` is reported but still admits `'abc'`, while
+ * `maxLength: 2` rejects it (Greptile, #659 review round 6). A keyword the
+ * differ cannot evaluate on the value — a `pattern`, or a `multipleOf`
+ * where either is not an integer — is judged as on any string or number
+ * (`keywordTightened`). Every other type is judged keyword by keyword
+ * (`constraintsTightened`).
+ */
+function levelTightened(
+  readBefore: Constraints | undefined,
+  readAfter: Constraints | undefined,
+  newType: TypeRef | undefined,
+): boolean {
+  const values = admittedValues(newType);
+  if (values === undefined) return constraintsTightened(readBefore, readAfter);
+  if (values.some((value) => admits(readBefore, value) && !admits(readAfter, value))) return true;
+  return UNDECIDABLE_KEYWORDS.some((keyword) => {
+    const [x, y] = [readBefore?.[keyword], readAfter?.[keyword]];
+    if (sameKeyword(keyword, x, y)) return false;
+    if (keyword === 'multipleOf' && values.every((value) => integerMultiple(value, x) && integerMultiple(value, y))) {
+      return false;
+    }
+    return keywordTightened(keyword, x, y);
+  });
+}
+
+/** The keywords `admits` cannot evaluate on a value: a `pattern` (no regular expression is built from a document), a `multipleOf` of or on a non-integer. */
+const UNDECIDABLE_KEYWORDS: ReadonlyArray<keyof Constraints> = ['pattern', 'multipleOf'];
+
+/** Whether `value % multipleOf` can be evaluated exactly: both integers, or no `multipleOf` at all. */
+function integerMultiple(value: LiteralValue, multipleOf: unknown): boolean {
+  return multipleOf === undefined || (Number.isInteger(value) && Number.isInteger(multipleOf));
+}
+
+type LiteralValue = string | number | boolean | null;
+
+/**
+ * The values a type admits when the IR knows them all: a literal's `value`
+ * (under any nullable wrapper), an enum reference's `values` when the
+ * parser carried them; `undefined` for every other type, or an enum
+ * reference without `values`.
+ */
+function admittedValues(type: TypeRef | undefined): LiteralValue[] | undefined {
+  if (!type) return undefined;
+  const value = unwrap(type);
+  if (value.kind === 'literal') return [value.value];
+  if (value.kind === 'enum' && value.values) return value.values;
+  return undefined;
+}
+
+/**
+ * Whether `limits` admit `value`, by the keywords the differ can evaluate
+ * on it: a string's length in code points against `minLength` /
+ * `maxLength`, a number against `minimum`, `maximum`, `exclusiveMinimum`,
+ * `exclusiveMaximum` and an integer `multipleOf` on an integer value; a
+ * `pattern`, a `multipleOf` on or of a non-integer, and every keyword on a
+ * boolean or `null` are passed over (`UNDECIDABLE_KEYWORDS`,
+ * `levelTightened` judges them on their own).
+ */
+function admits(limits: Constraints | undefined, value: LiteralValue): boolean {
+  if (!limits) return true;
+  if (typeof value === 'string') {
+    const length = [...value].length;
+    if (limits.minLength !== undefined && length < limits.minLength) return false;
+    if (limits.maxLength !== undefined && length > limits.maxLength) return false;
+    return true;
+  }
+  if (typeof value === 'number') {
+    if (limits.minimum !== undefined && value < limits.minimum) return false;
+    if (limits.exclusiveMinimum !== undefined && value <= limits.exclusiveMinimum) return false;
+    if (limits.maximum !== undefined && value > limits.maximum) return false;
+    if (limits.exclusiveMaximum !== undefined && value >= limits.exclusiveMaximum) return false;
+    if (limits.multipleOf !== undefined && integerMultiple(value, limits.multipleOf)) {
+      return value % limits.multipleOf === 0;
+    }
+    return true;
+  }
+  return true;
 }
 
 /**
@@ -185,7 +275,7 @@ export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedS
     ...(oldConstraints ? { oldConstraints } : {}),
     ...(newConstraints ? { newConstraints } : {}),
     details: levels.flatMap(renderLevel).join('; '),
-    tightened: levels.some((level) => constraintsTightened(level.readBefore, level.readAfter)),
+    tightened: levels.some((level) => level.tightened),
   };
 }
 
