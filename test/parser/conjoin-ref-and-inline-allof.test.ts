@@ -962,6 +962,50 @@ describe('#571', () => {
             '(HolderResult | string)',
             ['a', 'b'],
           ],
+          // `number` admits an integer, so the narrower name survives
+          // (round 8: matched by spelling, both were dropped).
+          [
+            'object or number beside object or integer',
+            [declaring(typed(['object', 'number'], { a: str })), declaring(typed(['object', 'integer'], { b: str }))],
+            '(HolderResult | integer)',
+            ['a', 'b'],
+          ],
+          [
+            'object or integer beside object or number',
+            [declaring(typed(['object', 'integer'], { b: str })), declaring(typed(['object', 'number'], { a: str }))],
+            '(HolderResult | integer)',
+            ['b', 'a'],
+          ],
+          [
+            'object or number, twice',
+            [declaring(typed(['object', 'number'], { a: str })), declaring(typed(['object', 'number'], { b: str }))],
+            '(HolderResult | number)',
+            ['a', 'b'],
+          ],
+          [
+            'object or integer, twice',
+            [declaring(typed(['object', 'integer'], { a: str })), declaring(typed(['object', 'integer'], { b: str }))],
+            '(HolderResult | integer)',
+            ['a', 'b'],
+          ],
+          [
+            'object, number or null beside object, integer or null',
+            [
+              declaring(typed(['object', 'number', 'null'], { a: str })),
+              declaring(typed(['object', 'integer', 'null'], { b: str })),
+            ],
+            '(HolderResult | integer)?',
+            ['a', 'b'],
+          ],
+          [
+            'object, number or string beside object, integer or string',
+            [
+              declaring(typed(['object', 'number', 'string'], { a: str })),
+              declaring(typed(['object', 'integer', 'string'], { b: str })),
+            ],
+            '(HolderResult | integer | string)',
+            ['a', 'b'],
+          ],
         ] as const) {
           const spec = await parseJson(holderDocument({ allOf: members }));
           const result = modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
