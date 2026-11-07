@@ -1282,8 +1282,10 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
 
       it('keeps it when the oneOf is one of several allOf members, as the IR model declares the field (MichaelDeBoey)', async () => {
         // Every instance carries every member, so whichever variant is sent, `has_more` is a boolean.
+        // Detection reads a stop field every variant of a flattened union
+        // declares (#622), so the override restates the detected one.
         const meta = { allOf: [issueMeta, object({ trace_id: { type: 'string' } })] };
-        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toBeUndefined();
+        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toEqual(endOfIteration);
         const ir = await parseJson(cursorSpec(meta, { endOfIteration }));
         expect(onlyOperation(ir).pagination).toMatchObject({ strategy: 'cursor', param: 'after', endOfIteration });
         expect(warn).not.toHaveBeenCalled();

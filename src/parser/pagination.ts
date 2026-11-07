@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import type {
+  Field,
   TypeRef,
   Parameter,
   Model,
@@ -9,7 +10,7 @@ import type {
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { componentKeyOf } from './schema-refs.js';
+import { componentKeyOf, isPendingSchemaRef } from './schema-refs.js';
 import {
   allOfReadAsMember,
   classifyInlineSchema,
@@ -25,7 +26,15 @@ import {
   wrapperDiscriminatorOf,
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
-import { annotatedTypingMember, combineDeclarations, readInlineAllOf, schemaShapeKey } from './inline-models.js';
+import {
+  annotatedTypingMember,
+  combineDeclarations,
+  declareVariant,
+  readInlineAllOf,
+  schemaShapeKey,
+  unionOfDeclarations,
+  type PropertyDeclarations,
+} from './inline-models.js';
 
 const CURSOR_PARAMS = ['cursor', 'after', 'before', 'starting_after', 'ending_before', 'page_token', 'next_token'];
 
@@ -291,8 +300,12 @@ export function spellsOneOf(name: string, fields: readonly string[]): boolean {
 
 /**
  * Find the envelope field that ends an iteration, when the envelope declares
- * an obvious one. `properties` are the envelope's merged properties and
- * `dataPath` names the data array among them.
+ * an obvious one. `properties` are the envelope's merged properties — those
+ * every instance carries (`collectObjectProperties`, `onEveryInstance`: a
+ * member's, or declared by every variant of a `oneOf`/`anyOf` the `allOf`
+ * flattens, so a stop field only some variants declare, or one they type
+ * differently, ends no iteration; workos/oagen#622) — and `dataPath` names
+ * the data array among them.
  *
  * The fields beside the array are considered first: when the path is
  * nested, the other properties of the object the array sits in, under
@@ -398,8 +411,10 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * Why an explicit `endOfIteration` cannot be read from a body whose
  * properties are `properties`, or `undefined` when it can. `properties` is
  * the map a detected stop field is read from — the body's own and every
- * `allOf` member's, through `$ref`s and nullable wrappers, as
- * `detectEndOfIteration` receives it — so an override and detection look at
+ * `allOf` member's, through `$ref`s and nullable wrappers, with what every
+ * variant of a `oneOf`/`anyOf` the `allOf` flattens declares
+ * (`onEveryInstance`), as `detectEndOfIteration` receives it — so an
+ * override and detection look at
  * one map: a field detection would read is one an override may name, and a
  * field it would not see is not there for an override either. `end.path` is
  * walked over that map as an explicit `dataPath` is (`fieldsAtPath`, the
@@ -581,7 +596,10 @@ function readFieldsNamed(
   componentSchemas: Record<string, SchemaObject> | undefined,
   lookup: FieldLookup,
 ): NamedField[] | undefined {
-  const { properties, unions, named } = collectObjectProperties(node, componentSchemas);
+  // The walk's own bookkeeping is handed on, so a flattened union among the
+  // node's members is read with it (`readFlattenedUnion`) and ends where the
+  // document repeats.
+  const { properties, unions, named } = collectObjectProperties(node, componentSchemas, lookup);
   const own = properties[segment];
   if (own) return [{ schema: own }];
   // A union counts exactly when the model carries its fields (`unionCounts`):
@@ -750,14 +768,17 @@ export function resolveBareSchema(
  * The properties of an object schema as `collectObjectProperties` collects
  * them — the one walk through `$ref`s, `allOf` members and nullable wrappers,
  * with a name two members declare settled by `combineDeclarations` — for a
- * site that reads the properties alone. Anything that is not an object
- * yields none.
+ * site that reads the properties alone: those every instance carries
+ * (`onEveryInstance`), a member's or every variant's of a union the `allOf`
+ * flattens, since the sites are the stop-field scan and the walk to each
+ * object on a `dataPath` (`detectEndOfIteration`, `resolveSchemaPath`).
+ * Anything that is not an object yields none.
  */
 function objectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): Record<string, SchemaObject | undefined> {
-  return collectObjectProperties(schema, componentSchemas).properties;
+  return collectObjectProperties(schema, componentSchemas).onEveryInstance;
 }
 
 /**
@@ -803,30 +824,72 @@ function objectProperties(
  * `allOf` of both, read through as any `allOf` member is (`result.items`
  * from `PetPage` beside `result.total_pages`), and otherwise the first
  * declaration that declares a type types it, a typeless one only annotating
- * it. (Envelope detection reads the
- * members' own `properties`; a `oneOf`/`anyOf` member with more than one
- * non-null variant declares none, so it contributes no property here; it is
- * listed in `unions`, with every other `oneOf`/`anyOf` the walk meets —
- * the body itself first, then the members in the order walked — each with
- * the component a `$ref` member on the way names and the `discriminator`
- * the document declares for it (`CollectedUnion`), and `named` says
- * whether the body is typed as a component's model (a `$ref`, or a nullable
- * wrapper or lone `allOf` member around one), for the override check,
- * which reads a field every variant of one declares exactly when the model
- * carries it (`fieldsNamed`, `unionCounts`). A body that is not an
- * envelope is merged by `mergeAllOfMembers`, which reads such a member's
- * variants.)
+ * it.
+ *
+ * A `oneOf`/`anyOf` member with more than one non-null variant declares no
+ * property of its own here: it is listed in `unions`, with every other
+ * `oneOf`/`anyOf` the walk meets — the body itself first, then the members
+ * in the order walked — each with the component a `$ref` member on the way
+ * names and the `discriminator` the document declares for it
+ * (`CollectedUnion`), and `named` says whether the body is typed as a
+ * component's model (a `$ref`, or a nullable wrapper or lone `allOf` member
+ * around one), for the override check, which reads a field every variant
+ * of one declares exactly when the model carries it (`fieldsNamed`,
+ * `unionCounts`). What such a union's variants declare is read beside
+ * `properties` for a union among the members that the model flattens into
+ * the node's one model (`unionCounts`: every inline member's, and a `$ref`
+ * member's component's unless that component dispatches it — never the
+ * node's own union, a union of models that no field of the node belongs
+ * to): `fields` is every property that model has, in the order first
+ * declared — `properties` and, for each flattened union, every property
+ * any non-null variant declares (`readFlattenedUnion`, through the branch
+ * reader the model flattens a variant with), typed as the model types a
+ * property only variants declare (`unionOfDeclarations`: one shape is that
+ * declaration, several are their `oneOf`) where no member always declares
+ * it — and `onEveryInstance` is the part of `fields` an instance carries
+ * whichever variant the wire sends: `properties`, and a branch-only
+ * property every non-null variant of its union declares, as the override
+ * walk resolves a path segment through the union (`unionFields`). An
+ * envelope's companions are its `fields` (`extractEnvelopeCompanions`);
+ * the array it is unwrapped on and the stop field it stops on must be
+ * `onEveryInstance` (`detectListEnvelope`, `detectEndOfIteration`,
+ * `bodyEndOfIterationProblem`), so a stop field written in each variant of
+ * a `oneOf` beside the `allOf` ends the iteration as one written flat does
+ * (workos/oagen#622: `{ allOf: [{ data }], oneOf: [{ has_more }, {
+ * has_more, total }] }` built the model `{ data, has_more?, total? }` and
+ * was no envelope, the variants read by the model alone), while a field
+ * only some variants declare, or one they type differently, is a companion
+ * and no stop field. A body that is not an envelope is merged by
+ * `mergeAllOfMembers`, whose reading of a variant `readFlattenedUnion`
+ * shares. `lookup` is the override walk's bookkeeping when that walk is
+ * what reads the node (`readFieldsNamed`), so the variants are read once
+ * per walk and a variant met again below itself ends the reading where
+ * the document repeats.
  */
 export function collectObjectProperties(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
-): { properties: Record<string, SchemaObject>; required: string[]; unions: CollectedUnion[]; named: boolean } {
+  lookup?: FieldLookup,
+): CollectedProperties {
   const properties: Record<string, SchemaObject> = {};
   const required: string[] = [];
   const unions: CollectedUnion[] = [];
   const seenRefs = new Set<string>();
   const seenNodes = new WeakSet<SchemaObject>();
   let named: boolean | undefined;
+  // Every name met, in the order first declared, by a member or by a
+  // variant; what the variants of each flattened union declare of a name
+  // (`readFlattenedUnion`), and the names every variant of one declares.
+  const order: string[] = [];
+  const noted = new Set<string>();
+  const note = (name: string): void => {
+    if (noted.has(name)) return;
+    noted.add(name);
+    order.push(name);
+  };
+  const branchOnly = new Map<string, SchemaObject[]>();
+  const carried = new Set<string>();
+  const walk = lookup ?? newFieldLookup();
 
   // The component a member's `$ref` names, as the model reads the member
   // (`CollectedUnion.origin`): the first reference the resolver followed
@@ -901,12 +964,26 @@ export function collectObjectProperties(
           visit(branch, depth, origin, discriminator);
           continue;
         }
-        unions.push({ schema: bare, keyword, variants, origin, discriminator });
+        const union: CollectedUnion = { schema: bare, keyword, variants, origin, discriminator };
+        unions.push(union);
+        // What the variants declare, when the model flattens the union into
+        // the node's model (`unionCounts`): branch-only fields of that model,
+        // carried by every instance when every variant declares them.
+        if (!unionCounts(union, named ?? false, componentSchemas)) continue;
+        const read = readFlattenedUnion(union, componentSchemas, walk);
+        for (const [name, declarations] of read.declared) {
+          note(name);
+          const held = branchOnly.get(name);
+          if (held) held.push(...declarations);
+          else branchOnly.set(name, [...declarations]);
+          if (read.carried.has(name)) carried.add(name);
+        }
       }
     }
     for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare));
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
+      note(key);
       const existing = properties[key];
       properties[key] = existing ? combineDeclarations(existing, prop) : prop;
     }
@@ -914,7 +991,76 @@ export function collectObjectProperties(
   };
   visit(schema, 0, null);
 
-  return { properties, required, unions, named: named ?? false };
+  // A member's declaration stands whatever a variant says — a variant can
+  // only narrow what every instance carries — and a name only variants
+  // declare is typed as the model types it.
+  const fields: Record<string, SchemaObject> = {};
+  const onEveryInstance: Record<string, SchemaObject> = {};
+  for (const name of order) {
+    const own = properties[name];
+    if (own) {
+      fields[name] = own;
+      onEveryInstance[name] = own;
+      continue;
+    }
+    const declaration = unionOfDeclarations(branchOnly.get(name) ?? []);
+    fields[name] = declaration;
+    if (carried.has(name)) onEveryInstance[name] = declaration;
+  }
+
+  return { properties, required, unions, named: named ?? false, fields, onEveryInstance };
+}
+
+/**
+ * What `collectObjectProperties` reads off an object schema: see there.
+ * `properties` is what the schema and its always-applying `allOf` members
+ * declare, `fields` every property the model built from it has, and
+ * `onEveryInstance` the part of `fields` an instance carries whichever
+ * variant of a flattened union the wire sends.
+ */
+export interface CollectedProperties {
+  properties: Record<string, SchemaObject>;
+  required: string[];
+  unions: CollectedUnion[];
+  named: boolean;
+  fields: Record<string, SchemaObject>;
+  onEveryInstance: Record<string, SchemaObject>;
+}
+
+/**
+ * What a `oneOf`/`anyOf` the model flattens into one model contributes to
+ * that model (`collectObjectProperties`, `detectListEnvelope`): `declared`,
+ * every property any non-null variant declares, with each variant's
+ * declaration of it, in the order first declared — each variant read as the
+ * model reads one it flattens (`declareVariant`: its own `properties`, its
+ * `allOf` members, the component a `$ref` variant names, the branches of a
+ * union nested in it), so the names and the declarations are the merged
+ * model's (`mergeAllOfMembers`) — and `carried`, the names every non-null
+ * variant declares, resolved as the override walk resolves a path segment
+ * through the union (`unionFields`: a variant that is itself a union must
+ * declare the name in each of its own variants, and one met again below
+ * itself declares nothing), so a field an instance carries whichever
+ * variant the wire sends is one the detected stop field and an explicit
+ * `endOfIteration` both read, and a field only some variants declare is one
+ * neither reads. `lookup` is the walk's bookkeeping (`fieldsNamed`).
+ */
+export function readFlattenedUnion(
+  union: CollectedUnion,
+  componentSchemas?: Record<string, SchemaObject>,
+  lookup: FieldLookup = newFieldLookup(),
+): { declared: Map<string, SchemaObject[]>; carried: Set<string> } {
+  const ledger = new Map<string, PropertyDeclarations>();
+  for (const variant of union.variants) {
+    if (!isNullSchema(variant)) declareVariant(ledger, variant, componentSchemas);
+  }
+  const declared = new Map<string, SchemaObject[]>();
+  const carried = new Set<string>();
+  for (const [name, { conditional }] of ledger) {
+    declared.set(name, conditional);
+    const fields = unionFields(union, name, componentSchemas, lookup);
+    if (fields !== undefined && fields.length > 0) carried.add(name);
+  }
+  return { declared, carried };
 }
 
 /**
@@ -947,10 +1093,12 @@ export interface CollectedUnion {
  * segment is looked up among the object's own properties — through `$ref`s,
  * `allOf` members and nullable wrappers — and the schema it lands on is
  * returned with a final `$ref` resolved. `undefined` when a segment is
- * missing, so also when an object on the way declares it only through the
- * variants of a `oneOf`/`anyOf`: a union declares no companion a stop field
- * is detected from. An explicit `dataPath` is walked through the variants
- * instead (`resolveDataPathArray`, workos/oagen#556).
+ * missing, so also when an object on the way is a `oneOf`/`anyOf` whose
+ * variants declare it: a union of models declares no companion a stop
+ * field is detected from. A segment every variant of a union the object's
+ * `allOf` flattens declares is reached, as the one model's field it is
+ * (`onEveryInstance`; workos/oagen#622). An explicit `dataPath` is walked
+ * through the variants instead (`resolveDataPathArray`, workos/oagen#556).
  */
 export function resolveSchemaPath(
   schema: SchemaObject,
@@ -1218,16 +1366,43 @@ function describeSchema(schema: SchemaObject): string {
  * path, not once per way of reaching it (PR #585 review: a `next.next.….
  * items` path doubled the work at every segment). An empty `dataPath` means
  * `root` itself is the array. `undefined` when a segment is missing, a model
- * is unknown, the path does not end on an array, or the variants disagree;
- * the document walk then answers (`resolveDataPathFromSchema`).
+ * is unknown, the path does not end on an array, or the variants disagree —
+ * and when the walk crosses a reference `resolveSchemaPointers` has yet to
+ * settle, which `walkDataPathItemType` tells apart from the rest; the
+ * document walk then answers (`resolveDataPathFromSchema`).
  */
-export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
+export function resolveDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): TypeRef | undefined {
+  const walked = walkDataPathItemType(root, dataPath, models);
+  return walked && 'itemType' in walked ? walked.itemType : undefined;
+}
+
+/**
+ * The walk `resolveDataPathItemType` makes, telling a path the IR cannot
+ * resolve yet from one it does not resolve: `{ pending: true }` when a type
+ * the walk reaches — the root, a field's type on the way, a variant of a
+ * union there, or the type the path lands on, under its nullable wrapper —
+ * is a reference a schema `$ref` deeper into a component left pending
+ * (`pendingSchemaRef`; #539), which names no model until
+ * `resolveSchemaPointers` settles it. Every type a segment reaches is
+ * checked for one before any field is looked up, so the answer never
+ * depends on which variant of a union is read first.
+ */
+export function walkDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): { itemType: TypeRef } | { pending: true } | undefined {
   let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const containers = new Map<string, TypeRef>();
     for (const type of reached) {
       for (const container of containersOf(type)) containers.set(typeRefKey(container), container);
     }
+    if ([...containers.values()].some(isPendingModelRef)) return { pending: true };
     const next = new Map<string, TypeRef>();
     for (const container of containers.values()) {
       if (container.kind !== 'model') return undefined;
@@ -1237,12 +1412,102 @@ export function resolveDataPathItemType(root: TypeRef, dataPath: string, models:
     }
     reached = [...next.values()];
   }
-  const items = reached.map((type) => {
-    const target = type.kind === 'nullable' ? type.inner : type;
-    return target.kind === 'array' ? target.items : undefined;
-  });
+  const targets = reached.map((type) => (type.kind === 'nullable' ? type.inner : type));
+  if (targets.some(isPendingModelRef)) return { pending: true };
+  const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
-  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first)) ? first : undefined;
+  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first))
+    ? { itemType: first }
+    : undefined;
+}
+
+/** Whether `type` is a model reference `resolveSchemaPointers` has yet to settle (#539). */
+function isPendingModelRef(type: TypeRef): boolean {
+  return type.kind === 'model' && isPendingSchemaRef(type);
+}
+
+/**
+ * Where an explicit `dataPath` is walked from in the IR, and the path left
+ * to walk from there: the response itself, unless the response was unwrapped
+ * on a list envelope (`envelopeFields` present) — it is then the data array,
+ * and the path starts at the companion its first segment names, with the
+ * rest of the path; `undefined` when the segment names no companion, and the
+ * document answers. The one choice for the walk at extraction
+ * (`resolveOverrideItemType`) and the walk at the settle
+ * (`settleDeferredDataPathItemType`), so the two read one path.
+ */
+export function dataPathWalkStart(
+  response: TypeRef,
+  envelopeFields: readonly Field[] | undefined,
+  dataPath: string,
+): { root: TypeRef; path: string } | undefined {
+  if (!envelopeFields) return { root: response, path: dataPath };
+  const [head, ...rest] = dataPath.split('.');
+  const companion = envelopeFields.find((field) => field.name === head);
+  return companion && { root: companion.type, path: rest.join('.') };
+}
+
+/**
+ * The iterator item types an explicit `dataPath` has yet to decide (#608):
+ * each a placeholder, typed `unknown`, standing in `PaginationMeta.itemType`
+ * from extraction until the settle. The walk from the response crossed a
+ * reference a schema `$ref` deeper into a component left pending — the
+ * response itself written as `{ $ref: '#/components/schemas/Holder/
+ * properties/result' }`, or a field on the way — so the model the pointed
+ * schema's items are built as (`HolderResultItem`, which
+ * `HolderResult.items` holds) exists but cannot be reached from the response
+ * yet; reading the document instead minted a second copy of it under the
+ * path-derived name (`ListOwnersItem`). The path is walked again once every
+ * reference is settled (`settleDeferredDataPathItemType`), so the iterator
+ * yields the very type the settled response's field holds, as it does when
+ * the response is a `$ref` to the component (`ResultItem` for `Result`).
+ */
+const deferredDataPathItemTypes = new WeakSet<TypeRef>();
+
+/** A placeholder item type for a `dataPath` the settle decides (`settleDeferredDataPathItemType`). */
+export function deferDataPathItemType(): TypeRef {
+  const placeholder: TypeRef = { kind: 'primitive', type: 'unknown' };
+  deferredDataPathItemTypes.add(placeholder);
+  return placeholder;
+}
+
+/** Whether `type` is a placeholder `deferDataPathItemType` built, awaiting the settle. */
+export function isDeferredDataPathItemType(type: TypeRef): boolean {
+  return deferredDataPathItemTypes.has(type);
+}
+
+/**
+ * Decide the item type `pagination.dataPath` names, now that `response`,
+ * the envelope's companions and every model's fields are settled
+ * (`resolveSchemaPointers`): the path is walked from where it was walked at
+ * extraction (`dataPathWalkStart`), through `models` — every model built —
+ * and `pagination.itemType` becomes the very `TypeRef` the array's field
+ * holds, which a later rename repoints in place. A path the settled types
+ * reach no array through yields `unknown`, with a warning: the override
+ * was accepted on the document walk, which reads through the pointer, but
+ * the pointer was typed `unknown` where it stands (an inline `allOf`
+ * member the `allOf` is not read as, a chain of pointers that reaches
+ * itself), and the iterator cannot yield a model the response does not
+ * hold. `context` names the operation as the settle names its sites
+ * (`Owners.listOwners`).
+ */
+export function settleDeferredDataPathItemType(
+  pagination: PaginationMeta,
+  response: TypeRef,
+  models: readonly Model[],
+  context: string,
+): void {
+  const { dataPath } = pagination;
+  const start = dataPath === undefined ? undefined : dataPathWalkStart(response, pagination.envelopeFields, dataPath);
+  const itemType = start && resolveDataPathItemType(start.root, start.path, models);
+  if (itemType) {
+    pagination.itemType = itemType;
+    return;
+  }
+  warn(
+    `dataPath "${dataPath}" on ${context} reaches no array in the response once its schema $ref is settled — typing the iterator's items as unknown`,
+  );
+  pagination.itemType = { kind: 'primitive', type: 'unknown' };
 }
 
 /**
@@ -1538,10 +1803,16 @@ function warn(message: string): void {
 
 /**
  * The type an iterator yields from `response`: the items of a top-level
- * array, under a nullable wrapper too (an OAS 3.0 `nullable: true` array
- * response is `nullable<array<T>>`), else the response itself.
+ * array, under every nullable wrapper it wears too — one for an OAS 3.0
+ * `nullable: true` array response (`nullable<array<T>>`), two for a
+ * nullable site settled from a pointer to a schema that admits null
+ * (`{ oneOf: [{ $ref: '#/components/schemas/Holder/properties/owners' },
+ * { type: 'null' }] }` to `owners: { type: ['array', 'null'] }`, which the
+ * settle leaves as `nullable<nullable<array<T>>>`; #609) — else the
+ * response itself.
  */
 export function paginatedItemType(response: TypeRef): TypeRef {
-  const inner = response.kind === 'nullable' ? response.inner : response;
+  let inner = response;
+  while (inner.kind === 'nullable') inner = inner.inner;
   return inner.kind === 'array' ? inner.items : response;
 }
