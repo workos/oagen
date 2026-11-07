@@ -5673,7 +5673,8 @@ function getEffectiveConstPropertyValue(
  * and a hop that reaches one again pins nothing. The one reading of a
  * pinned value, shared by `getConstPropertyValue` (an inline variant's own
  * property, which the naming reads without the map), by
- * `getEffectiveProperties`, and by the const-prefix reservation
+ * `getEffectiveProperties`, by the request-body fold
+ * (`flattenDiscriminatedUnionBody`) and by the const-prefix reservation
  * (`collectOperationConstPrefixes`), so no two sites read a declaration
  * differently.
  */
@@ -5681,15 +5682,54 @@ export function pinnedDeclarationValue(
   declaration: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): string | null {
+  const hops = pinnedDeclarationHops(declaration, schemas);
+  return hops ? pinnedStringValue(hops[hops.length - 1]!) : null;
+}
+
+/**
+ * Whether a property declaration admits `null` beside the value it pins, at
+ * any hop `pinnedDeclarationValue` reads it through (`declaresNull` at each:
+ * a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a
+ * nullable union wrapper, or an `allOf` read as a member that does; a
+ * `nullable: true` beside an `allOf` declares nothing, as the type builder
+ * reads it) — so `kind: { oneOf: [{ const: 'email' }, { type: 'null' }]
+ * }`, `kind: { type: ['string', 'null'], const: 'email' }`, `kind: { type:
+ * 'string', enum: ['email'], nullable: true }` and a `$ref` to a component
+ * written so admit `null` as the field built from them is
+ * `nullable<literal>`. Read by the request-body fold
+ * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
+ * the pinned values admits `null` exactly when a variant's does (#607
+ * review: the fold dropped the admission). False for a chain that repeats.
+ */
+export function pinnedDeclarationAdmitsNull(
+  declaration: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): boolean {
+  return (pinnedDeclarationHops(declaration, schemas) ?? []).some(declaresNull);
+}
+
+/**
+ * The schemas a property declaration is read through to its pinned value
+ * (`pinnedDeclarationValue`), in order — the declaration, then each hop's
+ * target — ending with the one read as written; `undefined` for a chain
+ * that repeats (every schema read is recorded by identity, and a hop that
+ * reaches one again ends the walk pinning nothing).
+ */
+function pinnedDeclarationHops(
+  declaration: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): SchemaObject[] | undefined {
+  const hops: SchemaObject[] = [];
   const seen = new Set<SchemaObject>();
   let current = declaration;
   while (!seen.has(current)) {
     seen.add(current);
+    hops.push(current);
     const next = current.$ref !== undefined ? schemaRefTarget(current.$ref, schemas) : readAsWrapped(current);
-    if (next === undefined) return pinnedStringValue(current);
+    if (next === undefined) return hops;
     current = next;
   }
-  return null;
+  return undefined;
 }
 
 /**

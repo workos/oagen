@@ -521,6 +521,78 @@ describe('#607', () => {
       );
     });
 
+    it("keeps null on the folded discriminator when a variant's declaration admits it, in every spelling", async () => {
+      const inline = (kind: Doc, extra: Record<string, Doc>): Doc => ({
+        type: 'object',
+        required: ['kind'],
+        properties: { kind, ...extra },
+      });
+      const document = (kinds: [Doc, Doc], schemas: Record<string, Doc> = {}): Doc =>
+        doc(openapi, schemas, {
+          '/tags': {
+            post: {
+              operationId: 'createTag',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      oneOf: [
+                        inline(kinds[0], { address: { type: 'string' } }),
+                        inline(kinds[1], { number: { type: 'string' } }),
+                      ],
+                      discriminator: { propertyName: 'kind' },
+                    },
+                  },
+                },
+              },
+              responses: { '204': { description: 'OK' } },
+            },
+          },
+        });
+      /** The const admitting `null` as written: OAS 3.0 `nullable: true`, or a 3.1 type list. */
+      const nullableConst = (value: string): Doc =>
+        openapi === '3.0.3' ? { ...c(value), nullable: true } : { type: ['string', 'null'], const: value };
+      const kindOf = (spec: ApiSpec, label: string): TypeRef => {
+        const [op] = spec.services.flatMap((service) => service.operations);
+        expect(op?.requestBody, label).toEqual({ kind: 'model', name: 'CreateTagRequest' });
+        expect(model(spec, 'CreateTagRequest').fields.find(({ name }) => name === 'kind')?.required, label).toBe(true);
+        return fieldType(spec, 'CreateTagRequest', 'kind');
+      };
+      const cases: Array<[string, [Doc, Doc], Record<string, Doc>]> = [
+        ['a nullable wrapper', [{ oneOf: [c('email'), { type: 'null' }] }, c('sms')], {}],
+        ['the flag or a type list', [nullableConst('email'), c('sms')], {}],
+        [
+          'an allOf around a nullable wrapper',
+          [{ allOf: [{ oneOf: [c('email'), { type: 'null' }] }], description: 'Email.' }, c('sms')],
+          {},
+        ],
+        ['a $ref to a nullable component', [ref('EmailKind'), c('sms')], { EmailKind: nullableConst('email') }],
+        ['the second variant admitting it', [c('email'), { oneOf: [c('sms'), { type: 'null' }] }], {}],
+      ];
+      for (const [label, kinds, schemas] of cases) {
+        const spec = await parseJson(document(kinds, schemas));
+        // The folded field admits `null`, as the variant's own field does.
+        expect(kindOf(spec, label), label).toMatchObject({
+          kind: 'nullable',
+          inner: { kind: 'enum', name: 'CreateTagRequestKind' },
+        });
+        expect(
+          spec.enums.find(({ name }) => name === 'CreateTagRequestKind')?.values.map(({ value }) => value),
+          label,
+        ).toEqual(['email', 'sms']);
+      }
+      // One value pinned by both variants, one admitting `null`: the one-value
+      // enum — a literal — admits it.
+      const one = await parseJson(document([{ oneOf: [c('email'), { type: 'null' }] }, c('email')]));
+      expect(kindOf(one, 'one value')).toEqual({ kind: 'nullable', inner: { kind: 'literal', value: 'email' } });
+      // `nullable: true` beside the `allOf` declares nothing, as beside any
+      // schema without a `type`: the field stays the plain enum.
+      const beside = await parseJson(document([{ allOf: [c('email')], nullable: true }, c('sms')]));
+      expect(kindOf(beside, 'beside the allOf')).toMatchObject({ kind: 'enum', name: 'CreateTagRequestKind' });
+      const plain = await parseJson(document([c('email'), c('sms')]));
+      expect(kindOf(plain, 'no null')).toMatchObject({ kind: 'enum', name: 'CreateTagRequestKind' });
+    });
+
     it('reserves the const prefix a nested variant takes behind an allOf, as it reserves one written as a const', async () => {
       const inline = (kind: Doc, extra: Record<string, Doc>): Doc => ({
         type: 'object',
