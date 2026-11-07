@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { typesAsUnknown } from '../../src/parser/schemas.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import type { ApiSpec, Field, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -316,6 +317,86 @@ describe('#616', () => {
       constraints: { maxItems: 3 },
     });
   });
+
+  it.each(['3.0.3', '3.1.0'])(
+    'keeps on a primitive copy only the `allOf` members that say something about its type (review), under OAS %s',
+    async (openapi) => {
+      // Michael's four documents: `Owner` untyped, with `required`. Its
+      // `properties` and `required` say nothing of a string, `minLength`
+      // does; a member that applied kept the whole `allOf` on the `string`
+      // copy, whose `$ref` then typed it `Owner`.
+      const Owner = { required: ['name'], properties: { name: string } };
+      const typeOf = async (schema: unknown): Promise<TypeRef> =>
+        author(await parseJson(document(openapi, schema, { Owner }))).type;
+      const ownerOrString = union(owner, primitive('string'));
+      const beside = { type: ['object', 'string'], minLength: 1, allOf: [ref('Owner')] };
+      const member = { type: ['object', 'string'], allOf: [ref('Owner'), { minLength: 1 }] };
+      expect(await typeOf(beside)).toEqual({ ...ownerOrString, constraints: { minLength: 1 } });
+      expect(await typeOf(member)).toEqual({ ...ownerOrString, constraints: { minLength: 1 } });
+      expect(await typeOf({ type: ['object', 'string'], allOf: [ref('Owner'), { pattern: '^a' }] })).toEqual({
+        ...ownerOrString,
+        constraints: { pattern: '^a' },
+      });
+      const stringOrInteger = union(primitive('string'), primitive('integer'));
+      expect(await typeOf({ type: ['string', 'integer'], allOf: [ref('Owner')] })).toEqual(stringOrInteger);
+      expect(await typeOf({ type: ['string', 'integer'], allOf: [ref('Owner'), { minLength: 1 }] })).toEqual({
+        ...stringOrInteger,
+        constraints: { minLength: 1 },
+      });
+      // `oagen diff` between the two spellings: nothing moved.
+      const fromBeside = await parseJson(document(openapi, beside, { Owner }));
+      const toMember = await parseJson(document(openapi, member, { Owner }));
+      expect(diffSpecs(fromBeside, toMember).changes).toEqual([]);
+      expect(diffSpecs(toMember, fromBeside).changes).toEqual([]);
+    },
+  );
+
+  it.each(['3.0.3', '3.1.0'])(
+    'types a `200` body’s `allOf` beside the list as the request body types it: the merge beside the `string`, under OAS %s',
+    async (openapi) => {
+      // The primary success body read the `allOf` as the merge alone
+      // (`CreateNoteResponse`), the `string` lost, where the same schema as
+      // the request body was `CreateNoteRequest | string` (review).
+      const bodyDocument = (schema: unknown, Owner: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/notes': {
+            post: {
+              operationId: 'createNote',
+              requestBody: { content: { 'application/json': { schema } } },
+              responses: { '200': { description: 'OK', content: { 'application/json': { schema } } } },
+            },
+          },
+        },
+        components: { schemas: { Owner } },
+      });
+      const nick = { properties: { nick: string } };
+      // Beside a `$ref` to a typed `Owner` the `string` copy is excluded, so
+      // both bodies are the merge alone — alike, as the field is `Owner`.
+      const model = (name: string): TypeRef => ({ kind: 'model', name });
+      const withString = (name: string): TypeRef => union(model(name), primitive('string'));
+      for (const [label, members, Owner, shape, fields] of [
+        ['inline member', [nick], untypedOwner, withString, ['nick']],
+        ['$ref and inline member', [ref('Owner'), nick], untypedOwner, withString, ['name', 'nick']],
+        ['$ref to a typed Owner and inline member', [ref('Owner'), nick], typedOwner, model, ['name', 'nick']],
+      ] as const) {
+        const spec = await parseJson(bodyDocument({ type: ['object', 'string'], allOf: members }, Owner));
+        const op = operation(spec, 'createNote');
+        expect(op.response, label).toEqual(shape('CreateNoteResponse'));
+        expect(op.requestBody, label).toEqual(shape('CreateNoteRequest'));
+        for (const name of ['CreateNoteResponse', 'CreateNoteRequest']) {
+          expect(
+            spec.models.find((model) => model.name === name)?.fields.map((field) => field.name),
+            `${label}: ${name}`,
+          ).toEqual(fields);
+        }
+      }
+      expect(
+        warn.mock.calls.map((call: unknown[]) => String(call[0])).filter((w: string) => w.includes('Unresolved')),
+      ).toEqual([]);
+    },
+  );
 
   it('answers `typesAsUnknown` for a list as the type it builds: bare `unknown` exactly when every copy is', async () => {
     expect(typesAsUnknown({ type: ['weird', 'weirder'] })).toBe(true);

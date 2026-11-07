@@ -116,9 +116,9 @@ const tagsField = (ir: ApiSpec, name: string): Field => model(ir, name).fields.f
 /** The type of `tags` on model `name`, as the issue's script prints it. */
 const tagsOf = (ir: ApiSpec, name: string): TypeRef => tagsField(ir, name).type;
 
-/** The issue's warning: the body `shape` left as `GetPetError404`, since the component `name` cannot stand for it. */
-const kept = (shape: string, name: string): string =>
-  `[oagen] Warning: The shared error body ${shape} would be named "${name}", which component schema "${name}" already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one`;
+/** The issue's warning: the body `shape` left as `GetPetError404`, since the component `name` cannot stand for it; the component's own shape prints beside the body's (#629), the same unless given. */
+const kept = (shape: string, name: string, componentShape = shape): string =>
+  `[oagen] Warning: The shared error body ${shape} would be named "${name}", which component schema "${name}" ${componentShape} already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one`;
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -162,7 +162,10 @@ describe('#611', () => {
       expect(tagsOf(nested.ir, 'ErrorBodyWithTagsList')).toEqual(listOf(listOf(shortString)));
       expect(nested.warnings).toEqual([kept('{ message: string, tags: string[][] }', 'ErrorBodyWithTagsList')]);
       // A limit on a `oneOf` variant, whichever order either side lists the variants in.
-      for (const component of [oneOf(short, int), oneOf(int, short)]) {
+      for (const [component, componentShape] of [
+        [oneOf(short, int), 'string | integer'],
+        [oneOf(int, short), 'integer | string'],
+      ] as const) {
         for (const [inline, shape, expected] of [
           [oneOf(str, int), 'string | integer', unionOf(string, integer)],
           [oneOf(int, str), 'integer | string', unionOf(integer, string)],
@@ -171,7 +174,11 @@ describe('#611', () => {
           expect(errorOf(variant.ir, 'getPet')).toBe('GetPetError404');
           expect(tagsOf(variant.ir, 'GetPetError404')).toEqual(expected);
           expect(variant.warnings).toEqual([
-            kept(`{ message: string, tags: ${shape} }`, 'ErrorBodyWithTagsOrTagsInteger'),
+            kept(
+              `{ message: string, tags: ${shape} }`,
+              'ErrorBodyWithTagsOrTagsInteger',
+              `{ message: string, tags: ${componentShape} }`,
+            ),
           ]);
         }
       }
