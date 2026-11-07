@@ -3401,8 +3401,10 @@ function buildSyntheticEnumRef(
  * The name `schemaToTypeRef` gives an inline enum typed under `contextName`
  * (`GetPetError404`; `status` → `Status`): qualified by `parentModelName`
  * with its list-item markers stripped (`DirectoryListItem` + `State` →
- * `DirectoryState`) unless the name already starts with it (`Connection` +
- * `ConnectionType` → `ConnectionType`), then passed through the active
+ * `DirectoryState`) unless the name already starts with it and adds
+ * something after it (`extendsParentName`: `Connection` + `ConnectionType` →
+ * `ConnectionType`; `Reply` + `Reply` → `ReplyReply`, never the model's own
+ * name, workos/oagen#621), then passed through the active
  * `schemaNameTransform` as a component's name is, so a project's rename map
  * (`RadarAction` → `RadarListAction` in `oagen.config.ts`) reaches inline
  * enums too. One rule for every inline enum: an `enum:` list and a `oneOf`
@@ -3411,7 +3413,8 @@ function buildSyntheticEnumRef(
 export function inlineEnumName(contextName: string | undefined, parentModelName: string | undefined): string {
   const baseName = toPascalCase(contextName ?? 'UnknownEnum');
   const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
-  const qualifiedName = cleanParent && !baseName.startsWith(cleanParent) ? `${cleanParent}${baseName}` : baseName;
+  const qualifiedName =
+    cleanParent && !extendsParentName(baseName, cleanParent) ? `${cleanParent}${baseName}` : baseName;
   return activeSchemaNameTransform ? activeSchemaNameTransform(qualifiedName) : qualifiedName;
 }
 
@@ -5760,15 +5763,19 @@ function discriminatedVariantSchemas(
  * objects and enums its fields mint), by a variant an earlier dispatcher or
  * an earlier variant of the union settled on, or, whatever its shape, by the
  * component itself or the union's other variants. It then steps by number
- * (`CatEventCat2`, `CatEventCat3`, …), everything nested under it moving
- * with it. A holder of the identical shape is shared. A component's model
- * stands for the variant's, which is not built, so the component keeps its
- * own documentation; any other holder's copy is built as before and folds
- * onto the other (`keepLarger`, `settleFieldInlineModels`), so the mapping
- * never names a model a later pass may rename through another site, such as
- * a field's object. A name that does not start with the variant's (a nested
- * variant's title) does not move with it and is left to the rules that name
- * it.
+ * (`CatEventCat2`, `CatEventCat3`, …), the number spelled as `numberedName`
+ * spells every numbered name, behind `No` after a digit (`PetEvent`'s
+ * `pet.v2` beside a component `PetV2` of another shape is `PetV2No2`, then
+ * `PetV2No3`, never `PetV22`, which reads as version 22; #602), everything
+ * nested under it moving with it (`CatEventCat2Owner`, `PetV2No2Owner`) and
+ * the mapping naming it there. A holder of the identical shape is shared. A
+ * component's model stands for the variant's, which is not built, so the
+ * component keeps its own documentation; any other holder's copy is built
+ * as before and folds onto the other (`keepLarger`,
+ * `settleFieldInlineModels`), so the mapping never names a model a later
+ * pass may rename through another site, such as a field's object. A name
+ * that does not start with the variant's (a nested variant's title) does
+ * not move with it and is left to the rules that name it.
  */
 function planDispatcherVariants(
   schemas: Record<string, SchemaObject>,
@@ -5826,9 +5833,12 @@ function planDispatcherVariants(
 }
 
 /**
- * The first of `base`, `base2`, `base3`, … under which a variant's tree
- * — its rebuilt schema `merged`, extracted with everything nested under it
- * — mints no name starting with the candidate that is `taken`, or `held`
+ * The first of `base`, then `base` numbered 2, 3, … as `numberedName`
+ * spells every numbered model and enum name — bare after a letter
+ * (`CatEventCat2`), behind `No` after a digit (`PetV2No2`, never `PetV22`,
+ * which reads as version 22; #602) — under which a variant's tree — its
+ * rebuilt schema `merged`, extracted with everything nested under it —
+ * mints no name starting with the candidate that is `taken`, or `held`
  * with a shape other than the one it mints; with that tree. It ends: each
  * candidate's names start with the candidate, and a held or taken name
  * starts with finitely many of them.
@@ -5841,7 +5851,7 @@ function firstFreeVariantName(
   held: ReadonlyMap<string, readonly string[]>,
 ): { variantName: string; tree: Model[] } {
   for (let n = 1; ; n++) {
-    const variantName = n === 1 ? base : `${base}${n}`;
+    const variantName = n === 1 ? base : numberedName(base, n);
     if (taken.has(variantName)) continue;
     const tree = rehearse(() => extractInlineModelDeep(variantName, merged, schemas));
     const free = tree.every(
@@ -6742,6 +6752,7 @@ import {
   mintedInlineNames,
   modelFingerprint,
   type PropertyDeclarations,
+  extendsParentName,
   qualifyInlineModelName,
   recordLiftedFieldModel,
   reservedInlineNames,
