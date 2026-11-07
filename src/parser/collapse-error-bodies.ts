@@ -341,6 +341,10 @@ function fold(
   const canonical = new Map<string, string>(); // group key → shared name
   const absorbed = new Set<string>(); // group keys folded onto a component of their shape
   const seeds = new Set<string>(); // the models of the groups left as they are
+  // The deprecated bodies a live component took, announced once the fold
+  // is known to be kept: a name a group cannot take makes the pass run
+  // again (`frozen`), and the same bodies fold again then.
+  const deprecatedFolds: Array<{ name: string; deprecated: Model[] }> = [];
   const leave = (name: string, holder: string, left: readonly Model[]): void => {
     for (const member of left) seeds.add(member.name);
     const list = left.map((member) => `"${member.name}"`).join(', ');
@@ -370,7 +374,7 @@ function fold(
         // deprecated inline copy a live component admits is (#441, #629):
         // the body's flag has no carrier once the body folds.
         const deprecated = members.filter((member) => member.deprecated);
-        if (deprecated.length > 0) warnDeprecatedFold(name, deprecated, `component schema "${name}"`);
+        if (deprecated.length > 0) deprecatedFolds.push({ name, deprecated });
         canonical.set(key, name);
         absorbed.add(key);
         return;
@@ -443,6 +447,8 @@ function fold(
     }
     return { models: input.models, frozen };
   }
+  for (const { name, deprecated } of deprecatedFolds)
+    warnDeprecatedFold(name, deprecated, `component schema "${name}"`);
 
   // The shared enums, one per field name some group pins to two or more
   // values, named from the same pool as the models so neither takes the
@@ -1231,7 +1237,9 @@ function sharedModelDeprecated(name: string, members: readonly Model[]): boolean
  * component of the name (`claim`) — as a deprecated inline copy a live
  * declared model admits is announced everywhere else (`deprecatedFoldWarning`):
  * the body's flag has no carrier once the body folds, so the readers of
- * its site lose the notice (#629).
+ * its site lose the notice (#629). Printed only once `fold` knows its
+ * result is kept, after every group has claimed a name, so a pass that
+ * runs again announces each fold once.
  */
 function warnDeprecatedFold(name: string, deprecated: readonly Model[], live: string): void {
   const list = deprecated.map((member) => `"${member.name}"`).join(', ');
