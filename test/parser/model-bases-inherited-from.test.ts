@@ -630,6 +630,28 @@ describe('#591', () => {
         ]);
       });
 
+      it('a model composing a `<Name>` and its `<Name>Json` names the base once after the fold (Greptile, round three)', async () => {
+        const schemas = {
+          Bar: { type: 'object', properties: { a: { type: 'string' } } },
+          BarJson: { type: 'object', properties: { a: { type: 'string' }, b: { type: 'string' } } },
+          Foo: { allOf: [R('Bar'), R('BarJson')], properties: { own: { type: 'string' } } },
+        };
+        const paths = {
+          '/foos/{fooId}': getting('getFoo', 'fooId', 'Foo'),
+          '/bars/{barId}': getting('getBar', 'barId', 'Bar'),
+          '/bars/{barId}/json': getting('getBarJson', 'barId', 'BarJson'),
+        };
+        const spec = await parseJson(documentWith(openapi, schemas, paths));
+        expect(spec.models.map((m) => m.name)).toEqual(['Bar', 'Foo']);
+        const foo = modelNamed(spec, 'Foo');
+        expect(foo.bases).toEqual([model('Bar')]);
+        expect(outline(foo)).toEqual([
+          ['own', false, undefined],
+          ['a', false, 'Bar'],
+          ['b', false, 'Bar'],
+        ]);
+      });
+
       it('a model built from an inline allOf — a body, a field — carries neither key', async () => {
         const merged = { allOf: [R('Animal'), { type: 'object', properties: { nickname } }] };
         const paths = {

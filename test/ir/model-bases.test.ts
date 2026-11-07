@@ -63,6 +63,22 @@ describe('#591', () => {
     expect(fresh.fields[1]!.inheritedFrom).toEqual(model('Beast'));
   });
 
+  it('renameModelRefs keeps one entry when a rename sends two bases to one name (Greptile)', () => {
+    const m: Model = {
+      name: 'Foo',
+      fields: [
+        { name: 'a', type: string, required: false, inheritedFrom: model('Bar') },
+        { name: 'b', type: string, required: false, inheritedFrom: model('BarJson') },
+      ],
+      bases: [model('Bar'), model('BarJson'), model('Other')],
+    };
+    const bases = m.bases!;
+    expect(renameModelRefs(m, new Map([['BarJson', 'Bar']]))).toBe(true);
+    expect(m.bases).toBe(bases);
+    expect(m.bases).toEqual([model('Bar'), model('Other')]);
+    expect(m.fields.map((f) => f.inheritedFrom)).toEqual([model('Bar'), model('Bar')]);
+  });
+
   it('renameModelRefs leaves a base or inheritedFrom an admit rejects as written', () => {
     const m = pet();
     expect(renameModelRefs(m, new Map([['Animal', 'Beast']]), () => false)).toBe(false);

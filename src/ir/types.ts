@@ -1381,8 +1381,10 @@ export interface Model {
    * Animal }, { $ref: Living }]` over `Animal: { allOf: [{ $ref: Living }]
    * }` has `[Animal, Living]`, and `[Living, Animal]` the other way
    * round, the fields it carries naming the first member that declares
-   * them; the same `$ref` twice is one base, and a component naming
-   * itself, or an alias of itself, is no base of its own. A `…Json`
+   * them; the same `$ref` twice is one base, a component naming
+   * itself, or an alias of itself, is no base of its own, and two bases a
+   * rename sends to one name (`Bar` beside a `BarJson` folded onto it)
+   * are one, the first kept (`renameModelRefs`). A `…Json`
    * component folded onto its base carries its bases with its fields,
    * less one whose own chain reaches the folded model, which would close
    * a cycle (see `collapseJsonSuffixModels`). A `$ref` member naming a named union — flattened into
@@ -2030,8 +2032,10 @@ function renameMappingTargets(mapping: Record<string, string>, renames: Readonly
  * and its union variants that `renames` maps and `admit` accepts is pointed
  * at the new name (`renameTypeRefModels`, so a union's mapping inside a field
  * follows its variant) — its `bases` and its fields' `inheritedFrom` with
- * them, so a base renamed or folded away is named by its new name (#591)
- * — and the model's own `discriminator.mapping` is
+ * them, so a base renamed or folded away is named by its new name, and two
+ * bases the rename sends to one name (`Bar` beside a `BarJson` folded onto
+ * it) are one base, the first kept, so `bases` names each once (#591,
+ * Greptile) — and the model's own `discriminator.mapping` is
  * rewritten with it: without an `admit`, every target `renames` maps, by
  * name — whether it names a variant, a model outside the variants a
  * document's own mapping sends a value to, or a member an allOf+oneOf
@@ -2054,7 +2058,17 @@ export function renameModelRefs(
     if (renameTypeRefModels(field.type, renames, admit)) moved = true;
     if (field.inheritedFrom && renameTypeRefModels(field.inheritedFrom, renames, admit)) moved = true;
   }
-  for (const base of model.bases ?? []) if (renameTypeRefModels(base, renames, admit)) moved = true;
+  if (model.bases) {
+    for (const base of model.bases) if (renameTypeRefModels(base, renames, admit)) moved = true;
+    const named = new Set<string>();
+    const distinct = model.bases.filter((base) => {
+      if (base.kind !== 'model') return true;
+      if (named.has(base.name)) return false;
+      named.add(base.name);
+      return true;
+    });
+    if (distinct.length !== model.bases.length) model.bases.splice(0, model.bases.length, ...distinct);
+  }
   const mapping = model.discriminator?.mapping;
   if (model.variants) {
     if (renameVariants(model.variants, mapping, renames, admit)) moved = true;
