@@ -602,6 +602,63 @@ describe('#619', () => {
           `[oagen] Warning: Unresolved schema $ref "${nope}" in Pet.variants: no schema at that pointer — typing the site as unknown`,
         ]);
       });
+
+      describe('three keys sharing one pointed model, a pointer variant and a redirected variant beside (Greptile, round 4)', () => {
+        // `dog` is the pointer variant, `hound` an inline variant, `puppy` no variant: all three target `Shelter/properties/dog`.
+        const inlineHound = {
+          ...animal('hound', openapi),
+          properties: { ...animal('hound', openapi).properties, bark: { type: 'string' } },
+        };
+        const three = {
+          oneOf: [{ $ref: CAT }, { $ref: SHELTER_DOG }, inlineHound],
+          discriminator: {
+            propertyName: 'kind',
+            mapping: { cat: CAT, dog: SHELTER_DOG, hound: SHELTER_DOG, puppy: SHELTER_DOG },
+          },
+        };
+        const schemas = components(openapi, { Pet: three, Home: { type: 'object', properties: { pet: three } } });
+        const paths = {
+          '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'),
+          '/homes/{id}': getOp('getHome', '#/components/schemas/Home'),
+        };
+        // A `dog` query enum of the `shelter` service takes `ShelterDog`, so `Shelter.dog`'s model steps to `ShelterDog2`.
+        const shelterDogEnumListing = {
+          get: {
+            operationId: 'listShelter',
+            parameters: [{ name: 'dog', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } }],
+            responses: {
+              '200': {
+                description: 'OK',
+                content: { 'application/json': { schema: { $ref: '#/components/schemas/Shelter' } } },
+              },
+            },
+          },
+        };
+        const expectAll = (spec: ApiSpec, name: string) => {
+          const mapping = { cat: 'Cat', dog: name, hound: name, puppy: name };
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model(name), model(name)]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping });
+          expect(fieldType(spec, 'Home', 'pet')).toEqual({
+            kind: 'union',
+            variants: [model('Cat'), model(name), model(name)],
+            compositionKind: 'oneOf',
+            discriminator: { property: 'kind', mapping },
+          });
+        };
+
+        it('names the pointed model from every key', async () => {
+          const spec = await parseJson(documentWith(openapi, schemas, paths));
+          expectAll(spec, 'ShelterDog');
+          expect(warnings()).toEqual([]);
+        });
+
+        it('follows a rename of the pointed model from every key', async () => {
+          const spec = await parseJson(documentWith(openapi, schemas, { ...paths, '/shelter': shelterDogEnumListing }));
+          expect(fieldType(spec, 'Shelter', 'dog')).toEqual(model('ShelterDog2'));
+          expectAll(spec, 'ShelterDog2');
+        });
+      });
     });
   });
 });

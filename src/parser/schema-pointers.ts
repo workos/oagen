@@ -122,7 +122,7 @@ import {
   withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
-import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
+import { allOfTypingMember, cloneTypeRef, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
 import {
   collectObjectProperties,
   isDeferredDataPathItemType,
@@ -188,11 +188,14 @@ function underNullableWrappers(type: TypeRef): TypeRef {
  * variant `Zoo/properties/dog`; #619) is settled here too, at the mapping
  * site, to the model the schema it points at is built as (`ShelterDog`),
  * and the union — an allOf+oneOf dispatcher's mapping alone, since it
- * holds no variants — is returned as a view with every reference its
- * entries follow that it does not hold as a variant put before its
- * variants: such a target's own, or a redirected inline variant's held
- * inside a multi-type variant's union, so the rename reaches the entry as
- * it reaches a variant's, meeting that reference first.
+ * holds no variants — is returned as a view with a copy of each settled
+ * entry's reference put before its variants, so every entry has a variant
+ * of its own there and the rename reaches it as it reaches a variant's:
+ * whether the reference is a target's own, a redirected inline variant's
+ * held inside a multi-type variant's union, or a variant the union holds
+ * that several keys name at once (`mappingEntriesByVariant` hands the j-th
+ * entry naming a model to the j-th variant naming it, so a third key on
+ * two such variants would be left behind).
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
@@ -245,28 +248,29 @@ export function resolveSchemaPointers(
   // the model the schema it points at is built as — a variant's, settled
   // by the walk, or a target of its own, settled now at the mapping site —
   // and a union holding a settled variant, or whose entry settled to a
-  // model, stands in for them among the references returned. A reference
-  // an entry follows that the union does not hold as a variant — a target
-  // of its own, or a redirected inline variant's inside a multi-type
-  // variant's union — is put before the variants in the view, so a rename
-  // meets it first, where it owns its entries (`mappingEntriesByVariant`),
-  // and is never returned bare as well (Greptile, #619 review round 2: the
-  // entry of a multi-type variant kept the old name).
+  // model, stands in for them among the references returned, as a view
+  // with a copy of each such entry's reference put before its variants:
+  // `mappingEntriesByVariant` hands the j-th entry naming a model to the
+  // j-th variant naming it, so every entry has a variant of its own there
+  // and follows the rename whatever else names the model (Greptile, #619
+  // review rounds 2 and 4: a reference held inside a multi-type variant's
+  // union, and a third key sharing one pointed model, kept the old name).
+  // A reference settled by the walk is renamed through the view, never
+  // again as a bare reference.
   const bare = new Set(resolver.settled);
   const roots: TypeRef[] = [];
   for (const { union, context } of unions) {
     const references = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
       resolver.settle(target, `${context}.discriminator.mapping.${value}`, new Set(), 'leaving the entry as written'),
     );
-    const held = new Set(union.variants.map(variantModelRef));
     const own = union.variants
       .map(variantModelRef)
       .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
     const followed: TypeRef[] = [];
     for (const reference of references) {
       const model = variantModelRef(reference);
-      if (model === undefined || held.has(model) || followed.includes(reference)) continue;
-      followed.push(reference);
+      if (model === undefined) continue;
+      followed.push(cloneTypeRef(reference));
       bare.delete(model);
     }
     if (own.length === 0 && followed.length === 0) continue;
