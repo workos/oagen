@@ -430,8 +430,6 @@ describe('#599', () => {
         ['minItems', 1],
         ['maxItems', 1],
         ['uniqueItems', true],
-        ['minContains', 2],
-        ['maxContains', 1],
         ['minProperties', 1],
         ['maxProperties', 1],
         ['dependentRequired', { a: ['b'] }],
@@ -449,17 +447,26 @@ describe('#599', () => {
         expect(keywordTightened(keyword, undefined, 1), `${keyword}: 1 added`).toBe(true);
         expect(keywordTightened(keyword, 0, 1), `${keyword} 0 → 1`).toBe(true);
       }
-      // `contains` must match once by default, so `minContains: 1` restates it and `0` loosens it.
-      expect(keywordTightened('minContains', undefined, 1)).toBe(false);
-      expect(keywordTightened('minContains', undefined, 0)).toBe(false);
-      expect(keywordTightened('minContains', undefined, 2)).toBe(true);
-      expect(keywordTightened('minContains', 1, undefined)).toBe(false);
-      // Removed from below its default, the default is back: `minContains: 0` removed requires one match again (round 3).
-      expect(keywordTightened('minContains', 0, undefined)).toBe(true);
-      expect(keywordTightened('minContains', 2, undefined)).toBe(false);
+      // Removed from below its default, the default is back (round 3); removed from above it, loosened.
       expect(keywordTightened('minItems', 3, undefined)).toBe(false);
-      expect(constraintsTightened({ minContains: 0 }, undefined)).toBe(true);
-      expect(constraintsTightened({ minContains: 0, maxContains: 3 }, { maxContains: 3 })).toBe(true);
+      expect(keywordTightened('minLength', 0, undefined)).toBe(false);
+      // `minContains` / `maxContains` bound what `contains` matches, which the IR does not carry, so a
+      // change to them is reported but never tightened or loosened (round 4).
+      for (const [before, after] of [
+        [undefined, 0],
+        [undefined, 1],
+        [undefined, 2],
+        [0, undefined],
+        [2, undefined],
+        [0, 2],
+        [2, 0],
+      ] as const) {
+        expect(keywordTightened('minContains', before, after), `minContains ${before} → ${after}`).toBe(false);
+        expect(keywordTightened('maxContains', before, after), `maxContains ${before} → ${after}`).toBe(false);
+      }
+      expect(constraintsTightened({ minContains: 0 }, undefined)).toBe(false);
+      expect(constraintsTightened({ minContains: 0, maxContains: 3 }, { maxContains: 1 })).toBe(false);
+      expect(constraintsTightened({ minContains: 0, minItems: 0 }, { minItems: 1 })).toBe(true);
       expect(keywordTightened('dependentRequired', undefined, { a: [] })).toBe(false);
       expect(keywordTightened('dependentRequired', undefined, { a: [], b: ['c'] })).toBe(true);
       expect(keywordTightened('dependentRequired', { a: [] }, { a: [], b: [] })).toBe(false);
@@ -472,25 +479,11 @@ describe('#599', () => {
     });
 
     it('reads an upper bound lowered and a lower bound raised as tightened, the reverse moves as loosened', () => {
-      for (const keyword of [
-        'maximum',
-        'exclusiveMaximum',
-        'maxLength',
-        'maxItems',
-        'maxContains',
-        'maxProperties',
-      ] as const) {
+      for (const keyword of ['maximum', 'exclusiveMaximum', 'maxLength', 'maxItems', 'maxProperties'] as const) {
         expect(keywordTightened(keyword, 10, 5), `${keyword} lowered`).toBe(true);
         expect(keywordTightened(keyword, 5, 10), `${keyword} raised`).toBe(false);
       }
-      for (const keyword of [
-        'minimum',
-        'exclusiveMinimum',
-        'minLength',
-        'minItems',
-        'minContains',
-        'minProperties',
-      ] as const) {
+      for (const keyword of ['minimum', 'exclusiveMinimum', 'minLength', 'minItems', 'minProperties'] as const) {
         expect(keywordTightened(keyword, 5, 10), `${keyword} raised`).toBe(true);
         expect(keywordTightened(keyword, 10, 5), `${keyword} lowered`).toBe(false);
       }
@@ -1785,36 +1778,49 @@ describe('#599', () => {
     }
 
     for (const openapi of OPENAPI_VERSIONS) {
-      it(`reports minContains: 0 removed as tightened, exit 2, and minContains: 0 added as loosened (OpenAPI ${openapi}; round 3)`, async () => {
-        const doc = (minContains: number | undefined) =>
+      it(`reports minContains added, removed or changed as additive either way, with or without contains (OpenAPI ${openapi}; rounds 3 and 4)`, async () => {
+        // The IR carries no `contains`, so the differ cannot tell whether the keyword applies.
+        const doc = (minContains: number | undefined, withContains: boolean) =>
           petsDoc(openapi, {
             Pet: petWith({
               tags: {
                 type: 'array',
                 items: { type: 'string' },
-                contains: { type: 'string', pattern: '^featured_' },
+                ...(withContains ? { contains: { type: 'string', pattern: '^featured_' } } : {}),
                 ...(minContains === undefined ? {} : { minContains }),
               },
             }),
           });
-        const oldSpec = await parse('old', doc(0));
-        const newSpec = await parse('new', doc(undefined));
-        expect(fieldChangesOf(diffSpecs(oldSpec, newSpec).changes, 'Pet')).toEqual([
-          {
-            kind: 'field-constraints-changed',
-            fieldName: 'tags',
-            classification: 'breaking',
-            oldConstraints: { minContains: 0 },
-            details: 'minContains 0 → <unset>',
-          },
-        ]);
-        expect(fieldChangesOf(diffSpecs(newSpec, oldSpec).changes, 'Pet')).toMatchObject([
-          { classification: 'additive', details: 'minContains <unset> → 0' },
-        ]);
-        expect(await exitCodeOf(doc(0), doc(undefined))).toBe(2);
-        expect(await exitCodeOf(doc(undefined), doc(0))).toBe(1);
-        // Removed from above the default is loosened, as a `minItems` is.
-        expect(await exitCodeOf(doc(2), doc(undefined))).toBe(1);
+        for (const withContains of [false, true]) {
+          const oldSpec = await parse('old', doc(0, withContains));
+          const newSpec = await parse('new', doc(undefined, withContains));
+          expect(fieldChangesOf(diffSpecs(oldSpec, newSpec).changes, 'Pet'), `contains: ${withContains}`).toEqual([
+            {
+              kind: 'field-constraints-changed',
+              fieldName: 'tags',
+              classification: 'additive',
+              oldConstraints: { minContains: 0 },
+              details: 'minContains 0 → <unset>',
+            },
+          ]);
+          expect(fieldChangesOf(diffSpecs(newSpec, oldSpec).changes, 'Pet')).toMatchObject([
+            { classification: 'additive', details: 'minContains <unset> → 0' },
+          ]);
+          expect(await exitCodeOf(doc(0, withContains), doc(undefined, withContains))).toBe(1);
+          expect(await exitCodeOf(doc(undefined, withContains), doc(0, withContains))).toBe(1);
+          expect(await exitCodeOf(doc(2, withContains), doc(0, withContains))).toBe(1);
+          expect(await exitCodeOf(doc(0, withContains), doc(2, withContains))).toBe(1);
+        }
+        // A real lower bound removed from below its default is still tightened (round 3): `minItems`
+        // has no such default above 0, so the rule only ever loosens — `minItems: 3` removed exits 1.
+        const items = (minItems: number | undefined) =>
+          petsDoc(openapi, {
+            Pet: petWith({
+              tags: { type: 'array', items: { type: 'string' }, ...(minItems === undefined ? {} : { minItems }) },
+            }),
+          });
+        expect(await exitCodeOf(items(3), items(undefined))).toBe(1);
+        expect(await exitCodeOf(items(undefined), items(3))).toBe(2);
       });
     }
 
