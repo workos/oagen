@@ -277,6 +277,46 @@ describe('#616', () => {
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('carries the limits beside a collapsed list as the same schema without the list carries them (Greptile, round 3)', async () => {
+    // Array items carry their own limits (#545). A list collapsed to a model
+    // reference carries none, exactly as a bare `$ref` or an `allOf` of one
+    // beside the same limits carries none; a list that stays a union
+    // carries them, as before.
+    const authorsOf = (items: unknown) => ({
+      type: 'object',
+      properties: { authors: { type: 'array', items, maxItems: 3 } },
+    });
+    const parseItems = async (items: unknown, Owner: unknown): Promise<Field> =>
+      fieldOf(
+        await parseJson({
+          openapi: '3.1.0',
+          info: { title: 'repro', version: '1' },
+          paths: { '/notes': getNote },
+          components: { schemas: { Note: authorsOf(items), Owner } },
+        }),
+        'Note',
+        'authors',
+      );
+    const listed = await parseItems(
+      { type: ['object', 'string'], allOf: [ref('Owner')], minProperties: 2 },
+      typedOwner,
+    );
+    const bare = await parseItems({ allOf: [ref('Owner')], minProperties: 2 }, typedOwner);
+    expect(listed.type).toEqual({ kind: 'array', items: owner, constraints: { maxItems: 3 } });
+    expect(bare.type).toEqual(listed.type);
+    expect(listed.constraints).toEqual({ maxItems: 3 });
+
+    const kept = await parseItems(
+      { type: ['object', 'string'], allOf: [ref('Owner')], minProperties: 2, maxLength: 5 },
+      untypedOwner,
+    );
+    expect(kept.type).toEqual({
+      kind: 'array',
+      items: { ...union(owner, primitive('string')), constraints: { maxLength: 5, minProperties: 2 } },
+      constraints: { maxItems: 3 },
+    });
+  });
+
   it('answers `typesAsUnknown` for a list as the type it builds: bare `unknown` exactly when every copy is', async () => {
     expect(typesAsUnknown({ type: ['weird', 'weirder'] })).toBe(true);
     expect(typesAsUnknown({ type: ['weird', 'string'] })).toBe(false);

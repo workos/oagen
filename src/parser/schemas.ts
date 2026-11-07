@@ -3623,13 +3623,20 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
  * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
- * through `allOf` wrappers too).
+ * through `allOf` wrappers too), and for a schema written as a `$ref`,
+ * which pins nothing of its own: nothing but annotations is read beside a
+ * `$ref`, so `properties` beside an alias's reference are no declaration
+ * here, as they are none for its model (`getEffectiveProperties`,
+ * `componentAllOfMembers`; Greptile, #618 review: `CatAlias: { $ref: Cat,
+ * properties: { kind: { const: 'other' } } }` had `kind: 'cat'` as a field
+ * while a union mapped `'other'` to it).
  */
 function getConstPropertyValue(
   schema: SchemaObject,
   property: string,
   schemas?: Record<string, SchemaObject>,
 ): string | null {
+  if (schema.$ref !== undefined) return null;
   const prop = schema.properties?.[property];
   return prop ? pinnedDeclarationValue(prop, schemas) : null;
 }
@@ -6962,7 +6969,13 @@ function buildTypeRef(
     // limits are the union's (`schemaToTypeRef` attaches them to it), not
     // each variant's: a variant is the same schema read as one of its
     // types, so the limits are read from the union, once, for whichever
-    // type the value takes (#545). The variants are built without them
+    // type the value takes (#545) — or, once the list collapses to one
+    // variant, from that type where it can carry them: a model or enum
+    // reference carries none, as the same limits beside a bare `$ref` carry
+    // none (Greptile, #616 review: `items: { type: ['object', 'string'],
+    // allOf: [{ $ref: Owner }], minProperties: 2 }` is `Owner[]`, as
+    // `items: { allOf: [{ $ref: Owner }], minProperties: 2 }` is). The
+    // variants are built without them
     // (`buildTypeRef`); what they nest — items, values — carries its own.
     // Each per-type copy stands for the schema it was spread from
     // (`derivedCopy`), so a merge the schema carries (`allOf` beside `type:
