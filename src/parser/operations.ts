@@ -4896,7 +4896,8 @@ function typePickedRequestBody(
  * The rebuilt discriminator admits `null` exactly when a variant's
  * declaration does, at any hop (`pinnedDeclarationAdmitsNull`: a nullable
  * wrapper, a type list naming `null`, OAS 3.0 `nullable: true` beside a
- * type), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
+ * type — never a keyword beside a `$ref`, which the type builder gives
+ * precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
  * variant beside one pinning `sms` folds to a `kind` typed
  * `nullable<enum>`, as the variant's own field is `nullable<literal>`
  * (#607 review: the fold rebuilt the field without `null`, as it had

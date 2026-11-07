@@ -589,6 +589,20 @@ describe('#607', () => {
       // schema without a `type`: the field stays the plain enum.
       const beside = await parseJson(document([{ allOf: [c('email')], nullable: true }, c('sms')]));
       expect(kindOf(beside, 'beside the allOf')).toMatchObject({ kind: 'enum', name: 'CreateTagRequestKind' });
+      // A null keyword beside a `$ref` declares nothing either: the type
+      // builder gives the `$ref` precedence over its siblings, so the field
+      // the variant carries is the non-null `EmailKind`, and so is the fold's.
+      const nullBesideRef: Doc =
+        openapi === '3.0.3'
+          ? { ...ref('EmailKind'), nullable: true }
+          : { ...ref('EmailKind'), type: ['string', 'null'] };
+      const besideRef = await parseJson(
+        document([nullBesideRef, c('sms')], { EmailKind: c('email'), Holder: object(nullBesideRef) }),
+      );
+      expect(fieldType(besideRef, 'Holder', 'kind'), 'beside the $ref').toMatchObject(
+        openapi === '3.0.3' ? { kind: 'enum', name: 'EmailKind' } : { kind: 'literal', value: 'email' },
+      );
+      expect(kindOf(besideRef, 'beside the $ref')).toMatchObject({ kind: 'enum', name: 'CreateTagRequestKind' });
       const plain = await parseJson(document([c('email'), c('sms')]));
       expect(kindOf(plain, 'no null')).toMatchObject({ kind: 'enum', name: 'CreateTagRequestKind' });
     });

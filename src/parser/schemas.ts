@@ -5692,10 +5692,13 @@ export function pinnedDeclarationValue(
  * a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a
  * nullable union wrapper, or an `allOf` read as a member that does; a
  * `nullable: true` beside an `allOf` declares nothing, as the type builder
- * reads it) — so `kind: { oneOf: [{ const: 'email' }, { type: 'null' }]
- * }`, `kind: { type: ['string', 'null'], const: 'email' }`, `kind: { type:
- * 'string', enum: ['email'], nullable: true }` and a `$ref` to a component
- * written so admit `null` as the field built from them is
+ * reads it, and nothing beside a `$ref` is read, since the type builder
+ * gives the `$ref` precedence over every sibling — `kind: { $ref:
+ * EmailKind, type: ['string', 'null'] }` is the non-null field `EmailKind`
+ * types; #607 review round 2) — so `kind: { oneOf: [{ const: 'email' }, {
+ * type: 'null' }] }`, `kind: { type: ['string', 'null'], const: 'email' }`,
+ * `kind: { type: 'string', enum: ['email'], nullable: true }` and a `$ref`
+ * to a component written so admit `null` as the field built from them is
  * `nullable<literal>`. Read by the request-body fold
  * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
  * the pinned values admits `null` exactly when a variant's does (#607
@@ -5705,7 +5708,7 @@ export function pinnedDeclarationAdmitsNull(
   declaration: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): boolean {
-  return (pinnedDeclarationHops(declaration, schemas) ?? []).some(declaresNull);
+  return (pinnedDeclarationHops(declaration, schemas) ?? []).some((hop) => hop.$ref === undefined && declaresNull(hop));
 }
 
 /**
