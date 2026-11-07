@@ -619,6 +619,36 @@ describe('#608', () => {
       }
     });
 
+    describe('Greptile review: shared named unions are expanded once per walk', () => {
+      /** Greptile's chain: `C1`…`C<depth>`, each an `anyOf` of two references to the next, the last declaring `items: Pet[]`. */
+      const chain = (depth: number): Record<string, unknown> => {
+        const schemas: Record<string, unknown> = { Pet: object({ id: { type: 'string' } }) };
+        for (let k = 1; k < depth; k++) schemas[`C${k}`] = { anyOf: [ref(`C${k + 1}`), ref(`C${k + 1}`)] };
+        schemas[`C${depth}`] = object({ items: array(ref('Pet')) });
+        return schemas;
+      };
+
+      it('reads a 25-deep chain of shared unions in well under a second, through the pointer and as a plain body', async () => {
+        for (const [body, dataPath] of [
+          [pointer, 'items'],
+          [ref('C1'), 'items'],
+        ] as const) {
+          const started = performance.now();
+          const ir = await parseJson(
+            spec(openapi, listOwners(body, dataPath), { ...chain(25), Holder: object({ result: ref('C1') }) }),
+          );
+          const elapsed = performance.now() - started;
+          const op = onlyOperation(ir);
+          expect(op.response).toEqual({ kind: 'model', name: 'C1' });
+          expect(op.pagination).toMatchObject({ dataPath, itemType: { kind: 'model', name: 'Pet' } });
+          expect(ir.models.map((m) => m.name)).not.toContain('ListOwnersItem');
+          // Expanded once per route, the walk took seconds (2^25 expansions); once per model it takes milliseconds.
+          expect(elapsed).toBeLessThan(1000);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      });
+    });
+
     it('without an override, the pointer response still yields the settled response itself (#539)', async () => {
       const ir = await parseJson(spec(openapi, listOwners(pointer, undefined), { Holder }));
       const op = onlyOperation(ir);
@@ -798,6 +828,49 @@ describe('#608', () => {
         compositionKind: 'oneOf',
       };
       expect(walkDataPathItemType(named('Loop'), 'items', [loop, ...pool])).toBeUndefined();
+    });
+
+    it('expands a shared named union once per walk, however many routes reach it, and keeps a cycle from a partial reading', () => {
+      const unionOf = (name: string, variants: TypeRef[]): Model => ({
+        name,
+        fields: [],
+        variants,
+        compositionKind: 'anyOf',
+      });
+      // Greptile's chain as the IR holds it: each union two references to the next.
+      const chain: Model[] = [model('C25', { items: petArray })];
+      for (let k = 24; k >= 1; k--) chain.push(unionOf(`C${k}`, [named(`C${k + 1}`), named(`C${k + 1}`)]));
+      let started = performance.now();
+      expect(walkDataPathItemType(named('C1'), 'items', chain)).toEqual({ itemType: named('Pet') });
+      expect(performance.now() - started).toBeLessThan(200);
+      // A diamond chain of distinct unions: C_k is an anyOf of D_k and E_k, each an anyOf of C_{k+1} and a Leaf.
+      const diamond: Model[] = [
+        model('C25', { items: petArray, last: named('Pet') }),
+        model('Leaf', { items: petArray }),
+      ];
+      for (let k = 24; k >= 1; k--) {
+        diamond.push(
+          unionOf(`C${k}`, [named(`D${k}`), named(`E${k}`)]),
+          unionOf(`D${k}`, [named(`C${k + 1}`), named('Leaf')]),
+          unionOf(`E${k}`, [named(`C${k + 1}`), named('Leaf')]),
+        );
+      }
+      started = performance.now();
+      expect(walkDataPathItemType(named('C1'), 'items', diamond)).toEqual({ itemType: named('Pet') });
+      expect(performance.now() - started).toBeLessThan(200);
+      // Two unions reaching each other: whichever is walked first, each reads both leaves, as the document walk
+      // keeps no reading a cycle closed above (`fieldsNamed`).
+      const leaves = (y: TypeRef) => [
+        unionOf('A', [named('B'), named('X')]),
+        unionOf('B', [named('A'), named('Y')]),
+        model('X', { items: petArray }),
+        model('Y', { items: y }),
+      ];
+      expect(walkDataPathItemType(named('B'), 'items', leaves(petArray))).toEqual({ itemType: named('Pet') });
+      expect(walkDataPathItemType(named('A'), 'items', leaves(petArray))).toEqual({ itemType: named('Pet') });
+      const cats: TypeRef = { kind: 'array', items: named('Cat') };
+      expect(walkDataPathItemType(named('B'), 'items', leaves(cats))).toBeUndefined();
+      expect(walkDataPathItemType(named('A'), 'items', leaves(cats))).toBeUndefined();
     });
 
     it('keeps every other failure undefined, as before, so the document answers', () => {
