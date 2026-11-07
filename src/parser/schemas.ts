@@ -3948,7 +3948,8 @@ function nameInlineObjectVariants(
  * members are typed alike as is one member (`dedupeTypeRefs`).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
-  const modelRef: TypeRef = { kind: 'model', name: refName };
+  const modelRef: ModelRef = { kind: 'model', name: refName };
+  if (refName !== modelName) redirectedVariantModelRefs.add(modelRef);
   const typeList = Array.isArray(variant.type) ? variant.type : [];
   const nullable = variant.nullable === true || typeList.includes('null');
   const keys = variantMemberKeys(variant, modelName);
@@ -5483,11 +5484,24 @@ function schemasAlong(schema: SchemaObject, schemas: Record<string, SchemaObject
 }
 
 /**
+ * The model references `inlineVariantTypeRef` built for an inline object
+ * variant redirected to a mapping entry's target — a name other than the
+ * variant's own model's — by identity, so a pointer entry finds the
+ * references it redirected and no other: a reference an array variant's
+ * items or a map variant's values make to a component of the same name is
+ * the document's own and stays (Greptile, #619 review round 6: it was
+ * found by name and sent to the pointer too).
+ */
+const redirectedVariantModelRefs = new WeakSet<ModelRef>();
+
+/**
  * The references among `variants` an inline object variant was redirected
  * to under `name` — a mapping entry's target as the IR spells it, which for
  * a pointer names no model — the variant itself, or the object member of a
- * multi-type variant's union; none when `name` is no entry's spelling. A
- * reference already pending is a pointer's own and is passed over.
+ * multi-type variant's union, each one `inlineVariantTypeRef` built for the
+ * redirect (`redirectedVariantModelRefs`); none when `name` is no entry's
+ * spelling. A reference already pending is a pointer's own and is passed
+ * over.
  */
 function redirectedVariantRefs(variants: readonly TypeRef[], name: string | undefined): ModelRef[] {
   const refs: ModelRef[] = [];
@@ -5495,7 +5509,7 @@ function redirectedVariantRefs(variants: readonly TypeRef[], name: string | unde
   for (const variant of variants) {
     walkTypeRef(variant, {
       model: (ref) => {
-        if (ref.name === name && !isPendingSchemaRef(ref)) refs.push(ref);
+        if (ref.name === name && redirectedVariantModelRefs.has(ref) && !isPendingSchemaRef(ref)) refs.push(ref);
       },
     });
   }

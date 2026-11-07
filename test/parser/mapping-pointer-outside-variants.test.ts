@@ -837,6 +837,44 @@ describe('#619', () => {
           expect(warnings()).toEqual([]);
         });
       });
+
+      describe('a variant of its own naming the component a pointer entry’s alias target names (Greptile, round 6)', () => {
+        it('keeps an array variant’s items as written while the entry settles through the alias, as a component and inline', async () => {
+          // `items: { $ref: Hound }` is the document's own reference, not one a redirect made: only references
+          // `inlineVariantTypeRef` built for a redirect follow the entry to the pointer.
+          const HOUND = '#/components/schemas/Hound';
+          const withArray = {
+            oneOf: [{ $ref: CAT }, { $ref: SHELTER_DOG }, { type: 'array', items: { $ref: HOUND } }],
+            discriminator: { propertyName: 'kind', mapping: { cat: CAT, dog: HOUND } },
+          };
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              components(openapi, {
+                Hound: { $ref: SHELTER_DOG },
+                Pet: withArray,
+                Home: { type: 'object', properties: { pet: withArray } },
+              }),
+              {
+                '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'),
+                '/homes/{id}': getOp('getHome', '#/components/schemas/Home'),
+              },
+            ),
+          );
+          const variants = [model('Cat'), model('ShelterDog'), { kind: 'array', items: model('Hound') }];
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toEqual(variants);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } });
+          expect(fieldType(spec, 'Home', 'pet')).toEqual({
+            kind: 'union',
+            variants,
+            compositionKind: 'oneOf',
+            discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } },
+          });
+          expect(modelNames(spec)).toEqual(['Cat', 'Home', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+      });
     });
   });
 });
