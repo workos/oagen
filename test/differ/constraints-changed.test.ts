@@ -454,6 +454,12 @@ describe('#599', () => {
       expect(keywordTightened('minContains', undefined, 0)).toBe(false);
       expect(keywordTightened('minContains', undefined, 2)).toBe(true);
       expect(keywordTightened('minContains', 1, undefined)).toBe(false);
+      // Removed from below its default, the default is back: `minContains: 0` removed requires one match again (round 3).
+      expect(keywordTightened('minContains', 0, undefined)).toBe(true);
+      expect(keywordTightened('minContains', 2, undefined)).toBe(false);
+      expect(keywordTightened('minItems', 3, undefined)).toBe(false);
+      expect(constraintsTightened({ minContains: 0 }, undefined)).toBe(true);
+      expect(constraintsTightened({ minContains: 0, maxContains: 3 }, { maxContains: 3 })).toBe(true);
       expect(keywordTightened('dependentRequired', undefined, { a: [] })).toBe(false);
       expect(keywordTightened('dependentRequired', undefined, { a: [], b: ['c'] })).toBe(true);
       expect(keywordTightened('dependentRequired', { a: [] }, { a: [], b: [] })).toBe(false);
@@ -1775,6 +1781,40 @@ describe('#599', () => {
           });
         expect(await exitCodeOf(withoutLimit(false), withoutLimit(true))).toBe(1);
         expect(await exitCodeOf(withoutLimit(true), withoutLimit(false))).toBe(1);
+      });
+    }
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`reports minContains: 0 removed as tightened, exit 2, and minContains: 0 added as loosened (OpenAPI ${openapi}; round 3)`, async () => {
+        const doc = (minContains: number | undefined) =>
+          petsDoc(openapi, {
+            Pet: petWith({
+              tags: {
+                type: 'array',
+                items: { type: 'string' },
+                contains: { type: 'string', pattern: '^featured_' },
+                ...(minContains === undefined ? {} : { minContains }),
+              },
+            }),
+          });
+        const oldSpec = await parse('old', doc(0));
+        const newSpec = await parse('new', doc(undefined));
+        expect(fieldChangesOf(diffSpecs(oldSpec, newSpec).changes, 'Pet')).toEqual([
+          {
+            kind: 'field-constraints-changed',
+            fieldName: 'tags',
+            classification: 'breaking',
+            oldConstraints: { minContains: 0 },
+            details: 'minContains 0 → <unset>',
+          },
+        ]);
+        expect(fieldChangesOf(diffSpecs(newSpec, oldSpec).changes, 'Pet')).toMatchObject([
+          { classification: 'additive', details: 'minContains <unset> → 0' },
+        ]);
+        expect(await exitCodeOf(doc(0), doc(undefined))).toBe(2);
+        expect(await exitCodeOf(doc(undefined), doc(0))).toBe(1);
+        // Removed from above the default is loosened, as a `minItems` is.
+        expect(await exitCodeOf(doc(2), doc(undefined))).toBe(1);
       });
     }
 
