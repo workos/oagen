@@ -514,4 +514,145 @@ describe('#618', () => {
       expect(warnings()).toEqual([]);
     });
   });
+
+  describe('what is written beside the `$ref`, other than annotations, stays unread (Greptile, #618 review)', () => {
+    /** `Cat` with `name` optional, so only a `required` that is read could make `name` required. */
+    const unrequired = { type: 'object', properties: { name: str } };
+    const extra = { type: 'object', properties: { extra: str } };
+
+    it.each(['3.1.0', '3.0.3'])(
+      'leaves `required` beside a `$ref` unread at every hop and in a merge, so an alias and its chain agree, on OAS %s',
+      async (openapi) => {
+        // Greptile's case: `B.name` was required and `A.name` optional.
+        // Nothing beside a `$ref` but its annotations is read — not in the
+        // alias, not at a hop of a chain, not in a merge naming either — so
+        // neither is required, exactly as with nothing beside the `$ref`;
+        // the `allOf` spelling is the one that composes a `required` beside it.
+        const schemas = (B: Record<string, unknown>) => ({
+          Cat: unrequired,
+          B,
+          A: ref('B'),
+          A2: { allOf: [ref('B')] },
+          Holder: {
+            type: 'object',
+            properties: { a: ref('A'), viaA: { allOf: [ref('A'), extra] }, viaB: { allOf: [ref('B'), extra] } },
+          },
+        });
+        const beside = await parseJson(documentWith(openapi, schemas({ ...ref('Cat'), required: ['name'] })));
+        const plain = await parseJson(documentWith(openapi, schemas(ref('Cat'))));
+        expect(beside.models).toEqual(plain.models);
+        for (const name of ['Cat', 'B', 'A', 'A2']) {
+          expect(fieldsOf(modelByName(beside, name)), name).toEqual(['name?: string']);
+        }
+        expect(fieldsOf(modelByName(beside, 'HolderViaA'))).toEqual(['name?: string', 'extra?: string']);
+        expect(fieldsOf(modelByName(beside, 'HolderViaB'))).toEqual(['name?: string', 'extra?: string']);
+        const composed = await parseJson(documentWith(openapi, schemas({ allOf: [ref('Cat')], required: ['name'] })));
+        for (const name of ['B', 'A', 'A2']) {
+          expect(fieldsOf(modelByName(composed, name)), name).toEqual(['name: string']);
+        }
+        expect(fieldsOf(modelByName(composed, 'HolderViaA'))).toEqual(['name: string', 'extra?: string']);
+        expectSound(beside);
+        expect(warnings()).toEqual([]);
+      },
+    );
+
+    it('leaves `required` beside a `$ref` member of an `allOf` unread, as the merge does', async () => {
+      const schemas = (member: Record<string, unknown>) => ({
+        Cat: unrequired,
+        Dog: { allOf: [member] },
+        Holder: { type: 'object', properties: { d: ref('Dog'), merged: { allOf: [member, extra] } } },
+      });
+      const beside = await parseJson(documentWith('3.1.0', schemas({ ...ref('Cat'), required: ['name'] })));
+      const plain = await parseJson(documentWith('3.1.0', schemas(ref('Cat'))));
+      expect(beside.models).toEqual(plain.models);
+      expect(fieldsOf(modelByName(beside, 'Dog'))).toEqual(['name?: string']);
+      expect(fieldsOf(modelByName(beside, 'HolderMerged'))).toEqual(['name?: string', 'extra?: string']);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('leaves `properties`, a union and a `discriminator` beside the `$ref` unread: the alias is its reference alone', async () => {
+      const kinds = {
+        Cat: { type: 'object', properties: { name: str, kind: { const: 'cat' } } },
+        Dog: { type: 'object', properties: { name: str, kind: { const: 'dog' } } },
+        Pet: { oneOf: [ref('Cat'), ref('Dog')] },
+      };
+      const schemas = (beside: Record<string, unknown>, petBeside: Record<string, unknown>) => ({
+        ...kinds,
+        B: { ...ref('Cat'), ...beside },
+        A: ref('B'),
+        P: { ...ref('Pet'), ...petBeside },
+        Holder: { type: 'object', properties: { a: ref('A'), merged: { allOf: [ref('A'), extra] }, p: ref('P') } },
+      });
+      const plain = await parseJson(documentWith('3.1.0', schemas({}, {})));
+      const beside = await parseJson(
+        documentWith(
+          '3.1.0',
+          schemas(
+            {
+              properties: { extra: str },
+              oneOf: [
+                { type: 'object', properties: { a: str } },
+                { type: 'object', properties: { b: str } },
+              ],
+            },
+            {
+              discriminator: {
+                propertyName: 'kind',
+                mapping: { feline: '#/components/schemas/Cat', canine: '#/components/schemas/Dog' },
+              },
+            },
+          ),
+        ),
+      );
+      expect(beside.models).toEqual(plain.models);
+      expect(beside.enums).toEqual(plain.enums);
+      expect(fieldsOf(modelByName(beside, 'B'))).toEqual(['name?: string', "kind?: 'cat'"]);
+      expect(fieldsOf(modelByName(beside, 'A'))).toEqual(fieldsOf(modelByName(beside, 'B')));
+      expect(fieldsOf(modelByName(beside, 'HolderMerged'))).toEqual([
+        'name?: string',
+        "kind?: 'cat'",
+        'extra?: string',
+      ]);
+      // `P` dispatches as `Pet` does, by the consts, not by the keyword beside its `$ref`.
+      expect(modelByName(beside, 'P')?.discriminator).toEqual({
+        property: 'kind',
+        mapping: { cat: 'Cat', dog: 'Dog' },
+      });
+      expect(beside.models.map((m) => m.name).sort()).toEqual([
+        'A',
+        'B',
+        'Cat',
+        'Dog',
+        'Holder',
+        'HolderMerged',
+        'P',
+        'Pet',
+      ]);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('still ends a cycle through an alias that writes `required` beside its `$ref`, reported once per component', async () => {
+      const file = await write(
+        documentWith('3.1.0', {
+          A: { type: 'object' },
+          B: { type: 'object' },
+          Holder: { type: 'object', properties: { a: ref('A'), b: ref('B') } },
+        }),
+      );
+      const spec = await parseSpec(file, {
+        transformSpec: (doc) => {
+          const { schemas } = doc.components as { schemas: Record<string, unknown> };
+          Object.assign(schemas, { A: ref('B'), B: { ...ref('A'), required: ['x'] } });
+          return doc;
+        },
+      });
+      expect(fieldsOf(modelByName(spec, 'A'))).toEqual([]);
+      expect(fieldsOf(modelByName(spec, 'B'))).toEqual([]);
+      expectSound(spec);
+      expect(warnings().map((w: string) => w.slice(0, 40))).toEqual([
+        '[oagen] Warning: Component schema "A" is',
+        '[oagen] Warning: Component schema "B" is',
+      ]);
+    });
+  });
 });

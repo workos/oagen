@@ -233,8 +233,12 @@ export interface Webhook {
    * `null`, `7` — is no Response Object and no Reference Object: it is
    * skipped with one warning naming the site (`200 response of
    * webhooks.petAdopted.post is not a Response Object ("oops"); skipping
-   * it.`), and a `responses` that is not an object at all is read as
-   * declaring none, with a warning (#617); a callback's are read the same way.
+   * it.`), as is a `$ref` whose chain ends on a `components/responses` entry
+   * that is not an object (`Gone: []`), the warning naming the component
+   * (`components/responses/Gone (the 200 response of
+   * webhooks.petAdopted.post) is not a Response Object ([]); skipping it.`),
+   * and a `responses` that is not an object at all is read as declaring
+   * none, with a warning (#617); a callback's are read the same way.
    * Body schemas on these responses are not carried either: a webhook
    * response is an acknowledgement, and typing it would mint models no
    * handler needs.
@@ -609,8 +613,13 @@ export interface Operation {
    * Object ("oops"); skipping it.`) and the operation is read from its other
    * entries, so `listPets` with `200: "oops"` beside a `204` is read from
    * the `204`, with no entry here, in `errors`, `defaultResponse` or
-   * `rangeResponses` for the skipped key; a `responses` that is not an
-   * object at all is read as absent, with a warning (#617).
+   * `rangeResponses` for the skipped key; a `$ref` whose chain ends on a
+   * `components/responses` entry that is not an object (`Gone: []`) is
+   * skipped the same way, the warning naming the component
+   * (`components/responses/Gone (the 200 response of listPets) is not a
+   * Response Object ([]); skipping it.`), so the inline and `$ref`
+   * spellings give one IR; a `responses` that is not an object at all is
+   * read as absent, with a warning (#617).
    */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
@@ -1289,8 +1298,11 @@ export interface TypeParam {
  * `description`, `deprecated`, `externalDocs`, limits or `x-*` keys beside
  * the `$ref`, which are the alias's own — is a model of its own carrying
  * `Cat`'s fields, `required` and discriminator, exactly as `CatAlias: {
- * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases and into a
- * component that itself composes; a `$ref` to it resolves to the alias
+ * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases (nothing
+ * else an alias writes beside its `$ref` — `properties`, `required`, an
+ * `allOf`, a union, a `discriminator` — is read, at any hop, as nothing
+ * but annotations is read beside any `$ref`; only the `allOf` spelling
+ * composes them) and into a component that itself composes; a `$ref` to it resolves to the alias
  * (`{ kind: 'model', name: 'CatAlias' }`), never to `Cat`, at every site,
  * and as a union variant it pins what `Cat` pins (#618: it was a model with
  * no fields). A chain of bare `$ref`s that returns to itself names nothing:

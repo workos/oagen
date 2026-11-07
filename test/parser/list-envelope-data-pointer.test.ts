@@ -343,6 +343,67 @@ describe('#609', () => {
       ]);
     });
 
+    it('reads a `properties` step as the merged field the settle types: a member’s description-only declaration beside a typed one is the array (Greptile review)', async () => {
+      const typed = { type: 'object', properties: { owners: ownersArray } };
+      const annotating = { type: 'object', properties: { owners: { description: 'The owners.' } } };
+      const expectUnwrapped = async (schemas: Record<string, unknown>, path: string, models: string[]) => {
+        const spec = await parse(document(openapi, schemas, listOwners(envelope(pointer(path)))));
+        expect(read(spec)).toEqual({ ...unwrapped, models });
+      };
+      // The annotating member after the typed one, and before it.
+      await expectUnwrapped({ Owner, Holder: { allOf: [typed, annotating] } }, 'Holder/allOf/1/properties/owners', [
+        'Holder',
+        'Owner',
+      ]);
+      await expectUnwrapped({ Owner, Holder: { allOf: [annotating, typed] } }, 'Holder/allOf/0/properties/owners', [
+        'Holder',
+        'Owner',
+      ]);
+      // The typed declaration behind a `$ref` member.
+      await expectUnwrapped(
+        { Owner, Base: typed, Holder: { allOf: [pointer('Base'), annotating] } },
+        'Holder/allOf/1/properties/owners',
+        ['Base', 'Holder', 'Owner'],
+      );
+      // Sibling `properties` beside the `allOf`, read through the schema itself.
+      await expectUnwrapped(
+        { Owner, Holder: { allOf: [typed], properties: { owners: { description: 'The owners.' } } } },
+        'Holder/properties/owners',
+        ['Holder', 'Owner'],
+      );
+      // The merge of a nested field's own `allOf`.
+      await expectUnwrapped(
+        { Owner, Holder: { type: 'object', properties: { box: { allOf: [typed, annotating] } } } },
+        'Holder/properties/box/allOf/1/properties/owners',
+        ['Holder', 'HolderBox', 'Owner'],
+      );
+      expect(warnings).toEqual([]);
+    });
+
+    it('picks the primary response through the same merged reading: a 200 pointing at the annotating member’s declaration keeps the 200', async () => {
+      const typed = { type: 'object', properties: { owners: ownersArray } };
+      const annotating = { type: 'object', properties: { owners: { description: 'The owners.' } } };
+      const paths = {
+        '/owners': {
+          get: {
+            operationId: 'getOwners',
+            responses: {
+              '200': {
+                description: 'ok',
+                content: { 'application/json': { schema: pointer('Holder/allOf/1/properties/owners') } },
+              },
+              '201': { description: 'made', content: { 'application/json': { schema: pointer('Owner') } } },
+            },
+          },
+        },
+      };
+      const spec = await parse(document(openapi, { Owner, Holder: { allOf: [typed, annotating] } }, paths));
+      const op = spec.services.flatMap((s) => s.operations).find((o) => o.name === 'getOwners')!;
+      expect(op.responseStatusCode).toBe(200);
+      expect(op.response).toEqual(array(model('Owner')));
+      expect(warnings).toEqual([]);
+    });
+
     it('reads no array through a chain of pointers that reaches itself', async () => {
       const self = pointer('Holder/properties/owners');
       // The bundler rejects a self-referencing pointer, so it is written after bundling.
@@ -400,6 +461,12 @@ describe('#609', () => {
   describe('pointerTypesAsArray', () => {
     const schemas: Record<string, SchemaObject> = {
       Owner,
+      Merged: {
+        allOf: [
+          { type: 'object', properties: { owners: ownersArray } },
+          { type: 'object', properties: { owners: { description: 'x' } } },
+        ],
+      },
       Holder: {
         type: 'object',
         properties: {
@@ -419,6 +486,7 @@ describe('#609', () => {
       expect(lands('Holder/properties/maybe')).toBe(true);
       expect(lands('Holder/properties/wrapped')).toBe(true);
       expect(lands('Holder/properties/chained')).toBe(true);
+      expect(lands('Merged/allOf/1/properties/owners')).toBe(true);
       expect(lands('Holder/properties/self')).toBe(false);
       expect(lands('Holder/properties/first')).toBe(false);
       expect(lands('Holder/properties/owners/items')).toBe(false);
