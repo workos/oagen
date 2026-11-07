@@ -172,6 +172,7 @@ import {
 import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
+import { combineConstraints } from './schemas.js';
 
 /** The stem every shared error body is named from: `ErrorBody`, `ErrorBodyWithCode`, and the enums `ErrorBodyCode`, `ErrorBodyError`. */
 export const ERROR_BODY_BASE = 'ErrorBody';
@@ -1452,7 +1453,9 @@ function sharedFieldType(
  * no member's order — the result keeping the first member's order; and
  * two variants left alike once their limits are dropped are one, a lone
  * survivor standing for the union (`simplifyType`), since a `oneOf` of two
- * plain strings admits nothing.
+ * plain strings admits nothing — the survivor taking the limits the union
+ * itself agreed on, conjoined onto its own (`withLimits`), so none is lost
+ * with the union.
  */
 function agreedLimits(types: readonly TypeRef[]): TypeRef {
   const first = types[0];
@@ -1490,10 +1493,38 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
       ordered[0].forEach(({ index }, position) => {
         variants[index] = agreedLimits(ordered.map((member) => member[position].variant));
       });
-      return simplifyType({ ...top, variants });
+      const merged = simplifyType({ ...top, variants });
+      // A lone survivor takes the union's own agreed limits, conjoined onto
+      // its own, the stricter bound winning (`combineConstraints`): the
+      // string left of `{ oneOf: [...], minLength: 1 }` is under
+      // `minLength: 1`, not one that admits the empty string (Greptile, #639).
+      return merged.kind === 'union' ? merged : withLimits(merged, top.constraints);
     }
     default:
       return top;
+  }
+}
+
+/**
+ * `type` carrying `limits` conjoined onto its own (`combineConstraints`, the
+ * stricter bound winning) on the node that can — the type itself, or the
+ * `inner` of a nullable wrapper, whose keywords are the value's — as a new
+ * tree; a `model` or `enum` reference carries none and is returned as it
+ * is, as is `type` when `limits` is `undefined`.
+ */
+function withLimits(type: TypeRef, limits: Constraints | undefined): TypeRef {
+  if (limits === undefined) return type;
+  switch (type.kind) {
+    case 'nullable':
+      return { kind: 'nullable', inner: withLimits(type.inner, limits) };
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union':
+      return { ...type, constraints: combineConstraints(type.constraints, limits) };
+    default:
+      return type;
   }
 }
 
