@@ -415,11 +415,17 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * (`collectObjectProperties`) ignore for the component the reference names
  * (PR #643 review round 2: a union beside the `$ref` was read here, so a
  * `data` every variant declared marked an envelope the walk had no `data`
- * in, and the response was `string[]`) — and a nullable wrapper a member
- * writes (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the
- * member by the companion walk and the model) are not read here, as
- * before: a body whose array or companion sits in one is the wrapper an
- * explicit `dataPath` keeps (workos/oagen#308).
+ * in, and the response was `string[]`) — is not read here, as before: a
+ * body whose array or companion sits in one is the wrapper an explicit
+ * `dataPath` keeps (workos/oagen#308). A nullable wrapper a member writes
+ * (`{ oneOf: [{ has_more }, { type: 'null' }] }`, `{ enum: [null] }` on
+ * OAS 3.0) is read as its one non-null variant, as the model and the
+ * companion walk read it, so `allOf: [{ data }]` beside it is the list
+ * `allOf: [{ data }, { has_more }]` is, with one non-null variant as with
+ * two (PR #643 review, MichaelDeBoey: the axis was skipped here, and the
+ * body stayed the model `ListPetsResponse { data, has_more }` while a
+ * second non-null variant made it `Pet[]`); a `$ref` branch is a `$ref`
+ * member, unread.
  */
 function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema), and
@@ -432,24 +438,33 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
     schema.allOf !== undefined &&
     classifyInlineSchema(schema) === 'allOf' &&
     readInlineAllOf(schema.allOf, schema, componentSchemas) === 'merged';
-  for (const sub of schema.allOf ?? []) {
+  const read = new Set<SchemaObject>();
+  const readMember = (member: SchemaObject): void => {
     // A `$ref` member is its component, whatever is written beside the
-    // reference, as the model and the walk read it.
-    if (sub.$ref) continue;
-    if (sub.properties) propSources.push(sub.properties);
-    if (!merges) continue;
-    for (const variants of unionAxesOf(sub)) {
-      if (nullableAxisBranch(sub, variants)) continue;
-      const keyword = variants === sub.oneOf ? 'oneOf' : 'anyOf';
-      const read = readFlattenedUnion({ schema: sub, keyword, variants, origin: null }, componentSchemas);
-      for (const [name, declarations] of read.declared) {
+    // reference, as the model and the walk read it; a member met again
+    // (a nullable wrapper around the body itself) declares nothing more.
+    if (member.$ref || read.has(member)) return;
+    read.add(member);
+    if (member.properties) propSources.push(member.properties);
+    if (!merges) return;
+    for (const variants of unionAxesOf(member)) {
+      // A nullable axis is its one non-null variant, read as the member is.
+      const branch = nullableAxisBranch(member, variants);
+      if (branch) {
+        readMember(branch);
+        continue;
+      }
+      const keyword = variants === member.oneOf ? 'oneOf' : 'anyOf';
+      const flattened = readFlattenedUnion({ schema: member, keyword, variants, origin: null }, componentSchemas);
+      for (const [name, declarations] of flattened.declared) {
         const held = branchOnly.get(name);
         if (held) held.push(...declarations);
         else branchOnly.set(name, [...declarations]);
-        if (read.carried.has(name)) carried.add(name);
+        if (flattened.carried.has(name)) carried.add(name);
       }
     }
-  }
+  };
+  for (const sub of schema.allOf ?? []) readMember(sub);
   if (schema.properties) {
     propSources.push(schema.properties);
   }

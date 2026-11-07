@@ -393,17 +393,50 @@ function classifyEndField(
         ? 'totalCount'
         : undefined;
   if (!kind) return undefined;
-  return endFieldFits(kind, resolveBareSchema(schema, componentSchemas)) ? kind : undefined;
+  return endDeclarationFits(kind, schema, componentSchemas) ? kind : undefined;
 }
 
 /**
  * Whether a stop field's bare schema (`resolveBareSchema`) has the type its
  * kind is tested against: a `boolean` for `hasMore`, an `integer` or
- * `number` for `totalPages` and `totalCount`, under a type list too. The one
- * test for a field detection names and for one an override names.
+ * `number` for `totalPages` and `totalCount`, under a type list too. The
+ * test `endDeclarationFits` applies to a declaration, or to each variant
+ * of one.
  */
 function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObject): boolean {
   return kind === 'hasMore' ? hasType(schema, 'boolean') : isNumeric(schema);
+}
+
+/**
+ * Whether a stop field's declaration fits its kind: its bare schema
+ * (`resolveBareSchema`) has the kind's type (`endFieldFits`), or it is a
+ * `oneOf`/`anyOf` of more than one non-null variant and each variant's
+ * declaration fits in turn. The declaration the model types a property
+ * only variants declare as is such a union when the variants' declarations
+ * differ (`unionOfDeclarations`: `has_more: { type: 'boolean', const: true
+ * }` in one variant and `{ type: 'boolean', const: false }` in the other,
+ * or `{ $ref: Flag }` beside `{ type: 'boolean' }`), so it is tested as the
+ * override walk tests the field it lands on one level down, in every
+ * variant (`endOfIterationProblem`, `fieldsAtPath`) — PR #643 review
+ * (MichaelDeBoey): the union was tested as one schema, so such a `has_more`
+ * ended no iteration at the top level and an explicit `endOfIteration`
+ * naming it was rejected as "not a boolean field", while `meta.has_more`
+ * through the same union was accepted. A union met again below itself
+ * fits nothing. The one test for a field detection names and for one an
+ * override names.
+ */
+function endDeclarationFits(
+  kind: PaginationEndOfIteration['kind'],
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+  seen: Set<SchemaObject> = new Set(),
+): boolean {
+  const bare = resolveBareSchema(schema, componentSchemas);
+  const variants = (bare.oneOf ?? bare.anyOf)?.filter((variant) => !isNullSchema(variant));
+  if (!variants || variants.length === 0) return endFieldFits(kind, bare);
+  if (seen.has(bare)) return false;
+  seen.add(bare);
+  return variants.every((variant) => endDeclarationFits(kind, variant, componentSchemas, seen));
 }
 
 /**
@@ -423,11 +456,11 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * non-null variant of a `oneOf`/`anyOf` that object is or has among its
  * `allOf` members, a variant that is itself a union through each of its
  * own in turn), so it lands on one field per variant; each must fit
- * `end.kind` by the test
- * detection applies to a field it names (`endFieldFits`), under
- * `resolveBareSchema` as a detected one is. With no `properties` — an
- * operation whose primary response declares no body — the path resolves to
- * nothing.
+ * `end.kind` by the test detection applies to a field it names
+ * (`endDeclarationFits`: under `resolveBareSchema` as a detected one is,
+ * and, for a declaration that is itself a union of the variants'
+ * declarations, in each variant). With no `properties` — an operation
+ * whose primary response declares no body — the path resolves to nothing.
  *
  * The text is the reason alone; the caller names the override's source and
  * the operation, and says what it does about it.
@@ -439,7 +472,7 @@ export function endOfIterationProblem(
 ): string | undefined {
   const fields = properties && fieldsAtPath({ properties }, end.path, componentSchemas);
   if (!fields) return `endOfIteration path "${end.path}" does not resolve to a field in the response`;
-  if (fields.every((field) => endFieldFits(end.kind, resolveBareSchema(field, componentSchemas)))) return undefined;
+  if (fields.every((field) => endDeclarationFits(end.kind, field, componentSchemas))) return undefined;
   const expected = end.kind === 'hasMore' ? 'a boolean' : 'an integer or number';
   return `endOfIteration path "${end.path}" is not ${expected} field, as kind "${end.kind}" requires`;
 }
