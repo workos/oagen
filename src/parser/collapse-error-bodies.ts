@@ -137,18 +137,18 @@
  * Every other inline enum a shared body's field lists — an integer or
  * number `enum`, a string `enum` under array items or map values or in a
  * union, through a nullable wrapper, on a nested body — is named from the
- * field the same way, never from the operation whose body happened to sort
- * first (#612): `ErrorBody<Field>` (`ErrorBodyStatus` for
- * `status: { type: integer, enum: [404, 410] }`) when the shared bodies
- * list one value set for the field, shared by every shared body whose field
- * of that name lists those values; else, for each of the sets, the values
- * spelled as the model's token spells them (`ErrorBodyStatus404Or410`
- * beside `ErrorBodyStatus500Or503`), so the name is a function of the
- * document's value sets alone and adding, removing or renaming an operation
- * moves no enum. A name an enum of the same members already holds is
- * shared; one anything else holds sends a lone set to its spelled name; and
- * a spelled name anything else holds leaves the bodies that list the set as
- * they are, with a warning, as a taken model name does.
+ * field and its values, never from the operation whose body happened to
+ * sort first (#612): `ErrorBody<Field><Values>`, the values spelled as the
+ * model's token spells them (`ErrorBodyStatus404Or410` for
+ * `status: { type: integer, enum: [404, 410] }`, `ErrorBodyCodesAOrB` for
+ * `codes: [{ enum: ['a', 'b'] }]`), one enum shared by every shared body
+ * whose field of that name lists those values, and by a field that spells
+ * alike and lists them (`errorCode` beside `error_code`). The name depends
+ * on the field and its values alone, never on what else the document
+ * declares, so adding, removing or renaming an operation moves no enum. A
+ * name an enum of the same members already holds is shared; one anything
+ * else holds leaves the bodies that list the set as they are, with a
+ * warning, as a taken model name does.
  *
  * The references are rewritten in place, so the `contents` entry that shared
  * its `type` with the entry's `type` keeps sharing it. A `oneOf` of variants
@@ -159,7 +159,18 @@
  * `collapseErrorBodies: false` on `ParseOptions` keeps the per-operation
  * models for a consumer that names them.
  */
-import type { Constraints, Enum, EnumRef, Field, Model, Service, TypeRef, UnionType, Webhook } from '../ir/types.js';
+import type {
+  Constraints,
+  Enum,
+  EnumRef,
+  EnumValue,
+  Field,
+  Model,
+  Service,
+  TypeRef,
+  UnionType,
+  Webhook,
+} from '../ir/types.js';
 import {
   collectModelRefs,
   collectModelTypeRefs,
@@ -299,7 +310,7 @@ interface NamingContext {
 /**
  * One attempt at folding the error-only models `errorOnly`: the model list
  * with every group folded, or — when a shared name is taken by something of
- * another shape, or an inline enum's spelled name by anything (#612) — the
+ * another shape, or an inline enum's name by anything else (#612) — the
  * names of the models to leave as they are, so the caller can try again
  * without them.
  */
@@ -376,7 +387,7 @@ function fold(
       `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; give the two the same shape, or rename one`,
     );
   };
-  // An inline enum whose spelled name is taken leaves its bodies the same way (#612).
+  // An inline enum whose name is taken leaves its bodies the same way (#612).
   const leaveEnum = (field: string, name: string, holder: string, left: readonly Model[]): void => {
     console.warn(
       `[oagen] Warning: The inline enum the shared error body ${shapeOf(left[0])} lists for "${field}" would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; rename one`,
@@ -493,33 +504,36 @@ function fold(
   }
 
   // Every other inline enum a shared body's field lists is named from the
-  // field as the string enum is, never from the operation whose body sorted
-  // first (#612): `ErrorBody<Field>` when the shared bodies list one value
-  // set for the field, else each set's values spelled as the model's token
-  // spells them, the sets taken in value order so the outcome depends on
-  // the document alone. A name an enum of the same members holds is shared;
-  // one anything else holds sends a lone set to its spelled name; a spelled
-  // name anything else holds leaves the bodies that list the set as they
-  // are, like a taken model name.
+  // field and its values, never from the operation whose body sorted first
+  // (#612): `ErrorBody<Field><Values>`, the values spelled as the model's
+  // token spells them, so the name depends on nothing else in the document
+  // and adding a body moves no enum. A name an enum of the same members
+  // holds — the document's, or one claimed here by a field that spells
+  // alike — is shared; one anything else holds leaves the bodies that list
+  // the set as they are, like a taken model name.
   const inlineEnumNames = new Map<string, string>();
+  const claimedEnums = new Map<string, EnumValue[]>();
   for (const [field, sets] of inlineEnumSets(orderedGroups, pinnedByKey, absorbed)) {
     const word = toPascalCase(field);
     for (const { values, groups } of sets.values()) {
-      const spelled = `${ERROR_BODY_BASE}${enumValuesToken(word, values)}`;
-      const members = values.map((value) => ({ name: String(value), value }));
-      let chosen: string | undefined;
-      for (const candidate of sets.size === 1 ? [`${ERROR_BODY_BASE}${word}`, spelled] : [spelled]) {
-        if (existingEnums.some((e) => e.name === candidate && sameEnumShape(e.values, members))) {
-          chosen = candidate;
-          break;
-        }
-        if (holders.has(candidate)) continue;
-        holders.set(candidate, `the shared enum "${candidate}"`);
-        chosen = candidate;
-        break;
+      const name = `${ERROR_BODY_BASE}${enumValuesToken(word, values)}`;
+      const members: EnumValue[] = values.map((value) => ({ name: String(value), value }));
+      const existing = existingEnums.find((e) => e.name === name);
+      const claimed = claimedEnums.get(name);
+      const shared = existing
+        ? sameEnumShape(existing.values, members)
+        : claimed
+          ? sameEnumShape(claimed, members)
+          : !holders.has(name);
+      if (!shared) {
+        for (const left of groups) leaveEnum(field, name, holders.get(name)!, left);
+        continue;
       }
-      if (chosen !== undefined) inlineEnumNames.set(inlineEnumKey(field, values), chosen);
-      else for (const left of groups) leaveEnum(field, spelled, holders.get(spelled)!, left);
+      if (!existing && !claimed) {
+        holders.set(name, `the shared enum "${name}"`);
+        claimedEnums.set(name, members);
+      }
+      inlineEnumNames.set(inlineEnumKey(field, values), name);
     }
   }
   if (seeds.size > 0) return { models: input.models, frozen: frozenClosure(seeds, errorOnly, byName) };
@@ -1565,8 +1579,8 @@ function inlineEnumKey(field: string, values: readonly (string | number)[]): str
  * member — by field name, each with the groups whose field lists it, less
  * the fields the string rule reads whole (`pinnedValues`), the groups a
  * component absorbs, and an enum that lists no value. The fields are sorted
- * by name and the sets by their values, so the order the names are claimed
- * in is the document's value sets' alone (#612).
+ * by name and the sets by their values, so when two sets spell one name
+ * with other members, which keeps it is the document's alone (#612).
  */
 function inlineEnumSets(
   groups: ReadonlyArray<readonly [string, Model[]]>,
