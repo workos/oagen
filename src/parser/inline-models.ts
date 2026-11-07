@@ -2847,19 +2847,30 @@ export function resetCombinedDeclarations(): void {
  * whenever they had any keyword, so a member documenting the items made
  * `data` an `unknown[]`); the later's other keywords over the earlier's;
  * and `type: ['array', 'null']` when either admits `null`
- * (`declaresNull`), else `type: 'array'`; an inline object and a `$ref` to
- * an object component, or an `allOf` that reaches one (`composesObject`,
- * the component the document's: `componentSchemaOf`), become the `allOf`
+ * (`declaresNull`), else `type: 'array'`; any two declarations that each
+ * describe an object — an inline object, a `$ref` to an object component,
+ * or an `allOf` that reaches one (`describesObject`, `composesObject`,
+ * the component the document's: `componentSchemaOf`) — become the `allOf`
  * of both in document order, which every reader reads as any inline
  * `allOf` (`mergeAllOfMembers`, `collectObjectProperties`), carrying the
  * keywords a field reads from either (`declarationKeywords`, the later's
- * over the earlier's) — so `result: { $ref: PetPage }` beside `result: {
- * properties: { total_pages } }` is a `PetPage` that also has
+ * over the earlier's) and the nullability an inline `allOf` of two
+ * members has, which is none — so `result: { $ref: PetPage }` beside
+ * `result: { properties: { total_pages } }` is a `PetPage` that also has
  * `total_pages`, whichever is read first (workos/oagen#432: the first was
  * kept, so `result` had `items` or `total_pages`, never both, and a
- * `dataPath` through the other was rejected), while a `$ref` to an array,
- * an enum, a primitive or a union component is no object to conjoin. Any
- * other pair keeps the first as written. Returns `held` itself when `next`
+ * `dataPath` through the other was rejected), and so is `result: { $ref:
+ * PetPage }` beside `result: { allOf: [{ properties: { total_pages } }]
+ * }`, or beside `result: { $ref: Meta }`, with `nullable: true`, `type:
+ * 'object'` or a `description` written beside the `allOf` or not
+ * (workos/oagen#571: only an inline object beside a composing declaration
+ * was conjoined, so these pairs kept the first and `result` had the
+ * component's fields or the inline ones by member order) — while two
+ * `$ref`s naming one component (`namesOneComponent`) add nothing to each
+ * other, so the first stands, and a `$ref` to an array, an enum, a
+ * primitive or a union component is no object to conjoin. Any other pair
+ * — an object beside a string, say — keeps the first as written, with no
+ * warning, as two arrays of different items do. Returns `held` itself when `next`
  * adds nothing to it, so a lone declaration keeps its identity. The same two
  * declarations combine into the same object throughout the document
  * (`combinedDeclarations`), so a reader that guards by identity meets a
@@ -2970,13 +2981,27 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
     };
   }
-  if (
-    (isInlineObjectSchema(first) && composesObject(second)) ||
-    (isInlineObjectSchema(second) && composesObject(first))
-  ) {
+  if (describesObject(first) && describesObject(second)) {
+    // Two `$ref`s naming one component add nothing to each other, so the
+    // first stands, as a lone declaration does.
+    if (namesOneComponent(first, second)) return first;
     return { ...declarationKeywords(first), ...declarationKeywords(second), allOf: [first, second] };
   }
   return first;
+}
+
+/**
+ * Whether a typing declaration describes an object whose properties an
+ * `allOf` merge reads, in either of its two spellings: an inline object
+ * (`isInlineObjectSchema`) or a `$ref`/`allOf` that composes one
+ * (`composesObject`). Two such declarations of one property conjoin as the
+ * `allOf` of both (`conjoinTypedDeclarations`), whichever spelling each
+ * uses (workos/oagen#571: only an inline object beside a composing one
+ * was conjoined, so a `$ref` beside an inline `allOf`, or two `$ref`s,
+ * kept the first).
+ */
+function describesObject(schema: SchemaObject): boolean {
+  return isInlineObjectSchema(schema) || composesObject(schema);
 }
 
 /**
@@ -2985,11 +3010,23 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * (`contributesProperties`): a `$ref` to a component that declares
  * properties, its own or its `allOf` chain's, or an `allOf` that reaches
  * one. A `$ref` to an array, a primitive, an enum or a union component, or
- * one no component answers, is not, so no inline object beside it turns it
- * into an object merge (`combineDeclarations`).
+ * one no component answers, is not, so no object declaration beside it
+ * turns it into an object merge (`combineDeclarations`).
  */
 function composesObject(schema: SchemaObject): boolean {
   return (schema.$ref !== undefined || schema.allOf !== undefined) && contributesProperties(schema);
+}
+
+/**
+ * Whether two declarations are each a `$ref` to the same component — the
+ * one object, by identity (`componentSchemaOf`), whatever each `$ref` is
+ * spelled — so conjoining them would read that component twice
+ * (`conjoinTypedDeclarations`).
+ */
+function namesOneComponent(first: SchemaObject, second: SchemaObject): boolean {
+  if (first.$ref === undefined || second.$ref === undefined) return false;
+  const target = componentSchemaOf(first.$ref);
+  return target !== undefined && target === componentSchemaOf(second.$ref);
 }
 
 /**
