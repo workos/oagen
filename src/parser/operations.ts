@@ -118,6 +118,7 @@ import {
   resolvePaginationOverride,
   resolveOverrideParams,
   applyPaginationOverride,
+  dataPathForks,
   dataPathProblem,
   dataPathWalkStart,
   deferDataPathItemType,
@@ -6348,8 +6349,13 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * are built as exists, and reading the document now would mint a copy of
  * it (`ListOwnersItem` beside `HolderResultItem`; #608), so the item type
  * is a placeholder the settle decides from the settled types
- * (`settleDeferredDataPathItemType`). The document (`schema`, classified
- * under `contextName`) answers only when the path crosses a model the
+ * (`settleDeferredDataPathItemType`) — unless the path goes on through the
+ * variants of a union on its way (`dataPathForks`): each variant's model
+ * types inline items under a name of its own, so the document answers now,
+ * under the path-derived name, as it does for a union the IR already holds
+ * (#556), and a `$ref` or primitive the variants share is the one type the
+ * settle would find. The document (`schema`, classified under
+ * `contextName`) answers otherwise only when the path crosses a model the
  * parser has not materialized, minting inline items under a path-derived
  * name.
  */
@@ -6372,7 +6378,9 @@ function resolveOverrideItemType(
   const start = dataPathWalkStart(result.response, result.envelopeFields, dataPath);
   const walked = start && walkDataPathItemType(start.root, start.path, pool);
   if (walked && 'itemType' in walked) return { itemType: walked.itemType, inlineModels: [] };
-  if (walked?.pending) return { itemType: deferDataPathItemType(), inlineModels: [] };
+  if (walked?.pending && !dataPathForks(schema, dataPath, componentSchemas)) {
+    return { itemType: deferDataPathItemType(), inlineModels: [] };
+  }
 
   return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas, settle);
 }
