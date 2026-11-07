@@ -306,6 +306,87 @@ describe('#606', () => {
     ]);
   });
 
+  it('reads a $ref with a oneOf beside it as the reference it is, an alias of Kind, never as a wrapper of its own (review)', async () => {
+    const spec = await parse({
+      Pet: { type: 'object', properties: { kind: ref('Alias'), maybe: ref('MaybeAlias') } },
+      Kind: kindEnum,
+      // A `$ref` is the reference whatever sits beside it, as the type
+      // builder reads it: an alias of `Kind`, its sibling union ignored —
+      // not a wrapper that unwraps to itself (and recursed without end).
+      Alias: { $ref: '#/components/schemas/Kind', oneOf: [kindEnum, nul] },
+      MaybeAlias: { oneOf: [ref('Alias'), nul] },
+    });
+
+    expectNoUnknownEnum(spec);
+    expect(names(spec)).toEqual({ enums: ['Kind'], models: ['Pet'] });
+    expect(fieldsOf(spec, 'Pet').map(typed)).toEqual([
+      { name: 'kind', type: enumRef('Kind'), required: false },
+      { name: 'maybe', type: nullable(enumRef('Kind')), required: false },
+    ]);
+  });
+
+  it('reads nested nullable wrappers one level at a time: the nearest outer default, text and limit win, an inner one stands where the outer declares none (review)', async () => {
+    const spec = await parse(
+      {
+        Pet: pet(),
+        // The inner wrapper's `default`, text and limit where the outer declares none.
+        Kind: { oneOf: [{ oneOf: [kindEnum, nul], default: 'dog', description: 'Inner.', maxLength: 3 }, nul] },
+        // The outer's over the inner's where both declare one; the inner's limit beside the outer's.
+        Size: {
+          default: 'large',
+          description: 'Outer.',
+          maxLength: 5,
+          anyOf: [{ anyOf: [sizeEnum, nul], default: 'small', description: 'Inner.', minLength: 1 }, nul],
+        },
+        Color: wrapped.Color,
+      },
+      {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [
+              { name: 'kind', in: 'query', schema: ref('Kind') },
+              { name: 'size', in: 'query', schema: ref('Size') },
+            ],
+            responses: { '200': { description: 'OK' } },
+          },
+        },
+      },
+    );
+
+    expectNoUnknownEnum(spec);
+    expect(names(spec)).toEqual({ enums: ['Kind', 'Size', 'Color'], models: ['Pet'] });
+    const read = ({ name, description, default: fallback }: Enum) => ({ name, description, default: fallback });
+    expect(spec.enums.map(read).slice(0, 2)).toEqual([
+      { name: 'Kind', description: 'Inner.', default: 'dog' },
+      { name: 'Size', description: 'Outer.', default: 'large' },
+    ]);
+    const [listPets] = operations(spec);
+    const param = ({ name, type, description, default: fallback, constraints }: Parameter) => ({
+      name,
+      type,
+      description,
+      default: fallback,
+      constraints,
+    });
+    expect(listPets.queryParams.map(param)).toEqual([
+      {
+        name: 'kind',
+        type: nullable(enumRef('Kind')),
+        description: 'Inner.',
+        default: 'dog',
+        constraints: { maxLength: 3 },
+      },
+      {
+        name: 'size',
+        type: nullable(enumRef('Size')),
+        description: 'Outer.',
+        default: 'large',
+        constraints: { maxLength: 5, minLength: 1 },
+      },
+    ]);
+  });
+
   it('keeps a nullable lone allOf of a $ref to an enum component an alias, typed nullable<Kind>, with an alias in front of the wrapper too', async () => {
     const spec = await parse({
       Pet: {

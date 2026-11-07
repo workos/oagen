@@ -298,7 +298,7 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
  * type: 'string', enum: ['cat', 'dog'] }], description }`, a lone member or
  * one beside members that only annotate or limit it, however nested), or
  * inside a nullable `oneOf`/`anyOf` wrapper the type builder collapses
- * (`collapsedNullableBranch`: `Kind: { oneOf: [{ allOf: [{ type: 'string',
+ * (`nullableUnionBranch`: `Kind: { oneOf: [{ allOf: [{ type: 'string',
  * enum }] }, { type: 'null' }] }`, `Color: { oneOf: [{ type: 'string', enum
  * }, { type: 'null' }] }`, the one non-null variant beside `null` variants,
  * however nested; #606), which makes the enum nullable. All become an
@@ -346,13 +346,21 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * `oneOf`/`anyOf` wrapper the type builder collapses (#606: one non-null
  * variant beside `null` variants, `nullableUnionBranch`) — the branch it
  * collapses to read in turn, carrying what the same wrapper hands a field
- * (`collapsedNullableBranch`): the wrapper's text, link, examples and keys
- * over the branch's (`withWrapperDocs`), its `deprecated` in place of the
- * branch's own (`withWrapperDeprecation`), its limits conjoined
- * (`extractConstraints`), its `default` over the branch's as the `allOf`
- * layer's is, and the wrapper's `null` variant as the enum's own
- * nullability (`nullable: true` on the declaration, the one spelling that
- * adds no member). So `Kind: { oneOf: [{ allOf: [{ type: 'string', enum:
+ * (`unwrapNullableField`'s layer, laid one level at a time): the wrapper's
+ * text, link, examples and keys over the branch's (`withWrapperDocs`), its
+ * `deprecated` in place of the branch's own (`withWrapperDeprecation`),
+ * its limits conjoined (`extractConstraints`), its `default` over the
+ * branch's as the `allOf` layer's is, and the wrapper's `null` variant as
+ * the enum's own nullability (`nullable: true` on the declaration, the one
+ * spelling that adds no member). A wrapper nested in a wrapper is read as
+ * a wrapper of its own, so the nearest outer level's text, flag, key or
+ * `default` wins and an inner level's stands where the outer declares
+ * none (#606 review: every level was collapsed at once, and an inner
+ * level's `default` was lost). A schema with a `$ref` declares no enum
+ * whatever sits beside it: it is the reference, as the type builder reads
+ * it first (#606 review: `{ $ref: Kind, oneOf: [{ enum }, { type: 'null'
+ * }] }` unwrapped to itself and this reader recursed without end). So
+ * `Kind: { oneOf: [{ allOf: [{ type: 'string', enum:
  * ['cat', 'dog'] }] }, { type: 'null' }] }`, `Size: { anyOf: [{ allOf: [{
  * type: 'string', enum }, { description: 'The size of the pet.' }] }, {
  * type: 'null' }] }` and `Color: { oneOf: [{ type: 'string', enum }, {
@@ -376,13 +384,23 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  */
 export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
   if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return schema;
-  if (Object.keys(schema.properties ?? {}).length > 0) return undefined;
-  // A nullable wrapper: its branch, read in turn with the wrapper's layer
-  // on it as a field's wrapper hands it down, the wrapper's `default` over
-  // the branch's, and the wrapper's nullability as the enum's own.
-  const branch = collapsedNullableBranch(schema);
+  // A `$ref` is the reference, whatever sits beside it — the type builder
+  // reads it first — so it declares no enum of its own; an alias is read
+  // through it (`componentEntries`). #606 review: `{ $ref: Kind, oneOf: [{
+  // enum }, { type: 'null' }] }` passed as a wrapper that unwrapped to
+  // itself, and this reader recursed without end.
+  if (schema.$ref || Object.keys(schema.properties ?? {}).length > 0) return undefined;
+  // A nullable wrapper: its one branch (`nullableUnionBranch`), read in
+  // turn with this level's layer on it as `unwrapNullableField` lays a
+  // wrapper's on what it unwraps to — the limits, the text, link, examples
+  // and keys, the `deprecated` in place of the branch's own — one level at
+  // a time, so a nested wrapper is read as a wrapper of its own and its
+  // `default` stands where this level declares none (#606 review); this
+  // level's `default` over the branch's, and its nullability as the enum's.
+  const branch = nullableUnionBranch(schema);
   if (branch !== undefined) {
-    const declaration = enumComponentDeclaration(branch);
+    const limited = derivedCopy({ ...branch, ...extractConstraints(schema) }, branch);
+    const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, schema), schema));
     if (declaration === undefined) return undefined;
     return { ...declaration, ...(schema.default === undefined ? {} : { default: schema.default }), nullable: true };
   }
