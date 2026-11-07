@@ -109,14 +109,30 @@ const LOWER_BOUNDS: ReadonlyMap<keyof Constraints, number> = new Map([
 
 /**
  * One level of a site where the limits differ: the path to it (`''` for the
- * site's own, `items.`, `variants[1].items.`) and the limits on each side,
- * both carried so the level is judged as a whole (`constraintsTightened`
- * reads `minimum` and `exclusiveMinimum` together).
+ * site's own, `items.`, `variants[1].items.`), the limits on each side as
+ * the document wrote them — what `details` and the sides report — and as
+ * the differ reads them for the level's type (`integerBounds`: an integer
+ * side's exclusive bounds made inclusive), which is what decides whether
+ * the level tightened (`constraintsTightened` reads `minimum` and
+ * `exclusiveMinimum` together).
  */
 interface LevelShift {
   path: string;
   before?: Constraints;
   after?: Constraints;
+  readBefore?: Constraints;
+  readAfter?: Constraints;
+}
+
+/** A `LevelShift` for two sides written `before` / `after` on types `oldType` / `newType`, each read for its own type. */
+function levelShift(
+  path: string,
+  before: Constraints | undefined,
+  after: Constraints | undefined,
+  oldType: TypeRef | undefined,
+  newType: TypeRef | undefined,
+): LevelShift {
+  return { path, before, after, readBefore: integerBounds(before, oldType), readAfter: integerBounds(after, newType) };
 }
 
 /**
@@ -161,7 +177,7 @@ export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedS
   const oldConstraints = siteLimits(oldSite);
   const newConstraints = siteLimits(newSite);
   if (!sameConstraints(oldConstraints, newConstraints)) {
-    levels.push({ path: '', before: oldConstraints, after: newConstraints });
+    levels.push(levelShift('', oldConstraints, newConstraints, oldSite.type, newSite.type));
   }
   if (oldSite.type && newSite.type) levels.push(...childLevels('', oldSite.type, newSite.type, memo));
   if (levels.length === 0) return undefined;
@@ -169,7 +185,7 @@ export function constraintsShift(oldSite: ConstrainedSite, newSite: ConstrainedS
     ...(oldConstraints ? { oldConstraints } : {}),
     ...(newConstraints ? { newConstraints } : {}),
     details: levels.flatMap(renderLevel).join('; '),
-    tightened: levels.some((level) => constraintsTightened(level.before, level.after)),
+    tightened: levels.some((level) => constraintsTightened(level.readBefore, level.readAfter)),
   };
 }
 
@@ -189,7 +205,7 @@ function typeLevels(path: string, a: TypeRef, b: TypeRef, memo: PairMemo): Level
   if (!levels) {
     levels = [];
     const [x, y] = [limitsOf(a), limitsOf(b)];
-    if (!sameConstraints(x, y)) levels.push({ path: '', before: x, after: y });
+    if (!sameConstraints(x, y)) levels.push(levelShift('', x, y, a, b));
     levels.push(...childLevels('', a, b, memo));
     byNew.set(b, levels);
   }
@@ -234,8 +250,10 @@ function renderLevel({ path, before, after }: LevelShift): string[] {
  * `exclusiveMinimum: true` flipped off, which the parser reads as exactly
  * that — admits the `0` it rejected and is loosened (Greptile, #659 review
  * round 1), while `minimum: 0` becoming `exclusiveMinimum: 0` is tightened.
- * Every other keyword is judged on its own (`keywordTightened`), and the
- * level is tightened when any of them is.
+ * The caller passes an integer site's bounds already read as inclusive
+ * (`integerBounds`), so `exclusiveMinimum: 0` becoming `minimum: 1` on an
+ * integer tightens nothing. Every other keyword is judged on its own
+ * (`keywordTightened`), and the level is tightened when any of them is.
  */
 export function constraintsTightened(before: Constraints | undefined, after: Constraints | undefined): boolean {
   if (boundTightened(lowerBound(before), lowerBound(after), 'lower')) return true;
@@ -294,6 +312,46 @@ export function keywordTightened(keyword: keyof Constraints, oldValue: unknown, 
   if (UPPER_BOUNDS.has(keyword)) return (newValue as number) < (oldValue as number);
   // `pattern` and `multipleOf`: changed is tightened.
   return true;
+}
+
+/**
+ * `limits` as the differ reads them for a value of `type`, for the
+ * tightened judgement alone (`details` still names the keywords as the
+ * document wrote them): on an integer — a `primitive` of type `integer`,
+ * under any nullable wrapper — a bound admits the same integers as the
+ * inclusive one beside it, so `exclusiveMinimum: n` is read as `minimum:
+ * ⌊n⌋ + 1` and `exclusiveMaximum: n` as `maximum: ⌈n⌉ − 1`, a fractional
+ * inclusive bound is rounded inward (`minimum: 0.5` is `minimum: 1`), and
+ * the stricter of the two on a side wins when both are declared. So
+ * `exclusiveMinimum: 0` → `minimum: 1`, OpenAPI 3.0's `{ minimum: 0,
+ * exclusiveMinimum: true }` → `{ minimum: 1 }` and `maximum: 9` →
+ * `exclusiveMaximum: 10` on an integer are reported, since the declaration
+ * changed, but tighten nothing (MichaelDeBoey, #659 review). On a number,
+ * or a type the differ cannot read as one integer (a union, a model), the
+ * bounds are read as written: `0 < x` admits `0.5` and `1 <= x` does not.
+ */
+export function integerBounds(limits: Constraints | undefined, type: TypeRef | undefined): Constraints | undefined {
+  if (!limits || !type) return limits;
+  const value = unwrap(type);
+  if (value.kind !== 'primitive' || value.type !== 'integer') return limits;
+  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, ...rest } = limits;
+  const read: Constraints = { ...rest };
+  const lower = defined([
+    minimum === undefined ? undefined : Math.ceil(minimum),
+    exclusiveMinimum === undefined ? undefined : Math.floor(exclusiveMinimum) + 1,
+  ]);
+  const upper = defined([
+    maximum === undefined ? undefined : Math.floor(maximum),
+    exclusiveMaximum === undefined ? undefined : Math.ceil(exclusiveMaximum) - 1,
+  ]);
+  if (lower.length > 0) read.minimum = Math.max(...lower);
+  if (upper.length > 0) read.maximum = Math.min(...upper);
+  return read;
+}
+
+/** The numbers among `values`. */
+function defined(values: Array<number | undefined>): number[] {
+  return values.filter((v): v is number => v !== undefined);
 }
 
 /** A numeric bound as it admits a value: `exclusive` when the value itself is rejected. */

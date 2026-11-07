@@ -297,9 +297,14 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
 /**
  * Whether a component schema is an enum: it declares an `enum:` list, or it
  * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
- * schema (`constUnionEnumMembers`) with no `allOf` and no `properties` of
- * its own — the OAS 3.1 spelling that documents and deprecates values one
- * by one — or it declares either inside an `allOf` the type builder reads
+ * schema (`constUnionEnumMembers`) with no `allOf` that types the schema
+ * (`allOfTypesSchema`: one whose members only annotate or limit it is part
+ * of the wrapper, so `Kind: { allOf: [{ description }], oneOf: [{ const:
+ * 'cat' }, { const: 'dog' }] }` is the enum `Kind` the same keys beside
+ * the `oneOf` make it, as the same schema is inline; #613 review) and no
+ * `properties` of its own — the OAS 3.1 spelling that documents and
+ * deprecates values one by one — or it declares either inside an `allOf`
+ * the type builder reads
  * as its one typing member (`enumComponentDeclaration`: `Kind: { allOf: [{
  * type: 'string', enum: ['cat', 'dog'] }], description }`, a lone member or
  * one beside members that only annotate or limit it, however nested), or
@@ -389,7 +394,19 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * nothing and `UnknownEnum`, `UnknownEnum2` again.
  */
 export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
-  if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return schema;
+  // The members on the schema itself — an `enum:` list, or a union of
+  // string consts — beside no `allOf`, or one whose members only annotate
+  // or limit it: the schema with the wrapper layer's text, link, flag,
+  // examples and keys folded in (`allOfWrapperLayer`; the schema itself
+  // without such members) and the layer's `default`, so `Kind: { allOf: [{
+  // description: 'A kind.' }], oneOf: [{ const: 'cat' }, { const: 'dog' }]
+  // }` is the enum `Kind` described "A kind.", as `{ description: 'A
+  // kind.', oneOf: [...] }` is and as the same schema is inline (#613
+  // review: it was a model with no fields and no variants, and `oagen diff`
+  // between the two spellings exited 2).
+  if (Boolean(schema.enum) || isConstUnionEnumSchema(schema)) {
+    return withWrapperLayerDefault(allOfWrapperLayer(schema), schema);
+  }
   // A `$ref` is the reference, whatever sits beside it — the type builder
   // reads it first — so it declares no enum of its own; an alias is read
   // through it (`componentEntries`). #606 review: `{ $ref: Kind, oneOf: [{
@@ -418,14 +435,30 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   if (declaration === undefined) return undefined;
   // The wrapper layer's `default` — the wrapper's own, then the first
   // annotating member's — over the member's, as its text is.
-  const layer = [schema, ...annotatingAllOfMembers(schema)].find((level) => level.default !== undefined);
-  return layer === undefined ? declaration : { ...declaration, default: layer.default };
+  return withWrapperLayerDefault(declaration, schema);
 }
 
-/** The `oneOf`/`anyOf`-of-string-consts half of `isEnumComponentSchema`. */
+/**
+ * The `oneOf`/`anyOf`-of-string-consts half of `isEnumComponentSchema`:
+ * beside no `allOf` that types the schema (`allOfTypesSchema`; one whose
+ * members only annotate or limit it is part of the wrapper, #613 review)
+ * and no `properties` of its own.
+ */
 function isConstUnionEnumSchema(schema: SchemaObject): boolean {
-  if (schema.allOf || Object.keys(schema.properties ?? {}).length > 0) return false;
+  if (schema.allOf !== undefined && allOfTypesSchema(schema.allOf)) return false;
+  if (Object.keys(schema.properties ?? {}).length > 0) return false;
   return constUnionEnumMembers(schema) !== null;
+}
+
+/**
+ * `declaration` with the wrapper layer's `default` — `wrapper`'s own, then
+ * the first annotating `allOf` member's (`annotatingAllOfMembers`) — over
+ * its own, as the layer's text is (`allOfWrapperLayer`); `declaration`
+ * itself when the layer declares none.
+ */
+function withWrapperLayerDefault(declaration: SchemaObject, wrapper: SchemaObject): SchemaObject {
+  const layer = [wrapper, ...annotatingAllOfMembers(wrapper)].find((level) => level.default !== undefined);
+  return layer === undefined ? declaration : { ...declaration, default: layer.default };
 }
 
 /**
@@ -4087,10 +4120,8 @@ function isNamedUnionSchema(schema: SchemaObject): boolean {
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   // A `oneOf`/`anyOf` of string consts, or a nullable wrapper around one
   // enum declaration, is an enum (`isEnumComponentSchema`), not a union —
-  // and so is a `oneOf` of string consts beside an annotating `allOf`,
-  // which the enum reading does not read through, so that component stays
-  // the fieldless model it was.
-  if (isEnumComponentSchema(schema) || constUnionEnumMembers(schema) !== null) return false;
+  // beside an `allOf` that only annotates or limits it too (#613 review).
+  if (isEnumComponentSchema(schema)) return false;
   const nonNull = (schema.oneOf ?? schema.anyOf ?? []).filter((v) => !isNullSchema(v));
   return !(nonNull.length === 1 && isPlainObjectSchema(nonNull[0]));
 }
