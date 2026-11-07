@@ -115,7 +115,7 @@ import {
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
-import { paginatedItemType } from './pagination.js';
+import { collectObjectProperties, paginatedItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
@@ -464,6 +464,23 @@ function allOfReadAsMember(
  * must know what a pointer settles to before a body is typed
  * (`pointerTypesAsUnknown`, `pointerTypesAsArray`), so each counts a
  * pointer as typed exactly when the settle types it.
+ *
+ * A pointer that ends at a `properties/<name>` step lands on the
+ * declaration the settle types that step from: the field of the model at
+ * hand, which an `allOf` merges from every member that declares the name
+ * (`combineDeclarations`: the first declaration that declares a type
+ * types it, a typeless one only annotating it) — so the declaration is
+ * read as `collectObjectProperties` merges it, from the schema whose
+ * `allOf` the step goes through (`Holder` for `Holder/allOf/1/properties/
+ * owners`, however many inline `allOf` steps lead there; `box` for
+ * `Holder/properties/box/allOf/1/properties/owners`) or the schema the
+ * step reads directly (its own `allOf` and sibling `properties` folded
+ * in), never as the member's own text alone: `Holder/allOf/1/properties/
+ * owners` to a member declaring `owners: { description }` beside one
+ * declaring `owners: Owner[]`, or a `$ref` member to a component that
+ * does, is the array the merged `Holder.owners` is (Greptile, #609
+ * review: the member's text alone read no array, and the envelope's data
+ * was not one here while the settle typed it `Owner[]`).
  */
 function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | undefined): SchemaObject | undefined {
   const tokens = schemaRefTokens(ref);
@@ -473,7 +490,15 @@ function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | und
   if (!component) return undefined;
   const steps = pointerSteps(component, path, schemas);
   if ('problem' in steps) return undefined;
-  return steps.length === 0 ? component : steps[steps.length - 1]!.next;
+  if (steps.length === 0) return component;
+  const last = steps[steps.length - 1]!;
+  if (last.keyword !== 'properties') return last.next;
+  // The schema whose merge the field belongs to: the one before the run of
+  // inline `allOf` steps the `properties` step sits in, else the step's own.
+  let first = steps.length - 1;
+  while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
+  const owner = steps[first]!.node;
+  return collectObjectProperties(owner, schemas).properties[last.name!] ?? last.next;
 }
 
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */
@@ -491,8 +516,11 @@ const pointersBeingRead = new Set<string>();
  * otherwise exactly when the schema it lands on is typed `unknown` where
  * it stands, read as a body written there is (`referenceTypesAsUnknown`:
  * `{}`, a `$ref` to an untyped primitive component, an `allOf` read as
- * one). A chain of pointers that reaches itself is read as the settle
- * reads it, `unknown`.
+ * one) — a `properties/<name>` step landing on the declaration the merged
+ * model's field is typed from, every `allOf` member's combined
+ * (`pointerLanding`), so a member's `{ description }` beside a typed
+ * declaration is typed. A chain of pointers that reaches itself is read as
+ * the settle reads it, `unknown`.
  */
 export function pointerTypesAsUnknown(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (pointersBeingRead.has(ref)) return true;
