@@ -1366,15 +1366,30 @@ function sharedFieldType(
  * variants' — kept where every one of them writes the same and dropped
  * where they differ (#611), as the shared model keeps a field's own
  * (`buildSharedModel`); a new tree wherever something is dropped, the
- * first itself when nothing is. A union's variants pair by shape, not by
- * position — each member's ordered by their limitless reading, then by
- * their full reading where two share a shape, so the pairing depends on
- * no member's order — the result keeping the first member's order; and
- * two variants left alike once their limits are dropped are one, a lone
- * survivor standing for the union (`simplifyType`), since a `oneOf` of two
- * plain strings admits nothing — the survivor, a nested union the outer
- * collapses onto included, taking the limits the union itself agreed on,
- * conjoined onto its own (`withLimits`), so none is lost with the union.
+ * first itself when nothing is. A level's limits are kept or dropped as a
+ * whole, as a field's own are: items `{ maxLength: 2, pattern: '^a' }`
+ * beside `{ maxLength: 3, pattern: '^a' }` carry none. A union's variants
+ * are read by shape, not by position, whichever order each member lists
+ * them in: a shape every member lists with the same variants keeps the
+ * first member's, and one they list apart merges into one variant
+ * carrying the limits every variant of the shape, in every member, agrees
+ * on, so no limit survives on one variant of a shape that another lacks
+ * (`oneOf: [{ string, pattern: '^[a-z]+$' }, { string, pattern: '^[0-9]+$' }]`
+ * beside the same with `'^[A-Z]+$'` is a plain `string`, never
+ * `oneOf: [{ string, pattern: '^[a-z]+$' }, string]`, which rejects what
+ * both bodies admit); the result keeps the first member's order, and
+ * variants left alike are one, a lone survivor standing for the union
+ * (`simplifyType`), since a `oneOf` of two plain strings admits nothing —
+ * the survivor, a nested union the outer collapses onto included, taking
+ * the limits the union itself agreed on, conjoined onto its own
+ * (`withLimits`), so none is lost with the union. A `oneOf` the merge
+ * widened a variant of beside a variant it may now overlap — one of the
+ * same JSON value kind, or an untyped one (`mayOverlap`) — is read as
+ * `anyOf`, since its variants can no longer promise to match one value at
+ * a time (`oneOf: [{ string, pattern: '^b' }, { const: 'a' }]` beside the
+ * same with `'^c'` is `anyOf: [string, 'a']`, which admits the `"a"` both
+ * bodies do); one widened beside variants of other kinds only stays
+ * `oneOf`.
  */
 function agreedLimits(types: readonly TypeRef[]): TypeRef {
   const first = types[0];
@@ -1399,19 +1414,40 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
       };
     }
     case 'union': {
-      const ordered = of('union').map((union) =>
-        union.variants
-          .map((variant, index) => ({
-            variant,
-            index,
-            key: `${stableJson(limitlessShape(variant))}\n${stableJson(variant)}`,
-          }))
-          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
-      );
-      const variants = [...top.variants];
-      ordered[0].forEach(({ index }, position) => {
-        variants[index] = agreedLimits(ordered.map((member) => member[position].variant));
+      // Each member's variants by shape (`limitlessShape`), each shape's in
+      // the member's order with its index in the union.
+      const byShape = of('union').map((union) => {
+        const shapes = new Map<string, Array<{ variant: TypeRef; index: number }>>();
+        union.variants.forEach((variant, index) => {
+          const shape = stableJson(limitlessShape(variant));
+          const alike = shapes.get(shape);
+          if (alike) alike.push({ variant, index });
+          else shapes.set(shape, [{ variant, index }]);
+        });
+        return shapes;
       });
+      const variants = [...top.variants];
+      const widened = new Set<string>(); // the shapes merged into one variant that admits more than some member's did
+      for (const [shape, own] of byShape[0]) {
+        // A shape every member lists with the same variants keeps the
+        // first member's; one they list apart merges into one variant
+        // carrying the limits every variant of the shape, in every
+        // member, agrees on, so no limit survives on one variant of a
+        // shape that another lacks (MichaelDeBoey, #639: `^[a-z]+$` kept
+        // on one string beside a plain string rejects what both bodies
+        // admit).
+        const runs = byShape.map((member) => member.get(shape) ?? []);
+        const readings = runs.map((run) =>
+          run
+            .map(({ variant }) => stableJson(variant))
+            .sort()
+            .join('\n'),
+        );
+        if (readings.every((reading) => reading === readings[0])) continue;
+        const merged = agreedLimits(runs.flatMap((run) => run.map(({ variant }) => variant)));
+        for (const { index } of own) variants[index] = merged;
+        widened.add(shape);
+      }
       const merged = simplifyType({ ...top, variants });
       // A lone survivor — the one variant left once the alike are dropped,
       // told by their count rather than by the survivor's kind, since the
@@ -1422,7 +1458,26 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
       // that admits the empty string, and so is the `anyOf` or type list
       // the `oneOf` collapses onto (Greptile, #639).
       const distinct = new Set(variants.map((variant) => stableJson(variant))).size;
-      return distinct > 1 ? merged : withLimits(merged, top.constraints);
+      if (distinct === 1) return withLimits(merged, top.constraints);
+      if (merged.kind !== 'union' || merged.compositionKind !== 'oneOf' || widened.size === 0) return merged;
+      // A `oneOf` promises its variants match one value at a time, which a
+      // widened variant can break beside a variant it may now overlap —
+      // one of the same JSON value kind, or an untyped one (`mayOverlap`):
+      // `oneOf: [{ string, pattern: '^b' }, { const: 'a' }]` beside the
+      // same with `'^c'` would be `oneOf: [string, 'a']`, rejecting the
+      // `"a"` both bodies admit (Greptile, #639). Such a union is read as
+      // `anyOf`; one widened beside variants of other kinds only (a string
+      // beside an integer) stays `oneOf`.
+      const overlaps = [...byShape[0]].some(([shape, own]) => {
+        if (!widened.has(shape)) return false;
+        const indices = new Set(own.map(({ index }) => index));
+        return own.some(({ index }) =>
+          variants.some((other, i) => !indices.has(i) && mayOverlap(variants[index], other)),
+        );
+      });
+      if (!overlaps) return merged;
+      const open: UnionType = { ...merged, compositionKind: 'anyOf' };
+      return open;
     }
     default:
       return top;
@@ -1450,6 +1505,40 @@ function withLimits(type: TypeRef, limits: Constraints | undefined): TypeRef {
     default:
       return type;
   }
+}
+
+/**
+ * The JSON value kinds `type` admits — `string`, `number` (an integer is
+ * one), `boolean`, `null`, `array`, `object` (a map or a model) — or
+ * `unknown` for an untyped schema and for a named enum whose values the
+ * reference does not carry; a nullable wrapper adds `null` to its inner's,
+ * a union gathers its variants'.
+ */
+function valueKinds(type: TypeRef): Set<string> {
+  switch (type.kind) {
+    case 'primitive':
+      return new Set([type.type === 'integer' ? 'number' : type.type]);
+    case 'literal':
+      return new Set([type.value === null ? 'null' : typeof type.value]);
+    case 'enum':
+      return new Set(type.values?.map((value) => typeof value) ?? ['unknown']);
+    case 'array':
+      return new Set(['array']);
+    case 'map':
+    case 'model':
+      return new Set(['object']);
+    case 'nullable':
+      return new Set([...valueKinds(type.inner), 'null']);
+    case 'union':
+      return new Set(type.variants.flatMap((variant) => [...valueKinds(variant)]));
+  }
+}
+
+/** Whether one JSON value may match both `a` and `b`: they admit a value kind in common, or either admits any (`valueKinds`). */
+function mayOverlap(a: TypeRef, b: TypeRef): boolean {
+  const kinds = valueKinds(a);
+  const others = valueKinds(b);
+  return kinds.has('unknown') || others.has('unknown') || [...kinds].some((kind) => others.has(kind));
 }
 
 /**
