@@ -93,9 +93,10 @@ let activeEnumSchemaNames: Set<string> = new Set();
 let activeNullableEnumSchemaNames: Set<string> = new Set();
 
 /**
- * Resolved names of the model components that admit `null`, so that, as for
- * a nullable enum, a `$ref` to one of these resolves to `nullable(model)`
- * (`componentTypeRef`): a named union with a `null` variant, an OAS 3.1
+ * The `components/schemas` keys of the model components that admit `null`,
+ * so that, as for a nullable enum, a `$ref` to one of these resolves to
+ * `nullable(model)` (`componentTypeRef`): a named union with a `null`
+ * variant, an OAS 3.1
  * `type` list with `'null'` or OAS 3.0 `nullable: true`
  * (`isNullableUnionSchema`) — the null variant is not a member
  * (`unionMembers` drops it), so the reference carries it and the IR says
@@ -113,11 +114,14 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  * `allOf` on a field is typed — while an `allOf` that merges a typing
  * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
  * properties }] }`) is the object its merged fields describe, bare, as it
- * is on a field (`isNullableModelComponentEntry`). Keyed by resolved name,
- * as `activeEnumSchemaNames` is, since the reference is minted by that
- * name.
+ * is on a field (`isNullableModelComponentEntry`). Keyed by the component
+ * key the `$ref` names, as the array, primitive and alias components are,
+ * never by the resolved name the reference is minted with: `Note: { type:
+ * ['object', 'null'], properties }` and `note: { type: 'object', properties
+ * }` resolve to one model `Note`, and only `{ $ref: Note }` admits `null`
+ * — `{ $ref: note }` is the bare model (#641 review).
  */
-let activeNullableModelSchemaNames: Set<string> = new Set();
+let activeNullableModelComponentKeys: Set<string> = new Set();
 
 /**
  * What one extraction remembers about its named unions, so each is planned
@@ -1494,7 +1498,7 @@ export function extractSchemas(
   // call schemaToTypeRef during extraction).
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableModelSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
   // to one is the primitive, literal, union of primitives or `unknown` it
@@ -1538,7 +1542,7 @@ export function extractSchemas(
       !activePrimitiveComponentKeys.has(name) &&
       !activeEnumAliasKeys.has(name)
     ) {
-      activeNullableModelSchemaNames.add(resolved);
+      activeNullableModelComponentKeys.add(name);
     }
   }
 
@@ -1729,7 +1733,7 @@ export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableModelSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeComponentSchemaKeys = new Set();
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
@@ -2486,7 +2490,7 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
 /**
  * Whether a `components/schemas` entry that becomes a `Model` admits
  * `null`, so that a `$ref` to it is wrapped in `nullable`
- * (`componentTypeRef`, through `activeNullableModelSchemaNames`): a named
+ * (`componentTypeRef`, through `activeNullableModelComponentKeys`): a named
  * union with a `null` variant (`isNullableUnionSchema`); an object
  * component whose own schema `schemaToTypeRef` wraps when it is written
  * inline (`declaresNull`: an OAS 3.1 `type` list naming `'null'`, OAS 3.0
@@ -3067,21 +3071,25 @@ function hasFoldableProperties(schema: SchemaObject): boolean {
  * `allOf` (`NewPet: { allOf: [base], oneOf: [...] }`) or beside the
  * component's own `properties` alone (`Pet: { properties: { id }, oneOf:
  * [...] }`, read as a composed model by `composesComponentModel`). A
- * component written as a bare `$ref` composes one member, the reference
- * as written — `CatAlias: { $ref: Cat, description }` is read as `{ allOf:
- * [{ $ref: Cat }], description }` is (#618) — which every reader follows
- * to the component it names through a chain of aliases
- * (`followMemberRefs`), so the readers key nothing on the member itself;
- * what is written beside the `$ref` is the wrapper's own
- * (`allOfWrapperLayer`, `constraintsEntry`), never a member. Shared
+ * component written as a bare `$ref` composes one member and nothing
+ * else: the reference as written — `CatAlias: { $ref: Cat, description }`
+ * is read as `{ allOf: [{ $ref: Cat }], description }` is (#618) — which
+ * every reader follows to the component it names through a chain of
+ * aliases (`followMemberRefs`), so the readers key nothing on the member
+ * itself. The text, flag, limits and keys written beside the `$ref` are
+ * the wrapper's own (`allOfWrapperLayer`, `constraintsEntry`), never a
+ * member; `properties`, `required`, an `allOf`, a union or a
+ * `discriminator` beside it are not read, here or anywhere a `$ref` is
+ * followed (#618 review, #622: nothing but annotations is read beside a
+ * `$ref`), so only the `allOf: [{ $ref }]` spelling composes them. Shared
  * by `extractAllOfModel`, at every level of a `$ref` chain, and by
  * `extractDiscriminatedAllOfVariantModels`, whose dispatcher base carries
  * them into every variant. Empty for a component that composes nothing.
  */
 function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
   if (!composesComponentModel(schema)) return [];
-  const reference: SchemaObject[] = schema.$ref === undefined ? [] : [{ $ref: schema.$ref }];
-  const members = [...reference, ...(schema.allOf ?? []), ...besideUnionMembers(schema)];
+  if (schema.$ref !== undefined) return [{ $ref: schema.$ref }];
+  const members = [...(schema.allOf ?? []), ...besideUnionMembers(schema)];
   if (!hasFoldableProperties(schema)) return members;
   const { properties, required } = schema;
   return [{ type: 'object', properties, ...(required && required.length > 0 && { required }) }, ...members];
@@ -3967,7 +3975,10 @@ interface NamedUnionPlan {
  * lost.
  */
 function isNamedUnionSchema(schema: SchemaObject): boolean {
-  if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
+  // A `$ref` with a union beside it is the alias of its reference
+  // (`composesComponentModel`), the union unread as anything beside a
+  // `$ref` is (#618 review): never a named union minting variants of its own.
+  if (schema.allOf || schema.$ref !== undefined || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   // A `oneOf`/`anyOf` of string consts, or a nullable wrapper around one
   // enum declaration, is an enum (`isEnumComponentSchema`), not a union.
@@ -5423,7 +5434,10 @@ function readComponentAllOfMember(
  * member as the wrapper's; one written beside a union goes with that union
  * (`besideUnionMembers`). A schema reached again on the chain declares
  * nothing more (`seen`), so a component that names itself, or two members
- * naming one component, terminate.
+ * naming one component, terminate. A component written as a bare `$ref`
+ * composes its reference alone (`componentAllOfMembers`): a `required` or
+ * a `discriminator` beside the `$ref` is not read, as nothing but
+ * annotations is beside any `$ref` (#618 review).
  */
 function readComponentAllOf(
   name: string,
@@ -5440,9 +5454,23 @@ function readComponentAllOf(
   }
   // The component's own `required`: carried by its own member when it
   // declares properties, and read here when it only names inherited ones
-  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`).
-  for (const r of schema.required ?? []) reading.required.add(r);
+  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`) — never beside
+  // a bare `$ref`, which composes its reference alone.
+  for (const r of ownRequired(schema)) reading.required.add(r);
   return discriminator;
+}
+
+/**
+ * The `required` names a composed component declares as its own
+ * (`readComponentAllOf`, `discriminatedVariantSchemas`): its `required`
+ * list, unless the component is written as a bare `$ref`, beside which
+ * nothing but annotations is read (#618 review: `B: { $ref: Cat,
+ * required: [name] }` is `Cat`'s `name` as optional as `Cat` declares it,
+ * at `B`, at every hop of a chain naming `B` and in a merge naming it,
+ * where `B: { allOf: [{ $ref: Cat }], required: [name] }` requires it).
+ */
+function ownRequired(schema: SchemaObject): readonly string[] {
+  return schema.$ref === undefined ? (schema.required ?? []) : [];
 }
 
 /**
@@ -5453,6 +5481,10 @@ function readComponentAllOf(
  * reference to the component and the component itself dispatch by it.
  */
 export function wrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeyword | undefined {
+  // A `discriminator` beside a `$ref` is not read, as nothing but
+  // annotations is beside any `$ref` (#618 review): a bare `$ref` alias
+  // dispatches as the component it names does.
+  if (schema.$ref !== undefined) return undefined;
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
 }
 
@@ -5569,11 +5601,12 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
  * Without the map a `$ref` member declares nothing, as the allOf+oneOf
  * readers read a variant's inline members only. A schema that is itself a
- * bare `$ref` — a component alias (`CatAlias: { $ref: Cat }`), which the
- * model readers read as `allOf: [{ $ref: Cat }]` (#618) — is followed the
- * same way, before its own `allOf`, so a union variant naming the alias
- * pins what `Cat` pins, and `Pet: { oneOf: [{ $ref: CatAlias }, { $ref:
- * Dog }] }` dispatches by `kind` as it does with the `allOf` spelling.
+ * `$ref` — a component alias (`CatAlias: { $ref: Cat }`), which the model
+ * readers read as `allOf: [{ $ref: Cat }]` (#618) — is followed too, one
+ * hop at a time, and nothing written beside its `$ref` is read, as beside
+ * any `$ref` (#618 review), so a union variant naming the alias pins what
+ * `Cat` pins, and `Pet: { oneOf: [{ $ref: CatAlias }, { $ref: Dog }] }`
+ * dispatches by `kind` as it does with the `allOf` spelling.
  *
  * A property several members declare keeps its first declaration, unless a
  * later one pins it to one value the earlier left open — a const narrows
@@ -5595,6 +5628,16 @@ function getEffectiveProperties(
   const visit = (s: SchemaObject): void => {
     if (seen.has(s)) return;
     seen.add(s);
+    // A `$ref` composes the component it names and nothing beside it
+    // (#618): followed one hop at a time, so a chain of aliases is read
+    // through, a cycle ends on `seen`, and a `$ref` no component answers
+    // declares nothing; what is written beside the `$ref` is not read, as
+    // beside any `$ref` (#618 review).
+    if (s.$ref !== undefined) {
+      const target = schemaRefTarget(s.$ref, schemas);
+      if (target) visit(target);
+      return;
+    }
     for (const [k, v] of Object.entries(s.properties ?? {})) {
       if (!v) continue;
       const held = props.get(k);
@@ -5607,11 +5650,6 @@ function getEffectiveProperties(
         props.set(k, v);
       }
     }
-    // A bare `$ref` composes the component it names (#618): followed to
-    // it, or to nothing when the chain repeats (`seen` holds `s`) or no
-    // component answers (the chain ends on `s` itself).
-    const alias = s.$ref === undefined ? undefined : followMemberRefs(s, schemas, seen);
-    if (alias !== undefined && alias !== s) visit(alias);
     for (const sub of s.allOf ?? []) {
       const member = followMemberRefs(sub, schemas, seen);
       if (member) visit(member);
@@ -5763,29 +5801,39 @@ export function componentUnionDispatches(
  * Whether a component written as a bare `$ref` names no component its
  * model could carry: its chain of `$ref`s returns to itself (`Loop: { $ref:
  * Loop }`; `A: { $ref: B }` beside `B: { $ref: A }`), or ends at a `$ref` no
- * component answers (`followMemberRefs` lands on the schema itself). Such
- * a component is read as any bare `$ref` alias is (`extractAllOfModel`;
- * #618) and declares nothing, so its model has no fields; `extractSchemas`
- * reports it once. False for a schema that is no bare `$ref`, and for one
- * whose chain ends at a component.
+ * component answers — followed through every `$ref` on the chain, whatever
+ * is written beside it. Such a component is read as any bare `$ref` alias
+ * is (`extractAllOfModel`; #618) and the chain declares nothing, so its
+ * model has no fields but what the aliases write beside their `$ref`s;
+ * `extractSchemas` reports it once. False for a schema that is no bare
+ * `$ref`, and for one whose chain ends at a component.
  */
 function bareRefNamesNothing(schema: SchemaObject, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (schema.$ref === undefined) return false;
-  const target = followMemberRefs(schema, schemas, new Set([schema]));
-  return target === undefined || target.$ref !== undefined;
+  const chain = new Set<SchemaObject>([schema]);
+  let hop: SchemaObject = schema;
+  while (hop.$ref !== undefined) {
+    const target = schemaRefTarget(hop.$ref, schemas);
+    if (target === undefined || chain.has(target)) return true;
+    chain.add(target);
+    hop = target;
+  }
+  return false;
 }
 
 /**
  * The component an `allOf` member names, followed through a chain of
  * references (`Hop: { $ref: Alias }`), or the member itself when it is no
  * reference; `undefined` when the chain repeats or reaches a component
- * already read on this walk (`seen`), which then declares nothing more. The
- * one reference-following every reader of a component's member shares:
- * `readComponentAllOfMember` reads the member it lands on, `memberUnion`
- * finds the union it carries, `getEffectiveProperties` and
- * `bareRefNamesNothing` follow a component that is itself a bare `$ref`
- * (#618). A `$ref` no component answers ends the chain on the schema that
- * writes it, which the caller sees by its `$ref`.
+ * already read on this walk (`seen`), which then declares nothing more.
+ * Every `$ref` on the chain is followed through, whatever is written
+ * beside it: nothing but annotations is read beside a `$ref` (#618
+ * review), so `B: { $ref: Cat, required: [name] }` under `A: { $ref: B }`
+ * is `Cat` at `A` and at `B` alike. The one reference-following every
+ * reader of a component's member shares: `readComponentAllOfMember` reads
+ * the member it lands on, `memberUnion` finds the union it carries. A
+ * `$ref` no component answers ends the chain on the schema that writes
+ * it, which the caller sees by its `$ref`.
  */
 function followMemberRefs(
   member: SchemaObject,
@@ -5976,7 +6024,7 @@ function discriminatedVariantSchemas(
   }
   // The component's own `required` naming an inherited property only, as
   // `readComponentAllOf` reads it for the dispatcher model.
-  for (const r of schema.required ?? []) reading.required.add(r);
+  for (const r of ownRequired(schema)) reading.required.add(r);
   const baseRequired = reading.required;
   const baseProperties: Record<string, SchemaObject> = Object.fromEntries(
     [...reading.ledger.values()].map((entry) => [entry.name, declaredComponentProperty(entry)]),
@@ -6380,7 +6428,7 @@ export function markComponentModelRef(ref: ModelRef): void {
  * `oneOf`/`anyOf` wrapper, a single-member `allOf` around one of these —
  * is wrapped in `nullable` here, since the enum or model built for it
  * carries no wrapper (`activeNullableEnumSchemaNames`,
- * `activeNullableModelSchemaNames`; #615: `PetOwner: { type: ['object',
+ * `activeNullableModelComponentKeys`; #615: `PetOwner: { type: ['object',
  * 'null'], properties }` named by a bare `$ref` was `PetOwner`, while
  * `Pet.owner` written inline, and the JSON Pointer `#/components/schemas/
  * Pet/properties/owner` to it, were `nullable<PetOwner>`). An alias of
@@ -6436,12 +6484,13 @@ export function componentTypeRef(key: string): TypeRef {
   // Likewise a model component that admits `null` — a named union with a
   // `null` variant, or an object component that declares it (#615): neither
   // the variant nor the declaration is a member of the model, so the
-  // reference carries the nullability. The model reference itself is
-  // recorded as a component's (`componentModelRefs`) whether or not it is
-  // wrapped.
+  // reference carries the nullability — read by the key the `$ref` names,
+  // since two keys can resolve to one model and only the one that admits
+  // `null` wraps its references. The model reference itself is recorded as
+  // a component's (`componentModelRefs`) whether or not it is wrapped.
   const modelRef: ModelRef = { kind: 'model', name: resolved };
   componentModelRefs.add(modelRef);
-  return activeNullableModelSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
+  return activeNullableModelComponentKeys.has(key) ? { kind: 'nullable', inner: modelRef } : modelRef;
 }
 
 /**
