@@ -908,6 +908,13 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * its variants none: each variant is the same schema read as one of its
  * types, so the limits are read from the union for whichever type the
  * value takes.
+ *
+ * `oagen diff` compares them on every node that carries them, the type's
+ * at every level included, and reports each keyword tightened or loosened
+ * (`field-constraints-changed`, `param-constraints-changed`,
+ * `header-constraints-changed`, `variant-constraints-changed`,
+ * `constraintsChanged` on a model), breaking when tightened on a
+ * request-facing site (#599; see docs/cli.md).
  */
 export interface Constraints {
   /** Inclusive lower bound (`minimum`). */
