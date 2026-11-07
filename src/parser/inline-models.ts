@@ -1747,7 +1747,9 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
  * component a schema that is itself a bare `$ref` names — a component alias
  * (`CatAlias: { $ref: Cat }`), read as `allOf: [{ $ref: Cat }]` is (#618),
  * followed through a chain of aliases when `schemas` is given, so the
- * alias's fields are typed with `Cat`'s sibling set — those of a
+ * alias's fields are typed with `Cat`'s sibling set, with those of an
+ * `allOf` or a union written beside any `$ref` on the way, as beside an
+ * `allOf` — those of a
  * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
  * member it wraps (`nullableAxisBranch`, per keyword, the definition the
  * model walks resolve a member by, so a nullable `$ref` member's component
@@ -1769,29 +1771,34 @@ export function collectProperties(
 ): Map<string, SchemaObject> {
   const ledger = new Map<string, PropertyDeclarations>();
   const seen = new Set<SchemaObject>();
-  const visit = (s: SchemaObject | undefined, followRef: boolean, onBranch: boolean): void => {
+  const visit = (s: SchemaObject | undefined, onBranch: boolean): void => {
     if (!s || seen.has(s)) return;
     seen.add(s);
     if (s.$ref) {
-      if (followRef && schemas) visit(schemaRefTarget(s.$ref, schemas), true, onBranch);
-      return;
+      // A `$ref` — the root's own, a member's, a variant's — is followed
+      // into `schemas` when given, and what the schema composes beside it
+      // (`allOf` members, a union) is read below as beside an `allOf: [{
+      // $ref }]` it is; its `properties` are not, as `componentAllOfMembers`
+      // reads none beside a `$ref` (#618).
+      if (schemas) visit(schemaRefTarget(s.$ref, schemas), onBranch);
+    } else {
+      for (const [key, value] of Object.entries(s.properties ?? {})) {
+        if (value) declareProperty(ledger, key, value, null, onBranch);
+      }
     }
-    for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value) declareProperty(ledger, key, value, null, onBranch);
-    }
-    for (const sub of s.allOf ?? []) visit(sub, true, onBranch);
+    for (const sub of s.allOf ?? []) visit(sub, onBranch);
     for (const axis of unionAxesOf(s)) {
       // A nullable wrapper is its one variant, decided per keyword
       // (`nullableAxisBranch`); a variant's `$ref` is followed as the merges
       // follow it (`declareVariant`).
       const branch = nullableAxisBranch(s, axis);
-      if (branch) visit(branch, followRef, onBranch);
-      else for (const variant of axis) visit(variant, true, true);
+      if (branch) visit(branch, onBranch);
+      else for (const variant of axis) visit(variant, true);
     }
   };
   // The root's own `$ref` is followed as a member's is: the root is a
   // component alias, read as the `allOf` of that reference (#618).
-  visit(schema, true, false);
+  visit(schema, false);
   return new Map(
     [...ledger.values()].map((entry) => [
       entry.name,
@@ -2764,7 +2771,9 @@ function contributesProperties(schema: SchemaObject, componentSchemas?: Record<s
   const declares = (s: SchemaObject | undefined): boolean => {
     if (!s || seen.has(s)) return false;
     seen.add(s);
-    if (s.$ref) return declares(componentSchemaOf(s.$ref, componentSchemas));
+    // A `$ref` declares through the component it names and through an
+    // `allOf` beside it, read as `allOf: [{ $ref }, ...]` is (#618 review).
+    if (s.$ref) return declares(componentSchemaOf(s.$ref, componentSchemas)) || (s.allOf ?? []).some(declares);
     if (Object.keys(s.properties ?? {}).length > 0) return true;
     return (s.allOf ?? []).some(declares);
   };
@@ -3181,12 +3190,16 @@ function readVariant(
   if (seen.has(schema) || walking.has(schema)) return;
   seen.add(schema);
   if (schema.$ref) {
+    // The component named, then what the schema composes beside the `$ref`
+    // — `allOf` members, a union — as beside an `allOf: [{ $ref }]` (#618
+    // review); its `properties` are not read, as `componentAllOfMembers`
+    // reads none beside a `$ref`.
     const target = schemaRefTarget(schema.$ref, componentSchemas);
     if (target) readVariant(ledger, target, componentSchemas, seen, walking);
-    return;
-  }
-  for (const [key, value] of Object.entries(schema.properties ?? {})) {
-    if (value) declareProperty(ledger, key, value, null, false);
+  } else {
+    for (const [key, value] of Object.entries(schema.properties ?? {})) {
+      if (value) declareProperty(ledger, key, value, null, false);
+    }
   }
   for (const sub of schema.allOf ?? []) readVariant(ledger, sub, componentSchemas, seen, walking);
   for (const variants of unionAxesOf(schema)) {
@@ -3224,7 +3237,10 @@ function readVariant(
  * its name: an `allOf` component that inherits it stays the origin of
  * everything reached inside its chain (`DogMeta`), and so does a bare
  * alias (`Hop: { $ref: Base }`), whose model is built as `allOf: [{ $ref:
- * Base }]`'s is and carries the field as `HopMeta` (#618), while a nullable
+ * Base }]`'s is and carries the field as `HopMeta` (#618) — and what any
+ * `$ref` on the way writes beside itself, `required` names, further `allOf`
+ * members or a union, is read as beside that `allOf` (#618 review: `B: {
+ * $ref: Cat, required: [name] }` lost `name`'s requiredness) — while a nullable
  * alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null' }] }`) declares
  * nothing of its own and builds no model, so a reference met inside one
  * starts its own origin (`Base.meta` stays `BaseMeta`; workos/oagen#308
@@ -3358,11 +3374,16 @@ export function mergeAllOfMembers(
         origin?.schema.allOf || origin?.schema.$ref !== undefined || key === undefined
           ? origin
           : { name: resolveSchemaName(key), schema: target };
-      visit(target, owner);
-      return;
-    }
-    for (const [key, value] of Object.entries(s.properties ?? {})) {
-      if (value) declareProperty(declared, key, value, origin, false);
+      visit(target, owner, wrapperDiscriminatorOf(s));
+      // What the schema composes beside its `$ref` — `required` names,
+      // further `allOf` members, a union — is read below as beside an
+      // `allOf: [{ $ref }]` it is (#618 review: a merge naming `B: { $ref:
+      // Cat, required: [name] }` left `name` optional); its `properties`
+      // are not, as `componentAllOfMembers` reads none beside a `$ref`.
+    } else {
+      for (const [key, value] of Object.entries(s.properties ?? {})) {
+        if (value) declareProperty(declared, key, value, origin, false);
+      }
     }
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
     for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s));
