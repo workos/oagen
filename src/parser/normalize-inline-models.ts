@@ -1376,12 +1376,15 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
  * `deprecated`: deprecation names the type the SDK exposes, and that is
  * `base`, so a deprecated `<Name>Json` folded into a live `<Name>` leaves
  * `<Name>` live. The bases `json` is built on (`Model.bases`) come with its
- * fields, each field's `inheritedFrom` included — less a base that is
- * `base` itself, by either name (`PetJson: { allOf: [{ $ref: Pet }],
- * properties: { extra } }` folded onto `Pet`): a model is no base of its
- * own, so that entry is dropped and the fields it lent are `base`'s own
- * (#591, Greptile review: the fields came with their origin and the bases
- * were dropped, so a folded model named a base it did not list).
+ * fields, each field's `inheritedFrom` included — less a base whose own
+ * chain of bases, read through `models`, reaches `base` by either name:
+ * `base` itself (`PetJson: { allOf: [{ $ref: Pet }], properties: { extra }
+ * }` folded onto `Pet`) or a model built on it (`PetJson` on `Animal` on
+ * `Pet`), since a model is no base of its own and the fold would close
+ * the chain into a cycle; that entry is dropped and the fields it lent
+ * are `base`'s own (#591, Greptile review: the fields came with their
+ * origin and the bases were dropped, so a folded model named a base it did
+ * not list; round two: `Pet` folded under `Animal`, which extends `Pet`).
  * A base that dispatches by rules `json` does not preserve is never folded
  * (`collapseJsonSuffixModels` refuses it), so this only ever adds union
  * metadata to a plain base or replaces a union's with identical rules. The
@@ -1389,9 +1392,16 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
  * written; `applyFold` writes it. Every site that copies one model's shape
  * onto another goes through these two.
  */
-function foldedShape(base: Model, json: Model): Model {
+function foldedShape(base: Model, json: Model, models: readonly Model[]): Model {
   const self = new Set([base.name, json.name]);
-  const ownOf = (ref: TypeRef | undefined): boolean => ref?.kind === 'model' && self.has(ref.name);
+  const byName = new Map(models.map((model) => [model.name, model]));
+  const reachesSelf = (name: string, visiting: Set<string>): boolean => {
+    if (self.has(name)) return true;
+    if (visiting.has(name)) return false;
+    visiting.add(name);
+    return (byName.get(name)?.bases ?? []).some((ref) => ref.kind === 'model' && reachesSelf(ref.name, visiting));
+  };
+  const ownOf = (ref: TypeRef | undefined): boolean => ref?.kind === 'model' && reachesSelf(ref.name, new Set());
   const fields = json.fields.map((field) => {
     if (!ownOf(field.inheritedFrom)) return field;
     const { inheritedFrom: _self, ...own } = field;
@@ -1413,9 +1423,9 @@ function foldedShape(base: Model, json: Model): Model {
   return shape;
 }
 
-/** Write `foldedShape(base, json)` onto `base`, in place. */
-function applyFold(base: Model, json: Model): void {
-  const shape = foldedShape(base, json);
+/** Write `foldedShape(base, json, models)` onto `base`, in place. */
+function applyFold(base: Model, json: Model, models: readonly Model[]): void {
+  const shape = foldedShape(base, json, models);
   delete base.bases;
   delete base.variants;
   delete base.compositionKind;
@@ -1688,7 +1698,7 @@ export function collapseJsonSuffixModels(
     // passes on the shape it ends with, as the folds are applied.
     const shapeOf = (model: Model): Model => {
       const json = jsonOf.get(model);
-      return json ? foldedShape(model, shapeOf(json)) : model;
+      return json ? foldedShape(model, shapeOf(json), models) : model;
     };
     const refused = new Set<FoldCandidate>();
     const refuse = (candidate: FoldCandidate, warning: string): void => {
@@ -1841,7 +1851,7 @@ export function collapseJsonSuffixModels(
   // copies it, so `Pet` ends with `PetJsonJson`'s fields and keys whatever
   // the declaration order. A chain's `…Json` names grow by `Json` a link.
   const deepestFirst = [...accepted].sort((a, b) => b.jsonModel.name.length - a.jsonModel.name.length);
-  for (const { baseModel, jsonModel } of deepestFirst) applyFold(baseModel, jsonModel);
+  for (const { baseModel, jsonModel } of deepestFirst) applyFold(baseModel, jsonModel, models);
 
   const removed = new Set<Model>(accepted.map((candidate) => candidate.jsonModel));
   // The model that keeps each name: the one the folds leave under it, else

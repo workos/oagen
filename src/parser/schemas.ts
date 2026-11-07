@@ -5416,6 +5416,8 @@ interface ComponentReading {
    * (`noteBase`), each once, in the order first met.
    */
   bases: ModelRef[];
+  /** The schema the reading started on (the component's own), so a member that reaches it again — the component naming itself, or an alias of it — is told from one naming another component already read (`followMemberRefChain`). */
+  root?: SchemaObject;
   seen: Set<SchemaObject>;
 }
 
@@ -5628,14 +5630,20 @@ function readComponentAllOfMember(
 ): AllOfDiscriminator | undefined {
   const { ledger, seen } = reading;
   const landing = followMemberRefChain(member, schemas, seen);
-  if (!landing) return undefined;
   const { resolved } = landing;
   // The component the member's declarations are recorded under
   // (`memberOrigin`); a landing that sets it is a base of the model, unless
   // the component is only a nullable wrapper, whose one variant names the
-  // base (a bare alias of one is a model of its own, and the base).
-  const origin = memberOrigin(landing, options.origin);
+  // base (a bare alias of one is a model of its own, and the base). A
+  // member whose component another member's chain already read declares
+  // nothing more but is a direct base all the same, in either order
+  // (Greptile on #591: `allOf: [{ $ref: Animal }, { $ref: Living }]` over
+  // `Animal: { allOf: [{ $ref: Living }] }` named `Animal` alone, and
+  // reordered both); one that reaches the model itself (`reading.root`) —
+  // a component naming itself, or an alias of it — is no base of its own.
+  const origin = landing.stoppedAt === reading.root ? null : memberOrigin(landing, options.origin);
   if (origin !== null && origin !== options.origin && !declaresOnlyNullable(origin.schema)) noteBase(reading, origin);
+  if (!landing.read) return undefined;
   // A member that writes an `allOf` composing it — one that types it, one
   // beside properties of its own, or one with no typing union beside it —
   // is read as a component is; a typing union beside an `allOf` whose
@@ -5742,6 +5750,7 @@ function readComponentAllOf(
 ): AllOfDiscriminator | undefined {
   if (reading.seen.has(schema)) return undefined;
   reading.seen.add(schema);
+  reading.root ??= schema;
   let discriminator: AllOfDiscriminator | undefined;
   const wrapperDiscriminator = wrapperDiscriminatorOf(schema);
   for (const member of componentAllOfMembers(schema)) {
@@ -5809,7 +5818,9 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * document order, each once (`noteBase`: a model component — a bare alias
  * being a model of its own, read as the `allOf` of its reference (#618) —
  * read through a nullable alias; an enum, array or primitive component is
- * none),
+ * none; a `$ref` member whose component an earlier member's chain read
+ * declares nothing more but is a base all the same, while the model
+ * itself, or an alias of it, is none),
  * and a field whose declaration is a base's as written, which the model
  * requires only as that base does, carries that base as `inheritedFrom`
  * (`inheritedBase`; #591) — `fields` complete and in order either way,
@@ -6217,7 +6228,8 @@ function followMemberRefs(
   schemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
 ): SchemaObject | undefined {
-  return followMemberRefChain(member, schemas, seen)?.resolved;
+  const landing = followMemberRefChain(member, schemas, seen);
+  return landing.read ? landing.resolved : undefined;
 }
 
 /**
@@ -6233,6 +6245,9 @@ interface MemberLanding {
   resolved: SchemaObject;
   key?: string;
   named?: SchemaObject;
+  /** Whether the landing is to be read: `false` when the chain reaches a schema already read on this walk (`seen`), or one of its own again, which then declares nothing more — `stoppedAt` names it, so a member that only names the model itself, or an alias of it, is told from one naming a component another member's chain read. */
+  read: boolean;
+  stoppedAt?: SchemaObject;
 }
 
 /** `followMemberRefs` with the landing's component key (`MemberLanding`). */
@@ -6240,7 +6255,7 @@ function followMemberRefChain(
   member: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
-): MemberLanding | undefined {
+): MemberLanding {
   let resolved = member;
   let key: string | undefined;
   let named: SchemaObject | undefined;
@@ -6248,15 +6263,15 @@ function followMemberRefChain(
   while (resolved.$ref) {
     const target = schemaRefTarget(resolved.$ref, schemas);
     if (!target) break;
-    if (seen.has(target) || chain.has(target)) return undefined;
-    chain.add(target);
     if (key === undefined) {
       key = componentKeyOf(resolved.$ref);
       if (key !== undefined) named = target;
     }
+    if (seen.has(target) || chain.has(target)) return { resolved: target, key, named, read: false, stoppedAt: target };
+    chain.add(target);
     resolved = target;
   }
-  return { resolved, key, named };
+  return { resolved, key, named, read: true };
 }
 
 /** One union a component's `allOf` member carries: the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it. */
@@ -6414,6 +6429,7 @@ function discriminatedVariantSchemas(
   if (axisVariants.size === 0) return axesFound;
   const reading = newComponentReading();
   reading.seen.add(schema);
+  reading.root = schema;
   // Shared limits every variant instance must satisfy under allOf semantics:
   // the outer wrapper's own keywords, each base member's (through its allOf
   // wrappers), and any written beside the `oneOf` itself — everything except

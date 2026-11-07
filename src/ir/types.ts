@@ -1363,9 +1363,17 @@ export interface Model {
    * oneOf: [{ $ref: Animal }, { type: 'null' }] }`) declares nothing of its
    * own, so the base is `Animal`. A `$ref` member
    * naming an enum, array or primitive component — which builds no model
-   * and contributes nothing to the fields — is no base; a member read
-   * again (`allOf: [{ $ref: A }, { $ref: A }]`, a component naming itself)
-   * is read once. A `$ref` member naming a named union — flattened into
+   * and contributes nothing to the fields — is no base. A `$ref` member
+   * whose component an earlier member's chain already read declares
+   * nothing more but is a direct base all the same: `allOf: [{ $ref:
+   * Animal }, { $ref: Living }]` over `Animal: { allOf: [{ $ref: Living }]
+   * }` has `[Animal, Living]`, and `[Living, Animal]` the other way
+   * round, the fields it carries naming the first member that declares
+   * them; the same `$ref` twice is one base, and a component naming
+   * itself, or an alias of itself, is no base of its own. A `…Json`
+   * component folded onto its base carries its bases with its fields,
+   * less one whose own chain reaches the folded model, which would close
+   * a cycle (see `collapseJsonSuffixModels`). A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher

@@ -489,7 +489,7 @@ describe('#591', () => {
         expect(modelNamed(spec, 'PetMeta').fields).toEqual(modelNamed(spec, 'AnimalMeta').fields);
       });
 
-      it('a member read again — the same $ref twice, or the component itself — is read once', async () => {
+      it('a member read again — the same $ref twice, or the component itself, or an alias of it — is no further base', async () => {
         const twice = { Animal: looseAnimal, Pet: { allOf: [R('Animal'), R('Animal')], properties: { nickname } } };
         expect(modelNamed(await parseJson(documentWith(openapi, twice)), 'Pet').bases).toEqual([ANIMAL]);
         const self = { Animal: looseAnimal, Pet: { allOf: [R('Animal'), R('Pet')], properties: { nickname } } };
@@ -499,6 +499,38 @@ describe('#591', () => {
           ['nickname', false, undefined],
           ['name', false, 'Animal'],
           ['species', false, 'Animal'],
+        ]);
+        const viaAlias = {
+          Animal: looseAnimal,
+          Hop: R('Pet'),
+          Pet: { allOf: [R('Animal'), R('Hop')], properties: { nickname } },
+        };
+        expect(modelNamed(await parseJson(documentWith(openapi, viaAlias)), 'Pet').bases).toEqual([ANIMAL]);
+      });
+
+      it('a direct $ref member another member’s chain already read is still a base, in either order (Greptile)', async () => {
+        const chain = {
+          Born: { type: 'object', properties: { born: { type: 'string' } } },
+          Living: { allOf: [R('Born')], properties: { alive: { type: 'boolean' } } },
+          Animal: { allOf: [R('Living')], required: ['name'], properties: { name: nameProperty } },
+        };
+        const first = { ...chain, Pet: { allOf: [R('Animal'), R('Living')], properties: { nickname } } };
+        const pet = modelNamed(await parseJson(documentWith(openapi, first)), 'Pet');
+        expect(pet.bases).toEqual([ANIMAL, model('Living')]);
+        expect(outline(pet)).toEqual([
+          ['nickname', false, undefined],
+          ['name', true, 'Animal'],
+          ['alive', false, 'Animal'],
+          ['born', false, 'Animal'],
+        ]);
+        const reordered = { ...chain, Pet: { allOf: [R('Living'), R('Animal')], properties: { nickname } } };
+        const swapped = modelNamed(await parseJson(documentWith(openapi, reordered)), 'Pet');
+        expect(swapped.bases).toEqual([model('Living'), ANIMAL]);
+        expect(outline(swapped)).toEqual([
+          ['nickname', false, undefined],
+          ['alive', false, 'Living'],
+          ['born', false, 'Living'],
+          ['name', true, 'Animal'],
         ]);
       });
 
@@ -569,6 +601,32 @@ describe('#591', () => {
         expect(outline(modelNamed(selfSpec, 'Pet'))).toEqual([
           ['extra', false, undefined],
           ['id', false, undefined],
+        ]);
+        // `PetJson` built on `Animal`, itself built on `Pet`: the fold would
+        // make `Pet` extend a model that extends it, so that base is dropped
+        // and `Animal` keeps its own (Greptile, round two).
+        const cyclic = {
+          Pet: { type: 'object', properties: { id: { type: 'string' } } },
+          Animal: { allOf: [R('Pet')], properties: { name: { type: 'string' } } },
+          PetJson: { allOf: [R('Animal')], properties: { extra: { type: 'string' } } },
+        };
+        const cyclicSpec = await parseJson(
+          documentWith(openapi, cyclic, {
+            ...issuePaths,
+            '/pets/{petId}/json': getting('getPetJson', 'petId', 'PetJson'),
+          }),
+        );
+        expect(cyclicSpec.models.map((m) => m.name)).toEqual(['Pet', 'Animal']);
+        expect(modelNamed(cyclicSpec, 'Pet').bases).toBeUndefined();
+        expect(outline(modelNamed(cyclicSpec, 'Pet'))).toEqual([
+          ['extra', false, undefined],
+          ['name', false, undefined],
+          ['id', false, undefined],
+        ]);
+        expect(modelNamed(cyclicSpec, 'Animal').bases).toEqual([model('Pet')]);
+        expect(outline(modelNamed(cyclicSpec, 'Animal'))).toEqual([
+          ['name', false, undefined],
+          ['id', false, 'Pet'],
         ]);
       });
 
@@ -679,6 +737,31 @@ describe('#591', () => {
           ['extra', false, undefined],
         ]);
       }
+    });
+
+    it('drops a base whose own chain reaches the folded model, so a fold never closes a cycle (Greptile, round two)', () => {
+      const models: Model[] = [
+        { name: 'Pet', fields: [field('id')] },
+        {
+          name: 'Animal',
+          fields: [field('name'), field('id', { inheritedFrom: model('Pet') })],
+          bases: [model('Pet')],
+        },
+        {
+          name: 'PetJson',
+          fields: [field('extra'), field('name', { inheritedFrom: ANIMAL }), field('id', { inheritedFrom: ANIMAL })],
+          bases: [ANIMAL],
+        },
+      ];
+      const merged = collapseJsonSuffixModels(models, []);
+      expect(merged.map((m) => m.name)).toEqual(['Pet', 'Animal']);
+      expect(merged[0]!.bases).toBeUndefined();
+      expect(outline(merged[0]!)).toEqual([
+        ['extra', false, undefined],
+        ['name', false, undefined],
+        ['id', false, undefined],
+      ]);
+      expect(merged[1]!.bases).toEqual([model('Pet')]);
     });
 
     it('leaves the base’s own bases behind when a plain `…Json` model folds onto it, as it leaves its variants', () => {
