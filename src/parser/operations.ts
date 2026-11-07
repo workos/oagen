@@ -6758,7 +6758,8 @@ function bodyModelNames(
  * bodies of one operation with one key are one body, named alike
  * (`stepSecondaryBody`) — a 202 identical to the 201 but for the flag
  * shares `CreatePetResponse201`, and the merge in `extractResponses` keeps
- * the live definition (#630) — and the reservation of a later body's names
+ * the 201's definition, live while either copy is (#630) — and the
+ * reservation of a later body's names
  * (`operationBodyModelNames`) asks the same question of the same schema.
  * Read silently (`rehearse`): the body reports its problems once, when it is
  * read.
@@ -7394,11 +7395,12 @@ function undescribedBodyType(): TypeRef {
  * them mint. Every 2xx body's models are kept, merged by name: a later
  * body's model of a kept name resolves to the kept definition when the two
  * are the same shape but for the model's own `deprecated`
- * (`shapeFingerprint`), the live definition kept whichever status code
- * declares it — a live 202 body identical to a deprecated 200 body types
- * both as a live `Pet`, as a deprecated 202 beside a live 200 does, and the
- * model is deprecated only when every copy is — and to the kept definition
- * with a warning when they differ in a field (#630).
+ * (`shapeFingerprint`), the kept definition — the primary's, its
+ * references and documentation with it — going live when any copy is, so
+ * a live 202 body identical to a deprecated 200 body types both as a live
+ * `Pet`, as a deprecated 202 beside a live 200 does, and the model is
+ * deprecated only when every copy is; and to the kept definition with a
+ * warning when they differ in a field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -7783,14 +7785,15 @@ function extractResponses(
   // its `successResponses` entry keeps the shape its status code declared
   // under a name no other status code's body decides. A model of a later
   // body the kept one shares (`shapeFingerprint`: the model's own
-  // `deprecated` apart) resolves to the kept definition silently — the live
-  // one when the two differ in the flag, whichever status code declares it,
-  // as the merge passes keep a live copy's definition across operations, so
-  // a live 202 body identical to a deprecated 200 body keeps a live `Pet`,
-  // deprecating either copy leaves no trace, and the model is deprecated
-  // only when every copy is (#630); only a clash on a model the stem does
-  // not name — a field more, a field's own flag, a limit — is still resolved
-  // to the kept definition, with a warning. The
+  // `deprecated` apart) resolves to the kept definition silently — the kept
+  // definition going live when only the flag tells the two apart, as a live
+  // copy owns a shared name across operations in the merge passes, so a
+  // live 202 body identical to a deprecated 200 body keeps a live `Pet`
+  // with the 200's references and documentation, deprecating either copy
+  // leaves no trace, and the model is deprecated only when every copy is
+  // (#630); only a clash on a model the stem does not name — a field more,
+  // a field's own flag, a limit — is still resolved to the kept definition,
+  // with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
@@ -7828,12 +7831,13 @@ function extractResponses(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
         );
       } else if (kept.model.deprecated && !model.deprecated) {
-        // Identical but for the model's own flag: the live copy owns the
-        // name, whichever status code declares it (#630). Every kept model
-        // was pushed when it was kept, so it is replaced in place and keeps
-        // the primary's position.
-        inlineModels[inlineModels.indexOf(kept.model)] = model;
-        keptByName.set(model.name, { model, status });
+        // Identical but for the model's own flag: the shared model is live
+        // while any copy is (#630). The kept definition stays — its
+        // references (an explicit `$ref` the primary wrote where this body
+        // nests an inline object of the same name, repointed apart by the
+        // merge passes) and its documentation with it — and only its flag
+        // goes; the live copy's object never replaces it.
+        delete kept.model.deprecated;
       }
     }
   }
@@ -7948,8 +7952,9 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * (`deferredNamingStem`, `later`: `CreatePetApplicationYamlResponse201`), a
  * candidate being taken when no name it would give is kept under another
  * shape (`shapeFingerprint`: the kept model's own `deprecated` apart, so a
- * copy identical but for the flag takes the name and the caller keeps the
- * live definition, #630), or owned in the spec-wide registry by a component
+ * copy identical but for the flag takes the name and the caller folds it
+ * onto the kept definition, live while any copy is, #630), or owned in the
+ * spec-wide registry by a component
  * or another operation, under a shape the owner does not share
  * (`ownerShares`), nor is a component response's body,
  * whichever operation returning it is read first (`CardResponse3` for `card`'s
@@ -7997,7 +8002,7 @@ function stepSecondaryBody(
     // steps past it whether or not an operation returning it came first.
     if (ownBody?.componentBodies.has(name)) return true;
     // A kept model's shape is read with its own `deprecated` apart: a copy
-    // identical to it but for the flag is folded onto the live definition by
+    // identical to it but for the flag is folded onto the kept definition by
     // the caller (#630), not stepped past.
     const keptModel = kept.get(name)?.model;
     if (keptModel && shapeFingerprint(keptModel) !== shapeFingerprint(model)) return true;
