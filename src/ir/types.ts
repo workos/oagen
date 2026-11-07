@@ -1116,6 +1116,21 @@ export interface LiteralType {
 
 export interface UnionType {
   kind: 'union';
+  /**
+   * The variants, in the document's order: a `oneOf`/`anyOf`'s non-null
+   * variants, or — for an OAS 3.1 type list naming several types (`type:
+   * ['object', 'string']`) — one per non-null type in the list's order,
+   * each the schema read as that type alone: keeping the keywords that
+   * apply to an instance of it (`properties` for the object, `items` for
+   * an array, `format` and `pattern` for a string; `const`, `enum` and a
+   * composition for every type) and left out when the schema's
+   * `allOf`/`oneOf`/`anyOf` admits no instance of it (#616). `{ type:
+   * ['object', 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string`
+   * when `Owner` declares `properties` and no `type`, and `Owner` alone —
+   * no union — when `Owner` is `type: 'object'`, which no string
+   * satisfies. Never one type twice: copies typed alike are one variant,
+   * and a lone variant is the type itself.
+   */
   variants: TypeRef[];
   /**
    * When set, the union is discriminated on `property`, and `mapping` names
