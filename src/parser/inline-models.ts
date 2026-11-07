@@ -971,7 +971,12 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * nothing: the Paths Object's (an extension by the specification, which
  * `extractOperations` steps over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification, which `extractCallbacks` steps over). Decided from the document's content
+ * the specification, which `extractCallbacks` steps over). An object
+ * written as a `$ref` — a parameter, request body, response or header, a
+ * path item or a callback — is stepped over whole, as the readers step
+ * over it, so a union under a `content` or `headers` written beside the
+ * `$ref` is under no root and contests nothing, whether the ref resolves
+ * or not (#601). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
  * document, before any union is named (`extractSchemas`), so the union
  * TypeRef and every extractor read the same decision. `undefined` clears
@@ -1050,10 +1055,23 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * (#382). A `$ref` entry
  * anywhere carries no schema of its own: the target is a component, or
  * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
- * read under its own map. A `schema` is yielded and not entered, so one
- * shared by two sites is yielded for each; every other object is entered once, which
- * ends the walk on a document that refers back to itself. `example`,
- * `examples`, `links` and extensions are never entered.
+ * read under its own map, and the object around the `$ref` is stepped
+ * over whole, as the readers step over it — a Parameter, Header, Request
+ * Body or Response Object written as a Reference Object, whose every other
+ * key OpenAPI says to ignore (`followReference`, #562), a Path Item's
+ * `$ref` entry, whose target is taken whole (`resolvePathItemRef`), and a
+ * Callback Object's (`resolveCallbackRef`) — so a `schema`, `content` or
+ * `headers` written beside the `$ref` is never read, whether the ref
+ * resolves or not, at every site that takes one: on an operation, a
+ * webhook or a callback, and as a `components` entry itself (#601: a
+ * titled union under a `content` beside a `404`'s `$ref` contested the
+ * `Tag` of a component's `collar` and renamed it `TagPetCollar`, though
+ * the parser typed nothing from it). A `$ref` key holding `undefined` is
+ * no reference, as `followReference` reads it. A `schema` is yielded and
+ * not entered, so one shared by two sites is yielded for each; every other
+ * object is entered once, which ends the walk on a document that refers
+ * back to itself. `example`, `examples`, `links` and extensions are never
+ * entered.
  */
 function schemaRootsOf(
   document: Record<string, unknown>,
@@ -1093,31 +1111,43 @@ function schemaRootsOf(
     schema(value['schema']);
     named(value['encoding'], encoding);
   };
+  /**
+   * Whether `value` is written as a reference: a `$ref` with a value, which
+   * the readers follow to its target and read nothing else of, so every
+   * key beside it is stepped over (#601). A `$ref` holding `undefined` is
+   * no reference, as `followReference` reads it.
+   */
+  const isReference = (value: Record<string, unknown>): boolean => value['$ref'] !== undefined;
   /** A Parameter Object or a Header Object: the same schema sites. */
   const parameter = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     schema(value['schema']);
     named(value['content'], mediaType);
   };
   const requestBody = (value: unknown): void => {
-    if (enter(value)) named(value['content'], mediaType);
+    if (enter(value) && !isReference(value)) named(value['content'], mediaType);
   };
   const response = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     named(value['headers'], parameter);
     named(value['content'], mediaType);
   };
   const pathItem = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     listed(value['parameters'], parameter);
     for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
+  };
+  /** A Callback Object: an expression or an `x-` extension per key, each a Path Item; one written as a reference is stepped over. */
+  const callback = (value: unknown): void => {
+    if (isRecord(value) && isReference(value)) return;
+    keyed(value, pathItem);
   };
   const operation = (value: unknown): void => {
     if (!enter(value)) return;
     listed(value['parameters'], parameter);
     requestBody(value['requestBody']);
     keyed(value['responses'], response);
-    named(value['callbacks'], (callback) => keyed(callback, pathItem));
+    named(value['callbacks'], callback);
   };
 
   // `paths` steps over `x-` extensions, as `extractOperations` does; every
@@ -1130,7 +1160,7 @@ function schemaRootsOf(
     named(components['requestBodies'], requestBody);
     named(components['headers'], parameter);
     named(components['pathItems'], pathItem);
-    named(components['callbacks'], (callback) => keyed(callback, pathItem));
+    named(components['callbacks'], callback);
   }
   return roots;
 }
