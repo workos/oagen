@@ -69,8 +69,13 @@ export function collectSnippetArgs(
 
   const collisionNames = new Set<string>();
   const bodyWireNames = new Set<string>();
-  if (op.requestBody?.kind === 'model') {
-    const bodyModel = findModel(ctx, op.requestBody.name);
+  // The body under any nullable wrapper: a `$ref` to a component that
+  // admits `null`, like the same object written inline, is
+  // `nullable<model>` (#615), and its required fields are the call's
+  // arguments all the same.
+  const body = op.requestBody?.kind === 'nullable' ? op.requestBody.inner : op.requestBody;
+  if (body?.kind === 'model') {
+    const bodyModel = findModel(ctx, body.name);
     if (bodyModel) {
       for (const f of bodyModel.fields) {
         if (!f.required || f.deprecated) continue;

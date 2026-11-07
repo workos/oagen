@@ -385,7 +385,18 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * were read by the model alone, and the body was that model, no list). The
  * array must be there whichever variant the wire sends — a member's, or
  * declared by every non-null variant (`carried`), as an explicit `dataPath`
- * is resolved through the union (`resolveDataPathArray`) — while a
+ * is resolved through the union (`resolveDataPathArray`) — and it must be
+ * the array the companion walk reads at that name
+ * (`collectObjectProperties`, `onEveryInstance`), the one
+ * `extractListResponse` unwraps on: a declaration a `$ref` member's
+ * component or a nested `allOf` member makes — which detection does not
+ * read — stands over the variants' there as in the model
+ * (`declareProperty`: an always-applying declaration, typeless or not,
+ * over a branch-only one), so `Base: { data: { description } }` beside
+ * `oneOf: [{ data: integer[] }, …]` is no envelope but the model (PR #643
+ * review round 3: it was unwrapped on an array the walk had no items for,
+ * and the response was `string[]`), while `Base: { data: integer[] }` is
+ * unwrapped on `Base`'s array — while a
  * companion may be any variant's: a stop field only some variants declare,
  * or one they type differently, still marks the envelope, as an optional
  * `has_more` written flat does, and `detectEndOfIteration` then finds no
@@ -398,11 +409,17 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * the variants are read only for an `allOf` the parser merges (PR #643
  * review: a lone union member was read as a merge here, detected as an
  * envelope, and extracted off a walk that saw no field — `string[]` with
- * no companions). A `$ref` member, and a nullable wrapper a member writes
- * (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the member by
- * the companion walk and the model), are not read here, as before: a body
- * whose array or companion sits in one is the wrapper an explicit
- * `dataPath` keeps (workos/oagen#308).
+ * no companions). A `$ref` member — and whatever is written beside its
+ * `$ref` (`{ $ref: Base, oneOf: [A, B] }`, `{ $ref: Base, properties }`),
+ * which the model (`mergeAllOfMembers`) and the companion walk
+ * (`collectObjectProperties`) ignore for the component the reference names
+ * (PR #643 review round 2: a union beside the `$ref` was read here, so a
+ * `data` every variant declared marked an envelope the walk had no `data`
+ * in, and the response was `string[]`) — and a nullable wrapper a member
+ * writes (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the
+ * member by the companion walk and the model) are not read here, as
+ * before: a body whose array or companion sits in one is the wrapper an
+ * explicit `dataPath` keeps (workos/oagen#308).
  */
 function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema), and
@@ -416,6 +433,9 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
     classifyInlineSchema(schema) === 'allOf' &&
     readInlineAllOf(schema.allOf, schema, componentSchemas) === 'merged';
   for (const sub of schema.allOf ?? []) {
+    // A `$ref` member is its component, whatever is written beside the
+    // reference, as the model and the walk read it.
+    if (sub.$ref) continue;
     if (sub.properties) propSources.push(sub.properties);
     if (!merges) continue;
     for (const variants of unionAxesOf(sub)) {
@@ -467,10 +487,12 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
   // properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
+  const isArrayDeclaration = (declaration: SchemaObject): boolean =>
+    arraySchemaOf(declaration) !== undefined || isArrayComponentRef(declaration) || isArrayPointerRef(declaration);
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (arraySchemaOf(propSchema) || isArrayComponentRef(propSchema) || isArrayPointerRef(propSchema)) {
+    if (isArrayDeclaration(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -488,6 +510,14 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
     // wire sends; one only some variants declare leaves the body the model
     // it is, the array an optional field of it.
     if (!onEveryInstance(arrayPropName)) return { isEnvelope: false, dataPath: null };
+    // And it must be the array the companion walk reads at that name, the
+    // one `extractListResponse` unwraps on: a declaration a `$ref` member's
+    // component or a nested `allOf` member makes, which detection does not
+    // read, stands over the variants' there as in the model, so a typeless
+    // or object `data` in `Base` beside variants typing it `integer[]`
+    // leaves the body the model it is.
+    const walked = collectObjectProperties(schema, componentSchemas).onEveryInstance[arrayPropName];
+    if (walked === undefined || !isArrayDeclaration(walked)) return { isEnvelope: false, dataPath: null };
 
     // A companion is pagination metadata when it is one of the stop fields
     // the end-of-iteration detector reads, in any spelling (`hasMore`,
