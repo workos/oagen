@@ -6614,6 +6614,9 @@ function operationBodyModelNames(
           // warns about it once when it reads it (#617).
           if (!isResponseEntry(response)) return [];
           const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
+          // A ref whose chain ends on a component that is no object is left
+          // out, as the operation leaves it out (#617).
+          if (resolved === undefined) return [];
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
         const primaryCode = primaryResponseEntry(entries, componentSchemas)?.code;
@@ -6645,9 +6648,10 @@ function componentResponseBodySchema(
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
   const component = componentResponses[componentName];
-  // A component that is not an object (`Bad: "oops"`) declares no body; a
-  // `$ref` to it is reported by the operation that writes it, as a ref
-  // nothing answers (#617).
+  // A component that is not an object (`Bad: "oops"`) declares no body, and
+  // neither does one whose chain ends on such a component; a `$ref` to
+  // either is reported by the operation that writes it, as the malformed
+  // entry it is (#617).
   if (!isResponseEntry(component)) return undefined;
   const resolved = resolveResponseRef<ResponseObject>(
     component as ResponseObject | ReferenceObject,
@@ -6656,7 +6660,7 @@ function componentResponseBodySchema(
     'override',
     'silent',
   );
-  return primaryBodySchema(resolved).schema;
+  return resolved === undefined ? undefined : primaryBodySchema(resolved).schema;
 }
 
 /**
@@ -7072,6 +7076,9 @@ function readFallbackResponse(
     `${key} response of ${sink.opLabel}`,
     sink.ctx.refSiblingDescriptions,
   );
+  // A ref whose chain ends on a component that is no object is left out,
+  // after the warning, as an inline entry that is no object is (#617).
+  if (resolved === undefined) return;
   // A ref into `components/responses` names the body after the component,
   // as it does at a status code, so every operation that returns the
   // component — at any status, `default` or a range — shares one model; its
@@ -7419,40 +7426,45 @@ function extractResponses(
   // warned about once and read as absent, as for an operation that declares
   // none (#617).
   if (responses !== undefined && !isResponsesObject(responses, opLabel)) responses = undefined;
-  // An entry that is not an object — `200: "oops"`, `null`, `7`, `true`,
-  // `[]` — is no Response Object and no Reference Object, so no branch
-  // below could read it: it is warned about once, naming the operation and
-  // the key, and left out, and the operation is read from its other entries
-  // (#617). Only a key a branch reads is checked: an `x-` key is an
-  // extension, which may hold anything, and a key OpenAPI does not define
-  // is reported on its own (`readFallbackResponse`), whatever it holds.
-  const entries = Object.entries(responses ?? {}).filter(([key, raw]) => {
-    const kind = classifyResponseKey(key).kind;
-    return kind === 'extension' || kind === 'unrecognized' || isResponseEntry(raw, `${key} response of ${opLabel}`);
-  });
-
-  // Every 2xx, 3xx and error entry is resolved once, here, and the loop
-  // below reads it from this map. The bundler leaves `$ref:
+  // One pass over the map decides what the loop below reads, in document
+  // order. An entry that is not an object — `200: "oops"`, `null`, `7`,
+  // `true`, `[]` — is no Response Object and no Reference Object, so no
+  // branch below could read it: it is warned about once, naming the
+  // operation and the key, and left out, and the operation is read from its
+  // other entries (#617). Only a key a branch reads is checked: an `x-` key
+  // is an extension, which may hold anything, and a key OpenAPI does not
+  // define is reported on its own (`readFallbackResponse`), whatever it
+  // holds. Every 2xx, 3xx and error entry is then resolved once, here, and
+  // the loop reads it from `resolvedResponses`. The bundler leaves `$ref:
   // '#/components/responses/…'` in place, and a Reference Object has no
   // `headers` or `content` of its own to read, so the ref is resolved before
   // either is — its sibling `description` read by `ctx.refSiblingDescriptions`,
-  // an unresolvable one warned about once. Only a status code one of the
-  // branches below reads is resolved: `default`, a `2XX` range and an `x-`
-  // extension are left as written, as nothing here reads them, and a 1xx is
-  // read as written too.
+  // an unresolvable one warned about once, and one whose chain ends on a
+  // component that is no object (`Gone: []`) left out exactly as the inline
+  // entry is, after the same warning (`resolveResponseRef`). Only a status
+  // code one of the branches below reads is resolved here: `default` and a
+  // `2XX` range are resolved as they are read (`readFallbackResponse`), an
+  // `x-` extension is left as written, as nothing here reads it, and a 1xx
+  // is read as written too.
+  const entries: Array<[string, ResponseObject]> = [];
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of entries) {
-    const responseKey = classifyResponseKey(statusCode);
-    if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
-    resolvedResponses.set(
-      statusCode,
-      resolveResponseRef<ResponseObject>(
-        rawResponse,
-        ctx.componentResponses,
-        `${statusCode} response of ${opLabel}`,
-        ctx.refSiblingDescriptions,
-      ),
-    );
+  for (const [key, raw] of Object.entries(responses ?? {})) {
+    const responseKey = classifyResponseKey(key);
+    if (responseKey.kind !== 'extension' && responseKey.kind !== 'unrecognized') {
+      const site = `${key} response of ${opLabel}`;
+      if (!isResponseEntry(raw, site)) continue;
+      if (responseKey.kind === 'status' && responseKey.code >= 200) {
+        const resolved = resolveResponseRef<ResponseObject>(
+          raw,
+          ctx.componentResponses,
+          site,
+          ctx.refSiblingDescriptions,
+        );
+        if (resolved === undefined) continue;
+        resolvedResponses.set(key, resolved);
+      }
+    }
+    entries.push([key, raw]);
   }
 
   // The override is accepted or rejected once, before any body is
