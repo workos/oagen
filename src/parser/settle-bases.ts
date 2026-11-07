@@ -1,6 +1,17 @@
-import type { Field, Model, TypeRef } from '../ir/types.js';
-import { walkTypeRef } from '../ir/types.js';
-import { stableStringify, typeShapeKey } from './inline-models.js';
+import type {
+  ArrayType,
+  EnumRef,
+  Field,
+  MapType,
+  Model,
+  ModelRef,
+  NullableType,
+  TypeRef,
+  UnionType,
+} from '../ir/types.js';
+import { assertNever } from '../ir/types.js';
+import { shapeWithEnumFlags } from './enum-members.js';
+import { stableStringify } from './inline-models.js';
 import { isComponentModelRef } from './schemas.js';
 
 /**
@@ -25,7 +36,7 @@ import { isComponentModelRef } from './schemas.js';
  *    one the model carries: same keys, same values, the type read as its
  *    final shape — an inline model built under either model (`PetMeta`,
  *    `AnimalMeta`) as it ends, an inline enum by its values, a component
- *    by name (`fieldKey`). A fold that loosens a base after the
+ *    by name (`sameField`). A fold that loosens a base after the
  *    model took its fields — `AnimalJson` declaring `name` optional beside
  *    `extra`, folded onto an `Animal` requiring `name`, under `Pet: { allOf:
  *    [{ $ref: Animal }] }` — leaves `Pet.name` required and `Pet` without
@@ -53,7 +64,7 @@ export function settleBases(models: readonly Model[]): void {
       for (const field of model.fields) {
         if (field.inheritedFrom?.kind !== 'model' || field.inheritedFrom.name !== target.name) continue;
         const inherited = target.fields.find((own) => own.name === field.name);
-        if (!inherited || fieldKey(field, byName, new Set()) !== fieldKey(inherited, byName, new Set())) {
+        if (!inherited || !sameField(field, inherited, byName, new Map())) {
           delete field.inheritedFrom;
         }
       }
@@ -105,51 +116,119 @@ function dropBase(model: Model, name: string): void {
 }
 
 /**
- * A field as it compares with the base's (step 3): every key but
- * `inheritedFrom`, the type read as its final shape (`typeKey`) — a
- * reference to an inline model built under either model (`PetMeta`,
- * `AnimalMeta`) stands for that model as it ends, read the same way in
- * turn (its fields each by this key, its own keys beside them, a model
- * reached again on the way marked as such), a reference to a component
- * by name (`isComponentModelRef`: the same model on both sides), an
- * inline enum by its values and their flags alone (`typeShapeKey`
- * carries them), a component enum by name — so a fold that changes a
- * nested model under the base (`AnimalMetaJson` onto `AnimalMeta`) is told
- * from a name that only differs by the model it was built under, and an
- * unchanged inline enum (`PetStatus` beside `AnimalStatus`) compares
- * equal (Greptile review, round six).
+ * Whether two fields are one field (step 3): every key but `inheritedFrom`
+ * the same, and the type the same final shape (`sameType`) — a reference
+ * to an inline model built under either model (`PetMeta`, `AnimalMeta`)
+ * standing for that model as it ends, compared the same way in turn
+ * (`sameModel`: its fields each by this test, its own keys beside them,
+ * a pair of models met again on the way taken as one), a reference to a
+ * component by name (`isComponentModelRef`: the same model on both sides),
+ * an inline enum by its values and their flags alone, a component enum
+ * by name — so a fold that changes a nested model under the base
+ * (`AnimalMetaJson` onto `AnimalMeta`) is told from a name that only
+ * differs by the model it was built under, and an unchanged inline enum
+ * (`PetStatus` beside `AnimalStatus`) compares equal (Greptile review,
+ * round six). Compared as values, never through a serialized key that
+ * embeds a child's — which grew with each level of nesting (round seven).
  */
-function fieldKey(field: Field, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
-  const { inheritedFrom: _origin, type, ...rest } = field;
-  return stableStringify({ ...rest, type: typeKey(type, byName, visiting) });
+function sameField(a: Field, b: Field, byName: ReadonlyMap<string, Model>, seen: ComparedPairs): boolean {
+  const { inheritedFrom: _originA, type: typeA, ...restA } = a;
+  const { inheritedFrom: _originB, type: typeB, ...restB } = b;
+  return stableStringify(restA) === stableStringify(restB) && sameType(typeA, typeB, byName, seen);
 }
 
-/** A type's final shape as `fieldKey` reads it. */
-function typeKey(type: TypeRef, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
-  const components = new Set<string>();
-  walkTypeRef(type, {
-    model: (ref) => {
-      if (isComponentModelRef(ref)) components.add(ref.name);
-    },
-  });
-  const readModelName = (name: string): string => {
-    const target = components.has(name) ? undefined : byName.get(name);
-    if (!target) return name;
-    if (visiting.has(name)) return '<itself>';
-    visiting.add(name);
-    const key = modelKey(target, byName, visiting);
-    visiting.delete(name);
-    return key;
-  };
-  return typeShapeKey(type, { readModelName, readEnumName: () => '' });
+/** The pairs of models `sameModel` has entered, by identity: a pair met again on the way is one being compared, and is taken as one. */
+type ComparedPairs = Map<Model, Set<Model>>;
+
+/** Whether two types are one final shape, as `sameField` reads them. */
+function sameType(a: TypeRef, b: TypeRef, byName: ReadonlyMap<string, Model>, seen: ComparedPairs): boolean {
+  if (a.kind !== b.kind) return false;
+  switch (a.kind) {
+    case 'primitive':
+    case 'literal':
+      return stableStringify(a) === stableStringify(b);
+    case 'array': {
+      const other = b as ArrayType;
+      return sameLimits(a.constraints, other.constraints) && sameType(a.items, other.items, byName, seen);
+    }
+    case 'nullable':
+      return sameType(a.inner, (b as NullableType).inner, byName, seen);
+    case 'map': {
+      const other = b as MapType;
+      if (!sameLimits(a.constraints, other.constraints)) return false;
+      if ((a.keyType === undefined) !== (other.keyType === undefined)) return false;
+      if (a.keyType && other.keyType && !sameType(a.keyType, other.keyType, byName, seen)) return false;
+      return sameType(a.valueType, other.valueType, byName, seen);
+    }
+    case 'union': {
+      const other = b as UnionType;
+      const { variants: _va, ...restA } = a;
+      const { variants: _vb, ...restB } = other;
+      if (stableStringify(restA) !== stableStringify(restB)) return false;
+      return sameTypes(a.variants, other.variants, byName, seen);
+    }
+    case 'enum': {
+      const other = b as EnumRef;
+      if (a.values === undefined && other.values === undefined) return a.name === other.name;
+      return stableStringify(enumMembers(a)) === stableStringify(enumMembers(other));
+    }
+    case 'model': {
+      const other = b as ModelRef;
+      if (isComponentModelRef(a) || isComponentModelRef(other)) return a.name === other.name;
+      const modelA = byName.get(a.name);
+      const modelB = byName.get(other.name);
+      if (!modelA || !modelB) return a.name === other.name;
+      return sameModel(modelA, modelB, byName, seen);
+    }
+    default:
+      return assertNever(a);
+  }
 }
 
-/** An inline model as `fieldKey` reads a reference to it: its own keys but its name and bases, its fields each by `fieldKey`, its variants each by `typeKey`. */
-function modelKey(model: Model, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
-  const { name: _name, bases: _bases, fields, variants, ...rest } = model;
-  return stableStringify({
-    ...rest,
-    fields: fields.map((field) => fieldKey(field, byName, visiting)),
-    ...(variants ? { variants: variants.map((variant) => typeKey(variant, byName, visiting)) } : {}),
-  });
+/** Whether two type lists are one, pairwise. */
+function sameTypes(
+  a: readonly TypeRef[],
+  b: readonly TypeRef[],
+  byName: ReadonlyMap<string, Model>,
+  seen: ComparedPairs,
+): boolean {
+  return a.length === b.length && a.every((type, index) => sameType(type, b[index]!, byName, seen));
+}
+
+/** Whether two sets of limits are one. */
+function sameLimits(a: unknown, b: unknown): boolean {
+  return stableStringify(a ?? null) === stableStringify(b ?? null);
+}
+
+/** An inline enum's members as `sameType` compares them: its values and, among them, the deprecated ones (`shapeWithEnumFlags`), its name set aside. */
+function enumMembers(ref: EnumRef): unknown {
+  const { name: _name, ...members } = shapeWithEnumFlags(ref) as EnumRef & { deprecatedValues?: unknown };
+  return members;
+}
+
+/**
+ * Whether two inline models are one final shape: their own keys but the
+ * name and the bases the same, the same field names, each field one by
+ * `sameField`, and the same variants in order. A pair entered again on
+ * the way — a model that reaches itself through a field — is taken as
+ * one, so the walk ends; a difference found anywhere still answers for
+ * the whole.
+ */
+function sameModel(a: Model, b: Model, byName: ReadonlyMap<string, Model>, seen: ComparedPairs): boolean {
+  if (a === b) return true;
+  let pairs = seen.get(a);
+  if (pairs?.has(b)) return true;
+  if (!pairs) seen.set(a, (pairs = new Set()));
+  pairs.add(b);
+  const { name: _nameA, bases: _basesA, fields: fieldsA, variants: variantsA, ...restA } = a;
+  const { name: _nameB, bases: _basesB, fields: fieldsB, variants: variantsB, ...restB } = b;
+  if (stableStringify(restA) !== stableStringify(restB)) return false;
+  if (fieldsA.length !== fieldsB.length) return false;
+  const byField = new Map(fieldsB.map((field) => [field.name, field]));
+  for (const field of fieldsA) {
+    const other = byField.get(field.name);
+    if (!other || !sameField(field, other, byName, seen)) return false;
+  }
+  if ((variantsA === undefined) !== (variantsB === undefined)) return false;
+  return !variantsA || !variantsB || sameTypes(variantsA, variantsB, byName, seen);
 }

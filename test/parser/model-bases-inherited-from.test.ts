@@ -740,6 +740,32 @@ describe('#591', () => {
         ]);
       });
 
+      it('an inline object nested six levels deep under an inherited field is compared in linear time (Greptile, round seven)', async () => {
+        let leaf: Record<string, unknown> = { type: 'string' };
+        for (let level = 6; level >= 1; level--) {
+          leaf = {
+            type: 'object',
+            required: [`l${level}`],
+            properties: { [`l${level}`]: leaf, [`s${level}`]: { type: 'string' } },
+          };
+        }
+        const schemas = {
+          Animal: { type: 'object', properties: { meta: leaf, name: nameProperty } },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const started = performance.now();
+        const spec = await parseJson(documentWith(openapi, schemas));
+        expect(performance.now() - started).toBeLessThan(10_000);
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toEqual([ANIMAL]);
+        expect(pet.fields.map((f) => [f.name, refName(f.type) ?? f.type.kind, refName(f.inheritedFrom)])).toEqual([
+          ['nickname', 'primitive', undefined],
+          ['meta', 'PetMeta', 'Animal'],
+          ['name', 'primitive', 'Animal'],
+        ]);
+        expect(spec.models.map((m) => m.name).filter((name) => name.startsWith('PetMeta')).length).toBe(6);
+      });
+
       it('an inline enum the base declares is inherited under the model’s own enum name (Greptile, round six)', async () => {
         const schemas = {
           Kind: { type: 'string', enum: ['cat', 'dog'] },
