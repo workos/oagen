@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec, type ParseOptions } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
 import type { ApiSpec, Model, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -657,6 +658,132 @@ describe('#619', () => {
           const spec = await parseJson(documentWith(openapi, schemas, { ...paths, '/shelter': shelterDogEnumListing }));
           expect(fieldType(spec, 'Shelter', 'dog')).toEqual(model('ShelterDog2'));
           expectAll(spec, 'ShelterDog2');
+        });
+      });
+
+      describe('a component target that is an alias of a pointer (MichaelDeBoey, review round 1)', () => {
+        // The bundler follows `Hound` to the pointed schema and rewrites the entry to the component it hoists it into;
+        // the entry is written back and read through the alias, so it names what the alias stands for and no `Dog` is built.
+        const HOUND = '#/components/schemas/Hound';
+        const aliased = (extra: Record<string, unknown> = {}) =>
+          components(openapi, { Hound: { $ref: SHELTER_DOG }, ...extra });
+        const homes = { '/homes/{id}': getOp('getHome', '#/components/schemas/Home') };
+
+        it('names the pointer variant’s model, as the pointer spelling does, as a component and inline', async () => {
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              aliased({
+                Pet: union({ cat: CAT, dog: HOUND }, [CAT, SHELTER_DOG]),
+                Home: { type: 'object', properties: { pet: union({ cat: CAT, dog: HOUND }, [CAT, SHELTER_DOG]) } },
+              }),
+              { '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'), ...homes },
+            ),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ShelterDog')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } });
+          expect(fieldType(spec, 'Home', 'pet')).toEqual({
+            kind: 'union',
+            variants: [model('Cat'), model('ShelterDog')],
+            compositionKind: 'oneOf',
+            discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } },
+          });
+          expect(modelNames(spec)).toEqual(['Cat', 'Home', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('reads as the pointer spelling reads, so `oagen diff` between the two reports no change', async () => {
+          const asAlias = await parseJson(
+            documentWith(openapi, aliased({ Pet: union({ cat: CAT, dog: HOUND }, [CAT, SHELTER_DOG]) })),
+          );
+          const asPointer = await parseJson(
+            documentWith(openapi, aliased({ Pet: union({ cat: CAT, dog: SHELTER_DOG }, [CAT, SHELTER_DOG]) })),
+          );
+          const { changes, summary } = diffSpecs(asAlias, asPointer);
+          expect(changes).toEqual([]);
+          expect(summary.breaking).toBe(0);
+          expect(modelNames(asAlias)).toEqual(modelNames(asPointer));
+        });
+
+        it('settles an alias of a pointer outside the variants to the pointed schema’s model', async () => {
+          const spec = await parseJson(documentWith(openapi, aliased({ Pet: union({ cat: CAT, dog: HOUND }) })));
+          const pet = modelOf(spec, 'Pet');
+          expect(variantNames(pet)).toEqual(['Cat', 'ZooDog']);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } });
+          expect(modelNames(spec)).toEqual(['Cat', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('names the alias itself when the alias is the variant', async () => {
+          const spec = await parseJson(
+            documentWith(openapi, aliased({ Pet: union({ cat: CAT, dog: HOUND }, [CAT, HOUND]) })),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(variantNames(pet)).toEqual(['Cat', 'Hound']);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Hound' } });
+          expect(modelNames(spec)).toEqual(['Cat', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('names the component an alias of a component stands for, as the bundler’s rewrite did', async () => {
+          const spec = await parseJson(
+            documentWith(openapi, aliased({ Hound: { $ref: CAT }, Pet: union({ cat: CAT, dog: HOUND }) })),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(variantNames(pet)).toEqual(['Cat', 'ZooDog']);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Cat' } });
+          expect(modelNames(spec)).toEqual(['Cat', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('follows a chain of aliases to the pointer variant’s model', async () => {
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              aliased({
+                Mutt: { $ref: HOUND },
+                Pet: union({ cat: CAT, dog: '#/components/schemas/Mutt' }, [CAT, SHELTER_DOG]),
+              }),
+            ),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(variantNames(pet)).toEqual(['Cat', 'ShelterDog']);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } });
+          expect(modelNames(spec)).toEqual(['Cat', 'Hound', 'Mutt', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('types an inline variant the entry redirects to the alias as the pointed schema’s model', async () => {
+          const inlineDog = {
+            ...animal('dog', openapi),
+            properties: { ...animal('dog', openapi).properties, bark: { type: 'string' } },
+          };
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              aliased({
+                Pet: {
+                  oneOf: [{ $ref: CAT }, inlineDog],
+                  discriminator: { propertyName: 'kind', mapping: { cat: CAT, dog: HOUND } },
+                },
+              }),
+            ),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('ShelterDog')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog' } });
+          expect(modelNames(spec)).toEqual([
+            'Cat',
+            'Hound',
+            'Pet',
+            'PetWithKind',
+            'Shelter',
+            'ShelterDog',
+            'Zoo',
+            'ZooDog',
+          ]);
+          expect(warnings()).toEqual([]);
         });
       });
     });

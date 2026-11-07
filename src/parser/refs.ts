@@ -15,8 +15,8 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
   const content = await readFile(absolutePath, 'utf-8');
   const document = makeDocumentFromString(content, pathToFileURL(absolutePath).href);
   // The bundler rewrites the document in place, so what it rewrites is
-  // recorded first and written back once it is done (see `PointerMappingTarget`).
-  const pointerTargets = recordPointerMappingTargets(document.parsed);
+  // recorded first and written back once it is done (see `SchemaMappingTarget`).
+  const mappingTargets = recordSchemaMappingTargets(document.parsed);
   const ownSchemaKeys = new Set(Object.keys(componentSchemasOf(document.parsed) ?? {}));
 
   const config = await createConfig({});
@@ -42,33 +42,37 @@ export async function loadAndBundleSpec(specPath: string): Promise<BundledSpec> 
   }
 
   const parsed = result.bundle.parsed as Record<string, unknown>;
-  restorePointerMappingTargets(parsed, pointerTargets, ownSchemaKeys);
+  restoreSchemaMappingTargets(parsed, mappingTargets, ownSchemaKeys);
   return { parsed, specPath: absolutePath };
 }
 
 /**
- * A discriminator `mapping` entry whose target is a JSON Pointer deeper
- * into a component (`dog: '#/components/schemas/Shelter/properties/dog'`;
- * #539, #619), as the document spells it. The bundler hoists every such
- * target into a component of its own, named by the pointer's last token
- * (`dog`: the very object `Shelter.dog` is, not a copy, stepped to `dog-2`
- * when a component `dog` of another shape exists), and rewrites the entry
- * to `#/components/schemas/dog` (`DiscriminatorMapping.leave` in
- * `@redocly/openapi-core`'s bundle visitor), while a variant written as the
- * same pointer is left as written. Read so, the entry would name the model
- * built for the component the bundler added (`Dog`), which no variant,
- * field or operation references, instead of the model built for the
- * schema it points at (`ShelterDog`). So every such entry is recorded
- * before the bundle (`recordPointerMappingTargets`) and written back after
- * it, the component the bundler added for it dropped
- * (`restorePointerMappingTargets`): the parser reads the entry as the
- * document wrote it — as it reads one `transformSpec` writes — and settles
- * it to the model the pointed schema is built as
- * (`deferPointerMappingEntries`). A target that is a pointer into another
- * section of the document, or into another file, is no schema `$ref` the
- * parser follows, and is left to the bundler.
+ * A discriminator `mapping` entry whose target is a `$ref` into
+ * `components/schemas`, as the document spells it (#539, #619). The bundler
+ * follows every such target to the schema it stands for — through a
+ * component that is an alias (`Hound: { $ref: '#/components/schemas/
+ * Shelter/properties/dog' }`; #619 review) — and, when that schema is no
+ * component of its own, hoists it into a component named by its pointer's
+ * last token (`dog`: the very object `Shelter.dog` is, not a copy, stepped
+ * to `dog-2` when a component `dog` of another shape exists) and rewrites
+ * the entry to it (`DiscriminatorMapping.leave` in `@redocly/openapi-core`'s
+ * bundle visitor): `dog: '#/components/schemas/Shelter/properties/dog'`
+ * and `dog: '#/components/schemas/Hound'` alike become `#/components/
+ * schemas/dog`, and an alias of a component the component it aliases,
+ * while a variant written as the same pointer or alias is left as written.
+ * Read so, the entry would name the model built for the component the
+ * bundler added (`Dog`), which no variant, field or operation references,
+ * instead of the model built for the schema it stands for (`ShelterDog`).
+ * So every such entry is recorded before the bundle
+ * (`recordSchemaMappingTargets`) and written back after it, the component
+ * the bundler added for it dropped (`restoreSchemaMappingTargets`): the
+ * parser reads the entry as the document wrote it — as it reads one
+ * `transformSpec` writes — and settles it to the model the schema it
+ * stands for is built as (`deferPointerMappingEntries`). A target that is
+ * a pointer into another section of the document, or into another file,
+ * is no schema `$ref` the parser follows, and is left to the bundler.
  */
-interface PointerMappingTarget {
+interface SchemaMappingTarget {
   /** The `mapping` object, which the bundler rewrites in place. */
   mapping: Record<string, unknown>;
   /** The discriminator value the entry is for. */
@@ -77,14 +81,14 @@ interface PointerMappingTarget {
   target: string;
 }
 
-/** Every pointer mapping target under `document` (see `PointerMappingTarget`), before the bundler reads it. */
-function recordPointerMappingTargets(document: unknown): PointerMappingTarget[] {
-  const targets: PointerMappingTarget[] = [];
+/** Every schema mapping target under `document` (see `SchemaMappingTarget`), before the bundler reads it. */
+function recordSchemaMappingTargets(document: unknown): SchemaMappingTarget[] {
+  const targets: SchemaMappingTarget[] = [];
   walkObjects(document, (node) => {
     const mapping = isRecord(node.discriminator) ? node.discriminator.mapping : undefined;
     if (!isRecord(mapping)) return;
     for (const [value, target] of Object.entries(mapping)) {
-      if (typeof target === 'string' && isPointerIntoComponent(target)) targets.push({ mapping, value, target });
+      if (typeof target === 'string' && schemaRefTokens(target) !== undefined) targets.push({ mapping, value, target });
     }
   });
   return targets;
@@ -96,15 +100,16 @@ function recordPointerMappingTargets(document: unknown): PointerMappingTarget[] 
  * schemas` lacked before the bundle (`ownSchemaKeys`) — once nothing in
  * the document names it any more: a `$ref` of the document's own could
  * name no component the document lacked, so only another rewrite the
- * bundler made (one left to it, see `PointerMappingTarget`) can, and a
+ * bundler made (one left to it, see `SchemaMappingTarget`) can, and a
  * component so named is kept. A target rewritten to a component the
- * document declares itself — one the bundler found equal to the schema
- * pointed at — is written back too: the entry names the schema it points
- * at, not a look-alike.
+ * document declares itself — the component an alias stands for, or one
+ * the bundler found equal to the schema pointed at — is written back too:
+ * the entry names the schema it stands for, not a look-alike, and the
+ * parser reads the alias itself.
  */
-function restorePointerMappingTargets(
+function restoreSchemaMappingTargets(
   document: Record<string, unknown>,
-  targets: readonly PointerMappingTarget[],
+  targets: readonly SchemaMappingTarget[],
   ownSchemaKeys: ReadonlySet<string>,
 ): void {
   const added = new Set<string>();
@@ -125,11 +130,6 @@ function restorePointerMappingTargets(
   const schemas = componentSchemasOf(document);
   if (schemas === undefined) return;
   for (const key of added) delete schemas[key];
-}
-
-/** Whether `ref` is a `$ref` deeper into a `components/schemas` entry: a pointer, which names a schema and no component. */
-function isPointerIntoComponent(ref: string): boolean {
-  return (schemaRefTokens(ref)?.length ?? 0) > 1;
 }
 
 /** The document's `components.schemas` map, when it has one. */
