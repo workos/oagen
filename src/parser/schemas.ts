@@ -3010,8 +3010,11 @@ function hasFoldableProperties(schema: SchemaObject): boolean {
  * [{ $ref: Cat }], description }` is (#618) — which every reader follows
  * to the component it names through a chain of aliases
  * (`followMemberRefs`), so the readers key nothing on the member itself;
- * what is written beside the `$ref` is the wrapper's own
- * (`allOfWrapperLayer`, `constraintsEntry`), never a member. Shared
+ * the text, flag, limits and keys written beside the `$ref` are the
+ * wrapper's own (`allOfWrapperLayer`, `constraintsEntry`), never a member,
+ * and `required` names, an `allOf` or a typing union beside it are read
+ * exactly as beside an `allOf`, at every level of a chain
+ * (`composesBesideRef`; #618 review). Shared
  * by `extractAllOfModel`, at every level of a `$ref` chain, and by
  * `extractDiscriminatedAllOfVariantModels`, whose dispatcher base carries
  * them into every variant. Empty for a component that composes nothing.
@@ -3899,7 +3902,10 @@ interface NamedUnionPlan {
  * would be lost.
  */
 function isNamedUnionSchema(schema: SchemaObject): boolean {
-  if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
+  // A union beside a `$ref` composes with it, as one beside an `allOf`
+  // does (`composesBesideRef`; #618 review): flattened or dispatched by
+  // the model, never a named union minting variants of its own.
+  if (schema.allOf || schema.$ref !== undefined || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`), not a union.
   if (isConstUnionEnumSchema(schema)) return false;
@@ -5251,7 +5257,13 @@ function readComponentAllOfMember(
   const { ledger, required, seen } = reading;
   const resolved = followMemberRefs(member, schemas, seen);
   if (!resolved) return undefined;
-  if (resolved.allOf) {
+  // An `allOf` component, or an alias that composes more than its
+  // reference (`composesBesideRef`, where the chain stops), is read as the
+  // composed component it is — its members, then what it writes beside
+  // them — so `required` names, a union or a `discriminator` beside a
+  // `$ref` apply at every level of a chain, as beside an `allOf` (#618
+  // review).
+  if (resolved.allOf || composesBesideRef(resolved)) {
     readComponentAllOf(name, resolved, schemas, reading);
     return undefined;
   }
@@ -5469,11 +5481,12 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
  * Without the map a `$ref` member declares nothing, as the allOf+oneOf
  * readers read a variant's inline members only. A schema that is itself a
- * bare `$ref` — a component alias (`CatAlias: { $ref: Cat }`), which the
- * model readers read as `allOf: [{ $ref: Cat }]` (#618) — is followed the
- * same way, before its own `allOf`, so a union variant naming the alias
- * pins what `Cat` pins, and `Pet: { oneOf: [{ $ref: CatAlias }, { $ref:
- * Dog }] }` dispatches by `kind` as it does with the `allOf` spelling.
+ * `$ref` — a component alias (`CatAlias: { $ref: Cat }`), which the model
+ * readers read as `allOf: [{ $ref: Cat }]` (#618) — is followed too, one
+ * hop at a time with what each hop declares beside its `$ref`, before its
+ * own `allOf`, so a union variant naming the alias pins what `Cat` pins,
+ * and `Pet: { oneOf: [{ $ref: CatAlias }, { $ref: Dog }] }` dispatches by
+ * `kind` as it does with the `allOf` spelling.
  *
  * A property several members declare keeps its first declaration, unless a
  * later one pins it to one value the earlier left open — a const narrows
@@ -5507,11 +5520,14 @@ function getEffectiveProperties(
         props.set(k, v);
       }
     }
-    // A bare `$ref` composes the component it names (#618): followed to
-    // it, or to nothing when the chain repeats (`seen` holds `s`) or no
-    // component answers (the chain ends on `s` itself).
-    const alias = s.$ref === undefined ? undefined : followMemberRefs(s, schemas, seen);
-    if (alias !== undefined && alias !== s) visit(alias);
+    // A `$ref` composes the component it names (#618), read one hop at a
+    // time with whatever the hop declares beside it, so a chain of aliases
+    // is read through, a cycle ends on `seen`, and a `$ref` no component
+    // answers declares nothing.
+    if (s.$ref !== undefined) {
+      const target = schemaRefTarget(s.$ref, schemas);
+      if (target) visit(target);
+    }
     for (const sub of s.allOf ?? []) {
       const member = followMemberRefs(sub, schemas, seen);
       if (member) visit(member);
@@ -5663,16 +5679,50 @@ export function componentUnionDispatches(
  * Whether a component written as a bare `$ref` names no component its
  * model could carry: its chain of `$ref`s returns to itself (`Loop: { $ref:
  * Loop }`; `A: { $ref: B }` beside `B: { $ref: A }`), or ends at a `$ref` no
- * component answers (`followMemberRefs` lands on the schema itself). Such
- * a component is read as any bare `$ref` alias is (`extractAllOfModel`;
- * #618) and declares nothing, so its model has no fields; `extractSchemas`
- * reports it once. False for a schema that is no bare `$ref`, and for one
- * whose chain ends at a component.
+ * component answers — followed through every `$ref` on the chain, whatever
+ * is written beside it. Such a component is read as any bare `$ref` alias
+ * is (`extractAllOfModel`; #618) and the chain declares nothing, so its
+ * model has no fields but what the aliases write beside their `$ref`s;
+ * `extractSchemas` reports it once. False for a schema that is no bare
+ * `$ref`, and for one whose chain ends at a component.
  */
 function bareRefNamesNothing(schema: SchemaObject, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (schema.$ref === undefined) return false;
-  const target = followMemberRefs(schema, schemas, new Set([schema]));
-  return target === undefined || target.$ref !== undefined;
+  const chain = new Set<SchemaObject>([schema]);
+  let hop: SchemaObject = schema;
+  while (hop.$ref !== undefined) {
+    const target = schemaRefTarget(hop.$ref, schemas);
+    if (target === undefined || chain.has(target)) return true;
+    chain.add(target);
+    hop = target;
+  }
+  return false;
+}
+
+/**
+ * Whether a schema written as a `$ref` composes more than the reference
+ * beside it: `required` names, an `allOf`, a typing union
+ * (`besideUnionMembers`) or a `discriminator` — the keywords the `allOf`
+ * reader reads for the same schema spelled `allOf: [{ $ref }]`
+ * (`componentAllOfMembers`, `readComponentAllOf`). Such a schema is read as
+ * that `allOf` wherever a chain of references passes it, never followed
+ * through (`followMemberRefs`, `readComponentAllOfMember`, `memberUnions`;
+ * Greptile, #618 review: `B: { $ref: Cat, required: [name] }` under `A: {
+ * $ref: B }` was followed straight to `Cat`, so `A.name` was optional while
+ * `B.name` was required, where `B: { allOf: [{ $ref: Cat }], required:
+ * [name] }` kept it). A `$ref` with only text, flags, limits or `x-*` keys
+ * beside it composes nothing more and is followed through. `properties`
+ * beside a `$ref` are read by neither spelling (`hasFoldableProperties`).
+ * False for a schema that is no `$ref`.
+ */
+function composesBesideRef(schema: SchemaObject): boolean {
+  if (schema.$ref === undefined) return false;
+  return (
+    (schema.required?.length ?? 0) > 0 ||
+    schema.allOf !== undefined ||
+    schema.discriminator !== undefined ||
+    besideUnionMembers(schema).length > 0
+  );
 }
 
 /**
@@ -5680,18 +5730,24 @@ function bareRefNamesNothing(schema: SchemaObject, schemas: Record<string, Schem
  * references (`Hop: { $ref: Alias }`), or the member itself when it is no
  * reference; `undefined` when the chain repeats or reaches a component
  * already read on this walk (`seen`), which then declares nothing more. The
- * one reference-following every reader of a component's member shares:
- * `readComponentAllOfMember` reads the member it lands on, `memberUnion`
- * finds the union it carries, `getEffectiveProperties` and
- * `bareRefNamesNothing` follow a component that is itself a bare `$ref`
- * (#618). A `$ref` no component answers ends the chain on the schema that
- * writes it, which the caller sees by its `$ref`.
+ * chain ends early — on the member itself, or on an alias it passes — at a
+ * schema that composes more than its reference (`composesBesideRef`:
+ * `required`, an `allOf`, a union or a `discriminator` beside its `$ref`),
+ * which the caller reads as the `allOf` of that reference, so what is
+ * written beside the `$ref` applies as it does in that spelling (#618
+ * review); a `$ref` with nothing but text, flags, limits or keys beside it
+ * is followed through. The one reference-following every reader of a
+ * component's member shares: `readComponentAllOfMember` reads the member
+ * it lands on, `memberUnion` finds the union it carries. A `$ref` no
+ * component answers ends the chain on the schema that writes it, which the
+ * caller sees by its `$ref`.
  */
 function followMemberRefs(
   member: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
   seen: Set<SchemaObject>,
 ): SchemaObject | undefined {
+  if (composesBesideRef(member)) return member;
   let resolved = member;
   const chain = new Set<SchemaObject>();
   while (resolved.$ref) {
@@ -5700,6 +5756,7 @@ function followMemberRefs(
     if (seen.has(target) || chain.has(target)) return undefined;
     chain.add(target);
     resolved = target;
+    if (composesBesideRef(resolved)) break;
   }
   return resolved;
 }
@@ -5744,7 +5801,10 @@ function memberUnions(
   wrapper?: DiscriminatorKeyword,
 ): MemberUnion[] {
   const carrier = followMemberRefs(member, schemas, seen);
-  if (!carrier || carrier.allOf) return [];
+  // An `allOf` component, or an alias composing more than its reference
+  // (`composesBesideRef`), is read as a composed component, never as a
+  // variant axis (#618 review).
+  if (!carrier || carrier.allOf || composesBesideRef(carrier)) return [];
   const axes = unionAxesOf(carrier);
   const branches = axes.map((variants) => nullableAxisBranch(carrier, variants));
   // The wrapper is recorded as read, as the member reader records it, so a

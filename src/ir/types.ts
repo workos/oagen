@@ -1258,8 +1258,10 @@ export interface TypeParam {
  * `description`, `deprecated`, `externalDocs`, limits or `x-*` keys beside
  * the `$ref`, which are the alias's own — is a model of its own carrying
  * `Cat`'s fields, `required` and discriminator, exactly as `CatAlias: {
- * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases and into a
- * component that itself composes; a `$ref` to it resolves to the alias
+ * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases (what an
+ * alias writes beside its `$ref` — `required` names, a further `allOf`, a
+ * typing union, a `discriminator` — is read at every hop as beside an
+ * `allOf`) and into a component that itself composes; a `$ref` to it resolves to the alias
  * (`{ kind: 'model', name: 'CatAlias' }`), never to `Cat`, at every site,
  * and as a union variant it pins what `Cat` pins (#618: it was a model with
  * no fields). A chain of bare `$ref`s that returns to itself names nothing:
