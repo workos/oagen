@@ -786,6 +786,57 @@ describe('#619', () => {
           expect(warnings()).toEqual([]);
         });
       });
+
+      describe('a pointer target matched to a member the site holds no pending variant for (Greptile, round 5)', () => {
+        it('settles a dispatcher’s entry written as its own pointer member’s pointer', async () => {
+          // A dispatcher holds no variants, so the pointer member's match defers to a reference of the pointer's own.
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              components(openapi, {
+                Base: { type: 'object', properties: { id: { type: 'string' } } },
+                Pet: { allOf: [{ $ref: '#/components/schemas/Base' }, union({ cat: CAT, dog: ZOO_DOG })] },
+              }),
+            ),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toBeUndefined();
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog' } });
+          expect(modelNames(spec)).toEqual(['Base', 'Cat', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it('names a named alias variant for a pointer target matched through it, as a component and inline', async () => {
+          // `$ref: Hound` aliases `Shelter/properties/dog`: the entry names the variant's model, not the pointer it reached it by.
+          const HOUND = '#/components/schemas/Hound';
+          const aliasVariant = union({ cat: CAT, dog: SHELTER_DOG }, [CAT, HOUND]);
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              components(openapi, {
+                Hound: { $ref: SHELTER_DOG },
+                Pet: aliasVariant,
+                Home: { type: 'object', properties: { pet: aliasVariant } },
+              }),
+              {
+                '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'),
+                '/homes/{id}': getOp('getHome', '#/components/schemas/Home'),
+              },
+            ),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(pet?.variants).toEqual([model('Cat'), model('Hound')]);
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Hound' } });
+          expect(fieldType(spec, 'Home', 'pet')).toEqual({
+            kind: 'union',
+            variants: [model('Cat'), model('Hound')],
+            compositionKind: 'oneOf',
+            discriminator: { property: 'kind', mapping: { cat: 'Cat', dog: 'Hound' } },
+          });
+          expect(modelNames(spec)).toEqual(['Cat', 'Home', 'Hound', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+      });
     });
   });
 });
