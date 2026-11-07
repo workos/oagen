@@ -149,31 +149,53 @@ function documentMapOf(ref: string): 'paths' | 'webhooks' | undefined {
   return undefined;
 }
 
+/** The `components` sections a pointer the resolvers below follow may name. */
+type ComponentSection =
+  | 'pathItems'
+  | 'parameters'
+  | 'requestBodies'
+  | 'responses'
+  | 'headers'
+  | 'examples'
+  | 'callbacks'
+  | 'securitySchemes';
+
 /**
- * The component a `#/components/<section>/<name>` pointer names, or
- * `undefined` when it points anywhere else or at nothing. The whole pointer
- * is matched, so a ref into another section never resolves off a same-named
- * entry of this one. Shared by the path item resolution above and every
- * Reference Object resolver (`followReference` in `reference-objects.ts`).
+ * The entry a `#/components/<section>/<name>` pointer names, with its name
+ * decoded, whatever the entry holds — an object, or a value that is no
+ * object (`Gone: []`, `"oops"`, `null`), which a caller reports as the
+ * malformed entry it is rather than as missing (#617) — or `undefined` when
+ * the pointer points anywhere else or at a name the section holds nothing
+ * under. The whole pointer is matched, so a ref into another section never
+ * names a same-named entry of this one.
  */
-export function resolveComponentRef(
+export function componentRefEntry(
   ref: string,
-  section:
-    | 'pathItems'
-    | 'parameters'
-    | 'requestBodies'
-    | 'responses'
-    | 'headers'
-    | 'examples'
-    | 'callbacks'
-    | 'securitySchemes',
+  section: ComponentSection,
   components: Record<string, Record<string, unknown>> | undefined,
-): Record<string, unknown> | undefined {
+): { name: string; value: unknown } | undefined {
   const prefix = `#/components/${section}/`;
   if (!ref.startsWith(prefix)) return undefined;
   // JSON Pointer escapes (RFC 6901 §4): `~1` -> `/`, then `~0` -> `~`, in that order.
-  const refName = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
-  return refName === '' ? undefined : components?.[refName];
+  const name = ref.slice(prefix.length).replace(/~1/g, '/').replace(/~0/g, '~');
+  if (name === '' || components === undefined || !Object.hasOwn(components, name)) return undefined;
+  return { name, value: components[name] };
+}
+
+/**
+ * The component a `#/components/<section>/<name>` pointer names, or
+ * `undefined` when it points anywhere else or at nothing
+ * (`componentRefEntry`). The entry is returned as the document holds it, so
+ * a caller reads it only once it has checked it is an object. Shared by the
+ * path item resolution above and every Reference Object resolver
+ * (`followReference` in `reference-objects.ts`).
+ */
+export function resolveComponentRef(
+  ref: string,
+  section: ComponentSection,
+  components: Record<string, Record<string, unknown>> | undefined,
+): Record<string, unknown> | undefined {
+  return componentRefEntry(ref, section, components)?.value as Record<string, unknown> | undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
