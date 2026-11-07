@@ -83,8 +83,8 @@
  * walked again from the settled types, under every nullable wrapper the
  * site settled into, so the iterator yields the model the pointed schema's
  * items are built as, never a copy read from the document
- * (`settleDeferredDataPathItemType`; #608; a path that forks at a union on
- * the way was read from the document at extraction, as any union's is);
+ * (`settleDeferredDataPathItemType`; #608; a path that forks to more than
+ * one array was read from the document at extraction, as any such path is);
  * and a discriminator mapping
  * entry that named a pointer variant is written as the model the variant
  * settled to (`settleDeferredMappingEntries`).

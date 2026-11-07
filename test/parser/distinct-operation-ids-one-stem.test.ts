@@ -369,6 +369,36 @@ describe('#627', () => {
           expect(nameOf(operationAt(spec, '/drafts').response)).toBe('DraftsGetResponse');
           expect(warn).not.toHaveBeenCalled();
         });
+
+        // Greptile (round 2): the request body was rehearsed as a response,
+        // which names an array body's items `CreatePetRequestItem`, while
+        // the request extractor names them `CreatePetRequest` itself — so
+        // the `CreatePetRequestFooPostRequest` they nest was never reserved.
+        it('reserves what an array request body’s items nest, as the request extractor names them, in either order', async () => {
+          /** `createPet` taking an array of objects that nest a `foo_post_request` object. */
+          const createPetArray = {
+            operationId: 'createPet',
+            requestBody: json({ type: 'array', items: body({ foo_post_request: body({ tag: str }) }) }),
+            responses: { '204': { description: 'ok' } },
+          };
+          const pets = { '/pets': { post: createPetArray } };
+          const foo = { '/create/pet/request/foo': { post: fooPost('create_pet') } };
+          for (const [label, paths] of [
+            ['pets-first', { ...pets, ...foo }],
+            ['foo-first', { ...foo, ...pets }],
+          ] as const) {
+            const spec = await parse(`extends-array-${label}`, document(openapi, paths));
+            const items = operationAt(spec, '/pets').requestBody;
+            expect(items, label).toEqual({ kind: 'array', items: { kind: 'model', name: 'CreatePetRequest' } });
+            expect(fieldsOf(spec, 'CreatePetRequest'), label).toEqual(['foo_post_request']);
+            expect(fieldsOf(spec, 'CreatePetRequestFooPostRequest'), label).toEqual(['tag']);
+            const request = nameOf(operationAt(spec, '/create/pet/request/foo').requestBody);
+            expect(request, label).toMatch(hashed('CreatePetRequestFoo', 'Post', 'Request'));
+            expect(fieldsOf(spec, request), label).toEqual(['draftId']);
+            expect(spec.models, label).toHaveLength(3);
+          }
+          expect(warn).not.toHaveBeenCalled();
+        });
       });
 
       // Michael (round 1): only the camelCase spelling of the stem could keep

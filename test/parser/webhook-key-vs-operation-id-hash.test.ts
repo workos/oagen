@@ -3,6 +3,8 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
+import { diffSpecs } from '../../src/differ/diff.js';
+import { diffCommand } from '../../src/cli/diff.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 
 /**
@@ -404,12 +406,11 @@ describe('#580', () => {
       expect(warn).not.toHaveBeenCalled();
     });
 
-    it('hashes the prefixed text for a method of the key that collides elsewhere beside the operationId', async () => {
-      // The one accepted document whose hashed stem moves: the key's stems
-      // never met the operationId's, but `PetAdoptedPost` collides with a
-      // component, and the key is held as an operationId too, so it hashes
-      // `key:petAdopted` (`PetAdopted15Fe0FPost`), no longer `petAdopted`
-      // (`PetAdoptedB4A950Post`).
+    it('hashes as written a method of the key that collides elsewhere beside the operationId', async () => {
+      // `PetAdoptedPost` collides with a component, and the key is held as
+      // an operationId too, but `PetAdoptedPost` and `PetAdopted` cannot
+      // meet, so it hashes `petAdopted` as written (`PetAdoptedB4A950Post`),
+      // exactly as it did without `noteAdded`.
       const components = {
         schemas: { PetAdoptedPostPayload: { type: 'object', properties: { x: { type: 'string' } } } },
       };
@@ -424,17 +425,123 @@ describe('#580', () => {
         ),
       );
       expect(payloads(spec)).toEqual([
-        ['petAdopted', undefined, 'PetAdopted15Fe0FPostPayload'],
+        ['petAdopted', undefined, 'PetAdoptedB4A950PostPayload'],
         ['petAdopted', undefined, 'PetAdoptedPutPayload'],
         ['noteAdded', 'petAdopted', 'PetAdoptedPayload'],
       ]);
       expect(modelFields(spec)).toEqual([
-        ['PetAdopted15Fe0FPostPayload', ['petId']],
+        ['PetAdoptedB4A950PostPayload', ['petId']],
         ['PetAdoptedPayload', ['noteId']],
         ['PetAdoptedPostPayload', ['x']],
         ['PetAdoptedPutPayload', ['putId']],
       ]);
       expect(warn).not.toHaveBeenCalled();
+    });
+
+    describe("adding one half of a pair whose stems cannot meet renames nothing (Michael's review)", () => {
+      const component = (name: string) => ({
+        schemas: { [name]: { type: 'object', properties: { x: { type: 'string' } } } },
+      });
+
+      /** `[classification, kind, name]` of every change, sorted, plus the `oagen diff` exit code. */
+      async function diffOf(
+        openapi: string,
+        oldWebhooks: Record<string, unknown>,
+        newWebhooks: Record<string, unknown>,
+        components: Record<string, unknown>,
+      ) {
+        const oldFile = path.join(tmpDir, 'old.json');
+        const newFile = path.join(tmpDir, 'new.json');
+        await fs.writeFile(oldFile, JSON.stringify(documentWith(openapi, oldWebhooks, { components })), 'utf-8');
+        await fs.writeFile(newFile, JSON.stringify(documentWith(openapi, newWebhooks, { components })), 'utf-8');
+        const changes = diffSpecs(await parseSpec(oldFile), await parseSpec(newFile))
+          .changes.map((change) => `${change.classification} ${change.kind} ${'name' in change ? change.name : ''}`)
+          .sort();
+        const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+        try {
+          const error = (await diffCommand({ old: oldFile, new: newFile }).catch((e: unknown) => e)) as {
+            exitCode: number;
+          };
+          return { changes, exitCode: error.exitCode };
+        } finally {
+          log.mockRestore();
+        }
+      }
+
+      describe.each(['3.1.0', '3.0.3'])('on OpenAPI %s', (openapi) => {
+        it("adding noteAdded (operationId petAdopted) beside a multi-method key keeps the key's hashed post", async () => {
+          const multi = { ...posting('petId'), put: posting('putId').post };
+          const added = { noteAdded: posting('noteId', 'petAdopted') };
+          const components = component('PetAdoptedPostPayload');
+          for (const webhooks of [
+            { petAdopted: multi, ...added },
+            { ...added, petAdopted: multi },
+          ]) {
+            const spec = await parseJson(documentWith(openapi, webhooks, { components }));
+            expect(modelFields(spec)).toEqual([
+              ['PetAdoptedB4A950PostPayload', ['petId']],
+              ['PetAdoptedPayload', ['noteId']],
+              ['PetAdoptedPostPayload', ['x']],
+              ['PetAdoptedPutPayload', ['putId']],
+            ]);
+          }
+          expect(await diffOf(openapi, { petAdopted: multi }, { petAdopted: multi, ...added }, components)).toEqual({
+            changes: ['additive model-added PetAdoptedPayload', 'additive webhook-added noteAdded'],
+            exitCode: 1,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it('adding a key adoptions_created beside noteAdded (operationId adoptions_created) keeps its hashed payload', async () => {
+          const note = { noteAdded: posting('noteId', 'adoptions_created') };
+          const added = { adoptions_created: posting('aId') };
+          const components = component('AdoptionCreatedPayload');
+          for (const webhooks of [
+            { ...note, ...added },
+            { ...added, ...note },
+          ]) {
+            const spec = await parseJson(documentWith(openapi, webhooks, { components }));
+            expect(modelFields(spec)).toEqual([
+              ['AdoptionCreatedA40316Payload', ['noteId']],
+              ['AdoptionCreatedPayload', ['x']],
+              ['AdoptionsCreatedPayload', ['aId']],
+            ]);
+          }
+          expect(await diffOf(openapi, note, { ...note, ...added }, components)).toEqual({
+            changes: ['additive model-added AdoptionsCreatedPayload', 'additive webhook-added adoptions_created'],
+            exitCode: 1,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it("adding a post without an operationId beside one key's put declaring operationId petAdopted keeps the put's hashed payload", async () => {
+          const put = posting('putId', 'petAdopted').post;
+          const components = component('PetAdoptedPayload');
+          for (const item of [
+            { post: posting('petId').post, put },
+            { put, post: posting('petId').post },
+          ]) {
+            const spec = await parseJson(documentWith(openapi, { petAdopted: item }, { components }));
+            expect(modelFields(spec)).toEqual([
+              ['PetAdoptedB4A950Payload', ['putId']],
+              ['PetAdoptedPayload', ['x']],
+              ['PetAdoptedPostPayload', ['petId']],
+            ]);
+          }
+          expect(
+            await diffOf(
+              openapi,
+              { petAdopted: { put } },
+              { petAdopted: { post: posting('petId').post, put } },
+              components,
+            ),
+          ).toEqual({
+            changes: ['additive model-added PetAdoptedPostPayload', 'additive webhook-added petAdopted'],
+            exitCode: 1,
+          });
+          expect(warn).not.toHaveBeenCalled();
+        });
+      });
     });
 
     it('parts a webhook key from a callback operationId of one text through the reserved names, as before', async () => {
