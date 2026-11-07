@@ -347,6 +347,90 @@ describe('#622', () => {
         }
       },
     );
+
+    it.each(openapis)(
+      "leaves what is written beside a $ref member's reference unread, as the model and the walk do (PR #643 review; OAS %s)",
+      async (openapi) => {
+        // The model and the companion walk read a `$ref` member as its
+        // component and nothing beside the reference, so a `data` every
+        // sibling variant declares, or one sibling `properties` declare,
+        // marks no envelope: the body is the model the sibling-less
+        // document builds. Read beside the reference, it marked an envelope
+        // the walk had no `data` in, and the response was `string[]`.
+        const schemas = { Base: object({ id: string }) };
+        const ints = { type: 'array', items: integer };
+        const base = { $ref: '#/components/schemas/Base' };
+        const plain = await parseQuiet(
+          listPets({ allOf: [object({ has_more: boolean }), base] }, openapi, {}, schemas),
+        );
+        expect(shown(plain)).toMatchObject({
+          dataPath: undefined,
+          models: ['Pet { name? }', 'Base { id? }', 'ListPetsResponse { has_more?, id? }'],
+          response: 'ListPetsResponse',
+        });
+        const siblings: Record<string, unknown> = {
+          oneOf: { ...base, oneOf: [object({ data: ints }), object({ data: ints })] },
+          anyOf: { ...base, anyOf: [object({ data: ints }), object({ data: ints })] },
+          properties: { ...base, properties: { data: ints } },
+        };
+        for (const [label, member] of Object.entries(siblings)) {
+          const ir = await parseQuiet(
+            listPets({ allOf: [object({ has_more: boolean }), member] }, openapi, {}, schemas),
+          );
+          expect(shown(ir), label).toEqual(shown(plain));
+          expect(onlyOperation(ir).response, label).toEqual(onlyOperation(plain).response);
+        }
+      },
+    );
+
+    it.each(openapis)(
+      'unwraps only on the array the companion walk reads at that name, which a referenced or nested member may type otherwise (PR #643 review; OAS %s)',
+      async (openapi) => {
+        // `Base` annotates `data` without typing it, or types it an object;
+        // every variant types it `integer[]`. The walk and the model keep
+        // `Base`'s declaration — an always-applying one stands over a
+        // branch-only one — so there is no array to unwrap on and the body
+        // is the model. Read off the variants alone, detection unwrapped it
+        // and the response was `string[]` with no item model.
+        const ints = { type: 'array', items: integer };
+        const A = object({ data: ints, has_more: boolean });
+        const B = object({ data: ints, has_more: boolean, total: integer });
+        const base = { $ref: '#/components/schemas/Base' };
+        const typeless = { Base: object({ data: { description: 'Page data' } }) };
+        const cases: Array<[string, unknown, Record<string, unknown>]> = [
+          ['oneOf beside a $ref', { allOf: [base, { oneOf: [A, B] }] }, typeless],
+          ['anyOf beside a $ref', { allOf: [base, { anyOf: [A, B] }] }, typeless],
+          [
+            'nested allOf member',
+            { allOf: [{ allOf: [object({ data: { description: 'Page data' } })] }, { oneOf: [A, B] }] },
+            {},
+          ],
+          [
+            'object in the component',
+            { allOf: [base, { oneOf: [A, B] }] },
+            { Base: object({ data: object({ x: string }) }) },
+          ],
+        ];
+        for (const [label, body, schemas] of cases) {
+          const ir = await parseQuiet(listPets(body, openapi, {}, schemas));
+          expect(shown(ir).dataPath, label).toBeUndefined();
+          expect(onlyOperation(ir).response, label).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+          expect(modelsOf(ir), label).toContain('ListPetsResponse { data?, has_more?, total? }');
+        }
+        // The array `Base` types is the one the walk reads: unwrapped on it.
+        const typed = await parseQuiet(
+          listPets({ allOf: [base, { oneOf: [A, B] }] }, openapi, {}, { Base: object({ data: ints }) }),
+        );
+        expect(shown(typed)).toEqual({
+          dataPath: 'data',
+          endOfIteration: { kind: 'hasMore', path: 'has_more' },
+          itemType: 'integer',
+          envelopeFields: ['has_more?: boolean', 'total?: integer'],
+          models: ['Pet { name? }', 'Base { data? }'],
+          response: 'integer[]',
+        });
+      },
+    );
   });
 
   describe('the rule: a stop field counts when every variant declares it with one shape', () => {
