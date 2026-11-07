@@ -831,7 +831,7 @@ describe('round 1: the reserved set covers every name the component and header p
   const enumValues = (ir: ApiSpec, name: string) => ir.enums.find((e) => e.name === name)?.values.map((v) => v.value);
   const notFound = (schema: SchemaObject) => ({ '404': { description: 'nf', ...json(schema) } });
   const reason = obj({ reason: str });
-  /** `getPet` and `get-pet`: two operationIds with one stem, so one `<Op>Error404` name. */
+  /** `getPet` and `get-pet`: two operationIds that clean to one stem, so `get-pet` is path-named (`PetByPetIdGetError404`, #627). */
   const sameStem = (second: Doc) =>
     doc({
       ...getPet(notFound(reason)),
@@ -864,20 +864,24 @@ describe('round 1: the reserved set covers every name the component and header p
     expectConsistent(ir, ['GetPet']);
   });
 
-  it('two operations whose operationIds share a stem: different 404 bodies get distinct models', async () => {
+  it('two operations whose operationIds clean to one stem: different 404 bodies get distinct models, each under its own stem', async () => {
     const ir = await parseWithoutWarnings(sameStem(notFound(obj({ code: int }))));
     const [first, second] = operationsOf(ir);
     expect(first.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404') }]);
-    expect(second.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('GetPetError404Body') }]);
+    expect(second.errors).toEqual([{ statusCode: 404, description: 'nf', type: model('PetByPetIdGetError404') }]);
     expect(fieldTypes(ir, 'GetPetError404')).toEqual({ reason: primitive('string') });
-    expect(fieldTypes(ir, 'GetPetError404Body')).toEqual({ code: primitive('integer') });
+    expect(fieldTypes(ir, 'PetByPetIdGetError404')).toEqual({ code: primitive('integer') });
     expectConsistent(ir);
   });
 
-  it('two operations whose operationIds share a stem: identical 404 bodies share one model', async () => {
+  it('two operations whose operationIds clean to one stem: identical 404 bodies get distinct models too, named from the ids alone', async () => {
     const ir = await parseWithoutWarnings(sameStem(notFound(reason)));
-    expect(operationsOf(ir).map((op) => op.errors[0].type)).toEqual([model('GetPetError404'), model('GetPetError404')]);
+    expect(operationsOf(ir).map((op) => op.errors[0].type)).toEqual([
+      model('GetPetError404'),
+      model('PetByPetIdGetError404'),
+    ]);
     expect(modelNames(ir).filter((n) => n.startsWith('GetPetError404'))).toEqual(['GetPetError404']);
+    expect(fieldTypes(ir, 'PetByPetIdGetError404')).toEqual({ reason: primitive('string') });
     expectConsistent(ir);
   });
 
@@ -969,23 +973,24 @@ describe('round 1: the reserved set covers every name the component and header p
     expect(enumValues(ir, headerType.name)).toEqual(['a', 'b']);
   });
 
-  it('two operations whose operationIds share a stem: enum bodies with other members get distinct enums', async () => {
+  it('two operations whose operationIds clean to one stem: an object body and an enum body each keep their own stem', async () => {
     const ir = await parseWithoutWarnings(sameStem(notFound(en(['absent', 'unknown']))));
     // The first operation's 404 is `reason`-shaped and the second's is an
-    // enum, both deriving `GetPetError404`. The enum's name is reserved
-    // before any deferred model is named (workos/oagen#303: a model never
-    // keeps an enum's name, whichever the document declares first), so the
-    // object body steps to `GetPetError404Body` and the enum keeps the
-    // name: the IR never declares a model and an enum under one name.
+    // enum. Before #627 both derived `GetPetError404`, and the enum's name
+    // being reserved before any deferred model is named (workos/oagen#303)
+    // sent the object body to `GetPetError404Body`; now `get-pet` is
+    // path-named, so the enum is `PetByPetIdGetError404` and the object
+    // keeps `GetPetError404`: the IR still never declares a model and an
+    // enum under one name.
     const second = operationsOf(ir)[1];
     expect(second.errors[0].type).toEqual({
       kind: 'enum',
-      name: 'GetPetError404',
+      name: 'PetByPetIdGetError404',
       values: ['absent', 'unknown'],
     });
-    expect(ir.models.map((m) => m.name)).toContain('GetPetError404Body');
-    expect(ir.models.map((m) => m.name)).not.toContain('GetPetError404');
-    expect(operationsOf(ir)[0].errors[0].type).toEqual({ kind: 'model', name: 'GetPetError404Body' });
+    expect(ir.models.map((m) => m.name)).toContain('GetPetError404');
+    expect(ir.models.map((m) => m.name)).not.toContain('GetPetError404Body');
+    expect(operationsOf(ir)[0].errors[0].type).toEqual({ kind: 'model', name: 'GetPetError404' });
 
     const both = await parseWithoutWarnings(
       doc({
@@ -997,9 +1002,9 @@ describe('round 1: the reserved set covers every name the component and header p
     );
     expect(operationsOf(both).map((op) => op.errors[0].type)).toEqual([
       { kind: 'enum', name: 'GetPetError404', values: ['gone', 'missing'] },
-      { kind: 'enum', name: 'GetPetError404Body', values: ['absent', 'unknown'] },
+      { kind: 'enum', name: 'PetByPetIdGetError404', values: ['absent', 'unknown'] },
     ]);
-    expect(enumValues(both, 'GetPetError404Body')).toEqual(['absent', 'unknown']);
+    expect(enumValues(both, 'PetByPetIdGetError404')).toEqual(['absent', 'unknown']);
   });
 
   const unprocessable = (schema: SchemaObject) => ({ '422': { description: 'unprocessable', ...json(schema) } });
@@ -1184,7 +1189,7 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
     expectConsistent(shared);
   });
 
-  it('two operations whose operationIds share a stem: a differing titled variant steps, an identical one is shared', async () => {
+  it('two operations whose operationIds clean to one stem: a differing titled variant steps under the path-named stem, an identical one is shared', async () => {
     const ir = await parseWithoutWarnings(
       doc({
         ...getPet(bad(titled)),
@@ -1203,8 +1208,8 @@ describe('round 3: a clash on a name the body name does not reach reserves the t
     );
     const [first, second] = operationsOf(ir);
     expect(first.errors[0].type).toEqual(unionOf('Circle', 'Square'));
-    expect(second.errors[0].type).toEqual(unionOf('CircleGetPetError400', 'Square'));
-    expect(fieldTypes(ir, 'CircleGetPetError400')).toEqual({
+    expect(second.errors[0].type).toEqual(unionOf('CirclePetByPetIdGetError400', 'Square'));
+    expect(fieldTypes(ir, 'CirclePetByPetIdGetError400')).toEqual({
       kind: { kind: 'literal', value: 'circle' },
       area: primitive('number'),
     });

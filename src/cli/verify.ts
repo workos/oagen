@@ -3,7 +3,7 @@ import { CommandError } from '../errors.js';
 import { parseSpec, type OpenApiDocument } from '../parser/parse.js';
 import { expandDocUrls } from '../utils/expand-doc-urls.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming, OperationResolution } from '../ir/operation-hints.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { CompatConfig, CompatFailLevel } from '../compat/config.js';
 import { severityMeetsThreshold } from '../compat/config.js';
@@ -119,6 +119,14 @@ export async function verifyCommand(opts: {
   };
   // `--spec`, parsed once for every step that reads it.
   const parsedSpec = spec ? await parseAsGenerate(spec) : undefined;
+  // Resolve as `generate` resolves, so the compat scope and the staleness
+  // check read the classes and methods the SDK in `--output` has — the mount
+  // targets and the resolved method names — rather than the IR's service and
+  // operation names (#600). Without `mountRules`, the `Animals` class a
+  // `{ Pets: 'Animals' }` rule makes generation write is no name the spec
+  // derives: it is scoped out of compat, a method it lost is never reported
+  // removed, and it is never found stale.
+  const resolution: OperationResolution = { operationHints, mountRules, operationNaming };
 
   // Resolve compat options: CLI flags take precedence over config
   const effectiveFailOn: CompatFailLevel =
@@ -164,7 +172,7 @@ export async function verifyCommand(opts: {
             status: 'passed' as const,
             attempts: 0,
             patchedPerIteration: [],
-            compatResult: await runCompatCheck(baseline, output, lang, scopeSpec),
+            compatResult: await runCompatCheck(baseline, output, lang, scopeSpec, undefined, resolution),
           };
 
     const compatSummary = summarizeCompatCheck(compatFlow.compatResult);
@@ -250,7 +258,7 @@ export async function verifyCommand(opts: {
     console.log(separator);
 
     const oldParsedSpec = await parseAsGenerate(oldSpec);
-    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, parsedSpec, lang);
+    const stalenessResult = runStalenessCheck(baseline, oldParsedSpec, parsedSpec, lang, resolution);
 
     if (stalenessResult.violations.length > 0) {
       console.log(`Found ${stalenessResult.violations.length} stale symbol(s):`);

@@ -334,7 +334,7 @@ describe('a name an enum owns is not a parameter model’s', () => {
       expectSound(spec);
     });
 
-    it('`get-pet` enum 404, then `getPet` object 404: the enum keeps the stem, the object steps', async () => {
+    it('`get-pet` enum 404, then `getPet` object 404: `get-pet` is path-named (#627), so each keeps its own stem', async () => {
       const { spec, warnings } = await parse(
         'table-2',
         specDoc(
@@ -361,10 +361,10 @@ describe('a name an enum owns is not a parameter model’s', () => {
       );
       expect(warnings).toEqual([]);
       const byPath = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.path, op]));
-      expect(show(byPath['/pet/{petId}'].errors[0].type!)).toBe('GetPetError404');
-      expect(show(byPath['/pets/{petId}'].errors[0].type!)).toBe('GetPetError404Body');
-      expect(enumValues(spec, 'GetPetError404')).toEqual(['gone', 'missing']);
-      expect(fieldsOf(spec, 'GetPetError404Body')).toEqual({ reason: 'string' });
+      expect(show(byPath['/pet/{petId}'].errors[0].type!)).toBe('PetByPetIdGetError404');
+      expect(show(byPath['/pets/{petId}'].errors[0].type!)).toBe('GetPetError404');
+      expect(enumValues(spec, 'PetByPetIdGetError404')).toEqual(['gone', 'missing']);
+      expect(fieldsOf(spec, 'GetPetError404')).toEqual({ reason: 'string' });
       expectSound(spec, ['Pet']);
     });
 
@@ -524,9 +524,11 @@ describe('a name an enum owns is not a parameter model’s', () => {
               },
             },
           },
-          // `get-pet` and `getPet` share the stem `GetPet`: the enum body of
-          // the first owns `GetPetError404`, the object body of the second
-          // steps to `GetPetError404Body` as a second model would.
+          // `get-pet` and `getPet` clean to one stem `GetPet`, so `get-pet`
+          // is path-named (#627): its enum body is `PetByPetIdGetError404`
+          // and its `X-Mode` parameter object, qualified by the operation
+          // beside `listPets`'s `X-Mode` header enum, `PetsPetByPetIdGetXMode`;
+          // `getPet` keeps `GetPetError404`.
           '/pet/{petId}': {
             get: {
               operationId: 'get-pet',
@@ -556,13 +558,16 @@ describe('a name an enum owns is not a parameter model’s', () => {
     expect(warnings).toEqual([]);
     const byPath = Object.fromEntries(spec.services.flatMap((s) => s.operations).map((op) => [op.path, op]));
     expect(show(byPath['/pets'].responseHeaders![0].type)).toBe('PetsXMode');
-    expect(paramTypes(byPath['/pet/{petId}'])).toEqual({ 'path:petId': 'string', 'header:X-Mode': 'PetsGetPetXMode' });
-    expect(show(byPath['/pet/{petId}'].errors[0].type!)).toBe('GetPetError404');
-    expect(show(byPath['/pets/{petId}'].errors[0].type!)).toBe('GetPetError404Body');
+    expect(paramTypes(byPath['/pet/{petId}'])).toEqual({
+      'path:petId': 'string',
+      'header:X-Mode': 'PetsPetByPetIdGetXMode',
+    });
+    expect(show(byPath['/pet/{petId}'].errors[0].type!)).toBe('PetByPetIdGetError404');
+    expect(show(byPath['/pets/{petId}'].errors[0].type!)).toBe('GetPetError404');
     expect(enumValues(spec, 'PetsXMode')).toEqual(['fast', 'slow']);
-    expect(enumValues(spec, 'GetPetError404')).toEqual(['gone', 'missing']);
-    expect(fieldsOf(spec, 'PetsGetPetXMode')).toEqual({ lane: 'string' });
-    expect(fieldsOf(spec, 'GetPetError404Body')).toEqual({ reason: 'string' });
+    expect(enumValues(spec, 'PetByPetIdGetError404')).toEqual(['gone', 'missing']);
+    expect(fieldsOf(spec, 'PetsPetByPetIdGetXMode')).toEqual({ lane: 'string' });
+    expect(fieldsOf(spec, 'GetPetError404')).toEqual({ reason: 'string' });
     expectSound(spec, ['Pet']);
   });
 

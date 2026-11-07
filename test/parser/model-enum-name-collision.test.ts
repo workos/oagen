@@ -559,7 +559,7 @@ describe('review: one rule — the model steps wherever an enum of its name exis
     expectSound(spec, ['Widget']);
   });
 
-  it('shares one model between two identical `getPet` bodies beside a component enum `GetPetResponse`', async () => {
+  it('steps `getPet`’s body beside a component enum `GetPetResponse`, and path-names the identical body of `get_pet` (#627)', async () => {
     const { spec, warnings } = await parse(
       'identical-get-pet',
       specDoc(
@@ -578,9 +578,9 @@ describe('review: one rule — the model steps wherever an enum of its name exis
       ),
     );
     expect(bothKinds(spec)).toEqual([]);
-    expect(modelsOf(spec)).toEqual(['GetPetResponse2 {a}']);
-    expect(opsIn(spec).map((op) => show(op.response))).toEqual(['model GetPetResponse2', 'model GetPetResponse2']);
-    expect(warnings).toEqual([`${renamed('GetPetResponse', 'GetPetResponse2')} (shared by 2 sites)`]);
+    expect(modelsOf(spec)).toEqual(['GetPetResponse2 {a}', 'PetByIdGetResponse {a}']);
+    expect(opsIn(spec).map((op) => show(op.response))).toEqual(['model GetPetResponse2', 'model PetByIdGetResponse']);
+    expect(warnings).toEqual([renamed('GetPetResponse', 'GetPetResponse2')]);
     expectSound(spec, ['GetPetResponse']);
   });
 
@@ -675,7 +675,7 @@ describe('review: one rule — the model steps wherever an enum of its name exis
     expectSound(shared.spec, ['Pet']);
   });
 
-  it('an object `404` body and an enum `404` body under one stem: the object steps (`GetPetError404Body`) in either order, for either spelling of the enum', async () => {
+  it('an object `404` body under `getPet` and an enum `404` body under `get-pet`: each keeps its own stem (#627) in either order, for either spelling of the enum', async () => {
     const objectBody = {
       '/pets/{id}': {
         get: {
@@ -698,7 +698,10 @@ describe('review: one rule — the model steps wherever an enum of its name exis
     });
     // Both spellings `schemaToTypeRef` lifts as an enum reserve the name
     // before any deferred model is named (`inlineEnumSpelling`): an `enum:`
-    // list, and a `oneOf` of string consts (Greptile, merge round 1).
+    // list, and a `oneOf` of string consts (Greptile, merge round 1). Before
+    // #627 both bodies derived `GetPetError404` and the object stepped to
+    // `GetPetError404Body`; now `get-pet` is path-named, so the enum is
+    // `PetByPetIdGetError404` and the object keeps `GetPetError404`.
     const spellings: Array<[string, SchemaObject]> = [
       ['enum-list', en(['absent', 'unknown'])],
       ['const-union', { oneOf: [{ const: 'absent' }, { const: 'unknown' }] } as SchemaObject],
@@ -711,12 +714,12 @@ describe('review: one rule — the model steps wherever an enum of its name exis
         const { spec, warnings } = await parse(`${spelling}-${order}`, specDoc(paths));
         expect(warnings).toEqual([]);
         expect(bothKinds(spec)).toEqual([]);
-        expect(enumsOf(spec)).toEqual(['GetPetError404 [absent,unknown]']);
-        expect(modelsOf(spec)).toEqual(['GetPetError404Body {reason}']);
+        expect(enumsOf(spec)).toEqual(['PetByPetIdGetError404 [absent,unknown]']);
+        expect(modelsOf(spec)).toEqual(['GetPetError404 {reason}']);
         expect(opsIn(spec).map((op) => errorsOf(op)[0])).toEqual(
           order === 'object-first'
-            ? ['404: model GetPetError404Body', '404: enum GetPetError404']
-            : ['404: enum GetPetError404', '404: model GetPetError404Body'],
+            ? ['404: model GetPetError404', '404: enum PetByPetIdGetError404']
+            : ['404: enum PetByPetIdGetError404', '404: model GetPetError404'],
         );
         expectSound(spec);
       }

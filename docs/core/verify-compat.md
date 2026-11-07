@@ -6,13 +6,13 @@
 
 ### Existing Flags (Compat-Related)
 
-| Flag                   | Description                                                         |
-| ---------------------- | ------------------------------------------------------------------- |
-| `--api-surface <path>` | Baseline API surface JSON — enables compat verification             |
-| `--spec <path>`        | OpenAPI spec for spec-scoped comparison                             |
-| `--scope <mode>`       | `full` or `spec-only` (default: `spec-only` when `--spec` provided) |
-| `--max-retries <n>`    | Max overlay patch iterations (default: 3)                           |
-| `--diagnostics`        | Write `verify-diagnostics.json`                                     |
+| Flag                   | Description                                                                                                                                                                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--api-surface <path>` | Baseline API surface JSON — enables compat verification                                                                                                                                                                                                 |
+| `--spec <path>`        | OpenAPI spec for spec-scoped comparison                                                                                                                                                                                                                 |
+| `--scope <mode>`       | `full` or `spec-only` (default: `spec-only` when `--spec` provided); `spec-only` compares the models and the classes and methods the config's `mountRules`, `operationHints` and `operationNaming` resolve the operations to, as `generate` writes them |
+| `--max-retries <n>`    | Max overlay patch iterations (default: 3)                                                                                                                                                                                                               |
+| `--diagnostics`        | Write `verify-diagnostics.json`                                                                                                                                                                                                                         |
 
 ### New Flags (Classified Compat)
 

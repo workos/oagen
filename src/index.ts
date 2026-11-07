@@ -74,6 +74,7 @@ export {
 export type {
   OperationHint,
   OperationNaming,
+  OperationResolution,
   PaginationHint,
   SplitHint,
   ResolvedOperation,

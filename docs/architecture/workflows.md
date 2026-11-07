@@ -50,6 +50,14 @@ language-appropriate.
    rather than another one
 5. Repeat
 
+The diff in step 2 is scoped to the spec (`--scope spec-only`, the default with
+`--spec`): the baseline keeps the models the spec derives and the service classes
+and methods the config's `mountRules`, `operationHints` and `operationNaming`
+resolve the operations to — what `generate` writes, under `mountRules: { Pets: 'Animals' }`
+the `Animals` class with `get_pet`, matched in the language's casing — so a
+remounted service is compared, and a method it lost is a violation the loop
+patches. The staleness check reads the same resolution.
+
 **Caps:**
 
 - `--max-retries <n>` flag on `oagen verify` (default 3, set to 0 for single-pass)
