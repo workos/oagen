@@ -122,6 +122,49 @@ describe('#620', () => {
       expect(singularize('Paralyses')).toBe('Paralysis');
     });
 
+    it('keeps the `e` of a consonant + -aches noun, and drops the `es` of a vowel + -aches one', () => {
+      expect(singularize('Caches')).toBe('Cache');
+      expect(singularize('Headaches')).toBe('Headache');
+      expect(singularize('Mustaches')).toBe('Mustache');
+      expect(singularize('Coaches')).toBe('Coach');
+      expect(singularize('Beaches')).toBe('Beach');
+      expect(singularize('Approaches')).toBe('Approach');
+      expect(singularizePathSegment('caches')).toBe('cache');
+      expect(singularizePathSegment('headaches')).toBe('headache');
+      expect(singularizePathSegment('coaches')).toBe('coach');
+    });
+
+    it("keeps a safe-listed word's -es plural as that word, whatever the suffix rules would make of it", () => {
+      expect(singularize('Canvases')).toBe('Canvas');
+      expect(singularize('Radiuses')).toBe('Radius');
+      expect(singularize('Statuses')).toBe('Status');
+      expect(singularize('Addresses')).toBe('Address');
+      expect(singularize('Accesses')).toBe('Access');
+      expect(singularize('Processes')).toBe('Process');
+      expect(singularize('Buses')).toBe('Bus');
+      expect(singularize('Aliases')).toBe('Alias');
+      // The guard is the safe list's, which a path segment has no part in.
+      expect(singularizePathSegment('canvases')).toBe('canvase');
+      expect(singularizePathSegment('radiuses')).toBe('radiuse');
+    });
+
+    it("reads the suffix rules' documented limits as singularizePathSegment does", () => {
+      // `main` happened to read these right: `-ases` with a `-as` stem and
+      // `-nses` with a `-ns` stem through its `-ses` branch, `-che` nouns
+      // through its plain `s` branch. The shared rules cannot tell them from
+      // `cases`, `licenses` and `branches`, so they read as a path segment.
+      expect(singularize('Gases')).toBe('Gase');
+      expect(singularize('Lenses')).toBe('Lense');
+      expect(singularize('Atlases')).toBe('Atlase');
+      expect(singularize('Niches')).toBe('Nich');
+      expect(singularize('Cliches')).toBe('Clich');
+      expect(singularize('Avalanches')).toBe('Avalanch');
+      expect(singularize('Tranches')).toBe('Tranch');
+      for (const word of ['gases', 'lenses', 'atlases', 'niches', 'cliches', 'avalanches', 'tranches']) {
+        expect(singularize(capitalize(word)), word).toBe(capitalize(singularizePathSegment(word)));
+      }
+    });
+
     it('agrees with singularizePathSegment on every word both read as a plural', () => {
       const words = [
         'causes',
@@ -150,7 +193,11 @@ describe('#620', () => {
         'diagnoses',
         'excuses',
         'caches',
+        'headaches',
+        'coaches',
         'quizzes',
+        'bonuses',
+        'campuses',
       ];
       for (const word of words) {
         expect(singularize(capitalize(word)), word).toBe(capitalize(singularizePathSegment(word)));
@@ -164,7 +211,7 @@ describe('#620', () => {
       expect(singularize('statuses')).toBe('status');
     });
 
-    it('returns every singular it produces as it is when passed back in', () => {
+    it('returns every singular the suffix rules write as it is when passed back in, but the -us of a consonant + -uses plural', () => {
       for (const word of [
         'Causes',
         'Licenses',
@@ -172,16 +219,29 @@ describe('#620', () => {
         'Boxes',
         'Batches',
         'Hashes',
+        'Caches',
         'Analyses',
         'Statuses',
         'Addresses',
         'Aliases',
+        'Canvases',
+        'Radiuses',
         'Notes',
         'Directories',
       ]) {
         const once = singularize(word);
         expect(singularize(once), `${word} → ${once}`).toBe(once);
       }
+      // The documented exception, as on every version before: a `-us` word
+      // is read as a plural, so the singular a consonant + `-uses` plural
+      // gives is not a fixed point unless it is safe-listed (`Statuses`,
+      // `Buses`, `Radiuses` above).
+      expect(singularize('Bonuses')).toBe('Bonus');
+      expect(singularize('Bonus')).toBe('Bonu');
+      expect(singularize('Campuses')).toBe('Campus');
+      expect(singularize('Campus')).toBe('Campu');
+      expect(singularize('Viruses')).toBe('Virus');
+      expect(singularize('Virus')).toBe('Viru');
     });
   });
 
@@ -227,7 +287,7 @@ describe('#620', () => {
     });
   });
 
-  describe('singularizePathSegment is unchanged', () => {
+  describe('singularizePathSegment reads every word as before, but a consonant + -aches', () => {
     it('reads the same words as before', () => {
       expect(singularizePathSegment('causes')).toBe('cause');
       expect(singularizePathSegment('licenses')).toBe('license');
@@ -243,8 +303,17 @@ describe('#620', () => {
       expect(singularizePathSegment('status')).toBe('status');
       expect(singularizePathSegment('utopias')).toBe('utopias');
       expect(singularizePathSegment('series')).toBe('series');
-      // A documented limit both singularizers share.
+      // Documented limits both singularizers share.
       expect(singularizePathSegment('quizzes')).toBe('quizze');
+      expect(singularizePathSegment('niches')).toBe('nich');
+      expect(singularizePathSegment('avalanches')).toBe('avalanch');
+      expect(singularizePathSegment('gases')).toBe('gase');
+      expect(singularizePathSegment('lenses')).toBe('lense');
+      expect(singularizePathSegment('atlases')).toBe('atlase');
+      // The one reading that moved: an `-ache` noun keeps its `e` (`cach` before).
+      expect(singularizePathSegment('caches')).toBe('cache');
+      expect(singularizePathSegment('headaches')).toBe('headache');
+      expect(singularizePathSegment('branches')).toBe('branch');
     });
   });
 
@@ -258,6 +327,8 @@ describe('#620', () => {
       expect(cleanSchemaName('Analyses')).toBe('Analysis');
       expect(cleanSchemaName('Analysis')).toBe('Analysis');
       expect(cleanSchemaName('Statuses')).toBe('Status');
+      expect(cleanSchemaName('Caches')).toBe('Cache');
+      expect(cleanSchemaName('Canvases')).toBe('Canvas');
       for (const name of [
         'Licenses',
         'LicensesDto',
@@ -265,10 +336,15 @@ describe('#620', () => {
         'BoxesListItemState',
         'Causes',
         'Analyses',
+        'Caches',
+        'Canvases',
       ]) {
         const once = cleanSchemaName(name);
         expect(cleanSchemaName(once), `${name} → ${once}`).toBe(once);
       }
+      // The documented exception to its idempotency, as on every version before.
+      expect(cleanSchemaName('Bonuses')).toBe('Bonus');
+      expect(cleanSchemaName('Bonus')).toBe('Bonu');
     });
 
     it('qualifyInlineModelName singularizes the trailing word of an array field', () => {
@@ -356,6 +432,75 @@ describe('#620', () => {
           kind: 'array',
           items: { kind: 'model', name: 'ErrorBodyCauseWithReason' },
         });
+      },
+    );
+
+    // MichaelDeBoey's review of #632: words `main` read right by accident.
+    it.each(['3.1.0', '3.0.3'])(
+      'keeps Cache and Canvas (PetCache, PetCanvas), and reads gases, lenses and atlases as a path segment (OAS %s)',
+      async (openapi) => {
+        const doc = issueRepro(openapi, ['caches', 'canvases', 'gases', 'lenses', 'atlases']);
+        const schemas = doc.components.schemas as Record<string, unknown>;
+        delete schemas.Licenses;
+        schemas.Caches = { type: 'object', properties: { id: { type: 'string' } } };
+        schemas.Canvases = { type: 'object', properties: { id: { type: 'string' } } };
+        const spec = await parseJson(doc);
+        expect(modelNames(spec)).toEqual([
+          'Pet',
+          'Cache',
+          'Canvas',
+          'PetCache',
+          'PetCanvas',
+          'PetGase',
+          'PetLense',
+          'PetAtlase',
+        ]);
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
+
+    // MichaelDeBoey's review of #632: cleanSchemaName also names a body from
+    // an operationId and from a components/responses key.
+    it.each(['3.1.0', '3.0.3'])(
+      'names an inline body from operationId casesCreate CaseCreateRequest/Response and from a component response Boxes BoxResponse (OAS %s)',
+      async (openapi) => {
+        const body = { type: 'object', properties: { id: { type: 'string' } } };
+        const spec = await parseJson({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {
+            '/notes': {
+              post: {
+                operationId: 'casesCreate',
+                requestBody: { content: { 'application/json': { schema: body } } },
+                responses: { '200': { description: 'ok', content: { 'application/json': { schema: body } } } },
+              },
+            },
+            '/boxes': {
+              get: { operationId: 'listBoxes', responses: { '200': { $ref: '#/components/responses/Boxes' } } },
+            },
+          },
+          components: {
+            responses: {
+              Boxes: {
+                description: 'boxes',
+                content: {
+                  'application/json': { schema: { type: 'object', properties: { count: { type: 'integer' } } } },
+                },
+              },
+            },
+          },
+        });
+        expect(modelNames(spec)).toEqual(['CaseCreateResponse', 'CaseCreateRequest', 'BoxResponse']);
+        const operations = spec.services.flatMap((service) => service.operations);
+        const casesCreate = operations.find((op) => op.name === 'casesCreate');
+        expect(casesCreate?.requestBody).toEqual({ kind: 'model', name: 'CaseCreateRequest' });
+        expect(casesCreate?.response).toEqual({ kind: 'model', name: 'CaseCreateResponse' });
+        expect(operations.find((op) => op.name === 'listBoxes')?.response).toEqual({
+          kind: 'model',
+          name: 'BoxResponse',
+        });
+        expect(warn).not.toHaveBeenCalled();
       },
     );
   });
