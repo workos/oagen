@@ -631,6 +631,37 @@ describe('#618', () => {
       expect(warnings()).toEqual([]);
     });
 
+    it.each(['3.1.0', '3.0.3'])(
+      'maps a union variant naming the alias by the const its reference pins, never one beside the `$ref` (Greptile; OAS %s)',
+      async (openapi) => {
+        // `getEffectiveProperties` left `properties` beside the `$ref`
+        // unread while the direct const lookup read them first, so the
+        // alias's field was `'cat'` and the union mapped `'other'` to it.
+        const kinds = {
+          Cat: { type: 'object', properties: { name: str, kind: pinned(openapi, 'cat') } },
+          Dog: { type: 'object', properties: { name: str, kind: pinned(openapi, 'dog') } },
+        };
+        const schemas = (beside: Record<string, unknown>) => ({
+          ...kinds,
+          CatAlias: { ...ref('Cat'), ...beside },
+          Pet: { oneOf: [ref('CatAlias'), ref('Dog')] },
+          Holder: { type: 'object', properties: { pet: { oneOf: [ref('CatAlias'), ref('Dog')] } } },
+        });
+        const paths = { ...getting('Holder', 'getHolder'), ...getting('Pet', 'getPet') };
+        const plain = await parseJson(documentWith(openapi, schemas({}), paths));
+        const beside = await parseJson(
+          documentWith(openapi, schemas({ properties: { kind: pinned(openapi, 'other') } }), paths),
+        );
+        expect(beside.models).toEqual(plain.models);
+        expect(fieldsOf(modelByName(beside, 'CatAlias'))).toEqual(['name?: string', "kind?: 'cat'"]);
+        const mapping = { property: 'kind', mapping: { cat: 'CatAlias', dog: 'Dog' } };
+        expect(modelByName(beside, 'Pet')?.discriminator).toEqual(mapping);
+        const inline = modelByName(beside, 'Holder')?.fields[0]?.type;
+        expect(inline?.kind === 'union' && inline.discriminator).toEqual(mapping);
+        expect(warnings()).toEqual([]);
+      },
+    );
+
     it('still ends a cycle through an alias that writes `required` beside its `$ref`, reported once per component', async () => {
       const file = await write(
         documentWith('3.1.0', {
