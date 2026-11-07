@@ -3557,9 +3557,16 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
- * through `allOf` wrappers too).
+ * through `allOf` wrappers too), and for a schema written as a `$ref`,
+ * which pins nothing of its own: nothing but annotations is read beside a
+ * `$ref`, so `properties` beside an alias's reference are no declaration
+ * here, as they are none for its model (`getEffectiveProperties`,
+ * `componentAllOfMembers`; Greptile, #618 review: `CatAlias: { $ref: Cat,
+ * properties: { kind: { const: 'other' } } }` had `kind: 'cat'` as a field
+ * while a union mapped `'other'` to it).
  */
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
+  if (schema.$ref !== undefined) return null;
   const prop = schema.properties?.[property];
   return prop ? pinnedStringValue(prop) : null;
 }
