@@ -61,6 +61,7 @@ import {
   enumComponentDeclaration,
   collapsedNullableBranch,
   foldSiblingProperties,
+  inlineEnumSpelling,
   inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
@@ -69,6 +70,7 @@ import {
   rehearse,
   unwrapCollapsedWrappers,
   unwrapNullableField,
+  unwrapNullableSchema,
   warnOnUncarriedProperties,
   withSchemaConstraints,
   withWrapperDocs,
@@ -4588,7 +4590,29 @@ function typeRequestBody(
   return typed ? { body: typed, encoding: selected.encoding, contentType: selected.essence } : {};
 }
 
-/** The picked content entry's type: a primitive for a schema-less binary or text body, else typed from its schema. */
+/**
+ * The picked content entry's type: a primitive for a schema-less binary or
+ * text body, else typed from its schema. An inline object is the model
+ * `<Op>Request`; a `oneOf` of inline objects, `$ref`s or other variants is
+ * built as a union, variant by variant, its inline object variants named
+ * from the body (`deriveOneOfVariantName`); everything else — an `anyOf`,
+ * an array, a map, a `$ref`, a primitive, a nullable wrapper around one of
+ * those — is typed by `schemaToTypeRef`, as a field of the same schema is.
+ * A `oneOf` whose every non-null variant is a string `const` (an OAS 3.0
+ * single-value `enum` counts) — two or more, or any number beside an
+ * `enum:` list — declares an enum, not a union to build
+ * (`inlineEnumSpelling`), so it is typed by `schemaToTypeRef` too: the
+ * body is the enum `<Op>Request` (`AddNoteRequest`), each variant's
+ * `description` and `deprecated` its member's, exactly as the same `anyOf`
+ * body, the same schema as a webhook payload or on a field, is typed; a
+ * `null` variant beside the consts, or `nullable: true` / `type: [...,
+ * 'null']` beside the union, makes it `nullable<AddNoteRequest>`
+ * (workos/oagen#603: the `oneOf` was built as a union of literals, the
+ * members' text lost, and switching `anyOf` to `oneOf` read as breaking).
+ * A `oneOf` that mixes consts with any other variant — a `$ref`, an
+ * object, a bare `type: 'string'`, a number const — is a union, here as
+ * everywhere.
+ */
 function typePickedRequestBody(
   selected: SelectedRequestBodyContent,
   op: OperationObject | undefined,
@@ -4687,9 +4711,23 @@ function typePickedRequestBody(
     schema.oneOf.some(isNullSchema) &&
     schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
+  // A `oneOf` of string consts is an enum, not a union to build: whether it
+  // is one is the one decision `schemaToTypeRef` makes (`inlineEnumSpelling`),
+  // on the schema with its nullable wrappers removed, as that builder sees
+  // it (`unwrapNullableSchema`) — so `nullable: true` or `type: ['string',
+  // 'null']` beside the `oneOf` hides nothing, and a lone const beside
+  // `null` with no `enum:` list, which that unwrap collapses to the const,
+  // is no enum and stays the nullable literal the wrapper rule above gives
+  // it. Such a `oneOf` takes the fall-through, where it is typed as the
+  // same `anyOf` is: the enum `<Op>Request`, nullable when the schema is
+  // (workos/oagen#603: it was built below, a union of literals with no
+  // enum and no member text, while `anyOf` and the webhook payload were
+  // the enum).
+  const constUnion = inlineEnumSpelling(unwrapNullableSchema(schema))?.spelling === 'const-union';
+
   // If the request body is a oneOf, extract each variant as an inline model
   // and build a union type pointing to them by name.
-  if (schema.oneOf && (!nullableWrapper || (branch !== undefined && isInlineObjectSchema(branch)))) {
+  if (schema.oneOf && !constUnion && (!nullableWrapper || (branch !== undefined && isInlineObjectSchema(branch)))) {
     const variants: TypeRef[] = [];
     // The inline object variants of this union and the names its const-less
     // variants have taken so far, for `deriveOneOfVariantName`.
@@ -4807,9 +4845,10 @@ function typePickedRequestBody(
     return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 
-  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
-  // array, a map, a nullable object, a nullable wrapper around an array, a
-  // `$ref` or a primitive, …). Such a TypeRef can still reach inline models
+  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, a
+  // `oneOf`/`anyOf` of string consts read as an enum, an array, a map, a
+  // nullable object, a nullable wrapper around an array, a `$ref` or a
+  // primitive, …). Such a TypeRef can still reach inline models
   // — the inline object variants of an `anyOf`, an array's inline items or
   // the variants of an `items.oneOf`, a map's inline values, and whatever is
   // nested under any of them, a union under a variant included — so
