@@ -1159,17 +1159,27 @@ export function resolveDataPathArray(
 }
 
 /**
- * Whether an explicit `dataPath` goes on through the variants of a union on
- * its way to the array — the body itself, or an object on the way, being a
- * `oneOf`/`anyOf` or having one among its `allOf` members (`fieldsNamed`) —
- * so that the path lands on one array per variant. Each variant's model
- * then types inline items under a name of its own, and only the document
- * can type them once, under the path-derived name (#556), so an override
- * whose IR walk crossed a pending pointer reference reads the document at
+ * Whether an explicit `dataPath` lands on more than one array: it went on
+ * through the variants of a union on its way — the body itself, or an
+ * object on the way, being a `oneOf`/`anyOf` or having one among its
+ * `allOf` members (`fieldsNamed`) — and the variants reach distinct arrays,
+ * their `items` distinct schemas in the document. Each variant's model then
+ * types inline items under a name of its own, and only the document can
+ * type them once, under the path-derived name (#556), so an override whose
+ * IR walk crossed a pending pointer reference reads the document at
  * extraction for such a path rather than deferring to the settle, where the
  * IR walk would find the variants' arrays disagreeing by name
- * (`resolveOverrideItemType`; Greptile, #608 review). A `null` variant set
- * aside as a nullable wrapper is no fork. `false` for a path that lands on
+ * (`resolveOverrideItemType`; Greptile, #608 review). Variants that reach
+ * one array are no fork — every variant holding the same pointer (`{ oneOf:
+ * [A, B] }`, both `result: { $ref: '#/components/schemas/Holder/properties/
+ * result' }`, with `dataPath: 'result.items'`), or pointers that resolve to
+ * one component, as `resolveBareSchema` follows them — since the one schema
+ * is built as one model where it stands and the settled walk agrees on its
+ * items (`HolderResultItem`), exactly as both holding `$ref: Result` agree
+ * on `ResultItem` (MichaelDeBoey, #651 review); the arrays are told apart
+ * by their `items` object rather than their own, which a nullable array
+ * component unwraps to afresh at each reading. A `null` variant set aside
+ * as a nullable wrapper is no fork either. `false` for a path that lands on
  * no array.
  */
 export function dataPathForks(
@@ -1181,7 +1191,7 @@ export function dataPathForks(
   return 'items' in walked && walked.forked;
 }
 
-/** The walk `resolveDataPathArray` makes, saying too whether the path went on through a union's variants (`forked`). */
+/** The walk `resolveDataPathArray` makes, saying too whether the path landed on more than one array (`forked`; see `dataPathForks`). */
 function walkDataPathArray(
   schema: SchemaObject,
   dataPath: string,
@@ -1233,7 +1243,7 @@ function walkDataPathArray(
         `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeItems))}`,
     };
   }
-  return { items: items[0], forked: union !== undefined };
+  return { items: items[0], forked: new Set(items).size > 1 };
 }
 
 /**
