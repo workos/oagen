@@ -2787,9 +2787,12 @@ function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
  * carries a typing keyword. A union of bare constraint sets —
  * `anyOf: [{ required: ['k'] }, { maxProperties: 1 }]` beside the schema's
  * own `properties` — does not, as such an `allOf` does not: the schema is typed from its own
- * keywords (the object, with its `k`), and the variants only limit it.
+ * keywords (the object, with its `k`), and the variants only limit it. The
+ * stop-field test reads a declaration's variants by it too
+ * (`endDeclarationFits`), so `total: { type: 'integer', anyOf: [{ maximum:
+ * 100 }, { minimum: 200 }] }` stays the integer its `type` says.
  */
-function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
+export function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
   return variants.some((variant) =>
     TYPING_KEYWORDS.some((key) => (variant as Record<string, unknown>)[key] !== undefined),
   );
