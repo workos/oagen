@@ -74,8 +74,8 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  fieldSettings,
   pinnedDeclarationAdmitsNull,
-  pinnedDeclarationLayers,
   pinnedDeclarationValue,
   rehearse,
   unwrapCollapsedWrappers,
@@ -99,7 +99,6 @@ import {
 import {
   agreedDeclarationKeys,
   LIFTED_DECLARATION_KEYWORDS,
-  levelSettings,
   allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
@@ -4926,9 +4925,14 @@ function typePickedRequestBody(
  * carries the settings every variant's declaration agrees on — the flags,
  * text, default, examples, link, limits and `x-*` keys a field reads
  * (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off its levels as
- * `buildFieldFromSchema` reads a field's (`levelSettings` over
- * `pinnedDeclarationLayers`; the limits conjoined across the levels as
- * `schemaConstraints` reads a field's, the stricter bound winning), so two
+ * `buildFieldFromSchema` reads a field's — the one reading, `fieldSettings`,
+ * the pin walk kept apart: under a wrapper the declaration documents itself
+ * and takes none of the component's text, flags, default, examples or keys,
+ * a bare `$ref` reads the entries it passes, and the limits conjoin from
+ * every entry either way, the stricter bound winning (#607 review: the
+ * settings were read through every hop of the pin walk, so `kind: { allOf:
+ * [{ $ref: CatKind }] }` on every variant, `CatKind` read-only, folded to a
+ * read-only `kind` where each variant's own field is not) — so two
  * variants writing `kind: { allOf: [{
  * const: … }], readOnly: true }` fold to a read-only `kind`, as each
  * variant's own field is (#607 review: `description` alone was carried,
@@ -4969,11 +4973,11 @@ function flattenDiscriminatedUnionBody(
   }
 
   const variantCount = variants.length;
-  // The discriminator's declarations as a field reads each — off its
-  // levels, through the wrappers and references the pin is read through —
-  // so declarations spelled differently are compared alike.
+  // The discriminator's declarations as a field written as each is read
+  // (`fieldSettings`: the reading `buildFieldFromSchema` makes, the pin
+  // walk kept apart), so declarations spelled differently compare alike.
   const settingsOf = (declared: readonly SchemaObject[]): SchemaObject[] =>
-    declared.map((dp) => levelSettings(pinnedDeclarationLayers(dp, componentSchemas)));
+    declared.map((dp) => fieldSettings(dp, componentSchemas));
   // Every declaration each property receives, in variant order; the first
   // types the field, and the extensions are the ones every declaration
   // agrees on (`agreedExtensions`, the one rule for a property several
@@ -5011,10 +5015,8 @@ function flattenDiscriminatedUnionBody(
           // a `oneOf` of one const would be a union. The enum and the field
           // carry the settings every declaration agrees on — the flags,
           // text, default, examples, link, limits and `x-*` keys a field
-          // reads (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off
-          // its levels as a field reads them (`levelSettings` over
-          // `pinnedDeclarationLayers`: the declaration, its annotating
-          // members, then what a `$ref` or a wrapper leads to) —
+          // reads (`LIFTED_DECLARATION_KEYWORDS`), each declaration read
+          // exactly as a field written as it is read (`fieldSettings`) —
           // (workos/oagen#446: the first variant's text, which documents one
           // value, was the enum's; #607 review: `description` alone was
           // carried, so a `readOnly` every variant wrote was dropped).
