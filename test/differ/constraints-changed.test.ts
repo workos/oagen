@@ -26,6 +26,7 @@ import { diffWebhooks } from '../../src/differ/webhooks.js';
 import {
   constraintsShift,
   constraintsTightened,
+  integerBounds,
   keywordTightened,
   pairVariants,
 } from '../../src/differ/constraints.js';
@@ -1531,6 +1532,170 @@ describe('#599', () => {
       ]);
       expect(diffModels([pet()], [pet()])).toEqual([]);
     });
+  });
+
+  describe("#659 Michael's review — an exclusive integer bound and the inclusive one beside it admit the same values", () => {
+    const integer = (constraints?: Constraints): TypeRef => ({
+      kind: 'primitive',
+      type: 'integer',
+      ...(constraints ? { constraints } : {}),
+    });
+    const number = (constraints?: Constraints): TypeRef => ({
+      kind: 'primitive',
+      type: 'number',
+      ...(constraints ? { constraints } : {}),
+    });
+
+    it('reads an integer site’s exclusive bounds as the inclusive ones beside them, and a number’s as written', () => {
+      expect(integerBounds({ exclusiveMinimum: 0 }, integer())).toEqual({ minimum: 1 });
+      expect(integerBounds({ exclusiveMaximum: 10 }, integer())).toEqual({ maximum: 9 });
+      expect(integerBounds({ exclusiveMinimum: 0.5, exclusiveMaximum: 9.5 }, integer())).toEqual({
+        minimum: 1,
+        maximum: 9,
+      });
+      expect(integerBounds({ minimum: 0.5, maximum: 9.5 }, integer())).toEqual({ minimum: 1, maximum: 9 });
+      // The stricter of a side's two wins.
+      expect(integerBounds({ minimum: 5, exclusiveMinimum: 0 }, integer())).toEqual({ minimum: 5 });
+      expect(integerBounds({ minimum: 0, exclusiveMinimum: 0 }, integer())).toEqual({ minimum: 1 });
+      expect(integerBounds({ maximum: 5, exclusiveMaximum: 10 }, integer())).toEqual({ maximum: 5 });
+      expect(integerBounds({ exclusiveMinimum: 0, pattern: '^a', multipleOf: 2 }, integer())).toEqual({
+        minimum: 1,
+        pattern: '^a',
+        multipleOf: 2,
+      });
+      // Under a nullable wrapper too; a number, a union or a model as written.
+      expect(integerBounds({ exclusiveMinimum: 0 }, { kind: 'nullable', inner: integer() })).toEqual({ minimum: 1 });
+      expect(integerBounds({ exclusiveMinimum: 0 }, number())).toEqual({ exclusiveMinimum: 0 });
+      expect(integerBounds({ exclusiveMinimum: 0 }, { kind: 'union', variants: [integer(), number()] })).toEqual({
+        exclusiveMinimum: 0,
+      });
+      expect(integerBounds({ exclusiveMinimum: 0 }, undefined)).toEqual({ exclusiveMinimum: 0 });
+      expect(integerBounds(undefined, integer())).toBeUndefined();
+    });
+
+    it('reports the rewrite as written, additive on an integer and tightened on a number', () => {
+      const site = (type: TypeRef, constraints: Constraints) => ({ type, constraints });
+      expect(constraintsShift(site(integer(), { exclusiveMinimum: 0 }), site(integer(), { minimum: 1 }))).toEqual({
+        oldConstraints: { exclusiveMinimum: 0 },
+        newConstraints: { minimum: 1 },
+        details: 'minimum <unset> → 1; exclusiveMinimum 0 → <unset>',
+        tightened: false,
+      });
+      expect(constraintsShift(site(integer(), { minimum: 1 }), site(integer(), { exclusiveMinimum: 0 }))).toMatchObject(
+        {
+          tightened: false,
+        },
+      );
+      expect(
+        constraintsShift(site(integer(), { maximum: 9 }), site(integer(), { exclusiveMaximum: 10 })),
+      ).toMatchObject({
+        details: 'maximum 9 → <unset>; exclusiveMaximum <unset> → 10',
+        tightened: false,
+      });
+      // The bound really moved: tightened.
+      expect(constraintsShift(site(integer(), { exclusiveMinimum: 0 }), site(integer(), { minimum: 2 }))).toMatchObject(
+        {
+          tightened: true,
+        },
+      );
+      expect(constraintsShift(site(integer(), { maximum: 9 }), site(integer(), { exclusiveMaximum: 9 }))).toMatchObject(
+        {
+          tightened: true,
+        },
+      );
+      // On a number `0 < x` admits `0.5` and `1 <= x` does not.
+      expect(constraintsShift(site(number(), { exclusiveMinimum: 0 }), site(number(), { minimum: 1 }))).toMatchObject({
+        tightened: true,
+      });
+      expect(constraintsShift(site(number(), { maximum: 9 }), site(number(), { exclusiveMaximum: 10 }))).toMatchObject({
+        tightened: false,
+      });
+      // A header or a variant, whose type carries the limits, and an array's items read the same way.
+      expect(
+        constraintsShift({ type: integer({ exclusiveMinimum: 0 }) }, { type: integer({ minimum: 1 }) }),
+      ).toMatchObject({
+        tightened: false,
+      });
+      expect(
+        constraintsShift(
+          { type: { kind: 'array', items: integer({ exclusiveMinimum: 0 }) } },
+          { type: { kind: 'array', items: integer({ minimum: 1 }) } },
+        ),
+      ).toEqual({ details: 'items.minimum <unset> → 1; items.exclusiveMinimum 0 → <unset>', tightened: false });
+    });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`exits 1 for his three rewrites on a query parameter and a request field, 2 when the bound really moves (OpenAPI ${openapi})`, async () => {
+        const oas30 = openapi === '3.0.3';
+        /** `GET /pets` (`listPets`) with the query parameter `page`, and `POST /pets` taking `Pet` whose `count` is typed the same way. */
+        const doc = (type: string, limit: Record<string, unknown>) => ({
+          openapi,
+          info: { title: 'pets', version: '1' },
+          paths: {
+            '/pets': {
+              get: {
+                operationId: 'listPets',
+                parameters: [{ name: 'page', in: 'query', schema: { type, ...limit } }],
+                responses: { '200': { description: 'ok' } },
+              },
+              post: {
+                operationId: 'createPet',
+                requestBody: jsonBody(petRef),
+                responses: { '201': { description: 'ok' } },
+              },
+            },
+          },
+          components: { schemas: { Pet: { type: 'object', properties: { count: { type, ...limit } } } } },
+        });
+        const exclusiveMin0 = oas30 ? { minimum: 0, exclusiveMinimum: true } : { exclusiveMinimum: 0 };
+        const exclusiveMax10 = oas30 ? { maximum: 10, exclusiveMaximum: true } : { exclusiveMaximum: 10 };
+        const exclusiveMax9 = oas30 ? { maximum: 9, exclusiveMaximum: true } : { exclusiveMaximum: 9 };
+
+        // His repro: `page: { type: integer, exclusiveMinimum: 0 }` → `{ type: integer, minimum: 1 }`.
+        const report = diffSpecs(
+          await parse('old', doc('integer', exclusiveMin0)),
+          await parse('new', doc('integer', { minimum: 1 })),
+        );
+        expect(paramChangesOf(report.changes, 'listPets')).toEqual([
+          {
+            kind: 'param-constraints-changed',
+            paramName: 'page',
+            classification: 'additive',
+            paramLocation: 'query',
+            oldConstraints: { exclusiveMinimum: 0 },
+            newConstraints: { minimum: 1 },
+            details: 'minimum <unset> → 1; exclusiveMinimum 0 → <unset>',
+          },
+        ]);
+        expect(fieldChangesOf(report.changes, 'Pet')).toMatchObject([
+          { kind: 'field-constraints-changed', fieldName: 'count', classification: 'additive' },
+        ]);
+        expect(report.summary).toMatchObject({ modified: 2, breaking: 0, additive: 2 });
+        for (const [before, after] of [
+          [exclusiveMin0, { minimum: 1 }],
+          [{ maximum: 9 }, exclusiveMax10],
+        ]) {
+          expect(await exitCodeOf(doc('integer', before), doc('integer', after)), JSON.stringify(before)).toBe(1);
+          expect(await exitCodeOf(doc('integer', after), doc('integer', before)), JSON.stringify(after)).toBe(1);
+        }
+        // Controls: the bound really moved.
+        expect(await exitCodeOf(doc('integer', exclusiveMin0), doc('integer', { minimum: 2 }))).toBe(2);
+        expect(await exitCodeOf(doc('integer', { maximum: 9 }), doc('integer', exclusiveMax9))).toBe(2);
+        expect(
+          await exitCodeOf(doc('integer', { minimum: 1 }), doc('integer', { minimum: 1, exclusiveMinimum: 1 })),
+        ).toBe(2);
+        // On a number the same rewrites keep their classification.
+        expect(await exitCodeOf(doc('number', exclusiveMin0), doc('number', { minimum: 1 }))).toBe(2);
+        expect(await exitCodeOf(doc('number', { minimum: 1 }), doc('number', exclusiveMin0))).toBe(1);
+        expect(await exitCodeOf(doc('number', { maximum: 9 }), doc('number', exclusiveMax10))).toBe(1);
+        expect(await exitCodeOf(doc('number', exclusiveMax10), doc('number', { maximum: 9 }))).toBe(2);
+        // A fractional bound on an integer is rounded inward.
+        if (!oas30) {
+          expect(await exitCodeOf(doc('integer', { exclusiveMinimum: 0.5 }), doc('integer', { minimum: 1 }))).toBe(1);
+          expect(await exitCodeOf(doc('integer', { minimum: 0.5 }), doc('integer', { minimum: 1 }))).toBe(1);
+        }
+      });
+    }
   });
 
   describe('#659 review round 1 (Greptile)', () => {
