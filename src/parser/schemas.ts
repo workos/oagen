@@ -406,8 +406,10 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * The one variant of a `oneOf`/`anyOf` written with OAS 3.0 `nullable:
  * true` beside it and no `null` variant — `Color: { oneOf: [{ type:
  * 'string', enum }], nullable: true }` — or `undefined`: no union, a union
- * under an `allOf`, no `nullable: true`, more than one variant, or a
- * `null` variant (`nullableUnionBranch` reads that wrapper). The OAS 3.0
+ * under an `allOf` that types the schema (`allOfTypesSchema`; one whose
+ * members only annotate or limit it is part of the wrapper, as for
+ * `nullableAxisBranch`, #613), no `nullable: true`, more than one variant,
+ * or a `null` variant (`nullableUnionBranch` reads that wrapper). The OAS 3.0
  * form of the nullable wrapper `nullableUnionBranch` collapses, since a
  * `null` variant cannot be written there: beside a `oneOf`/`anyOf` the
  * flag is read — every `$ref` to the component is nullable, as it is for
@@ -421,7 +423,7 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * one it always was, as the same schema inline is.
  */
 function flaggedNullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
-  if (schema.nullable !== true || schema.allOf) return undefined;
+  if (schema.nullable !== true || (schema.allOf !== undefined && allOfTypesSchema(schema.allOf))) return undefined;
   const variants = schema.oneOf ?? schema.anyOf;
   if (variants === undefined || variants.length !== 1 || isNullSchema(variants[0]!)) return undefined;
   return variants[0];
@@ -458,10 +460,16 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   // branch's, and its nullability as the enum's.
   const branch = nullableUnionBranch(schema) ?? flaggedNullableUnionBranch(schema);
   if (branch !== undefined) {
+    // This level's layer: its own keys, with an annotating `allOf` member's
+    // where it declares none (`allOfWrapperLayer`), so `{ allOf: [{
+    // description }], oneOf: [{ enum }, { type: 'null' }] }` — or with OAS
+    // 3.0 `nullable: true` in the `null` variant's place — is the nullable
+    // enum `{ description, oneOf: [...] }` is (#613 review).
+    const layer = allOfWrapperLayer(schema);
     const limited = derivedCopy({ ...branch, ...extractConstraints(schema) }, branch);
-    const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, schema), schema));
+    const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, layer), layer));
     if (declaration === undefined) return undefined;
-    return { ...declaration, ...(schema.default === undefined ? {} : { default: schema.default }), nullable: true };
+    return { ...withWrapperLayerDefault(declaration, schema), nullable: true };
   }
   if (!schema.allOf) return undefined;
   if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {

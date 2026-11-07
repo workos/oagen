@@ -384,6 +384,21 @@ describe.each(['3.1.0', '3.0.3'])('#613 (OAS %s)', (openapi) => {
     });
     expect(enumOf(besideNullable, 'Kind')).toEqual(enumOf(plainNullable, 'Kind'));
     expect(besideNullable.models).toEqual(plainNullable.models);
+    // A nullable wrapper around one enum declaration (#606), in this version's spelling, beside the annotating `allOf`.
+    const wrapped =
+      openapi === '3.0.3'
+        ? { oneOf: [{ type: 'string', enum: ['cat', 'dog'] }], nullable: true }
+        : { oneOf: [{ type: 'string', enum: ['cat', 'dog'] }, { type: 'null' }] };
+    const plainWrapped = await parse(kindDoc({ description: 'A kind.', ...wrapped }));
+    const besideWrapped = await parse(kindDoc({ allOf: [{ description: 'A kind.' }], ...wrapped }));
+    expect(enumOf(besideWrapped, 'Kind')).toMatchObject({ description: 'A kind.' });
+    expect(enumOf(besideWrapped, 'Kind')?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+    expect(model(besideWrapped, 'Holder').fields[0].type).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'enum', name: 'Kind' },
+    });
+    expect(enumOf(besideWrapped, 'Kind')).toEqual(enumOf(plainWrapped, 'Kind'));
+    expect(besideWrapped.models).toEqual(plainWrapped.models);
   });
 
   it('a nullable union beside the annotating `allOf`: the nullable named union, the body and the reference nullable, as the plain spelling', async () => {
