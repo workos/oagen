@@ -191,25 +191,75 @@ const SINGULAR_SAFE_LIST = new Set([
 ]);
 
 /**
- * Conservative singularize for the leading PascalCase word.
- * Only applied to the first word of a PascalCase name (the resource word).
- * - `ies` → `y` (e.g. Directories → Directory)
- * - trailing `s` for words >4 chars (e.g. Organizations → Organization)
- * Safe-listed words are never singularized.
+ * The singular of a word read as a plural, by suffix alone: `word` ends in
+ * `s`, and the caller has ruled out whatever it does not read as a plural.
+ * The one set of rules `singularize` and `singularizePathSegment` share, so a
+ * field, a component and a path segment spell one noun's singular the same
+ * way (`causes` is `cause` as an array field and as a resource; #620):
+ * - `-ies` → `-y` when the word is longer than four letters (`directories` →
+ *   `directory`; a short `-ies` word keeps its `ie`, `pies` → `pie`);
+ * - `-yses` → `-ysis` (`analyses` → `analysis`);
+ * - the `es` of a sibilant stem is dropped — `-sses`, `-uses` after a
+ *   consonant, `-iases`, `-xes`, `-ches`, `-shes` (`addresses` → `address`,
+ *   `statuses` → `status`, `aliases` → `alias`, `boxes` → `box`, `batches` →
+ *   `batch`, `hashes` → `hash`);
+ * - any other `s` is a plain plural `s` (`notes` → `note`, `causes` →
+ *   `cause`, `licenses` → `license`, `responses` → `response`, `releases` →
+ *   `release`, `warehouses` → `warehouse`).
+ * Case is preserved — the rules only slice, except the `y` and `is` they
+ * write, which take the case of the letters they replace (`DIRECTORIES` →
+ * `DIRECTORY`, `ANALYSES` → `ANALYSIS`).
+ */
+function stripPluralSuffix(word: string): string {
+  const lower = word.toLowerCase();
+  // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
+  if (lower.endsWith('ies') && lower.length > 4) {
+    return word.slice(0, -3) + (word.endsWith('IES') ? 'Y' : 'y');
+  }
+  // `analyses` → `analysis`: every English `-yses` noun is the plural of a
+  // `-ysis` noun (`paralyses`, `dialyses`, `catalyses`).
+  if (lower.endsWith('yses')) return word.slice(0, -2) + (word.endsWith('ES') ? 'IS' : 'is');
+  // An `es` added to a sibilant stem: `addresses`, `statuses`, `aliases`,
+  // `boxes`, `batches`, `hashes`. A vowel before `uses` is a plain `s` instead
+  // (`warehouses`), and so is any letter but `i` before `ases` (`cases`,
+  // `releases`): no English noun ends in `-iase`, so `aliases` and `biases`
+  // are `-ias` nouns.
+  if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower) || lower.endsWith('iases')) return word.slice(0, -2);
+  if (lower.endsWith('xes') || lower.endsWith('ches') || lower.endsWith('shes')) return word.slice(0, -2);
+  return word.slice(0, -1);
+}
+
+/**
+ * Conservative singularize for one word of a model name — the leading word
+ * of a component name (`cleanSchemaName`), the trailing word of an inline
+ * model's name (`qualifyInlineModelName`), the field a nested error body's
+ * items are reached through (`collapseErrorBodies`), the array a `dataPath`
+ * hint ends in (`inlineItemNameForPath`) — or a raw field name. The suffix
+ * rules are the ones a path segment is singularized by (`stripPluralSuffix`,
+ * shared with `singularizePathSegment`), so a field and a resource of one
+ * noun spell its singular alike: `Directories` → `Directory`, `Organizations`
+ * → `Organization`, `Statuses` → `Status`, `Addresses` → `Address`, `Boxes`
+ * → `Box`, `Batches` → `Batch`, `Causes` → `Cause`, `Licenses` → `License`,
+ * `Responses` → `Response`, `Analyses` → `Analysis` (#620; before it, every
+ * `-ses` word lost its `es` — `Caus`, `Licens`, `Respons` — and every other
+ * `-es` word only its `s` — `Boxe`, `Batche`). What is read as a plural at
+ * all is decided here, not by the path segment's guards: a safe-listed word
+ * (`Status`, `Address`, `Series`, …), a word of four letters or fewer
+ * (`Pets`, `Tags`, `Bus`, `Gas`, `News`, `Axes` are kept as they are, since
+ * a short word is as likely a singular) and a word ending in `ss` (`Class`)
+ * are never singularized, and neither is a `-ysis` word, the singular the
+ * `-yses` rule writes (`Analysis`); any other `-us` or `-is` word is read as
+ * a plural, as it always was (`Menus` → `Menu`, `Emojis` → `Emoji`, at the
+ * price of `Campus` → `Campu`).
  */
 export function singularize(word: string): string {
-  if (SINGULAR_SAFE_LIST.has(word)) return word;
-  if (word.endsWith('ies') && word.length > 4) {
-    return word.slice(0, -3) + 'y';
-  }
-  if (word.endsWith('ses') && word.length > 4) {
-    // e.g. "Processes" — but "Process" is safe-listed, this handles non-safe ones
-    return word.slice(0, -2);
-  }
-  if (word.endsWith('s') && !word.endsWith('ss') && word.length > 4) {
-    return word.slice(0, -1);
-  }
-  return word;
+  if (SINGULAR_SAFE_LIST.has(word) || word.length <= 4) return word;
+  // `-ss` is never a plural (`Class`), and neither is `-ysis`, the singular
+  // the `-yses` rule writes (`Analysis`), so every singular this function
+  // produces is returned as it is when passed back in, as cleanSchemaName
+  // requires.
+  if (!word.endsWith('s') || word.endsWith('ss') || word.endsWith('ysis')) return word;
+  return stripPluralSuffix(word);
 }
 
 /**
@@ -219,9 +269,11 @@ export function singularize(word: string): string {
  * `aliases` → `alias`, `analyses` → `analysis`, `boxes` → `box`, `batches` →
  * `batch`, `responses` → `response`.
  *
- * Suffix rules only, no dictionary, so anything that does not look plural is
- * returned as it is: a segment that does not end in `s`, or ends in `ss`, `us`,
- * `is` or `ias` (`status`, `analysis`, `alias`), or is an invariant plural
+ * Suffix rules only (`stripPluralSuffix`, the rules `singularize` applies to
+ * a model name's word, so `/causes/{id}` and a `causes` field spell one
+ * `cause`), no dictionary, so anything that does not look plural is returned
+ * as it is: a segment that does not end in `s`, or ends in `ss`, `us`, `is`
+ * or `ias` (`status`, `analysis`, `alias`), or is an invariant plural
  * (`series`). Case is preserved — the rules only slice, except `-ies` → `-y`
  * and `-yses` → `-ysis`, whose `y` and `is` take the case of the letters they
  * replace (`DIRECTORIES` → `DIRECTORY`, `ANALYSES` → `ANALYSIS`, so splitWords
@@ -234,7 +286,9 @@ export function singularize(word: string): string {
  * `operationId`: irregular plurals (`people`, `children`, `data`), `-ies`
  * words whose singular keeps the `ie` (`cookies` → `cooky`), `-oes` (`heroes`
  * → `heroe`), `-ches` nouns ending in `-che` (`caches` → `cach`), `-uses`
- * nouns ending in `-use` (`excuses` → `excus`), `-ases` nouns ending in `-as`
+ * nouns ending in `-use` (`excuses` → `excus`), `-zes` plurals of a doubled
+ * `z` (`quizzes` → `quizze`, where `sizes` → `size` is the common reading),
+ * `-ases` nouns ending in `-as`
  * other than `-ias` (`canvases` → `canvase`, where `cases` → `case` is the
  * common reading), `-es` plurals of `-is` nouns other than `-ysis` (`crises`
  * → `crise`, `theses` → `these`, where `premises` → `premise` and `cheeses`
@@ -256,21 +310,7 @@ export function singularizePathSegment(segment: string): string {
   // `-ias` is kept for `alias` and `bias`, the singulars the `-iases` rule
   // below produces, at the price of the rarer `-ia` plurals (`utopias`).
   if (lower.endsWith('ss') || lower.endsWith('us') || lower.endsWith('is') || lower.endsWith('ias')) return segment;
-  // `directories` → `directory`; a short `-ies` word keeps its `ie` (`pies` → `pie`).
-  if (lower.endsWith('ies') && lower.length > 4) {
-    return segment.slice(0, -3) + (segment.endsWith('IES') ? 'Y' : 'y');
-  }
-  // `analyses` → `analysis`: every English `-yses` noun is the plural of a
-  // `-ysis` noun (`paralyses`, `dialyses`, `catalyses`).
-  if (lower.endsWith('yses')) return segment.slice(0, -2) + (segment.endsWith('ES') ? 'IS' : 'is');
-  // An `es` added to a sibilant stem: `addresses`, `statuses`, `aliases`,
-  // `boxes`, `batches`, `hashes`. A vowel before `uses` is a plain `s` instead
-  // (`warehouses`), and so is any letter but `i` before `ases` (`cases`,
-  // `releases`): no English noun ends in `-iase`, so `aliases` and `biases`
-  // are `-ias` nouns.
-  if (lower.endsWith('sses') || /[^aeiou]uses$/.test(lower) || lower.endsWith('iases')) return segment.slice(0, -2);
-  if (lower.endsWith('xes') || lower.endsWith('ches') || lower.endsWith('shes')) return segment.slice(0, -2);
-  return segment.slice(0, -1);
+  return stripPluralSuffix(segment);
 }
 
 /**
