@@ -5390,9 +5390,10 @@ function newComponentReading(ledger = new Map<string, PropertyDeclarations>()): 
  * The component a declaration is recorded under — the `{ name, schema }`
  * `declareProperty` keeps as a declaration's origin, with the
  * `components/schemas` key it was reached by, which `componentTypeRef`
- * resolves (`noteBase`). `schema` is the one the member's chain lands on,
- * whose members are read (`memberOrigin` keeps the origin through its
- * `allOf`), not the alias the key names when the chain passes one.
+ * resolves (`noteBase`). `schema` is the component's own — a bare alias's
+ * `{ $ref }` when the member names one — whose own keywords keep the
+ * origin through everything read inside it (`memberOrigin`), as the inline
+ * merge keeps an origin whose schema writes an `allOf` or a `$ref`.
  */
 interface ComponentOrigin {
   key: string;
@@ -5428,17 +5429,19 @@ interface MemberReadingOptions {
  * the enclosing base (`enclosing`) for a member of a base's own `allOf`
  * chain — the base's model carries everything reached inside it, a `$ref`
  * member of its included, so `Living`'s `born` under `Animal: { allOf: [{
- * $ref: Living }] }` is `Animal`'s, read on the schema the base's chain
- * lands on — and for an inline member or branch read inside any base; a
- * nullable alias (`Alias: { oneOf: [{ $ref: Animal }, { type: 'null' }]
- * }`) is no `allOf` component and declares nothing of its own, so the
- * `$ref` its branch names starts an origin of its own. `null` for an
- * inline member at the top level: the model's own.
+ * $ref: Living }] }` is `Animal`'s — and for an inline member or branch
+ * read inside any base, a bare alias of a nullable wrapper included
+ * (`Hop: { $ref: Alias }`: what `Alias`'s one variant names is `Hop`'s,
+ * as the inline merge keeps an origin whose schema writes a `$ref`;
+ * Greptile on #591); a nullable alias (`Alias: { oneOf: [{ $ref: Animal
+ * }, { type: 'null' }] }`) is no `allOf` component and declares nothing
+ * of its own, so the `$ref` its branch names starts an origin of its own.
+ * `null` for an inline member at the top level: the model's own.
  */
 function memberOrigin(landing: MemberLanding, enclosing: ComponentOrigin | undefined): ComponentOrigin | null {
-  if (enclosing?.schema.allOf) return enclosing;
-  if (landing.key !== undefined) {
-    return { key: landing.key, name: resolveSchemaName(landing.key), schema: landing.resolved };
+  if (enclosing && (enclosing.schema.allOf || enclosing.schema.$ref !== undefined)) return enclosing;
+  if (landing.key !== undefined && landing.named) {
+    return { key: landing.key, name: resolveSchemaName(landing.key), schema: landing.named };
   }
   return enclosing ?? null;
 }
@@ -5591,9 +5594,10 @@ function readComponentAllOfMember(
   const { resolved } = landing;
   // The component the member's declarations are recorded under
   // (`memberOrigin`); a landing that sets it is a base of the model, unless
-  // it is only a nullable wrapper, whose one variant names the base.
+  // the component is only a nullable wrapper, whose one variant names the
+  // base (a bare alias of one is a model of its own, and the base).
   const origin = memberOrigin(landing, options.origin);
-  if (origin !== null && origin !== options.origin && !declaresOnlyNullable(resolved)) noteBase(reading, origin);
+  if (origin !== null && origin !== options.origin && !declaresOnlyNullable(origin.schema)) noteBase(reading, origin);
   // A member that writes an `allOf` composing it — one that types it, one
   // beside properties of its own, or one with no typing union beside it —
   // is read as a component is; a typing union beside an `allOf` whose
@@ -6178,10 +6182,19 @@ function followMemberRefs(
   return followMemberRefChain(member, schemas, seen)?.resolved;
 }
 
-/** Where a member's reference chain lands (`followMemberRefs`), with the key of the first component it resolves through — the one whose model carries what the member declares (`memberOrigin`): a bare alias on the way (`Hop: { $ref: Animal }`) is read as `allOf: [{ $ref: Animal }]`, a model of its own (#618); no key for an inline member, or a chain of pointers into components alone (#539). */
+/**
+ * Where a member's reference chain lands (`followMemberRefs`), with the key
+ * and the own schema of the first component it resolves through — the one
+ * whose model carries what the member declares (`memberOrigin`): a bare
+ * alias on the way (`Hop: { $ref: Animal }`, `Hop: { $ref: Alias }` over a
+ * nullable `Alias`) is read as `allOf: [{ $ref: … }]`, a model of its own
+ * (#618), so the member's declarations are its. No key for an inline
+ * member, or a chain of pointers into components alone (#539).
+ */
 interface MemberLanding {
   resolved: SchemaObject;
   key?: string;
+  named?: SchemaObject;
 }
 
 /** `followMemberRefs` with the landing's component key (`MemberLanding`). */
@@ -6192,16 +6205,20 @@ function followMemberRefChain(
 ): MemberLanding | undefined {
   let resolved = member;
   let key: string | undefined;
+  let named: SchemaObject | undefined;
   const chain = new Set<SchemaObject>();
   while (resolved.$ref) {
     const target = schemaRefTarget(resolved.$ref, schemas);
     if (!target) break;
     if (seen.has(target) || chain.has(target)) return undefined;
     chain.add(target);
-    key ??= componentKeyOf(resolved.$ref);
+    if (key === undefined) {
+      key = componentKeyOf(resolved.$ref);
+      if (key !== undefined) named = target;
+    }
     resolved = target;
   }
-  return { resolved, key };
+  return { resolved, key, named };
 }
 
 /** One union a component's `allOf` member carries: the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it. */

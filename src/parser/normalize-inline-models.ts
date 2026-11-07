@@ -1375,7 +1375,13 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
  * or `json`'s where it has none, and `base`'s name, description and
  * `deprecated`: deprecation names the type the SDK exposes, and that is
  * `base`, so a deprecated `<Name>Json` folded into a live `<Name>` leaves
- * `<Name>` live.
+ * `<Name>` live. The bases `json` is built on (`Model.bases`) come with its
+ * fields, each field's `inheritedFrom` included — less a base that is
+ * `base` itself, by either name (`PetJson: { allOf: [{ $ref: Pet }],
+ * properties: { extra } }` folded onto `Pet`): a model is no base of its
+ * own, so that entry is dropped and the fields it lent are `base`'s own
+ * (#591, Greptile review: the fields came with their origin and the bases
+ * were dropped, so a folded model named a base it did not list).
  * A base that dispatches by rules `json` does not preserve is never folded
  * (`collapseJsonSuffixModels` refuses it), so this only ever adds union
  * metadata to a plain base or replaces a union's with identical rules. The
@@ -1384,10 +1390,20 @@ function isModelReferencedByOthers(name: string, models: Model[], excludeNames: 
  * onto another goes through these two.
  */
 function foldedShape(base: Model, json: Model): Model {
-  const shape: Model = { ...base, fields: json.fields };
+  const self = new Set([base.name, json.name]);
+  const ownOf = (ref: TypeRef | undefined): boolean => ref?.kind === 'model' && self.has(ref.name);
+  const fields = json.fields.map((field) => {
+    if (!ownOf(field.inheritedFrom)) return field;
+    const { inheritedFrom: _self, ...own } = field;
+    return own;
+  });
+  const bases = (json.bases ?? []).filter((ref) => !ownOf(ref));
+  const shape: Model = { ...base, fields };
+  delete shape.bases;
   delete shape.variants;
   delete shape.compositionKind;
   delete shape.discriminator;
+  if (bases.length > 0) shape.bases = bases;
   if (json.variants) shape.variants = json.variants;
   if (json.compositionKind) shape.compositionKind = json.compositionKind;
   if (json.discriminator) shape.discriminator = json.discriminator;
@@ -1400,6 +1416,7 @@ function foldedShape(base: Model, json: Model): Model {
 /** Write `foldedShape(base, json)` onto `base`, in place. */
 function applyFold(base: Model, json: Model): void {
   const shape = foldedShape(base, json);
+  delete base.bases;
   delete base.variants;
   delete base.compositionKind;
   delete base.discriminator;

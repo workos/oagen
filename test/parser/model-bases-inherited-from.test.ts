@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { collapseJsonSuffixModels } from '../../src/parser/normalize-inline-models.js';
 import {
   fieldAdmits,
   fieldPropertiesAdmit,
@@ -344,6 +345,41 @@ describe('#591', () => {
           ['name', false, 'Hop'],
           ['species', false, 'Hop'],
         ]);
+        // A bare alias of a nullable alias is a model of its own (#618), and the
+        // base: what the wrapper's one variant names is the alias's (Greptile).
+        if (openapi === '3.1.0') {
+          const over = {
+            Animal: looseAnimal,
+            Alias: { oneOf: [R('Animal'), { type: 'null' }] },
+            Hop: R('Alias'),
+            Pet: { allOf: [R('Hop')], properties: { nickname } },
+          };
+          const overSpec = await parseJson(documentWith(openapi, over));
+          expect(modelNamed(overSpec, 'Hop').bases).toEqual([ANIMAL]);
+          const overPet = modelNamed(overSpec, 'Pet');
+          expect(overPet.bases).toEqual([model('Hop')]);
+          expect(outline(overPet)).toEqual([
+            ['nickname', false, undefined],
+            ['name', false, 'Hop'],
+            ['species', false, 'Hop'],
+          ]);
+        }
+        // A two-hop bare chain: each model names the next.
+        const hops = {
+          Animal: looseAnimal,
+          Hop2: R('Animal'),
+          Hop: R('Hop2'),
+          Pet: { allOf: [R('Hop')], properties: { nickname } },
+        };
+        const hopsSpec = await parseJson(documentWith(openapi, hops));
+        expect(modelNamed(hopsSpec, 'Hop2').bases).toEqual([ANIMAL]);
+        expect(modelNamed(hopsSpec, 'Hop').bases).toEqual([model('Hop2')]);
+        expect(modelNamed(hopsSpec, 'Pet').bases).toEqual([model('Hop')]);
+        expect(outline(modelNamed(hopsSpec, 'Pet'))).toEqual([
+          ['nickname', false, undefined],
+          ['name', false, 'Hop'],
+          ['species', false, 'Hop'],
+        ]);
         // A bare alias of an `allOf` component: each model names the next.
         const chain = { ...nested, Hop: R('Animal'), Pet: { allOf: [R('Hop')], properties: { nickname } } };
         const chainSpec = await parseJson(documentWith(openapi, chain));
@@ -499,6 +535,43 @@ describe('#591', () => {
         expect(dog.fields.every((f) => f.inheritedFrom === undefined)).toBe(true);
       });
 
+      it('a `<Name>Json` component built on a base folds onto `<Name>` with its bases and each field’s origin (Greptile)', async () => {
+        const schemas = {
+          Animal: animal,
+          Pet: { type: 'object', properties: { id: { type: 'string' } } },
+          PetJson: { allOf: [R('Animal')], properties: { id: { type: 'string' }, extra: { type: 'string' } } },
+        };
+        const paths = { ...issuePaths, '/pets/{petId}/json': getting('getPetJson', 'petId', 'PetJson') };
+        const spec = await parseJson(documentWith(openapi, schemas, paths));
+        expect(spec.models.map((m) => m.name)).toEqual(['Animal', 'Pet']);
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toEqual([ANIMAL]);
+        expect(outline(pet)).toEqual([
+          ['id', false, undefined],
+          ['extra', false, undefined],
+          ['name', true, 'Animal'],
+        ]);
+        expect(collectReferencedNames(spec.services, spec.models).models.has('Animal')).toBe(true);
+        // `PetJson` built on `Pet` itself: the fold drops that base, and the
+        // fields it lent are `Pet`'s own.
+        const onSelf = {
+          Pet: { type: 'object', properties: { id: { type: 'string' } } },
+          PetJson: { allOf: [R('Pet')], properties: { extra: { type: 'string' } } },
+        };
+        const selfSpec = await parseJson(
+          documentWith(openapi, onSelf, {
+            '/pets/{petId}': getting('getPet', 'petId', 'Pet'),
+            '/pets/{petId}/json': getting('getPetJson', 'petId', 'PetJson'),
+          }),
+        );
+        expect(selfSpec.models.map((m) => m.name)).toEqual(['Pet']);
+        expect(modelNamed(selfSpec, 'Pet').bases).toBeUndefined();
+        expect(outline(modelNamed(selfSpec, 'Pet'))).toEqual([
+          ['extra', false, undefined],
+          ['id', false, undefined],
+        ]);
+      });
+
       it('a model built from an inline allOf — a body, a field — carries neither key', async () => {
         const merged = { allOf: [R('Animal'), { type: 'object', properties: { nickname } }] };
         const paths = {
@@ -556,6 +629,73 @@ describe('#591', () => {
       });
     });
   }
+
+  describe('the `…Json` fold (Greptile)', () => {
+    const field = (name: string, extra: Partial<Field> = {}): Field => ({
+      name,
+      type: string,
+      required: false,
+      ...extra,
+    });
+
+    it('carries the `…Json` model’s bases and each field’s origin onto the base it folds into', () => {
+      const models: Model[] = [
+        { name: 'Animal', fields: [field('name')] },
+        { name: 'Pet', fields: [field('id')] },
+        {
+          name: 'PetJson',
+          fields: [field('id'), field('extra'), field('name', { inheritedFrom: ANIMAL })],
+          bases: [ANIMAL],
+        },
+      ];
+      const merged = collapseJsonSuffixModels(models, []);
+      expect(merged.map((m) => m.name)).toEqual(['Animal', 'Pet']);
+      expect(merged[1]!.bases).toEqual([ANIMAL]);
+      expect(outline(merged[1]!)).toEqual([
+        ['id', false, undefined],
+        ['extra', false, undefined],
+        ['name', false, 'Animal'],
+      ]);
+    });
+
+    it('drops a base that is the folded model itself, by either name, and makes the fields it lent the model’s own', () => {
+      for (const self of ['Pet', 'PetJson']) {
+        const models: Model[] = [
+          { name: 'Pet', fields: [field('id')] },
+          {
+            name: 'PetJson',
+            fields: [field('id', { inheritedFrom: model(self) }), field('extra')],
+            bases: [model(self)],
+          },
+        ];
+        const merged = collapseJsonSuffixModels(models, []);
+        expect(
+          merged.map((m) => m.name),
+          self,
+        ).toEqual(['Pet']);
+        expect(merged[0]!.bases, self).toBeUndefined();
+        expect(outline(merged[0]!), self).toEqual([
+          ['id', false, undefined],
+          ['extra', false, undefined],
+        ]);
+      }
+    });
+
+    it('leaves the base’s own bases behind when a plain `…Json` model folds onto it, as it leaves its variants', () => {
+      const models: Model[] = [
+        { name: 'Animal', fields: [field('name')] },
+        { name: 'Pet', fields: [field('name', { inheritedFrom: ANIMAL })], bases: [ANIMAL] },
+        { name: 'PetJson', fields: [field('name'), field('extra')] },
+      ];
+      const merged = collapseJsonSuffixModels(models, []);
+      expect(merged.map((m) => m.name)).toEqual(['Animal', 'Pet']);
+      expect(merged[1]!.bases).toBeUndefined();
+      expect(outline(merged[1]!)).toEqual([
+        ['name', false, undefined],
+        ['extra', false, undefined],
+      ]);
+    });
+  });
 
   describe('the keys are provenance, not shape', () => {
     const plain: Field = { name: 'name', type: string, required: true };
