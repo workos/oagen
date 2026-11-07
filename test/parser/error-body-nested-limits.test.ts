@@ -372,5 +372,54 @@ describe('#611', () => {
         }),
       );
     });
+
+    it("gives a lone surviving variant that is itself a union the outer union's agreed limits", async () => {
+      // Greptile on #639 (round 3): the outer `oneOf` collapses onto its one surviving variant, an `anyOf` or a
+      // type list, which is a union too and takes the outer's agreed `minLength: 1` all the same.
+      const anyOf = (...variants: Doc[]): Doc => ({ anyOf: variants });
+      const min3 = { type: 'string', minLength: 3 };
+      const max3 = { type: 'string', maxLength: 3 };
+      const min4 = { type: 'string', minLength: 4 };
+      const outer = (a: Doc, b: Doc): Doc => ({ ...oneOf(a, b), minLength: 1 });
+      const survivor: TypeRef = {
+        kind: 'union',
+        variants: [string, integer],
+        compositionKind: 'anyOf',
+        constraints: { minLength: 1 },
+      };
+      const nested = await parse(
+        doc(version, {
+          ...getOp('pets', outer(anyOf(short, int), anyOf(min3, int))),
+          ...getOp('notes', outer(anyOf(max3, int), anyOf(min4, int))),
+        }),
+      );
+      expect(nested.warnings).toEqual([]);
+      expect(modelNames(nested.ir)).toEqual(['ErrorBodyWithTagsOrTagsInteger', 'Pet']);
+      expect(tagsOf(nested.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(survivor);
+      expect(tagsField(nested.ir, 'ErrorBodyWithTagsOrTagsInteger').constraints).toEqual({ minLength: 1 });
+      const items = await parse(
+        doc(version, {
+          ...getOp('pets', list(outer(anyOf(short, int), anyOf(min3, int)))),
+          ...getOp('notes', list(outer(anyOf(max3, int), anyOf(min4, int)))),
+        }),
+      );
+      expect(items.warnings).toEqual([]);
+      expect(tagsOf(items.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(listOf(survivor));
+      if (version === '3.1.0') {
+        const typeList = (own: Doc): Doc => ({ type: ['string', 'integer'], ...own });
+        const lists = await parse(
+          doc(version, {
+            ...getOp('pets', outer(typeList({ maxLength: 2 }), typeList({ minLength: 3 }))),
+            ...getOp('notes', outer(typeList({ maxLength: 3 }), typeList({ minLength: 4 }))),
+          }),
+        );
+        expect(lists.warnings).toEqual([]);
+        expect(tagsOf(lists.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual({
+          kind: 'union',
+          variants: [string, integer],
+          constraints: { minLength: 1 },
+        });
+      }
+    });
   });
 });
