@@ -270,5 +270,54 @@ describe('#611', () => {
       expect(modelNames(variants.ir)).toEqual(['ErrorBodyWithTagsOrTagsInteger', 'Pet']);
       expect(tagsOf(variants.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(unionOf(string, integer));
     });
+
+    it("pairs a union's variants by shape whichever order the bodies list them in, and keeps one of two left alike", async () => {
+      // Greptile on #639 (P2): the variants listed in different orders, a limit on one side, share one `oneOf`
+      // with the limit dropped — in the first member's order (`GetNotesError404`, by name), never a union of two unions.
+      const reordered = await parse(
+        doc(version, { ...getOp('pets', oneOf(short, int)), ...getOp('notes', oneOf(int, str)) }),
+      );
+      expect(reordered.warnings).toEqual([]);
+      expect(modelNames(reordered.ir)).toEqual(['ErrorBodyWithTagsOrTagsInteger', 'Pet']);
+      expect(errorOf(reordered.ir, 'getPets')).toBe('ErrorBodyWithTagsOrTagsInteger');
+      expect(errorOf(reordered.ir, 'getNotes')).toBe('ErrorBodyWithTagsOrTagsInteger');
+      expect(tagsOf(reordered.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(unionOf(integer, string));
+      const swapped = await parse(
+        doc(version, { ...getOp('pets', oneOf(int, str)), ...getOp('notes', oneOf(short, int)) }),
+      );
+      expect(swapped.warnings).toEqual([]);
+      expect(tagsOf(swapped.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(unionOf(string, integer));
+      const plain = await parse(
+        doc(version, { ...getOp('pets', oneOf(str, int)), ...getOp('notes', oneOf(int, str)) }),
+      );
+      expect(plain.warnings).toEqual([]);
+      expect(modelNames(plain.ir)).toEqual(['ErrorBodyWithTagsOrTagsInteger', 'Pet']);
+      expect(tagsOf(plain.ir, 'ErrorBodyWithTagsOrTagsInteger')).toEqual(unionOf(integer, string));
+      // Greptile on #639 (P1): two string variants told apart by their limits alone, which the bodies set
+      // differently, are one plain string — never `oneOf: [string, string]`, which admits nothing — at any depth.
+      const min3 = { type: 'string', minLength: 3 };
+      const max3 = { type: 'string', maxLength: 3 };
+      const min4 = { type: 'string', minLength: 4 };
+      const alike = await parse(
+        doc(version, { ...getOp('pets', oneOf(short, min3)), ...getOp('notes', oneOf(max3, min4)) }),
+      );
+      expect(alike.warnings).toEqual([]);
+      expect(modelNames(alike.ir)).toEqual(['ErrorBodyWithTags', 'Pet']);
+      expect(errorOf(alike.ir, 'getPets')).toBe('ErrorBodyWithTags');
+      expect(tagsOf(alike.ir, 'ErrorBodyWithTags')).toEqual(string);
+      const alikeNested = await parse(
+        doc(version, { ...getOp('pets', list(oneOf(short, min3))), ...getOp('notes', list(oneOf(max3, min4))) }),
+      );
+      expect(alikeNested.warnings).toEqual([]);
+      expect(tagsOf(alikeNested.ir, 'ErrorBodyWithTags')).toEqual(listOf(string));
+      // The same two variants listed in either order pair with each other and keep their limits.
+      const sameReordered = await parse(
+        doc(version, { ...getOp('pets', oneOf(short, min3)), ...getOp('notes', oneOf(min3, short)) }),
+      );
+      expect(sameReordered.warnings).toEqual([]);
+      expect(tagsOf(sameReordered.ir, 'ErrorBodyWithTags')).toEqual(
+        unionOf({ kind: 'primitive', type: 'string', constraints: { minLength: 3 } }, shortString),
+      );
+    });
   });
 });
