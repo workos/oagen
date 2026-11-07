@@ -6350,11 +6350,13 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * it (`ListOwnersItem` beside `HolderResultItem`; #608), so the item type
  * is a placeholder the settle decides from the settled types
  * (`settleDeferredDataPathItemType`) — unless the path goes on through the
- * variants of a union on its way (`dataPathForks`): each variant's model
- * types inline items under a name of its own, so the document answers now,
- * under the path-derived name, as it does for a union the IR already holds
- * (#556), and a `$ref` or primitive the variants share is the one type the
- * settle would find. The document (`schema`, classified under
+ * variants of a union to more than one array (`dataPathForks`): each
+ * variant's model types inline items under a name of its own, so the
+ * document answers now, under the path-derived name, as it does for such a
+ * union the IR already holds (#556), and a `$ref` or primitive the variants
+ * share is the one type the settle would find; variants that all hold one
+ * pointer land on one array and are settled like any other path. The
+ * document (`schema`, classified under
  * `contextName`) answers otherwise only when the path crosses a model the
  * parser has not materialized, minting inline items under a path-derived
  * name.

@@ -6597,22 +6597,31 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  * excluding `type` (`declaredTypes`: its own, its component's, its own
  * composition's) admits no instance of it, so an `allOf` with such a
  * member leaves no copy at all (`undefined`), as does a `oneOf`/`anyOf`
- * whose every variant is one; a composition some member of which says
- * something about an instance of `type` (`appliesToType`) stays on the
- * copy as written — never trimmed to those members, since the extractor
- * reads the schema's composition whole (a merge, a reference) and a copy
- * reading a composition of its own would reference a model nobody builds
- * (Greptile, #616 review: `allOf: [{ properties: { name } }, { items }]`
- * beside `['array', 'string']` was `array<NoteAuthor>` for an array copy
- * keeping the `items` member alone, while the extractor merged
- * `NoteAuthor { name }`); a composition no member of which says anything
- * about an instance of `type` is left off the copy when the copy is then
- * a bare type — a primitive, an enum, a literal, an object or array
- * declaring no schema of its own (`declaresOwnSchemas`) — and kept
- * otherwise, read as the schema as a whole is read, so `{ type: ['array',
- * 'string'], items, allOf: [{ $ref: Owner }] }` is `Owner | string`, the
- * reference the `allOf` beside the items is, not an array of items no
- * extractor builds. So `Note.author: { type: ['object',
+ * whose every variant is one. On an `object` or `array` copy — one the
+ * extractor builds models for (`buildsModels`), from the schema's
+ * composition read whole as a merge or a reference — a composition some
+ * member of which says something about an instance of `type`
+ * (`appliesToType`) stays as written, never trimmed to those members,
+ * since a copy reading a composition of its own would reference a model
+ * nobody builds (Greptile, #616 review: `allOf: [{ properties: { name } },
+ * { items }]` beside `['array', 'string']` was `array<NoteAuthor>` for an
+ * array copy keeping the `items` member alone, while the extractor merged
+ * `NoteAuthor { name }`); one no member of which says anything about an
+ * instance of `type` is left off when the copy is then a bare type — an
+ * object or array declaring no schema of its own (`declaresOwnSchemas`) —
+ * and kept otherwise, so `{ type: ['array', 'string'], items, allOf: [{
+ * $ref: Owner }] }` is `Owner | string`, the reference the `allOf` beside
+ * the items is, not an array of items no extractor builds. A primitive
+ * copy, which nothing of reaches the extractor, keeps of an `allOf` the
+ * members that say something about its type alone (#616 review): `{ type:
+ * ['object', 'string'], allOf: [{ $ref: Owner }, { minLength: 1 }] }` with
+ * `Owner` untyped is `Owner | string`, the `string` copy keeping `{
+ * minLength: 1 }` and shedding the `$ref` as it does when the keyword sits
+ * beside the list, and `['string', 'integer']` beside the same `allOf` is
+ * `string | integer` — not `Owner` and `Owner | integer`, the `$ref`
+ * typing the `string` copy because a member beside it applied. A
+ * `oneOf`/`anyOf` is kept whole while any variant applies, so the union
+ * it types keeps the shape the document wrote. So `Note.author: { type: ['object',
  * 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string` when `Owner`
  * declares `properties` and no `type` — its `properties` say nothing of a
  * string — and `Owner` alone when `Owner` is `type: 'object'`, which no
@@ -6639,10 +6648,24 @@ function typeListCopy(
     if (members === undefined || members.length === 0) continue;
     const excluding = members.filter((member) => !admitsType(member, type)).length;
     if (keyword === 'allOf' ? excluding > 0 : excluding === members.length) return undefined;
-    // Kept or left off whole, never trimmed to the members that apply.
-    if (!members.some((member) => appliesToType(member, type)) && !declaresOwnSchemas(copy)) delete copy[keyword];
+    const applying = members.filter((member) => appliesToType(member, type));
+    if (keyword === 'allOf' && !buildsModels(type)) {
+      // A primitive copy keeps the members that say something about its
+      // type alone: nothing of it reaches the extractor, so nothing can
+      // disagree with what it builds.
+      if (applying.length === 0) delete copy.allOf;
+      else if (applying.length < members.length) copy.allOf = applying;
+    } else if (applying.length === 0 && !declaresOwnSchemas(copy)) {
+      // Kept or left off whole, never trimmed to the members that apply.
+      delete copy[keyword];
+    }
   }
   return derivedCopy(copy, schema);
+}
+
+/** Whether the extractor builds models for a copy of `type` — an object's, or an array's items — so its composition must stay the one the extractor reads. */
+function buildsModels(type: string): boolean {
+  return type === 'object' || type === 'array';
 }
 
 /** The keywords under which a schema declares schemas of its own — an inline object, items, values — that an extractor builds models for. */
@@ -6663,6 +6686,11 @@ const OWN_SCHEMA_KEYWORDS: readonly string[] = [
  */
 function declaresOwnSchemas(copy: SchemaObject): boolean {
   return OWN_SCHEMA_KEYWORDS.some((keyword) => copy[keyword] !== undefined);
+}
+
+/** Whether `schema`'s `type` is a list naming several types besides `null` — the lists `buildTypeRef` reads as a union of per-type copies (`typeListCopies`; #616). */
+export function namesSeveralTypes(schema: SchemaObject): boolean {
+  return Array.isArray(schema.type) && schema.type.filter((type) => type !== 'null').length > 1;
 }
 
 /**
