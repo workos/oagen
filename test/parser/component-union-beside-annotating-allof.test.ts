@@ -218,7 +218,7 @@ describe.each(['3.1.0', '3.0.3'])('#613 (OAS %s)', (openapi) => {
     expect(beside.models).toEqual(plain.models);
   });
 
-  it('a dispatching union beside the annotating `allOf`, inline as a member: the model dispatches and its variant models are built, as the plain spelling', async () => {
+  it("a dispatching union beside the annotating `allOf`, inline as a member: the model dispatches, its variant models are built and carry the members' limits, as the plain spelling", async () => {
     const cat = {
       type: 'object',
       properties: { kind: { const: 'cat' }, meow: { type: 'string' } },
@@ -230,15 +230,26 @@ describe.each(['3.1.0', '3.0.3'])('#613 (OAS %s)', (openapi) => {
       required: ['kind'],
     };
     const holder = (member: Record<string, unknown>) => ({ Base, Holder: { allOf: [ref('Base'), member] } });
-    const plain = await parse(issueDoc(openapi, plainNew, holder({ description: 'Kinds.', oneOf: [cat, dog] })));
+    const plain = await parse(
+      issueDoc(openapi, plainNew, holder({ description: 'Kinds.', maxProperties: 3, oneOf: [cat, dog] })),
+    );
     const beside = await parse(
-      issueDoc(openapi, plainNew, holder({ allOf: [{ description: 'Kinds.' }], oneOf: [cat, dog] })),
+      issueDoc(
+        openapi,
+        plainNew,
+        holder({ allOf: [{ description: 'Kinds.' }, { maxProperties: 3 }], oneOf: [cat, dog] }),
+      ),
     );
     const dispatcher = model(beside, 'Holder');
     expect(dispatcher.discriminator?.property).toBe('kind');
+    expect(dispatcher.constraints).toEqual({ maxProperties: 3 });
     const targets = Object.values(dispatcher.discriminator?.mapping ?? {});
     expect(targets).toHaveLength(2);
-    for (const target of targets) expect(modelNames(beside)).toContain(target);
+    // The limit written in the annotating member binds every variant (Greptile review).
+    for (const target of targets) {
+      expect(modelNames(beside)).toContain(target);
+      expect(model(beside, target).constraints, target).toEqual({ maxProperties: 3 });
+    }
     expect(beside.models).toEqual(plain.models);
   });
 
