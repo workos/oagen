@@ -4283,11 +4283,15 @@ describe('#537', () => {
   // and `Note_List` (the leading word is singularized) — share a stem, and
   // one stem qualified neither operation's models: the second one's fell to
   // `PetsXMeta200`, `PetsQueryFilter` and `PetsHeaderXTrace`, and which one
-  // kept the qualified name followed document order. Now a stem another
-  // operation's models are named from too, or one that names nothing
-  // (`ListItem` cleans to nothing), qualifies no model: the operation is
-  // qualified by its id PascalCased before the cleaning instead, which no
-  // transform changes either.
+  // kept the qualified name followed document order. #537 qualified each
+  // by its id PascalCased before the cleaning instead, while their bodies
+  // still shared one name; since #627 the contest is settled before any
+  // operation is built: the operation spelled as the stem (`listNotes`)
+  // keeps it, and every other one is path-named throughout — its bodies,
+  // header and parameter models all from its path. A stem that names
+  // nothing (`ListItem` cleans to nothing) still qualifies no model: the
+  // operation is qualified by its id PascalCased before the cleaning, which
+  // no transform changes either.
   type Op = [path: string, operationId: string, word: string];
   /** A document of `GET` operations, each site shaped from the operation's own word, so every site clashes with every other's. */
   const stems = (openapi: string, ops: Op[]) => ({
@@ -4328,18 +4332,19 @@ describe('#537', () => {
       )
       .map((change) => `${change.kind} ${change.name}`);
 
-  it('qualifies an operation whose stem another holds by its id as written: `listNotesByExternalId` beside `listNotes`', async () => {
+  it('path-names an operation whose stem another id is spelled as: `listNotesByExternalId` beside `listNotes`', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'oagen-537-'));
     try {
       for (const openapi of ['3.1.0', '3.0.3']) {
         const label = openapi.replaceAll('.', '-');
-        // Both ids clean to `ListNotes`, so neither is qualified by the stem
-        // alone: `listNotes`'s id as written is the stem, and
-        // `listNotesByExternalId` keeps its `ByExternalId`.
+        // Both ids clean to `ListNotes`; `listNotes` is spelled as the stem,
+        // so it keeps the stem and the plain names, and `listNotesByExternalId`
+        // is path-named throughout (#627): its body, header and parameter
+        // models all from `PetsByIdNotesByExternalIdGet`.
         const expected = (byExternalIdName = 'listNotesByExternalId') => [
           bareGetPet,
           qualified('listNotes', 'ListNotes', 'ListNotesResponse'),
-          qualified(byExternalIdName, 'ListNotesByExternalId', 'ListNotesResponse'),
+          qualified(byExternalIdName, 'ByIdNotesByExternalIdGet', 'PetsByIdNotesByExternalIdGetResponse'),
         ];
         const plain = await parse(dir, `held-${label}`, stems(openapi, [getPet, listNotes, byExternalId]));
         expect(names(plain), openapi).toEqual(expected());
@@ -4349,15 +4354,16 @@ describe('#537', () => {
         ).toEqual([
           'GetPetResponse',
           'ListNotesResponse',
+          'PetsByIdNotesByExternalIdGetResponse',
           'PetsXMeta',
           'PetsFilter',
           'PetsXTrace',
           'PetsListNotesXMeta',
           'PetsListNotesFilter',
           'PetsListNotesXTrace',
-          'PetsListNotesByExternalIdXMeta',
-          'PetsListNotesByExternalIdFilter',
-          'PetsListNotesByExternalIdXTrace',
+          'PetsByIdNotesByExternalIdGetXMeta',
+          'PetsByIdNotesByExternalIdGetFilter',
+          'PetsByIdNotesByExternalIdGetXTrace',
         ]);
         // A transform renames the operation and nothing else.
         const transformed = await parse(
@@ -4377,13 +4383,14 @@ describe('#537', () => {
     }
   });
 
-  it('falls back the same way for `listNotesController`, `Notes_List` beside `Note_List`, and a stem that cleans to nothing', async () => {
+  it('path-names `listNotesController` beside `listNotes` and both of `Notes_List` beside `Note_List`, and qualifies a stem that cleans to nothing by the id', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'oagen-537-'));
     try {
       for (const openapi of ['3.1.0', '3.0.3']) {
         const label = openapi.replaceAll('.', '-');
         // `Controller` is a backend word the cleaning strips, so
-        // `listNotesController` cleans to `ListNotes` too.
+        // `listNotesController` cleans to `ListNotes` too, and `listNotes`,
+        // spelled as the stem, keeps it.
         const controller = await parse(
           dir,
           `controller-${label}`,
@@ -4392,10 +4399,11 @@ describe('#537', () => {
         expect(names(controller), openapi).toEqual([
           bareGetPet,
           qualified('listNotes', 'ListNotes', 'ListNotesResponse'),
-          qualified('listNotesController', 'ListNotesController', 'ListNotesResponse'),
+          qualified('listNotesController', 'ByIdNotesControllerGet', 'PetsByIdNotesControllerGetResponse'),
         ]);
         // The leading word is singularized, so `Notes_List` and `Note_List`
-        // both clean to `NoteList`; each is qualified by its id as written.
+        // both clean to `NoteList`; neither is spelled `noteList`, so both
+        // are path-named.
         const singular = await parse(
           dir,
           `singular-${label}`,
@@ -4407,8 +4415,8 @@ describe('#537', () => {
         );
         expect(names(singular), openapi).toEqual([
           bareGetPet,
-          qualified('notesList', 'NotesList', 'NoteListResponse'),
-          qualified('noteList', 'NoteList', 'NoteListResponse'),
+          qualified('notesList', 'ByIdNotesGet', 'PetsByIdNotesGetResponse'),
+          qualified('noteList', 'ByIdNoteGet', 'PetsByIdNoteGetResponse'),
         ]);
         // `ListItem` is a marker the cleaning strips whole, so the stem
         // names nothing and qualified nothing (`PetsXMeta200`); the id as
@@ -4436,34 +4444,36 @@ describe('#537', () => {
     try {
       for (const openapi of ['3.1.0', '3.0.3']) {
         const label = openapi.replaceAll('.', '-');
-        // `listNotes` is qualified by `ListNotes` alone and beside
-        // `listNotesByExternalId` alike — its id as written is the stem —
-        // so adding the latter adds its three models and renames nothing;
-        // the two operations' bodies are named alike either way.
+        // `listNotes` is named from `ListNotes` alone and beside
+        // `listNotesByExternalId` alike — its id is spelled as the stem —
+        // so adding the latter adds its four path-named models and renames
+        // nothing (#627).
         const before = await parse(dir, `added-${label}-before`, stems(openapi, [getPet, listNotes]));
         const after = await parse(dir, `added-${label}-after`, stems(openapi, [getPet, listNotes, byExternalId]));
         expect(names(before), openapi).toEqual([bareGetPet, qualified('listNotes', 'ListNotes', 'ListNotesResponse')]);
         expect(names(after).slice(0, 2), openapi).toEqual(names(before));
         expect(allModelChanges(before, after), openapi).toEqual([
-          'model-added PetsListNotesByExternalIdXMeta',
-          'model-added PetsListNotesByExternalIdFilter',
-          'model-added PetsListNotesByExternalIdXTrace',
+          'model-added PetsByIdNotesByExternalIdGetResponse',
+          'model-added PetsByIdNotesByExternalIdGetXMeta',
+          'model-added PetsByIdNotesByExternalIdGetFilter',
+          'model-added PetsByIdNotesByExternalIdGetXTrace',
         ]);
         // `listNotesByExternalId` holds `ListNotes` alone until `listNotes`
-        // is added, then moves to its id as written: its models keep its
-        // name — `PetsListNotesByExternalIdXMeta`, never `PetsXMeta200` —
-        // and `oagen diff` reports the three it held under the stem as
-        // modified, the added operation's shapes now under them, beside the
-        // body the two operations name alike whatever is added.
+        // is added, then is path-named: its models keep its path's name —
+        // `PetsByIdNotesByExternalIdGetXMeta`, never `PetsXMeta200` — and
+        // `oagen diff` reports the four it held under the stem as modified,
+        // the added operation's shapes now under them, beside its own four
+        // added.
         const alone = await parse(dir, `added-${label}-alone`, stems(openapi, [getPet, byExternalId]));
         expect(names(alone), openapi).toEqual([
           bareGetPet,
           qualified('listNotesByExternalId', 'ListNotes', 'ListNotesResponse'),
         ]);
         expect(allModelChanges(alone, after), openapi).toEqual([
-          'model-added PetsListNotesByExternalIdXMeta',
-          'model-added PetsListNotesByExternalIdFilter',
-          'model-added PetsListNotesByExternalIdXTrace',
+          'model-added PetsByIdNotesByExternalIdGetResponse',
+          'model-added PetsByIdNotesByExternalIdGetXMeta',
+          'model-added PetsByIdNotesByExternalIdGetFilter',
+          'model-added PetsByIdNotesByExternalIdGetXTrace',
           'model-modified ListNotesResponse',
           'model-modified PetsListNotesXMeta',
           'model-modified PetsListNotesFilter',

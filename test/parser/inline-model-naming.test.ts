@@ -195,8 +195,12 @@ describe('inline model naming without operationId (issue #188)', () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it('warns when two operationIds resolve to the same inline model name with different fields', async () => {
+  it('names two operationIds that clean to one stem apart, without a warning (#627)', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // `createNote` and `create-note` both clean to `CreateNote`; the first is
+    // spelled as the stem and keeps `CreateNoteRequest`, the second is
+    // path-named, so neither body is merged away and nothing is warned about.
 
     await parseInline(
       {
@@ -221,19 +225,17 @@ describe('inline model naming without operationId (issue #188)', () => {
       },
       (ir) => {
         const bodies = ir.services.flatMap((s) => s.operations).map((o) => summarize(o).requestBody);
-        expect(bodies).toEqual(['CreateNoteRequest', 'CreateNoteRequest']);
+        expect(bodies).toEqual(['CreateNoteRequest', 'LegacyNotesPostRequest']);
         expect(ir.models.filter((m) => m.name === 'CreateNoteRequest')).toHaveLength(1);
-        expect(ir.models.find((m) => m.name === 'CreateNoteRequest')!.fields.map((f) => f.name)).toEqual([
+        expect(ir.models.find((m) => m.name === 'CreateNoteRequest')!.fields.map((f) => f.name)).toEqual(['text']);
+        expect(ir.models.find((m) => m.name === 'LegacyNotesPostRequest')!.fields.map((f) => f.name)).toEqual([
           'title',
           'body',
         ]);
       },
     );
 
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatchInlineSnapshot(
-      `"[oagen] Warning: Inline model "CreateNoteRequest" has more than one definition with different fields or field types (2 vs 1) — keeping the one with more fields"`,
-    );
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
 

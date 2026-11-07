@@ -696,12 +696,17 @@ export function extractOperations(
   // built (see planOperations), so the models of an operation whose
   // operationId the document reuses can follow the name it ends up with, and
   // no two such operations name their models alike (see
-  // resolveReusedOperationIds).
+  // resolveReusedOperationIds). Nor do two operations whose distinct ids
+  // clean to one stem (`createPet` beside `create_pet`): the one spelled as
+  // the stem keeps it and every other one is path-named (see
+  // resolveContestedOperationIdStems).
   const plan = planOperations(resolvedPaths, apiRoot, operationIdNames);
   const { modelOperationIds, sharedWith } = resolveReusedOperationIds(resolvedPaths, plan);
+  resolveContestedOperationIdStems(resolvedPaths, plan, modelOperationIds, sharedWith);
 
   // Operations without an operationId — or left none by the reuse of their
-  // own (see resolveReusedOperationIds) — name their inline models from the
+  // own (see resolveReusedOperationIds) or by the contest of their stem (see
+  // resolveContestedOperationIdStems) — name their inline models from the
   // path, and two distinct paths — or a path and an operationId, component
   // schema or component response — can produce the same name, so the prefix
   // for every such operation is decided up front (see resolvePathModelBaseNames).
@@ -767,11 +772,6 @@ export function extractOperations(
     modelOperationIds,
     sharedWith,
   );
-  // A stem two distinct `operationId`s clean to (`listNotes` and
-  // `listNotesByExternalId`, both `ListNotes`) qualifies neither operation's
-  // header and parameter models: each is qualified by its id as written
-  // instead (see headerOperationQualifier).
-  const contestedStems = contestedOperationIdStems(resolvedPaths, modelOperationIds, sharedWith);
 
   /** Every operation built, by its plan key (`${method} ${path}`). */
   const operationsByKey = new Map<string, Operation>();
@@ -865,7 +865,6 @@ export function extractOperations(
         registeredModels,
         registry,
         modelOperationIds.get(key),
-        contestedStems,
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
@@ -1510,6 +1509,10 @@ function isWhitespace(char: string): boolean {
  * that has an `operationId`. The single source of that name: extractRequestBody,
  * deriveResponseName, deriveFallbackResponseName and deriveErrorModelName use
  * it to name, resolvePathModelBaseNames and operationBodyModelNames to reserve.
+ * Read with the `operationId` the operation's models are named from, which
+ * the reuse of its own (resolveReusedOperationIds) or the contest of its
+ * stem (resolveContestedOperationIdStems) may have taken from it, so no two
+ * operations reach it with ids that clean to one stem (#627).
  */
 function operationIdModelName(operationId: string, suffix: string): string {
   return cleanSchemaName(toPascalCase(normalizeOperationIdForNaming(operationId)) + suffix);
@@ -3204,13 +3207,12 @@ function buildOperation(
   registry?: ModelShapeRegistry,
   /**
    * The `operationId` the operation's models are named from when the
-   * document reuses its own (`resolveReusedOperationIds`): the name the
+   * document reuses its own (`resolveReusedOperationIds`) or another id
+   * cleans to its stem (`resolveContestedOperationIdStems`): the name the
    * reuse renamed it to, or `null` to name them from the path; absent, its
    * own.
    */
   modelOperationId?: string | null,
-  /** The stems more than one operation names its models from (`contestedOperationIdStems`), which qualify no header or parameter model. */
-  contestedStems: ReadonlySet<string> = new Set(),
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3228,7 +3230,8 @@ function buildOperation(
   const opLabel = operationLabel(op, path, method);
   // The Operation Object as every model name reads it (the request and
   // response bodies, the error and fallback bodies, the qualifiers): with
-  // the `operationId` the reuse of its own leaves it, if any.
+  // the `operationId` the reuse of its own, or the contest of its stem,
+  // leaves it, if any.
   const namingOp = modelOperationId === undefined ? op : { ...op, operationId: modelOperationId ?? undefined };
   // Resolve a `components/requestBodies` ref up front so body extraction, body
   // parameter groups, and the body-ownership rule below all read one object.
@@ -3299,7 +3302,7 @@ function buildOperation(
   const opContext = serviceName;
   // Names this operation's models in the shape registry, and qualifies a
   // deferred model's name when one of them is taken across operations.
-  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext, contestedStems);
+  const operationQualifier = headerOperationQualifier(namingOp, pathModelBaseName, opContext);
   // What the typing of a parameter, a response header or a secondary,
   // fallback or error body reads from the operation and the spec; a schema
   // deferred through it is typed once every operation has been read
@@ -3701,45 +3704,36 @@ function responseTypeRefs(op: Operation): TypeRef[] {
  * beside `NoteListResponse`, whatever an `operationIdTransform` names the
  * operation — the operation's PascalCase name, before #537, renamed the
  * header and parameter models (`PetsListNotesXMeta`) with every change to
- * the transform while the bodies kept their names. The stem must be the
- * operation's own, though: when another operation's models are named from
- * the same stem (`contestedStems`, see `contestedOperationIdStems`) — two
- * distinct ids that `cleanSchemaName` makes alike, `listNotesByExternalId`
- * beside `listNotes` (`ByExternalId` is a marker it strips), `Notes_List`
- * beside `Note_List` (the leading word is singularized), `listNotesController`
- * beside `listNotes` (`Controller` is stripped) — or when the stem names
- * nothing (`ListItem` cleans to nothing), the operation is qualified by its
- * id PascalCased before the cleaning instead (`toPascalCase` of the id, its
- * overload markers stripped), which no transform changes either:
- * `PetsListNotesByExternalIdXMeta` beside `listNotes`'s `PetsListNotesXMeta`,
- * `PetsNotesListXMeta` beside `PetsNoteListXMeta`,
- * `PetsListNotesControllerXMeta`, and `PetsListItemXMeta`. One qualifier
- * for the two operations read as one to the shape registry and to
- * `deferredNamingStem`'s `withinOperation` test, so the second one's
+ * the transform while the bodies kept their names. The stem is the
+ * operation's own: when two distinct ids clean to one stem
+ * (`listNotesByExternalId` beside `listNotes`, `create_pet` beside
+ * `createPet`), the operation that loses the contest is path-named before
+ * any operation is built (`resolveContestedOperationIdStems`, #627) and
+ * reaches here with no `operationId`, so its qualifier is the path-derived
+ * stem its bodies are built from (`ByIdNotesByExternalIdGet` beside
+ * `PetsByIdNotesByExternalIdGetResponse`) — before #627 one stem named
+ * both operations' bodies, so it qualified neither one's header and
+ * parameter models and each was qualified by its id as written instead
+ * (`PetsListNotesByExternalIdXMeta`), and before #537 the second one's
  * clashing models fell to names that say nothing about the operation
- * (`PetsXMeta200`, `PetsQueryFilter`, `PetsHeaderXTrace`), and which
- * operation kept the qualified name followed document order. Whether a
- * stem is contested depends on the document's `operationId`s alone, never
- * on their order: an operation whose id PascalCases to its stem keeps its
- * qualifier whatever operation is added beside it, while one whose id
- * cleans to a different stem holds that stem only while no other operation
- * does, and moves to its pre-clean id when one is added — its models still
- * named for it, not stripped of it. A path-named operation uses the
- * path-derived stem, so a verb or singular change in inferOperationName
- * must not rename a generated type either. That stem's leading service word
- * is dropped when it ends on a word boundary, since the model name already
- * starts with the service: `Notes` + `ByIdPinPost` + `XMeta`, beside
- * `NotesByIdPinPostResponse`.
+ * (`PetsXMeta200`, `PetsQueryFilter`, `PetsHeaderXTrace`). A stem that
+ * names nothing (`ListItem` cleans to nothing) qualifies nothing, so the
+ * operation is qualified by its id PascalCased before the cleaning instead
+ * (`toPascalCase` of the id, its overload markers stripped), which no
+ * transform changes either: `PetsListItemXMeta`. A path-named operation
+ * uses the path-derived stem, so a verb or singular change in
+ * inferOperationName must not rename a generated type either. That stem's
+ * leading service word is dropped when it ends on a word boundary, since
+ * the model name already starts with the service: `Notes` + `ByIdPinPost` +
+ * `XMeta`, beside `NotesByIdPinPostResponse`.
  */
 function headerOperationQualifier(
   op: OperationObject,
   pathModelBaseName: string,
   serviceName: string | undefined,
-  contestedStems: ReadonlySet<string>,
 ): string {
   if (op.operationId) {
-    const stem = operationIdModelBase(op.operationId);
-    return stem && !contestedStems.has(stem) ? stem : toPascalCase(normalizeOperationIdForNaming(op.operationId));
+    return operationIdModelBase(op.operationId) || toPascalCase(normalizeOperationIdForNaming(op.operationId));
   }
   const parent = serviceName ? toPascalCase(serviceName) : '';
   const rest = pathModelBaseName.slice(parent.length);
@@ -5828,6 +5822,25 @@ export function derivePathBasedName(
 }
 
 /**
+ * The order the naming passes take operations in where a choice must not
+ * depend on document order — the one the numeric pass of
+ * disambiguateOperationNames keeps a name in: the shorter API root, then the
+ * path by code unit, then the method in HTTP_METHODS order. Orders the
+ * claims of resolveReusedOperationIds and the paths of an Operation Object
+ * resolveContestedOperationIdStems path-names.
+ */
+function compareOperationOrder(
+  a: { rootLength: number; path: string; method: HttpMethod },
+  b: { rootLength: number; path: string; method: HttpMethod },
+): number {
+  return (
+    a.rootLength - b.rootLength ||
+    (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) ||
+    HTTP_METHODS.indexOf(a.method) - HTTP_METHODS.indexOf(b.method)
+  );
+}
+
+/**
  * What the models of each operation whose `operationId` the document reuses
  * are named from, keyed by `${method} ${path}`. `modelOperationIds` holds
  * the name to read as its `operationId`, or `null` for one that names them
@@ -5849,8 +5862,9 @@ export function derivePathBasedName(
  * models `CreateNote2Request` beside `createNote`'s `CreateNoteRequest`.
  * Paths and claims are taken in the order the numeric pass of
  * disambiguateOperationNames keeps a name in — the shorter API root, then
- * the path by code unit, then the method in HTTP_METHODS order — so the
- * outcome never depends on document order. The stems the document wrote
+ * the path by code unit, then the method in HTTP_METHODS order
+ * (compareOperationOrder) — so the outcome never depends on document
+ * order. The stems the document wrote
  * are served first, each granted while no earlier claim and no `operationId`
  * declared on one Operation Object holds it; then the new names, which the
  * parser made, each granted, as a path-derived prefix is, only while no
@@ -5893,12 +5907,7 @@ function resolveReusedOperationIds(
     .filter(reused)
     .flat()
     .map((entry) => ({ ...entry, ...plan.operations.get(entry.key)! }))
-    .sort(
-      (a, b) =>
-        a.rootLength - b.rootLength ||
-        (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) ||
-        HTTP_METHODS.indexOf(a.method) - HTTP_METHODS.indexOf(b.method),
-    );
+    .sort(compareOperationOrder);
 
   // One claim per Operation Object, made by the first of its paths.
   const claimants = new Map<OperationObject, (typeof claims)[number]>();
@@ -5929,25 +5938,61 @@ function resolveReusedOperationIds(
 }
 
 /**
- * The stems (operationIdModelBase) more than one Operation Object names its
- * models from, which qualify no operation's header and parameter models
- * (headerOperationQualifier). Read off the `operationId` each operation's
- * models are named from — the one the reuse of its own left it, or its own
- * (`modelOperationIds`) — with a path that shares another's Operation
- * Object (`sharedWith`) and a second path onto one Path Item both reading
- * as the one Operation Object they are, so an `operationId` declared once
- * holds its stem alone however many paths reach it. `listNotes` and
- * `listNotesByExternalId` both clean to `ListNotes` (`ByExternalId` is a
- * marker cleanSchemaName strips), as `Notes_List` and `Note_List` do to
- * `NoteList` and `listNotesController` and `listNotes` to `ListNotes`.
- * Depends on the document's `operationId`s alone, never on their order.
+ * Settle every stem (operationIdModelBase) more than one Operation Object
+ * would name its models from, so that no two operations' bodies share a
+ * model (#627). Two distinct `operationId`s can clean to one stem:
+ * `createPet` beside `create_pet` or `CreatePet` (each PascalCases to
+ * `CreatePet`) or beside `createPetController` (`Controller` is a backend
+ * word cleanSchemaName strips), `listNotes` beside `listNotesByExternalId`
+ * (`ByExternalId` is a marker it strips), `Notes_List` beside `Note_List`
+ * (the leading word is singularized). Every model the stem names —
+ * `CreatePetRequest`, `CreatePetResponse`, `CreatePetError404`, a list's
+ * `CreatePetItem`, the nested models and envelope companions under them and
+ * the enums the bodies mint — was minted once per operation, and the merge
+ * kept the first definition for both, so one operation was typed with
+ * fields it does not take, and which one followed the order of the paths.
+ *
+ * Of the Operation Objects that contest a stem, the one whose `operationId`
+ * is the stem's own spelling — the stem with its first letter lowered,
+ * `createPet` for `CreatePet`, read with the overload markers at its end
+ * stripped (normalizeOperationIdForNaming) — keeps the stem and the plain
+ * names, and every other one names its models from its path
+ * (`PetDraftsPostRequest`), exactly as a reused id's later operation does
+ * (resolveReusedOperationIds); when none is spelled so (`create_pet`
+ * beside `CreatePet`), or more than one is — which the reuse pass leaves no
+ * room for, since one id as written names the models of one Operation
+ * Object — every one of them does. So adding `create_pet` beside `createPet`
+ * adds two models and renames none of `createPet`'s, whatever the order of
+ * the paths: the outcome depends on the document's `operationId`s alone.
+ * Whether the contested bodies agree in shape takes no part, so that a
+ * change to one body never renames its model.
+ *
+ * Read off the `operationId` each operation's models are named from
+ * (`modelOperationIds`: the one the reuse of its own left it, or its own),
+ * with a path that shares another's Operation Object (`sharedWith`) and a
+ * second path onto one Path Item both reading as the one Operation Object
+ * they are, so an `operationId` declared once holds its stem alone however
+ * many paths reach it. An Operation Object that loses its stem names its
+ * models from the first of its paths in the order the reuse pass takes
+ * claims in (compareOperationOrder), and every other path of it shares
+ * them. Written into `modelOperationIds` (`null`: path-named) and
+ * `sharedWith`, which every later pass reads.
  */
-function contestedOperationIdStems(
+function resolveContestedOperationIdStems(
   paths: Record<string, PathItem>,
-  modelOperationIds: ReadonlyMap<string, string | null>,
-  sharedWith: ReadonlyMap<string, string>,
-): Set<string> {
-  const holders = new Map<string, Set<OperationObject>>();
+  plan: OperationPlan,
+  modelOperationIds: Map<string, string | null>,
+  sharedWith: Map<string, string>,
+): void {
+  /** One path's operation: its plan key, and what orders it among the paths of its Operation Object. */
+  interface Site {
+    key: string;
+    path: string;
+    method: HttpMethod;
+    rootLength: number;
+  }
+  /** Each Operation Object whose models the stem would name, with the id they are read from and the paths that reach it. */
+  const holders = new Map<string, Map<OperationObject, { id: string; sites: Site[] }>>();
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
@@ -5957,12 +6002,27 @@ function contestedOperationIdStems(
       const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
       if (!operationId) continue;
       const stem = operationIdModelBase(operationId);
-      const ops = holders.get(stem) ?? new Set<OperationObject>();
-      ops.add(op);
+      const ops = holders.get(stem) ?? new Map<OperationObject, { id: string; sites: Site[] }>();
+      const holder = ops.get(op) ?? { id: normalizeOperationIdForNaming(operationId), sites: [] };
+      holder.sites.push({ key, path, method, rootLength: plan.operations.get(key)!.rootLength });
+      ops.set(op, holder);
       holders.set(stem, ops);
     }
   }
-  return new Set([...holders].filter(([, ops]) => ops.size > 1).map(([stem]) => stem));
+  for (const [stem, ops] of holders) {
+    if (ops.size < 2) continue;
+    const spelling = stem.charAt(0).toLowerCase() + stem.slice(1);
+    const kept = [...ops.values()].filter(({ id }) => id === spelling).length === 1;
+    for (const { id, sites } of ops.values()) {
+      if (kept && id === spelling) continue;
+      const [first, ...rest] = sites.sort(compareOperationOrder);
+      modelOperationIds.set(first.key, null);
+      for (const { key } of rest) {
+        modelOperationIds.set(key, null);
+        sharedWith.set(key, first.key);
+      }
+    }
+  }
 }
 
 /**
