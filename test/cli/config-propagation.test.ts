@@ -1082,4 +1082,46 @@ describe('the settings generate reads from config reach compat-extract and verif
     expect(result.stdout).toContain('Compat: converged after 1 retry iteration(s)');
     expect(shapeOf(readSurface())).toEqual(expected);
   });
+
+  describe('#600', () => {
+    // #567's third scenario: under the retry config's `mountRules` and name
+    // hint, `verify --scope spec-only` printed `1/2 baseline symbols in scope`
+    // and missed a method removed from `Animals`, because the compat scope
+    // read the IR's `Pets` rather than the `Animals` class `generate` writes.
+    it('verify: scopes compat to the class and methods the mount rule and name hint make generation write', async () => {
+      const generated = await run([
+        '--config',
+        retryConfig,
+        'generate',
+        '--spec',
+        petsSpec,
+        '--lang',
+        'pets',
+        '--output',
+        sdk,
+      ]);
+      expect(generated.code).toBe(0);
+      const written = readSurface();
+      expect(shapeOf(written)).toEqual({
+        classes: { Animals: ['get_pet', 'list_all'] },
+        interfaces: ['Pet'],
+        emitterOptions: { flavor: 'retry' },
+      });
+
+      // The SDK lost `Animals.list_all`.
+      writeFileSync(baseline, JSON.stringify(written));
+      const { list_all: _lost, ...kept } = written.classes.Animals.methods;
+      writeFileSync(
+        sdkSurface,
+        JSON.stringify({ ...written, classes: { Animals: { ...written.classes.Animals, methods: kept } } }),
+      );
+      const result = await run(['--config', retryConfig, ...verifyArgs(petsSpec), '--max-retries', '0']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('(scoped to spec: 2/2 baseline symbols in scope)');
+      expect(result.stdout).toContain(
+        '[symbol_removed] breaking: Animals.list_all — Symbol "Animals.list_all" was removed',
+      );
+      expect(result.stderr).toContain('Compat violations found');
+    });
+  });
 });

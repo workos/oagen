@@ -18,6 +18,7 @@ import {
   type RequestBodyEncodingShift,
 } from './classify.js';
 import { formatChangeDetails, primitivesDifferOnlyByFormat, typeRefsEqual } from './models.js';
+import { constraintsShift, constraintsSides } from './constraints.js';
 import { classifySecurityChange, securityShift, type DocumentSecurity } from './security.js';
 import { diffRequestBodyContentTypes, ownRepresentationKept } from './media-types.js';
 import type { DocumentShapes } from './shapes.js';
@@ -332,6 +333,11 @@ function diffWebhookResponses(oldWebhook: Webhook, newWebhook: Webhook): { chang
  *   the same (RFC 9110 §5.1).
  * - removed: breaking — handler code that read it has nothing to read.
  * - type changed: breaking; format-only changes are additive, as elsewhere.
+ * - limits changed (the parameter's own `constraints` and its type's at
+ *   every level, `constraintsShift`; #599): additive either way — the
+ *   receiver reads the value and never supplies it, so a limit tightened
+ *   narrows what it receives and one loosened widens it within the same
+ *   base type, as a format change does; `details` names every keyword.
  * - optional → required: additive (now always present);
  *   required → optional: breaking (code that assumed presence breaks).
  * - default changed: additive with details, as the receiver sets no defaults;
@@ -385,6 +391,21 @@ function diffWebhookParams(oldWebhook: Webhook, newWebhook: Webhook): ParamChang
       } else {
         changes.push({ kind: 'param-type-changed', paramName: name, classification: 'breaking', paramLocation: loc });
       }
+    }
+
+    // The limits the parameter and its type carry, at every level: additive
+    // either way from the receiver's side, which reads the value and never
+    // supplies it (#599).
+    const limits = constraintsShift(oldParam, newParam);
+    if (limits) {
+      changes.push({
+        kind: 'param-constraints-changed',
+        paramName: name,
+        classification: 'additive',
+        paramLocation: loc,
+        ...constraintsSides(limits),
+        details: limits.details,
+      });
     }
 
     // The media type the value is serialized in (`Parameter.contentType`,

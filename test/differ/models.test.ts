@@ -563,11 +563,44 @@ describe('#545', () => {
 
   it('reads two types that differ only in the limits they carry as one type, as it reads two fields', () => {
     // `typeRefsEqual` passes over a type's limits as `diffFields` passes over
-    // a field's: a limit tightened or loosened on an array's items, like one
-    // on the field itself, is no type change the differ reports today.
+    // a field's for its type: a limit tightened or loosened on an array's
+    // items, like one on the field itself, is no type change — it is a
+    // `field-constraints-changed` entry beside the type (#599), naming the
+    // level it moved on, breaking when tightened on a model of unknown
+    // direction and additive when loosened.
     expect(typeRefsEqual({ kind: 'array', items: tagged }, { kind: 'array', items: string })).toBe(true);
-    expect(diffModels([tags(tagged)], [tags(string)])).toEqual([]);
-    expect(diffModels([tags(string)], [tags(tagged)])).toEqual([]);
-    expect(diffModels([tags(string, { minItems: 1 })], [tags(string)])).toEqual([]);
+    const limits = (changes: ReturnType<typeof diffModels>) =>
+      changes.map((c) => (c.kind === 'model-modified' ? c.fieldChanges : []));
+    expect(limits(diffModels([tags(tagged)], [tags(string)]))).toEqual([
+      [
+        {
+          kind: 'field-constraints-changed',
+          fieldName: 'tags',
+          classification: 'additive',
+          details: "items.pattern '^tag_' → <unset>",
+        },
+      ],
+    ]);
+    expect(limits(diffModels([tags(string)], [tags(tagged)]))).toEqual([
+      [
+        {
+          kind: 'field-constraints-changed',
+          fieldName: 'tags',
+          classification: 'breaking',
+          details: "items.pattern <unset> → '^tag_'",
+        },
+      ],
+    ]);
+    expect(limits(diffModels([tags(string, { minItems: 1 })], [tags(string)]))).toEqual([
+      [
+        {
+          kind: 'field-constraints-changed',
+          fieldName: 'tags',
+          classification: 'additive',
+          oldConstraints: { minItems: 1 },
+          details: 'minItems 1 → <unset>',
+        },
+      ],
+    ]);
   });
 });

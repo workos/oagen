@@ -1,14 +1,23 @@
 import type { Model, TypeRef, UnionType } from '../ir/types.js';
 import { assertNever } from '../ir/types.js';
 import type { Change, FieldChange, VariantChange } from './types.js';
-import { classifyFieldChange, deprecationDetails, deprecationFlip, extensionsShift } from './classify.js';
+import {
+  classifyConstraintsChange,
+  classifyFieldChange,
+  constraintsDetails,
+  deprecationDetails,
+  deprecationFlip,
+  extensionsShift,
+} from './classify.js';
+import { constraintsShift, constraintsSides, pairVariants } from './constraints.js';
 import type { DirectionIndex, ModelDirection } from './direction.js';
 import { directionOf } from './direction.js';
 
 /**
- * `directions` (from `buildDirectionIndex`) lets requiredness changes be judged
- * against the side of the wire each model is used on. Omit it and every model is
- * treated as unknown-direction, i.e. the conservative classification.
+ * `directions` (from `buildDirectionIndex`) lets requiredness and limits
+ * changes be judged against the side of the wire each model is used on. Omit
+ * it and every model is treated as unknown-direction, i.e. the conservative
+ * classification.
  */
 export function diffModels(oldModels: Model[], newModels: Model[], directions?: DirectionIndex): Change[] {
   const changes: Change[] = [];
@@ -31,16 +40,24 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
     const oldModel = oldByName.get(name);
     if (!oldModel) continue;
 
-    const fieldChanges = diffFields(oldModel, newModel, directionOf(directions, name));
-    const variantChanges = diffVariants(oldModel, newModel);
+    const direction = directionOf(directions, name);
+    const fieldChanges = diffFields(oldModel, newModel, direction);
+    const variantChanges = diffVariants(oldModel, newModel, direction);
     // A flipped flag alone is a change: nothing the model's callers compile
     // against moves, but a changelog has to say it.
     const deprecation = deprecationFlip(oldModel, newModel);
     // So is a change to the model's own extensions, which are not shape
     // either; the flag is present only when they differ (`extensionsShift`).
     const extensions = extensionsShift(oldModel, newModel);
-    if (fieldChanges.length > 0 || variantChanges.length > 0 || deprecation || extensions) {
-      const hasBreaking = [...fieldChanges, ...variantChanges].some((c) => c.classification === 'breaking');
+    // And so is one to the model's own limits — an object schema's
+    // `minProperties`, `maxProperties` and `dependentRequired`, a named
+    // union's keywords — judged by direction as a field's are (#599).
+    const limits = constraintsShift(oldModel, newModel);
+    const limitsBreaking =
+      limits !== undefined && classifyConstraintsChange(limits.tightened, direction) === 'breaking';
+    if (fieldChanges.length > 0 || variantChanges.length > 0 || deprecation || extensions || limits) {
+      const hasBreaking =
+        limitsBreaking || [...fieldChanges, ...variantChanges].some((c) => c.classification === 'breaking');
       changes.push({
         kind: 'model-modified',
         name,
@@ -49,6 +66,9 @@ export function diffModels(oldModels: Model[], newModels: Model[], directions?: 
         deprecatedChanged: deprecation !== undefined,
         ...deprecation,
         ...(extensions ? { extensionsChanged: true, ...extensions } : {}),
+        ...(limits
+          ? { constraintsChanged: true, ...constraintsSides(limits), details: constraintsDetails(limits, direction) }
+          : {}),
         classification: hasBreaking ? 'breaking' : 'additive',
       });
     }
@@ -90,8 +110,23 @@ type UnionSource = Pick<Model, 'variants' | 'discriminator'> & Pick<UnionType, '
  * receive). A model that gains or loses `variants` altogether reports each
  * variant added or removed, not a composition change. An inline union is read
  * the same way (`addedUnionVariants`).
+ *
+ * A kept variant whose type carries other limits — a primitive variant's
+ * `pattern`, an array variant's items' `maxLength` — is a
+ * `variant-constraints-changed` entry, since `typeRefsEqual` passes over
+ * limits (#599): the new variants are paired with the old as `pairVariants`
+ * pairs them (by type, the same limits preferred, so a reorder of two
+ * variants of one type reports nothing), and each pair's limits are
+ * compared at every level of the type (`constraintsShift`) and judged by
+ * `direction` as a field's are (`classifyConstraintsChange`): breaking when
+ * tightened on a union that is not response-only, additive otherwise. A
+ * model variant carries none (the model's own are compared with the model).
  */
-function diffVariants(oldModel: UnionSource, newModel: UnionSource): VariantChange[] {
+function diffVariants(
+  oldModel: UnionSource,
+  newModel: UnionSource,
+  direction: ModelDirection = 'unknown',
+): VariantChange[] {
   const changes: VariantChange[] = [];
   const oldVariants = dispatchedVariants(oldModel);
   const newVariants = dispatchedVariants(newModel);
@@ -157,6 +192,19 @@ function diffVariants(oldModel: UnionSource, newModel: UnionSource): VariantChan
         details: `mapping changed for ${quoteKeys(mapping.changed)}`,
       });
     }
+  }
+
+  for (const [i, old] of pairVariants(oldVariants, newVariants)) {
+    const variant = newVariants[i];
+    const limits = constraintsShift({ type: old }, { type: variant });
+    if (!limits) continue;
+    changes.push({
+      kind: 'variant-constraints-changed',
+      variant: variantLabel(variant),
+      classification: classifyConstraintsChange(limits.tightened, direction),
+      ...constraintsSides(limits),
+      details: constraintsDetails(limits, direction),
+    });
   }
 
   return changes;
@@ -301,7 +349,11 @@ function quoteKeys(keys: readonly string[]): string {
  * variant is not a widening. Nor is a member added to an `allOf`, which
  * narrows it. Such a change is additive as a named union's `variant-added`
  * is, from either side of the wire: a caller may send the new variant but
- * need not, and a reader may receive it as it may a new enum value.
+ * need not, and a reader may receive it as it may a new enum value. A kept
+ * variant whose limits moved is still kept — `typeRefsEqual` passes over
+ * limits, and `diffFields` reports them beside the widening as a
+ * `field-constraints-changed` entry (#599) — so a `variant-constraints-changed`
+ * `diffVariants` reports is not a change this is not.
  */
 export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[] | undefined {
   if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
@@ -353,7 +405,8 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
   const changes = diffVariants(oldType, newType);
   const removed = changes.filter((change) => change.kind === 'variant-removed').length;
   if (removed !== widened) return undefined;
-  if (changes.some((change) => change.kind !== 'variant-added' && change.kind !== 'variant-removed')) return undefined;
+  const widening = new Set<VariantChange['kind']>(['variant-added', 'variant-removed', 'variant-constraints-changed']);
+  if (changes.some((change) => !widening.has(change.kind))) return undefined;
   return added;
 }
 
@@ -401,7 +454,14 @@ function variantLabel(ref: TypeRef): string {
 /**
  * What changed between two field lists, matched by name: a model's fields, or
  * a list envelope's (`PaginationMeta.envelopeFields`, which `diffOperations`
- * compares the same way, #439).
+ * compares the same way, #439). A kept field is compared on its type
+ * (`typeRefsEqual`, which passes over limits), its limits — its own
+ * `constraints` and those its type carries at every level under it, an
+ * array's `items`, a map's `valueType`, a union's variants
+ * (`constraintsShift`; #599), reported as a `field-constraints-changed`
+ * entry beside whatever else changed and judged by `direction`
+ * (`classifyConstraintsChange`) — its requiredness, access flags,
+ * `deprecated` flag and extensions.
  */
 export function diffFields(
   oldModel: Pick<Model, 'fields'>,
@@ -454,6 +514,18 @@ export function diffFields(
           details: `type changed`,
         });
       }
+    }
+
+    // The limits the field and its type carry, at every level, which
+    // `typeRefsEqual` passes over; reported beside, not instead of, a type
+    // change, and softened on a response-only model as `field-added` is.
+    const limits = constraintsShift(oldField, newField);
+    if (limits) {
+      changes.push({
+        ...classifyFieldChange('field-constraints-changed', name, limits.tightened, direction),
+        ...constraintsSides(limits),
+        details: constraintsDetails(limits, direction),
+      });
     }
 
     if (oldField.required !== newField.required) {

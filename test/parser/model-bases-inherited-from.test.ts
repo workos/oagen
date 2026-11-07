@@ -296,14 +296,21 @@ describe('#591', () => {
         });
       });
 
-      it('a bare or nullable alias is read to the component it names; an allOf alias is a base of its own', async () => {
+      it('a bare alias is a base of its own (#618); a nullable alias is read to the component it names; an allOf alias is a base of its own', async () => {
         const bare = { Animal: looseAnimal, Hop: R('Animal'), Pet: { allOf: [R('Hop')], properties: { nickname } } };
-        const barePet = modelNamed(await parseJson(documentWith(openapi, bare)), 'Pet');
-        expect(barePet.bases).toEqual([ANIMAL]);
-        expect(outline(barePet)).toEqual([
-          ['nickname', false, undefined],
+        const bareSpec = await parseJson(documentWith(openapi, bare));
+        const hop = modelNamed(bareSpec, 'Hop');
+        expect(hop.bases).toEqual([ANIMAL]);
+        expect(outline(hop)).toEqual([
           ['name', false, 'Animal'],
           ['species', false, 'Animal'],
+        ]);
+        const barePet = modelNamed(bareSpec, 'Pet');
+        expect(barePet.bases).toEqual([model('Hop')]);
+        expect(outline(barePet)).toEqual([
+          ['nickname', false, undefined],
+          ['name', false, 'Hop'],
+          ['species', false, 'Hop'],
         ]);
         if (openapi === '3.1.0') {
           const alias = {
@@ -337,14 +344,21 @@ describe('#591', () => {
           ['name', false, 'Hop'],
           ['species', false, 'Hop'],
         ]);
-        // A bare alias of an `allOf` component lands on that component.
+        // A bare alias of an `allOf` component: each model names the next.
         const chain = { ...nested, Hop: R('Animal'), Pet: { allOf: [R('Hop')], properties: { nickname } } };
-        const chainPet = modelNamed(await parseJson(documentWith(openapi, chain)), 'Pet');
-        expect(chainPet.bases).toEqual([ANIMAL]);
-        expect(outline(chainPet)).toEqual([
-          ['nickname', false, undefined],
+        const chainSpec = await parseJson(documentWith(openapi, chain));
+        expect(modelNamed(chainSpec, 'Animal').bases).toEqual([model('Living')]);
+        expect(modelNamed(chainSpec, 'Hop').bases).toEqual([ANIMAL]);
+        expect(outline(modelNamed(chainSpec, 'Hop'))).toEqual([
           ['name', true, 'Animal'],
           ['born', false, 'Animal'],
+        ]);
+        const chainPet = modelNamed(chainSpec, 'Pet');
+        expect(chainPet.bases).toEqual([model('Hop')]);
+        expect(outline(chainPet)).toEqual([
+          ['nickname', false, undefined],
+          ['name', true, 'Hop'],
+          ['born', false, 'Hop'],
         ]);
       });
 

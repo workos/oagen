@@ -3052,8 +3052,10 @@ describe('#569', () => {
       { name: 'array_without_items', type: { kind: 'model', name: 'ArrayWithoutItems' } },
       { name: 'object_or_string', type: { kind: 'model', name: 'ObjectOrString' } },
       { name: 'array_or_string', type: { kind: 'model', name: 'ArrayOrString' } },
-      { name: 'null_only', type: { kind: 'model', name: 'NullOnly' } },
-      { name: 'null_list', type: { kind: 'model', name: 'NullList' } },
+      // A `null`-only component keeps its fieldless model, and admits `null`
+      // in either spelling, so the reference is wrapped (#615).
+      { name: 'null_only', type: nullable({ kind: 'model', name: 'NullOnly' }) },
+      { name: 'null_list', type: nullable({ kind: 'model', name: 'NullList' }) },
       { name: 'map_without_type', type: { kind: 'model', name: 'MapWithoutType' } },
       { name: 'unread_type', type: { kind: 'model', name: 'UnreadType' } },
       { name: 'one_const', type: nullable({ kind: 'enum', name: 'OneConst' }) },
@@ -4526,8 +4528,8 @@ describe('#539', () => {
           expect(pet?.variants).toEqual([model('Cat'), model('ZooDog')]);
           expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog' } });
           expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog'));
-          // The bundler keeps the hoisted copy as a component `dog`, so a model `Dog` is built for it; nothing references it.
-          expect(modelNames(spec)).toEqual(['Cat', 'Dog', 'Home', 'Pet', 'Zoo', 'ZooDog']);
+          // No `Dog`: the component the bundler hoisted `Zoo.dog` into is dropped with the rewrite it made (#619).
+          expect(modelNames(spec)).toEqual(['Cat', 'Home', 'Pet', 'Zoo', 'ZooDog']);
           expect(warnings).toEqual([]);
         });
 

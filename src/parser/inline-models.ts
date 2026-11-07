@@ -70,13 +70,32 @@ import {
   type SchemaOrContent,
 } from './operations.js';
 import { classifyResponseKey } from './responses.js';
+import { responseBodyReading } from './body-media-types.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
+
+/**
+ * Whether `baseName` already carries `cleanParent` as its leading part and
+ * adds something after it (`PetOwner` or `PetsItem` under `Pet`), so that
+ * qualifying it would only double the parent (`PetPetOwner`). A name that is
+ * the parent's own (`Reply` under `Reply`, `Pet` under `Pet`) adds nothing
+ * and is not one: it is qualified like any other field's, never left as the
+ * name the component holds (workos/oagen#621). The one test for every
+ * inline name minted under a parent — a model's (`qualifyInlineModelName`)
+ * and an enum's (`inlineEnumName`, `mintedInlineNameEntries`).
+ */
+export function extendsParentName(baseName: string, cleanParent: string): boolean {
+  return baseName.length > cleanParent.length && baseName.startsWith(cleanParent);
+}
 
 /**
  * Qualify an inline model name with the parent schema name.
  * If `parentName` is provided and the field name doesn't already start with
- * the parent, the result is `${parentName}${PascalField}` with the trailing
- * word singularized (e.g., Connection + Domains → ConnectionDomain).
+ * the parent and add something after it (`extendsParentName`: Pet + PetOwner
+ * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
+ * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
+ * named like its parent is qualified too — Reply + Reply → ReplyReply, as
+ * Reply + Replies names its items — never left as the parent's own name,
+ * which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
@@ -84,7 +103,7 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // are clean, for response models as much as component ones.
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
-  if (baseName.startsWith(cleanParent)) return baseName;
+  if (extendsParentName(baseName, cleanParent)) return baseName;
   // Singularize the trailing PascalCase word of the combined name.
   // Split baseName into leading words + trailing word, singularize trailing.
   const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
@@ -177,7 +196,10 @@ export function mintedInlineNameEntries(
   const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     return [
-      { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
+      {
+        name: cleanParent && !extendsParentName(base, cleanParent) ? `${cleanParent}${base}` : base,
+        contextFree: false,
+      },
     ];
   };
   if (kind === 'allOf' && s.allOf) {
@@ -875,7 +897,7 @@ function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unkn
 }
 
 /** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-function stableStringify(value: unknown): string {
+export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;
@@ -973,7 +995,12 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * nothing: the Paths Object's (an extension by the specification, which
  * `extractOperations` steps over), a Responses
  * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification, which `extractCallbacks` steps over). Decided from the document's content
+ * the specification, which `extractCallbacks` steps over). An object
+ * written as a `$ref` — a parameter, request body, response or header, a
+ * path item or a callback — is stepped over whole, as the readers step
+ * over it, so a union under a `content` or `headers` written beside the
+ * `$ref` is under no root and contests nothing, whether the ref resolves
+ * or not (#601). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
  * document, before any union is named (`extractSchemas`), so the union
  * TypeRef and every extractor read the same decision. `undefined` clears
@@ -1052,10 +1079,23 @@ const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'qu
  * (#382). A `$ref` entry
  * anywhere carries no schema of its own: the target is a component, or
  * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
- * read under its own map. A `schema` is yielded and not entered, so one
- * shared by two sites is yielded for each; every other object is entered once, which
- * ends the walk on a document that refers back to itself. `example`,
- * `examples`, `links` and extensions are never entered.
+ * read under its own map, and the object around the `$ref` is stepped
+ * over whole, as the readers step over it — a Parameter, Header, Request
+ * Body or Response Object written as a Reference Object, whose every other
+ * key OpenAPI says to ignore (`followReference`, #562), a Path Item's
+ * `$ref` entry, whose target is taken whole (`resolvePathItemRef`), and a
+ * Callback Object's (`resolveCallbackRef`) — so a `schema`, `content` or
+ * `headers` written beside the `$ref` is never read, whether the ref
+ * resolves or not, at every site that takes one: on an operation, a
+ * webhook or a callback, and as a `components` entry itself (#601: a
+ * titled union under a `content` beside a `404`'s `$ref` contested the
+ * `Tag` of a component's `collar` and renamed it `TagPetCollar`, though
+ * the parser typed nothing from it). A `$ref` key holding `undefined` is
+ * no reference, as `followReference` reads it. A `schema` is yielded and
+ * not entered, so one shared by two sites is yielded for each; every other
+ * object is entered once, which ends the walk on a document that refers
+ * back to itself. `example`, `examples`, `links` and extensions are never
+ * entered.
  */
 function schemaRootsOf(
   document: Record<string, unknown>,
@@ -1095,31 +1135,43 @@ function schemaRootsOf(
     schema(value['schema']);
     named(value['encoding'], encoding);
   };
+  /**
+   * Whether `value` is written as a reference: a `$ref` with a value, which
+   * the readers follow to its target and read nothing else of, so every
+   * key beside it is stepped over (#601). A `$ref` holding `undefined` is
+   * no reference, as `followReference` reads it.
+   */
+  const isReference = (value: Record<string, unknown>): boolean => value['$ref'] !== undefined;
   /** A Parameter Object or a Header Object: the same schema sites. */
   const parameter = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     schema(value['schema']);
     named(value['content'], mediaType);
   };
   const requestBody = (value: unknown): void => {
-    if (enter(value)) named(value['content'], mediaType);
+    if (enter(value) && !isReference(value)) named(value['content'], mediaType);
   };
   const response = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     named(value['headers'], parameter);
     named(value['content'], mediaType);
   };
   const pathItem = (value: unknown): void => {
-    if (!enter(value)) return;
+    if (!enter(value) || isReference(value)) return;
     listed(value['parameters'], parameter);
     for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
+  };
+  /** A Callback Object: an expression or an `x-` extension per key, each a Path Item; one written as a reference is stepped over. */
+  const callback = (value: unknown): void => {
+    if (isRecord(value) && isReference(value)) return;
+    keyed(value, pathItem);
   };
   const operation = (value: unknown): void => {
     if (!enter(value)) return;
     listed(value['parameters'], parameter);
     requestBody(value['requestBody']);
     keyed(value['responses'], response);
-    named(value['callbacks'], (callback) => keyed(callback, pathItem));
+    named(value['callbacks'], callback);
   };
 
   // `paths` steps over `x-` extensions, as `extractOperations` does; every
@@ -1132,7 +1184,7 @@ function schemaRootsOf(
     named(components['requestBodies'], requestBody);
     named(components['headers'], parameter);
     named(components['pathItems'], pathItem);
-    named(components['callbacks'], (callback) => keyed(callback, pathItem));
+    named(components['callbacks'], callback);
   }
   return roots;
 }
@@ -1144,7 +1196,10 @@ type SiteDirection = 'sent' | 'received';
  * The components the SDK only sends, by resolved name (`resolveSchemaName`):
  * those reached by at least one site the parser reads and by none that the
  * SDK receives. What an operation under `paths` sends is its request body,
- * under every media type, and the parameters it types — the Path Item's,
+ * under every media type it declares a schema for — each is typed through
+ * it, as `requestBody` or in `requestBodyContents`, so a `postNote` body of
+ * `$ref: Pet` under `application/xml` alone, which nothing reads as
+ * `requestBody`, still sends `Pet` — and the parameters it types — the Path Item's,
  * then its own, an operation parameter replacing a Path Item one of the same
  * identity (`parameterKey`: location and name, a header's name case-folded)
  * as `buildOperation` merges them, so a Path Item parameter the operation
@@ -1166,6 +1221,17 @@ type SiteDirection = 'sent' | 'received';
  * `Content-Type`, whatever its case, which OpenAPI says to ignore
  * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
  * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
+ * response body is read by the media types whose schema the reader reads
+ * (`responseBodyReading`): every one but `application/octet-stream`,
+ * `application/pdf`, `text/plain`, `text/html`, `text/xml` and
+ * `application/xml`, which `primaryBodySchema` and `typeSecondaryContent`
+ * type as a binary string or a string without reading the schema, at a
+ * 2xx, 3xx, error, `default` or range entry alike — so a `listNotes` `200`
+ * of `$ref: Pet` under `application/xml`, `text/plain` or
+ * `application/octet-stream` alone, or under `application/xml` beside a
+ * `201` whose `application/json` is `{ type: string }`, leaves `Pet` only
+ * sent, as the document without it does, while a body under
+ * `application/json`, `application/yaml` or `*\/*` receives it (#610). A
  * parameter or header is read by the one schema that types it
  * (`parameterTyping`): its `schema`,
  * else the schema of the `content` entry `selectParameterContent` picks, so
@@ -1256,9 +1322,35 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       if (Array.isArray(members)) for (const member of members) schema(member, direction);
     }
   };
-  const content = (value: unknown, direction: SiteDirection): void => {
+  /**
+   * A request body's `content` map — an operation's, sent, or a webhook's or
+   * a callback's, received — read as the body readers read it: every media
+   * type that declares a schema is typed through it, as the primary pick
+   * (`selectRequestBodyContent`) or a secondary entry
+   * (`typeSecondaryRequestContent`, `mintPayload`: `requestBodyContents`),
+   * so each reaches what its schema names, under `application/xml` as under
+   * `application/json`.
+   */
+  const requestContent = (value: unknown, direction: SiteDirection): void => {
     if (!isRecord(value)) return;
     for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
+  };
+  /**
+   * A response's `content` map, read as `extractResponseContents` reads it:
+   * a media type the reader types as a binary string or a string without
+   * reading its schema (`responseBodyReading`: `application/octet-stream`,
+   * `application/pdf`, `text/plain`, `text/html`, `text/xml`,
+   * `application/xml`, by essence) reaches nothing, as the primary pick
+   * (`primaryBodySchema`) and a secondary entry (`typeSecondaryContent`)
+   * alike leave its schema unread; every other media type types its body
+   * through its schema and reaches what it names (#610).
+   */
+  const responseContent = (value: unknown): void => {
+    if (!isRecord(value)) return;
+    for (const [contentType, mediaType] of Object.entries(value)) {
+      if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
+      schema(mediaType['schema'], 'received');
+    }
   };
   /**
    * A Parameter or Header Object, read by the one schema that types it
@@ -1330,7 +1422,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       const operation = item[method];
       if (!isRecord(operation)) continue;
       parameters(item, operation, request);
-      content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
+      requestContent(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
       callbacks(operation['callbacks']);
       const responses = operation['responses'];
       if (received || !isRecord(responses)) continue;
@@ -1354,7 +1446,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         }
         const response = follow(entry, 'responses');
         if (!response) continue;
-        content(response['content'], 'received');
+        responseContent(response['content']);
         const headers = response['headers'];
         if (!isRecord(headers)) continue;
         // Read as `extractResponseHeaders` reads the map: header names are
@@ -1694,7 +1786,11 @@ function sameNames(a: readonly string[], b: readonly string[]): boolean {
 /**
  * Every property the object described by `schema` exposes, by name: its own
  * `properties`, those of its `allOf` members (following a member's `$ref`
- * into `schemas` when given, as `extractAllOfModel` does), those of a
+ * into `schemas` when given, as `extractAllOfModel` does), those of the
+ * component a schema that is itself a bare `$ref` names — a component alias
+ * (`CatAlias: { $ref: Cat }`), read as `allOf: [{ $ref: Cat }]` is (#618),
+ * followed through a chain of aliases when `schemas` is given, so the
+ * alias's fields are typed with `Cat`'s sibling set — those of a
  * nullable `oneOf`/`anyOf` wrapper's one non-null variant, read as the
  * member it wraps (`nullableAxisBranch`, per keyword, the definition the
  * model walks resolve a member by, so a nullable `$ref` member's component
@@ -1736,7 +1832,9 @@ export function collectProperties(
       else for (const variant of axis) visit(variant, true, true);
     }
   };
-  visit(schema, false, false);
+  // The root's own `$ref` is followed as a member's is: the root is a
+  // component alias, read as the `allOf` of that reference (#618).
+  visit(schema, true, false);
   return new Map(
     [...ledger.values()].map((entry) => [
       entry.name,
@@ -2037,11 +2135,14 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
           : {}),
       };
       // A mapping entry deferred to a pointer variant (#539) follows the
-      // variant's copy, so the copy's mapping is settled with its own variants.
+      // variant's copy, and one deferred to a reference of its own target's
+      // (#619) a copy of that reference, so the copy's mapping is settled
+      // with the copy's own references.
       if (ref.discriminator && copy.discriminator) {
         carryDeferredMappingEntries(
           { variants: ref.variants, mapping: ref.discriminator.mapping },
           { variants: copy.variants, mapping: copy.discriminator.mapping },
+          cloneTypeRef,
         );
       }
       return copy;
@@ -2849,19 +2950,33 @@ export function resetCombinedDeclarations(): void {
  * whenever they had any keyword, so a member documenting the items made
  * `data` an `unknown[]`); the later's other keywords over the earlier's;
  * and `type: ['array', 'null']` when either admits `null`
- * (`declaresNull`), else `type: 'array'`; an inline object and a `$ref` to
- * an object component, or an `allOf` that reaches one (`composesObject`,
- * the component the document's: `componentSchemaOf`), become the `allOf`
+ * (`declaresNull`), else `type: 'array'`; any two declarations that each
+ * describe an object — an inline object, a `$ref` to an object component,
+ * or an `allOf` that reaches one (`describesObject`, `composesObject`,
+ * the component the document's: `componentSchemaOf`) — become the `allOf`
  * of both in document order, which every reader reads as any inline
  * `allOf` (`mergeAllOfMembers`, `collectObjectProperties`), carrying the
  * keywords a field reads from either (`declarationKeywords`, the later's
- * over the earlier's) — so `result: { $ref: PetPage }` beside `result: {
- * properties: { total_pages } }` is a `PetPage` that also has
+ * over the earlier's) and the nullability an inline `allOf` of two
+ * members has, which is none — so `result: { $ref: PetPage }` beside
+ * `result: { properties: { total_pages } }` is a `PetPage` that also has
  * `total_pages`, whichever is read first (workos/oagen#432: the first was
  * kept, so `result` had `items` or `total_pages`, never both, and a
- * `dataPath` through the other was rejected), while a `$ref` to an array,
- * an enum, a primitive or a union component is no object to conjoin. Any
- * other pair keeps the first as written. Returns `held` itself when `next`
+ * `dataPath` through the other was rejected), and so is `result: { $ref:
+ * PetPage }` beside `result: { allOf: [{ properties: { total_pages } }]
+ * }`, or beside `result: { $ref: Meta }`, with `nullable: true`, `type:
+ * 'object'` or a `description` written beside the `allOf` or not
+ * (workos/oagen#571: only an inline object beside a composing declaration
+ * was conjoined, so these pairs kept the first and `result` had the
+ * component's fields or the inline ones by member order) — while two
+ * `$ref`s naming one component (`namesOneComponent`) add nothing to each
+ * other, so the first stands, a `$ref` to a component that dispatches a
+ * union describes an object too, its conjunction read as the same `allOf`
+ * written by hand (the shared fields, the union left to the component:
+ * `mergeAllOfMembers`, workos/oagen#429), and a `$ref` to an array, an
+ * enum, a primitive or a union component is no object to conjoin. Any other pair
+ * — an object beside a string, say — keeps the first as written, with no
+ * warning, as two arrays of different items do. Returns `held` itself when `next`
  * adds nothing to it, so a lone declaration keeps its identity. The same two
  * declarations combine into the same object throughout the document
  * (`combinedDeclarations`), so a reader that guards by identity meets a
@@ -2972,13 +3087,27 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       type: declaresNull(first) || declaresNull(second) ? ['array', 'null'] : 'array',
     };
   }
-  if (
-    (isInlineObjectSchema(first) && composesObject(second)) ||
-    (isInlineObjectSchema(second) && composesObject(first))
-  ) {
+  if (describesObject(first) && describesObject(second)) {
+    // Two `$ref`s naming one component add nothing to each other, so the
+    // first stands, as a lone declaration does.
+    if (namesOneComponent(first, second)) return first;
     return { ...declarationKeywords(first), ...declarationKeywords(second), allOf: [first, second] };
   }
   return first;
+}
+
+/**
+ * Whether a typing declaration describes an object whose properties an
+ * `allOf` merge reads, in either of its two spellings: an inline object
+ * (`isInlineObjectSchema`) or a `$ref`/`allOf` that composes one
+ * (`composesObject`). Two such declarations of one property conjoin as the
+ * `allOf` of both (`conjoinTypedDeclarations`), whichever spelling each
+ * uses (workos/oagen#571: only an inline object beside a composing one
+ * was conjoined, so a `$ref` beside an inline `allOf`, or two `$ref`s,
+ * kept the first).
+ */
+function describesObject(schema: SchemaObject): boolean {
+  return isInlineObjectSchema(schema) || composesObject(schema);
 }
 
 /**
@@ -2987,11 +3116,23 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * (`contributesProperties`): a `$ref` to a component that declares
  * properties, its own or its `allOf` chain's, or an `allOf` that reaches
  * one. A `$ref` to an array, a primitive, an enum or a union component, or
- * one no component answers, is not, so no inline object beside it turns it
- * into an object merge (`combineDeclarations`).
+ * one no component answers, is not, so no object declaration beside it
+ * turns it into an object merge (`combineDeclarations`).
  */
 function composesObject(schema: SchemaObject): boolean {
   return (schema.$ref !== undefined || schema.allOf !== undefined) && contributesProperties(schema);
+}
+
+/**
+ * Whether two declarations are each a `$ref` to the same component — the
+ * one object, by identity (`componentSchemaOf`), whatever each `$ref` is
+ * spelled — so conjoining them would read that component twice
+ * (`conjoinTypedDeclarations`).
+ */
+function namesOneComponent(first: SchemaObject, second: SchemaObject): boolean {
+  if (first.$ref === undefined || second.$ref === undefined) return false;
+  const target = componentSchemaOf(first.$ref);
+  return target !== undefined && target === componentSchemaOf(second.$ref);
 }
 
 /**
@@ -3167,11 +3308,13 @@ function readVariant(
  * component answers contributes nothing and is listed in `unresolvedRefs`.
  * The component tagged is the one whose own model carries the field under
  * its name: an `allOf` component that inherits it stays the origin of
- * everything reached inside its chain (`DogMeta`), while a bare alias
- * (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref: Base
- * }, { type: 'null' }] }`) or a chain of either declares nothing of its own
- * and builds no model, so a reference met inside one starts its own origin
- * (`Base.meta` stays `BaseMeta`; workos/oagen#308 round 4).
+ * everything reached inside its chain (`DogMeta`), and so does a bare
+ * alias (`Hop: { $ref: Base }`), whose model is built as `allOf: [{ $ref:
+ * Base }]`'s is and carries the field as `HopMeta` (#618), while a nullable
+ * alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null' }] }`) declares
+ * nothing of its own and builds no model, so a reference met inside one
+ * starts its own origin (`Base.meta` stays `BaseMeta`; workos/oagen#308
+ * round 4).
  * An inline member contributes its `properties`, those of its nested
  * `allOf` members and, for each `oneOf`/`anyOf` it carries (`unionAxesOf`:
  * a member writing both carries two, a nullable wrapper among them decided
@@ -3286,18 +3429,21 @@ export function mergeAllOfMembers(
       // carries them under its name. A ref inside an `allOf` component's own
       // chain stays that component's: its model inherits through its
       // members, nullable ones included, and types their fields under its
-      // own name (`DogMeta`). Any other component met on the way declares
-      // nothing of its own that this reference adds to — a bare alias
-      // (`Hop: { $ref: Base }`), a nullable alias (`Alias: { oneOf: [{ $ref:
-      // Base }, { type: 'null' }] }`), a chain of either — and builds no
-      // model for the fields, so the reference starts its own origin, as a
-      // top-level ref member does (workos/oagen#308 round 4: `HolderValue.meta`
-      // named `AliasMeta`, which nothing built, where `BaseMeta` exists).
-      // A pointer deeper into a component (#539) names a schema and no
-      // model of its own, so it declares as a member written inline does:
-      // under the origin at hand.
+      // own name (`DogMeta`); so does one inside a bare alias's (`Hop: {
+      // $ref: Base }`), whose model is built as `allOf: [{ $ref: Base }]`'s
+      // is and types the field `HopMeta` (#618). Any other component met on
+      // the way declares nothing of its own that this reference adds to —
+      // a nullable alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null'
+      // }] }`), a chain of them — and builds no model for the fields, so
+      // the reference starts its own origin, as a top-level ref member does
+      // (workos/oagen#308 round 4: `HolderValue.meta` named `AliasMeta`,
+      // which nothing built, where `BaseMeta` exists). A pointer deeper into
+      // a component (#539) names a schema and no model of its own, so it
+      // declares as a member written inline does: under the origin at hand.
       const owner =
-        origin?.schema.allOf || key === undefined ? origin : { name: resolveSchemaName(key), schema: target };
+        origin?.schema.allOf || origin?.schema.$ref !== undefined || key === undefined
+          ? origin
+          : { name: resolveSchemaName(key), schema: target };
       visit(target, owner);
       return;
     }
@@ -3773,18 +3919,28 @@ function typedOutsideMerges<T>(build: () => T): T {
 
 /**
  * The merged shape as one object schema, for a site that builds its model
- * from a schema rather than from the merged list (`extractDirectResource`,
- * `extractInlineModelDeep`): every property under its name in merged order,
- * the collected `required`, and the wrapper's own `deprecated`, limits and
- * link, as `buildMergedModel` carries them — a member's stay on that member,
- * a `$ref` member's on its component. The wrapper's `description` is left
- * off, as both sites left it off the schemas they rebuilt before.
+ * from a schema rather than from the merged list (`extractDirectResource`:
+ * the primary success body and each further success code's — every other
+ * body site builds from the list): every property under its name in
+ * merged order, the collected `required`, the wrapper's limits conjoined
+ * with its inline members', and the wrapper layer's `description`,
+ * `deprecated`, link and `x-*` keys, exactly as `buildMergedModel` carries
+ * them onto the model a field's merge builds — a member's stay on that
+ * member, a `$ref` member's on its component. So the model built from the
+ * schema (`buildInlineModel`) is documented as the model built from the
+ * list is: a response body `{ allOf: [{ $ref: Base }, { properties: { name
+ * } }, { description: 'A pet.' }] }` is described "A pet.", as the same
+ * schema is as a request body, a field, a secondary media type's or an
+ * error body (#604: the text alone was left off here, kept off from before
+ * the merge read the wrapper layer at all, so `CreatePetResponse` had none
+ * while `CreatePetRequest` did).
  */
 export function mergedObjectSchema(merged: MergedAllOf): SchemaObject {
   return {
     type: 'object',
     properties: Object.fromEntries(merged.properties.map((p) => [p.name, p.schema])),
     required: merged.required,
+    ...(merged.description !== undefined ? { description: merged.description } : {}),
     ...(merged.deprecated ? { deprecated: true } : {}),
     ...merged.constraints,
     ...(merged.externalDocs ? { externalDocs: merged.externalDocs } : {}),

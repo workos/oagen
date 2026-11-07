@@ -1,4 +1,11 @@
-import type { AuthScheme, Extensions, Operation, SecurityRequirementSet, StatusRange } from '../ir/types.js';
+import type {
+  AuthScheme,
+  Constraints,
+  Extensions,
+  Operation,
+  SecurityRequirementSet,
+  StatusRange,
+} from '../ir/types.js';
 import type { ParameterLocation } from '../ir/parameter-key.js';
 
 export interface DiffReport {
@@ -261,15 +268,46 @@ export interface ModelModified {
   /** Present exactly when `extensionsChanged`, each when the model had extensions on that side: old → new. */
   oldExtensions?: Extensions;
   newExtensions?: Extensions;
+  /**
+   * Present, and `true`, only when the model's own `constraints` differ —
+   * for an object schema `minProperties`, `maxProperties` and
+   * `dependentRequired`, for a named union what is written beside its
+   * `oneOf`/`anyOf` — compared keyword by keyword (`constraintsShift`;
+   * #599). Breaking when a keyword was tightened and the model is
+   * request-facing, both-facing or of unknown direction, since a value a
+   * caller sends today can be rejected; additive on a response-only model,
+   * or when every keyword only loosened (`classifyConstraintsChange`). A
+   * model whose only change is this is still reported, with an empty
+   * `fieldChanges`. A field's limits are a `field-constraints-changed`
+   * entry in `fieldChanges` instead, and a named union's variant's a
+   * `variant-constraints-changed` entry in `variantChanges`.
+   */
+  constraintsChanged?: true;
+  /** Present exactly when `constraintsChanged`, each when the model declared limits on that side: old → new. */
+  oldConstraints?: Constraints;
+  newConstraints?: Constraints;
+  /**
+   * Present exactly when `constraintsChanged`: every keyword that moved,
+   * old → new (`maxProperties 10 → 5; dependentRequired {"a":["b"]} →
+   * {"a":["b","c"]}`), followed by `; tightened on a response-only model`
+   * when the model's direction is what made a tightened keyword additive.
+   */
+  details?: string;
   classification: 'additive' | 'breaking';
 }
 
 export interface VariantChange {
-  kind: 'variant-added' | 'variant-removed' | 'discriminator-changed' | 'composition-changed';
+  kind:
+    | 'variant-added'
+    | 'variant-removed'
+    | 'discriminator-changed'
+    | 'composition-changed'
+    | 'variant-constraints-changed';
   /**
    * The variant, as a short type label (`Cat`, `string`, `nullable<Cat>`,
-   * `array<Cat>`); the discriminator property for `discriminator-changed`;
-   * the new composition keyword for `composition-changed`.
+   * `array<Cat>`) — the new spec's, for `variant-constraints-changed`; the
+   * discriminator property for `discriminator-changed`; the new
+   * composition keyword for `composition-changed`.
    */
   variant: string;
   /**
@@ -277,9 +315,19 @@ export interface VariantChange {
    * side of the wire. `discriminator-changed` and `composition-changed` are
    * breaking. A mapping entry that comes with an added variant or goes with a
    * removed one is part of that variant's entry (see `details`), not a
-   * `discriminator-changed` of its own.
+   * `discriminator-changed` of its own. `variant-constraints-changed` is
+   * breaking when a keyword was tightened and the union is request-facing,
+   * both-facing or of unknown direction, additive on a response-only union
+   * or when every keyword only loosened, as a field's limits are judged
+   * (`classifyConstraintsChange`; #599).
    */
   classification: 'additive' | 'breaking';
+  /**
+   * For `variant-constraints-changed`: the limits the variant's type carries
+   * on each side, each present when it carries any there (#599).
+   */
+  oldConstraints?: Constraints;
+  newConstraints?: Constraints;
   /**
    * For `variant-added` / `variant-removed`: present when discriminator
    * mapping keys came or went with the variant, reading `mapping added for
@@ -291,6 +339,11 @@ export interface VariantChange {
    * any wrapper (an alias: `kitty: Cat` beside a kept `Cat`, bare or as
    * `nullable<Cat>`) or for no variant, or removed while its model stays. For
    * `composition-changed`: `composition changed from 'anyOf' to 'oneOf'`.
+   * For `variant-constraints-changed`: every keyword that moved, old → new,
+   * at every level of the variant's type (`pattern '^pet_' → '^pt_'`,
+   * `items.maxLength 10 → 5`), followed by `; tightened on a response-only
+   * model` when the union's direction is what made a tightened keyword
+   * additive (#599).
    */
   details?: string;
 }
@@ -304,7 +357,8 @@ export interface FieldChange {
     | 'field-required-changed'
     | 'field-access-changed'
     | 'field-deprecated-changed'
-    | 'field-extensions-changed';
+    | 'field-extensions-changed'
+    | 'field-constraints-changed';
   fieldName: string;
   classification: 'additive' | 'breaking';
   /** For `field-deprecated-changed`: the flag's two sides, old → new. */
@@ -314,10 +368,31 @@ export interface FieldChange {
   oldExtensions?: Extensions;
   newExtensions?: Extensions;
   /**
+   * For `field-constraints-changed` (#599): the field's own `constraints`
+   * on each side, each present when it declared any there. The field's own
+   * are its type's (under a nullable wrapper) whenever the type can carry
+   * them; a keyword that moved on a nested level of the type — an array's
+   * `items`, a map's `valueType`, a union's variant — is named in
+   * `details` and read from the type, so such a change alone carries two
+   * equal sides, or none. Breaking when a keyword was tightened
+   * (`constraintsShift`) and the model is request-facing, both-facing or of
+   * unknown direction; additive on a response-only model, or when every
+   * keyword only loosened (`classifyConstraintsChange`). Reported beside,
+   * not instead of, a type or format change on the same field.
+   */
+  oldConstraints?: Constraints;
+  newConstraints?: Constraints;
+  /**
    * For `field-deprecated-changed`: `live → deprecated` or `deprecated → live`.
    * For `field-type-changed`: `type changed`, breaking, or — additive, for a
    * field typed by an inline union that only gained variants — `variant Bird
-   * added` / `variants Bird, Fish added`.
+   * added` / `variants Bird, Fish added`. For `field-constraints-changed`:
+   * every keyword that moved, old → new, joined with `; ` and prefixed with
+   * the path to a nested level (`maxLength 100 → 10`, `pattern '^pet_' →
+   * '^pt_'`, `minimum <unset> → 5`, `items.pattern '^tag_' → '^tg_'`,
+   * `variants[1].maxLength 10 → 5`), followed by `; tightened on a
+   * response-only model` when the model's direction is what made a tightened
+   * keyword additive.
    */
   details?: string;
 }
@@ -610,7 +685,9 @@ export interface OperationModified {
    * the envelope is only ever read: a field added is additive, required or
    * not; one removed or retyped is breaking, but for an inline union that
    * only gained variants; format, requiredness, access flags, `deprecated`
-   * and extensions are judged as on any model's field. The operation is
+   * and extensions are judged as on any model's field, and a limit
+   * tightened or loosened (`field-constraints-changed`) is additive either
+   * way, as on a response-only model (#599). The operation is
    * breaking when an entry is. Present only when there is at least one. A
    * scalar companion (`has_more`) sits on no model `diffModels` reads, so
    * this is where its change is reported; a companion object's own fields
@@ -627,8 +704,8 @@ export interface OperationModified {
   responseContentTypeChanges: ResponseContentTypesChange[];
   /**
    * True when a response entry gained, lost, retyped, re-required, renamed
-   * or deprecated one of the headers it declares; `responseHeaderChanges`
-   * says which.
+   * or deprecated one of the headers it declares, or changed the limits
+   * its type carries; `responseHeaderChanges` says which.
    */
   responseHeadersChanged: boolean;
   responseHeaderChanges: ResponseHeaderChange[];
@@ -681,8 +758,9 @@ export interface OperationModified {
  * breaking (an accessor the SDK exposed is gone); a type change is breaking,
  * a format-only change additive, as elsewhere; optional → required is
  * additive (the header is now always present) and required → optional
- * breaking (code that assumed it breaks); a `deprecated` flip and a
- * respelling are additive.
+ * breaking (code that assumed it breaks); a `deprecated` flip, a
+ * respelling and a limit tightened or loosened on the header's type
+ * (`header-constraints-changed`; #599) are additive.
  *
  * Response entries pair up between the two specs exactly as they do for
  * `responseContentTypeChanges`: by status code — every 2xx entry, the
@@ -722,7 +800,8 @@ export interface ResponseHeaderChange {
     | 'header-format-changed'
     | 'header-required-changed'
     | 'header-name-changed'
-    | 'header-deprecated-changed';
+    | 'header-deprecated-changed'
+    | 'header-constraints-changed';
   /** The header's name as written in the spec that declares it: the new spec's for a header both declare. */
   headerName: string;
   /**
@@ -745,10 +824,20 @@ export interface ResponseHeaderChange {
   oldDeprecated?: boolean;
   newDeprecated?: boolean;
   /**
+   * For `header-constraints-changed` (#599): the limits the header's type
+   * carries on each side, each present when it carries any there (a
+   * `ResponseHeader` carries none of its own). A keyword that moved on a
+   * nested level — an array header's `items` — is named in `details`.
+   */
+  oldConstraints?: Constraints;
+  newConstraints?: Constraints;
+  /**
    * What changed, in words: `format <old> → <new>` for `header-format-changed`,
    * `optional → required` or `required → optional` for
    * `header-required-changed`, `name <old> → <new>` for `header-name-changed`,
-   * `live → deprecated` or `deprecated → live` for `header-deprecated-changed`.
+   * `live → deprecated` or `deprecated → live` for `header-deprecated-changed`,
+   * every keyword that moved, old → new (`pattern '^req_' → '^rq_'`,
+   * `items.maxLength 10 → 5`), for `header-constraints-changed`.
    */
   details?: string;
 }
@@ -1104,9 +1193,25 @@ export interface ParamChange {
     | 'param-default-changed'
     | 'param-deprecated-changed'
     | 'param-name-changed'
-    | 'param-content-type-changed';
+    | 'param-content-type-changed'
+    | 'param-constraints-changed';
   paramName: string;
   classification: 'additive' | 'breaking';
+  /**
+   * For `param-constraints-changed` (#599): the parameter's own
+   * `constraints` on each side, each present when it declared any there —
+   * its type's (under a nullable wrapper) whenever the type can carry them,
+   * so a keyword that moved on a nested level of the type (an array
+   * parameter's `items`) is named in `details` and read from the type. On
+   * an operation, judged from the caller's side: breaking when a keyword
+   * was tightened (`constraintsShift`), since a value a caller sends today
+   * can be rejected, additive when every keyword only loosened. On a
+   * webhook or a callback, additive either way: the receiver reads the
+   * value and never supplies it. Reported beside, not instead of, a type or
+   * format change on the same parameter.
+   */
+  oldConstraints?: Constraints;
+  newConstraints?: Constraints;
   /** For `param-name-changed`: the name as the old spec wrote it. */
   oldName?: string;
   /** For `param-name-changed`: the name as the new spec writes it (also `paramName`). */
@@ -1139,6 +1244,10 @@ export interface ParamChange {
    * For `param-content-type-changed`: `content type <schema> → application/json`,
    * a side whose map the parser does not read followed by `(unread)`
    * (`content type <schema> → application/xml (unread)`).
+   * For `param-constraints-changed`: every keyword that moved, old → new,
+   * joined with `; ` and prefixed with the path to a nested level
+   * (`pattern '^pet_[0-9A-Z]{26}$' → '^pet_[0-9A-Z]{12}$'`, `minimum 1 → 5`,
+   * `maxLength 10 → <unset>`, `items.pattern '^tag_' → '^tg_'`).
    */
   details?: string;
 }
