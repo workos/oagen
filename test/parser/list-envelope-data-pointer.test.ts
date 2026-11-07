@@ -458,6 +458,89 @@ describe('#609', () => {
     });
   });
 
+  describe.each(['3.1.0', '3.0.3'])(
+    'the readings the BREAKING CHANGE note lists (MichaelDeBoey), on OAS %s',
+    (openapi) => {
+      const Pet = { type: 'object', properties: { name: { type: 'string' } } };
+      const petRef = { $ref: '#/components/schemas/Pet' };
+      const pets = { type: 'array', items: petRef };
+      const pet: TypeRef = model('Pet');
+
+      it('a pointer to an array beside `data` is a second array property: the envelope is kept as a plain model the iterator runs over, as beside `related: { $ref: Pets }`', async () => {
+        const listPets = (related: unknown) => ({
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [cursorParam],
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: {
+                    'application/json': {
+                      schema: { type: 'object', properties: { data: pets, related, has_more: { type: 'boolean' } } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+        const Shelter = { type: 'object', properties: { pets } };
+        const viaPointer = await parse(
+          document(openapi, { Pet, Shelter }, listPets(pointer('Shelter/properties/pets'))),
+        );
+        const viaComponent = await parse(document(openapi, { Pet, Pets: pets }, listPets(pointer('Pets'))));
+        for (const spec of [viaPointer, viaComponent]) {
+          const op = spec.services.flatMap((s) => s.operations).find((o) => o.name === 'listPets')!;
+          expect(op.response).toEqual(model('ListPetsResponse'));
+          expect(op.pagination).toMatchObject({
+            strategy: 'cursor',
+            param: 'cursor',
+            itemType: model('ListPetsResponse'),
+          });
+          expect(op.pagination?.dataPath).toBeUndefined();
+          expect(op.pagination?.envelopeFields).toBeUndefined();
+          expect(fieldsOf(spec, 'ListPetsResponse')).toEqual([
+            ['data', array(pet)],
+            ['related', array(pet)],
+            ['has_more', boolean],
+          ]);
+        }
+        expect(modelNames(viaPointer)).toEqual(['ListPetsResponse', 'Pet', 'Shelter']);
+        expect(warnings).toEqual([]);
+      });
+
+      it('a 200 pointing at an `allOf` member that only describes a field a `$ref` member types is typed, so it is the primary response over a typed 201', async () => {
+        const Note = { type: 'object', properties: { text: { type: 'string' } } };
+        const Base = { type: 'object', properties: { pet: petRef } };
+        const Sh = { allOf: [pointer('Base'), { type: 'object', properties: { pet: { description: 'The pet.' } } }] };
+        const paths = {
+          '/pet': {
+            get: {
+              operationId: 'getPet',
+              responses: {
+                '200': {
+                  description: 'ok',
+                  content: { 'application/json': { schema: pointer('Sh/allOf/1/properties/pet') } },
+                },
+                '201': { description: 'made', content: { 'application/json': { schema: pointer('Note') } } },
+              },
+            },
+          },
+        };
+        const spec = await parse(document(openapi, { Pet, Note, Base, Sh }, paths));
+        const op = spec.services.flatMap((s) => s.operations).find((o) => o.name === 'getPet')!;
+        expect(op.responseStatusCode).toBe(200);
+        expect(op.response).toEqual(pet);
+        expect(op.successResponses?.map(({ statusCode, type }) => ({ statusCode, type }))).toEqual([
+          { statusCode: 200, type: pet },
+          { statusCode: 201, type: model('Note') },
+        ]);
+        expect(warnings).toEqual([]);
+      });
+    },
+  );
+
   describe('pointerTypesAsArray', () => {
     const schemas: Record<string, SchemaObject> = {
       Owner,

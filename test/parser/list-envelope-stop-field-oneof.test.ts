@@ -711,5 +711,87 @@ describe('#622', () => {
         ]);
       },
     );
+
+    it.each(openapis)(
+      'leaves a body whose companion the walk types as a second array the model it is (Greptile; OAS %s)',
+      async (openapi) => {
+        // `Base` types `has_more` `integer[]`; both variants type it `boolean`.
+        // The walk and the model keep `Base`'s declaration, so the body has
+        // two arrays and no companion, as `{ data, has_more: integer[] }`
+        // written flat has. Detection, reading `has_more` off the variants,
+        // unwrapped it on `data` with the array `has_more` among the
+        // companions; before the PR it was the model it is again now.
+        const A = object({ has_more: boolean });
+        const B = object({ has_more: boolean, total: integer });
+        const base = { $ref: '#/components/schemas/Base' };
+        const body = { allOf: [base, object({ data: petArray }), { oneOf: [A, B] }] };
+        const ints = { type: 'array', items: integer };
+        const twoArrays = await parseQuiet(listPets(body, openapi, {}, { Base: object({ has_more: ints }) }));
+        expect(shown(twoArrays)).toEqual({
+          dataPath: undefined,
+          endOfIteration: undefined,
+          itemType: 'ListPetsResponse',
+          envelopeFields: undefined,
+          models: ['Pet { name? }', 'Base { has_more? }', 'ListPetsResponse { has_more?, data?, total? }'],
+          response: 'ListPetsResponse',
+        });
+        const flat = await parseQuiet(listPets(object({ data: petArray, has_more: ints, total: integer }), openapi));
+        expect(onlyOperation(flat).response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+        // `Base` typing `has_more` `boolean`: the companion the walk reads is the stop field.
+        const control = await parseQuiet(listPets(body, openapi, {}, { Base: object({ has_more: boolean }) }));
+        expect(shown(control)).toEqual({
+          ...expected,
+          envelopeFields: ['has_more?: boolean', 'total?: integer'],
+          models: ['Pet { name? }', 'Base { has_more? }'],
+        });
+      },
+    );
+
+    it.each(openapis)(
+      'reads a union two variants share as a shared reference, not a cycle, and still ends on one that reaches itself (Greptile; OAS %s)',
+      async (openapi) => {
+        // `Flag` is an `anyOf` of boolean consts; one variant declares
+        // `has_more` as `{ $ref: Flag }`, the other as `anyOf: [{ $ref: Flag
+        // }, { type: 'boolean' }]`. Both are booleans, but one `seen` set
+        // served both variants, so `Flag`'s second reading was taken for a
+        // cycle: no stop field at the top level, the override rejected,
+        // while `meta.has_more` through the same declarations passed.
+        const flag = { $ref: '#/components/schemas/Flag' };
+        const schemas = {
+          Flag: {
+            anyOf: [
+              { type: 'boolean', const: true },
+              { type: 'boolean', const: false },
+            ],
+          },
+          Loop: { anyOf: [{ $ref: '#/components/schemas/Loop' }, { type: 'boolean' }] },
+        };
+        const vRef = object({ has_more: flag });
+        const vUnion = object({ has_more: { anyOf: [flag, { type: 'boolean' }] } });
+        const top = { allOf: [dataMember], oneOf: [vRef, vUnion] };
+        const meta = object(
+          { data: petArray, meta: { allOf: [object({ trace_id: string })], oneOf: [vRef, vUnion] } },
+          ['data'],
+        );
+        for (const [label, body, path] of [
+          ['top', top, 'has_more'],
+          ['meta', meta, 'meta.has_more'],
+        ] as const) {
+          const detected = await parseQuiet(listPets(body, openapi, {}, schemas));
+          expect(onlyOperation(detected).pagination?.endOfIteration, label).toEqual(stopsOn(path));
+          const overridden = await parseQuiet(listPets(body, openapi, hasMore(path), schemas));
+          expect(onlyOperation(overridden).pagination, label).toEqual(onlyOperation(detected).pagination);
+        }
+        // A union that reaches itself fits nothing, and the test ends there.
+        const loop = object({ data: petArray, has_more: { $ref: '#/components/schemas/Loop' } }, ['data']);
+        expect(
+          onlyOperation(await parseQuiet(listPets(loop, openapi, {}, schemas))).pagination?.endOfIteration,
+        ).toBeUndefined();
+        const { warnings } = await parseWarning(listPets(loop, openapi, hasMore('has_more'), schemas));
+        expect(warnings).toEqual([
+          expect.stringContaining('endOfIteration path "has_more" is not a boolean field, as kind "hasMore" requires'),
+        ]);
+      },
+    );
   });
 });
