@@ -532,23 +532,16 @@ function fold(
   const sharedModels: Model[] = [];
   for (const [key, members] of orderedGroups) {
     if (absorbed.has(key)) continue;
-    sharedModels.push(
-      buildSharedModel(
-        canonical.get(key)!,
-        members,
-        pinnedByKey.get(key)!,
-        enumValuesByField,
-        enumNamesByField,
-        renames,
-      ),
-    );
-  }
-
-  // The inline enums the shared fields list take the names claimed above;
-  // the per-operation names the parser minted them under go with the models
-  // the fold removes.
-  for (const model of sharedModels) {
+    const pinned = pinnedByKey.get(key)!;
+    const model = buildSharedModel(canonical.get(key)!, members, pinned, enumValuesByField, enumNamesByField, renames);
+    // The inline enums the shared fields list take the names claimed above,
+    // read by field and values — so the fields the string rule built are
+    // left alone: its enum holds every value the bodies pin, under the
+    // name it claimed, whatever an array or map under the same field
+    // elsewhere lists — and the per-operation names the parser minted them
+    // under go with the models the fold removes.
     for (const field of model.fields) {
+      if (pinned.has(field.name)) continue;
       walkTypeRef(field.type, {
         enum: (ref) => {
           const name = ref.values && inlineEnumNames.get(inlineEnumKey(field.name, ref.values));
@@ -556,6 +549,7 @@ function fold(
         },
       });
     }
+    sharedModels.push(model);
   }
 
   // Rewrite every error site, then fold the unions whose variants became one.
