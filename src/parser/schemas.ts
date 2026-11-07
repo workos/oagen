@@ -3637,18 +3637,74 @@ export function buildFieldFromSchema(
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
   // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  const { settings, constraints } = fieldReading(fieldSchema, componentSchemas);
+  const externalDocs = readExternalDocs(settings.externalDocs);
+  const extensions = extensionsOf(settings, SCHEMA_CONSUMED_EXTENSIONS);
+  return {
+    name: fieldName,
+    type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
+    required: requiredSet.has(fieldName),
+    description: settings.description,
+    // The field schema's own link, read like `description`: a sibling of a
+    // `$ref` is the field's, and a bare `$ref` gives none — the referenced
+    // model carries its own — unless the `$ref` names an array component.
+    ...(externalDocs ? { externalDocs } : {}),
+    readOnly: settings.readOnly || undefined,
+    writeOnly: settings.writeOnly || undefined,
+    deprecated: settings.deprecated || undefined,
+    default: settings.default,
+    example: settings.example,
+    // Only materialise the key when there is something to carry so existing
+    // inline snapshots of fields without examples stay byte-identical.
+    ...(settings.examples ? { examples: settings.examples } : {}),
+    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
+    // a bare `$ref` to a model declares none, and the model carries its limits.
+    ...(constraints ? { constraints } : {}),
+    ...(extensions ? { extensions } : {}),
+  };
+}
+
+/**
+ * What a field written as `fieldSchema` reads off its levels, as one
+ * declaration — `settings`: its `description`, `externalDocs`, `readOnly`,
+ * `writeOnly`, `deprecated`, `default`, `example`, `examples` and `x-*`
+ * keys, each as `buildFieldFromSchema` carries it — with the limits it
+ * conjoins (`constraints`: `schemaConstraints`). The levels are the field's
+ * schema and, under it, each `allOf` member that declares no type and so
+ * only annotates or limits the field (`annotatingAllOfMembers`; #555:
+ * `allOf: [{ $ref: Kind }, { description }]` and `allOf: [{ type: 'string'
+ * }, { deprecated: true }]` read neither the text nor the flag) — nearest
+ * first, as `wrappedReference` orders them for a reference to an array or
+ * primitive component — and, for a bare `$ref` alone, the entries the
+ * reference passes (`componentReference`): under a wrapper the field
+ * documents itself, from the wrapper and the members beside the `$ref`,
+ * and takes none of the component's text, flags, default, examples or keys
+ * (#335 review), while its limits conjoin from every entry either way
+ * (#512 review). The one reading of a field's settings, shared with the
+ * request-body fold (`fieldSettings`), so a folded discriminator carries
+ * exactly what the variants' own fields carry (#607 review: the fold read
+ * its settings through every hop of the pin walk, a `$ref` under a wrapper
+ * included, so two variants writing `kind: { allOf: [{ $ref: CatKind }] }`
+ * with `CatKind: { const: 'cat', readOnly: true }` folded to a read-only
+ * `kind` where each variant's own field is not).
+ */
+function fieldReading(
+  fieldSchema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { settings: SchemaObject; constraints: Constraints | undefined } {
+  // What the field reads from an array or primitive component, or an alias
+  // of an enum component, it references (`componentReference`): every
+  // entry's limits, and a bare `$ref`'s documentation too. A `$ref` to a
+  // model, named union or enum leaves all of it on that node but the
+  // `example` and `examples` a field takes from any component a bare `$ref`
+  // names — the enum an alias resolves to included (#560). An enum
+  // component is read on the schema it declares its members on
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
   const reference = componentReference(fieldSchema, componentSchemas);
   const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
   const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  // The levels the field documents itself from: its schema and, under it,
-  // each `allOf` member that declares no type and so only annotates or
-  // limits the field (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind
-  // }, { description }]` and `allOf: [{ type: 'string' }, { deprecated: true
-  // }]` read neither the text nor the flag) — nearest first, as
-  // `wrappedReference` orders them for a reference to an array or primitive
-  // component.
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
   const { example, examples } = resolveExamples(
@@ -3657,7 +3713,8 @@ export function buildFieldFromSchema(
       examples: nonEmptyExamples(level.examples),
     })),
   );
-  const externalDocs = levels.map((level) => readExternalDocs(level.externalDocs)).find(Boolean);
+  // The first level whose link is usable (`readExternalDocs`) gives the field its link.
+  const linked = levels.find((level) => readExternalDocs(level.externalDocs));
   // Limits conjoin, as JSON Schema applies every level at once
   // (`schemaConstraints`: the same reading the field's type carries, #545);
   // an `x-*` key the nearer level declares wins, as a collapsed wrapper's
@@ -3668,28 +3725,38 @@ export function buildFieldFromSchema(
     const own = extensionsOf(level, SCHEMA_CONSUMED_EXTENSIONS);
     return own ? { ...keys, ...own } : keys;
   }, undefined);
-  return {
-    name: fieldName,
-    type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
-    required: requiredSet.has(fieldName),
-    description: levels.map((level) => level.description).find((text) => text !== undefined && text !== null),
-    // The field schema's own link, read like `description`: a sibling of a
-    // `$ref` is the field's, and a bare `$ref` gives none — the referenced
-    // model carries its own — unless the `$ref` names an array component.
-    ...(externalDocs ? { externalDocs } : {}),
-    readOnly: levels.some((level) => level.readOnly) || undefined,
-    writeOnly: levels.some((level) => level.writeOnly) || undefined,
-    deprecated: levels.some((level) => level.deprecated === true) || undefined,
-    default: levels.find((level) => level.default !== undefined)?.default,
-    example,
-    // Only materialise the key when there is something to carry so existing
-    // inline snapshots of fields without examples stay byte-identical.
+  const description = levels.map((level) => level.description).find((text) => text !== undefined && text !== null);
+  const defaulted = levels.find((level) => level.default !== undefined);
+  const settings: SchemaObject = {
+    ...(description !== undefined ? { description } : {}),
+    ...(linked ? { externalDocs: linked.externalDocs } : {}),
+    ...(levels.some((level) => level.readOnly) ? { readOnly: true } : {}),
+    ...(levels.some((level) => level.writeOnly) ? { writeOnly: true } : {}),
+    ...(levels.some((level) => level.deprecated === true) ? { deprecated: true } : {}),
+    ...(defaulted ? { default: defaulted.default } : {}),
+    ...(example !== undefined ? { example } : {}),
     ...(examples ? { examples } : {}),
-    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
-    // a bare `$ref` to a model declares none, and the model carries its limits.
-    ...(constraints ? { constraints } : {}),
-    ...(extensions ? { extensions } : {}),
+    ...extensions,
   };
+  return { settings, constraints };
+}
+
+/**
+ * The settings a field written as `schema` carries, as the keywords of one
+ * declaration — `fieldReading`'s settings with the limits it conjoins
+ * beside them — so declarations written through different wrappers and
+ * references compare as written ones do (`agreedDeclarationKeys`,
+ * `agreedExtensions`): the request-body fold reads each variant's
+ * discriminator declaration this way and carries onto the discriminator it
+ * rebuilds the settings every variant agrees on
+ * (`flattenDiscriminatedUnionBody`; #607 review).
+ */
+export function fieldSettings(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject {
+  const { settings, constraints } = fieldReading(schema, componentSchemas);
+  return { ...settings, ...constraints };
 }
 
 /**
@@ -6165,34 +6232,6 @@ function pinnedDeclarationHops(
     current = next;
   }
   return undefined;
-}
-
-/**
- * The levels a pinned declaration documents itself from, nearest first:
- * each hop `pinnedDeclarationValue` reads it through
- * (`pinnedDeclarationHops`) — the declaration, then what a `$ref`, a
- * nullable wrapper or an `allOf` read as one member leads to — each
- * followed by the `allOf` members that only annotate it
- * (`annotatingAllOfMembers`), as `buildFieldFromSchema` reads a field's
- * levels and the entries a reference passes — an enum component a `$ref`
- * reaches excluded, since it keeps its own text, flag, default, limits and
- * keys on the `Enum`, as for a field naming it (see Aliases in
- * `ir-types.md`), while an alias on the way and a const component, which
- * a field carries as a primitive component's, are levels. The declaration
- * alone for a chain that repeats. Read by the request-body fold for the
- * settings the discriminator it rebuilds carries (`levelSettings`; #607
- * review).
- */
-export function pinnedDeclarationLayers(
-  declaration: SchemaObject,
-  schemas?: Record<string, SchemaObject>,
-): SchemaObject[] {
-  const hops = pinnedDeclarationHops(declaration, schemas) ?? [declaration];
-  return hops.flatMap((hop, index) => {
-    const reachedByRef = index > 0 && hops[index - 1]!.$ref !== undefined;
-    if (reachedByRef && enumComponentDeclaration(hop) !== undefined) return [];
-    return [hop, ...annotatingAllOfMembers(hop)];
-  });
 }
 
 /**
