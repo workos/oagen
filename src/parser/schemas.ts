@@ -6632,7 +6632,7 @@ function typesNamed(type: string | string[]): ReadonlySet<string> {
 }
 
 /** Whether `declared` admits an instance of `type`: names it, or names `number` for an `integer`. */
-function admits(declared: ReadonlySet<string>, type: string): boolean {
+export function admits(declared: ReadonlySet<string>, type: string): boolean {
   return declared.has(type) || (type === 'integer' && declared.has('number'));
 }
 
