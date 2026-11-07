@@ -3052,8 +3052,10 @@ describe('#569', () => {
       { name: 'array_without_items', type: { kind: 'model', name: 'ArrayWithoutItems' } },
       { name: 'object_or_string', type: { kind: 'model', name: 'ObjectOrString' } },
       { name: 'array_or_string', type: { kind: 'model', name: 'ArrayOrString' } },
-      { name: 'null_only', type: { kind: 'model', name: 'NullOnly' } },
-      { name: 'null_list', type: { kind: 'model', name: 'NullList' } },
+      // A `null`-only component keeps its fieldless model, and admits `null`
+      // in either spelling, so the reference is wrapped (#615).
+      { name: 'null_only', type: nullable({ kind: 'model', name: 'NullOnly' }) },
+      { name: 'null_list', type: nullable({ kind: 'model', name: 'NullList' }) },
       { name: 'map_without_type', type: { kind: 'model', name: 'MapWithoutType' } },
       { name: 'unread_type', type: { kind: 'model', name: 'UnreadType' } },
       { name: 'one_const', type: nullable({ kind: 'enum', name: 'OneConst' }) },

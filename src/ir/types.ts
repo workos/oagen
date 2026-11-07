@@ -229,6 +229,12 @@ export interface Webhook {
    * one entry per status code key (three digits, 100–599) the operation
    * declares. `default`, range (`2XX`) and `x-` keys are not carried; a key
    * that is none of those (`error`, `6XX`, `600`) is ignored with a warning.
+   * An entry at a status code that is not an object — `200: "oops"`,
+   * `null`, `7` — is no Response Object and no Reference Object: it is
+   * skipped with one warning naming the site (`200 response of
+   * webhooks.petAdopted.post is not a Response Object ("oops"); skipping
+   * it.`), and a `responses` that is not an object at all is read as
+   * declaring none, with a warning (#617); a callback's are read the same way.
    * Body schemas on these responses are not carried either: a webhook
    * response is an acknowledgement, and typing it would mint models no
    * handler needs.
@@ -596,6 +602,15 @@ export interface Operation {
    * code only when it is exactly three digits in 100–599: `6XX`, `4XXX`,
    * `20X`, `600` and `200 ` are no status code and no range, so they are
    * ignored with a warning, like `error`, never read from a numeric prefix.
+   * An entry that is not an object — `200: "oops"`, `null`, `7`, `true`,
+   * `[]` — under any key a reader reads (a status code, `default`, a range)
+   * is no Response Object and no Reference Object: it is skipped with one
+   * warning naming the site (`200 response of listPets is not a Response
+   * Object ("oops"); skipping it.`) and the operation is read from its other
+   * entries, so `listPets` with `200: "oops"` beside a `204` is read from
+   * the `204`, with no entry here, in `errors`, `defaultResponse` or
+   * `rangeResponses` for the skipped key; a `responses` that is not an
+   * object at all is read as absent, with a warning (#617).
    */
   successResponses?: SuccessResponse[];
   errors: ErrorResponse[];
@@ -803,6 +818,18 @@ export interface PaginationMeta {
    * stop rule, so emitters never re-derive it.
    */
   pageStart?: number;
+  /**
+   * Path to the data array the response was unwrapped on (`data`,
+   * `result.items`); absent when the response is the array itself. The
+   * property is the array in every spelling a field is typed as one:
+   * written as an array, under a nullable wrapper or an `allOf` read as
+   * its member, a `$ref` to an array component, or a JSON Pointer deeper
+   * into a component that lands on a schema typed as an array where it
+   * stands (`#/components/schemas/Holder/properties/owners`; #609), read
+   * ahead from the document as the settle will type it — so `response` is
+   * the pointed array once settled and `itemType` its items, the model the
+   * pointed schema's items built, never a copy.
+   */
   dataPath?: string;
   /**
    * The description the document gives the data array property itself — the
@@ -908,6 +935,13 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * its variants none: each variant is the same schema read as one of its
  * types, so the limits are read from the union for whichever type the
  * value takes.
+ *
+ * `oagen diff` compares them on every node that carries them, the type's
+ * at every level included, and reports each keyword tightened or loosened
+ * (`field-constraints-changed`, `param-constraints-changed`,
+ * `header-constraints-changed`, `variant-constraints-changed`,
+ * `constraintsChanged` on a model), breaking when tightened on a
+ * request-facing site (#599; see docs/cli.md).
  */
 export interface Constraints {
   /** Inclusive lower bound (`minimum`). */
@@ -1116,6 +1150,21 @@ export interface LiteralType {
 
 export interface UnionType {
   kind: 'union';
+  /**
+   * The variants, in the document's order: a `oneOf`/`anyOf`'s non-null
+   * variants, or — for an OAS 3.1 type list naming several types (`type:
+   * ['object', 'string']`) — one per non-null type in the list's order,
+   * each the schema read as that type alone: keeping the keywords that
+   * apply to an instance of it (`properties` for the object, `items` for
+   * an array, `format` and `pattern` for a string; `const`, `enum` and a
+   * composition for every type) and left out when the schema's
+   * `allOf`/`oneOf`/`anyOf` admits no instance of it (#616). `{ type:
+   * ['object', 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string`
+   * when `Owner` declares `properties` and no `type`, and `Owner` alone —
+   * no union — when `Owner` is `type: 'object'`, which no string
+   * satisfies. Never one type twice: copies typed alike are one variant,
+   * and a lone variant is the type itself.
+   */
   variants: TypeRef[];
   /**
    * When set, the union is discriminated on `property`, and `mapping` names
@@ -1135,12 +1184,21 @@ export interface UnionType {
    * members, a `$ref` member followed to the component it names, and
    * through a `$ref` on the property to a component pinning one value
    * (`Cat: { allOf: [{ $ref: CatBase }, …] }` pins what `CatBase` pins;
-   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — a
+   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — the
+   * declaration read as the type builder reads it, at every hop: a `$ref`
+   * to its component, a nullable wrapper to its one variant, an `allOf`
+   * read as one member to that member, then the `const` or one-value
+   * `enum:` written there, so `kind: { allOf: [{ const: 'cat' }] }`,
+   * `kind: { allOf: [{ $ref: HamsterKind }], description }` and a `$ref`
+   * to `RabbitKind: { allOf: [{ $ref: RabbitConst }] }` pin as `kind: {
+   * const: … }` does, in OAS 3.0 and 3.1 alike (#607) — a
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
    * does as a component.
-   * A request body's union carries only the spec's own mapping.
+   * A request body's union carries only the spec's own mapping; a body
+   * that is a `oneOf` of inline objects under the keyword, each pinning the
+   * property by the same reading, is folded into one object instead.
    */
   discriminator?: { property: string; mapping: Record<string, string> };
   /** Which OAS composition keyword produced this union. Emitters can use this to
@@ -1205,7 +1263,14 @@ export interface TypeParam {
  * resolves to the enum (`{ kind: 'enum' }`, under `nullable` when the alias
  * or the enum admits null), what the alias declares is read by a field that
  * names it with a bare `$ref` (`Field`), and the enum keeps its own on the
- * `Enum`. An array component — a schema
+ * `Enum`. An alias is only a chain that ends at a `$ref` to an enum
+ * component: a component that declares its enum inside a lone `allOf`
+ * member (`Kind: { allOf: [{ type: 'string', enum }], description }`) or
+ * inside a nullable `oneOf`/`anyOf` wrapper (`Kind: { oneOf: [{ allOf: [{
+ * type: 'string', enum }] }, { type: 'null' }] }`, `Color: { oneOf: [{
+ * type: 'string', enum }, { type: 'null' }] }`; #606) is the enum `Kind`
+ * or `Color` itself, nullable for the wrapper, never an alias and never a
+ * model. An array component — a schema
  * that is an array and declares `items` (a nullable `oneOf`/`anyOf` around
  * one included), or an alias of one (a bare `$ref`, a nullable
  * `oneOf`/`anyOf` around a `$ref`, or an `allOf` of a `$ref` and limits)
@@ -1226,7 +1291,18 @@ export interface TypeParam {
  * component admits null (#512, #569). What either component and its
  * aliases declare beside the items or the type — text, link, flags,
  * limits, `default`, `x-*` keys — is read by a field that names it with a
- * bare `$ref` (`Field`). The inline schemas the parser materializes — request bodies,
+ * bare `$ref` (`Field`). A component that is only a `$ref` to a component
+ * that becomes a model — `CatAlias: { $ref: Cat }`, with or without
+ * `description`, `deprecated`, `externalDocs`, limits or `x-*` keys beside
+ * the `$ref`, which are the alias's own — is a model of its own carrying
+ * `Cat`'s fields, `required` and discriminator, exactly as `CatAlias: {
+ * allOf: [{ $ref: Cat }] }` is, through a chain of such aliases and into a
+ * component that itself composes; a `$ref` to it resolves to the alias
+ * (`{ kind: 'model', name: 'CatAlias' }`), never to `Cat`, at every site,
+ * and as a union variant it pins what `Cat` pins (#618: it was a model with
+ * no fields). A chain of bare `$ref`s that returns to itself names nothing:
+ * each such component is a model with no fields, reported once. The inline
+ * schemas the parser materializes — request bodies,
  * responses, union variants, nested objects, array items, map values — are
  * models too.
  */
@@ -1302,8 +1378,13 @@ export interface Model {
    * field is the discriminator key (e.g. "event"), and `mapping` maps each
    * discriminator value to the concrete variant model name (an IR model
    * name, after `schemaNameTransform`): an inline variant's model, built
-   * for it, or a `$ref` variant's component (`{ cat: "Cat", dog: "Dog" }`),
-   * which stands for it (#398).
+   * for it and named from the const it pins (`PetCat`), or a `$ref`
+   * variant's component (`{ cat: "Cat", dog: "Dog" }`), which stands for
+   * it (#398). The const is read as `UnionType.discriminator` reads one —
+   * through a `$ref`, a nullable wrapper and an `allOf` read as one member,
+   * at every hop — for the value and the variant's name alike, so `kind:
+   * { allOf: [{ const: 'cat' }] }` dispatches to `PetCat` as `kind: {
+   * const: 'cat' }` does (#607).
    */
   discriminator?: {
     property: string;
@@ -1484,7 +1565,10 @@ export interface Enum {
    * `Model.description` is a component model's — the wrapper layer's over
    * the member's when the component declares its members inside an
    * `allOf` read as its one typing member (`Kind: { allOf: [{ type:
-   * 'string', enum }], description }`), as its link, `deprecated`,
+   * 'string', enum }], description }`), or the wrapper's over the branch's
+   * when it declares them inside a nullable `oneOf`/`anyOf` wrapper
+   * (`Kind: { oneOf: [{ allOf: [{ type: 'string', enum }, { description
+   * }] }, { type: 'null' }] }`; #606), as its link, `deprecated`,
    * `default` and keys are read (`enumComponentDeclaration`) — or — for an
    * enum lifted
    * from an inline schema on a property, parameter, response header,
@@ -2233,13 +2317,24 @@ export interface ResponseHeader {
    */
   type: TypeRef;
   required: boolean;
+  /** The Header Object's own `description`; the schema's is never the header's. */
   description?: string;
+  /**
+   * `true` when the Header Object says `deprecated: true`, or the schema
+   * `type` is read from does — on its own keys, or on an `allOf` member of
+   * it that declares no type and so only annotates it (`allOfWrapperLayer`;
+   * #555), as a field reads the flag. Absent otherwise.
+   */
   deprecated?: boolean;
   /**
    * The header schema's `externalDocs`, when it declares a usable one — the
    * schema `type` is read from, whether the Header Object's `schema` or the
-   * `content` entry's. A Header Object has no `externalDocs` of its own.
-   * Absent otherwise.
+   * `content` entry's: its own, else the first `allOf` member's that
+   * declares no type and so only annotates the schema (`allOfWrapperLayer`;
+   * #605), so `allOf: [{ type: 'integer' }, { externalDocs }]` gives the
+   * header the link `allOf: [{ type: 'integer' }], externalDocs` does, as it
+   * gives a field, a parameter and the model built from the schema. A
+   * Header Object has no `externalDocs` of its own. Absent otherwise.
    */
   externalDocs?: ExternalDocs;
 }

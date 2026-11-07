@@ -33,6 +33,7 @@ import type {
   ServerChange,
 } from './types.js';
 import { jsonEncodedOnBothSides, locatedParams, paramKey, parameterContentTypeShift } from './params.js';
+import { constraintsShift, constraintsSides } from './constraints.js';
 import {
   classifyParamChange,
   classifyResponseHeaderChange,
@@ -621,8 +622,8 @@ function pairResponseHeaders(
 
 /**
  * Per response entry both specs have, the headers the new spec added,
- * removed, retyped, re-required, respelled or deprecated, each change
- * carrying the entry's `statusCode` or `fallback`. Entries pair as
+ * removed, retyped, re-required, respelled, deprecated or re-limited, each
+ * change carrying the entry's `statusCode` or `fallback`. Entries pair as
  * `diffResponseContentTypes` pairs them (`pairContentEntries`), so the entry
  * whose media types are compared with another's is the one whose headers
  * are; within an entry, headers pair by case-folded name
@@ -688,10 +689,11 @@ function entryLocation(entry: ContentEntry): Pick<ResponseHeaderChange, 'statusC
 
 /**
  * What changed about one header both specs declare, in the order
- * `diffParams` reports a parameter's: its spelling, its type, its
- * requiredness, its `deprecated` flag. Each kind is classified from the
- * reader's side by `classifyResponseHeaderChange`; the name is the new
- * spec's spelling.
+ * `diffParams` reports a parameter's: its spelling, its type, the limits
+ * its type carries at every level (`constraintsShift`; a `ResponseHeader`
+ * carries none of its own), its requiredness, its `deprecated` flag. Each
+ * kind is classified from the reader's side by
+ * `classifyResponseHeaderChange`; the name is the new spec's spelling.
  */
 function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseHeaderChange[] {
   const changes: ResponseHeaderChange[] = [];
@@ -707,6 +709,16 @@ function headerChanges(before: ResponseHeader, after: ResponseHeader): ResponseH
     } else {
       changes.push(classifyResponseHeaderChange('header-type-changed', name));
     }
+  }
+  // The limits the header's type carries, which `typeRefsEqual` passes
+  // over; additive either way, since the SDK only reads the header (#599).
+  const limits = constraintsShift(before, after);
+  if (limits) {
+    changes.push({
+      ...classifyResponseHeaderChange('header-constraints-changed', name),
+      ...constraintsSides(limits),
+      details: limits.details,
+    });
   }
   if (before.required !== after.required) {
     changes.push(classifyResponseHeaderChange('header-required-changed', name, after.required));
@@ -968,8 +980,12 @@ function classifyKeyedResponsesChange<K>(
  * one side and `x-pet-token` on the other are one parameter, compared like
  * any other and reported as `param-name-changed` rather than as a removal
  * beside an addition — #295) and classified from the caller's side by
- * `classifyParamChange`. Cookie parameters were left out of this walk until
- * #294, so a change to one came out as no change.
+ * `classifyParamChange`. A paired parameter is compared on its spelling,
+ * its type, its limits — its own `constraints` and those its type carries
+ * at every level, which `typeRefsEqual` passes over (`constraintsShift`;
+ * #599) — its media type, requiredness, default and `deprecated` flag.
+ * Cookie parameters were left out of this walk until #294, so a change to
+ * one came out as no change.
  */
 function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
   const changes: ParamChange[] = [];
@@ -1013,6 +1029,18 @@ function diffParams(oldOp: Operation, newOp: Operation): ParamChange[] {
       } else {
         changes.push(at(classifyParamChange('param-type-changed', name), loc));
       }
+    }
+
+    // The limits the parameter and its type carry, at every level, judged
+    // from the caller's side: a keyword tightened rejects a value a caller
+    // sends today, so it is breaking; loosened is additive (#599).
+    const limits = constraintsShift(oldEntry.p, newEntry.p);
+    if (limits) {
+      changes.push({
+        ...at(classifyParamChange('param-constraints-changed', name, limits.tightened), loc),
+        ...constraintsSides(limits),
+        details: limits.details,
+      });
     }
 
     // The media type the value is serialized in (`Parameter.contentType`,

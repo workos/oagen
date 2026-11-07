@@ -78,11 +78,17 @@
  * decided again from the settled type: an operation whose primary response
  * was pending chooses its iterator's item type from the settled response
  * (`paginatedItemType`), so a paginated response pointing at an array of
- * strings yields strings; and a discriminator mapping entry written as a
- * pointer is written as the model the schema it points at is built as — a
- * pointer variant's, settled by the walk, or, for a target outside the
- * variants, one settled here at the mapping site
- * (`settleDeferredMappingEntries`).
+ * strings yields strings; an explicit `dataPath` whose walk through the IR
+ * crossed a pending reference — that response, or a field on the way — is
+ * walked again from the settled types, under every nullable wrapper the
+ * site settled into, so the iterator yields the model the pointed schema's
+ * items are built as, never a copy read from the document
+ * (`settleDeferredDataPathItemType`; #608; a path that forks at a union on
+ * the way was read from the document at extraction, as any union's is);
+ * and a discriminator mapping entry written as a pointer is written as the
+ * model the schema it points at is built as — a pointer variant's, settled
+ * by the walk, or, for a target outside the variants, one settled here at
+ * the mapping site (`settleDeferredMappingEntries`).
  */
 import type {
   Callback,
@@ -105,8 +111,11 @@ import {
   walkTypeRef,
 } from '../ir/types.js';
 import {
+  arraySchemaOf,
   combineConstraints,
   componentTypeRef,
+  isArrayComponentRef,
+  isArrayPointerRef,
   isNullSchema,
   referenceTypesAsUnknown,
   schemaToTypeRef,
@@ -114,7 +123,7 @@ import {
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
-import { paginatedItemType } from './pagination.js';
+import { isDeferredDataPathItemType, paginatedItemType, settleDeferredDataPathItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
@@ -217,7 +226,9 @@ export function resolveSchemaPointers(
     }
   }
   for (const service of sites.services) {
-    for (const op of service.operations) visitOperation(op, `${service.name}.${op.name}`, visit, visitSite);
+    for (const op of service.operations) {
+      visitOperation(op, `${service.name}.${op.name}`, visit, visitSite, sites.models);
+    }
   }
   for (const webhook of sites.webhooks) {
     visitReceived(webhook, `webhooks.${webhook.name}.${webhook.httpMethod}`, visit, visitSite);
@@ -298,13 +309,17 @@ function collectDiscriminatedUnions(
  * variant schemas (`extractBodyParameterGroups`), so a member written as a
  * pointer holds a pending reference of its own. A parameter, a group member
  * or an envelope field goes through `visitSite`, which aligns its own
- * limits with its settled type's too.
+ * limits with its settled type's too. The iterator's item type an explicit
+ * `dataPath` deferred (`deferDataPathItemType`) is decided once the
+ * response and the envelope fields are settled, by walking the path through
+ * `models`, every model built (`settleDeferredDataPathItemType`; #608).
  */
 function visitOperation(
   op: Operation,
   context: string,
   visit: (ref: TypeRef, context: string) => void,
   visitSite: (site: LimitedSite, context: string) => void,
+  models: readonly Model[],
 ): void {
   for (const p of [
     ...op.pathParams,
@@ -320,16 +335,29 @@ function visitOperation(
   // reference it was — the response itself, since no reference is an array
   // — so it is chosen again from the settled response: an array's items, as
   // `detectPagination` reads any response (`paginatedItemType`). Only the
-  // item type taken from the response itself is reread; one an override or
-  // an envelope decided stands.
+  // item type taken from the response itself is reread that way — a body
+  // written as the pointer, or a list envelope unwrapped on a `data` written
+  // as one, which hands the pending response over as its item type for this
+  // very reread (`extractListResponse`; #609); one an override or an
+  // envelope decided from an array it could type stands, and one an
+  // explicit `dataPath` deferred is decided below.
   const responseWasPending = isPendingVariant(op.response);
   visit(op.response, `${context}.response`);
   if (responseWasPending && op.pagination && op.pagination.itemType === op.response) {
     op.pagination.itemType = paginatedItemType(op.response);
   }
   for (const entry of op.successResponses ?? []) visit(entry.type, `${context}.successResponses.${entry.statusCode}`);
-  if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
   for (const field of op.pagination?.envelopeFields ?? []) visitSite(field, `${context}.pagination.${field.name}`);
+  // An explicit `dataPath` whose walk crossed a pending reference at
+  // extraction — the response itself, a companion or a field on the way —
+  // left a placeholder (`deferDataPathItemType`): with the response, the
+  // companions and every model's fields settled, the path is walked again
+  // through the IR, so the iterator yields the model the pointed schema's
+  // items are built as, never a copy read from the document (#608).
+  if (op.pagination && isDeferredDataPathItemType(op.pagination.itemType)) {
+    settleDeferredDataPathItemType(op.pagination, op.response, models, context);
+  }
+  if (op.pagination) visit(op.pagination.itemType, `${context}.pagination.itemType`);
   for (const error of op.errors) if (error.type) visit(error.type, `${context}.errors.${error.statusCode}`);
   for (const header of collectResponseHeaders(op)) visit(header.type, `${context}.headers.${header.name}`);
   for (const { type, source } of collectResponseBodyTypes(op)) visit(type, `${context}.${source}`);
@@ -472,6 +500,28 @@ function allOfReadAsMember(
   return (allOfTypingMember(members) ?? members[0]) === member;
 }
 
+/**
+ * The schema a pointer `ref` lands on, read ahead of the IR from the
+ * document alone — the component the `$ref` starts from, then the steps
+ * the settle will walk (`pointerSteps`) — or `undefined` when the settle
+ * types nothing at the end of it: a `$ref` into another section, to a
+ * component the document lacks, to no schema, or to a schema the parser
+ * builds no type for at that place. The one read for every reader that
+ * must know what a pointer settles to before a body is typed
+ * (`pointerTypesAsUnknown`, `pointerTypesAsArray`), so each counts a
+ * pointer as typed exactly when the settle types it.
+ */
+function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | undefined): SchemaObject | undefined {
+  const tokens = schemaRefTokens(ref);
+  if (!tokens) return undefined;
+  const [key, ...path] = tokens;
+  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
+  if (!component) return undefined;
+  const steps = pointerSteps(component, path, schemas);
+  if ('problem' in steps) return undefined;
+  return steps.length === 0 ? component : steps[steps.length - 1]!.next;
+}
+
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */
 const pointersBeingRead = new Set<string>();
 
@@ -483,7 +533,7 @@ const pointersBeingRead = new Set<string>();
  * pointing at an untyped schema loses to a typed `201`, as the same schema
  * written inline would). True when the pointer leads nowhere (into another
  * section, to a component the document lacks, to no schema) or to a schema
- * the parser builds no type for at that place (`pointerSteps`), and
+ * the parser builds no type for at that place (`pointerLanding`), and
  * otherwise exactly when the schema it lands on is typed `unknown` where
  * it stands, read as a body written there is (`referenceTypesAsUnknown`:
  * `{}`, a `$ref` to an untyped primitive component, an `allOf` read as
@@ -492,19 +542,50 @@ const pointersBeingRead = new Set<string>();
  */
 export function pointerTypesAsUnknown(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (pointersBeingRead.has(ref)) return true;
-  const tokens = schemaRefTokens(ref);
-  if (!tokens) return true;
-  const [key, ...path] = tokens;
-  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
-  if (!component) return true;
-  const steps = pointerSteps(component, path, schemas);
-  if ('problem' in steps) return true;
-  const landed = steps.length === 0 ? component : steps[steps.length - 1]!.next;
+  const landed = pointerLanding(ref, schemas);
+  if (!landed) return true;
   pointersBeingRead.add(ref);
   try {
     return referenceTypesAsUnknown(landed);
   } finally {
     pointersBeingRead.delete(ref);
+  }
+}
+
+/** The pointers being read for the array they settle to (`pointerTypesAsArray`), so a chain that reaches itself ends. */
+const pointersBeingTyped = new Set<string>();
+
+/**
+ * Whether a site written as `ref`, a schema `$ref` that names no component,
+ * settles to an array (#609) — decided from the document before any model
+ * is built, for the reader that asks whether a property is an array before
+ * a body is typed (`isArrayPointerRef`, for `detectListEnvelope`: a list
+ * envelope's `data` written as `{ $ref: '#/components/schemas/Holder/
+ * properties/owners' }` is the array `Holder.owners` is, so the envelope is
+ * unwrapped on it as it is on `{ $ref: Owners }`). True exactly when the
+ * pointer lands on a schema (`pointerLanding`) typed as an array where it
+ * stands, read as a property written there is read: an array in any
+ * spelling, under any nullable wrapper or `allOf` read as its member
+ * (`arraySchemaOf`), a `$ref` to an array component under the same
+ * (`isArrayComponentRef`), or another such pointer in turn
+ * (`isArrayPointerRef`). False when the pointer leads nowhere or to a
+ * schema the parser builds no type for at that place — the settle reports
+ * it and types the site `unknown`, no array — and for a chain of pointers
+ * that reaches itself, which the settle types `unknown` too. What the
+ * document alone cannot refuse is left to the settle, as
+ * `pointerTypesAsUnknown` leaves it: a `properties` step through a
+ * component typed as a primitive or an enum reads on to the array here,
+ * and the settle reports the site and types it `unknown`.
+ */
+export function pointerTypesAsArray(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
+  if (pointersBeingTyped.has(ref)) return false;
+  const landed = pointerLanding(ref, schemas);
+  if (!landed) return false;
+  pointersBeingTyped.add(ref);
+  try {
+    return arraySchemaOf(landed) !== undefined || isArrayComponentRef(landed) || isArrayPointerRef(landed, schemas);
+  } finally {
+    pointersBeingTyped.delete(ref);
   }
 }
 

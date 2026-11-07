@@ -446,6 +446,26 @@ export function resolveMountTarget(name: string, mounts: Record<string, string>)
 export type OperationNaming = 'path' | 'operationId';
 
 /**
+ * The settings {@link resolveOperations} resolves a spec's operations with —
+ * the config's `operationHints`, `mountRules` and `operationNaming` — which
+ * together decide the class (`mountOn`) and the method (`methodName`) that
+ * `generate` writes each operation as. Every command that reads the SDK
+ * `generate` writes resolves with the same settings: `compat-extract` matches
+ * the SDK's callables by the names they resolve to, and `verify`'s compat
+ * scope and staleness check read the classes and methods they resolve to
+ * (see `specDerivedNames`, `specDerivedMethodPaths` and `detectStaleSymbols`
+ * in `compat`). Under `mountRules: { Pets: 'Animals' }` and
+ * `operationHints: { 'GET /pets': { name: 'list_all' } }`, `GET /pets` and
+ * `GET /pets/{id}` tagged `Pets` resolve to `Animals.list_all` and
+ * `Animals.get_pet`; with no settings, to `Pets.list_pets` and `Pets.get_pet`.
+ */
+export interface OperationResolution {
+  operationHints?: Record<string, OperationHint>;
+  mountRules?: Record<string, string>;
+  operationNaming?: OperationNaming;
+}
+
+/**
  * Resolve all operations in the spec, applying hints and mount rules.
  *
  * @param spec - The parsed API spec
