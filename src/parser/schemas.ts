@@ -5387,7 +5387,10 @@ function mappingTargetModelName(target: string): string {
  * the one the schema it stands for is built as, which no reader knows
  * until every model is. Each target is read through its alias chain
  * (`aliasChainOf`) and every hop matched by identity against the members'
- * schemas, read through their own aliases (`schemasAlong`): a hop that is
+ * schemas, read through their own aliases (`schemasAlong`), the nearest hop
+ * first and, at a hop, the member reached through the fewest aliases of
+ * its own, so `dog: Hound` beside `$ref: Mutt` and `$ref: Hound`, with
+ * `Mutt` an alias of `Hound`, is `Hound` in either order: a hop that is
  * a pointer variant's — an unnamed member, pending until settled — follows
  * the variant, to the model it settles to (`ZooDog`; `ShelterDog` for
  * `dog: Hound` beside the variant `Shelter/properties/dog`, as the pointer
@@ -5451,18 +5454,26 @@ function deferPointerMappingEntries(
       for (const redirect of redirected) redirect.name = name;
       if (Object.hasOwn(mapping, value)) mapping[value] = name;
     };
-    // The nearest hop of the chain that is a member's schema, read through
-    // the member's own aliases, names that member's model.
+    // The nearest hop of the chain that is a member's schema names that
+    // member's model — the member reached through the fewest aliases of its
+    // own first (its own schema, then one alias away, …), so an entry naming
+    // a variant outright is that variant's whatever is declared around it
+    // (Greptile, #619 review round 7: with `$ref: Mutt` declared before
+    // `$ref: Hound` and `Mutt` an alias of `Hound`, `dog: Hound` went to
+    // `Mutt`), and never the order the variants are declared in.
     let hop = -1;
     let index = -1;
+    const deepest = Math.max(0, ...memberSchemas.map((along) => along.length));
     outer: for (let at = 0; at < chain.length; at++) {
       const schema = chain[at]!.schema;
       if (schema === undefined) continue;
-      for (let position = 0; position < members.length; position++) {
-        if (memberSchemas[position]!.includes(schema)) {
-          hop = at;
-          index = position;
-          break outer;
+      for (let depth = 0; depth < deepest; depth++) {
+        for (let position = 0; position < members.length; position++) {
+          if (memberSchemas[position]![depth] === schema) {
+            hop = at;
+            index = position;
+            break outer;
+          }
         }
       }
     }
