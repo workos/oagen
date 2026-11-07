@@ -6574,8 +6574,11 @@ describe('#566', () => {
       // list from a copy of its own, which stood for nothing, so the type
       // builder named `NoteReplyReplyReply` where the extractor, meeting the
       // conjunction again, built nothing.
-      const cases: [string, string[], 'union' | 'nullable'][] = [
-        ['without null', ['object', 'string'], 'union'],
+      // #616: `Note` is `type: 'object'`, which no string satisfies, so the
+      // `string` copy of the list is left out and the field is the model on
+      // the path alone — not that model twice.
+      const cases: [string, string[], 'model' | 'nullable'][] = [
+        ['without null', ['object', 'string'], 'model'],
         ['with null', ['object', 'string', 'null'], 'nullable'],
       ];
       for (const [label, type, kind] of cases) {
@@ -6593,6 +6596,7 @@ describe('#566', () => {
         // Each type of the list is read from its own copy, each standing for
         // the field's declaration, so every one of them names the model on
         // the path: `NoteReplyReply`'s own `reply` is `NoteReplyReply`.
+        // The `object` copy is the one the `allOf` admits (#616).
         const chain: [string, string][] = [
           ['Note', 'NoteReply'],
           ['NoteReply', 'NoteReplyReply'],

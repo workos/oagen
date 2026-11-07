@@ -44,6 +44,12 @@ import {
   mediaTypeNameFragment,
   mediaTypeNamingOrder,
 } from '../utils/media-type.js';
+import {
+  BINARY_RESPONSE_MEDIA_TYPES,
+  TEXT_RESPONSE_MEDIA_TYPES,
+  responseBodyReading,
+  unreadResponseBodyType,
+} from './body-media-types.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -61,6 +67,7 @@ import {
   enumComponentDeclaration,
   collapsedNullableBranch,
   foldSiblingProperties,
+  inlineEnumSpelling,
   inlineMappingTargets,
   isComponentModelRef,
   isInlineObjectSchema,
@@ -69,6 +76,7 @@ import {
   rehearse,
   unwrapCollapsedWrappers,
   unwrapNullableField,
+  unwrapNullableSchema,
   warnOnUncarriedProperties,
   withSchemaConstraints,
   withWrapperDocs,
@@ -86,11 +94,13 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
   collectProperties,
   extractInlineModelsFromProperties,
   isInheritedModelRef,
+  shapeFingerprint,
   withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -109,7 +119,9 @@ import {
   resolveOverrideParams,
   applyPaginationOverride,
   dataPathProblem,
-  resolveDataPathItemType,
+  dataPathWalkStart,
+  deferDataPathItemType,
+  walkDataPathItemType,
 } from './pagination.js';
 import {
   BODY_READINGS,
@@ -125,7 +137,7 @@ import {
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
-import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import { isResponseEntry, isResponsesObject, resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
@@ -4588,7 +4600,29 @@ function typeRequestBody(
   return typed ? { body: typed, encoding: selected.encoding, contentType: selected.essence } : {};
 }
 
-/** The picked content entry's type: a primitive for a schema-less binary or text body, else typed from its schema. */
+/**
+ * The picked content entry's type: a primitive for a schema-less binary or
+ * text body, else typed from its schema. An inline object is the model
+ * `<Op>Request`; a `oneOf` of inline objects, `$ref`s or other variants is
+ * built as a union, variant by variant, its inline object variants named
+ * from the body (`deriveOneOfVariantName`); everything else — an `anyOf`,
+ * an array, a map, a `$ref`, a primitive, a nullable wrapper around one of
+ * those — is typed by `schemaToTypeRef`, as a field of the same schema is.
+ * A `oneOf` whose every non-null variant is a string `const` (an OAS 3.0
+ * single-value `enum` counts) — two or more, or any number beside an
+ * `enum:` list — declares an enum, not a union to build
+ * (`inlineEnumSpelling`), so it is typed by `schemaToTypeRef` too: the
+ * body is the enum `<Op>Request` (`AddNoteRequest`), each variant's
+ * `description` and `deprecated` its member's, exactly as the same `anyOf`
+ * body, the same schema as a webhook payload or on a field, is typed; a
+ * `null` variant beside the consts, or `nullable: true` / `type: [...,
+ * 'null']` beside the union, makes it `nullable<AddNoteRequest>`
+ * (workos/oagen#603: the `oneOf` was built as a union of literals, the
+ * members' text lost, and switching `anyOf` to `oneOf` read as breaking).
+ * A `oneOf` that mixes consts with any other variant — a `$ref`, an
+ * object, a bare `type: 'string'`, a number const — is a union, here as
+ * everywhere.
+ */
 function typePickedRequestBody(
   selected: SelectedRequestBodyContent,
   op: OperationObject | undefined,
@@ -4687,9 +4721,23 @@ function typePickedRequestBody(
     schema.oneOf.some(isNullSchema) &&
     schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
+  // A `oneOf` of string consts is an enum, not a union to build: whether it
+  // is one is the one decision `schemaToTypeRef` makes (`inlineEnumSpelling`),
+  // on the schema with its nullable wrappers removed, as that builder sees
+  // it (`unwrapNullableSchema`) — so `nullable: true` or `type: ['string',
+  // 'null']` beside the `oneOf` hides nothing, and a lone const beside
+  // `null` with no `enum:` list, which that unwrap collapses to the const,
+  // is no enum and stays the nullable literal the wrapper rule above gives
+  // it. Such a `oneOf` takes the fall-through, where it is typed as the
+  // same `anyOf` is: the enum `<Op>Request`, nullable when the schema is
+  // (workos/oagen#603: it was built below, a union of literals with no
+  // enum and no member text, while `anyOf` and the webhook payload were
+  // the enum).
+  const constUnion = inlineEnumSpelling(unwrapNullableSchema(schema))?.spelling === 'const-union';
+
   // If the request body is a oneOf, extract each variant as an inline model
   // and build a union type pointing to them by name.
-  if (schema.oneOf && (!nullableWrapper || (branch !== undefined && isInlineObjectSchema(branch)))) {
+  if (schema.oneOf && !constUnion && (!nullableWrapper || (branch !== undefined && isInlineObjectSchema(branch)))) {
     const variants: TypeRef[] = [];
     // The inline object variants of this union and the names its const-less
     // variants have taken so far, for `deriveOneOfVariantName`.
@@ -4807,9 +4855,10 @@ function typePickedRequestBody(
     return hasNull ? ({ kind: 'nullable', inner: union } as TypeRef) : union;
   }
 
-  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, an
-  // array, a map, a nullable object, a nullable wrapper around an array, a
-  // `$ref` or a primitive, …). Such a TypeRef can still reach inline models
+  // Anything else is typed by `schemaToTypeRef` (a primitive, an `anyOf`, a
+  // `oneOf`/`anyOf` of string consts read as an enum, an array, a map, a
+  // nullable object, a nullable wrapper around an array, a `$ref` or a
+  // primitive, …). Such a TypeRef can still reach inline models
   // — the inline object variants of an `anyOf`, an array's inline items or
   // the variants of an `items.oneOf`, a map's inline values, and whatever is
   // nested under any of them, a union under a variant included — so
@@ -5689,6 +5738,15 @@ function deferParameterModels(
  * earlier one's position, with a warning — the way an operation-level
  * parameter replaces a path-level one, except that the document gave these
  * two no precedence (#295).
+ *
+ * A header's `deprecated` and `externalDocs` are read from the layer its
+ * schema documents itself with (`allOfWrapperLayer`): the schema's own
+ * keys, then each `allOf` member's that declares no type and so only
+ * annotates it — the first such member's winning among members — so a link
+ * or flag written in such a member is the header's exactly as the same key
+ * beside the `allOf` is, as a field, a parameter and the model built from
+ * the schema read it (#555, #605). The Header Object's own `deprecated`
+ * counts too; its `description` is the header's alone.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
@@ -5729,24 +5787,29 @@ function extractResponseHeaders(
     // warning — once, here, as the header is typed.
     const schema = parameterSchema(header);
     warnUnreadParameterContent(header, `Response header "${name}" (${statusCode}) in ${operationLabel}`);
+    // The layer the header documents itself from: the schema's own keys,
+    // with each `allOf` member's that declares no type and so only annotates
+    // it folded in — the schema's own winning, then the first member's that
+    // declares one (`allOfWrapperLayer`; #555) — the one reading a field, a
+    // parameter and the model built from the schema give such a member, so
+    // `allOf: [{ type: 'integer' }, { externalDocs }]` and `allOf: [{ type:
+    // 'integer' }], externalDocs` are one header (#605: the flag read the
+    // members but the link the schema's own keys alone, so a link written
+    // in a member was dropped). The typing member's own keys stay on that
+    // member, and a `$ref` member's on its component, as for a field.
+    const layer = schema && allOfWrapperLayer(schema);
     const entry: ResponseHeader = {
       name,
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      // The Header Object's flag or its schema's — the schema's own, or an
-      // `allOf` member's that declares no type and so only annotates it
-      // (`annotatingAllOfMembers`; #555) — so a deprecated schema that folds
-      // onto a live component leaves it on the header; the model or enum a
-      // bare `$ref` names keeps its own, as for a field.
-      deprecated:
-        header.deprecated === true ||
-        (schema !== undefined &&
-          [schema, ...annotatingAllOfMembers(schema)].some((level) => level.deprecated === true)) ||
-        undefined,
-      // The header schema's own link — a Header Object has none — read from
+      // The Header Object's flag or its schema layer's — so a deprecated
+      // schema that folds onto a live component leaves it on the header; the
+      // model or enum a bare `$ref` names keeps its own, as for a field.
+      deprecated: header.deprecated === true || layer?.deprecated === true || undefined,
+      // The header schema layer's link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
-      ...externalDocsEntry(schema?.externalDocs),
+      ...externalDocsEntry(layer?.externalDocs),
     };
     if (schema) {
       // Named from the lower-cased header name, as a header parameter's inline
@@ -6212,6 +6275,9 @@ function collectOperationConstPrefixes(
     // fallback or a key OpenAPI does not define reserves nothing.
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
+    // An entry that is not an object reserves nothing; the operation warns
+    // about it once when it reads it (#617).
+    if (!isResponseEntry(response)) continue;
     // A Reference Object is not followed, and nothing beside its `$ref` is
     // read (#562): a `$ref` into `components/responses` names its inline
     // body after the component, so the consts it pins never prefix a
@@ -6274,9 +6340,18 @@ function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: 
  * model is reused and follows any later renaming), or the response model's
  * fields, through the models a component's fields mint too (`result.items`
  * through a `result` two `allOf` members of `PetPage` conjoin yields the
- * items `PetPageResult` holds) — and the document (`schema`, classified
- * under `contextName`) answers when the path crosses a model the parser has
- * not materialized, minting inline items under a path-derived name.
+ * items `PetPageResult` holds), the walk starting where `dataPathWalkStart`
+ * says. A walk that crosses a reference `resolveSchemaPointers` has yet to
+ * settle — the response written as a `$ref` deeper into a component
+ * (`#/components/schemas/Holder/properties/result`), or a field on the way
+ * written so — answers nothing yet: the model the pointed schema's items
+ * are built as exists, and reading the document now would mint a copy of
+ * it (`ListOwnersItem` beside `HolderResultItem`; #608), so the item type
+ * is a placeholder the settle decides from the settled types
+ * (`settleDeferredDataPathItemType`). The document (`schema`, classified
+ * under `contextName`) answers only when the path crosses a model the
+ * parser has not materialized, minting inline items under a path-derived
+ * name.
  */
 function resolveOverrideItemType(
   result: ResponseExtractionResult,
@@ -6294,17 +6369,10 @@ function resolveOverrideItemType(
     ...(result.envelopeCompanions ?? []).flatMap((companion) => companion.models),
     ...componentModels,
   ];
-  let fromIr: TypeRef | undefined;
-  if (result.envelopeFields) {
-    // The envelope was unwrapped, so its companions — not `result.response`,
-    // which is already the data array — are where the path starts.
-    const [head, ...rest] = dataPath.split('.');
-    const companion = result.envelopeFields.find((field) => field.name === head);
-    if (companion) fromIr = resolveDataPathItemType(companion.type, rest.join('.'), pool);
-  } else {
-    fromIr = resolveDataPathItemType(result.response, dataPath, pool);
-  }
-  if (fromIr) return { itemType: fromIr, inlineModels: [] };
+  const start = dataPathWalkStart(result.response, result.envelopeFields, dataPath);
+  const walked = start && walkDataPathItemType(start.root, start.path, pool);
+  if (walked && 'itemType' in walked) return { itemType: walked.itemType, inlineModels: [] };
+  if (walked?.pending) return { itemType: deferDataPathItemType(), inlineModels: [] };
 
   return resolveDataPathFromSchema(schema, dataPath, contextName, componentSchemas, settle);
 }
@@ -6607,6 +6675,9 @@ function operationBodyModelNames(
           const responseKey = classifyResponseKey(statusCode);
           if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 400) return [];
           const code = responseKey.code;
+          // An entry that is not an object mints nothing; the operation
+          // warns about it once when it reads it (#617).
+          if (!isResponseEntry(response)) return [];
           const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
@@ -6639,7 +6710,10 @@ function componentResponseBodySchema(
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
   const component = componentResponses[componentName];
-  if (!component) return undefined;
+  // A component that is not an object (`Bad: "oops"`) declares no body; a
+  // `$ref` to it is reported by the operation that writes it, as a ref
+  // nothing answers (#617).
+  if (!isResponseEntry(component)) return undefined;
   const resolved = resolveResponseRef<ResponseObject>(
     component as ResponseObject | ReferenceObject,
     componentResponses,
@@ -6687,10 +6761,14 @@ function bodyModelNames(
 /**
  * A response body's shape under `contextName`, under every reading
  * (`BODY_READINGS`): its type and every model it mints, each by name and
- * `modelFingerprint` — so the order of its fields and its documentation do
- * not count, while a titled variant's name, which names a model, does. Two
- * later bodies of one operation with one key are one body, named alike
- * (`stepSecondaryBody`), and the reservation of a later body's names
+ * `shapeFingerprint` — so the order of its fields, its documentation and
+ * the model's own `deprecated` do not count, while a titled variant's name,
+ * which names a model, does, and so does a field's own flag (a nested
+ * object's `deprecated` sits on the field that wrote it too). Two later
+ * bodies of one operation with one key are one body, named alike
+ * (`stepSecondaryBody`) — a 202 identical to the 201 but for the flag
+ * shares `CreatePetResponse201`, and the merge in `extractResponses` keeps
+ * the live definition (#630) — and the reservation of a later body's names
  * (`operationBodyModelNames`) asks the same question of the same schema.
  * Read silently (`rehearse`): the body reports its problems once, when it is
  * read.
@@ -6704,7 +6782,7 @@ function bodyShapeKey(
     JSON.stringify(
       BODY_READINGS.map((reading) => {
         const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
-        const models = body.inlineModels.map((model) => `${model.name} ${modelFingerprint(model)}`).sort();
+        const models = body.inlineModels.map((model) => `${model.name} ${shapeFingerprint(model)}`).sort();
         return [shapeWithEnumFlags(body.response), models];
       }),
     ),
@@ -6724,12 +6802,6 @@ function bodyShapeKey(
 function componentResponseModelBase(componentName: string): string {
   return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
 }
-
-/**
- * Media types the fixed-order response pick types as a plain string without
- * reading their schema, in the order it checks them.
- */
-const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
 
 /** Where an inline body declared for a secondary media type gets its name (`typeSecondaryContent`). */
 interface ContentModelNaming {
@@ -6942,12 +7014,11 @@ function typeSecondaryContent(
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
-  // as much a string as `text/plain`. The key itself stays as written.
-  const essence = mediaTypeEssence(contentType);
-  if (essence === 'application/octet-stream' || essence === 'application/pdf') {
-    return { kind: 'primitive', type: 'string', format: 'binary' };
-  }
-  if (TEXT_RESPONSE_MEDIA_TYPES.includes(essence)) return { kind: 'primitive', type: 'string' };
+  // as much a string as `text/plain` (`responseBodyReading`, the one
+  // classification the primary pick and `sentOnlyComponentNames` read too).
+  // The key itself stays as written.
+  const reading = responseBodyReading(contentType);
+  if (reading !== 'schema') return unreadResponseBodyType(reading);
   if (!schema) return { kind: 'primitive', type: 'unknown' };
   const fragment = mediaTypeNameFragment(contentType, siblings);
   ctx.deferred.push({
@@ -7260,16 +7331,21 @@ function typeErrorBody(
 /**
  * The fixed-order pick of a success response's body: the JSON schema when a
  * JSON media type is declared (`application/json` by essence, then `+json`);
- * else a binary (`application/octet-stream`, `application/pdf`) or text
- * (`TEXT_RESPONSE_MEDIA_TYPES`) media type, typed as a string without reading
- * its schema; else the first media type that declares a schema; else the
- * first declared, which reads as `unknown`. Media types are compared by
- * essence (`application/pdf; foo=bar` is as binary as `application/pdf`,
- * `TEXT/PLAIN; charset=utf-8` as much a string as `text/plain`) and
- * `contentType` is the key as written. `extractResponses` reads a 2xx body
- * through this, and `resolvePathModelBaseNames` asks the same question of a
- * component response, so the names it reserves are the ones the operation
- * will mint, whatever media type the body is declared under.
+ * else a binary (`BINARY_RESPONSE_MEDIA_TYPES`: `application/octet-stream`,
+ * `application/pdf`) or text (`TEXT_RESPONSE_MEDIA_TYPES`: `text/plain`,
+ * `text/html`, `text/xml`, `application/xml`) media type, typed as a string
+ * without reading its schema — the classification `responseBodyReading`
+ * shares with every secondary entry (`typeSecondaryContent`) and with the
+ * sent/received walk (`sentOnlyComponentNames`), so a body under such a
+ * media type reaches no component (#610); else the first media type that
+ * declares a schema; else the first declared, which reads as `unknown`.
+ * Media types are compared by essence (`application/pdf; foo=bar` is as
+ * binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much a string
+ * as `text/plain`) and `contentType` is the key as written.
+ * `extractResponses` reads a 2xx body through this, and
+ * `resolvePathModelBaseNames` asks the same question of a component
+ * response, so the names it reserves are the ones the operation will mint,
+ * whatever media type the body is declared under.
  */
 function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
   const json = jsonResponseSchema(resp);
@@ -7278,10 +7354,10 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
   if (!content) return {};
   const keyWithEssence = (essence: string): string | undefined =>
     Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
-  const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
-  if (binaryKey) return { contentType: binaryKey, type: { kind: 'primitive', type: 'string', format: 'binary' } };
+  const binaryKey = BINARY_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+  if (binaryKey) return { contentType: binaryKey, type: unreadResponseBodyType('binary') };
   const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
-  if (textKey) return { contentType: textKey, type: { kind: 'primitive', type: 'string' } };
+  if (textKey) return { contentType: textKey, type: unreadResponseBodyType('text') };
   // The first media type that declares a schema; when none does, the first
   // declared is the primary and reads as unknown.
   const entries = Object.entries(content);
@@ -7319,6 +7395,19 @@ function undescribedBodyType(): TypeRef {
   return { kind: 'primitive', type: 'unknown' };
 }
 
+/**
+ * Read an operation's `responses` map: the primary body (`response` and the
+ * paging fields), every 2xx/3xx entry (`successResponses`), the error
+ * entries, the `default` and range entries, and the inline models all of
+ * them mint. Every 2xx body's models are kept, merged by name: a later
+ * body's model of a kept name resolves to the kept definition when the two
+ * are the same shape but for the model's own `deprecated`
+ * (`shapeFingerprint`), the live definition kept whichever status code
+ * declares it — a live 202 body identical to a deprecated 200 body types
+ * both as a live `Pet`, as a deprecated 202 beside a live 200 does, and the
+ * model is deprecated only when every copy is — and to the kept definition
+ * with a warning when they differ in a field (#630).
+ */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   /** The Operation Object as the operation's model names read it (`buildOperation`'s `namingOp`). */
@@ -7350,7 +7439,7 @@ function extractResponses(
   itemType?: TypeRef;
   envelopeFields?: Field[];
   endOfIteration?: PaginationEndOfIteration;
-  /** Element type of the array the override's `dataPath` names; unset when the override was rejected or names none. */
+  /** Element type of the array the override's `dataPath` names — a placeholder the settle decides when the walk crossed a pending reference (`deferDataPathItemType`; #608); unset when the override was rejected or names none. */
   overrideItemType?: TypeRef;
   /**
    * Why the override cannot apply to the primary response — a `dataPath`
@@ -7405,6 +7494,23 @@ function extractResponses(
   // steps from (`stepSecondaryBody`), and whether it is a component's.
   const bodyContexts = new Map<number, { context: string; component: boolean }>();
 
+  // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
+  // `[…]` — is no Responses Object, so no key could be read from it: it is
+  // warned about once and read as absent, as for an operation that declares
+  // none (#617).
+  if (responses !== undefined && !isResponsesObject(responses, opLabel)) responses = undefined;
+  // An entry that is not an object — `200: "oops"`, `null`, `7`, `true`,
+  // `[]` — is no Response Object and no Reference Object, so no branch
+  // below could read it: it is warned about once, naming the operation and
+  // the key, and left out, and the operation is read from its other entries
+  // (#617). Only a key a branch reads is checked: an `x-` key is an
+  // extension, which may hold anything, and a key OpenAPI does not define
+  // is reported on its own (`readFallbackResponse`), whatever it holds.
+  const entries = Object.entries(responses ?? {}).filter(([key, raw]) => {
+    const kind = classifyResponseKey(key).kind;
+    return kind === 'extension' || kind === 'unrecognized' || isResponseEntry(raw, `${key} response of ${opLabel}`);
+  });
+
   // Every 2xx, 3xx and error entry is resolved once, here, and the loop
   // below reads it from this map. The bundler leaves `$ref:
   // '#/components/responses/…'` in place, and a Reference Object has no
@@ -7415,7 +7521,7 @@ function extractResponses(
   // extension are left as written, as nothing here reads them, and a 1xx is
   // read as written too.
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of Object.entries(responses ?? {})) {
+  for (const [statusCode, rawResponse] of entries) {
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
     resolvedResponses.set(
@@ -7455,7 +7561,7 @@ function extractResponses(
   if (!responses)
     return { response, errors, inlineModels, isPaginated, overrideProblem, componentBodies: componentBodyTypes };
 
-  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of entries) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
     // and `1XX`–`5XX` are routed to their own fields, an `x-` extension is
     // skipped, and a key OpenAPI does not define (`6XX`, `600`) is warned
@@ -7684,9 +7790,15 @@ function extractResponses(
   // `<Op>Response<code>`, then a number — whatever the kept bodies hold, so
   // its `successResponses` entry keeps the shape its status code declared
   // under a name no other status code's body decides. A model of a later
-  // body the kept one shares (`modelFingerprint`) resolves to the kept
-  // definition silently; only a clash on a model the stem does not name is
-  // still resolved to the kept definition, with a warning. The
+  // body the kept one shares (`shapeFingerprint`: the model's own
+  // `deprecated` apart) resolves to the kept definition silently — the live
+  // one when the two differ in the flag, whichever status code declares it,
+  // as the merge passes keep a live copy's definition across operations, so
+  // a live 202 body identical to a deprecated 200 body keeps a live `Pet`,
+  // deprecating either copy leaves no trace, and the model is deprecated
+  // only when every copy is (#630); only a clash on a model the stem does
+  // not name — a field more, a field's own flag, a limit — is still resolved
+  // to the kept definition, with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
@@ -7719,10 +7831,17 @@ function extractResponses(
       if (!kept) {
         keptByName.set(model.name, { model, status });
         inlineModels.push(model);
-      } else if (modelFingerprint(kept.model) !== modelFingerprint(model)) {
+      } else if (shapeFingerprint(kept.model) !== shapeFingerprint(model)) {
         console.warn(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
         );
+      } else if (kept.model.deprecated && !model.deprecated) {
+        // Identical but for the model's own flag: the live copy owns the
+        // name, whichever status code declares it (#630). Every kept model
+        // was pushed when it was kept, so it is replaced in place and keeps
+        // the primary's position.
+        inlineModels[inlineModels.indexOf(kept.model)] = model;
+        keptByName.set(model.name, { model, status });
       }
     }
   }
@@ -7731,9 +7850,11 @@ function extractResponses(
   // iterator yields from, so its element type — not the wrapper — must
   // become `itemType`. It is resolved against the primary body, whose models
   // (companions included) are the ones retained above, so the item type it
-  // selects always has its model. An accepted `dataPath` reached an array in
-  // the body the decision was made against, which is this one: a body an
-  // array is reached in is typed, and the lowest typed 2xx is the primary.
+  // selects always has its model — or is a placeholder until the settle, when
+  // the path crosses a pending reference (`resolveOverrideItemType`). An
+  // accepted `dataPath` reached an array in the body the decision was made
+  // against, which is this one: a body an array is reached in is typed, and
+  // the lowest typed 2xx is the primary.
   const primarySchema = primaryStatus === undefined ? undefined : bodySchemas.get(primaryStatus);
   if (
     primaryStatus !== undefined &&
@@ -7835,9 +7956,12 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * code (`CreatePetResponse201`), then a number (`CreatePetResponse2`, `…3`, …),
  * the chain the entry's secondary media-type bodies step through too
  * (`deferredNamingStem`, `later`: `CreatePetApplicationYamlResponse201`), a
- * candidate being taken when no name it would give is kept, or owned in the
- * spec-wide registry by a component or another operation, under a shape the
- * owner does not share (`ownerShares`), nor is a component response's body,
+ * candidate being taken when no name it would give is kept under another
+ * shape (`shapeFingerprint`: the kept model's own `deprecated` apart, so a
+ * copy identical but for the flag takes the name and the caller keeps the
+ * live definition, #630), or owned in the spec-wide registry by a component
+ * or another operation, under a shape the owner does not share
+ * (`ownerShares`), nor is a component response's body,
  * whichever operation returning it is read first (`CardResponse3` for `card`'s
  * 201 past a component `Card` at `CardResponse2` when a schema owns
  * `CardResponse201`). So no edit to the primary renames it: a 201 identical to
@@ -7882,11 +8006,13 @@ function stepSecondaryBody(
     // (`resolveComponentResponseModelNames`), so the operation's own body
     // steps past it whether or not an operation returning it came first.
     if (ownBody?.componentBodies.has(name)) return true;
-    const fingerprint = modelFingerprint(model);
+    // A kept model's shape is read with its own `deprecated` apart: a copy
+    // identical to it but for the flag is folded onto the live definition by
+    // the caller (#630), not stepped past.
     const keptModel = kept.get(name)?.model;
-    if (keptModel && modelFingerprint(keptModel) !== fingerprint) return true;
+    if (keptModel && shapeFingerprint(keptModel) !== shapeFingerprint(model)) return true;
     const owner = registry?.get(name);
-    return owner !== undefined && !ownerShares(owner, model, fingerprint);
+    return owner !== undefined && !ownerShares(owner, model, modelFingerprint(model));
   };
   // Reached through the body's own models, not the kept ones: the body
   // keeps its root once it steps, so everything under that root is its.
