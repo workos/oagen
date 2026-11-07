@@ -930,6 +930,9 @@ describe('#506', () => {
 
   it("keeps a field's flag, default and limits, and a model's, only when every body wrote the same ones", async () => {
     const limited = { ...str, maxLength: 10, deprecated: true, default: 'none' };
+    // A named field's `deprecated` is shape (#629): the body whose `message`
+    // is deprecated is `ErrorBodyWithDeprecatedMessage`, with everything it
+    // wrote, beside the live body's `ErrorBody`.
     const differing = await parseWithoutWarnings(
       doc({
         ...getOp('pets', {
@@ -938,8 +941,26 @@ describe('#506', () => {
         ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
       }),
     );
-    expect(modelNames(differing)).toEqual(['ErrorBody', 'Note']);
-    const shared = differing.models.find((m) => m.name === 'ErrorBody')!;
+    expect(modelNames(differing)).toEqual(['ErrorBody', 'ErrorBodyWithDeprecatedMessage', 'Note']);
+    expect(errorType(differing, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBodyWithDeprecatedMessage' });
+    expect(errorType(differing, 'getNotes', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
+    expect(differing.models.find((m) => m.name === 'ErrorBodyWithDeprecatedMessage')!.fields[0].deprecated).toBe(true);
+    expect(differing.models.find((m) => m.name === 'ErrorBody')!.fields[0].deprecated).toBeUndefined();
+    // The default and the limits, which are not shape, are dropped when the
+    // bodies disagree.
+    const loosened = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': {
+            description: 'nf',
+            content: json({ ...obj({ message: { ...str, maxLength: 10, default: 'none' } }), minProperties: 1 }),
+          },
+        }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+      }),
+    );
+    expect(modelNames(loosened)).toEqual(['ErrorBody', 'Note']);
+    const shared = loosened.models.find((m) => m.name === 'ErrorBody')!;
     expect(shared.fields[0]).toEqual({ name: 'message', type: { kind: 'primitive', type: 'string' }, required: true });
     expect(shared.constraints).toBeUndefined();
     const agreeing = await parseWithoutWarnings(
@@ -952,7 +973,8 @@ describe('#506', () => {
         }),
       }),
     );
-    const kept = agreeing.models.find((m) => m.name === 'ErrorBody')!;
+    expect(modelNames(agreeing)).toEqual(['ErrorBodyWithDeprecatedMessage', 'Note']);
+    const kept = agreeing.models.find((m) => m.name === 'ErrorBodyWithDeprecatedMessage')!;
     expect(kept.fields[0]).toEqual({
       name: 'message',
       type: { kind: 'primitive', type: 'string', constraints: { maxLength: 10 } },
@@ -1418,10 +1440,11 @@ describe('#515', () => {
       const b = await parseWithoutWarnings(reversed);
       expect(modelNames(a)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
       expect(modelNames(b)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
-      expect(enumValues(b, 'GetPetsError404Status')).toEqual(['404', '410']);
+      expect(enumValues(b, 'ErrorBodyStatus')).toEqual(['404', '410']);
       expect(diffOf(a, b).changes).toEqual([]);
       // Two bodies listing the same values in either order are one shape,
-      // and share one enum on the shared model rather than a union of two.
+      // and share one enum on the shared model, named from the field (#612),
+      // rather than a union of two.
       const both = await parseWithoutWarnings({
         ...doc({
           ...getOp('pets', { '404': { description: 'nf', content: json(status([404, 410])) } }),
@@ -1431,8 +1454,8 @@ describe('#515', () => {
       });
       expect(modelNames(both)).toEqual(['ErrorBodyWithStatus404Or410', 'Note']);
       const field = both.models.find((m) => m.name === 'ErrorBodyWithStatus404Or410')!.fields[1];
-      expect(field.type).toEqual({ kind: 'enum', name: 'GetNotesError404Status', values: [404, 410] });
-      expect(both.enums.map((e) => e.name)).toEqual(['GetNotesError404Status']);
+      expect(field.type).toEqual({ kind: 'enum', name: 'ErrorBodyStatus', values: [404, 410] });
+      expect(both.enums.map((e) => e.name)).toEqual(['ErrorBodyStatus']);
       expectSound(both);
     },
   );

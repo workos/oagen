@@ -93,7 +93,7 @@ The emitter receives the overlay via `EmitterContext` and uses it to preserve ex
 
 ## Step 3: Verify
 
-**IMPORTANT:** Always include `--spec` so the comparison is scoped to spec-derivable symbols only. Without it, the score includes hand-written SDK features (webhooks, PKCE, etc.) that the emitter can't generate, producing a misleadingly low compat score.
+**IMPORTANT:** Always include `--spec` so the comparison is scoped to spec-derivable symbols only. Without it, the score includes hand-written SDK features (webhooks, PKCE, etc.) that the emitter can't generate, producing a misleadingly low compat score. Run it with the same config `generate` used (`--config`, or `oagen.config.ts` in the project root): the scope follows the config's `mountRules`, `operationHints` and `operationNaming`, so the classes and methods compared are the ones `generate` writes — under `mountRules: { Pets: 'Animals' }` the `Animals` class, not `Pets`.
 
 ```bash
 oagen verify --spec {spec} --lang <language> --output {project}/sdk --api-surface {project}/sdk-{language}-surface.json

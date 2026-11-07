@@ -10,7 +10,7 @@ import type { CompatSnapshot } from '../compat/ir.js';
 import type { ApiSurface, ApiClass } from '../compat/types.js';
 import type { ApiSpec, Operation } from '../ir/types.js';
 import { resolveOperations } from '../ir/operation-hints.js';
-import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming, OperationResolution } from '../ir/operation-hints.js';
 import type { SchemaNameTransform } from '../parser/schemas.js';
 
 const SNAPSHOT_FILENAME = '.oagen-compat-snapshot.json';
@@ -190,13 +190,6 @@ export async function compatExtractCommand(opts: {
   const outputPath = resolve(opts.output, SNAPSHOT_FILENAME);
   writeFileSync(outputPath, JSON.stringify(snapshot, null, 2));
   console.log(`Extracted ${snapshot.symbols.length} symbols → ${outputPath}`);
-}
-
-/** The settings the engine resolves operations with (see `resolveOperations`). */
-interface OperationResolution {
-  operationHints?: Record<string, OperationHint>;
-  mountRules?: Record<string, string>;
-  operationNaming?: OperationNaming;
 }
 
 /** The spec-level identity a callable is enriched with. */
