@@ -73,6 +73,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  pinnedDeclarationAdmitsNull,
   pinnedDeclarationValue,
   rehearse,
   unwrapCollapsedWrappers,
@@ -4892,10 +4893,18 @@ function typePickedRequestBody(
  * alias of one, so `kind: { allOf: [{ const: 'email' }] }` folds as `kind:
  * { const: 'email' }` does (#607: the declaration was read as written, and
  * the body stayed an opaque union of variants named from their content).
- * The declaration as written still documents its value — its own
- * `description` and `deprecated`, the wrapper's for a wrapped const.
- * Gating on an *explicit* `discriminator` keeps undiscriminated `oneOf`
- * bodies untouched.
+ * The rebuilt discriminator admits `null` exactly when a variant's
+ * declaration does, at any hop (`pinnedDeclarationAdmitsNull`: a nullable
+ * wrapper, a type list naming `null`, OAS 3.0 `nullable: true` beside a
+ * type — never a keyword beside a `$ref`, which the type builder gives
+ * precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
+ * variant beside one pinning `sms` folds to a `kind` typed
+ * `nullable<enum>`, as the variant's own field is `nullable<literal>`
+ * (#607 review: the fold rebuilt the field without `null`, as it had
+ * dropped a `nullable: true` or a type list before). The declaration as
+ * written still documents its value — its own `description` and
+ * `deprecated`, the wrapper's for a wrapped const. Gating on an *explicit*
+ * `discriminator` keeps undiscriminated `oneOf` bodies untouched.
  */
 function flattenDiscriminatedUnionBody(
   schema: SchemaObject,
@@ -4908,6 +4917,9 @@ function flattenDiscriminatedUnionBody(
   // Every declaration that pins each value, in variant order, the values in
   // the order they are first pinned.
   const pins = new Map<string, SchemaObject[]>();
+  // Whether any variant admits `null` beside its value, which the rebuilt
+  // discriminator then admits too.
+  let admitsNull = false;
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
@@ -4918,6 +4930,7 @@ function flattenDiscriminatedUnionBody(
     const dp = variant.properties[discProp] as SchemaObject | undefined;
     const constVal = dp ? pinnedDeclarationValue(dp, componentSchemas) : null;
     if (constVal === null) return null;
+    if (pinnedDeclarationAdmitsNull(dp!, componentSchemas)) admitsNull = true;
     const pinning = pins.get(constVal);
     if (pinning) pinning.push(dp!);
     else pins.set(constVal, [dp!]);
@@ -4961,17 +4974,23 @@ function flattenDiscriminatedUnionBody(
           // a `oneOf` of one const would be a union. The enum and the field
           // carry the text and keys every declaration agrees on
           // (workos/oagen#446: the first variant's text, which documents one
-          // value, was the enum's).
+          // value, was the enum's). `null` is admitted when any variant
+          // admits it beside its value — the flag on the one-value enum, a
+          // `{ type: 'null' }` variant among the consts, the spellings the
+          // type builder reads as `nullable`.
           {
             type: 'string',
             ...(pins.size === 1
-              ? { enum: [...pins.keys()] }
+              ? { enum: [...pins.keys()], ...(admitsNull ? { nullable: true } : {}) }
               : {
-                  oneOf: [...pins].map(([value, pinning]) => ({
-                    const: value,
-                    ...(pinning[0]!.description !== undefined ? { description: pinning[0]!.description } : {}),
-                    ...(pinning.every((dp) => dp.deprecated === true) ? { deprecated: true } : {}),
-                  })),
+                  oneOf: [
+                    ...[...pins].map(([value, pinning]) => ({
+                      const: value,
+                      ...(pinning[0]!.description !== undefined ? { description: pinning[0]!.description } : {}),
+                      ...(pinning.every((dp) => dp.deprecated === true) ? { deprecated: true } : {}),
+                    })),
+                    ...(admitsNull ? [{ type: 'null' }] : []),
+                  ],
                 }),
             ...agreedDeclarationKeys(declared, ['description']),
             ...agreedExtensions(declared),
