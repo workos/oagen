@@ -242,6 +242,58 @@ describe.each(['3.1.0', '3.0.3'])('#613 (OAS %s)', (openapi) => {
     expect(beside.models).toEqual(plain.models);
   });
 
+  it("a `required` list in an annotating member beside the union is read as the member's own: `id` stays required inline and through a `$ref`, as the plain spelling (Greptile review)", async () => {
+    const idObject = { type: 'object', properties: { id: { type: 'string' } } };
+    const extra = (member: Record<string, unknown>) => ({
+      Inline: { allOf: [idObject, member] },
+      Named: member,
+      Through: { allOf: [idObject, ref('Named')] },
+    });
+    const plain = await parse(issueDoc(openapi, plainNew, extra({ required: ['id'], oneOf: union })));
+    const beside = await parse(issueDoc(openapi, plainNew, extra({ allOf: [{ required: ['id'] }], oneOf: union })));
+    for (const name of ['Inline', 'Through']) {
+      expect(fieldsOf(model(beside, name)), name).toEqual(['id: primitive', 'name?: primitive', 'toy?: primitive']);
+      expect(model(beside, name), name).toEqual(model(plain, name));
+    }
+    expect(model(beside, 'Named').variants?.map(show)).toEqual(['Pet', 'Toy']);
+    expect(beside.models).toEqual(plain.models);
+  });
+
+  it('a typing `oneOf` and a typing `anyOf` beside the annotating `allOf` stay composed: both unions read as members, as the member spelling (Greptile review)', async () => {
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map((key) => ({
+      type: 'object',
+      properties: { [key]: { type: 'string' } },
+    }));
+    const extra = (both: Record<string, unknown>) => ({
+      Both: both,
+      Through: { allOf: [ref('Base'), ref('Both')] },
+      Base,
+    });
+    const beside = await parse(
+      issueDoc(openapi, plainNew, extra({ allOf: [{ description: 'Both.' }], oneOf: [a, b], anyOf: [c, d] })),
+    );
+    const member = await parse(
+      issueDoc(openapi, plainNew, extra({ allOf: [{ description: 'Both.' }, { oneOf: [a, b] }, { anyOf: [c, d] }] })),
+    );
+    expect(fieldsOf(model(beside, 'Both'))).toEqual([
+      'a?: primitive',
+      'b?: primitive',
+      'c?: primitive',
+      'd?: primitive',
+    ]);
+    expect(model(beside, 'Both').variants).toBeUndefined();
+    expect(model(beside, 'Both').description).toBe('Both.');
+    expect(fieldsOf(model(beside, 'Through'))).toEqual([
+      'id: primitive',
+      'a?: primitive',
+      'b?: primitive',
+      'c?: primitive',
+      'd?: primitive',
+    ]);
+    expect(beside.models).toEqual(member.models);
+    expect(diffSpecs(member, beside).changes).toEqual([]);
+  });
+
   it('a nullable union beside the annotating `allOf`: the nullable named union, the body and the reference nullable, as the plain spelling', async () => {
     const plain = await parse(issueDoc(openapi, { description: 'A new pet.', ...nullable(union) }));
     const beside = await parse(issueDoc(openapi, { allOf: [{ description: 'A new pet.' }], ...nullable(union) }));

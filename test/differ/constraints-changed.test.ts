@@ -23,7 +23,12 @@ import { diffSpecs } from '../../src/differ/diff.js';
 import { diffFields, diffModels } from '../../src/differ/models.js';
 import { diffOperations } from '../../src/differ/operations.js';
 import { diffWebhooks } from '../../src/differ/webhooks.js';
-import { constraintsShift, keywordTightened, pairVariants } from '../../src/differ/constraints.js';
+import {
+  constraintsShift,
+  constraintsTightened,
+  keywordTightened,
+  pairVariants,
+} from '../../src/differ/constraints.js';
 import {
   classifyConstraintsChange,
   classifyFieldChange,
@@ -1503,6 +1508,195 @@ describe('#599', () => {
         },
       ]);
       expect(diffModels([pet()], [pet()])).toEqual([]);
+    });
+  });
+
+  describe('#659 review round 1 (Greptile)', () => {
+    const string = (constraints?: Constraints): TypeRef => ({
+      kind: 'primitive',
+      type: 'string',
+      ...(constraints ? { constraints } : {}),
+    });
+    const integer: TypeRef = { kind: 'primitive', type: 'integer' };
+    const boolean: TypeRef = { kind: 'primitive', type: 'boolean' };
+    const anyOf = (variants: TypeRef[]): TypeRef => ({ kind: 'union', variants, compositionKind: 'anyOf' });
+    const pet = (ref: TypeRef): Model => ({ name: 'Pet', fields: [{ name: 'ref', type: ref, required: false }] });
+
+    it('compares the kept variants of an inner union that also gained a variant, beside the additive widening', () => {
+      // The review's document: `anyOf: [boolean, anyOf: [string(maxLength: 100), integer]]`
+      // → `anyOf: [boolean, anyOf: [string(maxLength: 10), integer, array<string>]]`.
+      const before = pet(anyOf([boolean, anyOf([string({ maxLength: 100 }), integer])]));
+      const after = pet(
+        anyOf([boolean, anyOf([string({ maxLength: 10 }), integer, { kind: 'array', items: string() }])]),
+      );
+      expect(diffModels([before], [after], new Map([['Pet', 'request' as const]]))).toEqual([
+        {
+          kind: 'model-modified',
+          name: 'Pet',
+          fieldChanges: [
+            {
+              kind: 'field-type-changed',
+              fieldName: 'ref',
+              classification: 'additive',
+              details: 'variant array<string> added',
+            },
+            {
+              kind: 'field-constraints-changed',
+              fieldName: 'ref',
+              classification: 'breaking',
+              details: 'variants[1].variants[0].maxLength 100 → 10',
+            },
+          ],
+          deprecatedChanged: false,
+          classification: 'breaking',
+        },
+      ]);
+      // The widening alone is still additive, and the inner union's variants pair with their own.
+      const widened = pet(
+        anyOf([boolean, anyOf([string({ maxLength: 100 }), integer, { kind: 'array', items: string() }])]),
+      );
+      expect(diffModels([before], [widened])).toMatchObject([
+        { fieldChanges: [{ kind: 'field-type-changed', classification: 'additive' }], classification: 'additive' },
+      ]);
+      expect(
+        pairVariants(
+          before.fields[0].type.kind === 'union' ? before.fields[0].type.variants : [],
+          after.fields[0].type.kind === 'union' ? after.fields[0].type.variants : [],
+        ),
+      ).toEqual(
+        new Map([
+          [0, boolean],
+          [1, anyOf([string({ maxLength: 100 }), integer])],
+        ]),
+      );
+    });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`reports a kept variant of a widened inner union from a parsed document (OpenAPI ${openapi})`, async () => {
+        const doc = (maxLength: number, extra: unknown[]) =>
+          petsDoc(openapi, {
+            Pet: petWith({
+              ref: {
+                anyOf: [{ type: 'boolean' }, { anyOf: [{ type: 'string', maxLength }, { type: 'integer' }, ...extra] }],
+              },
+            }),
+          });
+        const report = diffSpecs(
+          await parse('old', doc(100, [])),
+          await parse('new', doc(10, [{ type: 'array', items: { type: 'string' } }])),
+        );
+        expect(fieldChangesOf(report.changes, 'Pet')).toEqual([
+          {
+            kind: 'field-type-changed',
+            fieldName: 'ref',
+            classification: 'additive',
+            details: 'variant array<string> added',
+          },
+          {
+            kind: 'field-constraints-changed',
+            fieldName: 'ref',
+            classification: 'breaking',
+            details: 'variants[1].variants[0].maxLength 100 → 10',
+          },
+        ]);
+      });
+    }
+
+    it('judges minimum and exclusiveMinimum (maximum and exclusiveMaximum) as the one bound they make', () => {
+      // `exclusiveMinimum: 0` → `minimum: 0` admits the 0 it rejected: loosened.
+      expect(constraintsTightened({ exclusiveMinimum: 0 }, { minimum: 0 })).toBe(false);
+      expect(constraintsTightened({ minimum: 0 }, { exclusiveMinimum: 0 })).toBe(true);
+      expect(constraintsTightened({ exclusiveMaximum: 10 }, { maximum: 10 })).toBe(false);
+      expect(constraintsTightened({ maximum: 10 }, { exclusiveMaximum: 10 })).toBe(true);
+      // Moved inward or outward, whichever keyword spells it.
+      expect(constraintsTightened({ exclusiveMinimum: 0 }, { minimum: 1 })).toBe(true);
+      expect(constraintsTightened({ minimum: 1 }, { exclusiveMinimum: 0 })).toBe(false);
+      expect(constraintsTightened({ exclusiveMaximum: 10 }, { maximum: 9 })).toBe(true);
+      expect(constraintsTightened({ maximum: 9 }, { exclusiveMaximum: 10 })).toBe(false);
+      // Both declared: the stricter one is the bound, so losing the looser one changes nothing.
+      expect(constraintsTightened({ minimum: 5, exclusiveMinimum: 0 }, { minimum: 5 })).toBe(false);
+      expect(constraintsTightened({ minimum: 5 }, { minimum: 5, exclusiveMinimum: 0 })).toBe(false);
+      expect(constraintsTightened({ minimum: 0, exclusiveMinimum: 0 }, { minimum: 0 })).toBe(false);
+      expect(constraintsTightened({ minimum: 0 }, { minimum: 0, exclusiveMinimum: 0 })).toBe(true);
+      expect(constraintsTightened({ maximum: 5, exclusiveMaximum: 10 }, { maximum: 5 })).toBe(false);
+      // Added, removed, and every other keyword on its own.
+      expect(constraintsTightened(undefined, { minimum: 0 })).toBe(true);
+      expect(constraintsTightened({ minimum: 0 }, undefined)).toBe(false);
+      expect(constraintsTightened({ minimum: 0, maxLength: 10 }, { minimum: 0, maxLength: 5 })).toBe(true);
+      expect(constraintsTightened({ exclusiveMinimum: 0, pattern: '^a' }, { minimum: 0, pattern: '^a' })).toBe(false);
+      // A numeric keyword judged on its own reads as if its twin were absent.
+      expect(keywordTightened('minimum', undefined, 0)).toBe(true);
+      expect(keywordTightened('exclusiveMinimum', 0, undefined)).toBe(false);
+      expect(keywordTightened('maximum', 10, 5)).toBe(true);
+    });
+
+    it('reports exclusiveMinimum → minimum as loosened, with both keywords in details', () => {
+      expect(constraintsShift({ constraints: { exclusiveMinimum: 0 } }, { constraints: { minimum: 0 } })).toEqual({
+        oldConstraints: { exclusiveMinimum: 0 },
+        newConstraints: { minimum: 0 },
+        details: 'minimum <unset> → 0; exclusiveMinimum 0 → <unset>',
+        tightened: false,
+      });
+      expect(
+        constraintsShift({ constraints: { minimum: 5, exclusiveMinimum: 0 } }, { constraints: { minimum: 5 } }),
+      ).toEqual({
+        oldConstraints: { minimum: 5, exclusiveMinimum: 0 },
+        newConstraints: { minimum: 5 },
+        details: 'exclusiveMinimum 0 → <unset>',
+        tightened: false,
+      });
+    });
+
+    it('exits 1 for the OpenAPI 3.0 boolean exclusiveMinimum flipped off, and for exclusiveMinimum → minimum in 3.1', async () => {
+      const limitDoc = (openapi: string, limit: Record<string, unknown>) =>
+        petsDoc(
+          openapi,
+          { Pet: petWith({}) },
+          { getPet: { parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', ...limit } }] } },
+        );
+      const exclusive30 = limitDoc('3.0.3', { minimum: 0, exclusiveMinimum: true });
+      const inclusive30 = limitDoc('3.0.3', { minimum: 0, exclusiveMinimum: false });
+      const expected = [
+        {
+          kind: 'param-constraints-changed',
+          paramName: 'limit',
+          classification: 'additive',
+          paramLocation: 'query',
+          oldConstraints: { exclusiveMinimum: 0 },
+          newConstraints: { minimum: 0 },
+          details: 'minimum <unset> → 0; exclusiveMinimum 0 → <unset>',
+        },
+      ];
+      expect(
+        paramChangesOf(diffSpecs(await parse('old', exclusive30), await parse('new', inclusive30)).changes, 'getPet'),
+      ).toEqual(expected);
+      expect(await exitCodeOf(exclusive30, inclusive30)).toBe(1);
+      expect(await exitCodeOf(inclusive30, exclusive30)).toBe(2);
+      const exclusive31 = limitDoc('3.1.0', { exclusiveMinimum: 0 });
+      const inclusive31 = limitDoc('3.1.0', { minimum: 0 });
+      expect(
+        paramChangesOf(diffSpecs(await parse('old', exclusive31), await parse('new', inclusive31)).changes, 'getPet'),
+      ).toEqual(expected);
+      expect(await exitCodeOf(exclusive31, inclusive31)).toBe(1);
+      expect(await exitCodeOf(inclusive31, exclusive31)).toBe(2);
+    });
+
+    it('compares a chain of nested unions once per pair of types, however deep', () => {
+      // Each level: a union of the next level and an integer; the leaf a string with `maxLength`.
+      const chain = (depth: number, maxLength: number): TypeRef =>
+        depth === 0 ? string({ maxLength }) : anyOf([chain(depth - 1, maxLength), integer]);
+      const depth = 40;
+      expect(constraintsShift({ type: chain(depth, 100) }, { type: chain(depth, 100) })).toBeUndefined();
+      expect(constraintsShift({ type: chain(depth, 100) }, { type: chain(depth, 10) })).toEqual({
+        details: `${'variants[0].'.repeat(depth)}maxLength 100 → 10`,
+        tightened: true,
+      });
+      expect(pairVariants([chain(depth, 100), integer], [integer, chain(depth, 100)])).toEqual(
+        new Map([
+          [0, integer],
+          [1, chain(depth, 100)],
+        ]),
+      );
     });
   });
 });
