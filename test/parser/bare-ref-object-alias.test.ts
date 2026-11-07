@@ -686,4 +686,90 @@ describe('#618', () => {
       ]);
     });
   });
+
+  describe('a bare `$ref` alias of a nullable object component (MichaelDeBoey, #646 review)', () => {
+    const named = { type: 'object', required: ['name'], properties: { name: str } };
+    /** The nullable component the alias names, in the shapes the review lists, per OAS version. */
+    const nullableOwners = (openapi: string): Record<string, Record<string, unknown>> => ({
+      typed: {
+        Owner: openapi.startsWith('3.0') ? { ...named, nullable: true } : { ...named, type: ['object', 'null'] },
+      },
+      wrapped: { Base: named, Owner: { oneOf: [ref('Base'), { type: 'null' }] } },
+      union: {
+        Cat: { type: 'object', properties: { kind: pinned(openapi, 'cat') } },
+        Dog: { type: 'object', properties: { kind: pinned(openapi, 'dog') } },
+        Owner: { oneOf: [ref('Cat'), ref('Dog'), { type: 'null' }] },
+      },
+    });
+    const paths = { ...getting('Pet', 'getPet'), ...getting('CatAlias', 'getOwner') };
+    const pet = (alias: string) => ({ type: 'object', properties: { owner: ref(alias) } });
+
+    it.each(['3.1.0', '3.0.3'])(
+      'admits `null` as the component it names does, at every site, as the `allOf` alias does, on OAS %s',
+      async (openapi) => {
+        // The review's case: `Pet { owner?: CatAlias }` and `response: CatAlias`
+        // for the bare `$ref`, `CatAlias | null` for the `allOf`, and
+        // `oagen diff` between the two exited 2.
+        for (const [label, owners] of Object.entries(nullableOwners(openapi))) {
+          const asRef = await parseJson(
+            documentWith(openapi, { ...owners, CatAlias: ref('Owner'), Pet: pet('CatAlias') }, paths),
+          );
+          const asAllOf = await parseJson(
+            documentWith(openapi, { ...owners, CatAlias: { allOf: [ref('Owner')] }, Pet: pet('CatAlias') }, paths),
+          );
+          expect(fieldType(asRef, 'Pet', 'owner'), label).toBe('nullable<model CatAlias>');
+          expect(show(operation(asRef, 'getOwner')!.response), label).toBe('nullable<model CatAlias>');
+          expect(show(operation(asRef, 'getPet')!.response), label).toBe('model Pet');
+          expect(asRef.models, label).toEqual(asAllOf.models);
+          expect(asRef.services, label).toEqual(asAllOf.services);
+          expect(diffSpecs(asAllOf, asRef).changes, label).toEqual([]);
+          expect(diffSpecs(asRef, asAllOf).changes, label).toEqual([]);
+          expectSound(asRef);
+        }
+        expect(warnings()).toEqual([]);
+      },
+    );
+
+    it.each(['3.1.0', '3.0.3'])(
+      'carries the `null` through a chain of aliases and past annotations beside the `$ref`, on OAS %s',
+      async (openapi) => {
+        const owners = nullableOwners(openapi)['typed']!;
+        const spec = await expectSpellingsAgree(
+          openapi,
+          (spelling) => ({
+            ...owners,
+            B: aliasOf('Owner', spelling, { description: 'An owner, by another name.' }),
+            CatAlias: aliasOf('B', spelling),
+            Pet: { type: 'object', properties: { owner: ref('CatAlias'), b: ref('B') } },
+          }),
+          paths,
+        );
+        expect(fieldType(spec, 'Pet', 'owner')).toBe('nullable<model CatAlias>');
+        expect(fieldType(spec, 'Pet', 'b')).toBe('nullable<model B>');
+        expect(fieldsOf(modelByName(spec, 'CatAlias'))).toEqual(['name: string']);
+        expect(modelByName(spec, 'B')?.description).toBe('An owner, by another name.');
+        expect(warnings()).toEqual([]);
+      },
+    );
+
+    it('leaves an alias of a component that admits no `null` bare, with or without OAS 3.0 `nullable: true` beside the `$ref`', async () => {
+      // `nullable: true` beside an `allOf` with no `type` declares nothing;
+      // beside a `$ref`, which reads nothing but annotations, it declares
+      // nothing either, so the two spellings agree on the bare model.
+      const spec = await expectSpellingsAgree(
+        '3.0.3',
+        (spelling) => ({
+          Owner: named,
+          CatAlias: aliasOf('Owner', spelling, { nullable: true }),
+          Plain: aliasOf('Owner', spelling),
+          Pet: { type: 'object', properties: { owner: ref('CatAlias'), plain: ref('Plain') } },
+        }),
+        paths,
+      );
+      expect(fieldType(spec, 'Pet', 'owner')).toBe('model CatAlias');
+      expect(fieldType(spec, 'Pet', 'plain')).toBe('model Plain');
+      expect(show(operation(spec, 'getOwner')!.response)).toBe('model CatAlias');
+      expect(warnings()).toEqual([]);
+    });
+  });
 });
