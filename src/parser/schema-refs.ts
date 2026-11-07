@@ -289,35 +289,34 @@ export function carryDeferredMappingEntries(
 /**
  * Write every deferred entry of `mapping` whose reference has settled to a
  * model — directly or under its nullable wrapper — as that model's name,
- * and forget the entries. A variant's reference is settled by the walk
- * before this runs; a reference of a target's own — one outside the
- * variants — is still pending, and is settled here through `settleTarget`,
- * at the mapping site. An entry whose reference settled to no model — a
- * pointer to a string, or one that led nowhere, which `settleTarget` has
- * warned about — is left as written. Returns the references settled here,
- * as the types they settled into, so the caller can hand the models among
- * them over with the union (`attachSharedRefs`): a rename of such a model
- * then reaches its entries as it reaches a variant's. Run once the
- * variants are settled (`resolveSchemaPointers`).
+ * and forget the entries. A variant's reference, and a redirected inline
+ * variant's (`deferPointerMappingEntries`), is settled by the walk before
+ * this runs; a reference of a target's own — one outside the variants —
+ * is still pending, and is settled here through `settleTarget`, at the
+ * mapping site. An entry whose reference settled to no model — a pointer
+ * to a string, or one that led nowhere, which the warning said — is left
+ * as written. Returns every entry's reference, as the type it settled
+ * into, so the caller can hand the models among them over with the union
+ * (`attachSharedRefs`) when the union does not hold them as variants: a
+ * rename of such a model then reaches its entries as it reaches a
+ * variant's. Run once the variants are settled (`resolveSchemaPointers`).
  */
 export function settleDeferredMappingEntries(
   mapping: Record<string, string> | undefined,
   settleTarget: (target: ModelRef, value: string) => void,
 ): TypeRef[] {
-  const targets: TypeRef[] = [];
-  if (mapping === undefined) return targets;
+  const references: TypeRef[] = [];
+  if (mapping === undefined) return references;
   const entries = deferredMappingEntries.get(mapping);
-  if (entries === undefined) return targets;
+  if (entries === undefined) return references;
   deferredMappingEntries.delete(mapping);
   for (const { value, variant } of entries) {
-    if (variant.kind === 'model' && isPendingSchemaRef(variant)) {
-      settleTarget(variant, value);
-      targets.push(variant);
-    }
+    if (variant.kind === 'model' && isPendingSchemaRef(variant)) settleTarget(variant, value);
+    references.push(variant);
     const model = settledVariantModel(variant);
     if (model !== undefined && Object.hasOwn(mapping, value)) mapping[value] = model.name;
   }
-  return targets;
+  return references;
 }
 
 /** The model `variant` names, directly or under its nullable wrapper, once settled; `undefined` while pending or for any other type. */

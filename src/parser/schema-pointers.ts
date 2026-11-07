@@ -123,7 +123,12 @@ import {
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
-import { isDeferredDataPathItemType, paginatedItemType, settleDeferredDataPathItemType } from './pagination.js';
+import {
+  collectObjectProperties,
+  isDeferredDataPathItemType,
+  paginatedItemType,
+  settleDeferredDataPathItemType,
+} from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
@@ -183,9 +188,11 @@ function underNullableWrappers(type: TypeRef): TypeRef {
  * variant `Zoo/properties/dog`; #619) is settled here too, at the mapping
  * site, to the model the schema it points at is built as (`ShelterDog`),
  * and the union — an allOf+oneOf dispatcher's mapping alone, since it
- * holds no variants — is returned as a view with each such reference
- * appended to its variants, so the rename reaches the entry as it reaches
- * a variant's.
+ * holds no variants — is returned as a view with every reference its
+ * entries follow that it does not hold as a variant put before its
+ * variants: such a target's own, or a redirected inline variant's held
+ * inside a multi-type variant's union, so the rename reaches the entry as
+ * it reaches a variant's, meeting that reference first.
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
@@ -237,22 +244,34 @@ export function resolveSchemaPointers(
   // Every variant is settled: a mapping entry written as a pointer takes
   // the model the schema it points at is built as — a variant's, settled
   // by the walk, or a target of its own, settled now at the mapping site —
-  // and a union holding a settled variant, or an entry settled to a model,
-  // stands in for them among the references returned, the entries' own
-  // references appended to its variants.
+  // and a union holding a settled variant, or whose entry settled to a
+  // model, stands in for them among the references returned. A reference
+  // an entry follows that the union does not hold as a variant — a target
+  // of its own, or a redirected inline variant's inside a multi-type
+  // variant's union — is put before the variants in the view, so a rename
+  // meets it first, where it owns its entries (`mappingEntriesByVariant`),
+  // and is never returned bare as well (Greptile, #619 review round 2: the
+  // entry of a multi-type variant kept the old name).
   const bare = new Set(resolver.settled);
   const roots: TypeRef[] = [];
   for (const { union, context } of unions) {
-    const targets = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
+    const references = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
       resolver.settle(target, `${context}.discriminator.mapping.${value}`, new Set(), 'leaving the entry as written'),
     );
+    const held = new Set(union.variants.map(variantModelRef));
     const own = union.variants
       .map(variantModelRef)
       .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
-    const named = targets.filter((target) => variantModelRef(target) !== undefined);
-    if (own.length === 0 && named.length === 0) continue;
+    const followed: TypeRef[] = [];
+    for (const reference of references) {
+      const model = variantModelRef(reference);
+      if (model === undefined || held.has(model) || followed.includes(reference)) continue;
+      followed.push(reference);
+      bare.delete(model);
+    }
+    if (own.length === 0 && followed.length === 0) continue;
     for (const ref of own) bare.delete(ref);
-    roots.push(named.length === 0 ? union : { ...union, variants: [...union.variants, ...named] });
+    roots.push(followed.length === 0 ? union : { ...union, variants: [...followed, ...union.variants] });
   }
   return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
 }
@@ -510,6 +529,23 @@ function allOfReadAsMember(
  * must know what a pointer settles to before a body is typed
  * (`pointerTypesAsUnknown`, `pointerTypesAsArray`), so each counts a
  * pointer as typed exactly when the settle types it.
+ *
+ * A pointer that ends at a `properties/<name>` step lands on the
+ * declaration the settle types that step from: the field of the model at
+ * hand, which an `allOf` merges from every member that declares the name
+ * (`combineDeclarations`: the first declaration that declares a type
+ * types it, a typeless one only annotating it) — so the declaration is
+ * read as `collectObjectProperties` merges it, from the schema whose
+ * `allOf` the step goes through (`Holder` for `Holder/allOf/1/properties/
+ * owners`, however many inline `allOf` steps lead there; `box` for
+ * `Holder/properties/box/allOf/1/properties/owners`) or the schema the
+ * step reads directly (its own `allOf` and sibling `properties` folded
+ * in), never as the member's own text alone: `Holder/allOf/1/properties/
+ * owners` to a member declaring `owners: { description }` beside one
+ * declaring `owners: Owner[]`, or a `$ref` member to a component that
+ * does, is the array the merged `Holder.owners` is (Greptile, #609
+ * review: the member's text alone read no array, and the envelope's data
+ * was not one here while the settle typed it `Owner[]`).
  */
 function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | undefined): SchemaObject | undefined {
   const tokens = schemaRefTokens(ref);
@@ -519,7 +555,15 @@ function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | und
   if (!component) return undefined;
   const steps = pointerSteps(component, path, schemas);
   if ('problem' in steps) return undefined;
-  return steps.length === 0 ? component : steps[steps.length - 1]!.next;
+  if (steps.length === 0) return component;
+  const last = steps[steps.length - 1]!;
+  if (last.keyword !== 'properties') return last.next;
+  // The schema whose merge the field belongs to: the one before the run of
+  // inline `allOf` steps the `properties` step sits in, else the step's own.
+  let first = steps.length - 1;
+  while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
+  const owner = steps[first]!.node;
+  return collectObjectProperties(owner, schemas).properties[last.name!] ?? last.next;
 }
 
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */
@@ -537,8 +581,11 @@ const pointersBeingRead = new Set<string>();
  * otherwise exactly when the schema it lands on is typed `unknown` where
  * it stands, read as a body written there is (`referenceTypesAsUnknown`:
  * `{}`, a `$ref` to an untyped primitive component, an `allOf` read as
- * one). A chain of pointers that reaches itself is read as the settle
- * reads it, `unknown`.
+ * one) — a `properties/<name>` step landing on the declaration the merged
+ * model's field is typed from, every `allOf` member's combined
+ * (`pointerLanding`), so a member's `{ description }` beside a typed
+ * declaration is typed. A chain of pointers that reaches itself is read as
+ * the settle reads it, `unknown`.
  */
 export function pointerTypesAsUnknown(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (pointersBeingRead.has(ref)) return true;
