@@ -482,6 +482,38 @@ describe('#619', () => {
         expect(warnings()).toEqual([]);
       });
 
+      it('follows a rename of the pointed schema’s model into a multi-type variant’s object member and its entry', async () => {
+        // Greptile, round 2: the member sits inside the variant's union, which no rename reads a mapping entry through.
+        const spec = await parseJson(
+          documentWith(
+            openapi,
+            components(openapi, { Pet: redirected(openapi, { ...inlineDog(openapi), type: ['object', 'string'] }) }),
+            {
+              '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'),
+              '/shelter': {
+                get: {
+                  operationId: 'listShelter',
+                  parameters: [{ name: 'dog', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } }],
+                  responses: {
+                    '200': {
+                      description: 'OK',
+                      content: { 'application/json': { schema: { $ref: '#/components/schemas/Shelter' } } },
+                    },
+                  },
+                },
+              },
+            },
+          ),
+        );
+        expect(fieldType(spec, 'Shelter', 'dog')).toEqual(model('ShelterDog2'));
+        const pet = modelOf(spec, 'Pet');
+        expect(pet?.variants).toEqual([
+          model('Cat'),
+          { kind: 'union', variants: [model('ShelterDog2'), { kind: 'primitive', type: 'string' }] },
+        ]);
+        expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog2' } });
+      });
+
       it('follows a rename of the pointed schema’s model with the variant', async () => {
         const spec = await parseJson(
           documentWith(openapi, components(openapi, { Pet: redirected(openapi) }), {

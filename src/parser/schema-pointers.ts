@@ -188,9 +188,11 @@ function underNullableWrappers(type: TypeRef): TypeRef {
  * variant `Zoo/properties/dog`; #619) is settled here too, at the mapping
  * site, to the model the schema it points at is built as (`ShelterDog`),
  * and the union — an allOf+oneOf dispatcher's mapping alone, since it
- * holds no variants — is returned as a view with each such reference
- * appended to its variants, so the rename reaches the entry as it reaches
- * a variant's.
+ * holds no variants — is returned as a view with every reference its
+ * entries follow that it does not hold as a variant put before its
+ * variants: such a target's own, or a redirected inline variant's held
+ * inside a multi-type variant's union, so the rename reaches the entry as
+ * it reaches a variant's, meeting that reference first.
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
@@ -242,22 +244,34 @@ export function resolveSchemaPointers(
   // Every variant is settled: a mapping entry written as a pointer takes
   // the model the schema it points at is built as — a variant's, settled
   // by the walk, or a target of its own, settled now at the mapping site —
-  // and a union holding a settled variant, or an entry settled to a model,
-  // stands in for them among the references returned, the entries' own
-  // references appended to its variants.
+  // and a union holding a settled variant, or whose entry settled to a
+  // model, stands in for them among the references returned. A reference
+  // an entry follows that the union does not hold as a variant — a target
+  // of its own, or a redirected inline variant's inside a multi-type
+  // variant's union — is put before the variants in the view, so a rename
+  // meets it first, where it owns its entries (`mappingEntriesByVariant`),
+  // and is never returned bare as well (Greptile, #619 review round 2: the
+  // entry of a multi-type variant kept the old name).
   const bare = new Set(resolver.settled);
   const roots: TypeRef[] = [];
   for (const { union, context } of unions) {
-    const targets = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
+    const references = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
       resolver.settle(target, `${context}.discriminator.mapping.${value}`, new Set(), 'leaving the entry as written'),
     );
+    const held = new Set(union.variants.map(variantModelRef));
     const own = union.variants
       .map(variantModelRef)
       .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
-    const named = targets.filter((target) => variantModelRef(target) !== undefined);
-    if (own.length === 0 && named.length === 0) continue;
+    const followed: TypeRef[] = [];
+    for (const reference of references) {
+      const model = variantModelRef(reference);
+      if (model === undefined || held.has(model) || followed.includes(reference)) continue;
+      followed.push(reference);
+      bare.delete(model);
+    }
+    if (own.length === 0 && followed.length === 0) continue;
     for (const ref of own) bare.delete(ref);
-    roots.push(named.length === 0 ? union : { ...union, variants: [...union.variants, ...named] });
+    roots.push(followed.length === 0 ? union : { ...union, variants: [...followed, ...union.variants] });
   }
   return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
 }
