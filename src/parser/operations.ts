@@ -86,6 +86,7 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
   collectProperties,
@@ -125,7 +126,7 @@ import {
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
-import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import { isResponseEntry, isResponsesObject, resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
@@ -5689,6 +5690,15 @@ function deferParameterModels(
  * earlier one's position, with a warning — the way an operation-level
  * parameter replaces a path-level one, except that the document gave these
  * two no precedence (#295).
+ *
+ * A header's `deprecated` and `externalDocs` are read from the layer its
+ * schema documents itself with (`allOfWrapperLayer`): the schema's own
+ * keys, then each `allOf` member's that declares no type and so only
+ * annotates it — the first such member's winning among members — so a link
+ * or flag written in such a member is the header's exactly as the same key
+ * beside the `allOf` is, as a field, a parameter and the model built from
+ * the schema read it (#555, #605). The Header Object's own `deprecated`
+ * counts too; its `description` is the header's alone.
  */
 function extractResponseHeaders(
   headers: Record<string, RawHeaderObject> | undefined,
@@ -5729,24 +5739,29 @@ function extractResponseHeaders(
     // warning — once, here, as the header is typed.
     const schema = parameterSchema(header);
     warnUnreadParameterContent(header, `Response header "${name}" (${statusCode}) in ${operationLabel}`);
+    // The layer the header documents itself from: the schema's own keys,
+    // with each `allOf` member's that declares no type and so only annotates
+    // it folded in — the schema's own winning, then the first member's that
+    // declares one (`allOfWrapperLayer`; #555) — the one reading a field, a
+    // parameter and the model built from the schema give such a member, so
+    // `allOf: [{ type: 'integer' }, { externalDocs }]` and `allOf: [{ type:
+    // 'integer' }], externalDocs` are one header (#605: the flag read the
+    // members but the link the schema's own keys alone, so a link written
+    // in a member was dropped). The typing member's own keys stay on that
+    // member, and a `$ref` member's on its component, as for a field.
+    const layer = schema && allOfWrapperLayer(schema);
     const entry: ResponseHeader = {
       name,
       type: { kind: 'primitive', type: 'string' },
       required: header.required ?? false,
       description: header.description,
-      // The Header Object's flag or its schema's — the schema's own, or an
-      // `allOf` member's that declares no type and so only annotates it
-      // (`annotatingAllOfMembers`; #555) — so a deprecated schema that folds
-      // onto a live component leaves it on the header; the model or enum a
-      // bare `$ref` names keeps its own, as for a field.
-      deprecated:
-        header.deprecated === true ||
-        (schema !== undefined &&
-          [schema, ...annotatingAllOfMembers(schema)].some((level) => level.deprecated === true)) ||
-        undefined,
-      // The header schema's own link — a Header Object has none — read from
+      // The Header Object's flag or its schema layer's — so a deprecated
+      // schema that folds onto a live component leaves it on the header; the
+      // model or enum a bare `$ref` names keeps its own, as for a field.
+      deprecated: header.deprecated === true || layer?.deprecated === true || undefined,
+      // The header schema layer's link — a Header Object has none — read from
       // whichever of `schema` and `content` types the header, as the type is.
-      ...externalDocsEntry(schema?.externalDocs),
+      ...externalDocsEntry(layer?.externalDocs),
     };
     if (schema) {
       // Named from the lower-cased header name, as a header parameter's inline
@@ -6212,6 +6227,9 @@ function collectOperationConstPrefixes(
     // fallback or a key OpenAPI does not define reserves nothing.
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
+    // An entry that is not an object reserves nothing; the operation warns
+    // about it once when it reads it (#617).
+    if (!isResponseEntry(response)) continue;
     // A Reference Object is not followed, and nothing beside its `$ref` is
     // read (#562): a `$ref` into `components/responses` names its inline
     // body after the component, so the consts it pins never prefix a
@@ -6607,6 +6625,9 @@ function operationBodyModelNames(
           const responseKey = classifyResponseKey(statusCode);
           if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 400) return [];
           const code = responseKey.code;
+          // An entry that is not an object mints nothing; the operation
+          // warns about it once when it reads it (#617).
+          if (!isResponseEntry(response)) return [];
           const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
@@ -6639,7 +6660,10 @@ function componentResponseBodySchema(
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
   const component = componentResponses[componentName];
-  if (!component) return undefined;
+  // A component that is not an object (`Bad: "oops"`) declares no body; a
+  // `$ref` to it is reported by the operation that writes it, as a ref
+  // nothing answers (#617).
+  if (!isResponseEntry(component)) return undefined;
   const resolved = resolveResponseRef<ResponseObject>(
     component as ResponseObject | ReferenceObject,
     componentResponses,
@@ -7405,6 +7429,23 @@ function extractResponses(
   // steps from (`stepSecondaryBody`), and whether it is a component's.
   const bodyContexts = new Map<number, { context: string; component: boolean }>();
 
+  // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
+  // `[…]` — is no Responses Object, so no key could be read from it: it is
+  // warned about once and read as absent, as for an operation that declares
+  // none (#617).
+  if (responses !== undefined && !isResponsesObject(responses, opLabel)) responses = undefined;
+  // An entry that is not an object — `200: "oops"`, `null`, `7`, `true`,
+  // `[]` — is no Response Object and no Reference Object, so no branch
+  // below could read it: it is warned about once, naming the operation and
+  // the key, and left out, and the operation is read from its other entries
+  // (#617). Only a key a branch reads is checked: an `x-` key is an
+  // extension, which may hold anything, and a key OpenAPI does not define
+  // is reported on its own (`readFallbackResponse`), whatever it holds.
+  const entries = Object.entries(responses ?? {}).filter(([key, raw]) => {
+    const kind = classifyResponseKey(key).kind;
+    return kind === 'extension' || kind === 'unrecognized' || isResponseEntry(raw, `${key} response of ${opLabel}`);
+  });
+
   // Every 2xx, 3xx and error entry is resolved once, here, and the loop
   // below reads it from this map. The bundler leaves `$ref:
   // '#/components/responses/…'` in place, and a Reference Object has no
@@ -7415,7 +7456,7 @@ function extractResponses(
   // extension are left as written, as nothing here reads them, and a 1xx is
   // read as written too.
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of Object.entries(responses ?? {})) {
+  for (const [statusCode, rawResponse] of entries) {
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
     resolvedResponses.set(
@@ -7455,7 +7496,7 @@ function extractResponses(
   if (!responses)
     return { response, errors, inlineModels, isPaginated, overrideProblem, componentBodies: componentBodyTypes };
 
-  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of entries) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
     // and `1XX`–`5XX` are routed to their own fields, an `x-` extension is
     // skipped, and a key OpenAPI does not define (`6XX`, `600`) is warned
