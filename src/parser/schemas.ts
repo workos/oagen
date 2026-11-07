@@ -8,6 +8,7 @@ import {
   deferMappingEntry,
   isPendingSchemaRef,
   isPendingVariant,
+  markPendingSchemaRef,
   pendingSchemaRef,
   pendingSiteLimitsOf,
   recordPendingSiteLimits,
@@ -5195,9 +5196,17 @@ function mappingTargetModelName(target: string): string {
  * left as written after a warning when it names no model
  * (`settleDeferredMappingEntries`). A target that names a component is
  * read by key (`mappingTargetModelName`, `inlineMappingTargets`) and never
- * deferred. `written` is the document's mapping, `mapping` the one the IR
- * carries; `variants[i]` is built from `members[i]`, and a dispatcher,
- * which holds no variants, passes none.
+ * deferred. An inline object variant pinning the entry's value was
+ * redirected to the entry's target as the IR spells it
+ * (`mapVariantToDiscriminatorEntry`, `inlineVariantTypeRef`), as a
+ * component target redirects it to the component's model; a pointer so
+ * spelled names no model, so the redirected reference is made the
+ * pointer's own — named by the `$ref` as written and marked pending — and
+ * settled by the walk as a pointer variant's is, to the model the pointed
+ * schema is built as, the entry following it (#619 review: the reference
+ * kept the pointer for a name no model has). `written` is the document's
+ * mapping, `mapping` the one the IR carries; `variants[i]` is built from
+ * `members[i]`, and a dispatcher, which holds no variants, passes none.
  */
 function deferPointerMappingEntries(
   written: Record<string, unknown>,
@@ -5218,8 +5227,37 @@ function deferPointerMappingEntries(
               member.name === null && member.resolved === schema && variant !== undefined && isPendingVariant(variant)
             );
           });
-    deferMappingEntry(mapping, value, index >= 0 ? variants[index]! : pendingSchemaRef(target));
+    if (index >= 0) {
+      deferMappingEntry(mapping, value, variants[index]!);
+      continue;
+    }
+    const redirected = redirectedVariantRefs(variants, mapping[value]);
+    for (const ref of redirected) {
+      ref.name = target;
+      markPendingSchemaRef(ref);
+    }
+    deferMappingEntry(mapping, value, redirected[0] ?? pendingSchemaRef(target));
   }
+}
+
+/**
+ * The references among `variants` an inline object variant was redirected
+ * to under `name` — a mapping entry's target as the IR spells it, which for
+ * a pointer names no model — the variant itself, or the object member of a
+ * multi-type variant's union; none when `name` is no entry's spelling. A
+ * reference already pending is a pointer's own and is passed over.
+ */
+function redirectedVariantRefs(variants: readonly TypeRef[], name: string | undefined): ModelRef[] {
+  const refs: ModelRef[] = [];
+  if (name === undefined) return refs;
+  for (const variant of variants) {
+    walkTypeRef(variant, {
+      model: (ref) => {
+        if (ref.name === name && !isPendingSchemaRef(ref)) refs.push(ref);
+      },
+    });
+  }
+  return refs;
 }
 
 /**
