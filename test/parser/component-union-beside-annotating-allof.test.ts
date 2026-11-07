@@ -305,6 +305,87 @@ describe.each(['3.1.0', '3.0.3'])('#613 (OAS %s)', (openapi) => {
     expect(diffSpecs(member, beside).changes).toEqual([]);
   });
 
+  /** The string consts of an enum written as a union, in this version's spelling: `const`, or OAS 3.0 single-value `enum` lists. */
+  const consts =
+    openapi === '3.0.3'
+      ? [
+          { type: 'string', enum: ['cat'] },
+          { type: 'string', enum: ['dog'] },
+        ]
+      : [
+          { type: 'string', const: 'cat' },
+          { type: 'string', const: 'dog' },
+        ];
+
+  /** Michael's document: `Kind` as given, the same schema inline as `createPet`'s request body, `Kind` returned, and a field naming it. */
+  const kindDoc = (Kind: Record<string, unknown>) => ({
+    openapi,
+    info: { title: 'repro', version: '1' },
+    paths: {
+      '/pets': {
+        post: {
+          operationId: 'createPet',
+          requestBody: { required: true, content: { 'application/json': { schema: Kind } } },
+          responses: { '200': { description: 'ok', content: { 'application/json': { schema: ref('Kind') } } } },
+        },
+      },
+    },
+    components: { schemas: { Kind, Holder: { type: 'object', properties: { k: ref('Kind') } } } },
+  });
+  const enumOf = (spec: ApiSpec, name: string) => spec.enums.find((e) => e.name === name);
+
+  it("a union of string consts beside the annotating `allOf` is the enum `Kind`, as inline and as the plain spelling, and `oagen diff` between the spellings exits 0 (Michael's review)", async () => {
+    const plainDoc = kindDoc({ description: 'A kind.', oneOf: consts });
+    const besideDoc = kindDoc({ allOf: [{ description: 'A kind.' }], oneOf: consts });
+    const plain = await parse(plainDoc);
+    const beside = await parse(besideDoc);
+    const kind = enumOf(beside, 'Kind');
+    expect(kind).toMatchObject({ name: 'Kind', description: 'A kind.' });
+    expect(kind?.values.map((v) => v.value)).toEqual(['cat', 'dog']);
+    expect(modelNames(beside)).not.toContain('Kind');
+    expect(operation(beside).response).toEqual({ kind: 'enum', name: 'Kind' });
+    expect(operation(beside).requestBody?.kind).toBe('enum');
+    expect(model(beside, 'Holder').fields[0].type).toEqual({ kind: 'enum', name: 'Kind' });
+    expect(kind).toEqual(enumOf(plain, 'Kind'));
+    expect(beside.models).toEqual(plain.models);
+    expect(diffSpecs(plain, beside).changes).toEqual([]);
+    expect(diffSpecs(beside, plain).changes).toEqual([]);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const [plainFile, besideFile] = [await write(plainDoc), await write(besideDoc)];
+    for (const [from, to] of [
+      [plainFile, besideFile],
+      [besideFile, plainFile],
+    ]) {
+      const error = (await diffCommand({ old: from, new: to }).catch((e: unknown) => e)) as { exitCode: number };
+      expect(error.exitCode).toBe(0);
+    }
+  });
+
+  it("an `enum:` list beside the annotating `allOf`, and the members' flag, default, keys and nullability, read as beside the keyword (Michael's review)", async () => {
+    const layer = { description: 'A kind.', deprecated: true, default: 'cat', 'x-since': 1 };
+    const plain = await parse(kindDoc({ ...layer, enum: ['cat', 'dog'] }));
+    const beside = await parse(kindDoc({ allOf: [layer], enum: ['cat', 'dog'] }));
+    expect(enumOf(beside, 'Kind')).toMatchObject({
+      description: 'A kind.',
+      deprecated: true,
+      default: 'cat',
+      extensions: { 'x-since': 1 },
+    });
+    expect(enumOf(beside, 'Kind')).toEqual(enumOf(plain, 'Kind'));
+    expect(beside.models).toEqual(plain.models);
+    // Nullable, in this version's spelling: the reference is `nullable<Kind>` in both spellings.
+    const nullableKind =
+      openapi === '3.0.3' ? { oneOf: consts, nullable: true } : { oneOf: [...consts, { type: 'null' }] };
+    const plainNullable = await parse(kindDoc({ description: 'A kind.', ...nullableKind }));
+    const besideNullable = await parse(kindDoc({ allOf: [{ description: 'A kind.' }], ...nullableKind }));
+    expect(model(besideNullable, 'Holder').fields[0].type).toEqual({
+      kind: 'nullable',
+      inner: { kind: 'enum', name: 'Kind' },
+    });
+    expect(enumOf(besideNullable, 'Kind')).toEqual(enumOf(plainNullable, 'Kind'));
+    expect(besideNullable.models).toEqual(plainNullable.models);
+  });
+
   it('a nullable union beside the annotating `allOf`: the nullable named union, the body and the reference nullable, as the plain spelling', async () => {
     const plain = await parse(issueDoc(openapi, { description: 'A new pet.', ...nullable(union) }));
     const beside = await parse(issueDoc(openapi, { allOf: [{ description: 'A new pet.' }], ...nullable(union) }));
