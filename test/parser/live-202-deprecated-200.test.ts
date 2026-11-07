@@ -258,6 +258,60 @@ describe('#630', () => {
       expect(warnings()).toEqual([differentFields(202, 200)]);
     });
 
+    it("keeps the primary's references: a 200 writing `$ref: PetOwner` keeps naming the component when the live 202 nests an inline `owner` of other fields", async () => {
+      // Greptile's first-round finding on #647: the two roots are the same
+      // shape (both `owner` fields name `PetOwner`), but one reference is an
+      // explicit `$ref` and the other an inline object the merge passes
+      // rename apart. Swapping in the live copy's object carried its
+      // reference into the primary's type; the kept definition now stays.
+      const refOwner = { $ref: '#/components/schemas/PetOwner' };
+      const inlineOwner = { type: 'object', properties: { email: { type: 'string' } } };
+      const schemas = { PetOwner: { type: 'object', properties: { id: { type: 'string' } } } };
+      const ownerOf = (spec: ApiSpec): string => {
+        const field = spec.models.find(({ name }) => name === 'Pet')!.fields.find(({ name }) => name === 'owner')!;
+        return field.type.kind === 'model' ? field.type.name : field.type.kind;
+      };
+      const renamed =
+        '[oagen] Renamed inline model "PetOwner" → "GetPetPetOwner": its shape differs from component schema "PetOwner"';
+
+      // The deprecated 200 writes the `$ref`; the live 202 nests the inline `owner`.
+      const refFirst = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, pet(true, { owner: refOwner })],
+            [202, pet(false, { owner: inlineOwner })],
+          ]),
+          schemas,
+        ),
+        'ref-first',
+      );
+      expect(modelNames(refFirst)).toEqual(['PetOwner', 'Pet', 'GetPetPetOwner']);
+      expect(ownerOf(refFirst)).toBe('PetOwner');
+      expect(successResponses(refFirst)).toEqual(['200: Pet', '202: Pet']);
+      expectResolved(refFirst);
+      expect(warnings()).toEqual([renamed]);
+
+      // The other way round: the deprecated 200 nests the inline `owner` and the live 202 writes the `$ref`.
+      warn.mockClear();
+      const inlineFirst = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, pet(true, { owner: inlineOwner })],
+            [202, pet(false, { owner: refOwner })],
+          ]),
+          schemas,
+        ),
+        'inline-first',
+      );
+      expect(modelNames(inlineFirst)).toEqual(['PetOwner', 'Pet', 'GetPetPetOwner']);
+      expect(ownerOf(inlineFirst)).toBe('GetPetPetOwner');
+      expect(successResponses(inlineFirst)).toEqual(['200: Pet', '202: Pet']);
+      expectResolved(inlineFirst);
+      expect(warnings()).toEqual([renamed]);
+    });
+
     it("folds a nested `PetOwner` deprecated on the 200 only onto the 202's live copy, under a `Pet.owner` the 200 flags", async () => {
       const owner = (deprecated: boolean) => ({
         type: 'object',
