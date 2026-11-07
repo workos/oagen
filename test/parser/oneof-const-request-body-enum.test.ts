@@ -85,6 +85,54 @@ function repro(
 const enumOf = (name: string, values: string[]): TypeRef => ({ kind: 'enum', name, values });
 const nullable = (inner: TypeRef): TypeRef => ({ kind: 'nullable', inner });
 
+/**
+ * The schema `{ ...extra, [keyword]: variants }` at every inline site the
+ * parser types: `addNote`'s query parameter `status`, its primary and
+ * `text/plain` request body, its `200` body and `X-Status` header, its
+ * callback `noteSaved`'s payload, the webhook `noteAdded`'s payload and the
+ * component `Note`'s `status` field — beside a component `Pet` for a typing
+ * `allOf` to reference.
+ */
+function everySite(openapi: string, keyword: Keyword, variants: unknown[], extra: Record<string, unknown>) {
+  const schema = { ...extra, [keyword]: variants };
+  const body = { required: true, content: { 'application/json': { schema } } };
+  return {
+    openapi,
+    info: { title: 'Notes', version: '1.0.0' },
+    paths: {
+      '/notes': {
+        post: {
+          operationId: 'addNote',
+          parameters: [{ name: 'status', in: 'query', schema }],
+          requestBody: {
+            required: true,
+            content: { 'application/json': { schema }, 'text/plain': { schema } },
+          },
+          responses: {
+            '200': {
+              description: 'ok',
+              headers: { 'X-Status': { schema } },
+              content: { 'application/json': { schema } },
+            },
+          },
+          callbacks: {
+            noteSaved: {
+              '{$request.body#/url}': { post: { requestBody: body, responses: { '204': { description: 'ok' } } } },
+            },
+          },
+        },
+      },
+    },
+    webhooks: { noteAdded: { post: { requestBody: body, responses: { '204': { description: 'ok' } } } } },
+    components: {
+      schemas: {
+        Note: { type: 'object', properties: { status: schema } },
+        Pet: { type: 'object', properties: { name: { type: 'string' } } },
+      },
+    },
+  };
+}
+
 describe('#603', () => {
   let warn: ReturnType<typeof vi.spyOn>;
   let log: ReturnType<typeof vi.spyOn>;
@@ -126,6 +174,21 @@ describe('#603', () => {
       field: spec.models.find((model) => model.name === 'Note')?.fields.find((field) => field.name === 'status')?.type,
       enums: spec.enums,
       models: spec.models.map((model) => model.name),
+    };
+  }
+
+  /** The type at each of `everySite`'s sites. */
+  function allSites(spec: ApiSpec): Record<string, TypeRef | undefined> {
+    const op = addNote(spec);
+    return {
+      param: op.queryParams.find((param) => param.name === 'status')?.type,
+      body: op.requestBody,
+      secondary: op.requestBodyContents?.find((content) => content.contentType === 'text/plain')?.type,
+      response: op.response,
+      header: op.responseHeaders?.find((header) => header.name.toLowerCase() === 'x-status')?.type,
+      callback: op.callbacks?.[0]?.requestBody,
+      webhook: spec.webhooks?.[0]?.requestBody,
+      field: spec.models.find((model) => model.name === 'Note')?.fields.find((field) => field.name === 'status')?.type,
     };
   }
 
@@ -254,6 +317,70 @@ describe('#603', () => {
         expect(addNote(lone).requestBody).toEqual(nullable(literal('draft')));
         expect(lone.enums).toEqual([]);
         expect(sites(lone)).toMatchObject({ field: nullable(literal('draft')), webhook: nullable(literal('draft')) });
+      });
+
+      // Review (MichaelDeBoey): the doc said a `oneOf` beside `properties`
+      // or an `allOf` is not an enum; inline, only an `allOf` that types the
+      // schema unmakes it. Pinned at every site the parser types a schema.
+      it('stays the enum beside an allOf of annotating members or beside properties, at every site, and is what a typing allOf types beside one', async () => {
+        const enumNames = {
+          param: 'NotesStatus',
+          body: 'AddNoteRequest',
+          secondary: 'AddNoteTextPlainRequest',
+          response: 'AddNoteResponse',
+          header: 'NotesXStatus',
+          callback: 'AddNoteNoteSavedPayload',
+          webhook: 'NoteAddedPayload',
+          field: 'NoteStatus',
+        };
+        const enums = Object.fromEntries(
+          Object.entries(enumNames).map(([site, name]) => [site, enumOf(name, ['draft', 'final'])]),
+        );
+        for (const [name, extra] of [
+          // An `allOf` of members that only annotate types nothing.
+          ['typeless-allOf', { allOf: [{ description: 'Annotated.' }] }],
+          // `properties` constrain nothing in a const variant.
+          ['properties', { properties: { name: { type: 'string' } } }],
+        ] as const) {
+          for (const keyword of ['oneOf', 'anyOf'] as const) {
+            const label = `${name} ${keyword}`;
+            const spec = await parseDocument(
+              `${name}-${keyword}.json`,
+              everySite(openapi, keyword, draftAndFinal(openapi), extra),
+            );
+            expect(allSites(spec), label).toEqual(enums);
+            for (const name of Object.values(enumNames)) {
+              expect(spec.enums.find((e) => e.name === name)?.values, `${label} ${name}`).toEqual([DRAFT, FINAL]);
+            }
+            expect(
+              spec.models.map((model) => model.name),
+              label,
+            ).toEqual(['Note', 'Pet']);
+          }
+        }
+        expect(warn).not.toHaveBeenCalled();
+
+        // A typing `allOf` beside the union: the union is one more member of
+        // it (#398), so the schema is what the `allOf` types — `Pet` — and
+        // no enum is minted, at every site alike.
+        for (const keyword of ['oneOf', 'anyOf'] as const) {
+          const spec = await parseDocument(
+            `typing-allOf-${keyword}.json`,
+            everySite(openapi, keyword, draftAndFinal(openapi), { allOf: [{ $ref: '#/components/schemas/Pet' }] }),
+          );
+          const pet: TypeRef = { kind: 'model', name: 'Pet' };
+          expect(allSites(spec), keyword).toEqual({
+            param: pet,
+            body: pet,
+            secondary: pet,
+            response: pet,
+            header: pet,
+            callback: pet,
+            webhook: pet,
+            field: pet,
+          });
+          expect(spec.enums, keyword).toEqual([]);
+        }
       });
 
       it('mints the name anyOf mints beside a component enum or model called AddNoteRequest', async () => {
