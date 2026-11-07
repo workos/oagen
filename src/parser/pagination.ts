@@ -1507,7 +1507,9 @@ export function resolveDataPathItemType(
  * (`pendingSchemaRef`; #539), which names no model until
  * `resolveSchemaPointers` settles it. Every type a segment reaches is
  * checked for one before any field is looked up, so the answer never
- * depends on which variant of a union is read first.
+ * depends on which variant of a union is read first. A named union model
+ * on the way, or where the path lands, is read through its variants
+ * (`containersOf`), as an inline union is.
  */
 export function walkDataPathItemType(
   root: TypeRef,
@@ -1518,7 +1520,7 @@ export function walkDataPathItemType(
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const containers = new Map<string, TypeRef>();
     for (const type of reached) {
-      for (const container of containersOf(type)) containers.set(typeRefKey(container), container);
+      for (const container of containersOf(type, models)) containers.set(typeRefKey(container), container);
     }
     if ([...containers.values()].some(isPendingModelRef)) return { pending: true };
     const next = new Map<string, TypeRef>();
@@ -1530,7 +1532,7 @@ export function walkDataPathItemType(
     }
     reached = [...next.values()];
   }
-  const targets = reached.map(underNullable);
+  const targets = reached.flatMap((type) => containersOf(type, models));
   if (targets.some(isPendingModelRef)) return { pending: true };
   const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
@@ -1643,15 +1645,29 @@ export function settleDeferredDataPathItemType(
  * (`objectProperties`), and a pointer steps through it to the member that
  * carries the keyword (#539), so the IR walk reads the object member too
  * rather than failing on the string member and minting a copy of the
- * items the object member's model holds.
+ * items the object member's model holds. Of a named union model
+ * (`Model.variants`, looked up in `models`; `Page: { oneOf: [{ $ref:
+ * Result }, { type: null }] }` is a model `Page` with the one variant
+ * `Result` and no fields), its variants, each in turn as above, as the
+ * document walk reads the component's `oneOf`/`anyOf` members — a pointer
+ * settled to `nullable<Page>` reads `Result`'s fields, rather than failing
+ * on `Page`'s none and typing the iterator `unknown` (Greptile, #608
+ * review); a named union that reaches itself through its variants is read
+ * once (`seen`).
  */
-function containersOf(type: TypeRef): TypeRef[] {
+function containersOf(type: TypeRef, models: readonly Model[], seen: ReadonlySet<string> = new Set()): TypeRef[] {
   const bare = underNullable(type);
+  if (bare.kind === 'model') {
+    const variants = models.find((m) => m.name === bare.name)?.variants;
+    if (!variants || seen.has(bare.name)) return [bare];
+    const within = new Set(seen).add(bare.name);
+    return variants.flatMap((variant) => containersOf(variant, models, within));
+  }
   if (bare.kind !== 'union') return [bare];
-  const members = bare.variants.flatMap(containersOf);
+  const members = bare.variants.flatMap((variant) => containersOf(variant, models, seen));
   if (bare.compositionKind) return members;
-  const models = members.filter((member) => member.kind === 'model');
-  return models.length > 0 ? models : members;
+  const modelMembers = members.filter((member) => member.kind === 'model');
+  return modelMembers.length > 0 ? modelMembers : members;
 }
 
 /** `type` under every nullable wrapper it wears. */
