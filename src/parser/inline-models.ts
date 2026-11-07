@@ -93,8 +93,9 @@ export function extendsParentName(baseName: string, cleanParent: string): boolea
  * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
  * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
  * named like its parent is qualified too — Reply + Reply → ReplyReply, as
- * Reply + Replies names its items — never left as the parent's own name,
- * which the component holds (workos/oagen#621).
+ * Reply + Replies names its items on its own (beside each other the field
+ * holds ReplyReply and the items step to ReplyRepliesItem) — never left as
+ * the parent's own name, which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
