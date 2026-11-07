@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
-import { isResponseEntry, isResponsesObject } from '../../src/parser/response-refs.js';
+import { isResponseEntry, isResponsesObject, resolveResponseRef } from '../../src/parser/response-refs.js';
+import { followReference } from '../../src/parser/reference-objects.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import type { ApiSpec, Operation } from '../../src/ir/types.js';
 
@@ -14,7 +15,10 @@ import type { ApiSpec, Operation } from '../../src/ir/types.js';
  * operator to search for '$ref' in oops`). It is now warned about once,
  * naming the site, and skipped, and the operation is read from its other
  * entries; a webhook's and a callback's responses are read the same way,
- * and a `responses` that is not an object at all is read as absent.
+ * and a `responses` that is not an object at all is read as absent. A
+ * `$ref` whose chain ends on a `components/responses` entry that is not an
+ * object is the same malformed entry behind a pointer, and is skipped the
+ * same way, the warning naming the component (review finding 1).
  */
 
 const VERSIONS = ['3.0.3', '3.1.0'] as const;
@@ -29,6 +33,10 @@ const NON_OBJECTS: Array<[kind: string, value: unknown, rendered: string]> = [
 const ok = { description: 'No pets.' };
 const info = { title: 'repro', version: '1' };
 const unknownType = { kind: 'primitive', type: 'unknown' };
+/** A `$ref` to the component the review's finding names. */
+const gone = { $ref: '#/components/responses/Gone' };
+/** `components/responses` holding `Gone` as the given value. */
+const goneAs = (value: unknown) => ({ components: { responses: { Gone: value } } });
 
 let dirs: string[] = [];
 afterEach(() => {
@@ -55,6 +63,15 @@ async function parse(doc: unknown): Promise<{ spec: ApiSpec; warnings: string[] 
   return { spec, warnings };
 }
 
+/** The exit code `oagen diff` ends with for the two documents. */
+async function diffExitCode(oldDoc: unknown, newDoc: unknown): Promise<number> {
+  vi.spyOn(console, 'log').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const err: any = await diffCommand({ old: write(oldDoc), new: write(newDoc) }).catch((e) => e);
+  expect(err).toBeDefined();
+  return err.exitCode;
+}
+
 /** The issue's document: `GET /pets` (`listPets`) with the given `responses`. */
 function petsDoc(responses: unknown, openapi: string, extra: Record<string, unknown> = {}) {
   return { openapi, info, paths: { '/pets': { get: { operationId: 'listPets', responses } } }, ...extra };
@@ -72,12 +89,18 @@ const payload = {
 };
 
 /** A `petAdopted` webhook posting a payload, with the given `responses`. */
-function webhookDoc(responses: unknown, openapi: string) {
-  return { openapi, info, paths: {}, webhooks: { petAdopted: { post: { requestBody: payload, responses } } } };
+function webhookDoc(responses: unknown, openapi: string, extra: Record<string, unknown> = {}) {
+  return {
+    openapi,
+    info,
+    paths: {},
+    webhooks: { petAdopted: { post: { requestBody: payload, responses } } },
+    ...extra,
+  };
 }
 
 /** `createPet`, declaring a `petAdopted` callback with the given `responses`. */
-function callbackDoc(responses: unknown, openapi: string) {
+function callbackDoc(responses: unknown, openapi: string, extra: Record<string, unknown> = {}) {
   const callback = { '{$request.body#/callbackUrl}': { post: { requestBody: payload, responses } } };
   return {
     openapi,
@@ -85,6 +108,7 @@ function callbackDoc(responses: unknown, openapi: string) {
     paths: {
       '/pets': { post: { operationId: 'createPet', responses: { '200': ok }, callbacks: { petAdopted: callback } } },
     },
+    ...extra,
   };
 }
 
@@ -92,6 +116,8 @@ const skipped = (site: string, rendered: string) =>
   `[oagen] Warning: ${site} is not a Response Object (${rendered}); skipping it.`;
 const noResponses = (label: string, rendered: string) =>
   `[oagen] Warning: responses of ${label} is not a Responses Object (${rendered}); reading no response from it.`;
+/** The warning for a `$ref` to `Gone` holding a non-object, at `site`. */
+const goneSkipped = (site: string, rendered: string) => skipped(`components/responses/Gone (the ${site})`, rendered);
 
 describe('#617', () => {
   for (const openapi of VERSIONS) {
@@ -194,20 +220,22 @@ describe('#617', () => {
       });
 
       it('parses a components/responses entry that is not an object, silently when nothing refers to it', async () => {
-        const components = { responses: { Bad: 'oops', Worse: null } };
+        const components = { responses: { Bad: 'oops', Worse: null, Gone: [] } };
         const { spec, warnings } = await parse(petsDoc({ '204': ok }, openapi, { components }));
 
         expect(warnings).toEqual([]);
         expect(onlyOperation(spec).responseStatusCode).toBe(204);
       });
 
-      it('reads a $ref to a components/responses entry that is not an object as a ref nothing answers', async () => {
-        const components = { responses: { Bad: 'oops' } };
-        const responses = { '200': { $ref: '#/components/responses/Bad' }, '204': ok };
+      it('still reads a $ref the section holds nothing under (one into another section) as a ref nothing answers', async () => {
+        // A pointer to a `components/responses` name that does not exist never
+        // reaches the parser: the bundler rejects it first.
+        const responses = { '200': { $ref: '#/components/schemas/Gone' }, '204': ok };
+        const components = { schemas: { Gone: { type: 'object' } }, responses: { Gone: [] } };
         const { spec, warnings } = await parse(petsDoc(responses, openapi, { components }));
 
         expect(warnings).toEqual([
-          '[oagen] Warning: Unresolved response $ref "#/components/responses/Bad" in 200 response of listPets: no matching entry under components/responses — reading the response as written, without a body or headers',
+          '[oagen] Warning: Unresolved response $ref "#/components/schemas/Gone" in 200 response of listPets: no matching entry under components/responses — reading the response as written, without a body or headers',
         ]);
         const op = onlyOperation(spec);
         expect(op.responseStatusCode).toBe(200);
@@ -248,18 +276,118 @@ describe('#617', () => {
         expect(op.callbacks).toHaveLength(1);
         expect(op.callbacks![0].responses).toEqual([{ statusCode: 204, description: 'Acknowledged' }]);
       });
+
+      describe('a $ref to a components/responses entry that is not an object (review finding 1)', () => {
+        it.each(NON_OBJECTS)(
+          'skips a 200 that points at %s, warning once naming the component, and reads listPets from its 204 as for the inline entry',
+          async (_kind, value, rendered) => {
+            const { spec, warnings } = await parse(petsDoc({ '200': gone, '204': ok }, openapi, goneAs(value)));
+
+            expect(warnings).toEqual([goneSkipped('200 response of listPets', rendered)]);
+            const op = onlyOperation(spec);
+            expect(op.responseStatusCode).toBe(204);
+            expect(op.response).toEqual(unknownType);
+            expect(op.responseDescription).toBe('No pets.');
+            expect(op.successResponses).toBeUndefined();
+            expect(op.errors).toEqual([]);
+            expect(spec.models).toEqual([]);
+            // One IR for the inline and the `$ref` spelling of the same malformed entry.
+            const inline = await parse(petsDoc({ '200': value, '204': ok }, openapi));
+            expect(spec).toEqual(inline.spec);
+          },
+        );
+
+        it('reads the same operation whichever order the entries are declared in', async () => {
+          const first = await parse(petsDoc({ '200': gone, '204': ok }, openapi, goneAs([])));
+          const second = await parse(petsDoc({ '204': ok, '200': gone }, openapi, goneAs([])));
+
+          expect(second.spec).toEqual(first.spec);
+          expect(second.warnings).toEqual(first.warnings);
+        });
+
+        it('names the last hop of a chain, by its decoded name', async () => {
+          const components = {
+            responses: { Alias: { $ref: '#/components/responses/Also~1Gone' }, 'Also/Gone': 'oops' },
+          };
+          const responses = { '200': { $ref: '#/components/responses/Alias' }, '204': ok };
+          const { spec, warnings } = await parse(petsDoc(responses, openapi, { components }));
+
+          expect(warnings).toEqual([
+            skipped('components/responses/Also/Gone (the 200 response of listPets)', '"oops"'),
+          ]);
+          const op = onlyOperation(spec);
+          expect(op.responseStatusCode).toBe(204);
+          expect(op.successResponses).toBeUndefined();
+        });
+
+        it.each([
+          ['a 3xx', '302'],
+          ['an error code', '404'],
+          ['default', 'default'],
+          ['a range', '2XX'],
+        ])('skips %s entry that points at it, with one warning naming the key', async (_kind, key) => {
+          const { spec, warnings } = await parse(petsDoc({ [key]: gone, '204': ok }, openapi, goneAs([])));
+
+          expect(warnings).toEqual([goneSkipped(`${key} response of listPets`, '[]')]);
+          const op = onlyOperation(spec);
+          expect(op.responseStatusCode).toBe(204);
+          expect(op.successResponses).toBeUndefined();
+          expect(op.errors).toEqual([]);
+          expect(op.defaultResponse).toBeUndefined();
+          expect(op.rangeResponses).toBeUndefined();
+        });
+
+        it('warns once for an operation named from its path, too: the name rehearsals skip the entry silently', async () => {
+          const doc = {
+            openapi,
+            info,
+            paths: { '/pets': { get: { responses: { '200': gone, '204': ok } } } },
+            ...goneAs(7),
+          };
+          const { spec, warnings } = await parse(doc);
+
+          expect(warnings).toEqual([goneSkipped('200 response of GET /pets', '7')]);
+          expect(onlyOperation(spec).responseStatusCode).toBe(204);
+        });
+
+        it.each(NON_OBJECTS)(
+          'skips a webhook response that points at %s, with one warning naming the component and the webhook',
+          async (_kind, value, rendered) => {
+            const responses = { '200': gone, '204': { description: 'Acknowledged' } };
+            const { spec, warnings } = await parse(webhookDoc(responses, openapi, goneAs(value)));
+
+            expect(warnings).toEqual([goneSkipped('200 response of webhooks.petAdopted.post', rendered)]);
+            expect(spec.webhooks![0].responses).toEqual([{ statusCode: 204, description: 'Acknowledged' }]);
+          },
+        );
+
+        it('skips a callback response that points at it, with one warning naming the component and the callback site', async () => {
+          const responses = { '200': gone, '204': { description: 'Acknowledged' } };
+          const { spec, warnings } = await parse(callbackDoc(responses, openapi, goneAs(null)));
+
+          expect(warnings).toEqual([
+            goneSkipped('200 response of createPet.callbacks.petAdopted.{$request.body#/callbackUrl}.post', 'null'),
+          ]);
+          const op = onlyOperation(spec);
+          expect(op.callbacks![0].responses).toEqual([{ statusCode: 204, description: 'Acknowledged' }]);
+        });
+
+        it('oagen diff between the inline and the $ref spelling of the same malformed entry exits 0', async () => {
+          const inline = petsDoc({ '200': [], '204': ok }, openapi);
+          const viaRef = petsDoc({ '200': gone, '204': ok }, openapi, goneAs([]));
+
+          expect(await diffExitCode(inline, viaRef)).toBe(0);
+          expect(await diffExitCode(viaRef, inline)).toBe(0);
+        });
+      });
     });
   }
 
   it('oagen diff on the issue document exits 0 with no changes, where it printed the TypeError and exited 1', async () => {
-    const file = write(petsDoc({ '200': 'oops', '204': ok }, '3.1.0'));
-    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const doc = petsDoc({ '200': 'oops', '204': ok }, '3.1.0');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const err: any = await diffCommand({ old: file, new: file }).catch((e) => e);
-
-    expect(err).toBeDefined();
-    expect(err.exitCode).toBe(0);
+    expect(await diffExitCode(doc, doc)).toBe(0);
     expect(warn.mock.calls.map((call) => String(call[0]))).toContain(skipped('200 response of listPets', '"oops"'));
   });
 
@@ -299,6 +427,56 @@ describe('#617', () => {
         expect(warn).toHaveBeenLastCalledWith(noResponses('listPets', rendered));
       }
       expect(warn).toHaveBeenCalledTimes(NON_OBJECTS.length);
+    });
+  });
+
+  describe('followReference', () => {
+    const components = (entries: Record<string, unknown>) => entries as Record<string, Record<string, unknown>>;
+
+    it.each(NON_OBJECTS)(
+      'ends unresolved on a component that is %s, handing the entry back as found',
+      (_kind, value) => {
+        const followed = followReference(gone, 'responses', components({ Gone: value }), 'override');
+
+        expect(followed).toEqual({
+          outcome: 'unresolved',
+          ref: gone.$ref,
+          value: gone,
+          found: { name: 'Gone', value },
+        });
+      },
+    );
+
+    it('hands back the last hop of a chain, by its decoded name', () => {
+      const chain = components({ Alias: { $ref: '#/components/responses/a~1b~0c' }, 'a/b~c': [] });
+      const followed = followReference({ $ref: '#/components/responses/Alias' }, 'responses', chain, 'override');
+
+      expect(followed).toMatchObject({
+        outcome: 'unresolved',
+        ref: '#/components/responses/a~1b~0c',
+        found: { name: 'a/b~c', value: [] },
+      });
+    });
+
+    it('hands nothing back for a name the section holds nothing under', () => {
+      const followed = followReference(gone, 'responses', components({ Other: ok }), 'override');
+
+      expect(followed).toEqual({ outcome: 'unresolved', ref: gone.$ref, value: gone });
+      expect(followed).not.toHaveProperty('found');
+    });
+  });
+
+  describe('resolveResponseRef', () => {
+    it('returns undefined for a chain that ends on a component that is not an object, warning once naming the component and the site', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const components = { Gone: [] } as unknown as Record<string, Record<string, unknown>>;
+
+      expect(resolveResponseRef(gone, components, '200 response of listPets')).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(goneSkipped('200 response of listPets', '[]'));
+      // Silently for a reader that only pre-computes names.
+      expect(resolveResponseRef(gone, components, '200 response of listPets', 'override', 'silent')).toBeUndefined();
+      expect(warn).toHaveBeenCalledTimes(1);
     });
   });
 });
