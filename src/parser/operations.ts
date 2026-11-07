@@ -33,6 +33,7 @@ import {
   splitWords,
   cleanSchemaName,
   stripListItemMarkers,
+  singularizeLeadingWord,
   singularizePathSegment,
   numberedName,
   numberedProperty,
@@ -6032,20 +6033,30 @@ function resolveReusedOperationIds(
  * kept the first definition for both, so one operation was typed with
  * fields it does not take, and which one followed the order of the paths.
  *
- * Of the Operation Objects that contest a stem, the one whose `operationId`
- * is the stem's own spelling — the stem with its first letter lowered,
- * `createPet` for `CreatePet`, read with the overload markers at its end
- * stripped (normalizeOperationIdForNaming) — keeps the stem and the plain
- * names, and every other one names its models from its path
- * (`PetDraftsPostRequest`), exactly as a reused id's later operation does
- * (resolveReusedOperationIds); when none is spelled so (`create_pet`
- * beside `CreatePet`), or more than one is — which the reuse pass leaves no
- * room for, since one id as written names the models of one Operation
- * Object — every one of them does. So adding `create_pet` beside `createPet`
- * adds two models and renames none of `createPet`'s, whatever the order of
- * the paths: the outcome depends on the document's `operationId`s alone.
- * Whether the contested bodies agree in shape takes no part, so that a
- * change to one body never renames its model.
+ * Of the Operation Objects that contest a stem, the one the cleaning moved
+ * least keeps the stem and the plain names, and every other one names its
+ * models from its path (`PetDraftsPostRequest`), exactly as a reused id's
+ * later operation does (resolveReusedOperationIds). An id the cleaning
+ * stripped a marker or a backend word from (`listNotesByExternalId`,
+ * `createPetController`) never keeps a contested stem. Among the rest, one
+ * whose PascalCase form — read with the overload markers at its end
+ * stripped (normalizeOperationIdForNaming) — is the stem as written
+ * (`createPet`, `create_pet` and `CreatePet` alike for `CreatePet`;
+ * `list_notes` or `ListNotes` for `ListNotes`) outranks one whose leading
+ * word was only singularized (`Notes_List`, `NotesList` to `NoteList`), so
+ * `Note_List` keeps `NoteList` beside `Notes_List`, and `Notes_List` keeps
+ * it beside `Notes_ListByExternalId`. A tie — ids that differ in case or
+ * separators alone, `createPet` beside `create_pet` or `CreatePet` — goes
+ * to the one written in camelCase (the id is its own PascalCase form with
+ * the first letter lowered) when there is exactly one, and to none when
+ * there is none (`create_pet` beside `CreatePet`); two cannot be, since one
+ * id as written names the models of one Operation Object once the reuse
+ * pass has run. So adding `create_pet` beside `createPet`, or
+ * `list_notes_by_external_id` beside `list_notes`, adds models and renames
+ * none of the existing operation's, whatever the order of the paths and
+ * whatever case the document writes its ids in: the outcome depends on the
+ * document's `operationId`s alone. Whether the contested bodies agree in
+ * shape takes no part, so that a change to one body never renames its model.
  *
  * Read off the `operationId` each operation's models are named from
  * (`modelOperationIds`: the one the reuse of its own left it, or its own),
@@ -6071,8 +6082,13 @@ function resolveContestedOperationIdStems(
     method: HttpMethod;
     rootLength: number;
   }
-  /** Each Operation Object whose models the stem would name, with the id they are read from and the paths that reach it. */
-  const holders = new Map<string, Map<OperationObject, { id: string; sites: Site[] }>>();
+  /** An Operation Object whose models a stem would name: the id they are read from, its PascalCase form, and the paths that reach it. */
+  interface Holder {
+    id: string;
+    pascal: string;
+    sites: Site[];
+  }
+  const holders = new Map<string, Map<OperationObject, Holder>>();
   for (const [path, pathItem] of Object.entries(paths)) {
     for (const method of HTTP_METHODS) {
       const op = pathItem[method];
@@ -6082,20 +6098,28 @@ function resolveContestedOperationIdStems(
       const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
       if (!operationId) continue;
       const stem = operationIdModelBase(operationId);
-      const ops = holders.get(stem) ?? new Map<OperationObject, { id: string; sites: Site[] }>();
-      const holder = ops.get(op) ?? { id: normalizeOperationIdForNaming(operationId), sites: [] };
+      const ops = holders.get(stem) ?? new Map<OperationObject, Holder>();
+      const id = normalizeOperationIdForNaming(operationId);
+      const holder = ops.get(op) ?? { id, pascal: toPascalCase(id), sites: [] };
       holder.sites.push({ key, path, method, rootLength: plan.operations.get(key)!.rootLength });
       ops.set(op, holder);
       holders.set(stem, ops);
     }
   }
+  /** How far the cleaning moved an id from its stem: not at all, its leading word singularized, or a marker or backend word stripped. */
+  const distance = ({ pascal }: Holder, stem: string) =>
+    pascal === stem ? 0 : singularizeLeadingWord(pascal) === stem ? 1 : 2;
+  /** Whether an id is written in camelCase: its own PascalCase form with the first letter lowered. */
+  const camelCased = ({ id, pascal }: Holder) => id === pascal.charAt(0).toLowerCase() + pascal.slice(1);
   for (const [stem, ops] of holders) {
     if (ops.size < 2) continue;
-    const spelling = stem.charAt(0).toLowerCase() + stem.slice(1);
-    const kept = [...ops.values()].filter(({ id }) => id === spelling).length === 1;
-    for (const { id, sites } of ops.values()) {
-      if (kept && id === spelling) continue;
-      const [first, ...rest] = sites.sort(compareOperationOrder);
+    const least = Math.min(...[...ops.values()].map((holder) => distance(holder, stem)));
+    const nearest = least < 2 ? [...ops.values()].filter((holder) => distance(holder, stem) === least) : [];
+    const camel = nearest.filter(camelCased);
+    const keeper = nearest.length === 1 ? nearest[0] : camel.length === 1 ? camel[0] : undefined;
+    for (const holder of ops.values()) {
+      if (holder === keeper) continue;
+      const [first, ...rest] = holder.sites.sort(compareOperationOrder);
       modelOperationIds.set(first.key, null);
       for (const { key } of rest) {
         modelOperationIds.set(key, null);
