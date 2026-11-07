@@ -1245,15 +1245,23 @@ function sharedFieldType(
  * variants' — kept where every one of them writes the same and dropped
  * where they differ (#611), as the shared model keeps a field's own
  * (`buildSharedModel`); a new tree wherever something is dropped, the
- * first itself when nothing is. A union's variants pair by shape, not by
- * position — each member's ordered by their limitless reading, then by
- * their full reading where two share a shape, so the pairing depends on
- * no member's order — the result keeping the first member's order; and
- * two variants left alike once their limits are dropped are one, a lone
- * survivor standing for the union (`simplifyType`), since a `oneOf` of two
- * plain strings admits nothing — the survivor, a nested union the outer
- * collapses onto included, taking the limits the union itself agreed on,
- * conjoined onto its own (`withLimits`), so none is lost with the union.
+ * first itself when nothing is. A level's limits are kept or dropped as a
+ * whole, as a field's own are: items `{ maxLength: 2, pattern: '^a' }`
+ * beside `{ maxLength: 3, pattern: '^a' }` carry none. A union's variants
+ * are read by shape, not by position, whichever order each member lists
+ * them in: a shape every member lists with the same variants keeps the
+ * first member's, and one they list apart merges into one variant
+ * carrying the limits every variant of the shape, in every member, agrees
+ * on, so no limit survives on one variant of a shape that another lacks
+ * (`oneOf: [{ string, pattern: '^[a-z]+$' }, { string, pattern: '^[0-9]+$' }]`
+ * beside the same with `'^[A-Z]+$'` is a plain `string`, never
+ * `oneOf: [{ string, pattern: '^[a-z]+$' }, string]`, which rejects what
+ * both bodies admit); the result keeps the first member's order, and
+ * variants left alike are one, a lone survivor standing for the union
+ * (`simplifyType`), since a `oneOf` of two plain strings admits nothing —
+ * the survivor, a nested union the outer collapses onto included, taking
+ * the limits the union itself agreed on, conjoined onto its own
+ * (`withLimits`), so none is lost with the union.
  */
 function agreedLimits(types: readonly TypeRef[]): TypeRef {
   const first = types[0];
@@ -1278,19 +1286,38 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
       };
     }
     case 'union': {
-      const ordered = of('union').map((union) =>
-        union.variants
-          .map((variant, index) => ({
-            variant,
-            index,
-            key: `${stableJson(limitlessShape(variant))}\n${stableJson(variant)}`,
-          }))
-          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
-      );
-      const variants = [...top.variants];
-      ordered[0].forEach(({ index }, position) => {
-        variants[index] = agreedLimits(ordered.map((member) => member[position].variant));
+      // Each member's variants by shape (`limitlessShape`), each shape's in
+      // the member's order with its index in the union.
+      const byShape = of('union').map((union) => {
+        const shapes = new Map<string, Array<{ variant: TypeRef; index: number }>>();
+        union.variants.forEach((variant, index) => {
+          const shape = stableJson(limitlessShape(variant));
+          const alike = shapes.get(shape);
+          if (alike) alike.push({ variant, index });
+          else shapes.set(shape, [{ variant, index }]);
+        });
+        return shapes;
       });
+      const variants = [...top.variants];
+      for (const [shape, own] of byShape[0]) {
+        // A shape every member lists with the same variants keeps the
+        // first member's; one they list apart merges into one variant
+        // carrying the limits every variant of the shape, in every
+        // member, agrees on, so no limit survives on one variant of a
+        // shape that another lacks (MichaelDeBoey, #639: `^[a-z]+$` kept
+        // on one string beside a plain string rejects what both bodies
+        // admit).
+        const runs = byShape.map((member) => member.get(shape) ?? []);
+        const readings = runs.map((run) =>
+          run
+            .map(({ variant }) => stableJson(variant))
+            .sort()
+            .join('\n'),
+        );
+        if (readings.every((reading) => reading === readings[0])) continue;
+        const merged = agreedLimits(runs.flatMap((run) => run.map(({ variant }) => variant)));
+        for (const { index } of own) variants[index] = merged;
+      }
       const merged = simplifyType({ ...top, variants });
       // A lone survivor — the one variant left once the alike are dropped,
       // told by their count rather than by the survivor's kind, since the
