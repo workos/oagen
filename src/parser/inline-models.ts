@@ -2988,8 +2988,9 @@ export function resetCombinedDeclarations(): void {
  * (`namesOneComponent`) — adds nothing, so two `$ref`s naming one
  * component, or a `$ref` beside its own wrapper, keep the first; and a
  * pair whose members the readers would not all read — one that is no
- * `$ref` and no inline object member (`isInlineAllOfMember`): an `allOf`
- * of `$ref`s under a `discriminator` or `additionalProperties` — keeps the first too,
+ * `$ref`, no inline object member (`isInlineAllOfMember`) and no
+ * annotating or limiting member (`declaresType`): an `allOf` of `$ref`s
+ * under a `discriminator` or `additionalProperties` — keeps the first too,
  * as before, rather than lose a part to the reference reading
  * (workos/oagen#653 review). A `$ref` to a component that dispatches a
  * union describes an object too, its conjunction read as the same `allOf`
@@ -3139,14 +3140,18 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // own wrapper — keeps the first, as a lone declaration does.
     if (members.length === held.members.length && required.length === held.required.length) return first;
     // The readers read a member that is a `$ref` or an inline object member
-    // (`isInlineAllOfMember`), and type the `allOf` by one that is a `$ref`
+    // (`isInlineAllOfMember`), or one that declares no type and only
+    // annotates or limits the schema (`declaresType`; `allOfWrapperLayer`,
+    // `extractConstraints`), and type the `allOf` by one that is a `$ref`
     // or declares properties inline (`allOfTypesSchema`). A member that is
-    // neither — a composition no splicing opens, an `allOf` of `$ref`s
-    // under a `discriminator` or `additionalProperties` — would be dropped
-    // by the reference reading or leave the conjunction `unknown`, so such
-    // a pair keeps the first, as before (workos/oagen#653 review).
+    // none of these — a composition no splicing opens, an `allOf` of
+    // `$ref`s under a `discriminator` or `additionalProperties` — would be
+    // dropped by the reference reading or leave the conjunction `unknown`,
+    // so such a pair keeps the first, as before (workos/oagen#653 review;
+    // round 5: `{ description }` spliced out of a wrapper failed this
+    // test, and the pair kept the first where the base merged both).
     const readable =
-      members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member)) &&
+      members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member) || !declaresType(member)) &&
       members.some((member) => member.$ref !== undefined || declaresInlineProperties(member));
     if (!readable) return first;
     // `null` exactly when both declarations admit it, as JSON Schema
@@ -3210,8 +3215,12 @@ function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = n
  * (`conjoinTypedDeclarations`), with the `required` it writes beside them:
  * its own `allOf` members, each read the same way, when nothing is written
  * beside the `allOf` that the conjunction does not carry itself — the
- * keywords it lifts (`declarationKeywords`, the declaration's own; a
- * wrapper nested inside it documents no field), a `required`, which JSON
+ * keywords it lifts (`declarationKeywords`: the declaration's own ride on
+ * the conjunction; a wrapper nested inside it keeps its own as a member
+ * that declares no type, which the readers conjoin onto the schema as the
+ * wrapper's own keywords: the limits with the stricter bound winning,
+ * `extractConstraints`, the documentation where the schema writes none,
+ * `allOfWrapperLayer`), a `required`, which JSON
  * Schema applies to the instance at any depth of a conjunction, so the
  * conjunction carries it, `type: 'object'` or a nullable spelling of it,
  * which say what the members already compose (the conjunction settles its
@@ -3232,15 +3241,27 @@ function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = n
 function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
   const members: SchemaObject[] = [];
   const required: string[] = [];
-  const splice = (schema: SchemaObject): void => {
+  const splice = (schema: SchemaObject, nested: boolean): void => {
     if (!splicesOpen(schema)) {
       members.push(schema);
       return;
     }
     for (const name of schema.required ?? []) if (!required.includes(name)) required.push(name);
-    for (const member of schema.allOf ?? []) splice(member);
+    // A wrapper spliced open inside the declaration keeps what it wrote
+    // for the field — its limits, documentation and extensions — as a
+    // member that declares no type, which the readers conjoin onto the
+    // schema as they do the wrapper's own keywords (`extractConstraints`,
+    // the stricter bound winning; `allOfWrapperLayer`, where the schema
+    // writes none itself). The declaration's own ride on the conjunction
+    // (`declarationKeywords`; workos/oagen#653 review, round 5: `{ allOf:
+    // [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
+    if (nested) {
+      const keywords = declarationKeywords(schema);
+      if (Object.keys(keywords).length > 0) members.push(keywords);
+    }
+    for (const member of schema.allOf ?? []) splice(member, true);
   };
-  splice(declaration);
+  splice(declaration, false);
   return { members, required };
 }
 

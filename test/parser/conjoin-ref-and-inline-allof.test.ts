@@ -720,5 +720,83 @@ describe('#571', () => {
       }
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it("keeps a spliced wrapper's annotations and limits, which the readers conjoin onto the conjunction (Greptile)", async () => {
+      // `{ allOf: [{ properties: { b } }, { description: 'Details' }] }`
+      // splices into `{ properties: { b } }` and `{ description }`: the
+      // second declares no type and only documents the schema, which the
+      // readers read as a wrapper's keywords, so it does not keep the pair
+      // on the first (round 5: it failed the readers' test, and the pair
+      // kept `a` alone where the base merged both). A wrapper spliced open
+      // inside a declaration keeps its limits and documentation the same
+      // way, the stricter bound winning (`minProperties: 2` was dropped).
+      const str = { type: 'string' };
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const holderDocument = (Holder: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/holders/{id}': {
+            get: {
+              operationId: 'getHolder',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: { '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            A: { type: 'object', properties: { a: str } },
+            B: { type: 'object', properties: { b: str } },
+            Holder,
+          },
+        },
+      });
+      const resultOf = (spec: ApiSpec) => modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
+      const inlineA = { type: 'object', properties: { a: str } };
+      const annotated = { allOf: [{ properties: { b: str } }, { description: 'Details' }] };
+      for (const [label, members, fields] of [
+        ['inline then annotated', [declaring(inlineA), declaring(annotated)], ['a', 'b']],
+        ['annotated then inline', [declaring(annotated), declaring(inlineA)], ['b', 'a']],
+        ['$ref then annotated', [declaring(ref('A')), declaring(annotated)], ['a', 'b']],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name: 'HolderResult' });
+        expect(resultOf(spec)?.description, label).toBe('Details');
+        expect(
+          modelNamed(spec, 'HolderResult')?.fields.map((f) => f.name),
+          label,
+        ).toEqual(fields);
+      }
+      const inlineC = { type: 'object', properties: { c: str } };
+      const limited = { allOf: [{ allOf: [ref('A')], minProperties: 2 }] };
+      const limitedDeep = { allOf: [{ allOf: [ref('A')], minProperties: 2, maxProperties: 9 }], maxProperties: 5 };
+      for (const [label, members, fields, constraints] of [
+        ['limited then inline', [declaring(limited), declaring(inlineC)], ['a', 'c'], { minProperties: 2 }],
+        ['inline then limited', [declaring(inlineC), declaring(limited)], ['c', 'a'], { minProperties: 2 }],
+        [
+          'limits at two depths then inline',
+          [declaring(limitedDeep), declaring(inlineC)],
+          ['a', 'c'],
+          { maxProperties: 5, minProperties: 2 },
+        ],
+        [
+          'limited then a limited wrapper',
+          [declaring(limited), declaring({ allOf: [ref('B')], minProperties: 3 })],
+          ['a', 'b'],
+          { minProperties: 3 },
+        ],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name: 'HolderResult' });
+        expect(resultOf(spec)?.constraints, label).toEqual(constraints);
+        expect(
+          modelNamed(spec, 'HolderResult')?.fields.map((f) => f.name),
+          label,
+        ).toEqual(fields);
+        expect(modelNamed(spec, 'HolderResult')?.constraints, label).toEqual(constraints);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
