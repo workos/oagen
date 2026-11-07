@@ -875,6 +875,57 @@ describe('#619', () => {
           expect(warnings()).toEqual([]);
         });
       });
+
+      describe('two alias variants, one an alias of the other (Greptile, round 7)', () => {
+        // `Mutt: { $ref: Hound }`, `Hound: { $ref: Shelter/properties/dog }`: a target names the variant reached through the
+        // fewest aliases of its own, whatever order the variants are declared in.
+        const HOUND = '#/components/schemas/Hound';
+        const MUTT = '#/components/schemas/Mutt';
+        const aliases = { Hound: { $ref: SHELTER_DOG }, Mutt: { $ref: HOUND } };
+        const orders: Array<[string, string[]]> = [
+          ['Mutt first', [CAT, MUTT, HOUND]],
+          ['Hound first', [CAT, HOUND, MUTT]],
+        ];
+
+        it.each(orders)('names the variant an entry names outright, %s', async (_label, variants) => {
+          const spec = await parseJson(
+            documentWith(openapi, components(openapi, { ...aliases, Pet: union({ cat: CAT, dog: HOUND }, variants) })),
+          );
+          const pet = modelOf(spec, 'Pet');
+          expect(variantNames(pet)).toEqual(variants.map((v) => v.split('/').pop()));
+          expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'Hound' } });
+          expect(modelNames(spec)).toEqual(['Cat', 'Hound', 'Mutt', 'Pet', 'Shelter', 'ShelterDog', 'Zoo', 'ZooDog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it.each(orders)(
+          'names the alias nearest the pointer for an entry written as the pointer, %s',
+          async (_label, variants) => {
+            const spec = await parseJson(
+              documentWith(
+                openapi,
+                components(openapi, { ...aliases, Pet: union({ cat: CAT, dog: SHELTER_DOG }, variants) }),
+              ),
+            );
+            expect(modelOf(spec, 'Pet')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'Hound' },
+            });
+            expect(warnings()).toEqual([]);
+          },
+        );
+
+        it.each(orders)('names the farther alias when the entry names it outright, %s', async (_label, variants) => {
+          const spec = await parseJson(
+            documentWith(openapi, components(openapi, { ...aliases, Pet: union({ cat: CAT, dog: MUTT }, variants) })),
+          );
+          expect(modelOf(spec, 'Pet')?.discriminator).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Cat', dog: 'Mutt' },
+          });
+          expect(warnings()).toEqual([]);
+        });
+      });
     });
   });
 });
