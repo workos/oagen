@@ -14,7 +14,7 @@ import {
 } from '../../src/compat/spec-filter.js';
 import { detectStaleSymbols } from '../../src/compat/staleness.js';
 import { nodeHints } from '../../src/compat/language-hints.js';
-import type { ApiSurface, ApiClass } from '../../src/compat/types.js';
+import type { ApiSurface, ApiClass, OverlayLookup } from '../../src/compat/types.js';
 import type { ApiSpec } from '../../src/ir/types.js';
 
 describe('#600', () => {
@@ -293,6 +293,66 @@ describe('#600', () => {
       expect(detectStaleSymbols(live, oldSpec, newSpec, hints, resolution).map((v) => v.message)).toEqual([
         'Class "Animals" is no longer defined in the OpenAPI spec',
       ]);
+    });
+  });
+
+  describe('the compat overlay', () => {
+    // `generate --api-surface` writes a baseline method the overlay maps to an
+    // operation (`.oagen-manifest.json`: `GET /pets` → `Animals.fetchAll`)
+    // under the baseline's name, not the resolved one, so that name has to
+    // be a key too, or `filterSurface` drops the method and an SDK that
+    // renamed it passes `verify` (Michael's finding on #657).
+    const resolution = { mountRules };
+    const overlayOf = (routes: Record<string, string>): Pick<OverlayLookup, 'methodByOperation'> => ({
+      methodByOperation: new Map(
+        Object.entries(routes).map(([httpKey, methodName]) => [
+          httpKey,
+          { className: 'Animals', methodName, params: [], returnType: 'Pet' },
+        ]),
+      ),
+    });
+    const kept = overlayOf({ 'GET /pets': 'fetchAll', 'GET /pets/{id}': 'getPet' });
+    // A route the spec does not declare derives nothing.
+    const legacy = overlayOf({ 'GET /legacy': 'legacy' });
+
+    it('keys a baseline method the overlay maps to a spec operation, under its own name', async () => {
+      const spec = await parse('overlay', doc('3.1.0', orders['list first']));
+
+      expect(sorted(specDerivedMethodPaths(spec, resolution, kept))).toEqual([
+        'Animals.fetchAll',
+        'Animals.get',
+        'Animals.getPet',
+        'Animals.get_pet',
+        'Animals.list',
+        'Animals.list_pets',
+      ]);
+      expect(sorted(specDerivedMethodPaths(spec, resolution, legacy))).toEqual(
+        sorted(specDerivedMethodPaths(spec, resolution)),
+      );
+
+      const baseline = surface({ Animals: serviceClass('Animals', ['fetchAll', 'getPet', 'legacy']) });
+      const scoped = (overlay?: Pick<OverlayLookup, 'methodByOperation'>) =>
+        Object.keys(
+          filterSurface(baseline, specDerivedNames(spec, hints, resolution), {
+            methodPaths: specDerivedMethodPaths(spec, resolution, overlay),
+          }).classes.Animals.methods,
+        ).sort();
+      expect(scoped()).toEqual(['getPet']);
+      expect(scoped(kept)).toEqual(['fetchAll', 'getPet']);
+      expect(scoped(legacy)).toEqual(['getPet']);
+    });
+
+    it('finds a method the overlay keeps stale once its operation is gone', async () => {
+      const oldSpec = await parse('overlay-old', doc('3.1.0', orders['list first']));
+      const newSpec = await parse('overlay-new', doc('3.1.0', { '/pets/{id}': getPet }));
+      const live = surface({ Animals: serviceClass('Animals', ['fetchAll', 'getPet']) });
+
+      expect(detectStaleSymbols(live, oldSpec, newSpec, hints, resolution)).toEqual([]);
+      expect(detectStaleSymbols(live, oldSpec, newSpec, hints, resolution, kept).map((v) => v.symbolPath)).toEqual([
+        'Animals.fetchAll',
+      ]);
+      // Still declared: not stale.
+      expect(detectStaleSymbols(live, oldSpec, oldSpec, hints, resolution, kept)).toEqual([]);
     });
   });
 });
