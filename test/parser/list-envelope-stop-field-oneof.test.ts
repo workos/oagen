@@ -323,6 +323,30 @@ describe('#622', () => {
         expect(pagination?.endOfIteration).toBeUndefined();
       }
     });
+
+    it.each(openapis)(
+      'keeps an allOf read as its lone union member the union it is, as the model does (PR #643 review; OAS %s)',
+      async (openapi) => {
+        // Every variant declares `data` and `has_more`, but the `allOf` is
+        // not merged: the body is the union. It read as `string[]` with no
+        // companions when the variants were read as a merge's.
+        const page = object({ data: petArray, has_more: boolean });
+        const total = object({ data: petArray, has_more: boolean, total: integer });
+        for (const keyword of ['oneOf', 'anyOf'] as const) {
+          const bare = await parseQuiet(listPets({ [keyword]: [page, total] }, openapi));
+          expect(onlyOperation(bare).response.kind, keyword).toBe('union');
+          for (const lone of [
+            { allOf: [{ [keyword]: [page, total] }] },
+            { allOf: [{ [keyword]: [page, total] }], description: 'A page' },
+          ]) {
+            const ir = await parseQuiet(listPets(lone, openapi));
+            expect(shown(ir), keyword).toEqual(shown(bare));
+            expect(onlyOperation(ir).response, keyword).toEqual(onlyOperation(bare).response);
+            expect(onlyOperation(ir).pagination?.dataPath, keyword).toBeUndefined();
+          }
+        }
+      },
+    );
   });
 
   describe('the rule: a stop field counts when every variant declares it with one shape', () => {
