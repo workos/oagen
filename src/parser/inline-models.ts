@@ -2970,9 +2970,22 @@ export function resetCombinedDeclarations(): void {
  * 'object'` or a `description` written beside the `allOf` or not
  * (workos/oagen#571: only an inline object beside a composing declaration
  * was conjoined, so these pairs kept the first and `result` had the
- * component's fields or the inline ones by member order) — while two
- * `$ref`s naming one component (`namesOneComponent`) add nothing to each
- * other, so the first stands, a `$ref` to a component that dispatches a
+ * component's fields or the inline ones by member order). The members of
+ * the conjunction are the parts of both (`conjunctionMembers`): a
+ * declaration that is a bare `allOf` — nothing beside it but the lifted
+ * keywords, a `required` the conjunction hoists, `type: 'object'` or a
+ * nullable spelling — is spliced open into its members, so `{ allOf: [{
+ * $ref: A }] }` beside `{ allOf: [{ $ref: B }] }` is `{ allOf: [{ $ref: A
+ * }, { $ref: B }] }`, which the readers type, where the `allOf` of the two
+ * wrappers as written is `unknown` to them; a part the first already has
+ * — the same object, or a `$ref` to a component it names
+ * (`namesOneComponent`) — adds nothing, so two `$ref`s naming one
+ * component, or a `$ref` beside its own wrapper, keep the first; and a
+ * pair whose members the readers would not all read — one that is no
+ * `$ref` and no inline object member (`isInlineAllOfMember`): an `allOf`
+ * of `$ref`s under a `title` or a `discriminator` — keeps the first too,
+ * as before, rather than lose a part to the reference reading
+ * (workos/oagen#653 review). A `$ref` to a component that dispatches a
  * union describes an object too, its conjunction read as the same `allOf`
  * written by hand (the shared fields, the union left to the component:
  * `mergeAllOfMembers`, workos/oagen#429), and a `$ref` to an array, an
@@ -3090,12 +3103,97 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     };
   }
   if (describesObject(first) && describesObject(second)) {
-    // Two `$ref`s naming one component add nothing to each other, so the
-    // first stands, as a lone declaration does.
-    if (namesOneComponent(first, second)) return first;
-    return { ...declarationKeywords(first), ...declarationKeywords(second), allOf: [first, second] };
+    const held = conjunctionMembers(first);
+    const added = conjunctionMembers(second);
+    // A part the first already has — the same object, or a `$ref` to the
+    // component one of its `$ref`s names — adds nothing to it.
+    const members = [...held.members];
+    for (const member of added.members) {
+      if (!members.some((present) => present === member || namesOneComponent(present, member))) members.push(member);
+    }
+    const required = [...new Set([...held.required, ...added.required])];
+    // Nothing added — two `$ref`s naming one component, a `$ref` beside its
+    // own wrapper — keeps the first, as a lone declaration does.
+    if (members.length === held.members.length && required.length === held.required.length) return first;
+    // The readers read a member that is a `$ref` or an inline object member
+    // (`isInlineAllOfMember`), and type the `allOf` by one that is a `$ref`
+    // or declares properties inline (`allOfTypesSchema`). A member that is
+    // neither — a composition no splicing opens, an `allOf` of `$ref`s
+    // under a `title` or a `discriminator` — would be dropped by the
+    // reference reading or leave the conjunction `unknown`, so such a pair
+    // keeps the first, as before (workos/oagen#653 review).
+    const readable =
+      members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member)) &&
+      members.some((member) => member.$ref !== undefined || declaresInlineProperties(member));
+    if (!readable) return first;
+    return {
+      ...declarationKeywords(first),
+      ...declarationKeywords(second),
+      allOf: members,
+      ...(required.length > 0 && { required }),
+    };
   }
   return first;
+}
+
+/**
+ * The parts a declaration brings to a conjunction
+ * (`conjoinTypedDeclarations`), with the `required` it writes beside them:
+ * its own `allOf` members, each read the same way, when nothing is written
+ * beside the `allOf` that the conjunction does not carry itself — the
+ * keywords it lifts (`declarationKeywords`, the declaration's own; a
+ * wrapper nested inside it documents no field), a `required`, which JSON
+ * Schema applies to the instance at any depth of a conjunction, so the
+ * conjunction carries it, and `type: 'object'` or a nullable spelling of
+ * it, which say what the members already compose (the conjunction admits
+ * no `null`) — else the declaration itself. JSON Schema reads `{ allOf:
+ * [A, B] }` and `{ allOf: [{ allOf: [A] }, B] }` alike, but the readers
+ * read a member that is a `$ref` or declares properties inline, so a
+ * wrapper around a `$ref` is spliced open: `{ allOf: [{ $ref: A }] }`
+ * beside `{ allOf: [{ $ref: B }] }` is `{ allOf: [{ $ref: A }, { $ref: B
+ * }] }`, and `{ allOf: [{ $ref: A }], required: ['a'] }` beside `{ $ref: B
+ * }` is `{ allOf: [{ $ref: A }, { $ref: B }], required: ['a'] }`
+ * (workos/oagen#653 review: the conjunction was the `allOf` of the two
+ * wrappers as written, which no reader types — `unknown` — and beside a
+ * bare `$ref` the wrapper was dropped by the reference reading).
+ */
+function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
+  const members: SchemaObject[] = [];
+  const required: string[] = [];
+  const splice = (schema: SchemaObject): void => {
+    if (!splicesOpen(schema)) {
+      members.push(schema);
+      return;
+    }
+    for (const name of schema.required ?? []) if (!required.includes(name)) required.push(name);
+    for (const member of schema.allOf ?? []) splice(member);
+  };
+  splice(declaration);
+  return { members, required };
+}
+
+/**
+ * Whether a declaration is a bare `allOf` a conjunction splices open
+ * (`conjunctionMembers`): every keyword beside the `allOf` is one the
+ * conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
+ * an `x-*` extension, `required`, `nullable`, or a `type` naming `object`
+ * alone or beside `null`. One that also writes a `title`, a
+ * `discriminator`, a `oneOf`/`anyOf`, `properties` or anything else says
+ * more than its members do, and stays a member as written.
+ */
+function splicesOpen(schema: SchemaObject): boolean {
+  if (schema.allOf === undefined) return false;
+  return Object.entries(schema).every(
+    ([key, value]) =>
+      value === undefined ||
+      key === 'allOf' ||
+      key === 'required' ||
+      key === 'nullable' ||
+      (key === 'type' &&
+        (value === 'object' || (Array.isArray(value) && value.every((t) => t === 'object' || t === 'null')))) ||
+      LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
+      key.startsWith('x-'),
+  );
 }
 
 /**

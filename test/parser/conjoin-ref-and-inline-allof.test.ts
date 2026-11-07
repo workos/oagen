@@ -363,5 +363,105 @@ describe('#571', () => {
       }
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('splices a bare allOf wrapper open, so wrappers around $refs conjoin as the $refs would (Greptile review)', async () => {
+      // `{ allOf: [{ $ref: A }] }` beside `{ allOf: [{ $ref: B }] }` is
+      // `{ allOf: [{ $ref: A }, { $ref: B }] }`: the readers type a member
+      // that is a `$ref` or declares properties inline, so the `allOf` of the
+      // two wrappers as written was `unknown`, and beside a bare `$ref` the
+      // wrapper was dropped by the reference reading. The lifted keywords,
+      // `type: 'object'`, a nullable spelling and a `required` beside the
+      // wrapper do not keep it closed: the keywords are the field's, the
+      // `required` the conjunction's.
+      const str = { type: 'string' };
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const schemas = {
+        A: { type: 'object', properties: { a: str } },
+        B: { type: 'object', properties: { b: str } },
+        X: { type: 'object', properties: { x: str } },
+      };
+      const holderDocument = (Holder: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/holders/{id}': {
+            get: {
+              operationId: 'getHolder',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: { '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        components: { schemas: { ...schemas, Holder } },
+      });
+      const resultOf = (spec: ApiSpec) => modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
+      const resultFields = (spec: ApiSpec) =>
+        modelNamed(spec, 'HolderResult')?.fields.map((f) => `${f.name}${f.required ? '!' : ''}`);
+      const nullable = openapi === '3.0.3' ? { nullable: true } : { type: ['object', 'null'] };
+      const wrapped = (name: string, extra: Record<string, unknown> = {}) => ({ ...extra, allOf: [ref(name)] });
+      for (const [label, members, fields] of [
+        ['two wrappers', [declaring(wrapped('A')), declaring(wrapped('B'))], ['a', 'b']],
+        ['two wrappers, swapped', [declaring(wrapped('B')), declaring(wrapped('A'))], ['b', 'a']],
+        ['wrapper then $ref', [declaring(wrapped('A')), declaring(ref('B'))], ['a', 'b']],
+        ['$ref then wrapper', [declaring(ref('A')), declaring(wrapped('B'))], ['a', 'b']],
+        [
+          'nested two $refs then $ref',
+          [declaring({ allOf: [ref('A'), ref('X')] }), declaring(ref('B'))],
+          ['a', 'x', 'b'],
+        ],
+        [
+          '$ref then nested two $refs',
+          [declaring(ref('B')), declaring({ allOf: [ref('A'), ref('X')] })],
+          ['b', 'a', 'x'],
+        ],
+        [
+          'type: object beside both',
+          [declaring(wrapped('A', { type: 'object' })), declaring(wrapped('B', { type: 'object' }))],
+          ['a', 'b'],
+        ],
+        ['nullable beside the first', [declaring(wrapped('A', nullable)), declaring(wrapped('B'))], ['a', 'b']],
+        ['wrapper of a wrapper', [declaring({ allOf: [wrapped('A')] }), declaring(wrapped('B'))], ['a', 'b']],
+        [
+          'required beside the first',
+          [declaring(wrapped('A', { required: ['a'] })), declaring(wrapped('B'))],
+          ['a!', 'b'],
+        ],
+        [
+          'required beside the second',
+          [declaring(ref('A')), declaring(wrapped('B', { required: ['b'] }))],
+          ['a', 'b!'],
+        ],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name: 'HolderResult' });
+        expect(resultFields(spec), label).toEqual(fields);
+      }
+      // The text beside the wrapper is the field's, as beside any declaration.
+      const described = await parseJson(
+        holderDocument({ allOf: [declaring(wrapped('A', { description: 'An A' })), declaring(wrapped('B'))] }),
+      );
+      expect([resultOf(described)?.description, resultFields(described)]).toEqual(['An A', ['a', 'b']]);
+      // A `$ref` beside its own wrapper adds nothing: the first stands, and
+      // nothing is minted.
+      for (const [label, members] of [
+        ['$ref then its wrapper', [declaring(ref('A')), declaring(wrapped('A'))]],
+        ['wrapper then its $ref', [declaring(wrapped('A')), declaring(ref('A'))]],
+      ] as const) {
+        const spec = await parseJson(holderDocument({ allOf: members }));
+        expect(resultOf(spec)?.type, label).toEqual({ kind: 'model', name: 'A' });
+        expect(modelNamed(spec, 'HolderResult'), label).toBeUndefined();
+      }
+      // A wrapper that says more than its members — a `title` — stays a
+      // member as written, which the readers would drop, so the pair keeps
+      // the first, as before.
+      const titled = await parseJson(
+        holderDocument({
+          allOf: [declaring(wrapped('A', { title: 'An A' })), declaring(wrapped('B', { title: 'A B' }))],
+        }),
+      );
+      expect(resultOf(titled)?.type).toEqual({ kind: 'model', name: 'A' });
+      expect(modelNamed(titled, 'HolderResult')).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+    });
   });
 });
