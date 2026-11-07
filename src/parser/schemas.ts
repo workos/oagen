@@ -5242,7 +5242,9 @@ function mappingTargetModelName(target: string): string {
  * pointer's own — named by the `$ref` as written and marked pending — and
  * settled by the walk as a pointer variant's is, to the model the pointed
  * schema is built as, the entry following it (#619 review: the reference
- * kept the pointer for a name no model has). `written` is the document's
+ * kept the pointer for a name no model has) — whether or not the target
+ * is a pointer variant's schema as well, since the entry's value may be
+ * pinned by an inline variant beside that pointer variant. `written` is the document's
  * mapping, `mapping` the one the IR carries; `variants[i]` is built from
  * `members[i]`, and a dispatcher, which holds no variants, passes none.
  */
@@ -5255,6 +5257,15 @@ function deferPointerMappingEntries(
 ): void {
   for (const [value, target] of Object.entries(written)) {
     if (typeof target !== 'string' || (schemaRefTokens(target)?.length ?? 0) < 2) continue;
+    // Whatever else the target names, an inline variant redirected to it is
+    // made the pointer's own reference first (Greptile, #619 review round 3:
+    // one beside a pointer variant of the same schema kept the pointer for
+    // a name).
+    const redirected = redirectedVariantRefs(variants, mapping[value]);
+    for (const ref of redirected) {
+      ref.name = target;
+      markPendingSchemaRef(ref);
+    }
     const schema = schemaRefTarget(target, schemas);
     const index =
       schema === undefined
@@ -5265,16 +5276,7 @@ function deferPointerMappingEntries(
               member.name === null && member.resolved === schema && variant !== undefined && isPendingVariant(variant)
             );
           });
-    if (index >= 0) {
-      deferMappingEntry(mapping, value, variants[index]!);
-      continue;
-    }
-    const redirected = redirectedVariantRefs(variants, mapping[value]);
-    for (const ref of redirected) {
-      ref.name = target;
-      markPendingSchemaRef(ref);
-    }
-    deferMappingEntry(mapping, value, redirected[0] ?? pendingSchemaRef(target));
+    deferMappingEntry(mapping, value, index >= 0 ? variants[index]! : (redirected[0] ?? pendingSchemaRef(target)));
   }
 }
 

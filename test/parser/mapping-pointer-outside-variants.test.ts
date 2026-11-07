@@ -514,6 +514,51 @@ describe('#619', () => {
         expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ShelterDog2' } });
       });
 
+      it('is made the pointer’s own beside a pointer variant of the same schema, as a component and inline', async () => {
+        // Greptile, round 3: `dog` is the pointer variant, `hound` an inline variant, both entries targeting
+        // `Shelter/properties/dog`; the identity match for `hound` must not leave its variant holding the pointer.
+        const inlineHound = {
+          ...animal('hound', openapi),
+          properties: { ...animal('hound', openapi).properties, bark: { type: 'string' } },
+        };
+        const both = {
+          oneOf: [{ $ref: CAT }, { $ref: SHELTER_DOG }, inlineHound],
+          discriminator: { propertyName: 'kind', mapping: { cat: CAT, dog: SHELTER_DOG, hound: SHELTER_DOG } },
+        };
+        const spec = await parseJson(
+          documentWith(
+            openapi,
+            components(openapi, { Pet: both, Home: { type: 'object', properties: { pet: both } } }),
+            {
+              '/pets/{id}': getOp('getPet', '#/components/schemas/Pet'),
+              '/homes/{id}': getOp('getHome', '#/components/schemas/Home'),
+            },
+          ),
+        );
+        const mapping = { cat: 'Cat', dog: 'ShelterDog', hound: 'ShelterDog' };
+        const pet = modelOf(spec, 'Pet');
+        expect(pet?.variants).toEqual([model('Cat'), model('ShelterDog'), model('ShelterDog')]);
+        expect(pet?.discriminator).toEqual({ property: 'kind', mapping });
+        expect(fieldType(spec, 'Home', 'pet')).toEqual({
+          kind: 'union',
+          variants: [model('Cat'), model('ShelterDog'), model('ShelterDog')],
+          compositionKind: 'oneOf',
+          discriminator: { property: 'kind', mapping },
+        });
+        expect(modelNames(spec)).toEqual([
+          'Cat',
+          'Home',
+          'HomePet',
+          'Pet',
+          'PetWithKind',
+          'Shelter',
+          'ShelterDog',
+          'Zoo',
+          'ZooDog',
+        ]);
+        expect(warnings()).toEqual([]);
+      });
+
       it('follows a rename of the pointed schema’s model with the variant', async () => {
         const spec = await parseJson(
           documentWith(openapi, components(openapi, { Pet: redirected(openapi) }), {
