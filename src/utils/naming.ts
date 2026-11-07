@@ -357,18 +357,20 @@ export function normalizeJsExtension(text: string): string {
 }
 
 export function cleanSchemaName(name: string): string {
-  let result = stripBackendPrefixes(stripBackendSuffixes(name));
-  result = stripListItemMarkers(result);
+  return singularizeLeadingWord(stripListItemMarkers(stripBackendPrefixes(stripBackendSuffixes(name))));
+}
 
-  // Singularize the leading PascalCase word
-  const match = result.match(/^([A-Z][a-z]*)/);
-  if (match) {
-    const leadWord = match[1];
-    const singular = singularize(leadWord);
-    if (singular !== leadWord) {
-      result = singular + result.slice(leadWord.length);
-    }
-  }
-
-  return result;
+/**
+ * `name` with its leading PascalCase word singularized (`NotesList` →
+ * `NoteList`, `Pets` → `Pet`): the last step of cleanSchemaName, read on its
+ * own where an id the cleaning only singularized must be told from one it
+ * stripped a marker or a backend word from (resolveContestedOperationIdStems,
+ * #627).
+ */
+export function singularizeLeadingWord(name: string): string {
+  const match = name.match(/^([A-Z][a-z]*)/);
+  if (!match) return name;
+  const leadWord = match[1];
+  const singular = singularize(leadWord);
+  return singular === leadWord ? name : singular + name.slice(leadWord.length);
 }

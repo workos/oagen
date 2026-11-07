@@ -29,6 +29,7 @@ import {
   integerBounds,
   keywordTightened,
   pairVariants,
+  readLimits,
 } from '../../src/differ/constraints.js';
 import {
   classifyConstraintsChange,
@@ -1532,6 +1533,176 @@ describe('#599', () => {
       ]);
       expect(diffModels([pet()], [pet()])).toEqual([]);
     });
+  });
+
+  describe('#659 review round 5 (Greptile, after the wave-two base merge)', () => {
+    const integer = (constraints?: Constraints): TypeRef => ({
+      kind: 'primitive',
+      type: 'integer',
+      ...(constraints ? { constraints } : {}),
+    });
+    const string: TypeRef = { kind: 'primitive', type: 'string' };
+    const site = (type: TypeRef, constraints?: Constraints) => ({ type, ...(constraints ? { constraints } : {}) });
+    const BIG = 9007199254740992; // 2^53: `BIG + 1 === BIG`
+
+    it('reads only the keywords that can constrain the type, so a maxLength on an integer tightens nothing', () => {
+      expect(readLimits({ maxLength: 5, minimum: 1 }, integer())).toEqual({ minimum: 1 });
+      expect(readLimits({ maxLength: 5, minimum: 1 }, string)).toEqual({ maxLength: 5 });
+      expect(readLimits({ maxLength: 5, minItems: 1, pattern: '^a' }, { kind: 'array', items: string })).toEqual({
+        minItems: 1,
+      });
+      expect(readLimits({ maxItems: 5, minProperties: 1 }, { kind: 'map', valueType: string })).toEqual({
+        minProperties: 1,
+      });
+      expect(readLimits({ maxLength: 5 }, { kind: 'primitive', type: 'boolean' })).toEqual({});
+      expect(readLimits({ maxLength: 5, minimum: 1 }, { kind: 'literal', value: 'x' })).toEqual({ maxLength: 5 });
+      expect(readLimits({ maxLength: 5, minimum: 1 }, { kind: 'literal', value: 3 })).toEqual({ minimum: 1 });
+      // A union's by every variant's; a type the differ cannot read admits every keyword.
+      expect(
+        readLimits({ maxLength: 5, minimum: 1, minItems: 2 }, { kind: 'union', variants: [string, integer()] }),
+      ).toEqual({
+        maxLength: 5,
+        minimum: 1,
+      });
+      const unreadable: Array<TypeRef | undefined> = [
+        { kind: 'primitive', type: 'unknown' },
+        { kind: 'model', name: 'Pet' },
+        { kind: 'enum', name: 'Kind' },
+        { kind: 'union', variants: [string, { kind: 'model', name: 'Pet' }] },
+        undefined,
+      ];
+      for (const type of unreadable) {
+        expect(readLimits({ maxLength: 5, minimum: 1 }, type), JSON.stringify(type)).toEqual({
+          maxLength: 5,
+          minimum: 1,
+        });
+      }
+      // Under a nullable wrapper, and with the integer bounds made inclusive after.
+      expect(readLimits({ maxLength: 5, exclusiveMinimum: 0 }, { kind: 'nullable', inner: integer() })).toEqual({
+        minimum: 1,
+      });
+      expect(readLimits(undefined, integer())).toBeUndefined();
+    });
+
+    it('reports a keyword added on a type it cannot constrain as written, but additive', () => {
+      expect(constraintsShift(site(integer(), {}), site(integer(), { maxLength: 5 }))).toEqual({
+        oldConstraints: {},
+        newConstraints: { maxLength: 5 },
+        details: 'maxLength <unset> → 5',
+        tightened: false,
+      });
+      expect(constraintsShift(site(integer(), { maxLength: 5 }), site(integer(), { maxLength: 3 }))).toMatchObject({
+        tightened: false,
+      });
+      expect(constraintsShift(site(string), site(string, { minimum: 1 }))).toMatchObject({ tightened: false });
+      // A keyword that does apply still tightens.
+      expect(constraintsShift(site(integer(), {}), site(integer(), { maximum: 5 }))).toMatchObject({ tightened: true });
+      expect(constraintsShift(site(string), site(string, { maxLength: 5 }))).toMatchObject({ tightened: true });
+      expect(
+        constraintsShift(site({ kind: 'model', name: 'Pet' }), site({ kind: 'model', name: 'Pet' }, { maxLength: 5 })),
+      ).toMatchObject({
+        tightened: true,
+      });
+    });
+
+    it('keeps an exclusive integer bound as written when the neighbor is not a safe integer', () => {
+      expect(integerBounds({ exclusiveMinimum: BIG }, integer())).toEqual({ exclusiveMinimum: BIG });
+      expect(integerBounds({ exclusiveMaximum: -BIG }, integer())).toEqual({ exclusiveMaximum: -BIG });
+      expect(integerBounds({ exclusiveMinimum: BIG - 1 }, integer())).toEqual({ exclusiveMinimum: BIG - 1 });
+      expect(integerBounds({ exclusiveMinimum: BIG - 2 }, integer())).toEqual({ minimum: BIG - 1 });
+      // `2^53 − 1` is exact, so an upper bound at 2^53 is still read; one two above it is not.
+      expect(integerBounds({ exclusiveMaximum: BIG }, integer())).toEqual({ maximum: BIG - 1 });
+      expect(integerBounds({ exclusiveMaximum: BIG + 2 }, integer())).toEqual({ exclusiveMaximum: BIG + 2 });
+      expect(integerBounds({ exclusiveMaximum: BIG - 1 }, integer())).toEqual({ maximum: BIG - 2 });
+      expect(integerBounds({ minimum: BIG, exclusiveMinimum: BIG }, integer())).toEqual({
+        minimum: BIG,
+        exclusiveMinimum: BIG,
+      });
+      // The review's rewrite: the new declaration rejects the value, so it is tightened; the reverse loosened.
+      expect(constraintsShift(site(integer(), { minimum: BIG }), site(integer(), { exclusiveMinimum: BIG }))).toEqual({
+        oldConstraints: { minimum: BIG },
+        newConstraints: { exclusiveMinimum: BIG },
+        details: `minimum ${BIG} → <unset>; exclusiveMinimum <unset> → ${BIG}`,
+        tightened: true,
+      });
+      expect(
+        constraintsShift(site(integer(), { exclusiveMinimum: BIG }), site(integer(), { minimum: BIG })),
+      ).toMatchObject({
+        tightened: false,
+      });
+      expect(
+        constraintsShift(site(integer(), { maximum: -BIG }), site(integer(), { exclusiveMaximum: -BIG })),
+      ).toMatchObject({
+        tightened: true,
+      });
+      // Within the safe range the neighbor is still read.
+      expect(
+        constraintsShift(site(integer(), { exclusiveMinimum: BIG - 2 }), site(integer(), { minimum: BIG - 1 })),
+      ).toMatchObject({
+        tightened: false,
+      });
+    });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`exits 1 for maxLength added to an integer parameter and 2 for a large bound made exclusive (OpenAPI ${openapi})`, async () => {
+        const oas30 = openapi === '3.0.3';
+        const limitDoc = (limit: Record<string, unknown>) =>
+          petsDoc(
+            openapi,
+            { Pet: petWith({}) },
+            { getPet: { parameters: [{ name: 'limit', in: 'query', schema: { type: 'integer', ...limit } }] } },
+          );
+        // (1) A keyword that cannot constrain an integer: reported as written, additive.
+        const report = diffSpecs(await parse('old', limitDoc({})), await parse('new', limitDoc({ maxLength: 5 })));
+        expect(paramChangesOf(report.changes, 'getPet')).toEqual([
+          {
+            kind: 'param-constraints-changed',
+            paramName: 'limit',
+            classification: 'additive',
+            paramLocation: 'query',
+            newConstraints: { maxLength: 5 },
+            details: 'maxLength <unset> → 5',
+          },
+        ]);
+        expect(await exitCodeOf(limitDoc({}), limitDoc({ maxLength: 5 }))).toBe(1);
+        expect(await exitCodeOf(limitDoc({ maxLength: 5 }), limitDoc({}))).toBe(1);
+        expect(await exitCodeOf(limitDoc({ maxLength: 5 }), limitDoc({ maxLength: 3 }))).toBe(1);
+        // A keyword that does: breaking.
+        expect(await exitCodeOf(limitDoc({}), limitDoc({ maximum: 5 }))).toBe(2);
+        // The same `maxLength` on a string parameter is breaking.
+        const stringDoc = (limit: Record<string, unknown>) =>
+          petsDoc(
+            openapi,
+            { Pet: petWith({}) },
+            { getPet: { parameters: [{ name: 'q', in: 'query', schema: { type: 'string', ...limit } }] } },
+          );
+        expect(await exitCodeOf(stringDoc({}), stringDoc({ maxLength: 5 }))).toBe(2);
+        // (2) A bound at 2^53 made exclusive rejects it: breaking; the reverse additive.
+        const exclusiveBig = oas30 ? { minimum: BIG, exclusiveMinimum: true } : { exclusiveMinimum: BIG };
+        expect(
+          paramChangesOf(
+            diffSpecs(await parse('old', limitDoc({ minimum: BIG })), await parse('new', limitDoc(exclusiveBig)))
+              .changes,
+            'getPet',
+          ),
+        ).toEqual([
+          {
+            kind: 'param-constraints-changed',
+            paramName: 'limit',
+            classification: 'breaking',
+            paramLocation: 'query',
+            oldConstraints: { minimum: BIG },
+            newConstraints: { exclusiveMinimum: BIG },
+            details: `minimum ${BIG} → <unset>; exclusiveMinimum <unset> → ${BIG}`,
+          },
+        ]);
+        expect(await exitCodeOf(limitDoc({ minimum: BIG }), limitDoc(exclusiveBig))).toBe(2);
+        expect(await exitCodeOf(limitDoc(exclusiveBig), limitDoc({ minimum: BIG }))).toBe(1);
+        // Within the safe range the rewrite still tightens nothing.
+        const exclusiveSmall = oas30 ? { minimum: BIG - 2, exclusiveMinimum: true } : { exclusiveMinimum: BIG - 2 };
+        expect(await exitCodeOf(limitDoc(exclusiveSmall), limitDoc({ minimum: BIG - 1 }))).toBe(1);
+      });
+    }
   });
 
   describe("#659 Michael's review — an exclusive integer bound and the inclusive one beside it admit the same values", () => {

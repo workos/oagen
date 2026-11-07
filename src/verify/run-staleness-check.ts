@@ -2,7 +2,7 @@ import { getExtractor } from '../compat/extractor-registry.js';
 import { detectStaleSymbols } from '../compat/staleness.js';
 import type { ApiSpec } from '../ir/types.js';
 import type { OperationResolution } from '../ir/operation-hints.js';
-import type { ApiSurface } from '../compat/types.js';
+import type { ApiSurface, OverlayLookup } from '../compat/types.js';
 import type { StalenessCheckResult } from './types.js';
 
 /**
@@ -10,7 +10,9 @@ import type { StalenessCheckResult } from './types.js';
  * longer does (`detectStaleSymbols`), both read as `generate` writes them
  * under the `resolution`'s `mountRules`, `operationHints` and
  * `operationNaming`, so a remounted service and its methods are found stale
- * on the class `generate` wrote them to.
+ * on the class `generate` wrote them to, and under the `overlay` `generate
+ * --api-surface` wrote with (see `manifestOverlay`), so a baseline method the
+ * manifest maps to a dropped operation is found stale under its own name.
  */
 export function runStalenessCheck(
   baseline: ApiSurface,
@@ -18,8 +20,9 @@ export function runStalenessCheck(
   newSpec: ApiSpec,
   lang: string,
   resolution?: OperationResolution,
+  overlay?: Pick<OverlayLookup, 'methodByOperation'>,
 ): StalenessCheckResult {
   const extractor = getExtractor(lang);
-  const violations = detectStaleSymbols(baseline, oldSpec, newSpec, extractor.hints, resolution);
+  const violations = detectStaleSymbols(baseline, oldSpec, newSpec, extractor.hints, resolution, overlay);
   return { violations };
 }

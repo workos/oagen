@@ -113,7 +113,8 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  * JSON Pointer `#/components/schemas/Pet/properties/owner` to that inline
  * field is (#539); and an alias of either — an `allOf` read as its `$ref`
  * member (`PetOwnerAlias: { allOf: [{ $ref: PetOwner }] }`), as the same
- * `allOf` on a field is typed — while an `allOf` that merges a typing
+ * `allOf` on a field is typed, or a bare `$ref` (`PetOwnerAlias: { $ref:
+ * PetOwner }`; #618), at every hop of a chain — while an `allOf` that merges a typing
  * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
  * properties }] }`) is the object its merged fields describe, bare, as it
  * is on a field (`isNullableModelComponentEntry`). Keyed by the component
@@ -316,11 +317,18 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
  * `Enum` (`extractEnum`), and a `$ref` to any resolves to an `EnumRef`,
  * under `nullable` for the wrapper; the same schemas written inline
  * collapse to an inline enum (`schemaToTypeRef`), so the spellings have
- * one shape wherever they appear. A `oneOf` with any other variant — a
- * `$ref`, an object, a number const — is a named union, as before, and so
- * is a `oneOf` of one variant with no `null` variant (OAS 3.0 `nullable:
- * true` beside it declares nothing, as beside any schema without a
- * `type`): the same schema inline is a union of one. The `allOf` and
+ * one shape wherever they appear. The wrapper's OAS 3.0 form — `nullable:
+ * true` beside a `oneOf`/`anyOf` of one variant, since a `null` variant
+ * cannot be written there (`flaggedNullableUnionBranch`: `Color: { oneOf:
+ * [{ type: 'string', enum }], nullable: true }`) — is the same nullable
+ * enum: the flag is read beside a union, where every `$ref` to the
+ * component is nullable as it is for a named union
+ * (`isNullableUnionSchema`), so the two spellings of one document give
+ * one IR and `oagen diff` between them reports nothing (#606 review). A
+ * `oneOf` with any other variant — a `$ref`, an object, a number const —
+ * is a named union, as before, and so is a `oneOf` of one variant with
+ * neither a `null` variant nor the flag: the same schema inline is a
+ * union of one. The `allOf` and
  * wrapper spellings name no enum component, so neither is an alias of one
  * (`isEnumComponentAlias`; #588 review and #606: each was read as an
  * alias, and its enum lifted as `UnknownEnum`).
@@ -377,9 +385,13 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * type: 'null' }] }` and `Color: { oneOf: [{ type: 'string', enum }, {
  * type: 'null' }] }` are the enums `Kind`, `Size` (with its text) and
  * `Color`, each nullable, as the same schemas inline are `nullable<enum>`.
- * A `oneOf` of one variant with no `null` variant is no wrapper — OAS 3.0
- * `nullable: true` beside it declares nothing — and stays the named union
- * of one it was. A component with `properties` beside the `allOf` or the
+ * The OAS 3.0 form of the wrapper, `nullable: true` beside a `oneOf` or
+ * `anyOf` of one variant (`flaggedNullableUnionBranch`), is read the
+ * same way, so `Color: { oneOf: [{ type: 'string', enum }], nullable: true
+ * }` is the nullable enum `Color` in a 3.0.3 document as the `null`
+ * variant makes it in a 3.1.0 one (#606 review). A `oneOf` of one variant
+ * with neither a `null` variant nor the flag is no wrapper and stays the
+ * named union of one it was. A component with `properties` beside the `allOf` or the
  * wrapper is a model, as it is everywhere. Read wherever an enum component
  * is read as a whole: `extractEnum`, the nullability pass of
  * `extractSchemas`, and what a bare `$ref` to it hands a field or
@@ -393,6 +405,33 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * and this reader did not, so `Kind` and `Size` above were aliases of
  * nothing and `UnknownEnum`, `UnknownEnum2` again.
  */
+/**
+ * The one variant of a `oneOf`/`anyOf` written with OAS 3.0 `nullable:
+ * true` beside it and no `null` variant — `Color: { oneOf: [{ type:
+ * 'string', enum }], nullable: true }` — or `undefined`: no union, a union
+ * under an `allOf` that types the schema (`allOfTypesSchema`; one whose
+ * members only annotate or limit it is part of the wrapper, as for
+ * `nullableAxisBranch`, #613), no `nullable: true`, more than one variant,
+ * or a `null` variant (`nullableUnionBranch` reads that wrapper). The OAS 3.0
+ * form of the nullable wrapper `nullableUnionBranch` collapses, since a
+ * `null` variant cannot be written there: beside a `oneOf`/`anyOf` the
+ * flag is read — every `$ref` to the component is nullable, as it is for
+ * a named union (`isNullableUnionSchema`) — unlike beside an `allOf` or
+ * any other schema without a `type`, where it declares nothing. Read
+ * where a component is read as an enum (`enumComponentDeclaration`; #606
+ * review: the 3.1 spelling read as the enum `Color` while this one stayed
+ * a `Color {}` model carrying `ColorVariant1`, so `oagen diff` from the
+ * 3.0.3 document to the 3.1.0 one exited 2). A `oneOf` of one variant
+ * with neither a `null` variant nor the flag is no wrapper: the union of
+ * one it always was, as the same schema inline is.
+ */
+function flaggedNullableUnionBranch(schema: SchemaObject): SchemaObject | undefined {
+  if (schema.nullable !== true || (schema.allOf !== undefined && allOfTypesSchema(schema.allOf))) return undefined;
+  const variants = schema.oneOf ?? schema.anyOf;
+  if (variants === undefined || variants.length !== 1 || isNullSchema(variants[0]!)) return undefined;
+  return variants[0];
+}
+
 export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | undefined {
   // The members on the schema itself — an `enum:` list, or a union of
   // string consts — beside no `allOf`, or one whose members only annotate
@@ -413,19 +452,27 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   // enum }, { type: 'null' }] }` passed as a wrapper that unwrapped to
   // itself, and this reader recursed without end.
   if (schema.$ref || Object.keys(schema.properties ?? {}).length > 0) return undefined;
-  // A nullable wrapper: its one branch (`nullableUnionBranch`), read in
-  // turn with this level's layer on it as `unwrapNullableField` lays a
-  // wrapper's on what it unwraps to — the limits, the text, link, examples
-  // and keys, the `deprecated` in place of the branch's own — one level at
-  // a time, so a nested wrapper is read as a wrapper of its own and its
-  // `default` stands where this level declares none (#606 review); this
-  // level's `default` over the branch's, and its nullability as the enum's.
-  const branch = nullableUnionBranch(schema);
+  // A nullable wrapper — a `null` variant beside one branch, or the OAS
+  // 3.0 form, `nullable: true` beside a union of one variant
+  // (`flaggedNullableUnionBranch`) — read in turn with this level's layer
+  // on it as `unwrapNullableField` lays a wrapper's on what it unwraps to
+  // — the limits, the text, link, examples and keys, the `deprecated` in
+  // place of the branch's own — one level at a time, so a nested wrapper
+  // is read as a wrapper of its own and its `default` stands where this
+  // level declares none (#606 review); this level's `default` over the
+  // branch's, and its nullability as the enum's.
+  const branch = nullableUnionBranch(schema) ?? flaggedNullableUnionBranch(schema);
   if (branch !== undefined) {
+    // This level's layer: its own keys, with an annotating `allOf` member's
+    // where it declares none (`allOfWrapperLayer`), so `{ allOf: [{
+    // description }], oneOf: [{ enum }, { type: 'null' }] }` — or with OAS
+    // 3.0 `nullable: true` in the `null` variant's place — is the nullable
+    // enum `{ description, oneOf: [...] }` is (#613 review).
+    const layer = allOfWrapperLayer(schema);
     const limited = derivedCopy({ ...branch, ...extractConstraints(schema) }, branch);
-    const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, schema), schema));
+    const declaration = enumComponentDeclaration(withWrapperDeprecation(withWrapperDocs(limited, layer), layer));
     if (declaration === undefined) return undefined;
-    return { ...declaration, ...(schema.default === undefined ? {} : { default: schema.default }), nullable: true };
+    return { ...withWrapperLayerDefault(declaration, schema), nullable: true };
   }
   if (!schema.allOf) return undefined;
   if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {
@@ -2550,7 +2597,10 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * the fieldless model it always became and admits nothing but `null`; or
  * an alias of either — an `allOf`
  * `readInlineAllOf` reads as its `$ref` member, alone or beside members
- * that only annotate or limit it (`allOfReadAsMember`), followed through
+ * that only annotate or limit it (`allOfReadAsMember`), or a bare `$ref`
+ * (`PetOwnerAlias: { $ref: PetOwner }`, with or without annotations beside
+ * it; #618, MichaelDeBoey's #646 review: the bare spelling lost the
+ * `null` the `allOf` spelling kept), followed through
  * aliases of aliases as an array or enum component's alias is
  * (`componentEntries`) — since the same `allOf` on a field is typed as the
  * reference, wrapper included. An `allOf` that merges — a typing member
@@ -2572,7 +2622,11 @@ function isNullableModelComponentEntry(
   seen.add(schema);
   if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
   if (isNullSchema(schema) || declaresNull(schema)) return true;
-  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  // A bare `$ref` alias is its reference (#618), so it admits what the
+  // component it names admits, at every hop of a chain, as the `allOf`
+  // alias below does (#646 review).
+  const bare = unwrapNullableSchema(schema);
+  const member = bare.$ref !== undefined ? bare : allOfReadAsMember(bare);
   if (member === undefined) return false;
   if (member.$ref === undefined) return isNullableModelComponentEntry(member, schemas, seen);
   const key = componentKeyOf(member.$ref);
@@ -2895,9 +2949,12 @@ function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
  * carries a typing keyword. A union of bare constraint sets —
  * `anyOf: [{ required: ['k'] }, { maxProperties: 1 }]` beside the schema's
  * own `properties` — does not, as such an `allOf` does not: the schema is typed from its own
- * keywords (the object, with its `k`), and the variants only limit it.
+ * keywords (the object, with its `k`), and the variants only limit it. The
+ * stop-field test reads a declaration's variants by it too
+ * (`endDeclarationFits`), so `total: { type: 'integer', anyOf: [{ maximum:
+ * 100 }, { minimum: 200 }] }` stays the integer its `type` says.
  */
-function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
+export function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
   return variants.some((variant) =>
     TYPING_KEYWORDS.some((key) => (variant as Record<string, unknown>)[key] !== undefined),
   );
@@ -7346,22 +7403,31 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  * excluding `type` (`declaredTypes`: its own, its component's, its own
  * composition's) admits no instance of it, so an `allOf` with such a
  * member leaves no copy at all (`undefined`), as does a `oneOf`/`anyOf`
- * whose every variant is one; a composition some member of which says
- * something about an instance of `type` (`appliesToType`) stays on the
- * copy as written — never trimmed to those members, since the extractor
- * reads the schema's composition whole (a merge, a reference) and a copy
- * reading a composition of its own would reference a model nobody builds
- * (Greptile, #616 review: `allOf: [{ properties: { name } }, { items }]`
- * beside `['array', 'string']` was `array<NoteAuthor>` for an array copy
- * keeping the `items` member alone, while the extractor merged
- * `NoteAuthor { name }`); a composition no member of which says anything
- * about an instance of `type` is left off the copy when the copy is then
- * a bare type — a primitive, an enum, a literal, an object or array
- * declaring no schema of its own (`declaresOwnSchemas`) — and kept
- * otherwise, read as the schema as a whole is read, so `{ type: ['array',
- * 'string'], items, allOf: [{ $ref: Owner }] }` is `Owner | string`, the
- * reference the `allOf` beside the items is, not an array of items no
- * extractor builds. So `Note.author: { type: ['object',
+ * whose every variant is one. On an `object` or `array` copy — one the
+ * extractor builds models for (`buildsModels`), from the schema's
+ * composition read whole as a merge or a reference — a composition some
+ * member of which says something about an instance of `type`
+ * (`appliesToType`) stays as written, never trimmed to those members,
+ * since a copy reading a composition of its own would reference a model
+ * nobody builds (Greptile, #616 review: `allOf: [{ properties: { name } },
+ * { items }]` beside `['array', 'string']` was `array<NoteAuthor>` for an
+ * array copy keeping the `items` member alone, while the extractor merged
+ * `NoteAuthor { name }`); one no member of which says anything about an
+ * instance of `type` is left off when the copy is then a bare type — an
+ * object or array declaring no schema of its own (`declaresOwnSchemas`) —
+ * and kept otherwise, so `{ type: ['array', 'string'], items, allOf: [{
+ * $ref: Owner }] }` is `Owner | string`, the reference the `allOf` beside
+ * the items is, not an array of items no extractor builds. A primitive
+ * copy, which nothing of reaches the extractor, keeps of an `allOf` the
+ * members that say something about its type alone (#616 review): `{ type:
+ * ['object', 'string'], allOf: [{ $ref: Owner }, { minLength: 1 }] }` with
+ * `Owner` untyped is `Owner | string`, the `string` copy keeping `{
+ * minLength: 1 }` and shedding the `$ref` as it does when the keyword sits
+ * beside the list, and `['string', 'integer']` beside the same `allOf` is
+ * `string | integer` — not `Owner` and `Owner | integer`, the `$ref`
+ * typing the `string` copy because a member beside it applied. A
+ * `oneOf`/`anyOf` is kept whole while any variant applies, so the union
+ * it types keeps the shape the document wrote. So `Note.author: { type: ['object',
  * 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string` when `Owner`
  * declares `properties` and no `type` — its `properties` say nothing of a
  * string — and `Owner` alone when `Owner` is `type: 'object'`, which no
@@ -7388,10 +7454,24 @@ function typeListCopy(
     if (members === undefined || members.length === 0) continue;
     const excluding = members.filter((member) => !admitsType(member, type)).length;
     if (keyword === 'allOf' ? excluding > 0 : excluding === members.length) return undefined;
-    // Kept or left off whole, never trimmed to the members that apply.
-    if (!members.some((member) => appliesToType(member, type)) && !declaresOwnSchemas(copy)) delete copy[keyword];
+    const applying = members.filter((member) => appliesToType(member, type));
+    if (keyword === 'allOf' && !buildsModels(type)) {
+      // A primitive copy keeps the members that say something about its
+      // type alone: nothing of it reaches the extractor, so nothing can
+      // disagree with what it builds.
+      if (applying.length === 0) delete copy.allOf;
+      else if (applying.length < members.length) copy.allOf = applying;
+    } else if (applying.length === 0 && !declaresOwnSchemas(copy)) {
+      // Kept or left off whole, never trimmed to the members that apply.
+      delete copy[keyword];
+    }
   }
   return derivedCopy(copy, schema);
+}
+
+/** Whether the extractor builds models for a copy of `type` — an object's, or an array's items — so its composition must stay the one the extractor reads. */
+function buildsModels(type: string): boolean {
+  return type === 'object' || type === 'array';
 }
 
 /** The keywords under which a schema declares schemas of its own — an inline object, items, values — that an extractor builds models for. */
@@ -7412,6 +7492,11 @@ const OWN_SCHEMA_KEYWORDS: readonly string[] = [
  */
 function declaresOwnSchemas(copy: SchemaObject): boolean {
   return OWN_SCHEMA_KEYWORDS.some((keyword) => copy[keyword] !== undefined);
+}
+
+/** Whether `schema`'s `type` is a list naming several types besides `null` — the lists `buildTypeRef` reads as a union of per-type copies (`typeListCopies`; #616). */
+export function namesSeveralTypes(schema: SchemaObject): boolean {
+  return Array.isArray(schema.type) && schema.type.filter((type) => type !== 'null').length > 1;
 }
 
 /**

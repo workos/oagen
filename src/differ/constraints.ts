@@ -1,5 +1,5 @@
 import type { Constraints, TypeRef } from '../ir/types.js';
-import { typeRefConstraints } from '../ir/types.js';
+import { assertNever, typeRefConstraints } from '../ir/types.js';
 import { addedUnionVariants, typeRefsEqual } from './models.js';
 
 /**
@@ -111,10 +111,10 @@ const LOWER_BOUNDS: ReadonlyMap<keyof Constraints, number> = new Map([
  * One level of a site where the limits differ: the path to it (`''` for the
  * site's own, `items.`, `variants[1].items.`), the limits on each side as
  * the document wrote them — what `details` and the sides report — and as
- * the differ reads them for the level's type (`integerBounds`: an integer
- * side's exclusive bounds made inclusive), which is what decides whether
- * the level tightened (`constraintsTightened` reads `minimum` and
- * `exclusiveMinimum` together).
+ * the differ reads them for the level's type (`readLimits`: the keywords
+ * that can constrain the type, an integer side's exclusive bounds made
+ * inclusive), which is what decides whether the level tightened
+ * (`constraintsTightened` reads `minimum` and `exclusiveMinimum` together).
  */
 interface LevelShift {
   path: string;
@@ -124,7 +124,7 @@ interface LevelShift {
   readAfter?: Constraints;
 }
 
-/** A `LevelShift` for two sides written `before` / `after` on types `oldType` / `newType`, each read for its own type. */
+/** A `LevelShift` for two sides written `before` / `after` on types `oldType` / `newType`, each read for its own type (`readLimits`). */
 function levelShift(
   path: string,
   before: Constraints | undefined,
@@ -132,7 +132,7 @@ function levelShift(
   oldType: TypeRef | undefined,
   newType: TypeRef | undefined,
 ): LevelShift {
-  return { path, before, after, readBefore: integerBounds(before, oldType), readAfter: integerBounds(after, newType) };
+  return { path, before, after, readBefore: readLimits(before, oldType), readAfter: readLimits(after, newType) };
 }
 
 /**
@@ -326,32 +326,130 @@ export function keywordTightened(keyword: keyof Constraints, oldValue: unknown, 
  * `exclusiveMinimum: 0` → `minimum: 1`, OpenAPI 3.0's `{ minimum: 0,
  * exclusiveMinimum: true }` → `{ minimum: 1 }` and `maximum: 9` →
  * `exclusiveMaximum: 10` on an integer are reported, since the declaration
- * changed, but tighten nothing (MichaelDeBoey, #659 review). On a number,
- * or a type the differ cannot read as one integer (a union, a model), the
- * bounds are read as written: `0 < x` admits `0.5` and `1 <= x` does not.
+ * changed, but tighten nothing (MichaelDeBoey, #659 review). An exclusive
+ * bound whose neighbor is not a safe integer (at or beyond 2^53) stays as
+ * written, since the neighbor cannot be represented, so `minimum: 2^53` →
+ * `exclusiveMinimum: 2^53` is still tightened. On a number, or a type the
+ * differ cannot read as one integer (a union, a model), the bounds are read
+ * as written: `0 < x` admits `0.5` and `1 <= x` does not.
  */
 export function integerBounds(limits: Constraints | undefined, type: TypeRef | undefined): Constraints | undefined {
   if (!limits || !type) return limits;
   const value = unwrap(type);
   if (value.kind !== 'primitive' || value.type !== 'integer') return limits;
-  const { minimum, maximum, exclusiveMinimum, exclusiveMaximum, ...rest } = limits;
-  const read: Constraints = { ...rest };
-  const lower = defined([
-    minimum === undefined ? undefined : Math.ceil(minimum),
-    exclusiveMinimum === undefined ? undefined : Math.floor(exclusiveMinimum) + 1,
-  ]);
-  const upper = defined([
-    maximum === undefined ? undefined : Math.floor(maximum),
-    exclusiveMaximum === undefined ? undefined : Math.ceil(exclusiveMaximum) - 1,
-  ]);
+  const read: Constraints = { ...limits };
+  // An exclusive bound is the inclusive one beside it only while that
+  // integer is exact: beyond `Number.MAX_SAFE_INTEGER` adding or taking one
+  // rounds back to the bound itself, which would read `minimum: 2^53` and
+  // `exclusiveMinimum: 2^53` as one bound though the second rejects it
+  // (Greptile, #659 review round 5), so such a bound stays as written.
+  const beside = (bound: number | undefined, next: (n: number) => number): number | undefined => {
+    if (bound === undefined) return undefined;
+    const neighbor = next(bound);
+    return Number.isSafeInteger(neighbor) ? neighbor : undefined;
+  };
+  const exclusiveLower = beside(limits.exclusiveMinimum, (n) => Math.floor(n) + 1);
+  const exclusiveUpper = beside(limits.exclusiveMaximum, (n) => Math.ceil(n) - 1);
+  const lower = defined([limits.minimum === undefined ? undefined : Math.ceil(limits.minimum), exclusiveLower]);
+  const upper = defined([limits.maximum === undefined ? undefined : Math.floor(limits.maximum), exclusiveUpper]);
   if (lower.length > 0) read.minimum = Math.max(...lower);
   if (upper.length > 0) read.maximum = Math.min(...upper);
+  if (exclusiveLower !== undefined) delete read.exclusiveMinimum;
+  if (exclusiveUpper !== undefined) delete read.exclusiveMaximum;
   return read;
 }
 
 /** The numbers among `values`. */
 function defined(values: Array<number | undefined>): number[] {
   return values.filter((v): v is number => v !== undefined);
+}
+
+/** The keywords that constrain a string. */
+const STRING_KEYWORDS: ReadonlySet<keyof Constraints> = new Set(['minLength', 'maxLength', 'pattern']);
+/** The keywords that constrain an integer or a number. */
+const NUMERIC_KEYWORDS: ReadonlySet<keyof Constraints> = new Set([
+  'minimum',
+  'maximum',
+  'exclusiveMinimum',
+  'exclusiveMaximum',
+  'multipleOf',
+]);
+/** The keywords that constrain an array. */
+const ARRAY_KEYWORDS: ReadonlySet<keyof Constraints> = new Set([
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+  'minContains',
+  'maxContains',
+]);
+/** The keywords that constrain an object (a map, a model's own schema). */
+const OBJECT_KEYWORDS: ReadonlySet<keyof Constraints> = new Set([
+  'minProperties',
+  'maxProperties',
+  'dependentRequired',
+]);
+/** No keyword constrains a boolean or a `null`. */
+const NO_KEYWORDS: ReadonlySet<keyof Constraints> = new Set();
+
+/**
+ * The keywords that can constrain a value of `type`, by what the type is
+ * under any nullable wrapper — a string's on a `string` primitive or
+ * literal, the numeric ones on an `integer` or `number`, an array's on an
+ * `array`, an object's on a `map`, none on a `boolean`, a union's by every
+ * variant's — or `undefined` when any keyword may: an `unknown` primitive,
+ * a model or enum reference (the site's own keywords written beside a
+ * `$ref`, whose target the differ does not read here), a union with such a
+ * variant, or no type at all (a model's own keywords, a hand-built site).
+ */
+function applicableKeywords(type: TypeRef | undefined): ReadonlySet<keyof Constraints> | undefined {
+  if (!type) return undefined;
+  const value = unwrap(type);
+  switch (value.kind) {
+    case 'primitive':
+      if (value.type === 'string') return STRING_KEYWORDS;
+      if (value.type === 'integer' || value.type === 'number') return NUMERIC_KEYWORDS;
+      if (value.type === 'boolean') return NO_KEYWORDS;
+      return undefined;
+    case 'literal':
+      if (typeof value.value === 'string') return STRING_KEYWORDS;
+      if (typeof value.value === 'number') return NUMERIC_KEYWORDS;
+      return NO_KEYWORDS;
+    case 'array':
+      return ARRAY_KEYWORDS;
+    case 'map':
+      return OBJECT_KEYWORDS;
+    case 'union': {
+      const sets = value.variants.map(applicableKeywords);
+      if (sets.some((set) => set === undefined)) return undefined;
+      return new Set(sets.flatMap((set) => [...(set ?? [])]));
+    }
+    case 'model':
+    case 'enum':
+    case 'nullable':
+      return undefined;
+  }
+  return assertNever(value);
+}
+
+/**
+ * `limits` as the differ reads them for a value of `type`, for the
+ * tightened judgement alone (`details` and the sides still carry the
+ * keywords as the document wrote them): only the keywords that can
+ * constrain the type (`applicableKeywords`) — a `maxLength` written on an
+ * integer, legal in OpenAPI 3.1 and kept by the parser, rejects no integer,
+ * so adding one is reported but tightens nothing (Greptile, #659 review
+ * round 5) — and, on an integer, the exclusive bounds read as the
+ * inclusive ones beside them (`integerBounds`).
+ */
+export function readLimits(limits: Constraints | undefined, type: TypeRef | undefined): Constraints | undefined {
+  if (!limits) return undefined;
+  const keep = applicableKeywords(type);
+  const applicable = keep
+    ? (Object.fromEntries(
+        Object.entries(limits).filter(([keyword]) => keep.has(keyword as keyof Constraints)),
+      ) as Constraints)
+    : limits;
+  return integerBounds(applicable, type);
 }
 
 /** A numeric bound as it admits a value: `exclusive` when the value itself is rejected. */
