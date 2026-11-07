@@ -5848,6 +5848,34 @@ function pinnedDeclarationHops(
 }
 
 /**
+ * The levels a pinned declaration documents itself from, nearest first:
+ * each hop `pinnedDeclarationValue` reads it through
+ * (`pinnedDeclarationHops`) — the declaration, then what a `$ref`, a
+ * nullable wrapper or an `allOf` read as one member leads to — each
+ * followed by the `allOf` members that only annotate it
+ * (`annotatingAllOfMembers`), as `buildFieldFromSchema` reads a field's
+ * levels and the entries a reference passes — an enum component a `$ref`
+ * reaches excluded, since it keeps its own text, flag, default, limits and
+ * keys on the `Enum`, as for a field naming it (see Aliases in
+ * `ir-types.md`), while an alias on the way and a const component, which
+ * a field carries as a primitive component's, are levels. The declaration
+ * alone for a chain that repeats. Read by the request-body fold for the
+ * settings the discriminator it rebuilds carries (`levelSettings`; #607
+ * review).
+ */
+export function pinnedDeclarationLayers(
+  declaration: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): SchemaObject[] {
+  const hops = pinnedDeclarationHops(declaration, schemas) ?? [declaration];
+  return hops.flatMap((hop, index) => {
+    const reachedByRef = index > 0 && hops[index - 1]!.$ref !== undefined;
+    if (reachedByRef && enumComponentDeclaration(hop) !== undefined) return [];
+    return [hop, ...annotatingAllOfMembers(hop)];
+  });
+}
+
+/**
  * The schema a wrapper reads as, by the type builder's rule: a nullable
  * wrapper's one variant (`unwrapNullableSchema`, which also strips a
  * `null` type-list entry or `nullable: true` to a copy), else the member

@@ -3769,9 +3769,11 @@ const LIFTED_LIMIT_KEYWORDS: readonly string[] = [
  * `unionOfDeclarations` lifts onto a combined declaration when every
  * declaration agrees on them, and which therefore make no shape of their
  * own there, at a declaration's top level or inside its array items and
- * map values (`withoutLiftedKeywords`).
+ * map values (`withoutLiftedKeywords`); the request-body fold carries the
+ * same keywords onto the discriminator it rebuilds, by the same agreement
+ * (`flattenDiscriminatedUnionBody`, through `levelSettings`).
  */
-const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'readOnly',
   'writeOnly',
   'deprecated',
@@ -3783,6 +3785,37 @@ const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   ...LIFTED_LIMIT_KEYWORDS,
 ];
 const LIFTED_DECLARATION_KEYWORD_SET: ReadonlySet<string> = new Set(LIFTED_DECLARATION_KEYWORDS);
+
+/**
+ * The lifted keywords (`LIFTED_DECLARATION_KEYWORDS`) and `x-*` keys a
+ * field reads off `levels`, nearest first, as `buildFieldFromSchema` reads
+ * a declaration's levels — its schema and the `allOf` members that only
+ * annotate it, then what a `$ref` reaches — folded into one declaration:
+ * `readOnly`, `writeOnly` and `deprecated` are set when any level says so,
+ * every other keyword and key as the nearest level that declares it
+ * writes it. So declarations read through different wrappers can be
+ * compared by `agreedDeclarationKeys` and `agreedExtensions` as written
+ * ones are: the request-body fold reads each variant's discriminator
+ * declaration this way (`pinnedDeclarationLayers`) and carries onto the
+ * discriminator it rebuilds the settings every variant agrees on (#607
+ * review: only `description` was carried, so two variants both writing
+ * `kind: { allOf: [{ const }], readOnly: true }` folded to a `kind` that
+ * was not read-only, where unfolded each variant's own field was).
+ */
+export function levelSettings(levels: readonly SchemaObject[]): SchemaObject {
+  const settings: Record<string, unknown> = {};
+  for (const level of levels) {
+    for (const [key, value] of Object.entries(level)) {
+      if (value === undefined) continue;
+      if (key === 'readOnly' || key === 'writeOnly' || key === 'deprecated') {
+        if (value === true) settings[key] = true;
+      } else if ((LIFTED_DECLARATION_KEYWORD_SET.has(key) || key.startsWith('x-')) && !Object.hasOwn(settings, key)) {
+        settings[key] = value;
+      }
+    }
+  }
+  return settings as SchemaObject;
+}
 
 /**
  * The keywords under which a declaration nests the one schema its array

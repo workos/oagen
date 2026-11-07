@@ -567,6 +567,104 @@ describe('#607', () => {
       );
     });
 
+    it("carries onto the folded discriminator the settings every variant's declaration agrees on, read off its levels", async () => {
+      const inline = (kind: Doc, extra: Record<string, Doc>): Doc => ({
+        type: 'object',
+        required: ['kind'],
+        properties: { kind, ...extra },
+      });
+      const document = (kinds: [Doc, Doc], schemas: Record<string, Doc> = {}): Doc =>
+        doc(openapi, schemas, {
+          '/notes': {
+            post: {
+              operationId: 'createNote',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      oneOf: [
+                        inline(kinds[0], { address: { type: 'string' } }),
+                        inline(kinds[1], { number: { type: 'string' } }),
+                      ],
+                      discriminator: { propertyName: 'kind' },
+                    },
+                  },
+                },
+              },
+              responses: { '204': { description: 'OK' } },
+            },
+          },
+        });
+      /** The folded body's `kind` field. */
+      const kindOf = async (kinds: [Doc, Doc], schemas: Record<string, Doc>, label: string) => {
+        const spec = await parseJson(document(kinds, schemas));
+        const [op] = spec.services.flatMap((service) => service.operations);
+        expect(op?.requestBody, label).toEqual({ kind: 'model', name: 'CreateNoteRequest' });
+        const field = model(spec, 'CreateNoteRequest').fields.find(({ name }) => name === 'kind');
+        expect(field, label).toBeDefined();
+        return field!;
+      };
+      const settings: Doc = { readOnly: true, deprecated: true, description: 'The kind.', 'x-note': 1 };
+      const carried = {
+        required: true,
+        readOnly: true,
+        deprecated: true,
+        description: 'The kind.',
+        extensions: { 'x-note': 1 },
+      };
+      // The flag, text and key every variant writes — on the wrapper, as
+      // written, or on an annotating member — are the folded field's, as
+      // they are each variant's own field's when the body is not folded
+      // (Greptile review of #656: `description` alone was carried, so the
+      // read-only flag was dropped and the field landed in request examples).
+      const agreeing: Array<[string, [Doc, Doc]]> = [
+        [
+          'on the wrapper',
+          [
+            { allOf: [c('email')], ...settings },
+            { allOf: [c('sms')], ...settings },
+          ],
+        ],
+        [
+          'as written',
+          [
+            { ...c('email'), ...settings },
+            { ...c('sms'), ...settings },
+          ],
+        ],
+        ['on an annotating member', [{ allOf: [c('email'), settings] }, { allOf: [c('sms'), settings] }]],
+      ];
+      for (const [label, kinds] of agreeing) expect(await kindOf(kinds, {}, label), label).toMatchObject(carried);
+      // Through a `$ref`: a const component's keys are the field's, as a
+      // primitive component's are (OAS 3.1); an enum component's stay on the
+      // `Enum` (OAS 3.0, where a one-value `enum:` component is one), as for
+      // a field naming it.
+      const viaRef = await kindOf(
+        [ref('EmailKind'), ref('SmsKind')],
+        { EmailKind: { ...c('email'), ...settings }, SmsKind: { ...c('sms'), ...settings } },
+        'through a $ref',
+      );
+      if (openapi === '3.1.0') {
+        expect(viaRef).toMatchObject(carried);
+      } else {
+        expect(viaRef).toMatchObject({ required: true });
+        expect(viaRef.readOnly).toBeUndefined();
+        expect(viaRef.deprecated).toBeUndefined();
+        expect(viaRef.description).toBeUndefined();
+        expect(viaRef.extensions).toBeUndefined();
+      }
+      // A setting one variant alone writes is nobody's.
+      const disagreeing = await kindOf(
+        [{ allOf: [c('email')], readOnly: true, description: 'Email.', 'x-note': 1 }, { allOf: [c('sms')] }],
+        {},
+        'disagreeing',
+      );
+      expect(disagreeing).toMatchObject({ required: true });
+      expect(disagreeing.readOnly).toBeUndefined();
+      expect(disagreeing.description).toBeUndefined();
+      expect(disagreeing.extensions).toBeUndefined();
+    });
+
     it("keeps null on the folded discriminator when a variant's declaration admits it, in every spelling", async () => {
       const inline = (kind: Doc, extra: Record<string, Doc>): Doc => ({
         type: 'object',
