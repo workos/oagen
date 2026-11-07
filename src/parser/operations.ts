@@ -66,6 +66,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  pinnedDeclarationValue,
   rehearse,
   unwrapCollapsedWrappers,
   unwrapNullableField,
@@ -4621,7 +4622,7 @@ function typePickedRequestBody(
   // fold it into that object and let the normal object path below emit
   // ergonomic, spread-able arguments. See flattenDiscriminatedUnionBody.
   if (schema.oneOf && schema.discriminator) {
-    const merged = flattenDiscriminatedUnionBody(schema);
+    const merged = flattenDiscriminatedUnionBody(schema, componentSchemas);
     if (merged) schema = merged;
   }
 
@@ -4840,10 +4841,22 @@ function typePickedRequestBody(
  * Returns null — leaving the union intact — unless the body is a clean
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
- * merged. Gating on an *explicit* `discriminator` keeps undiscriminated `oneOf`
+ * merged. The pin is read as a union's discriminator reads one
+ * (`pinnedDeclarationValue`): a `const` or one-value `enum:` as written,
+ * or behind a nullable wrapper, an `allOf` read as one member, or — with
+ * `componentSchemas` — a `$ref` to a component pinning one value or an
+ * alias of one, so `kind: { allOf: [{ const: 'email' }] }` folds as `kind:
+ * { const: 'email' }` does (#607: the declaration was read as written, and
+ * the body stayed an opaque union of variants named from their content).
+ * The declaration as written still documents its value — its own
+ * `description` and `deprecated`, the wrapper's for a wrapped const.
+ * Gating on an *explicit* `discriminator` keeps undiscriminated `oneOf`
  * bodies untouched.
  */
-function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | null {
+function flattenDiscriminatedUnionBody(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | null {
   const discProp = schema.discriminator?.propertyName;
   if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
 
@@ -4859,13 +4872,8 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
       return null;
     }
     const dp = variant.properties[discProp] as SchemaObject | undefined;
-    const constVal =
-      typeof dp?.const === 'string'
-        ? dp.const
-        : Array.isArray(dp?.enum) && dp.enum.length === 1 && typeof dp.enum[0] === 'string'
-          ? dp.enum[0]
-          : undefined;
-    if (constVal === undefined) return null;
+    const constVal = dp ? pinnedDeclarationValue(dp, componentSchemas) : null;
+    if (constVal === null) return null;
     const pinning = pins.get(constVal);
     if (pinning) pinning.push(dp!);
     else pins.set(constVal, [dp!]);
@@ -6183,7 +6191,9 @@ function prefixSpellings(prefix: string): string[] {
  * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
  * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
  * (nameOneOfVariant, nameVariantModel). Every string const or single-value
- * enum of every inline object variant is collected, top level and nested — a
+ * enum of every inline object variant is collected (`constStringOf`: as
+ * written, or behind a nullable wrapper or an `allOf` read as one member,
+ * as the naming reads it; #607), top level and nested — a
  * superset of whichever property each of those picks as the discriminator, so
  * the reservation can never be narrower than the naming. `$ref` targets are
  * components with names of their own and are not followed. A request body
@@ -6250,14 +6260,17 @@ function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>
   }
 }
 
-/** A property's pinned string value: a string `const`, or a single-value string `enum`. */
+/**
+ * A property's pinned string value, read as the naming reads an inline
+ * variant's own property (`pinnedDeclarationValue` without the component
+ * map, the reading `getConstPropertyValue` makes): a string `const` or a
+ * single-value string `enum`, written on the property or behind a nullable
+ * wrapper or an `allOf` read as one member (`kind: { allOf: [{ const:
+ * 'email' }] }`; #607), so the reservation reads every const the naming
+ * reads. A `$ref` on the property is followed by neither.
+ */
 function constStringOf(property: SchemaObject | undefined): string | null {
-  if (!property) return null;
-  if (typeof property.const === 'string') return property.const;
-  if (Array.isArray(property.enum) && property.enum.length === 1 && typeof property.enum[0] === 'string') {
-    return property.enum[0];
-  }
-  return null;
+  return property ? pinnedDeclarationValue(property) : null;
 }
 
 function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {

@@ -1135,12 +1135,21 @@ export interface UnionType {
    * members, a `$ref` member followed to the component it names, and
    * through a `$ref` on the property to a component pinning one value
    * (`Cat: { allOf: [{ $ref: CatBase }, …] }` pins what `CatBase` pins;
-   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — a
+   * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — the
+   * declaration read as the type builder reads it, at every hop: a `$ref`
+   * to its component, a nullable wrapper to its one variant, an `allOf`
+   * read as one member to that member, then the `const` or one-value
+   * `enum:` written there, so `kind: { allOf: [{ const: 'cat' }] }`,
+   * `kind: { allOf: [{ $ref: HamsterKind }], description }` and a `$ref`
+   * to `RabbitKind: { allOf: [{ $ref: RabbitConst }] }` pin as `kind: {
+   * const: … }` does, in OAS 3.0 and 3.1 alike (#607) — a
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
    * does as a component.
-   * A request body's union carries only the spec's own mapping.
+   * A request body's union carries only the spec's own mapping; a body
+   * that is a `oneOf` of inline objects under the keyword, each pinning the
+   * property by the same reading, is folded into one object instead.
    */
   discriminator?: { property: string; mapping: Record<string, string> };
   /** Which OAS composition keyword produced this union. Emitters can use this to
@@ -1302,8 +1311,13 @@ export interface Model {
    * field is the discriminator key (e.g. "event"), and `mapping` maps each
    * discriminator value to the concrete variant model name (an IR model
    * name, after `schemaNameTransform`): an inline variant's model, built
-   * for it, or a `$ref` variant's component (`{ cat: "Cat", dog: "Dog" }`),
-   * which stands for it (#398).
+   * for it and named from the const it pins (`PetCat`), or a `$ref`
+   * variant's component (`{ cat: "Cat", dog: "Dog" }`), which stands for
+   * it (#398). The const is read as `UnionType.discriminator` reads one —
+   * through a `$ref`, a nullable wrapper and an `allOf` read as one member,
+   * at every hop — for the value and the variant's name alike, so `kind:
+   * { allOf: [{ const: 'cat' }] }` dispatches to `PetCat` as `kind: {
+   * const: 'cat' }` does (#607).
    */
   discriminator?: {
     property: string;

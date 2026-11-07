@@ -3449,15 +3449,28 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
+ * read as the declaration pins it (`pinnedDeclarationValue`): as written,
+ * or behind the wrappers the type builder reads the declaration through —
+ * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
+ * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
  * through `allOf` wrappers too).
  */
-function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
+function getConstPropertyValue(
+  schema: SchemaObject,
+  property: string,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
   const prop = schema.properties?.[property];
-  return prop ? pinnedStringValue(prop) : null;
+  return prop ? pinnedDeclarationValue(prop, schemas) : null;
 }
 
-/** The one string a schema pins as written — a string `const`, or an `enum:` of exactly one string; null otherwise. */
+/**
+ * The one string a schema pins as written — a string `const`, or an `enum:`
+ * of exactly one string; null otherwise. The leaf `pinnedDeclarationValue`
+ * reads once every wrapper is read through; no other site reads a
+ * declaration as written.
+ */
 function pinnedStringValue(schema: SchemaObject): string | null {
   if (typeof schema.const === 'string') return schema.const;
   if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
@@ -5324,8 +5337,9 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * member read before the variant's own `kind: { const: 'cat' }` (`Cat: {
  * allOf: [{ $ref: Base }, { properties: { kind } }] }`) leaves the variant
  * pinned, in either member order, as it was when the `$ref` member was not
- * followed (#590 review). A pin behind a `$ref` on the declaration counts
- * (`pinnedDeclarationValue`).
+ * followed (#590 review). A pin behind a `$ref`, a nullable wrapper or an
+ * `allOf` read as one member on the declaration counts
+ * (`pinnedDeclarationValue`; #607).
  */
 function getEffectiveProperties(
   schema: SchemaObject,
@@ -5365,37 +5379,85 @@ function getEffectiveProperties(
  * The string const `schema` pins `property` to: in its own `properties`
  * (`getConstPropertyValue`), else through its `allOf` wrappers
  * (`getEffectiveProperties`, a `$ref` member followed to its component when
- * `schemas` is handed in). The declaration found may itself be a `$ref` to
- * a component pinning one value — `kind: { $ref: HamsterKind }` with
+ * `schemas` is handed in). The declaration found — the own one too — is
+ * read as the type builder reads it (`pinnedDeclarationValue`): a `$ref`
+ * to a component pinning one value — `kind: { $ref: HamsterKind }` with
  * `HamsterKind: { const: 'hamster' }`, or `{ enum: ['hamster'] }` in OAS
- * 3.0 — or to an alias chain ending in one; it is followed with the map
- * (#568 review), a chain that repeats pinning nothing. Null when the
- * property is undeclared or pins no one string (an enum of several values,
- * a plain `type: string`).
+ * 3.0 — or to an alias chain ending in one is followed with the map (#568
+ * review), a nullable wrapper and an `allOf` read as one member are read
+ * through at every hop (`kind: { allOf: [{ const: 'cat' }] }`; #607), and
+ * a chain that repeats pins nothing. Null when the property is undeclared
+ * or pins no one string (an enum of several values, a plain `type:
+ * string`).
  */
 function getEffectiveConstPropertyValue(
   schema: SchemaObject,
   property: string,
   schemas?: Record<string, SchemaObject>,
 ): string | null {
-  const direct = getConstPropertyValue(schema, property);
+  const direct = getConstPropertyValue(schema, property, schemas);
   if (direct !== null) return direct;
   const effective = getEffectiveProperties(schema, schemas)[property];
   return effective ? pinnedDeclarationValue(effective, schemas) : null;
 }
 
 /**
- * The one string a property declaration pins, as written (`pinnedStringValue`)
- * or through a `$ref` to a component pinning one value, or an alias chain
- * ending in one, when `schemas` is handed in (`followMemberRefs`; a chain
- * that repeats pins nothing); null otherwise.
+ * The one string a property declaration pins, read as the type builder
+ * reads the declaration (`schemaToTypeRef`): through every wrapper that
+ * reads as what it wraps, at every hop, in the builder's order — a `$ref`
+ * to its component, followed when `schemas` is handed in
+ * (`schemaRefTarget`; without the map a `$ref` declares nothing beyond
+ * what is written beside it, as a `$ref` member of an `allOf` declares
+ * nothing without it); a nullable wrapper of any spelling to its one
+ * variant (`unwrapNullableSchema`); an `allOf` read as one member
+ * (`allOfReadAsMember`: a lone member, one typing member beside members
+ * that only annotate or limit it, or a lone `$ref` member beside such
+ * members) to that member — then the `const` or one-value `enum:` written
+ * on what it lands on (`pinnedStringValue`). So `kind: { allOf: [{ const:
+ * 'cat' }] }`, `kind: { allOf: [{ $ref: HamsterKind }], description: 'The
+ * kind of pet.' }` with `HamsterKind: { const: 'hamster' }`, and `kind: {
+ * $ref: RabbitKind }` with `RabbitKind: { allOf: [{ $ref: RabbitConst }] }`
+ * and `RabbitConst: { const: 'rabbit' }` pin `cat`, `hamster` and `rabbit`
+ * — the literal each model's `kind` field carries — in OAS 3.0 (`enum:
+ * ['cat']`) and 3.1 alike (#607: the bare `$ref` chain alone was followed
+ * and what it landed on read as written, so each pinned nothing and the
+ * union mapped `{}`). Null for a declaration that pins no one string — a
+ * plain type, an enum of several values, an `allOf` of two typing members
+ * (`{ allOf: [{ const: 'cat' }, { const: 'dog' }] }`, which the type
+ * builder reads as neither, so it pins nothing even when the two agree) —
+ * and for a chain that repeats: every schema read is recorded by identity,
+ * and a hop that reaches one again pins nothing. The one reading of a
+ * pinned value, shared by `getConstPropertyValue` (an inline variant's own
+ * property, which the naming reads without the map), by
+ * `getEffectiveProperties`, and by the const-prefix reservation
+ * (`collectOperationConstPrefixes`), so no two sites read a declaration
+ * differently.
  */
-function pinnedDeclarationValue(
+export function pinnedDeclarationValue(
   declaration: SchemaObject,
-  schemas: Record<string, SchemaObject> | undefined,
+  schemas?: Record<string, SchemaObject>,
 ): string | null {
-  const target = followMemberRefs(declaration, schemas, new Set());
-  return target ? pinnedStringValue(target) : null;
+  const seen = new Set<SchemaObject>();
+  let current = declaration;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const next = current.$ref !== undefined ? schemaRefTarget(current.$ref, schemas) : readAsWrapped(current);
+    if (next === undefined) return pinnedStringValue(current);
+    current = next;
+  }
+  return null;
+}
+
+/**
+ * The schema a wrapper reads as, by the type builder's rule: a nullable
+ * wrapper's one variant (`unwrapNullableSchema`, which also strips a
+ * `null` type-list entry or `nullable: true` to a copy), else the member
+ * an `allOf` is read as (`allOfReadAsMember`); `undefined` for a schema
+ * that wraps nothing, which is then read as written.
+ */
+function readAsWrapped(schema: SchemaObject): SchemaObject | undefined {
+  const bare = unwrapNullableSchema(schema);
+  return bare !== schema ? bare : allOfReadAsMember(schema);
 }
 
 /**
@@ -5958,8 +6020,15 @@ function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
  * them and a `$ref` to a const schema, as the dispatcher detection reads
  * it (`detectAllOfVariantDiscriminator`, `getEffectiveProperties`), so a
  * variant named by an inherited tag dispatches as one tagged directly does
- * (#398 review round 3). Every reader of a variant's name hands the map in,
- * so detection, the variant plan and the builder settle on one name.
+ * (#398 review round 3) — and the declaration found is read as the
+ * detection reads it (`pinnedDeclarationValue`), through a nullable
+ * wrapper and an `allOf` read as one member, so a variant pinning `kind:
+ * { allOf: [{ const: 'cat' }] }` is `<component>Cat` as one pinning `kind:
+ * { const: 'cat' }` is (#607: the declaration was read as written, so the
+ * variant was named as the component, and the detection — which had read
+ * the value through the wrapper — rejected the clash and flattened the
+ * union). Every reader of a variant's name hands the map in, so detection,
+ * the variant plan and the builder settle on one name.
  */
 function deriveDiscriminatedVariantName(
   schema: SchemaObject,
@@ -5974,12 +6043,7 @@ function deriveDiscriminatedVariantName(
 
   const pickConst = (name: string): string | null => {
     const field = effective[name];
-    if (!field) return null;
-    if (typeof field.const === 'string') return field.const;
-    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
-      return field.enum[0];
-    }
-    return null;
+    return field ? pinnedDeclarationValue(field, schemas) : null;
   };
 
   let constValue: string | null = null;
