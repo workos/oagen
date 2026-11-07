@@ -447,14 +447,27 @@ const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'examples',
   'extensions',
 ]);
-/** Model properties outside its shape: the name, its documentation (description, link, extensions), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set([
-  'name',
-  'description',
-  'externalDocs',
-  'extensions',
-  'fields',
-]);
+/** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold reads from the copy it keeps (`takeModelDocumentation`). */
+const MODEL_DOC_KEYS = ['description', 'externalDocs', 'extensions'] as const satisfies readonly (keyof Model)[];
+/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'fields']);
+
+/**
+ * Give `into` the documentation of `from` — every `MODEL_DOC_KEYS` property,
+ * one `from` lacks removed — leaving its name, fields, flag, structure and
+ * references as they are. What the within-operation merge does to the kept
+ * definition when a later copy identical but for the model's own
+ * `deprecated` is live (`extractResponses`, #630): the shared model is then
+ * documented as that live copy is, as the merge passes keep a live copy's
+ * definition whole across operations (`settleSharedNames`), so a description
+ * written for the deprecated copy never documents a model that is not.
+ */
+export function takeModelDocumentation(into: Model, from: Model): void {
+  for (const key of MODEL_DOC_KEYS) {
+    if (from[key] === undefined) delete into[key];
+    else Object.assign(into, { [key]: from[key] });
+  }
+}
 /** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readModelName`. */
 const MODEL_STRUCTURE_KEYS: ReadonlySet<string> = new Set(['variants', 'compositionKind', 'discriminator']);
 /** Model properties outside `modelPropertiesKey`: the identity, the fields and the union structure, each read on its own. */

@@ -16,9 +16,10 @@ import type { ApiSpec, Operation } from '../../src/ir/types.js';
  * `202` body identical to a deprecated `200` body was typed as the
  * deprecated `Pet`, under a "different fields" warning, and `oagen diff`
  * reported the flag flip. The within-operation merge now reads the model's
- * own flag apart, as the merge passes do across operations: the live
- * definition is kept whichever status code declares it, silently, so
- * deprecating one of two identical copies leaves no trace in the IR.
+ * own flag apart, as the merge passes do across operations: the kept
+ * definition — the primary's, its references with it — stays, goes live
+ * while any copy is, and is documented as the first live copy is, silently,
+ * so deprecating one of two identical copies leaves no trace in the IR.
  */
 
 /** The issue's inline body: `{ object: 'pet', name? }`, flagged when `deprecated`, with `extra` properties. */
@@ -138,7 +139,7 @@ describe('#630', () => {
       expect(warnings()).toEqual([]);
     });
 
-    it('keeps the live definition whichever status code declares it, and whichever is declared first', async () => {
+    it('keeps `Pet` live whichever status code declares the live copy, and whichever is declared first', async () => {
       for (const flags of [
         { 200: true, 202: false },
         { 200: false, 202: true },
@@ -256,6 +257,129 @@ describe('#630', () => {
       expect(modelNames(fewer)).toEqual(['Pet']);
       expect(spec_fields(fewer, 'Pet')).toEqual(['object', 'name', 'age']);
       expect(warnings()).toEqual([differentFields(202, 200)]);
+    });
+
+    it('documents the live `Pet` as the first live copy is: `description`, `externalDocs` and extensions come from it, as across operations', async () => {
+      // Michael's finding 1 on #647: the live `Pet` kept the deprecated
+      // `200`'s `description` (`Old pet.`), where the merge passes keep a
+      // live copy's definition whole across operations.
+      const ext = { url: 'https://example.com/pets', description: 'Pets guide' };
+      const withDocs = (deprecated: boolean, docs: Record<string, unknown>) => ({ ...pet(deprecated), ...docs });
+      const docsOf = (spec: ApiSpec) => {
+        const { description, externalDocs, extensions } = spec.models.find(({ name }) => name === 'Pet')!;
+        return { description, externalDocs, extensions };
+      };
+      const legacyPet = (schema: Record<string, unknown>) => ({
+        '/legacy-pets/{id}': {
+          get: {
+            operationId: 'getLegacyPet',
+            parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+            responses: responses([[200, schema]]),
+          },
+        },
+      });
+
+      // Michael's `repro.json`: the deprecated 200 described `Old pet.`, the live 202 `A pet.`.
+      const repro = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, withDocs(true, { description: 'Old pet.' })],
+            [202, withDocs(false, { description: 'A pet.' })],
+          ]),
+        ),
+        'repro',
+      );
+      expect(modelNames(repro)).toEqual(['Pet']);
+      expect(docsOf(repro)).toEqual({ description: 'A pet.', externalDocs: undefined, extensions: undefined });
+
+      // The live 202 carries `description`, `externalDocs` and an extension while the deprecated 200 carries
+      // none: `Pet` carries all three, exactly as the 202's body parsed alone does.
+      const documented = withDocs(false, { description: 'A pet.', externalDocs: ext, 'x-kind': 'pet' });
+      const alone = await parseJson(documentWith(openapi, getPet([[202, documented]])), 'alone');
+      const live202 = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, pet(true)],
+            [202, documented],
+          ]),
+        ),
+        'live-202',
+      );
+      expect(docsOf(alone).extensions).toBeDefined();
+      expect(docsOf(live202)).toEqual(docsOf(alone));
+      expect(docsOf(live202)).toMatchObject({ description: 'A pet.', externalDocs: ext });
+
+      // The deprecated 200 carries `description` and `externalDocs` while the live 202 carries none:
+      // `Pet` carries neither, as it does across operations, so the deprecated copy's text never
+      // documents a live model.
+      const bare202 = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, withDocs(true, { description: 'Old pet.', externalDocs: ext })],
+            [202, pet(false)],
+          ]),
+        ),
+        'bare-202',
+      );
+      expect(modelNames(bare202)).toEqual(['Pet']);
+      expect(docsOf(bare202)).toEqual({ description: undefined, externalDocs: undefined, extensions: undefined });
+
+      // A live primary keeps its own documentation; a deprecated later copy's is never read.
+      const live200 = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, withDocs(false, { description: 'A pet.' })],
+            [202, withDocs(true, { description: 'Old pet.', externalDocs: ext })],
+          ]),
+        ),
+        'live-200',
+      );
+      expect(docsOf(live200)).toEqual({ description: 'A pet.', externalDocs: undefined, extensions: undefined });
+
+      // Several live copies: the first in status order documents the model (the 201's text, not the
+      // 202's `externalDocs`), as `preferredDefinition` keeps one copy whole across operations.
+      const three = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, withDocs(true, { description: 'Old pet.' })],
+            [201, withDocs(false, { description: 'A pet.' })],
+            [202, withDocs(false, { description: 'B pet.', externalDocs: ext })],
+          ]),
+        ),
+        'three',
+      );
+      expect(docsOf(three)).toEqual({ description: 'A pet.', externalDocs: undefined, extensions: undefined });
+
+      // Both deprecated: the primary's documentation, as before.
+      const both = await parseJson(
+        documentWith(
+          openapi,
+          getPet([
+            [200, withDocs(true, { description: 'Old pet.' })],
+            [202, withDocs(true, { description: 'Older pet.' })],
+          ]),
+        ),
+        'both',
+      );
+      expect(modelNames(both)).toEqual(['Pet (deprecated)']);
+      expect(docsOf(both)).toEqual({ description: 'Old pet.', externalDocs: undefined, extensions: undefined });
+      expect(warnings()).toEqual([]);
+
+      // The cross-operation rule this mirrors: `getLegacyPet`'s live copy documents the shared `Pet`.
+      const control = await parseJson(
+        documentWith(openapi, {
+          ...getPet([[200, withDocs(true, { description: 'Old pet.' })]]),
+          ...legacyPet(withDocs(false, { description: 'A pet.', externalDocs: ext })),
+        }),
+        'control',
+      );
+      expect(modelNames(control)).toEqual(['Pet']);
+      expect(docsOf(control)).toEqual({ description: 'A pet.', externalDocs: ext, extensions: undefined });
     });
 
     it("keeps the primary's references: a 200 writing `$ref: PetOwner` keeps naming the component when the live 202 nests an inline `owner` of other fields", async () => {
