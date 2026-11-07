@@ -57,7 +57,9 @@ const show = (type: TypeRef): string =>
         ? type.name
         : type.kind === 'primitive'
           ? type.type
-          : type.kind;
+          : type.kind === 'union'
+            ? `(${type.variants.map(show).join(' | ')})`
+            : type.kind;
 
 /** `Name { field: type, … }` per model, in order — the issue's script's output. */
 const shapes = (spec: ApiSpec) =>
@@ -828,5 +830,149 @@ describe('#571', () => {
       }
       expect(warn).not.toHaveBeenCalled();
     });
+
+    it('keeps the rejection of null on the conjunction, so a third nullable declaration cannot restore it (Greptile)', async () => {
+      // `{ type: 'object', allOf: [{ $ref: A }] }` rejects `null`; conjoined
+      // with `{ $ref: B }` the `type` was spliced away, and a nullable
+      // `{ $ref: C }` then found three nullable parts (round 7). The
+      // conjunction now writes `type: 'object'` when a part rejects `null`.
+      const str = { type: 'string' };
+      const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+      const nul = (schema: Record<string, unknown>) =>
+        openapi === '3.0.3' ? { ...schema, type: 'object', nullable: true } : { ...schema, type: ['object', 'null'] };
+      const holderDocument = (Holder: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/holders/{id}': {
+            get: {
+              operationId: 'getHolder',
+              parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+              responses: { '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } } },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            A: nul({ properties: { a: str } }),
+            B: nul({ properties: { b: str } }),
+            C: nul({ properties: { c: str } }),
+            Holder,
+          },
+        },
+      });
+      const resultOf = (spec: ApiSpec) => modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
+      const parts = [declaring({ type: 'object', allOf: [ref('A')] }), declaring(ref('B')), declaring(ref('C'))];
+      const orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+      ];
+      for (const order of orders) {
+        const spec = await parseJson(holderDocument({ allOf: order.map((index) => parts[index]) }));
+        expect(resultOf(spec)?.type, order.join('')).toEqual({ kind: 'model', name: 'HolderResult' });
+        expect(
+          modelNamed(spec, 'HolderResult')
+            ?.fields.map((f) => f.name)
+            .sort(),
+          order.join(''),
+        ).toEqual(['a', 'b', 'c']);
+      }
+      // Without the typed wrapper, every part admits `null`, in every order.
+      const bare = [declaring(ref('A')), declaring(ref('B')), declaring(ref('C'))];
+      for (const order of orders) {
+        const spec = await parseJson(holderDocument({ allOf: order.map((index) => bare[index]) }));
+        expect(resultOf(spec)?.type, order.join('')).toEqual({
+          kind: 'nullable',
+          inner: { kind: 'model', name: 'HolderResult' },
+        });
+      }
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it.runIf(openapi === '3.1.0')(
+      'keeps the type names two inline objects both admit beside object, as the base did (Greptile)',
+      async () => {
+        // `type: ['object', 'string']` on both declarations: a string is an
+        // instance of either, so of the conjunction (round 7: the conjunction
+        // wrote `object`, and the alternative was lost). Where the lists
+        // differ, the names both admit remain.
+        const str = { type: 'string' };
+        const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+        const holderDocument = (Holder: unknown) => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {
+            '/holders/{id}': {
+              get: {
+                operationId: 'getHolder',
+                parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+                responses: {
+                  '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } },
+                },
+              },
+            },
+          },
+          components: { schemas: { Holder } },
+        });
+        const typed = (type: string[], properties: Record<string, unknown>) => ({ type, properties });
+        for (const [label, members, type, fields] of [
+          [
+            'object or string, twice',
+            [declaring(typed(['object', 'string'], { a: str })), declaring(typed(['object', 'string'], { b: str }))],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          [
+            'object or string, twice, swapped',
+            [declaring(typed(['object', 'string'], { b: str })), declaring(typed(['object', 'string'], { a: str }))],
+            '(HolderResult | string)',
+            ['b', 'a'],
+          ],
+          [
+            'object, string or null, twice',
+            [
+              declaring(typed(['object', 'string', 'null'], { a: str })),
+              declaring(typed(['object', 'string', 'null'], { b: str })),
+            ],
+            '(HolderResult | string)?',
+            ['a', 'b'],
+          ],
+          [
+            'object, string or null beside object or string',
+            [
+              declaring(typed(['object', 'string', 'null'], { a: str })),
+              declaring(typed(['object', 'string'], { b: str })),
+            ],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          [
+            'object or string beside object or integer',
+            [declaring(typed(['object', 'string'], { a: str })), declaring(typed(['object', 'integer'], { b: str }))],
+            'HolderResult',
+            ['a', 'b'],
+          ],
+          [
+            'object or string beside an untyped object',
+            [declaring(typed(['object', 'string'], { a: str })), declaring({ properties: { b: str } })],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+        ] as const) {
+          const spec = await parseJson(holderDocument({ allOf: members }));
+          const result = modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
+          expect(result && show(result.type), label).toBe(type);
+          expect(
+            modelNamed(spec, 'HolderResult')?.fields.map((f) => f.name),
+            label,
+          ).toEqual(fields);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
   });
 });
