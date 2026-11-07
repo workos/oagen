@@ -711,5 +711,40 @@ describe('#622', () => {
         ]);
       },
     );
+
+    it.each(openapis)(
+      'leaves a body whose companion the walk types as a second array the model it is (Greptile; OAS %s)',
+      async (openapi) => {
+        // `Base` types `has_more` `integer[]`; both variants type it `boolean`.
+        // The walk and the model keep `Base`'s declaration, so the body has
+        // two arrays and no companion, as `{ data, has_more: integer[] }`
+        // written flat has. Detection, reading `has_more` off the variants,
+        // unwrapped it on `data` with the array `has_more` among the
+        // companions; before the PR it was the model it is again now.
+        const A = object({ has_more: boolean });
+        const B = object({ has_more: boolean, total: integer });
+        const base = { $ref: '#/components/schemas/Base' };
+        const body = { allOf: [base, object({ data: petArray }), { oneOf: [A, B] }] };
+        const ints = { type: 'array', items: integer };
+        const twoArrays = await parseQuiet(listPets(body, openapi, {}, { Base: object({ has_more: ints }) }));
+        expect(shown(twoArrays)).toEqual({
+          dataPath: undefined,
+          endOfIteration: undefined,
+          itemType: 'ListPetsResponse',
+          envelopeFields: undefined,
+          models: ['Pet { name? }', 'Base { has_more? }', 'ListPetsResponse { has_more?, data?, total? }'],
+          response: 'ListPetsResponse',
+        });
+        const flat = await parseQuiet(listPets(object({ data: petArray, has_more: ints, total: integer }), openapi));
+        expect(onlyOperation(flat).response).toEqual({ kind: 'model', name: 'ListPetsResponse' });
+        // `Base` typing `has_more` `boolean`: the companion the walk reads is the stop field.
+        const control = await parseQuiet(listPets(body, openapi, {}, { Base: object({ has_more: boolean }) }));
+        expect(shown(control)).toEqual({
+          ...expected,
+          envelopeFields: ['has_more?: boolean', 'total?: integer'],
+          models: ['Pet { name? }', 'Base { has_more? }'],
+        });
+      },
+    );
   });
 });

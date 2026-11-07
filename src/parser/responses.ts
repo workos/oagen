@@ -526,14 +526,25 @@ function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<stri
     // wire sends; one only some variants declare leaves the body the model
     // it is, the array an optional field of it.
     if (!onEveryInstance(arrayPropName)) return { isEnvelope: false, dataPath: null };
-    // And it must be the array the companion walk reads at that name, the
-    // one `extractListResponse` unwraps on: a declaration a `$ref` member's
+    // And the shape must be the one the companion walk reads, the one
+    // `extractListResponse` unwraps: a declaration a `$ref` member's
     // component or a nested `allOf` member makes, which detection does not
-    // read, stands over the variants' there as in the model, so a typeless
-    // or object `data` in `Base` beside variants typing it `integer[]`
-    // leaves the body the model it is.
-    const walked = collectObjectProperties(schema, componentSchemas).onEveryInstance[arrayPropName];
-    if (walked === undefined || !isArrayDeclaration(walked)) return { isEnvelope: false, dataPath: null };
+    // read, stands over the variants' there as in the model. So the array
+    // must be an array there (a typeless or object `data` in `Base` beside
+    // variants typing it `integer[]` leaves the body the model it is), and
+    // every other property detection read must be no array there (`Base: {
+    // has_more: integer[] }` beside variants typing it `boolean` is two
+    // arrays and no companion, as `{ data, has_more: integer[] }` written
+    // flat is; PR #643 review round 6: the body was unwrapped on `data` with
+    // the array `has_more` among its companions).
+    const walked = collectObjectProperties(schema, componentSchemas);
+    const walkedArray = walked.onEveryInstance[arrayPropName];
+    if (walkedArray === undefined || !isArrayDeclaration(walkedArray)) return { isEnvelope: false, dataPath: null };
+    const arrayInWalk = (key: string): boolean => {
+      const declaration = walked.fields[key];
+      return declaration === undefined ? arrayProps.includes(key) : isArrayDeclaration(declaration);
+    };
+    if (nonArrayKeys.some(arrayInWalk)) return { isEnvelope: false, dataPath: null };
 
     // A companion is pagination metadata when it is one of the stop fields
     // the end-of-iteration detector reads, in any spelling (`hasMore`,
