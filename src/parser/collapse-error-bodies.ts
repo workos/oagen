@@ -1251,9 +1251,9 @@ function sharedFieldType(
  * no member's order — the result keeping the first member's order; and
  * two variants left alike once their limits are dropped are one, a lone
  * survivor standing for the union (`simplifyType`), since a `oneOf` of two
- * plain strings admits nothing — the survivor taking the limits the union
- * itself agreed on, conjoined onto its own (`withLimits`), so none is lost
- * with the union.
+ * plain strings admits nothing — the survivor, a nested union the outer
+ * collapses onto included, taking the limits the union itself agreed on,
+ * conjoined onto its own (`withLimits`), so none is lost with the union.
  */
 function agreedLimits(types: readonly TypeRef[]): TypeRef {
   const first = types[0];
@@ -1292,11 +1292,16 @@ function agreedLimits(types: readonly TypeRef[]): TypeRef {
         variants[index] = agreedLimits(ordered.map((member) => member[position].variant));
       });
       const merged = simplifyType({ ...top, variants });
-      // A lone survivor takes the union's own agreed limits, conjoined onto
-      // its own, the stricter bound winning (`combineConstraints`): the
-      // string left of `{ oneOf: [...], minLength: 1 }` is under
-      // `minLength: 1`, not one that admits the empty string (Greptile, #639).
-      return merged.kind === 'union' ? merged : withLimits(merged, top.constraints);
+      // A lone survivor — the one variant left once the alike are dropped,
+      // told by their count rather than by the survivor's kind, since the
+      // survivor may be a union itself — takes the union's own agreed
+      // limits, conjoined onto its own, the stricter bound winning
+      // (`combineConstraints`): the string left of
+      // `{ oneOf: [...], minLength: 1 }` is under `minLength: 1`, not one
+      // that admits the empty string, and so is the `anyOf` or type list
+      // the `oneOf` collapses onto (Greptile, #639).
+      const distinct = new Set(variants.map((variant) => stableJson(variant))).size;
+      return distinct > 1 ? merged : withLimits(merged, top.constraints);
     }
     default:
       return top;
