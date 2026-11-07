@@ -390,21 +390,34 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * or one they type differently, still marks the envelope, as an optional
  * `has_more` written flat does, and `detectEndOfIteration` then finds no
  * field to stop on. A bare `oneOf`/`anyOf` body, with or without
- * `properties` beside it, is a union of models and never an envelope. A
- * `$ref` member, and a nullable wrapper a member writes (`{ oneOf: [{ $ref:
- * Base }, { type: 'null' }] }`, read as the member by the companion walk
- * and the model), are not read here, as before: a body whose array or
- * companion sits in one is the wrapper an explicit `dataPath` keeps
- * (workos/oagen#308).
+ * `properties` beside it, is a union of models and never an envelope, and
+ * so is an `allOf` the parser reads as its lone union member
+ * (`readInlineAllOf`: `allOf: [{ oneOf: [...] }]`, with or without
+ * annotations beside it, is that union, as `resolveBareSchema` reads it
+ * for the companion walk and `extractDirectResource` for the model), so
+ * the variants are read only for an `allOf` the parser merges (PR #643
+ * review: a lone union member was read as a merge here, detected as an
+ * envelope, and extracted off a walk that saw no field — `string[]` with
+ * no companions). A `$ref` member, and a nullable wrapper a member writes
+ * (`{ oneOf: [{ $ref: Base }, { type: 'null' }] }`, read as the member by
+ * the companion walk and the model), are not read here, as before: a body
+ * whose array or companion sits in one is the wrapper an explicit
+ * `dataPath` keeps (workos/oagen#308).
  */
 function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): ListEnvelopeResult {
   // Collect all property sources (allOf sub-schemas or flat schema), and
-  // what the variants of a union among the members declare.
+  // what the variants of a union among the members declare, for an `allOf`
+  // the parser merges into one model.
   const propSources: Record<string, SchemaObject | undefined>[] = [];
   const branchOnly = new Map<string, SchemaObject[]>();
   const carried = new Set<string>();
+  const merges =
+    schema.allOf !== undefined &&
+    classifyInlineSchema(schema) === 'allOf' &&
+    readInlineAllOf(schema.allOf, schema, componentSchemas) === 'merged';
   for (const sub of schema.allOf ?? []) {
     if (sub.properties) propSources.push(sub.properties);
+    if (!merges) continue;
     for (const variants of unionAxesOf(sub)) {
       if (nullableAxisBranch(sub, variants)) continue;
       const keyword = variants === sub.oneOf ? 'oneOf' : 'anyOf';
