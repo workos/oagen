@@ -16,6 +16,7 @@ import {
   buildFieldFromSchema,
   classifyInlineSchema,
   componentPropertyLedger,
+  admits,
   componentSchemaOf,
   componentUnionDispatches,
   documentComponentSchemas,
@@ -3210,7 +3211,9 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * is still an instance of the conjunction (the #653 review's round 7:
  * the conjunction wrote `object`, and the string alternative both
  * declarations admit was lost); `['object', 'string']` beside `['object',
- * 'integer']` is `object`, the only name both admit; `['object',
+ * 'integer']` is `object`, the only name both admit, while `['object',
+ * 'number']` beside `['object', 'integer']` is `['object', 'integer']`,
+ * since `number` admits an integer (`namesBothAdmit`); `['object',
  * 'string', 'null']` beside `['object', 'string']` is `['object',
  * 'string']`. A list of one is written as the name; no `type` at all when
  * neither declaration writes one and the conjunction admits no `null`,
@@ -3225,11 +3228,33 @@ function conjoinedObjectType(first: SchemaObject, second: SchemaObject): { type?
         : undefined;
   const held = namesOf(first);
   const added = namesOf(second);
-  const shared = held && added ? held.filter((name) => added.includes(name)) : (held ?? added);
+  const shared = held && added ? namesBothAdmit(held, added) : (held ?? added);
   const nullable = conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second);
   if (shared === undefined && !nullable) return {};
   const names = [...(shared && shared.length > 0 ? shared : ['object']), ...(nullable ? ['null'] : [])];
   return { type: names.length === 1 ? names[0] : names };
+}
+
+/**
+ * The type names two lists both admit, as JSON Schema reads them
+ * (`admits`: a list admits a name it writes, and `number` admits an
+ * `integer`), each name once in the order first written, the narrower of
+ * `number` and `integer` in the wider's place — so `['object', 'number',
+ * 'string']` beside `['object', 'integer', 'string']` is `['object',
+ * 'integer', 'string']` in either order, since every integer is a number
+ * (the #653 review's round 8: the names were matched by spelling, and
+ * both numeric names were dropped).
+ */
+function namesBothAdmit(held: readonly string[], added: readonly string[]): string[] {
+  const heldSet = new Set(held);
+  const addedSet = new Set(added);
+  const names: string[] = [];
+  for (const name of held) {
+    if (admits(addedSet, name)) names.push(name);
+    else if (name === 'number' && addedSet.has('integer')) names.push('integer');
+  }
+  for (const name of added) if (admits(heldSet, name) && !names.includes(name)) names.push(name);
+  return names;
 }
 
 /**
