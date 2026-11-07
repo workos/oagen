@@ -115,17 +115,24 @@ type UnionSource = Pick<Model, 'variants' | 'discriminator'> & Pick<UnionType, '
  * `pattern`, an array variant's items' `maxLength` — is a
  * `variant-constraints-changed` entry, since `typeRefsEqual` passes over
  * limits (#599): the new variants are paired with the old as `pairVariants`
- * pairs them (by type, the same limits preferred, so a reorder of two
- * variants of one type reports nothing), and each pair's limits are
- * compared at every level of the type (`constraintsShift`) and judged by
- * `direction` as a field's are (`classifyConstraintsChange`): breaking when
- * tightened on a union that is not response-only, additive otherwise. A
+ * pairs them (by type, or as a union the old one only widened, the same
+ * limits preferred, so a reorder of two variants of one type reports
+ * nothing), and each pair's limits are compared at every level of the type
+ * (`constraintsShift`) and judged by `direction` as a field's are
+ * (`classifyConstraintsChange`): breaking when tightened on a union that is
+ * not response-only, additive otherwise. So an inline-union variant that
+ * gained a variant is reported removed and added, as it always was, and —
+ * when a variant it kept carries other limits — re-limited beside them. A
  * model variant carries none (the model's own are compared with the model).
+ * `addedUnionVariants` passes `limits: false`, since it reads none of these
+ * entries and the pairing would otherwise read the widening it is deciding
+ * once more at every level (Greptile, #659 review round 1).
  */
 function diffVariants(
   oldModel: UnionSource,
   newModel: UnionSource,
   direction: ModelDirection = 'unknown',
+  limits = true,
 ): VariantChange[] {
   const changes: VariantChange[] = [];
   const oldVariants = dispatchedVariants(oldModel);
@@ -194,16 +201,17 @@ function diffVariants(
     }
   }
 
+  if (!limits) return changes;
   for (const [i, old] of pairVariants(oldVariants, newVariants)) {
     const variant = newVariants[i];
-    const limits = constraintsShift({ type: old }, { type: variant });
-    if (!limits) continue;
+    const shift = constraintsShift({ type: old }, { type: variant });
+    if (!shift) continue;
     changes.push({
       kind: 'variant-constraints-changed',
       variant: variantLabel(variant),
-      classification: classifyConstraintsChange(limits.tightened, direction),
-      ...constraintsSides(limits),
-      details: constraintsDetails(limits, direction),
+      classification: classifyConstraintsChange(shift.tightened, direction),
+      ...constraintsSides(shift),
+      details: constraintsDetails(shift, direction),
     });
   }
 
@@ -350,10 +358,11 @@ function quoteKeys(keys: readonly string[]): string {
  * narrows it. Such a change is additive as a named union's `variant-added`
  * is, from either side of the wire: a caller may send the new variant but
  * need not, and a reader may receive it as it may a new enum value. A kept
- * variant whose limits moved is still kept — `typeRefsEqual` passes over
- * limits, and `diffFields` reports them beside the widening as a
- * `field-constraints-changed` entry (#599) — so a `variant-constraints-changed`
- * `diffVariants` reports is not a change this is not.
+ * variant whose limits moved is still kept: `typeRefsEqual` passes over
+ * limits, this reads none (`diffVariants` is called with `limits: false`),
+ * and `diffFields` reports them beside the widening as a
+ * `field-constraints-changed` entry (#599), a kept variant of a widened
+ * inner union included (`pairVariants` pairs the two unions).
  */
 export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[] | undefined {
   if (oldType.kind === 'nullable' && newType.kind === 'nullable') {
@@ -402,11 +411,10 @@ export function addedUnionVariants(oldType: TypeRef, newType: TypeRef): string[]
   // for a model no old variant names. A widened variant shows up there as its
   // old form removed and its new form added, one removal per widening, both
   // accounted for above; any other entry is a change this is not.
-  const changes = diffVariants(oldType, newType);
+  const changes = diffVariants(oldType, newType, 'unknown', false);
   const removed = changes.filter((change) => change.kind === 'variant-removed').length;
   if (removed !== widened) return undefined;
-  const widening = new Set<VariantChange['kind']>(['variant-added', 'variant-removed', 'variant-constraints-changed']);
-  if (changes.some((change) => !widening.has(change.kind))) return undefined;
+  if (changes.some((change) => change.kind !== 'variant-added' && change.kind !== 'variant-removed')) return undefined;
   return added;
 }
 
