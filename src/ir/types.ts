@@ -1393,9 +1393,11 @@ export interface Model {
    * document or once a fold collapsed it onto a kept model of the same
    * shape, is dropped — a base stays a base only while every field it
    * ends with is on the model, and a field carries `inheritedFrom` only
-   * while the base's field is the one the model carries, so a fold that
-   * loosens a base after the model took its fields leaves the field the
-   * model's own. A `$ref` member naming a named union — flattened into
+   * while the base's field is the one the model carries — every key, the
+   * type read as its final shape, an inline model built under either
+   * model as it ends and an inline enum by its values — so a fold that
+   * loosens a base, or a model nested under it, after the model took its
+   * fields leaves the field the model's own. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher

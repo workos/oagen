@@ -138,6 +138,90 @@ describe('#591 settleBases', () => {
     expect(outline(other)).toEqual({ bases: [model('Animal')], inherited: [undefined] });
   });
 
+  it('reads an inline model under either model as it ends, so a nested change clears inheritedFrom and an unchanged one keeps it (Greptile, round six)', () => {
+    const inherit = (metaFields: Field[]) => {
+      const pet: Model = {
+        name: 'Pet',
+        fields: [field('meta', { type: model('PetMeta'), inheritedFrom: model('Animal') })],
+        bases: [model('Animal')],
+      };
+      const models: Model[] = [
+        { name: 'Animal', fields: [field('meta', { type: model('AnimalMeta') })] },
+        pet,
+        { name: 'PetMeta', fields: [field('name', { required: true }), field('deep', { type: model('PetMetaDeep') })] },
+        { name: 'AnimalMeta', fields: metaFields },
+        { name: 'PetMetaDeep', fields: [field('d')] },
+        { name: 'AnimalMetaDeep', fields: [field('d')] },
+      ];
+      settleBases(models);
+      return pet.fields[0]!.inheritedFrom;
+    };
+    // The same final shape, two levels down, under either name.
+    expect(inherit([field('name', { required: true }), field('deep', { type: model('AnimalMetaDeep') })])).toEqual(
+      model('Animal'),
+    );
+    // A fold loosened `AnimalMeta` alone (`AnimalMetaJson` onto it).
+    expect(inherit([field('name'), field('extra'), field('deep', { type: model('AnimalMetaDeep') })])).toBeUndefined();
+    // A change two levels down.
+    const deepPet: Model = {
+      name: 'Pet',
+      fields: [field('meta', { type: model('PetMeta'), inheritedFrom: model('Animal') })],
+      bases: [model('Animal')],
+    };
+    settleBases([
+      { name: 'Animal', fields: [field('meta', { type: model('AnimalMeta') })] },
+      deepPet,
+      { name: 'PetMeta', fields: [field('deep', { type: model('PetMetaDeep') })] },
+      { name: 'AnimalMeta', fields: [field('deep', { type: model('AnimalMetaDeep') })] },
+      { name: 'PetMetaDeep', fields: [field('d')] },
+      { name: 'AnimalMetaDeep', fields: [field('d', { required: true })] },
+    ]);
+    expect(deepPet.fields[0]!.inheritedFrom).toBeUndefined();
+    // A model that reaches itself is read once on the way.
+    const loopPet: Model = {
+      name: 'Pet',
+      fields: [field('node', { type: model('PetNode'), inheritedFrom: model('Animal') })],
+      bases: [model('Animal')],
+    };
+    settleBases([
+      { name: 'Animal', fields: [field('node', { type: model('AnimalNode') })] },
+      loopPet,
+      { name: 'PetNode', fields: [field('next', { type: { kind: 'nullable', inner: model('PetNode') } })] },
+      { name: 'AnimalNode', fields: [field('next', { type: { kind: 'nullable', inner: model('AnimalNode') } })] },
+    ]);
+    expect(loopPet.fields[0]!.inheritedFrom).toEqual(model('Animal'));
+  });
+
+  it('reads an inline enum by its values, a component enum by name (Greptile, round six)', () => {
+    const inline = (name: string, values: string[]): TypeRef => ({ kind: 'enum', name, values });
+    const pet: Model = {
+      name: 'Pet',
+      fields: [
+        field('status', { type: inline('PetStatus', ['a', 'b']), inheritedFrom: model('Animal') }),
+        field('mood', { type: inline('PetMood', ['x']), inheritedFrom: model('Animal') }),
+        field('kind', { type: { kind: 'enum', name: 'Kind' }, inheritedFrom: model('Animal') }),
+        field('other', { type: { kind: 'enum', name: 'PetOther' }, inheritedFrom: model('Animal') }),
+      ],
+      bases: [model('Animal')],
+    };
+    settleBases([
+      {
+        name: 'Animal',
+        fields: [
+          field('status', { type: inline('AnimalStatus', ['a', 'b']) }),
+          field('mood', { type: inline('AnimalMood', ['x', 'y']) }),
+          field('kind', { type: { kind: 'enum', name: 'Kind' } }),
+          field('other', { type: { kind: 'enum', name: 'AnimalOther' } }),
+        ],
+      },
+      pet,
+    ]);
+    expect(outline(pet)).toEqual({
+      bases: [model('Animal')],
+      inherited: [model('Animal'), undefined, model('Animal'), undefined],
+    });
+  });
+
   it('leaves a base no model carries for validateModelRefs', () => {
     const pet: Model = {
       name: 'Pet',

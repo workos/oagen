@@ -1,4 +1,4 @@
-import type { Field, Model } from '../ir/types.js';
+import type { Field, Model, TypeRef } from '../ir/types.js';
 import { walkTypeRef } from '../ir/types.js';
 import { stableStringify, typeShapeKey } from './inline-models.js';
 import { isComponentModelRef } from './schemas.js';
@@ -22,10 +22,10 @@ import { isComponentModelRef } from './schemas.js';
  *    bases to one name (`Bar` beside a `BarJson` folded onto it).
  * 3. A base is a base only while every field it ends with is on the model,
  *    and a field carries `inheritedFrom` only while the base's field is the
- *    one the model carries: same keys, same values, the type read with the
- *    inheriting model's name standing for the base's where an inline model
- *    is built under it (`PetMeta` for `AnimalMeta`; a reference to a
- *    component is read as written). A fold that loosens a base after the
+ *    one the model carries: same keys, same values, the type read as its
+ *    final shape — an inline model built under either model (`PetMeta`,
+ *    `AnimalMeta`) as it ends, an inline enum by its values, a component
+ *    by name (`fieldKey`). A fold that loosens a base after the
  *    model took its fields — `AnimalJson` declaring `name` optional beside
  *    `extra`, folded onto an `Animal` requiring `name`, under `Pet: { allOf:
  *    [{ $ref: Animal }] }` — leaves `Pet.name` required and `Pet` without
@@ -53,7 +53,7 @@ export function settleBases(models: readonly Model[]): void {
       for (const field of model.fields) {
         if (field.inheritedFrom?.kind !== 'model' || field.inheritedFrom.name !== target.name) continue;
         const inherited = target.fields.find((own) => own.name === field.name);
-        if (!inherited || fieldKey(field, model.name, target.name) !== fieldKey(inherited, target.name, target.name)) {
+        if (!inherited || fieldKey(field, byName, new Set()) !== fieldKey(inherited, byName, new Set())) {
           delete field.inheritedFrom;
         }
       }
@@ -106,20 +106,50 @@ function dropBase(model: Model, name: string): void {
 
 /**
  * A field as it compares with the base's (step 3): every key but
- * `inheritedFrom`, the type read with `under` — the model the field sits
- * on — standing for `as` in the name of every inline model built under it
- * (`PetMeta` read as `AnimalMeta`), a reference to a component kept as
- * written (`isComponentModelRef`).
+ * `inheritedFrom`, the type read as its final shape (`typeKey`) — a
+ * reference to an inline model built under either model (`PetMeta`,
+ * `AnimalMeta`) stands for that model as it ends, read the same way in
+ * turn (its fields each by this key, its own keys beside them, a model
+ * reached again on the way marked as such), a reference to a component
+ * by name (`isComponentModelRef`: the same model on both sides), an
+ * inline enum by its values and their flags alone (`typeShapeKey`
+ * carries them), a component enum by name — so a fold that changes a
+ * nested model under the base (`AnimalMetaJson` onto `AnimalMeta`) is told
+ * from a name that only differs by the model it was built under, and an
+ * unchanged inline enum (`PetStatus` beside `AnimalStatus`) compares
+ * equal (Greptile review, round six).
  */
-function fieldKey(field: Field, under: string, as: string): string {
+function fieldKey(field: Field, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
   const { inheritedFrom: _origin, type, ...rest } = field;
+  return stableStringify({ ...rest, type: typeKey(type, byName, visiting) });
+}
+
+/** A type's final shape as `fieldKey` reads it. */
+function typeKey(type: TypeRef, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
   const components = new Set<string>();
   walkTypeRef(type, {
     model: (ref) => {
       if (isComponentModelRef(ref)) components.add(ref.name);
     },
   });
-  const readModelName = (name: string): string =>
-    !components.has(name) && name.startsWith(under) ? `${as}${name.slice(under.length)}` : name;
-  return stableStringify({ ...rest, type: typeShapeKey(type, { readModelName }) });
+  const readModelName = (name: string): string => {
+    const target = components.has(name) ? undefined : byName.get(name);
+    if (!target) return name;
+    if (visiting.has(name)) return '<itself>';
+    visiting.add(name);
+    const key = modelKey(target, byName, visiting);
+    visiting.delete(name);
+    return key;
+  };
+  return typeShapeKey(type, { readModelName, readEnumName: () => '' });
+}
+
+/** An inline model as `fieldKey` reads a reference to it: its own keys but its name and bases, its fields each by `fieldKey`, its variants each by `typeKey`. */
+function modelKey(model: Model, byName: ReadonlyMap<string, Model>, visiting: Set<string>): string {
+  const { name: _name, bases: _bases, fields, variants, ...rest } = model;
+  return stableStringify({
+    ...rest,
+    fields: fields.map((field) => fieldKey(field, byName, visiting)),
+    ...(variants ? { variants: variants.map((variant) => typeKey(variant, byName, visiting)) } : {}),
+  });
 }

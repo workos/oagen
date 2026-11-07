@@ -708,6 +708,60 @@ describe('#591', () => {
         ]);
       });
 
+      it('a fold that changes a model nested under the base leaves the field the model’s own, the base still a base (Greptile, round six)', async () => {
+        const schemas = {
+          Animal: {
+            type: 'object',
+            properties: { meta: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } },
+          },
+          AnimalMetaJson: { type: 'object', properties: { name: { type: 'string' }, extra: { type: 'string' } } },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const paths = { ...issuePaths, '/metas/{metaId}': getting('getAnimalMetaJson', 'metaId', 'AnimalMetaJson') };
+        const spec = await parseJson(documentWith(openapi, schemas, paths));
+        expect(spec.models.map((m) => m.name).sort()).toEqual(['Animal', 'AnimalMeta', 'Pet', 'PetMeta']);
+        expect(outline(modelNamed(spec, 'AnimalMeta'))).toEqual([
+          ['name', false, undefined],
+          ['extra', false, undefined],
+        ]);
+        expect(outline(modelNamed(spec, 'PetMeta'))).toEqual([['name', true, undefined]]);
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toEqual([ANIMAL]);
+        expect(pet.fields.map((f) => [f.name, refName(f.type) ?? f.type.kind, refName(f.inheritedFrom)])).toEqual([
+          ['nickname', 'primitive', undefined],
+          ['meta', 'PetMeta', undefined],
+        ]);
+        // Without the fold, the nested model is the same under either name.
+        const { AnimalMetaJson: _json, ...plain } = schemas;
+        const plainPet = modelNamed(await parseJson(documentWith(openapi, plain)), 'Pet');
+        expect(plainPet.fields.map((f) => [f.name, refName(f.inheritedFrom)])).toEqual([
+          ['nickname', undefined],
+          ['meta', 'Animal'],
+        ]);
+      });
+
+      it('an inline enum the base declares is inherited under the model’s own enum name (Greptile, round six)', async () => {
+        const schemas = {
+          Kind: { type: 'string', enum: ['cat', 'dog'] },
+          Animal: {
+            type: 'object',
+            properties: { status: { type: 'string', enum: ['alive', 'asleep'] }, kind: R('Kind') },
+          },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const spec = await parseJson(documentWith(openapi, schemas));
+        const pet = modelNamed(spec, 'Pet');
+        expect(pet.bases).toEqual([ANIMAL]);
+        expect(
+          pet.fields.map((f) => [f.name, f.type.kind === 'enum' ? f.type.name : f.type.kind, refName(f.inheritedFrom)]),
+        ).toEqual([
+          ['nickname', 'primitive', undefined],
+          ['status', 'PetStatus', 'Animal'],
+          ['kind', 'Kind', 'Animal'],
+        ]);
+        expect(spec.enums.map((e) => e.name).sort()).toEqual(['AnimalStatus', 'Kind', 'PetStatus']);
+      });
+
       it('a cyclic document leaves neither component a base of the other, their fields their own', async () => {
         const schemas = {
           Animal: { allOf: [R('Pet')], properties: { name: { type: 'string' } } },
