@@ -2978,7 +2978,14 @@ export function resetCombinedDeclarations(): void {
  * nullable inline object is `PetPageResult | null`, beside a declaration
  * that rejects `null` is `PetPageResult`, in either member order
  * (workos/oagen#653 review: the conjunction admitted none, and two inline
- * objects took the later's `type` or either's `nullable: true`) — so
+ * objects took the later's `type` or either's `nullable: true`); the
+ * conjunction writes its `type` — two inline objects' the names both
+ * admit beside `object` (`conjoinedObjectType`: `['object', 'string']`
+ * twice stays so), an `allOf`'s `object` — with `null` beside it exactly
+ * when admitted, so a part's rejection of `null` is kept for a third
+ * declaration to read (the review's round 7: a typed wrapper's `type:
+ * object` was spliced away, and a later nullable `$ref` restored the
+ * `null`) — so
  * `result: { $ref: PetPage }` beside
  * `result: { properties: { total_pages } }` is a `PetPage` that also has
  * `total_pages`, whichever is read first (workos/oagen#432: the first was
@@ -3114,16 +3121,11 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // nullable object beside a plain one was nullable by member order).
     const { nullable: _firstFlag, ...firstBare } = first;
     const { nullable: _secondFlag, ...secondBare } = second;
-    const typed = first.type !== undefined || second.type !== undefined;
     return {
       ...firstBare,
       ...secondBare,
       properties,
-      ...(conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second)
-        ? { type: ['object', 'null'] }
-        : typed
-          ? { type: 'object' }
-          : {}),
+      ...conjoinedObjectType(first, second),
       ...(required.length > 0 && { required }),
     };
   }
@@ -3181,15 +3183,53 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
       members.every((member) => member.$ref !== undefined || isInlineAllOfMember(member) || !declaresType(member)) &&
       members.some((member) => member.$ref !== undefined || declaresInlineProperties(member));
     if (!readable) return first;
+    // The conjunction writes its `type`: `['object', 'null']` when both
+    // admit `null`, else `object`, so a part's rejection of `null` is kept
+    // on the conjunction for a third declaration to read (the #653
+    // review's round 7: `{ type: 'object', allOf: [{ $ref: A }] }` beside
+    // `{ $ref: B }` spliced the `type` away, and a nullable `{ $ref: C }`
+    // then found three nullable parts and restored the `null`).
     return {
       ...declarationKeywords(first),
       ...declarationKeywords(second),
       allOf: members,
-      ...(nullable && { type: ['object', 'null'] }),
+      type: nullable ? ['object', 'null'] : 'object',
       ...(required.length > 0 && { required }),
     };
   }
   return first;
+}
+
+/**
+ * The `type` of two inline object declarations conjoined
+ * (`conjoinTypedDeclarations`): the names both admit — the intersection
+ * of their type lists, a lone `type` read as a list of one, a declaration
+ * that writes none constraining nothing — with `null` exactly when both
+ * admit it (`conjunctionAdmitsNull`), as JSON Schema applies both: `type:
+ * ['object', 'string']` twice stays `['object', 'string']`, so a string
+ * is still an instance of the conjunction (the #653 review's round 7:
+ * the conjunction wrote `object`, and the string alternative both
+ * declarations admit was lost); `['object', 'string']` beside `['object',
+ * 'integer']` is `object`, the only name both admit; `['object',
+ * 'string', 'null']` beside `['object', 'string']` is `['object',
+ * 'string']`. A list of one is written as the name; no `type` at all when
+ * neither declaration writes one and the conjunction admits no `null`,
+ * as neither did.
+ */
+function conjoinedObjectType(first: SchemaObject, second: SchemaObject): { type?: string | string[] } {
+  const namesOf = (schema: SchemaObject): string[] | undefined =>
+    Array.isArray(schema.type)
+      ? schema.type.filter((name) => name !== 'null')
+      : schema.type !== undefined
+        ? [schema.type]
+        : undefined;
+  const held = namesOf(first);
+  const added = namesOf(second);
+  const shared = held && added ? held.filter((name) => added.includes(name)) : (held ?? added);
+  const nullable = conjunctionAdmitsNull(first) && conjunctionAdmitsNull(second);
+  if (shared === undefined && !nullable) return {};
+  const names = [...(shared && shared.length > 0 ? shared : ['object']), ...(nullable ? ['null'] : [])];
+  return { type: names.length === 1 ? names[0] : names };
 }
 
 /**
