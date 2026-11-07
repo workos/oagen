@@ -652,6 +652,54 @@ describe('#591', () => {
         ]);
       });
 
+      it('a kept model whose base a fold collapses onto it does not inherit from itself (Greptile, round four)', async () => {
+        const x = { type: 'object', properties: { x: { type: 'string' } } };
+        const child = (ref: string) => ({ type: 'object', properties: { id: { type: 'string' }, child: R(ref) } });
+        const paths = {
+          '/pets/{petId}': getting('getPet', 'petId', 'Pet'),
+          '/pets/{petId}/json': getting('getPetJson', 'petId', 'PetJson'),
+          '/pets/{petId}/child': getting('getPetChild', 'petId', 'PetChild'),
+        };
+        const direct = {
+          Pet: { type: 'object', properties: { id: { type: 'string' } } },
+          PetJson: child('PetJsonChild'),
+          PetJsonChild: x,
+          PetChild: { allOf: [R('PetJsonChild')] },
+        };
+        const spec = await parseJson(documentWith(openapi, direct, paths));
+        expect(spec.models.map((m) => m.name)).toEqual(['Pet', 'PetChild']);
+        expect(modelNamed(spec, 'Pet').fields.map((f) => [f.name, refName(f.type) ?? f.type.kind])).toEqual([
+          ['id', 'primitive'],
+          ['child', 'PetChild'],
+        ]);
+        expect(modelNamed(spec, 'PetChild').bases).toBeUndefined();
+        expect(outline(modelNamed(spec, 'PetChild'))).toEqual([['x', false, undefined]]);
+        // Through a chain: `PetChild` on `Mid` on `PetJsonChild`.
+        const chained = { ...direct, Mid: { allOf: [R('PetJsonChild')] }, PetChild: { allOf: [R('Mid')] } };
+        const chainedSpec = await parseJson(documentWith(openapi, chained, paths));
+        expect(chainedSpec.models.map((m) => m.name)).toEqual(['Pet', 'PetChild', 'Mid']);
+        expect(modelNamed(chainedSpec, 'PetChild').bases).toBeUndefined();
+        expect(modelNamed(chainedSpec, 'Mid').bases).toBeUndefined();
+        expect(outline(modelNamed(chainedSpec, 'PetChild'))).toEqual([['x', false, undefined]]);
+        expect(outline(modelNamed(chainedSpec, 'Mid'))).toEqual([['x', false, undefined]]);
+      });
+
+      it('a cyclic document leaves neither component a base of the other, their fields their own', async () => {
+        const schemas = {
+          Animal: { allOf: [R('Pet')], properties: { name: { type: 'string' } } },
+          Pet: { allOf: [R('Animal')], properties: { nickname } },
+        };
+        const spec = await parseJson(documentWith(openapi, schemas));
+        for (const name of ['Animal', 'Pet']) {
+          expect(modelNamed(spec, name).bases, name).toBeUndefined();
+          expect(
+            modelNamed(spec, name).fields.map((f) => f.inheritedFrom),
+            name,
+          ).toEqual([undefined, undefined]);
+        }
+        expect(modelNamed(spec, 'Pet').fields.map((f) => f.name)).toEqual(['nickname', 'name']);
+      });
+
       it('a model built from an inline allOf — a body, a field — carries neither key', async () => {
         const merged = { allOf: [R('Animal'), { type: 'object', properties: { nickname } }] };
         const paths = {

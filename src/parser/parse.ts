@@ -1,4 +1,5 @@
 import type { ApiSpec, AuthScheme, EnumRef, Model } from '../ir/types.js';
+import { dropCircularBases } from '../ir/types.js';
 import { defaultSdkBehavior } from '../ir/sdk-behavior.js';
 import { SpecParseError } from '../errors.js';
 import { loadAndBundleSpec } from './refs.js';
@@ -473,6 +474,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Needs the finished models and enums: divergence is decided on member
   // shape, so this can only run once every referenced type is resolvable.
   assignParameterGroupWrapperNames(result);
+
+  // No model's chain of bases reaches itself: a cyclic document, or a fold
+  // that collapsed a base onto a kept model of the same shape (#591).
+  dropCircularBases(result.models);
 
   validateModelRefs(result);
 
