@@ -70,6 +70,7 @@ import {
   type SchemaOrContent,
 } from './operations.js';
 import { classifyResponseKey } from './responses.js';
+import { responseBodyReading } from './body-media-types.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
@@ -1142,7 +1143,10 @@ type SiteDirection = 'sent' | 'received';
  * The components the SDK only sends, by resolved name (`resolveSchemaName`):
  * those reached by at least one site the parser reads and by none that the
  * SDK receives. What an operation under `paths` sends is its request body,
- * under every media type, and the parameters it types — the Path Item's,
+ * under every media type it declares a schema for — each is typed through
+ * it, as `requestBody` or in `requestBodyContents`, so a `postNote` body of
+ * `$ref: Pet` under `application/xml` alone, which nothing reads as
+ * `requestBody`, still sends `Pet` — and the parameters it types — the Path Item's,
  * then its own, an operation parameter replacing a Path Item one of the same
  * identity (`parameterKey`: location and name, a header's name case-folded)
  * as `buildOperation` merges them, so a Path Item parameter the operation
@@ -1164,6 +1168,17 @@ type SiteDirection = 'sent' | 'received';
  * `Content-Type`, whatever its case, which OpenAPI says to ignore
  * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
  * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
+ * response body is read by the media types whose schema the reader reads
+ * (`responseBodyReading`): every one but `application/octet-stream`,
+ * `application/pdf`, `text/plain`, `text/html`, `text/xml` and
+ * `application/xml`, which `primaryBodySchema` and `typeSecondaryContent`
+ * type as a binary string or a string without reading the schema, at a
+ * 2xx, 3xx, error, `default` or range entry alike — so a `listNotes` `200`
+ * of `$ref: Pet` under `application/xml`, `text/plain` or
+ * `application/octet-stream` alone, or under `application/xml` beside a
+ * `201` whose `application/json` is `{ type: string }`, leaves `Pet` only
+ * sent, as the document without it does, while a body under
+ * `application/json`, `application/yaml` or `*\/*` receives it (#610). A
  * parameter or header is read by the one schema that types it
  * (`parameterTyping`): its `schema`,
  * else the schema of the `content` entry `selectParameterContent` picks, so
@@ -1254,9 +1269,35 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       if (Array.isArray(members)) for (const member of members) schema(member, direction);
     }
   };
-  const content = (value: unknown, direction: SiteDirection): void => {
+  /**
+   * A request body's `content` map — an operation's, sent, or a webhook's or
+   * a callback's, received — read as the body readers read it: every media
+   * type that declares a schema is typed through it, as the primary pick
+   * (`selectRequestBodyContent`) or a secondary entry
+   * (`typeSecondaryRequestContent`, `mintPayload`: `requestBodyContents`),
+   * so each reaches what its schema names, under `application/xml` as under
+   * `application/json`.
+   */
+  const requestContent = (value: unknown, direction: SiteDirection): void => {
     if (!isRecord(value)) return;
     for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
+  };
+  /**
+   * A response's `content` map, read as `extractResponseContents` reads it:
+   * a media type the reader types as a binary string or a string without
+   * reading its schema (`responseBodyReading`: `application/octet-stream`,
+   * `application/pdf`, `text/plain`, `text/html`, `text/xml`,
+   * `application/xml`, by essence) reaches nothing, as the primary pick
+   * (`primaryBodySchema`) and a secondary entry (`typeSecondaryContent`)
+   * alike leave its schema unread; every other media type types its body
+   * through its schema and reaches what it names (#610).
+   */
+  const responseContent = (value: unknown): void => {
+    if (!isRecord(value)) return;
+    for (const [contentType, mediaType] of Object.entries(value)) {
+      if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
+      schema(mediaType['schema'], 'received');
+    }
   };
   /**
    * A Parameter or Header Object, read by the one schema that types it
@@ -1328,7 +1369,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       const operation = item[method];
       if (!isRecord(operation)) continue;
       parameters(item, operation, request);
-      content(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
+      requestContent(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
       callbacks(operation['callbacks']);
       const responses = operation['responses'];
       if (received || !isRecord(responses)) continue;
@@ -1352,7 +1393,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
         }
         const response = follow(entry, 'responses');
         if (!response) continue;
-        content(response['content'], 'received');
+        responseContent(response['content']);
         const headers = response['headers'];
         if (!isRecord(headers)) continue;
         // Read as `extractResponseHeaders` reads the map: header names are
