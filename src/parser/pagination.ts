@@ -1,15 +1,17 @@
 import { isDeepStrictEqual } from 'node:util';
 import type {
+  Field,
   TypeRef,
   Parameter,
   Model,
+  ModelRef,
   PaginationMeta,
   PaginationEndOfIteration,
   PaginationStrategy,
 } from '../ir/types.js';
 import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
-import { componentKeyOf } from './schema-refs.js';
+import { componentKeyOf, isPendingSchemaRef } from './schema-refs.js';
 import {
   allOfReadAsMember,
   classifyInlineSchema,
@@ -1225,6 +1227,49 @@ export function resolveDataPathArray(
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): { items: SchemaObject } | { problem: string } {
+  const walked = walkDataPathArray(schema, dataPath, componentSchemas);
+  return 'items' in walked ? { items: walked.items } : walked;
+}
+
+/**
+ * Whether an explicit `dataPath` lands on more than one array: it went on
+ * through the variants of a union on its way — the body itself, or an
+ * object on the way, being a `oneOf`/`anyOf` or having one among its
+ * `allOf` members (`fieldsNamed`) — and the variants reach distinct arrays,
+ * their `items` distinct schemas in the document. Each variant's model then
+ * types inline items under a name of its own, and only the document can
+ * type them once, under the path-derived name (#556), so an override whose
+ * IR walk crossed a pending pointer reference reads the document at
+ * extraction for such a path rather than deferring to the settle, where the
+ * IR walk would find the variants' arrays disagreeing by name
+ * (`resolveOverrideItemType`; Greptile, #608 review). Variants that reach
+ * one array are no fork — every variant holding the same pointer (`{ oneOf:
+ * [A, B] }`, both `result: { $ref: '#/components/schemas/Holder/properties/
+ * result' }`, with `dataPath: 'result.items'`), or pointers that resolve to
+ * one component, as `resolveBareSchema` follows them — since the one schema
+ * is built as one model where it stands and the settled walk agrees on its
+ * items (`HolderResultItem`), exactly as both holding `$ref: Result` agree
+ * on `ResultItem` (MichaelDeBoey, #651 review); the arrays are told apart
+ * by their `items` object rather than their own, which a nullable array
+ * component unwraps to afresh at each reading. A `null` variant set aside
+ * as a nullable wrapper is no fork either. `false` for a path that lands on
+ * no array.
+ */
+export function dataPathForks(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): boolean {
+  const walked = walkDataPathArray(schema, dataPath, componentSchemas);
+  return 'items' in walked && walked.forked;
+}
+
+/** The walk `resolveDataPathArray` makes, saying too whether the path landed on more than one array (`forked`; see `dataPathForks`). */
+function walkDataPathArray(
+  schema: SchemaObject,
+  dataPath: string,
+  componentSchemas?: Record<string, SchemaObject>,
+): { items: SchemaObject; forked: boolean } | { problem: string } {
   const missing = `dataPath "${dataPath}" does not resolve to an array in the response`;
   const segments = dataPath.split('.');
   // The path to the first union the walk went on through (`''` for the body
@@ -1271,7 +1316,7 @@ export function resolveDataPathArray(
         `the variants of ${unionAt(union ?? '')} type its items as ${listed(items.map(describeItems))}`,
     };
   }
-  return { items: items[0] };
+  return { items: items[0], forked: new Set(items).size > 1 };
 }
 
 /**
@@ -1418,8 +1463,9 @@ function describeSchema(schema: SchemaObject): string {
 
 /**
  * Resolve a dotted `dataPath` against the IR rather than the document: walk
- * from the response type through model fields, unwrapping nullables, and
- * return the element type of the array the path lands on. `models` is where
+ * from the response type through model fields, under every nullable wrapper
+ * (`containersOf`), and return the element type of the array the path lands
+ * on. `models` is where
  * each model along the way is looked up by name, so the item type is exactly
  * the one the parser already assigned — the very `TypeRef` object the field
  * holds, which later renaming passes repoint in place. A `union` on the way
@@ -1437,16 +1483,46 @@ function describeSchema(schema: SchemaObject): string {
  * path, not once per way of reaching it (PR #585 review: a `next.next.….
  * items` path doubled the work at every segment). An empty `dataPath` means
  * `root` itself is the array. `undefined` when a segment is missing, a model
- * is unknown, the path does not end on an array, or the variants disagree;
- * the document walk then answers (`resolveDataPathFromSchema`).
+ * is unknown, the path does not end on an array, or the variants disagree —
+ * and when the walk crosses a reference `resolveSchemaPointers` has yet to
+ * settle, which `walkDataPathItemType` tells apart from the rest; the
+ * document walk then answers (`resolveDataPathFromSchema`).
  */
-export function resolveDataPathItemType(root: TypeRef, dataPath: string, models: Model[]): TypeRef | undefined {
+export function resolveDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): TypeRef | undefined {
+  const walked = walkDataPathItemType(root, dataPath, models);
+  return walked && 'itemType' in walked ? walked.itemType : undefined;
+}
+
+/**
+ * The walk `resolveDataPathItemType` makes, telling a path the IR cannot
+ * resolve yet from one it does not resolve: `{ pending: true }` when a type
+ * the walk reaches — the root, a field's type on the way, a variant of a
+ * union there, or the type the path lands on, under its nullable wrapper —
+ * is a reference a schema `$ref` deeper into a component left pending
+ * (`pendingSchemaRef`; #539), which names no model until
+ * `resolveSchemaPointers` settles it. Every type a segment reaches is
+ * checked for one before any field is looked up, so the answer never
+ * depends on which variant of a union is read first. A named union model
+ * on the way, or where the path lands, is read through its variants
+ * (`containersOf`), as an inline union is.
+ */
+export function walkDataPathItemType(
+  root: TypeRef,
+  dataPath: string,
+  models: readonly Model[],
+): { itemType: TypeRef } | { pending: true } | undefined {
+  const reader = new ContainerReader(models);
   let reached: TypeRef[] = [root];
   for (const segment of dataPath === '' ? [] : dataPath.split('.')) {
     const containers = new Map<string, TypeRef>();
     for (const type of reached) {
-      for (const container of containersOf(type)) containers.set(typeRefKey(container), container);
+      for (const container of reader.containersOf(type)) containers.set(typeRefKey(container), container);
     }
+    if ([...containers.values()].some(isPendingModelRef)) return { pending: true };
     const next = new Map<string, TypeRef>();
     for (const container of containers.values()) {
       if (container.kind !== 'model') return undefined;
@@ -1456,24 +1532,197 @@ export function resolveDataPathItemType(root: TypeRef, dataPath: string, models:
     }
     reached = [...next.values()];
   }
-  const items = reached.map((type) => {
-    const target = type.kind === 'nullable' ? type.inner : type;
-    return target.kind === 'array' ? target.items : undefined;
-  });
+  const targets = reached.flatMap((type) => reader.containersOf(type));
+  if (targets.some(isPendingModelRef)) return { pending: true };
+  const items = targets.map((target) => (target.kind === 'array' ? target.items : undefined));
   const [first, ...rest] = items;
-  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first)) ? first : undefined;
+  return first && rest.every((item) => item !== undefined && isDeepStrictEqual(item, first))
+    ? { itemType: first }
+    : undefined;
+}
+
+/** Whether `type` is a model reference `resolveSchemaPointers` has yet to settle (#539). */
+function isPendingModelRef(type: TypeRef): boolean {
+  return type.kind === 'model' && isPendingSchemaRef(type);
 }
 
 /**
- * The types a `dataPath` segment is looked up in below `type`: the type
- * under a nullable wrapper, or each variant of a union there, under its own
- * wrapper — and, for a variant that is itself a union, each of its variants
- * in turn, however deep, as the document walk reads a nested union's
- * variants (`fieldsNamed`).
+ * Where an explicit `dataPath` is walked from in the IR, and the path left
+ * to walk from there: the response itself, unless the response was unwrapped
+ * on a list envelope (`envelopeFields` present) — it is then the data array,
+ * and the path starts at the companion its first segment names, with the
+ * rest of the path; `undefined` when the segment names no companion, and the
+ * document answers. The one choice for the walk at extraction
+ * (`resolveOverrideItemType`) and the walk at the settle
+ * (`settleDeferredDataPathItemType`), so the two read one path.
  */
-function containersOf(type: TypeRef): TypeRef[] {
-  const bare = type.kind === 'nullable' ? type.inner : type;
-  return bare.kind === 'union' ? bare.variants.flatMap(containersOf) : [bare];
+export function dataPathWalkStart(
+  response: TypeRef,
+  envelopeFields: readonly Field[] | undefined,
+  dataPath: string,
+): { root: TypeRef; path: string } | undefined {
+  if (!envelopeFields) return { root: response, path: dataPath };
+  const [head, ...rest] = dataPath.split('.');
+  const companion = envelopeFields.find((field) => field.name === head);
+  return companion && { root: companion.type, path: rest.join('.') };
+}
+
+/**
+ * The iterator item types an explicit `dataPath` has yet to decide (#608):
+ * each a placeholder, typed `unknown`, standing in `PaginationMeta.itemType`
+ * from extraction until the settle. The walk from the response crossed a
+ * reference a schema `$ref` deeper into a component left pending — the
+ * response itself written as `{ $ref: '#/components/schemas/Holder/
+ * properties/result' }`, or a field on the way — so the model the pointed
+ * schema's items are built as (`HolderResultItem`, which
+ * `HolderResult.items` holds) exists but cannot be reached from the response
+ * yet; reading the document instead minted a second copy of it under the
+ * path-derived name (`ListOwnersItem`). The path is walked again once every
+ * reference is settled (`settleDeferredDataPathItemType`), so the iterator
+ * yields the very type the settled response's field holds, as it does when
+ * the response is a `$ref` to the component (`ResultItem` for `Result`).
+ */
+const deferredDataPathItemTypes = new WeakSet<TypeRef>();
+
+/** A placeholder item type for a `dataPath` the settle decides (`settleDeferredDataPathItemType`). */
+export function deferDataPathItemType(): TypeRef {
+  const placeholder: TypeRef = { kind: 'primitive', type: 'unknown' };
+  deferredDataPathItemTypes.add(placeholder);
+  return placeholder;
+}
+
+/** Whether `type` is a placeholder `deferDataPathItemType` built, awaiting the settle. */
+export function isDeferredDataPathItemType(type: TypeRef): boolean {
+  return deferredDataPathItemTypes.has(type);
+}
+
+/**
+ * Decide the item type `pagination.dataPath` names, now that `response`,
+ * the envelope's companions and every model's fields are settled
+ * (`resolveSchemaPointers`): the path is walked from where it was walked at
+ * extraction (`dataPathWalkStart`), through `models` — every model built —
+ * and `pagination.itemType` becomes the very `TypeRef` the array's field
+ * holds, which a later rename repoints in place. A path the settled types
+ * reach no array through yields `unknown`, with a warning: the override
+ * was accepted on the document walk, which reads through the pointer, but
+ * the pointer was typed `unknown` where it stands (an inline `allOf`
+ * member the `allOf` is not read as, a chain of pointers that reaches
+ * itself), and the iterator cannot yield a model the response does not
+ * hold. `context` names the operation as the settle names its sites
+ * (`Owners.listOwners`).
+ */
+export function settleDeferredDataPathItemType(
+  pagination: PaginationMeta,
+  response: TypeRef,
+  models: readonly Model[],
+  context: string,
+): void {
+  const { dataPath } = pagination;
+  const start = dataPath === undefined ? undefined : dataPathWalkStart(response, pagination.envelopeFields, dataPath);
+  const itemType = start && resolveDataPathItemType(start.root, start.path, models);
+  if (itemType) {
+    pagination.itemType = itemType;
+    return;
+  }
+  warn(
+    `dataPath "${dataPath}" on ${context} reaches no array in the response once its schema $ref is settled — typing the iterator's items as unknown`,
+  );
+  pagination.itemType = { kind: 'primitive', type: 'unknown' };
+}
+
+/**
+ * One walk's reading of the types a `dataPath` segment is looked up in
+ * below a type (`containersOf`): the type under every nullable wrapper — a
+ * site settled from a pointer to a schema that admits null wears two,
+ * `nullable<nullable<HolderResult>>` for `oneOf: [{ $ref:
+ * …/Holder/properties/result }, { type: null }]` to a nullable `result`
+ * (#545; Greptile, #608 review) — or each variant of a `oneOf`/`anyOf`
+ * union there, under its own wrappers, and, for a variant that is itself a
+ * union, each of its variants in turn, however deep, as the document walk
+ * reads a nested union's variants (`fieldsNamed`). Of a union a type list
+ * produced (`type: ['object', 'string']`, one variant per type and no
+ * `compositionKind`), the variants that are models: the document walk
+ * reads such a schema's `properties` whatever else the list names
+ * (`objectProperties`), and a pointer steps through it to the member that
+ * carries the keyword (#539), so the IR walk reads the object member too
+ * rather than failing on the string member and minting a copy of the
+ * items the object member's model holds. Of a named union model
+ * (`Model.variants`, looked up in `models`; `Page: { oneOf: [{ $ref:
+ * Result }, { type: null }] }` is a model `Page` with the one variant
+ * `Result` and no fields), its variants, each in turn as above, as the
+ * document walk reads the component's `oneOf`/`anyOf` members — a pointer
+ * settled to `nullable<Page>` reads `Result`'s fields, rather than failing
+ * on `Page`'s none and typing the iterator `unknown` (Greptile, #608
+ * review).
+ *
+ * Each named union model is expanded once per walk, however many routes
+ * reach it (`memo`), and the types read are kept distinct as they are
+ * collected (`typeRefKey`): expanded once per route, twenty-five
+ * components each an `anyOf` of two references to the next expanded the
+ * last 2^25 times, and a document of a few hundred lines took seconds, or
+ * the memory, before the caller deduped (Greptile, #608 review) — as the
+ * document walk reads each schema once per segment (`fieldsNamed`). A
+ * model met again while being expanded (a union reaching itself through
+ * its variants) contributes nothing more on that route, and a model
+ * expanded while such a cycle was open above it is not memoized, since its
+ * reading would depend on the route (`closed`, as `fieldsNamed` keeps its
+ * memo).
+ */
+class ContainerReader {
+  private readonly memo = new Map<string, TypeRef[]>();
+  /** The named union models being expanded, outermost first. */
+  private readonly stack: string[] = [];
+  /** The lowest depth in `stack` a cycle closed at during the expansion under way; `Infinity` for none. */
+  private closed = Infinity;
+
+  constructor(private readonly models: readonly Model[]) {}
+
+  containersOf(type: TypeRef): TypeRef[] {
+    const bare = underNullable(type);
+    if (bare.kind === 'model') return this.namedUnionContainers(bare);
+    if (bare.kind !== 'union') return [bare];
+    const members = this.distinct(bare.variants);
+    if (bare.compositionKind) return members;
+    const modelMembers = members.filter((member) => member.kind === 'model');
+    return modelMembers.length > 0 ? modelMembers : members;
+  }
+
+  /** `ref` itself for a model with fields; a named union's variants' containers, read once. */
+  private namedUnionContainers(ref: ModelRef): TypeRef[] {
+    const done = this.memo.get(ref.name);
+    if (done) return done;
+    const variants = this.models.find((m) => m.name === ref.name)?.variants;
+    if (!variants) return [ref];
+    const above = this.stack.indexOf(ref.name);
+    if (above !== -1) {
+      this.closed = Math.min(this.closed, above);
+      return [];
+    }
+    const depth = this.stack.push(ref.name) - 1;
+    const outer = this.closed;
+    this.closed = Infinity;
+    const containers = this.distinct(variants);
+    this.stack.pop();
+    if (this.closed >= depth) this.memo.set(ref.name, containers);
+    this.closed = Math.min(outer, this.closed);
+    return containers;
+  }
+
+  /** The containers of each of `types`, one per `typeRefKey`. */
+  private distinct(types: readonly TypeRef[]): TypeRef[] {
+    const out = new Map<string, TypeRef>();
+    for (const type of types) {
+      for (const container of this.containersOf(type)) out.set(typeRefKey(container), container);
+    }
+    return [...out.values()];
+  }
+}
+
+/** `type` under every nullable wrapper it wears. */
+function underNullable(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  return bare;
 }
 
 /** A key two `TypeRef`s share exactly when they are one type to look a field up in: a model's or enum's name, else the TypeRef's shape. */
