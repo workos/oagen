@@ -44,6 +44,12 @@ import {
   mediaTypeNameFragment,
   mediaTypeNamingOrder,
 } from '../utils/media-type.js';
+import {
+  BINARY_RESPONSE_MEDIA_TYPES,
+  TEXT_RESPONSE_MEDIA_TYPES,
+  responseBodyReading,
+  unreadResponseBodyType,
+} from './body-media-types.js';
 import type { SchemaObject } from './schemas.js';
 import {
   schemaToTypeRef,
@@ -6799,12 +6805,6 @@ function componentResponseModelBase(componentName: string): string {
   return cleanSchemaName(toPascalCase(componentName).replace(/Response$/, ''));
 }
 
-/**
- * Media types the fixed-order response pick types as a plain string without
- * reading their schema, in the order it checks them.
- */
-const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text/html', 'text/xml', 'application/xml'];
-
 /** Where an inline body declared for a secondary media type gets its name (`typeSecondaryContent`). */
 interface ContentModelNaming {
   /**
@@ -7016,12 +7016,11 @@ function typeSecondaryContent(
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
-  // as much a string as `text/plain`. The key itself stays as written.
-  const essence = mediaTypeEssence(contentType);
-  if (essence === 'application/octet-stream' || essence === 'application/pdf') {
-    return { kind: 'primitive', type: 'string', format: 'binary' };
-  }
-  if (TEXT_RESPONSE_MEDIA_TYPES.includes(essence)) return { kind: 'primitive', type: 'string' };
+  // as much a string as `text/plain` (`responseBodyReading`, the one
+  // classification the primary pick and `sentOnlyComponentNames` read too).
+  // The key itself stays as written.
+  const reading = responseBodyReading(contentType);
+  if (reading !== 'schema') return unreadResponseBodyType(reading);
   if (!schema) return { kind: 'primitive', type: 'unknown' };
   const fragment = mediaTypeNameFragment(contentType, siblings);
   ctx.deferred.push({
@@ -7337,16 +7336,21 @@ function typeErrorBody(
 /**
  * The fixed-order pick of a success response's body: the JSON schema when a
  * JSON media type is declared (`application/json` by essence, then `+json`);
- * else a binary (`application/octet-stream`, `application/pdf`) or text
- * (`TEXT_RESPONSE_MEDIA_TYPES`) media type, typed as a string without reading
- * its schema; else the first media type that declares a schema; else the
- * first declared, which reads as `unknown`. Media types are compared by
- * essence (`application/pdf; foo=bar` is as binary as `application/pdf`,
- * `TEXT/PLAIN; charset=utf-8` as much a string as `text/plain`) and
- * `contentType` is the key as written. `extractResponses` reads a 2xx body
- * through this, and `resolvePathModelBaseNames` asks the same question of a
- * component response, so the names it reserves are the ones the operation
- * will mint, whatever media type the body is declared under.
+ * else a binary (`BINARY_RESPONSE_MEDIA_TYPES`: `application/octet-stream`,
+ * `application/pdf`) or text (`TEXT_RESPONSE_MEDIA_TYPES`: `text/plain`,
+ * `text/html`, `text/xml`, `application/xml`) media type, typed as a string
+ * without reading its schema — the classification `responseBodyReading`
+ * shares with every secondary entry (`typeSecondaryContent`) and with the
+ * sent/received walk (`sentOnlyComponentNames`), so a body under such a
+ * media type reaches no component (#610); else the first media type that
+ * declares a schema; else the first declared, which reads as `unknown`.
+ * Media types are compared by essence (`application/pdf; foo=bar` is as
+ * binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much a string
+ * as `text/plain`) and `contentType` is the key as written.
+ * `extractResponses` reads a 2xx body through this, and
+ * `resolvePathModelBaseNames` asks the same question of a component
+ * response, so the names it reserves are the ones the operation will mint,
+ * whatever media type the body is declared under.
  */
 function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
   const json = jsonResponseSchema(resp);
@@ -7355,10 +7359,10 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
   if (!content) return {};
   const keyWithEssence = (essence: string): string | undefined =>
     Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
-  const binaryKey = keyWithEssence('application/octet-stream') ?? keyWithEssence('application/pdf');
-  if (binaryKey) return { contentType: binaryKey, type: { kind: 'primitive', type: 'string', format: 'binary' } };
+  const binaryKey = BINARY_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
+  if (binaryKey) return { contentType: binaryKey, type: unreadResponseBodyType('binary') };
   const textKey = TEXT_RESPONSE_MEDIA_TYPES.map(keyWithEssence).find((key) => key !== undefined);
-  if (textKey) return { contentType: textKey, type: { kind: 'primitive', type: 'string' } };
+  if (textKey) return { contentType: textKey, type: unreadResponseBodyType('text') };
   // The first media type that declares a schema; when none does, the first
   // declared is the primary and reads as unknown.
   const entries = Object.entries(content);
