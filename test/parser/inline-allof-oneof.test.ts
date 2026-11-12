@@ -2195,13 +2195,19 @@ describe('the origin of an inherited field is the component whose model carries 
     expectSound(ir, ['Base', 'Alias', 'Holder']);
   });
 
-  it('follows a two-hop alias — a bare $ref to a nullable alias — to the declaring component', async () => {
+  it('keeps a two-hop alias — a bare $ref to a nullable alias — as the origin: its own model carries the field (#618)', async () => {
+    // `Hop` is read as `allOf: [{ $ref: Alias }]` is (#618), so its model
+    // carries `meta` as `HopMeta` and builds it; a merge naming `Hop`
+    // references that, as one naming an `allOf` component does (below).
+    // Before #618 the bare alias built a fieldless model, and the merge fell
+    // through to `Base`'s `BaseMeta`.
     const Alias = nullOf(ref('Base'));
     const Hop = ref('Alias');
     const merged = mergeAllOfMembers({ allOf: [ref('Hop'), inline] }, { Base, Alias, Hop });
-    expect(merged.properties.map((p) => `${p.name} (${p.origin?.name ?? 'own'})`)).toEqual(['meta (Base)', 'x (own)']);
+    expect(merged.properties.map((p) => `${p.name} (${p.origin?.name ?? 'own'})`)).toEqual(['meta (Hop)', 'x (own)']);
     const ir = await parseWithoutWarnings(doc({ Alias, Hop, Holder: holder(ref('Hop')) }));
-    expect(fieldsOf(modelsByName(ir)['HolderValue'])).toEqual(['meta: BaseMeta', 'x?: string']);
+    expect(fieldsOf(modelsByName(ir)['HolderValue'])).toEqual(['meta: HopMeta', 'x?: string']);
+    expect(fieldsOf(modelsByName(ir)['Hop'])).toEqual(['meta: HopMeta']);
     expectSound(ir, ['Base', 'Alias', 'Hop', 'Holder']);
   });
 

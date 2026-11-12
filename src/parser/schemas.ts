@@ -111,7 +111,8 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  * JSON Pointer `#/components/schemas/Pet/properties/owner` to that inline
  * field is (#539); and an alias of either — an `allOf` read as its `$ref`
  * member (`PetOwnerAlias: { allOf: [{ $ref: PetOwner }] }`), as the same
- * `allOf` on a field is typed — while an `allOf` that merges a typing
+ * `allOf` on a field is typed, or a bare `$ref` (`PetOwnerAlias: { $ref:
+ * PetOwner }`; #618), at every hop of a chain — while an `allOf` that merges a typing
  * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
  * properties }] }`) is the object its merged fields describe, bare, as it
  * is on a field (`isNullableModelComponentEntry`). Keyed by the component
@@ -1606,6 +1607,18 @@ export function extractSchemas(
       // Nor an alias of an enum component (#560): a `$ref` to it is the
       // enum it names, which keeps its own `Enum`.
     } else {
+      // A bare `$ref` to a component that becomes a model is a model of its
+      // own carrying that component's fields, as `allOf: [{ $ref }]` is
+      // (`composesComponentModel`; #618). One whose chain of `$ref`s
+      // returns to itself, or names no component, carries nothing: it is
+      // the fieldless model it always was, reported once, here, in the one
+      // pass that is no rehearsal (`componentMints` runs `extractModel`
+      // under `rehearse`, which drops warnings).
+      if (bareRefNamesNothing(schema, schemas)) {
+        console.warn(
+          `[oagen] Warning: Component schema "${name}" is a $ref that resolves to no component (a chain of $refs that returns to itself, or a $ref no component answers) — reading it as a model with no fields`,
+        );
+      }
       keepComponent(name, extractModel(pascalName, schema, schemas));
 
       for (const inlineModel of [
@@ -2427,10 +2440,19 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * the fieldless model it always became and admits nothing but `null`; or
  * an alias of either — an `allOf`
  * `readInlineAllOf` reads as its `$ref` member, alone or beside members
- * that only annotate or limit it (`allOfReadAsMember`), followed through
+ * that only annotate or limit it (`allOfReadAsMember`), or a bare `$ref`
+ * (`PetOwnerAlias: { $ref: PetOwner }`, with or without annotations beside
+ * it; #618, MichaelDeBoey's #646 review: the bare spelling lost the
+ * `null` the `allOf` spelling kept), followed through
  * aliases of aliases as an array or enum component's alias is
  * (`componentEntries`) — since the same `allOf` on a field is typed as the
- * reference, wrapper included. An `allOf` that merges — a typing member
+ * reference, wrapper included. A bare `$ref` admits what its target admits
+ * and nothing the keywords beside it say, as nothing but annotations is
+ * read beside a `$ref`: `B: { $ref: Cat, type: ['object', 'null'] }` (OAS
+ * 3.0: `type: 'object', nullable: true`) over a `Cat` that admits no `null`
+ * is `B`, and `A: { $ref: B }` is `A`, as `{ $ref: Cat, type: ['object',
+ * 'null'] }` on a field is `Cat` (Greptile, #646: the `type` beside the
+ * `$ref` made both `nullable`). An `allOf` that merges — a typing member
  * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
  * }`), a second `$ref`, a `required` that adds to the reference — is read
  * as none of its members: the composed model is the object its merged
@@ -2447,9 +2469,18 @@ function isNullableModelComponentEntry(
 ): boolean {
   if (seen.has(schema)) return false;
   seen.add(schema);
-  if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
-  if (isNullSchema(schema) || declaresNull(schema)) return true;
-  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  // A bare `$ref` alias is its reference (#618), so it admits what the
+  // component it names admits, at every hop of a chain, as the `allOf`
+  // alias below does (#646 review) — and nothing more: the `$ref` is
+  // followed before any keyword beside it is read, since nothing but
+  // annotations is read beside a `$ref`, so a `type` list naming `'null'`
+  // or OAS 3.0 `nullable: true` beside a `type`, written beside the
+  // `$ref`, declares no `null` here, as it declares none on a field.
+  if (schema.$ref === undefined) {
+    if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
+    if (isNullSchema(schema) || declaresNull(schema)) return true;
+  }
+  const member = schema.$ref !== undefined ? schema : allOfReadAsMember(unwrapNullableSchema(schema));
   if (member === undefined) return false;
   if (member.$ref === undefined) return isNullableModelComponentEntry(member, schemas, seen);
   const key = componentKeyOf(member.$ref);
@@ -2947,14 +2978,23 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * the variants, so its model flattens or dispatches the union as an
  * `allOf: [{ properties: { id } }, { oneOf: [...] }]` does; before, the
  * union was not read, and only a component that inherited `Pet` through an
- * `allOf` member carried the variants' properties). A `oneOf`/`anyOf` with
+ * `allOf` member carried the variants' properties), or it is a bare `$ref`
+ * to another component (`CatAlias: { $ref: Cat }`, with or without text,
+ * flags, limits or `x-*` keys beside the `$ref`), which composes the
+ * component it names exactly as `CatAlias: { allOf: [{ $ref: Cat }] }`
+ * does (#618: it was read from its own `properties`, which it has none of,
+ * so it was a model with no fields, and every `$ref` to it was typed as
+ * that empty model, while the `allOf` spelling carried `Cat`'s fields). A
+ * bare `$ref` alias of an enum, array or primitive component never reaches
+ * the model readers (`extractSchemas` reads it through to what it names;
+ * #512, #560), so it is unchanged by this. A `oneOf`/`anyOf` with
  * no properties beside it is a named union (`isNamedUnionSchema`), an
  * enum, an array or a primitive component, never composed here; an empty
  * `properties: {}` declares nothing (`hasFoldableProperties`), so it leaves
  * the union a named union as before.
  */
 function composesComponentModel(schema: SchemaObject): boolean {
-  if (schema.$ref) return false;
+  if (schema.$ref !== undefined) return true;
   return schema.allOf !== undefined || (hasFoldableProperties(schema) && besideUnionMembers(schema).length > 0);
 }
 
@@ -2990,13 +3030,25 @@ function hasFoldableProperties(schema: SchemaObject): boolean {
  * after every always-applying member, whether the union sits beside an
  * `allOf` (`NewPet: { allOf: [base], oneOf: [...] }`) or beside the
  * component's own `properties` alone (`Pet: { properties: { id }, oneOf:
- * [...] }`, read as a composed model by `composesComponentModel`). Shared
+ * [...] }`, read as a composed model by `composesComponentModel`). A
+ * component written as a bare `$ref` composes one member and nothing
+ * else: the reference as written — `CatAlias: { $ref: Cat, description }`
+ * is read as `{ allOf: [{ $ref: Cat }], description }` is (#618) — which
+ * every reader follows to the component it names through a chain of
+ * aliases (`followMemberRefs`), so the readers key nothing on the member
+ * itself. The text, flag, limits and keys written beside the `$ref` are
+ * the wrapper's own (`allOfWrapperLayer`, `constraintsEntry`), never a
+ * member; `properties`, `required`, an `allOf`, a union or a
+ * `discriminator` beside it are not read, here or anywhere a `$ref` is
+ * followed (#618 review, #622: nothing but annotations is read beside a
+ * `$ref`), so only the `allOf: [{ $ref }]` spelling composes them. Shared
  * by `extractAllOfModel`, at every level of a `$ref` chain, and by
  * `extractDiscriminatedAllOfVariantModels`, whose dispatcher base carries
  * them into every variant. Empty for a component that composes nothing.
  */
 function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
   if (!composesComponentModel(schema)) return [];
+  if (schema.$ref !== undefined) return [{ $ref: schema.$ref }];
   const members = [...(schema.allOf ?? []), ...besideUnionMembers(schema)];
   if (!hasFoldableProperties(schema)) return members;
   const { properties, required } = schema;
@@ -3527,9 +3579,16 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
- * through `allOf` wrappers too).
+ * through `allOf` wrappers too), and for a schema written as a `$ref`,
+ * which pins nothing of its own: nothing but annotations is read beside a
+ * `$ref`, so `properties` beside an alias's reference are no declaration
+ * here, as they are none for its model (`getEffectiveProperties`,
+ * `componentAllOfMembers`; Greptile, #618 review: `CatAlias: { $ref: Cat,
+ * properties: { kind: { const: 'other' } } }` had `kind: 'cat'` as a field
+ * while a union mapped `'other'` to it).
  */
 function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
+  if (schema.$ref !== undefined) return null;
   const prop = schema.properties?.[property];
   return prop ? pinnedStringValue(prop) : null;
 }
@@ -3733,10 +3792,22 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
     ...schemaExtensionsEntry(declaration),
   };
 }
+/**
+ * The model of a `components/schemas` entry that becomes one (resolved to
+ * `name`): a composed component — an `allOf`, a typing union beside
+ * properties of its own, or a bare `$ref` to another component, read as
+ * `allOf: [{ $ref }]` is (`composesComponentModel`; #618) — through
+ * `extractAllOfModel`; any other from its own `properties`, or, with none,
+ * the variants of a pure `oneOf`/`anyOf` flattened as optional fields. A
+ * bare `$ref` whose chain returns to itself or names no component composes
+ * nothing (`bareRefNamesNothing`, which `extractSchemas` reports once), so
+ * its model has no fields.
+ */
 function extractModel(name: string, schema: SchemaObject, schemas?: Record<string, SchemaObject>): Model {
   // A composed component: an `allOf`, its own `properties` beside it read
-  // as its first member and a typing union beside either as its last
-  // (`componentAllOfMembers`, `composesComponentModel`).
+  // as its first member and a typing union beside either as its last, or a
+  // bare `$ref` read as its one member (`componentAllOfMembers`,
+  // `composesComponentModel`).
   if (composesComponentModel(schema)) {
     return extractAllOfModel(name, schema, schemas);
   }
@@ -3865,7 +3936,10 @@ interface NamedUnionPlan {
  * would be lost.
  */
 function isNamedUnionSchema(schema: SchemaObject): boolean {
-  if (schema.allOf || (!schema.oneOf && !schema.anyOf)) return false;
+  // A `$ref` with a union beside it is the alias of its reference
+  // (`composesComponentModel`), the union unread as anything beside a
+  // `$ref` is (#618 review): never a named union minting variants of its own.
+  if (schema.allOf || schema.$ref !== undefined || (!schema.oneOf && !schema.anyOf)) return false;
   if (Object.keys(schema.properties ?? {}).length > 0) return false;
   // A `oneOf`/`anyOf` of string consts is an enum (`isEnumComponentSchema`), not a union.
   if (isConstUnionEnumSchema(schema)) return false;
@@ -4423,8 +4497,10 @@ function isEnumComponentEntry(schema: SchemaObject, schemas: Record<string, Sche
  * member of an `allOf` is the
  * entry's own declaration, not an entry of its own. A chain that returns to
  * an entry it has visited names no array, primitive or enum: such an entry
- * stays the fieldless model it always became, as an alias of an object
- * component does.
+ * is left to the model readers, as an alias of an object component is —
+ * that one a model carrying the component's fields (`extractModel`,
+ * `composesComponentModel`; #618), a chain that repeats a model with none,
+ * reported once (`bareRefNamesNothing`).
  */
 function componentEntries(
   schema: SchemaObject,
@@ -5276,7 +5352,8 @@ function readComponentAllOfMember(
 
 /**
  * Read a composed component schema — its own `properties` and `required`
- * first, then its `allOf` members, then a typing union written beside them
+ * first, then its `allOf` members, or the one `$ref` member a bare `$ref`
+ * component composes (#618), then a typing union written beside them
  * (`componentAllOfMembers`), each through `readComponentAllOfMember` — into
  * `reading`, and return the discriminator a direct member's
  * `oneOf`/`anyOf` declares, if any. A `discriminator` the schema writes
@@ -5286,7 +5363,10 @@ function readComponentAllOfMember(
  * member as the wrapper's; one written beside a union goes with that union
  * (`besideUnionMembers`). A schema reached again on the chain declares
  * nothing more (`seen`), so a component that names itself, or two members
- * naming one component, terminate.
+ * naming one component, terminate. A component written as a bare `$ref`
+ * composes its reference alone (`componentAllOfMembers`): a `required` or
+ * a `discriminator` beside the `$ref` is not read, as nothing but
+ * annotations is beside any `$ref` (#618 review).
  */
 function readComponentAllOf(
   name: string,
@@ -5303,9 +5383,23 @@ function readComponentAllOf(
   }
   // The component's own `required`: carried by its own member when it
   // declares properties, and read here when it only names inherited ones
-  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`).
-  for (const r of schema.required ?? []) reading.required.add(r);
+  // (`Pup: { allOf: [{ $ref: Dog }], required: [breed] }`) — never beside
+  // a bare `$ref`, which composes its reference alone.
+  for (const r of ownRequired(schema)) reading.required.add(r);
   return discriminator;
+}
+
+/**
+ * The `required` names a composed component declares as its own
+ * (`readComponentAllOf`, `discriminatedVariantSchemas`): its `required`
+ * list, unless the component is written as a bare `$ref`, beside which
+ * nothing but annotations is read (#618 review: `B: { $ref: Cat,
+ * required: [name] }` is `Cat`'s `name` as optional as `Cat` declares it,
+ * at `B`, at every hop of a chain naming `B` and in a merge naming it,
+ * where `B: { allOf: [{ $ref: Cat }], required: [name] }` requires it).
+ */
+function ownRequired(schema: SchemaObject): readonly string[] {
+  return schema.$ref === undefined ? (schema.required ?? []) : [];
 }
 
 /**
@@ -5316,6 +5410,10 @@ function readComponentAllOf(
  * reference to the component and the component itself dispatch by it.
  */
 export function wrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeyword | undefined {
+  // A `discriminator` beside a `$ref` is not read, as nothing but
+  // annotations is beside any `$ref` (#618 review): a bare `$ref` alias
+  // dispatches as the component it names does.
+  if (schema.$ref !== undefined) return undefined;
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
 }
 
@@ -5349,7 +5447,14 @@ export function declaredComponentProperty(entry: PropertyDeclarations): SchemaOb
  * first as one more member and a typing union written beside them last
  * (`componentAllOfMembers`); a `$ref` member's component is read the same
  * way, its own properties and then its members, so a chain
- * (`Puppy → Dog → Pet`) carries every level's own properties. Every field is
+ * (`Puppy → Dog → Pet`) carries every level's own properties. A component
+ * written as a bare `$ref` is read as the `allOf` of that one member
+ * (#618): `CatAlias: { $ref: Cat }` is `CatAlias: { allOf: [{ $ref: Cat }]
+ * }`, a model carrying `Cat`'s fields, `required` and dispatcher, through
+ * a chain of such aliases (`A: { $ref: B }`, `B: { $ref: Cat }`) and into a
+ * component that itself composes (`Puppy: { $ref: Dog }`), with what is
+ * written beside the `$ref` as its own text, flag, limits and keys, as
+ * beside an `allOf`. Every field is
  * typed under the component's own name with one sibling set
  * (`collectProperties`), from the one declaration
  * `declaredComponentProperty` picks: the always-applying declaration
@@ -5424,7 +5529,13 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * carry `kind`. A component reached again on one walk is read once, so a
  * cycle (`Loop: { allOf: [{ $ref: Loop }] }`) declares nothing more.
  * Without the map a `$ref` member declares nothing, as the allOf+oneOf
- * readers read a variant's inline members only.
+ * readers read a variant's inline members only. A schema that is itself a
+ * `$ref` — a component alias (`CatAlias: { $ref: Cat }`), which the model
+ * readers read as `allOf: [{ $ref: Cat }]` (#618) — is followed too, one
+ * hop at a time, and nothing written beside its `$ref` is read, as beside
+ * any `$ref` (#618 review), so a union variant naming the alias pins what
+ * `Cat` pins, and `Pet: { oneOf: [{ $ref: CatAlias }, { $ref: Dog }] }`
+ * dispatches by `kind` as it does with the `allOf` spelling.
  *
  * A property several members declare keeps its first declaration, unless a
  * later one pins it to one value the earlier left open — a const narrows
@@ -5446,6 +5557,16 @@ function getEffectiveProperties(
   const visit = (s: SchemaObject): void => {
     if (seen.has(s)) return;
     seen.add(s);
+    // A `$ref` composes the component it names and nothing beside it
+    // (#618): followed one hop at a time, so a chain of aliases is read
+    // through, a cycle ends on `seen`, and a `$ref` no component answers
+    // declares nothing; what is written beside the `$ref` is not read, as
+    // beside any `$ref` (#618 review).
+    if (s.$ref !== undefined) {
+      const target = schemaRefTarget(s.$ref, schemas);
+      if (target) visit(target);
+      return;
+    }
     for (const [k, v] of Object.entries(s.properties ?? {})) {
       if (!v) continue;
       const held = props.get(k);
@@ -5606,13 +5727,42 @@ export function componentUnionDispatches(
 }
 
 /**
+ * Whether a component written as a bare `$ref` names no component its
+ * model could carry: its chain of `$ref`s returns to itself (`Loop: { $ref:
+ * Loop }`; `A: { $ref: B }` beside `B: { $ref: A }`), or ends at a `$ref` no
+ * component answers — followed through every `$ref` on the chain, whatever
+ * is written beside it. Such a component is read as any bare `$ref` alias
+ * is (`extractAllOfModel`; #618) and the chain declares nothing, so its
+ * model has no fields but what the aliases write beside their `$ref`s;
+ * `extractSchemas` reports it once. False for a schema that is no bare
+ * `$ref`, and for one whose chain ends at a component.
+ */
+function bareRefNamesNothing(schema: SchemaObject, schemas: Record<string, SchemaObject> | undefined): boolean {
+  if (schema.$ref === undefined) return false;
+  const chain = new Set<SchemaObject>([schema]);
+  let hop: SchemaObject = schema;
+  while (hop.$ref !== undefined) {
+    const target = schemaRefTarget(hop.$ref, schemas);
+    if (target === undefined || chain.has(target)) return true;
+    chain.add(target);
+    hop = target;
+  }
+  return false;
+}
+
+/**
  * The component an `allOf` member names, followed through a chain of
  * references (`Hop: { $ref: Alias }`), or the member itself when it is no
  * reference; `undefined` when the chain repeats or reaches a component
- * already read on this walk (`seen`), which then declares nothing more. The
- * one reference-following every reader of a component's member shares:
- * `readComponentAllOfMember` reads the member it lands on, and `memberUnion`
- * finds the union it carries.
+ * already read on this walk (`seen`), which then declares nothing more.
+ * Every `$ref` on the chain is followed through, whatever is written
+ * beside it: nothing but annotations is read beside a `$ref` (#618
+ * review), so `B: { $ref: Cat, required: [name] }` under `A: { $ref: B }`
+ * is `Cat` at `A` and at `B` alike. The one reference-following every
+ * reader of a component's member shares: `readComponentAllOfMember` reads
+ * the member it lands on, `memberUnion` finds the union it carries. A
+ * `$ref` no component answers ends the chain on the schema that writes
+ * it, which the caller sees by its `$ref`.
  */
 function followMemberRefs(
   member: SchemaObject,
@@ -5803,7 +5953,7 @@ function discriminatedVariantSchemas(
   }
   // The component's own `required` naming an inherited property only, as
   // `readComponentAllOf` reads it for the dispatcher model.
-  for (const r of schema.required ?? []) reading.required.add(r);
+  for (const r of ownRequired(schema)) reading.required.add(r);
   const baseRequired = reading.required;
   const baseProperties: Record<string, SchemaObject> = Object.fromEntries(
     [...reading.ledger.values()].map((entry) => [entry.name, declaredComponentProperty(entry)]),
