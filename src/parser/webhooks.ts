@@ -395,6 +395,9 @@ export function buildReceivedRequests(
   // name a descendant mints under a stem of its own never moves an
   // ancestor's stem, so the descendant is the one that hashes.
   const plainStems = new Map(groups.map((group) => [group, plainStem(group.owner, '')]));
+  // What each group's collision hash is taken from: one record per group
+  // the settling, every wave and the catch-all share and raise together.
+  const identities = groupIdentities(groups);
   /**
    * Whether a name `other` mints may move `group`'s stem: it may when the
    * plain stems agree, when neither group is a strict descendant of the
@@ -410,7 +413,7 @@ export function buildReceivedRequests(
     plainStems.get(other) === plainStems.get(group) ||
     !ancestorsOf.get(other)!.has(group) ||
     ancestorsOf.get(group)!.has(other);
-  const settled = resolveWebhookModelStems(groups, reserved, components, siblingDocs, undefined, contends);
+  const settled = resolveWebhookModelStems(groups, reserved, components, siblingDocs, identities, undefined, contends);
   // Each group's wave: its shallowest member's depth.
   const waveOf = new Map(groups.map((group) => [group, Math.min(...group.entries.map(depthOf))] as const));
   const waves = [...new Set(waveOf.values())].sort((a, b) => a - b);
@@ -427,7 +430,15 @@ export function buildReceivedRequests(
     // One reserved set for the wave's step-around and its minting, so what
     // the step-around minted is what is kept; the next wave reserves it.
     const waveReserved: ReservedNames = { all: new Set(all), enums: new Set(enums) };
-    const resolved = resolveWebhookModelStems(waveGroups, waveReserved, components, siblingDocs, settled, contends);
+    const resolved = resolveWebhookModelStems(
+      waveGroups,
+      waveReserved,
+      components,
+      siblingDocs,
+      identities,
+      settled,
+      contends,
+    );
     for (const group of waveGroups) {
       const stem = resolved.stems.get(group)!;
       const minted = mintWebhook(group.owner, stem, components, waveReserved, siblingDocs);
@@ -442,7 +453,17 @@ export function buildReceivedRequests(
   // The groups in minting order: by wave, then as the document declares them.
   const order = waves.flatMap((wave) => groups.filter((group) => waveOf.get(group) === wave));
   if (entries[0]?.kind === 'callback') {
-    separateMintedNames(order, stems, hashLength, mintedByGroup, reservedOf, reserved, components, siblingDocs);
+    separateMintedNames(
+      order,
+      stems,
+      hashLength,
+      mintedByGroup,
+      reservedOf,
+      reserved,
+      identities,
+      components,
+      siblingDocs,
+    );
   }
   const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
   const names = new Set(order.flatMap((group) => [...mintedByGroup.get(group)!.names]));
@@ -494,10 +515,13 @@ export function buildReceivedRequests(
  * group minting it, each on its own identity and stem, so the outcome
  * never depends on which was declared first: a name that embeds a group's
  * stem is moved as the resolution moves one, the stem settled with six
- * more characters of its identity's hash and the group minted again; one
- * the hash cannot move is renamed under the group's stem (`<Stem><Name>`,
- * numbered when that is taken too) with every reference minted for it
- * repointed through `renameTypeRefModels`, as the merge passes rename, so
+ * more characters of its input's hash — or, hashing one string as another
+ * minter of the name, with its source put in front of the text
+ * (`partsBy`) — and the group minted again; one the hash cannot move is
+ * renamed under the group's stem
+ * (`<Stem><Name>`, numbered when that is taken too) with every reference
+ * minted for it repointed through `renameTypeRefModels`, as the merge
+ * passes rename, so
  * an explicit `$ref` to a component of the name — a parameter's union over
  * `components/schemas` — and the mapping entry it owns stay untouched.
  * Every contested name of a round is decided together: each replacement
@@ -537,6 +561,7 @@ function separateMintedNames(
   reservedOf: Map<WebhookGroup, ReservedNames>,
   /** The names reserved before the batch — what a replacement steps around beside the names still minted. */
   reserved: ReservedNames,
+  identities: Map<WebhookGroup, HashIdentity>,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
 ): void {
@@ -559,28 +584,56 @@ function separateMintedNames(
         new Set(groups.map((group) => mintedShape(mintedByGroup.get(group)!, name))).size > 1,
     );
     if (contested.length === 0) return;
+    // Of a contested name's minters the hash moves, those hashed already
+    // that hash one string as another minter of the name — a key and an
+    // operationId of one text, which six more characters would never part —
+    // put their source in front of the text instead (`partsBy`), decided
+    // for every contested name of the round before any is applied, and are
+    // minted again at the length they have; a name that raises any of its
+    // minters moves those alone by the hash, their new inputs parting them
+    // from the rest, which the next round takes up if still contested.
+    const raisedBy = new Map(
+      contested.map(([name, groups]) => [
+        name,
+        new Set(
+          groups.filter(
+            (group) =>
+              (hashLength.get(group) ?? 0) > 0 &&
+              name.includes(toPascalCase(stems.get(group)!)) &&
+              groups.some((other) => other !== group && partsBy(identities.get(group)!, identities.get(other)!)),
+          ),
+        ),
+      ]),
+    );
+    const raised = new Set([...raisedBy.values()].flatMap((groups) => [...groups]));
+    for (const group of raised) identities.get(group)!.level += 1;
     // How each minter of a contested name moves: a group whose stem the
-    // name embeds, with hash to spare, hashes once this round and mints
-    // again; a model the hash cannot move is renamed; an inline enum of a
-    // spent hash cannot move — nothing renames an enum reference.
+    // name embeds — raised, or with hash to spare where the name raises
+    // none of its minters — hashes once this round and mints again; a model
+    // the hash does not move is renamed; an inline enum of a spent hash
+    // cannot move — nothing renames an enum reference.
     const hashing = new Set<WebhookGroup>();
     const renaming: Array<{ group: WebhookGroup; name: string }> = [];
     const stuck = new Map<string, Set<WebhookGroup>>();
     for (const [name, groups] of contested) {
+      const raisedHere = raisedBy.get(name)!;
       for (const group of groups) {
         const stem = toPascalCase(stems.get(group)!);
-        if (name.includes(stem) && (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH) hashing.add(group);
+        const spare = (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH;
+        if (name.includes(stem) && (raisedHere.has(group) || (raisedHere.size === 0 && spare))) hashing.add(group);
         else if (mintedByGroup.get(group)!.inlineModels.some((m) => m.name === name)) renaming.push({ group, name });
         else stuck.set(name, new Set([...(stuck.get(name) ?? []), group]));
       }
     }
-    // The hash moves a stem on the group's identity alone: six more
-    // characters, minted again, the new names the hash's and no one else's.
-    // A group hashing this round renames nothing this round: its names are
-    // minted afresh, and a titled one still contested is renamed next round.
+    // The hash moves a stem on the group's input alone: six more characters
+    // — or, raised, as many of the new input's — minted again, the new
+    // names the hash's and no one else's. A group hashing this round
+    // renames nothing this round: its names are minted afresh, and a titled
+    // one still contested is renamed next round.
     for (const group of hashing) {
-      const next = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
-      const hashed = plainStem(group.owner, webhookDisambiguator(groupIdentity(group), next));
+      const length = hashLength.get(group) ?? 0;
+      const next = raised.has(group) ? length : Math.min(SHA1_HEX_LENGTH, length + 6);
+      const hashed = plainStem(group.owner, webhookDisambiguator(hashInput(identities.get(group)!), next));
       hashLength.set(group, next);
       stems.set(group, hashed);
       mintedByGroup.set(group, mintWebhook(group.owner, hashed, components, reservedOf.get(group)!, siblingDocs));
@@ -608,10 +661,18 @@ function separateMintedNames(
     // contested name of the group — `Shape` renamed to `<S>Shape` beside a
     // variant titled `<S>Shape` under a spent-hash stem `S` — never
     // becomes a source.
+    // Identity order reads a group's text, then its source — a key and an
+    // operationId of one text are two identities (#580) — then the name.
     const byIdentity = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+    const identityOf = (group: WebhookGroup): StemIdentity => identities.get(group)!.identity;
     const pending = renaming
       .filter(({ group }) => !hashing.has(group))
-      .sort((a, b) => byIdentity(groupIdentity(a.group), groupIdentity(b.group)) || byIdentity(a.name, b.name));
+      .sort(
+        (a, b) =>
+          byIdentity(identityOf(a.group).text, identityOf(b.group).text) ||
+          byIdentity(identityOf(a.group).source, identityOf(b.group).source) ||
+          byIdentity(a.name, b.name),
+      );
     const renamesOf = new Map<WebhookGroup, Map<string, string>>();
     const modelsOf = new Map<WebhookGroup, Array<{ model: Model; to: string }>>();
     for (const { group, name } of pending) {
@@ -983,8 +1044,24 @@ export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRe
  * under one key never hash alike, each keeping its own payload (#382) —
  * before the method qualifier (`PetAdoptedB4A950`), exactly as an
  * operationId-less operation's path prefix does, and is minted again under
- * it. The names minted under the moved stems are then checked again,
- * against the reserved names and every other group's: a group still
+ * it. What is hashed is the text as written (`groupIdentities`). Two
+ * groups hashed already that still share a name because they hash one
+ * string — a key and an operationId of one text, a webhook keyed
+ * `petAdopted` without an operationId beside `noteAdded` declaring
+ * `operationId: petAdopted`, both `PetAdoptedB4A950` — which six more
+ * characters would never part, each put their source in front of the
+ * text instead (`partsBy`: `key:petAdopted` and `operationId:petAdopted`)
+ * and are minted again at the length they have, so the six characters
+ * part them and each keeps its own payload whatever the key order (#580);
+ * a key or operationId spelling such a prefixed text as written
+ * (`key:petAdopted`) that shares a name with its group puts its source in
+ * front too (`key:key:petAdopted`), being the one not yet prefixed. Two
+ * groups that hash one string but share no name — the `post` and `put`
+ * groups of one key, a key whose several methods qualify its stems past
+ * the operationId's (`PetAdoptedPost` beside `PetAdopted`) — hash the
+ * text as written. The names minted under the moved stems
+ * are then checked again, against the reserved names and every other
+ * group's: a group still
  * clashing — two hash prefixes that coincide, a reserved name that spells a
  * hashed stem — takes six more characters of its hash, and so on until no
  * stem-embedding name clashes or the hash is spent, when the clash is left
@@ -1019,6 +1096,8 @@ function resolveWebhookModelStems(
   reserved: ReservedNames,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
+  /** What each group is hashed from (`groupIdentities`), one record per group the resolution raises in place (`partsBy`). */
+  identities: Map<WebhookGroup, HashIdentity>,
   /** Stems and hash lengths already settled, to start from and extend instead of the plain stems (`buildReceivedRequests`'s minting). */
   settled?: ResolvedStems,
   /** Whether a name `other` mints may move `group`'s stem; any may unless said otherwise. */
@@ -1033,24 +1112,46 @@ function resolveWebhookModelStems(
   let names = new Map(groups.map((group) => [group, mint(group, stems.get(group)!)]));
   for (;;) {
     // Only a clashing name the hash would move — one that embeds the stem —
-    // moves the stem.
-    const clashing = groups.filter((group) => {
-      const stem = toPascalCase(stems.get(group)!);
-      return [...names.get(group)!].some(
-        (name) =>
-          name.includes(stem) &&
-          (reserved.all.has(name) ||
-            groups.some((other) => other !== group && contends(group, other) && names.get(other)!.has(name))),
+    // moves the stem: a reserved one, or one a contending group also mints.
+    const embeds = (group: WebhookGroup, name: string): boolean => name.includes(toPascalCase(stems.get(group)!));
+    const onReserved = (group: WebhookGroup): boolean =>
+      [...names.get(group)!].some((name) => embeds(group, name) && reserved.all.has(name));
+    const rivals = (group: WebhookGroup): WebhookGroup[] =>
+      groups.filter(
+        (other) =>
+          other !== group &&
+          contends(group, other) &&
+          [...names.get(group)!].some((name) => embeds(group, name) && names.get(other)!.has(name)),
       );
-    });
+    // Of the groups hashed already, those that hash one string as a group
+    // they share a name with — a key and an operationId of one text, which
+    // six more characters would never part — put their source in front of
+    // the text instead (`partsBy`), decided for every pair before any is
+    // applied, and are minted again at the length they have.
+    const raised = new Set(
+      groups.filter(
+        (group) =>
+          (hashLength.get(group) ?? 0) > 0 &&
+          rivals(group).some((other) => partsBy(identities.get(group)!, identities.get(other)!)),
+      ),
+    );
+    for (const group of raised) identities.get(group)!.level += 1;
+    // The groups that move: the raised, and those clashing on a reserved
+    // name or with a group not raised — a raised group's new input parts
+    // it from every group it shared a name with, which so stay put.
+    const clashing = groups.filter(
+      (group) => raised.has(group) || onReserved(group) || rivals(group).some((other) => !raised.has(other)),
+    );
     // A clash that survives the whole hash is left to the model merge.
-    const movable = clashing.filter((group) => (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH);
+    const movable = clashing.filter((group) => raised.has(group) || (hashLength.get(group) ?? 0) < SHA1_HEX_LENGTH);
     if (movable.length === 0) return { stems, hashLength };
     const moved = new Map(stems);
     for (const group of movable) {
-      const length = Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
+      const length = raised.has(group)
+        ? hashLength.get(group)!
+        : Math.min(SHA1_HEX_LENGTH, (hashLength.get(group) ?? 0) + 6);
       hashLength.set(group, length);
-      moved.set(group, plainStem(group.owner, webhookDisambiguator(groupIdentity(group), length)));
+      moved.set(group, plainStem(group.owner, webhookDisambiguator(hashInput(identities.get(group)!), length)));
     }
     // Minted again under the moved stems alone, then checked again: the
     // groups that did not move keep the names they minted.
@@ -1073,30 +1174,118 @@ interface ResolvedStems {
   hashLength: Map<WebhookGroup, number>;
 }
 
+/** Where an identity's text comes from: the operationId a stem is named from, or the key — a callback's site — otherwise. */
+type IdentitySource = 'operationId' | 'key';
+
+/** What an entry or a group is told apart by: a text, and where it came from. */
+interface StemIdentity {
+  source: IdentitySource;
+  text: string;
+}
+
 /**
  * What an entry's disambiguator is hashed from: its operationId when its
  * stem is named from one; else a webhook's key, and a callback's identity
  * (`WebhookEntry.identity`, its label when none was set) — the owner's
  * identity, the key, the expression and the method — so two owners
  * declaring one callback key, or two expressions of one key that
- * PascalCase alike (`#/url` and `#/URL`), never hash alike (#382).
+ * PascalCase alike (`#/url` and `#/URL`), never hash alike (#382). The
+ * source comes with the text, so a key and an operationId that spell one
+ * text can be told apart when a batch holds both (`groupIdentities`; #580).
  */
-function stemIdentity(entry: WebhookEntry): string {
-  return entry.stemOperationId ?? (entry.kind === 'callback' ? (entry.identity ?? entry.label) : entry.name);
+function stemIdentity(entry: WebhookEntry): StemIdentity {
+  if (entry.stemOperationId !== undefined) return { source: 'operationId', text: entry.stemOperationId };
+  return { source: 'key', text: entry.kind === 'callback' ? (entry.identity ?? entry.label) : entry.name };
 }
 
 /**
- * What a group's disambiguator is hashed from: the smallest of its members'
+ * The identity a group is hashed from: the smallest text among its members'
  * identities (`stemIdentity`), so the hash never depends on which site the
  * group was first read at. The members of an operationId-named group share
  * one identity, as do the sites of a shared callback operation's own
  * callbacks, whose owner's identity is that operationId; a group of
  * key-named entries reading one object under one stem from owners whose
  * identities differ takes the smallest, which a reorder of the owners
- * cannot move (#382). A group of one is hashed from its own.
+ * cannot move (#382). A group of one is hashed from its own. Every member
+ * of a group has the one source, since a group is either named from one
+ * operationId or made of key-named entries (`groupEntries`).
  */
-function groupIdentity(group: WebhookGroup): string {
-  return group.entries.map(stemIdentity).sort()[0]!;
+function groupIdentity(group: WebhookGroup): StemIdentity {
+  return group.entries.map(stemIdentity).sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0))[0]!;
+}
+
+/**
+ * What a group is hashed from: its identity (`groupIdentity`), and how
+ * many times its source has been put in front of the text (`hashInput`;
+ * none to begin with). One record per group, shared by the settling, every
+ * wave and the catch-all, which raise the level when two groups hashing
+ * one string share a name (`partsBy`).
+ */
+interface HashIdentity {
+  identity: StemIdentity;
+  level: number;
+}
+
+/** The string a group's disambiguator is hashed from: its text, with its source in front once per level (`petAdopted`, `key:petAdopted`, `key:key:petAdopted`). */
+function hashInput({ identity: { source, text }, level }: HashIdentity): string {
+  return `${source}:`.repeat(level) + text;
+}
+
+/**
+ * The identity each group is hashed from (`groupIdentity`), nothing in
+ * front yet: what is hashed is the key or operationId as written, so a
+ * document hashes exactly as it always has until two groups hashing one
+ * string share a name — a key and an operationId of one text, which six
+ * more characters of one hash would never part — and the resolution puts
+ * a source in front (`partsBy`). A webhook keyed `petAdopted` without an
+ * `operationId` and one keyed `noteAdded` declaring
+ * `operationId: petAdopted` hashed one string, shared every hashed stem
+ * to the last character and merged their payloads, the first declared
+ * winning (#580); now, still sharing `PetAdoptedB4A950Payload` once
+ * hashed, each hashes the text prefixed with its source, `key:petAdopted`
+ * and `operationId:petAdopted`, and the six characters part them. Two
+ * groups that hash one string but share no name keep hashing the text as
+ * written, whatever their texts, so adding one half of such a pair never
+ * renames a payload the other half had: a key `petAdopted` whose path
+ * item declares several methods (`PetAdoptedPost`, `PetAdoptedPut`)
+ * beside `noteAdded` declaring `operationId: petAdopted` (`PetAdopted`)
+ * keeps `PetAdoptedB4A950PostPayload`, its `post` hashed because of a
+ * component, on the day `noteAdded` is added; so does `noteAdded`
+ * declaring `operationId: adoptions_created` (`AdoptionCreated`,
+ * singularized) beside a key `adoptions_created` (`AdoptionsCreated`),
+ * and one key whose `post` has no operationId (`PetAdoptedPost`) beside
+ * its `put` declaring `operationId: petAdopted` (`PetAdopted`). The
+ * entries of one key with several methods hold one text under one source
+ * and hash one string, parted by the method qualifier, as they always
+ * were. Which name two groups share is not foretold from the stems — a
+ * const-discriminated variant is `<Const><Stem>Payload`, a parameter model
+ * `<Stem><Param>`, and `Key` + `PetAdopted<hash>` + `PostPayload` is both
+ * the `kind: key` variant of a `petAdopted` query parameter `post_payload`
+ * and the `post` body of a webhook keyed `key:petAdopted` — so the
+ * resolution reads the names minted, never the stems alone.
+ */
+function groupIdentities(groups: WebhookGroup[]): Map<WebhookGroup, HashIdentity> {
+  return new Map(groups.map((group) => [group, { identity: groupIdentity(group), level: 0 }]));
+}
+
+/**
+ * Whether `group`, sharing a name with `other` while hashing one string
+ * (`hashInput`) — six more characters of which would never part them — is
+ * one to put its source in front of its text. Both are, when they hash one
+ * string at one level under different sources: the key and the operationId
+ * of one text (`key:petAdopted` beside `operationId:petAdopted`). The one
+ * at the lower level alone is, when the levels differ: a key spelling a
+ * prefixed text as written, `key:petAdopted` beside the `petAdopted`
+ * already prefixed to it, hashes `key:key:petAdopted` while `petAdopted`
+ * stays, so the two never chase each other. Neither is, when they hash one
+ * string at one level under one source: the several methods of one key,
+ * which share no name and never ask. The decision reads the two records
+ * alone, never the order the groups are declared in.
+ */
+function partsBy(group: HashIdentity, other: HashIdentity): boolean {
+  if (hashInput(group) !== hashInput(other)) return false;
+  if (group.level < other.level) return true;
+  return group.level === other.level && group.identity.source !== other.identity.source;
 }
 
 /**
@@ -1151,9 +1340,18 @@ function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupO
   return { groups, groupOf };
 }
 
+/** The plain stem of `entry` — before any collision hash — which a nested callback's key-derived stem is prefixed with (`extractCallbacks`). */
+export function plainStemOf(entry: WebhookEntry): string {
+  return plainStem(entry, '');
+}
+
 /**
- * The stem of `entry` with `disambiguator` (possibly empty) inserted before
- * the qualifiers. A key-derived stem is the key PascalCased, prefixed with
+ * The stem of `entry` with `disambiguator` inserted before the qualifiers:
+ * empty for the plain stem, else the hash prefix of what the resolution
+ * hashes the entry's group from (`hashInput`,
+ * `webhookDisambiguator`) — so two entries whose stems collide carry
+ * different prefixes, a key and an operationId of one text included. A
+ * key-derived stem is the key PascalCased, prefixed with
  * the declaring node's stem for a callback (`CreatePet` + `petAdopted` →
  * `CreatePetPetAdopted`; #382), then qualified by the expression
  * PascalCased when the callback's key declares several
@@ -1164,11 +1362,6 @@ function groupEntries(entries: WebhookEntry[]): { groups: WebhookGroup[]; groupO
  * starting with a digit, gets the kind's noun in front (`Webhook`,
  * `Callback`).
  */
-/** The plain stem of `entry` — before any collision hash — which a nested callback's key-derived stem is prefixed with (`extractCallbacks`). */
-export function plainStemOf(entry: WebhookEntry): string {
-  return plainStem(entry, '');
-}
-
 function plainStem(entry: WebhookEntry, disambiguator: string): string {
   const operationId = entry.stemOperationId;
   const expression = !operationId && (entry.expressionCount ?? 1) > 1 ? toPascalCase(entry.expression ?? '') : '';
@@ -1186,7 +1379,7 @@ function plainStem(entry: WebhookEntry, disambiguator: string): string {
   return /^\d/.test(stem) ? `${noun}${stem}` : stem;
 }
 
-/** The first `length` (six, by default) hex characters of the SHA-1 of what names an entry (`stemIdentity`). */
+/** The first `length` (six, by default) hex characters of the SHA-1 of what a group is hashed from (`hashInput`). */
 function webhookDisambiguator(name: string, length = 6): string {
   return createHash('sha1').update(name).digest('hex').slice(0, length);
 }
