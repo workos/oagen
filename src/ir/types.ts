@@ -827,6 +827,18 @@ export interface PaginationMeta {
    * stop rule, so emitters never re-derive it.
    */
   pageStart?: number;
+  /**
+   * Path to the data array the response was unwrapped on (`data`,
+   * `result.items`); absent when the response is the array itself. The
+   * property is the array in every spelling a field is typed as one:
+   * written as an array, under a nullable wrapper or an `allOf` read as
+   * its member, a `$ref` to an array component, or a JSON Pointer deeper
+   * into a component that lands on a schema typed as an array where it
+   * stands (`#/components/schemas/Holder/properties/owners`; #609), read
+   * ahead from the document as the settle will type it — so `response` is
+   * the pointed array once settled and `itemType` its items, the model the
+   * pointed schema's items built, never a copy.
+   */
   dataPath?: string;
   /**
    * The description the document gives the data array property itself — the

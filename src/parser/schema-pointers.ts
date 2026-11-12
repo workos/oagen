@@ -103,8 +103,11 @@ import {
   walkTypeRef,
 } from '../ir/types.js';
 import {
+  arraySchemaOf,
   combineConstraints,
   componentTypeRef,
+  isArrayComponentRef,
+  isArrayPointerRef,
   isNullSchema,
   referenceTypesAsUnknown,
   schemaToTypeRef,
@@ -112,7 +115,7 @@ import {
   type SchemaObject,
 } from './schemas.js';
 import { allOfTypingMember, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
-import { paginatedItemType } from './pagination.js';
+import { collectObjectProperties, paginatedItemType } from './pagination.js';
 import {
   isPendingSchemaRef,
   isPendingVariant,
@@ -296,8 +299,11 @@ function visitOperation(
   // reference it was — the response itself, since no reference is an array
   // — so it is chosen again from the settled response: an array's items, as
   // `detectPagination` reads any response (`paginatedItemType`). Only the
-  // item type taken from the response itself is reread; one an override or
-  // an envelope decided stands.
+  // item type taken from the response itself is reread — a body written as
+  // the pointer, or a list envelope unwrapped on a `data` written as one,
+  // which hands the pending response over as its item type for this very
+  // reread (`extractListResponse`; #609); one an override or an envelope
+  // decided from an array it could type stands.
   const responseWasPending = isPendingVariant(op.response);
   visit(op.response, `${context}.response`);
   if (responseWasPending && op.pagination && op.pagination.itemType === op.response) {
@@ -448,6 +454,53 @@ function allOfReadAsMember(
   return (allOfTypingMember(members) ?? members[0]) === member;
 }
 
+/**
+ * The schema a pointer `ref` lands on, read ahead of the IR from the
+ * document alone — the component the `$ref` starts from, then the steps
+ * the settle will walk (`pointerSteps`) — or `undefined` when the settle
+ * types nothing at the end of it: a `$ref` into another section, to a
+ * component the document lacks, to no schema, or to a schema the parser
+ * builds no type for at that place. The one read for every reader that
+ * must know what a pointer settles to before a body is typed
+ * (`pointerTypesAsUnknown`, `pointerTypesAsArray`), so each counts a
+ * pointer as typed exactly when the settle types it.
+ *
+ * A pointer that ends at a `properties/<name>` step lands on the
+ * declaration the settle types that step from: the field of the model at
+ * hand, which an `allOf` merges from every member that declares the name
+ * (`combineDeclarations`: the first declaration that declares a type
+ * types it, a typeless one only annotating it) — so the declaration is
+ * read as `collectObjectProperties` merges it, from the schema whose
+ * `allOf` the step goes through (`Holder` for `Holder/allOf/1/properties/
+ * owners`, however many inline `allOf` steps lead there; `box` for
+ * `Holder/properties/box/allOf/1/properties/owners`) or the schema the
+ * step reads directly (its own `allOf` and sibling `properties` folded
+ * in), never as the member's own text alone: `Holder/allOf/1/properties/
+ * owners` to a member declaring `owners: { description }` beside one
+ * declaring `owners: Owner[]`, or a `$ref` member to a component that
+ * does, is the array the merged `Holder.owners` is (Greptile, #609
+ * review: the member's text alone read no array, and the envelope's data
+ * was not one here while the settle typed it `Owner[]`).
+ */
+function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | undefined): SchemaObject | undefined {
+  const tokens = schemaRefTokens(ref);
+  if (!tokens) return undefined;
+  const [key, ...path] = tokens;
+  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
+  if (!component) return undefined;
+  const steps = pointerSteps(component, path, schemas);
+  if ('problem' in steps) return undefined;
+  if (steps.length === 0) return component;
+  const last = steps[steps.length - 1]!;
+  if (last.keyword !== 'properties') return last.next;
+  // The schema whose merge the field belongs to: the one before the run of
+  // inline `allOf` steps the `properties` step sits in, else the step's own.
+  let first = steps.length - 1;
+  while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
+  const owner = steps[first]!.node;
+  return collectObjectProperties(owner, schemas).properties[last.name!] ?? last.next;
+}
+
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */
 const pointersBeingRead = new Set<string>();
 
@@ -459,28 +512,62 @@ const pointersBeingRead = new Set<string>();
  * pointing at an untyped schema loses to a typed `201`, as the same schema
  * written inline would). True when the pointer leads nowhere (into another
  * section, to a component the document lacks, to no schema) or to a schema
- * the parser builds no type for at that place (`pointerSteps`), and
+ * the parser builds no type for at that place (`pointerLanding`), and
  * otherwise exactly when the schema it lands on is typed `unknown` where
  * it stands, read as a body written there is (`referenceTypesAsUnknown`:
  * `{}`, a `$ref` to an untyped primitive component, an `allOf` read as
- * one). A chain of pointers that reaches itself is read as the settle
- * reads it, `unknown`.
+ * one) — a `properties/<name>` step landing on the declaration the merged
+ * model's field is typed from, every `allOf` member's combined
+ * (`pointerLanding`), so a member's `{ description }` beside a typed
+ * declaration is typed. A chain of pointers that reaches itself is read as
+ * the settle reads it, `unknown`.
  */
 export function pointerTypesAsUnknown(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
   if (pointersBeingRead.has(ref)) return true;
-  const tokens = schemaRefTokens(ref);
-  if (!tokens) return true;
-  const [key, ...path] = tokens;
-  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
-  if (!component) return true;
-  const steps = pointerSteps(component, path, schemas);
-  if ('problem' in steps) return true;
-  const landed = steps.length === 0 ? component : steps[steps.length - 1]!.next;
+  const landed = pointerLanding(ref, schemas);
+  if (!landed) return true;
   pointersBeingRead.add(ref);
   try {
     return referenceTypesAsUnknown(landed);
   } finally {
     pointersBeingRead.delete(ref);
+  }
+}
+
+/** The pointers being read for the array they settle to (`pointerTypesAsArray`), so a chain that reaches itself ends. */
+const pointersBeingTyped = new Set<string>();
+
+/**
+ * Whether a site written as `ref`, a schema `$ref` that names no component,
+ * settles to an array (#609) — decided from the document before any model
+ * is built, for the reader that asks whether a property is an array before
+ * a body is typed (`isArrayPointerRef`, for `detectListEnvelope`: a list
+ * envelope's `data` written as `{ $ref: '#/components/schemas/Holder/
+ * properties/owners' }` is the array `Holder.owners` is, so the envelope is
+ * unwrapped on it as it is on `{ $ref: Owners }`). True exactly when the
+ * pointer lands on a schema (`pointerLanding`) typed as an array where it
+ * stands, read as a property written there is read: an array in any
+ * spelling, under any nullable wrapper or `allOf` read as its member
+ * (`arraySchemaOf`), a `$ref` to an array component under the same
+ * (`isArrayComponentRef`), or another such pointer in turn
+ * (`isArrayPointerRef`). False when the pointer leads nowhere or to a
+ * schema the parser builds no type for at that place — the settle reports
+ * it and types the site `unknown`, no array — and for a chain of pointers
+ * that reaches itself, which the settle types `unknown` too. What the
+ * document alone cannot refuse is left to the settle, as
+ * `pointerTypesAsUnknown` leaves it: a `properties` step through a
+ * component typed as a primitive or an enum reads on to the array here,
+ * and the settle reports the site and types it `unknown`.
+ */
+export function pointerTypesAsArray(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
+  if (pointersBeingTyped.has(ref)) return false;
+  const landed = pointerLanding(ref, schemas);
+  if (!landed) return false;
+  pointersBeingTyped.add(ref);
+  try {
+    return arraySchemaOf(landed) !== undefined || isArrayComponentRef(landed) || isArrayPointerRef(landed, schemas);
+  } finally {
+    pointersBeingTyped.delete(ref);
   }
 }
 
