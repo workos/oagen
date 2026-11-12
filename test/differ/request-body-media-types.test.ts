@@ -512,9 +512,10 @@ describe('#545 review — a limit edited on a body is no retype', () => {
   const array = (items: TypeRef): TypeRef => ({ kind: 'array', items });
   const json: [string, TypeRef] = ['application/json', request];
 
-  it('reports nothing for a limit edited on a secondary representation, as for one on the primary body or on a field', () => {
-    // `typeRefsEqual` passes over a type's limits as `diffFields` passes over
-    // a field's; `sameShape` reads them under a renamed model only.
+  it('reports nothing for a limit edited on a secondary representation, as for one on the primary body', () => {
+    // `typeRefsEqual` passes over a type's limits, and a body typed in place
+    // has no flag to carry them (a field's are a `field-constraints-changed`
+    // entry, #599); `sameShape` reads them under a renamed model only.
     expect(
       modified(createPet([json, ['text/plain', text(10)]]), createPet([json, ['text/plain', text(20)]])),
     ).toBeUndefined();
@@ -552,7 +553,23 @@ describe('#545 review — a limit edited on a body is no retype', () => {
       requestBodyContentTypeChange: { added: [], removed: [], retyped: ['text/plain'], classification: 'breaking' },
       classification: 'breaking',
     });
-    // Under one name the same edit is no change at all, as on any field.
-    expect(diffSpecs(spec('OldNote', tagged), spec('OldNote', string)).changes).toEqual([]);
+    // Under one name the same edit is the field's limits change alone, as on
+    // any field (#599): the body is not retyped, and the model reports it.
+    expect(diffSpecs(spec('OldNote', tagged), spec('OldNote', string)).changes).toEqual([
+      {
+        kind: 'model-modified',
+        name: 'OldNote',
+        fieldChanges: [
+          {
+            kind: 'field-constraints-changed',
+            fieldName: 'tags',
+            classification: 'additive',
+            details: "items.pattern '^tag_' → <unset>",
+          },
+        ],
+        deprecatedChanged: false,
+        classification: 'additive',
+      },
+    ]);
   });
 });
