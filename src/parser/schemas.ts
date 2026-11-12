@@ -2446,7 +2446,13 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * `null` the `allOf` spelling kept), followed through
  * aliases of aliases as an array or enum component's alias is
  * (`componentEntries`) — since the same `allOf` on a field is typed as the
- * reference, wrapper included. An `allOf` that merges — a typing member
+ * reference, wrapper included. A bare `$ref` admits what its target admits
+ * and nothing the keywords beside it say, as nothing but annotations is
+ * read beside a `$ref`: `B: { $ref: Cat, type: ['object', 'null'] }` (OAS
+ * 3.0: `type: 'object', nullable: true`) over a `Cat` that admits no `null`
+ * is `B`, and `A: { $ref: B }` is `A`, as `{ $ref: Cat, type: ['object',
+ * 'null'] }` on a field is `Cat` (Greptile, #646: the `type` beside the
+ * `$ref` made both `nullable`). An `allOf` that merges — a typing member
  * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
  * }`), a second `$ref`, a `required` that adds to the reference — is read
  * as none of its members: the composed model is the object its merged
@@ -2463,13 +2469,18 @@ function isNullableModelComponentEntry(
 ): boolean {
   if (seen.has(schema)) return false;
   seen.add(schema);
-  if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
-  if (isNullSchema(schema) || declaresNull(schema)) return true;
   // A bare `$ref` alias is its reference (#618), so it admits what the
   // component it names admits, at every hop of a chain, as the `allOf`
-  // alias below does (#646 review).
-  const bare = unwrapNullableSchema(schema);
-  const member = bare.$ref !== undefined ? bare : allOfReadAsMember(bare);
+  // alias below does (#646 review) — and nothing more: the `$ref` is
+  // followed before any keyword beside it is read, since nothing but
+  // annotations is read beside a `$ref`, so a `type` list naming `'null'`
+  // or OAS 3.0 `nullable: true` beside a `type`, written beside the
+  // `$ref`, declares no `null` here, as it declares none on a field.
+  if (schema.$ref === undefined) {
+    if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
+    if (isNullSchema(schema) || declaresNull(schema)) return true;
+  }
+  const member = schema.$ref !== undefined ? schema : allOfReadAsMember(unwrapNullableSchema(schema));
   if (member === undefined) return false;
   if (member.$ref === undefined) return isNullableModelComponentEntry(member, schemas, seen);
   const key = componentKeyOf(member.$ref);
