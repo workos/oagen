@@ -1380,8 +1380,11 @@ describe('a component written as a nullable `oneOf`/`anyOf` (#399)', () => {
         },
       ),
     );
-    expect(fieldType(spec, 'Holder', 'w')).toEqual(model('WithOwn'));
-    expect(fieldType(spec, 'Holder', 'r')).toEqual(model('WithOwnRef'));
+    // Each stays the model its `properties` make it; the `null` variant
+    // beside them rides on the reference, as it does on every reference to
+    // a component that admits `null` (#615).
+    expect(fieldType(spec, 'Holder', 'w')).toEqual(nullable(model('WithOwn')));
+    expect(fieldType(spec, 'Holder', 'r')).toEqual(nullable(model('WithOwnRef')));
     for (const name of ['WithOwn', 'WithOwnRef']) {
       expect(spec.models.find((m) => m.name === name)?.fields.map((f) => f.name)).toEqual(['own']);
     }

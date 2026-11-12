@@ -93,14 +93,35 @@ let activeEnumSchemaNames: Set<string> = new Set();
 let activeNullableEnumSchemaNames: Set<string> = new Set();
 
 /**
- * Resolved names of named-union components that admit `null`
- * (a `type: 'null'` variant, an OAS 3.1 `type` list with `'null'`, or OAS
- * 3.0 `nullable: true`). The null variant is not a member (`unionMembers`
- * drops it), so, as for a nullable enum, a `$ref` to one of these resolves to
- * `nullable(model)`: the IR then says what the inline form of the same union
- * says (`nullable<union>`).
+ * The `components/schemas` keys of the model components that admit `null`,
+ * so that, as for a nullable enum, a `$ref` to one of these resolves to
+ * `nullable(model)` (`componentTypeRef`): a named union with a `null`
+ * variant, an OAS 3.1
+ * `type` list with `'null'` or OAS 3.0 `nullable: true`
+ * (`isNullableUnionSchema`) — the null variant is not a member
+ * (`unionMembers` drops it), so the reference carries it and the IR says
+ * what the inline form of the same union says (`nullable<union>`); and an
+ * object component whose own schema `schemaToTypeRef` wraps in `nullable`
+ * when it is written inline (`declaresNull`; #615) — `PetOwner: { type:
+ * ['object', 'null'], properties }`, `{ type: 'object', nullable: true,
+ * properties }`, `{ oneOf: [{ type: 'object', properties }, { type: 'null'
+ * }] }`, a single-member `allOf` around one of these — whose model carries
+ * its fields and no wrapper, so the reference carries it: `{ $ref: PetOwner
+ * }` is `nullable<PetOwner>`, as `Pet.owner` written inline is and as the
+ * JSON Pointer `#/components/schemas/Pet/properties/owner` to that inline
+ * field is (#539); and an alias of either — an `allOf` read as its `$ref`
+ * member (`PetOwnerAlias: { allOf: [{ $ref: PetOwner }] }`), as the same
+ * `allOf` on a field is typed — while an `allOf` that merges a typing
+ * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
+ * properties }] }`) is the object its merged fields describe, bare, as it
+ * is on a field (`isNullableModelComponentEntry`). Keyed by the component
+ * key the `$ref` names, as the array, primitive and alias components are,
+ * never by the resolved name the reference is minted with: `Note: { type:
+ * ['object', 'null'], properties }` and `note: { type: 'object', properties
+ * }` resolve to one model `Note`, and only `{ $ref: Note }` admits `null`
+ * — `{ $ref: note }` is the bare model (#641 review).
  */
-let activeNullableUnionSchemaNames: Set<string> = new Set();
+let activeNullableModelComponentKeys: Set<string> = new Set();
 
 /**
  * What one extraction remembers about its named unions, so each is planned
@@ -1418,7 +1439,7 @@ export function extractSchemas(
   // call schemaToTypeRef during extraction).
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableUnionSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
   // to one is the primitive, literal, union of primitives or `unknown` it
@@ -1446,16 +1467,20 @@ export function extractSchemas(
       activeEnumSchemaNames.add(resolved);
       if (isNullableEnumSchema(declaration)) activeNullableEnumSchemaNames.add(resolved);
     } else if (
-      isNamedUnionSchema(schema) &&
-      isNullableUnionSchema(schema) &&
+      // A named union's `null` variant, or the `null` an object component
+      // declares on itself or on the component it is an alias of (#615),
+      // rides on every reference to the model (`componentTypeRef`), since
+      // the model built for it carries no wrapper.
+      isNullableModelComponentEntry(schema, schemas) &&
       // A nullable wrapper around an array, a primitive or a `$ref` to an
       // enum is no union but an array or primitive component, or an alias
-      // of the enum (#560), which a `$ref` names by its key.
+      // of the enum (#560), which a `$ref` names by its key and types with
+      // the component's own wrapper, as the schema written inline is typed.
       !isArrayComponentEntry(schema, schemas) &&
       !activePrimitiveComponentKeys.has(name) &&
       !activeEnumAliasKeys.has(name)
     ) {
-      activeNullableUnionSchemaNames.add(resolved);
+      activeNullableModelComponentKeys.add(name);
     }
   }
 
@@ -1634,7 +1659,7 @@ export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
   activeEnumSchemaNames = new Set();
   activeNullableEnumSchemaNames = new Set();
-  activeNullableUnionSchemaNames = new Set();
+  activeNullableModelComponentKeys = new Set();
   activeComponentSchemaKeys = new Set();
   activeComponentSchemas = undefined;
   activeNamedUnionMemo = null;
@@ -2386,6 +2411,50 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
   return (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema);
+}
+
+/**
+ * Whether a `components/schemas` entry that becomes a `Model` admits
+ * `null`, so that a `$ref` to it is wrapped in `nullable`
+ * (`componentTypeRef`, through `activeNullableModelComponentKeys`): a named
+ * union with a `null` variant (`isNullableUnionSchema`); an object
+ * component whose own schema `schemaToTypeRef` wraps when it is written
+ * inline (`declaresNull`: an OAS 3.1 `type` list naming `'null'`, OAS 3.0
+ * `nullable: true` beside a `type`, a nullable `oneOf`/`anyOf` wrapper —
+ * `properties` written beside it or not — or a single-member `allOf`
+ * around one of these; #615), or a `null`-only schema in either spelling
+ * (`isNullSchema`: `{ type: 'null' }`, `{ type: ['null'] }`), which keeps
+ * the fieldless model it always became and admits nothing but `null`; or
+ * an alias of either — an `allOf`
+ * `readInlineAllOf` reads as its `$ref` member, alone or beside members
+ * that only annotate or limit it (`allOfReadAsMember`), followed through
+ * aliases of aliases as an array or enum component's alias is
+ * (`componentEntries`) — since the same `allOf` on a field is typed as the
+ * reference, wrapper included. An `allOf` that merges — a typing member
+ * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
+ * }`), a second `$ref`, a `required` that adds to the reference — is read
+ * as none of its members: the composed model is the object its merged
+ * fields describe, bare, as the same `allOf` on a field is, so a member's
+ * nullability never wraps it. OAS 3.0 `nullable: true` beside an `allOf`
+ * with no `type` declares nothing, as beside any schema without one. A
+ * chain that returns to an entry it has visited admits nothing through
+ * the loop.
+ */
+function isNullableModelComponentEntry(
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject>,
+  seen: Set<SchemaObject> = new Set(),
+): boolean {
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  if (isNamedUnionSchema(schema)) return isNullableUnionSchema(schema);
+  if (isNullSchema(schema) || declaresNull(schema)) return true;
+  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  if (member === undefined) return false;
+  if (member.$ref === undefined) return isNullableModelComponentEntry(member, schemas, seen);
+  const key = componentKeyOf(member.$ref);
+  const aliased = key !== undefined && Object.hasOwn(schemas, key) ? schemas[key] : undefined;
+  return aliased !== undefined && isNullableModelComponentEntry(aliased, schemas, seen);
 }
 
 /**
@@ -6125,6 +6194,30 @@ export function markComponentModelRef(ref: ModelRef): void {
  * available even when called recursively for nested $refs. Read by
  * `schemaToTypeRef` for the `$ref` itself and by `resolveSchemaPointers`
  * for the component a pointer enters (#539).
+ *
+ * Every kind of component carries its own nullability through the
+ * reference, so the two spellings of one schema — written inline, or
+ * extracted into a component and named by a `$ref` — are typed alike. An
+ * array or primitive component is typed from its schema, wrapper included.
+ * An enum, a named union or an object component that admits `null` — an
+ * OAS 3.1 `type` list naming `'null'`, OAS 3.0 `nullable: true`, a nullable
+ * `oneOf`/`anyOf` wrapper, a single-member `allOf` around one of these —
+ * is wrapped in `nullable` here, since the enum or model built for it
+ * carries no wrapper (`activeNullableEnumSchemaNames`,
+ * `activeNullableModelComponentKeys`; #615: `PetOwner: { type: ['object',
+ * 'null'], properties }` named by a bare `$ref` was `PetOwner`, while
+ * `Pet.owner` written inline, and the JSON Pointer `#/components/schemas/
+ * Pet/properties/owner` to it, were `nullable<PetOwner>`). An alias of
+ * such a component — an `allOf` read as its `$ref` member, `PetOwnerAlias:
+ * { allOf: [{ $ref: PetOwner }] }` — is wrapped as the component is, as the
+ * same `allOf` on a field is typed; an `allOf` that merges a typing member
+ * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
+ * }`) is the object its fields describe, bare, as it is on a field
+ * (`isNullableModelComponentEntry`). This holds at every site typed
+ * through `schemaToTypeRef` — a field, array items, map
+ * values, a union variant, a body, a parameter, a header, a webhook or
+ * callback payload — and a site that wraps the `$ref` itself (`oneOf: [{
+ * $ref: PetOwner }, { type: 'null' }]`) is wrapped once (`asNullable`).
  */
 export function componentTypeRef(key: string): TypeRef {
   const component =
@@ -6164,13 +6257,16 @@ export function componentTypeRef(key: string): TypeRef {
     // `oneOf: [{ $ref }, { type: 'null' }]` form.
     return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
   }
-  // Likewise a named union with a `null` variant: the variant is not a
-  // member of the model, so the reference carries the nullability. The
-  // model reference itself is recorded as a component's (`componentModelRefs`)
-  // whether or not it is wrapped.
+  // Likewise a model component that admits `null` — a named union with a
+  // `null` variant, or an object component that declares it (#615): neither
+  // the variant nor the declaration is a member of the model, so the
+  // reference carries the nullability — read by the key the `$ref` names,
+  // since two keys can resolve to one model and only the one that admits
+  // `null` wraps its references. The model reference itself is recorded as
+  // a component's (`componentModelRefs`) whether or not it is wrapped.
   const modelRef: ModelRef = { kind: 'model', name: resolved };
   componentModelRefs.add(modelRef);
-  return activeNullableUnionSchemaNames.has(resolved) ? { kind: 'nullable', inner: modelRef } : modelRef;
+  return activeNullableModelComponentKeys.has(key) ? { kind: 'nullable', inner: modelRef } : modelRef;
 }
 
 /**
