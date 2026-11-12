@@ -1082,4 +1082,188 @@ describe('the settings generate reads from config reach compat-extract and verif
     expect(result.stdout).toContain('Compat: converged after 1 retry iteration(s)');
     expect(shapeOf(readSurface())).toEqual(expected);
   });
+
+  describe('#600', () => {
+    // #567's third scenario: under the retry config's `mountRules` and name
+    // hint, `verify --scope spec-only` printed `1/2 baseline symbols in scope`
+    // and missed a method removed from `Animals`, because the compat scope
+    // read the IR's `Pets` rather than the `Animals` class `generate` writes.
+    it('verify: scopes compat to the class and methods the mount rule and name hint make generation write', async () => {
+      const generated = await run([
+        '--config',
+        retryConfig,
+        'generate',
+        '--spec',
+        petsSpec,
+        '--lang',
+        'pets',
+        '--output',
+        sdk,
+      ]);
+      expect(generated.code).toBe(0);
+      const written = readSurface();
+      expect(shapeOf(written)).toEqual({
+        classes: { Animals: ['get_pet', 'list_all'] },
+        interfaces: ['Pet'],
+        emitterOptions: { flavor: 'retry' },
+      });
+
+      // The SDK lost `Animals.list_all`.
+      writeFileSync(baseline, JSON.stringify(written));
+      const { list_all: _lost, ...kept } = written.classes.Animals.methods;
+      writeFileSync(
+        sdkSurface,
+        JSON.stringify({ ...written, classes: { Animals: { ...written.classes.Animals, methods: kept } } }),
+      );
+      const result = await run(['--config', retryConfig, ...verifyArgs(petsSpec), '--max-retries', '0']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('(scoped to spec: 2/2 baseline symbols in scope)');
+      expect(result.stdout).toContain(
+        '[symbol_removed] breaking: Animals.list_all — Symbol "Animals.list_all" was removed',
+      );
+      expect(result.stderr).toContain('Compat violations found');
+    });
+
+    it('verify: keeps a baseline method the overlay maps to a spec operation in scope, as generate wrote it', async () => {
+      // Michael's document on #657: a baseline `Animals { fetchAll, getPet }`
+      // and an `.oagen-manifest.json` in `--output` mapping `GET /pets` to
+      // `fetchAll` and `GET /pets/{id}` to `getPet` on `animals`, under
+      // `mountRules: { Pets: 'Animals' }`. `generate --api-surface` writes
+      // `fetchAll` through `ctx.overlayLookup`; the SDK then renames it
+      // `listPets`. The method paths for `Animals` were `list_pets`, `list`,
+      // `get_pet` and `get`, so `filterSurface` dropped `fetchAll` from the
+      // baseline, `verify --max-retries 0` passed at `2/2`, and with retries
+      // the loop had nothing to patch.
+      const overlayConfig = resolve(dir, 'overlay.config.mjs');
+      const hintsModule = resolve(__dirname, '../../src/compat/language-hints.ts');
+      writeFileSync(
+        overlayConfig,
+        `${prelude}import { nodeHints } from '${hintsModule}';
+        const key = (r) => \`\${r.operation.httpMethod.toUpperCase()} \${r.operation.path}\`;
+        // The method name the overlay keeps for the route, else the resolved one.
+        const nameOf = (r, ctx) => ctx.overlayLookup?.methodByOperation.get(key(r))?.methodName ?? r.methodName;
+        const surfaceOf = (spec, ctx) => {
+          const classes = {};
+          for (const r of ctx.resolvedOperations) {
+            classes[r.mountOn] ??= { name: r.mountOn, methods: {}, properties: {}, constructorParams: [] };
+            classes[r.mountOn].methods[nameOf(r, ctx)] = [{ name: nameOf(r, ctx), params: [], returnType: 'Pet', async: true }];
+          }
+          return {
+            language: 'pets',
+            extractedFrom: 'sdk',
+            extractedAt: '2026-01-01T00:00:00.000Z',
+            classes,
+            interfaces: { Pet: { name: 'Pet', fields: { name: { name: 'name', type: 'string', optional: false } }, extends: [] } },
+            typeAliases: {},
+            enums: {},
+            exports: {},
+          };
+        };
+        export default {
+          extractors: [{
+            language: 'pets',
+            // The real hints, so the overlay builder can infer model names;
+            // no derived model names, so the count stays the baseline's two.
+            hints: { ...nodeHints, derivedModelNames: () => [] },
+            extract: async (sdkPath) => JSON.parse(readFileSync(join(sdkPath, 'surface.json'), 'utf8')),
+          }],
+          emitters: [{
+            language: 'pets',
+            generateModels: () => [],
+            generateEnums: () => [],
+            generateResources: () => [],
+            generateClient: (spec, ctx) => [
+              { path: 'surface.json', content: JSON.stringify(surfaceOf(spec, ctx), null, 2) + '\\n', headerPlacement: 'skip' },
+            ],
+            generateErrors: () => [],
+            generateTypeSignatures: () => [],
+            generateTests: () => [],
+            fileHeader: () => '',
+            buildOperationsMap: (spec, ctx) =>
+              Object.fromEntries(ctx.resolvedOperations.map((r) => [key(r), { sdkMethod: nameOf(r, ctx), service: r.mountOn.toLowerCase() }])),
+          }],
+          mountRules: { Pets: 'Animals' },
+        };\n`,
+      );
+      const manifestFile = resolve(sdk, '.oagen-manifest.json');
+      const manifest = (operations: Record<string, { sdkMethod: string; service: string }>) =>
+        JSON.stringify({ version: 2, language: 'pets', files: ['surface.json'], operations });
+      const method = (name: string) => [{ name, params: [], returnType: 'Pet', async: true }];
+      const animals = (...methods: string[]) =>
+        surface({
+          classes: {
+            Animals: {
+              name: 'Animals',
+              methods: Object.fromEntries(methods.map((m) => [m, method(m)])),
+              properties: {},
+              constructorParams: [],
+            },
+          },
+          interfaces: { Pet: iface('Pet', { name: 'string' }) },
+        });
+      const methodsWritten = () => Object.keys(readSurface().classes.Animals.methods).sort();
+
+      writeFileSync(baseline, JSON.stringify(animals('fetchAll', 'getPet')));
+      writeFileSync(
+        manifestFile,
+        manifest({
+          'GET /pets': { sdkMethod: 'fetchAll', service: 'animals' },
+          'GET /pets/{id}': { sdkMethod: 'getPet', service: 'animals' },
+        }),
+      );
+      const generated = await run([
+        '--config',
+        overlayConfig,
+        'generate',
+        '--spec',
+        petsSpec,
+        '--lang',
+        'pets',
+        '--output',
+        sdk,
+        '--api-surface',
+        baseline,
+      ]);
+      expect(generated.code).toBe(0);
+      expect(methodsWritten()).toEqual(['fetchAll', 'getPet']);
+      expect(JSON.parse(readFileSync(manifestFile, 'utf8')).operations).toEqual({
+        'GET /pets': { sdkMethod: 'fetchAll', service: 'animals' },
+        'GET /pets/{id}': { sdkMethod: 'getPet', service: 'animals' },
+      });
+
+      // The SDK renamed `fetchAll` to `listPets`.
+      writeFileSync(sdkSurface, JSON.stringify(animals('listPets', 'getPet')));
+      const result = await run(['--config', overlayConfig, ...verifyArgs(petsSpec), '--max-retries', '0']);
+      expect(result.code).toBe(1);
+      expect(result.stdout).toContain('(scoped to spec: 2/2 baseline symbols in scope)');
+      expect(result.stdout).toContain(
+        '[symbol_removed] breaking: Animals.fetchAll — Symbol "Animals.fetchAll" was removed',
+      );
+      expect(result.stderr).toContain('Compat violations found');
+
+      // With retries, the loop patches the overlay and regenerates `fetchAll`.
+      const retried = await run(['--config', overlayConfig, ...verifyArgs(petsSpec)]);
+      expect(retried.code).toBe(0);
+      expect(retried.stdout).toContain('Retry 1/3: patching 1 violation(s)...');
+      expect(retried.stdout).toContain('Compat: converged after 1 retry iteration(s)');
+      expect(methodsWritten()).toContain('fetchAll');
+
+      // A route the spec does not declare derives nothing: a `legacy` method
+      // the manifest maps to `GET /legacy` is out of scope, and its loss passes.
+      writeFileSync(baseline, JSON.stringify(animals('fetchAll', 'getPet', 'legacy')));
+      writeFileSync(sdkSurface, JSON.stringify(animals('fetchAll', 'getPet')));
+      writeFileSync(
+        manifestFile,
+        manifest({
+          'GET /pets': { sdkMethod: 'fetchAll', service: 'animals' },
+          'GET /pets/{id}': { sdkMethod: 'getPet', service: 'animals' },
+          'GET /legacy': { sdkMethod: 'legacy', service: 'animals' },
+        }),
+      );
+      const control = await run(['--config', overlayConfig, ...verifyArgs(petsSpec), '--max-retries', '0']);
+      expect(control.code).toBe(0);
+      expect(control.stdout).toContain('(scoped to spec: 2/2 baseline symbols in scope)');
+      expect(control.stdout).toContain('Compat: passed');
+    });
+  });
 });

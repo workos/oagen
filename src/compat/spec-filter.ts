@@ -6,22 +6,56 @@ import {
   collectRequestBodyTypes,
   collectResponseBodyTypes,
 } from '../ir/types.js';
-import type { ApiSurface, LanguageHints } from './types.js';
+import type { ApiSurface, LanguageHints, OverlayLookup } from './types.js';
+import { resolveOperations } from '../ir/operation-hints.js';
+import type { OperationResolution, ResolvedOperation } from '../ir/operation-hints.js';
+
+/**
+ * Resolve a spec's operations as `generate` resolves them, under the config's
+ * `operationHints`, `mountRules` and `operationNaming` — with none, as
+ * `generate` does with no config (see {@link OperationResolution}).
+ */
+function resolveAsGenerate(spec: ApiSpec, resolution?: OperationResolution): ResolvedOperation[] {
+  return resolveOperations(spec, resolution?.operationHints, resolution?.mountRules, resolution?.operationNaming);
+}
+
+/**
+ * The spelling a class member is matched by: underscores stripped and case
+ * folded, so one key reads a method in any language's casing — `list_all`,
+ * `listAll` and `ListAll` are one key.
+ */
+export function normalizeMemberName(name: string): string {
+  return name.replace(/_/g, '').toLowerCase();
+}
 
 /**
  * Compute the set of symbol names that are derivable from the OpenAPI spec.
  * Only these names should be compared during compat verification — everything
  * else in the baseline is hand-written and out of scope for generation.
+ *
+ * A service class is named as `generate` writes it: by the mount target
+ * (`ResolvedOperation.mountOn`) each operation resolves to under the
+ * `resolution`'s `mountRules`, `operationHints` and `operationNaming` — the
+ * settings `generate` resolves with — not by the IR's `Service.name`. Under
+ * `mountRules: { Pets: 'Animals' }` the names hold `Animals`, never `Pets`,
+ * which `generate` does not write; an operation a `mountOn` hint moves to
+ * another service names that service. With no `resolution`, the operations
+ * resolve as `generate` does with no config, so every service keeps its own
+ * name. Models, enums and the types the operations reach are collected from
+ * the IR as before.
  */
-export function specDerivedNames(spec: ApiSpec, hints: LanguageHints): Set<string> {
+export function specDerivedNames(spec: ApiSpec, hints: LanguageHints, resolution?: OperationResolution): Set<string> {
   const names = new Set<string>();
 
   // Build set of top-level enum names for filtering inline enums
   const topLevelEnumNames = new Set(spec.enums.map((e) => e.name));
 
-  // Service classes
+  // Service classes: the mount targets, as `generate` writes them
+  for (const r of resolveAsGenerate(spec, resolution)) {
+    names.add(r.mountOn);
+  }
+
   for (const service of spec.services) {
-    names.add(service.name);
     for (const op of service.operations) {
       // Operation methods are matched by the class diff, not by name here
       collectTypeRefNames(op.response, names, hints, topLevelEnumNames);
@@ -110,18 +144,71 @@ export function specDerivedFieldPaths(spec: ApiSpec, hints: LanguageHints): Set<
 }
 
 /**
- * Compute the set of method paths (e.g., "Auth.authorize") that are defined
- * as operations in the OpenAPI spec's services. Used by filterSurface to
- * exclude hand-written SDK methods that don't correspond to spec operations.
+ * Compute the set of method paths (e.g., "Animals.list_all") the OpenAPI
+ * spec's operations resolve to. Used by filterSurface to exclude hand-written
+ * SDK methods that don't correspond to spec operations, and by the staleness
+ * check to find methods the spec no longer names.
+ *
+ * Each operation is keyed as `generate` writes it, under the `resolution`'s
+ * `operationHints`, `mountRules` and `operationNaming` (with none, as
+ * `generate` resolves with no config): the mount target and the resolved
+ * method name (`Animals.list_all` under `mountRules: { Pets: 'Animals' }` and
+ * `operationHints: { 'GET /pets': { name: 'list_all' } }`; `Pets.get_pet`
+ * for `GET /pets/{id}` with no settings), each split wrapper's name on that
+ * target (`Pets.create_cat` for a `split` hint on `POST /pets`), and the IR's
+ * operation name on that target (`Animals.list`, `Pets.get`) — the key the
+ * scope read before, kept so an SDK whose methods carry the operationIds under
+ * path naming stays in scope. The method part is spelled as the resolution
+ * spells it (snake_case) and matched with underscores stripped and case folded
+ * (see {@link normalizeMemberName}), so a Node `getPet`, a Ruby `get_pet` and a
+ * .NET `GetPet` all read `Pets.get_pet`.
+ *
+ * With an `overlay` — the one `generate --api-surface` writes with, built by
+ * `buildOverlayLookup` from the baseline and the `.oagen-manifest.json` in the
+ * output directory — the paths also hold every baseline method the overlay
+ * maps to one of the spec's operations (`methodByOperation`: `GET /pets` →
+ * `Animals.fetchAll`), spelled as the baseline spells it: `generate` writes
+ * that name rather than the resolved one, so without it `filterSurface`
+ * dropped the method and an SDK that renamed it passed. A mapped method whose
+ * route the spec does not declare (`GET /legacy` → `Animals.legacy`) is not
+ * added; the spec derives nothing for it.
  */
-export function specDerivedMethodPaths(spec: ApiSpec): Set<string> {
+export function specDerivedMethodPaths(
+  spec: ApiSpec,
+  resolution?: OperationResolution,
+  overlay?: Pick<OverlayLookup, 'methodByOperation'>,
+): Set<string> {
   const paths = new Set<string>();
-  for (const service of spec.services) {
-    for (const op of service.operations) {
-      paths.add(`${service.name}.${op.name}`);
+  for (const r of resolveAsGenerate(spec, resolution)) {
+    paths.add(`${r.mountOn}.${r.methodName}`);
+    for (const wrapper of r.wrappers ?? []) paths.add(`${r.mountOn}.${wrapper.name}`);
+    paths.add(`${r.mountOn}.${r.operation.name}`);
+  }
+  if (overlay) {
+    const routes = specDerivedHttpKeys(spec);
+    for (const [httpKey, method] of overlay.methodByOperation) {
+      if (routes.has(httpKey)) paths.add(`${method.className}.${method.methodName}`);
     }
   }
   return paths;
+}
+
+/**
+ * Index method paths by class: class name → the normalized member names
+ * (see {@link normalizeMemberName}) its paths name. The class part is kept as
+ * written, since class names are matched exactly.
+ */
+export function memberKeysByClass(methodPaths: Iterable<string>): Map<string, Set<string>> {
+  const byClass = new Map<string, Set<string>>();
+  for (const path of methodPaths) {
+    const dot = path.indexOf('.');
+    if (dot === -1) continue;
+    const className = path.slice(0, dot);
+    const members = byClass.get(className) ?? new Set<string>();
+    members.add(normalizeMemberName(path.slice(dot + 1)));
+    byClass.set(className, members);
+  }
+  return byClass;
 }
 
 /**
@@ -177,8 +264,12 @@ function filterRecord<T>(record: Record<string, T>, allowed: Set<string>): Recor
  * For classes: when methodPaths is provided, only keeps methods whose names
  * appear in the spec-derived method paths. This prevents false positives from
  * hand-written SDK methods (e.g., Auth.authorization_url, Webhooks.construct_event)
- * that don't correspond to spec operations. Properties on service classes are
- * also filtered: only UPPER_CASE constants that are spec-derivable are kept.
+ * that don't correspond to spec operations. A method path's member is matched
+ * with underscores stripped and case folded (see {@link normalizeMemberName}),
+ * so the snake_case names `specDerivedMethodPaths` resolves read a method in
+ * any language's casing: `Animals.list_all` keeps a Node `listAll`, a Ruby
+ * `list_all` and a .NET `ListAll`. Properties on service classes are also
+ * filtered: only UPPER_CASE constants that are spec-derivable are kept.
  */
 export function filterSurface(
   surface: ApiSurface,
@@ -210,21 +301,20 @@ export function filterSurface(
 
   // Filter class methods and properties by spec-derived method paths if provided
   if (methodPaths) {
-    // Build a set of service-class names that have spec-derived methods.
-    // Only filter methods on these classes; non-service model classes keep all members.
-    const serviceClassNames = new Set<string>();
-    for (const path of methodPaths) {
-      const dot = path.indexOf('.');
-      if (dot !== -1) serviceClassNames.add(path.slice(0, dot));
-    }
+    // Index the member names by service class, in the spelling members are
+    // matched by. Only filter methods on these classes; non-service model
+    // classes keep all members.
+    const membersByClass = memberKeysByClass(methodPaths);
+    const isSpecMember = (className: string, member: string): boolean =>
+      membersByClass.get(className)?.has(normalizeMemberName(member)) ?? false;
 
     const newClasses: Record<string, (typeof filteredClasses)[string]> = {};
     for (const [name, cls] of Object.entries(filteredClasses)) {
-      if (serviceClassNames.has(name)) {
+      if (membersByClass.has(name)) {
         // Service class — filter methods and properties by spec-derived method paths
         const filteredMethods: typeof cls.methods = {};
         for (const [methodName, overloads] of Object.entries(cls.methods)) {
-          if (methodPaths.has(`${name}.${methodName}`)) {
+          if (isSpecMember(name, methodName)) {
             filteredMethods[methodName] = overloads;
           }
         }
@@ -234,7 +324,7 @@ export function filterSurface(
         // are not derivable from the spec and should be excluded.
         const filteredProperties: typeof cls.properties = {};
         for (const [propName, prop] of Object.entries(cls.properties)) {
-          if (methodPaths.has(`${name}.${propName}`)) {
+          if (isSpecMember(name, propName)) {
             filteredProperties[propName] = prop;
           }
         }
@@ -262,7 +352,7 @@ export function filterSurface(
         // otherwise drop non-spec methods.
         const filteredMethods: typeof cls.methods = {};
         for (const [methodName, overloads] of Object.entries(cls.methods)) {
-          if (fieldPaths.has(`${name}.${methodName}`) || methodPaths.has(`${name}.${methodName}`)) {
+          if (fieldPaths.has(`${name}.${methodName}`) || isSpecMember(name, methodName)) {
             filteredMethods[methodName] = overloads;
           }
         }

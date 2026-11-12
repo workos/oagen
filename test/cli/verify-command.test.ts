@@ -1034,3 +1034,212 @@ describe('#567', () => {
     expect(existsSync(baseline.irPath!)).toBe(false);
   });
 });
+
+describe('#600', () => {
+  // The compat scope and the staleness check have to read the classes and
+  // methods the config's `mountRules`, `operationHints` and `operationNaming`
+  // resolve the operations to — what `generate` writes — not the IR's service
+  // and operation names, or a service remounted by `mountRules` is scoped out
+  // of `verify` and never found stale.
+  let tmpDir: string;
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+
+  const ok = (schema: unknown) => ({ '200': { description: 'ok', content: { 'application/json': { schema } } } });
+  const pet = { $ref: '#/components/schemas/Pet' };
+  const listPets = { get: { operationId: 'list', tags: ['Pets'], responses: ok({ type: 'array', items: pet }) } };
+  const getPet = {
+    get: {
+      operationId: 'get',
+      tags: ['Pets'],
+      parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+      responses: ok(pet),
+    },
+  };
+  // The issue's `pets.json`.
+  const doc = (paths: Record<string, unknown>) => ({
+    openapi: '3.1.0',
+    info: { title: 'pets', version: '1' },
+    tags: [{ name: 'Pets' }],
+    paths,
+    components: { schemas: { Pet: { type: 'object', properties: { name: { type: 'string' } } } } },
+  });
+  const petsDoc = doc({ '/pets': listPets, '/pets/{id}': getPet });
+  // The issue's settings: `generate` writes `Animals.list_all` and
+  // `Animals.get_pet`.
+  const settings = { mountRules: { Pets: 'Animals' }, operationHints: { 'GET /pets': { name: 'list_all' } } };
+  const method = (name: string) => [{ name, params: [], returnType: 'Pet', async: true }];
+  const animals = (...methods: string[]) => ({
+    name: 'Animals',
+    methods: Object.fromEntries(methods.map((m) => [m, method(m)])),
+    properties: {},
+    constructorParams: [],
+  });
+  const interfaces = {
+    Pet: { name: 'Pet', fields: { name: { name: 'name', type: 'string', optional: true } }, extends: [] },
+  };
+  const write = (name: string, content: unknown) => {
+    const file = resolve(tmpDir, name);
+    writeFileSync(file, JSON.stringify(content));
+    return file;
+  };
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    tmpDir = resolve(os.tmpdir(), `oagen-verify-600-${process.pid}`);
+    mkdirSync(tmpDir, { recursive: true });
+    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { execFileSync } = await import('node:child_process');
+    (execFileSync as ReturnType<typeof vi.fn>).mockImplementation(() => '');
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('scopes compat to the classes and methods the settings resolve the operations to', async () => {
+    // The baseline is the SDK `generate` wrote: `Animals` with `list_all` and
+    // `get_pet`, and `Pet`. The SDK lost `list_all`.
+    const spec = write('pets.json', petsDoc);
+    const apiSurface = write(
+      'baseline.json',
+      makeSurface({ classes: { Animals: animals('list_all', 'get_pet') }, interfaces }),
+    );
+    mockExtract.mockResolvedValue(makeSurface({ classes: { Animals: animals('get_pet') }, interfaces }));
+    const opts = {
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 0,
+    };
+
+    // Without the settings, `Animals` is no name the spec derives: scoped out,
+    // and the lost method passes.
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 1/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith('Compat: passed');
+
+    await expect(verifyCommand({ ...opts, ...settings })).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: Animals.list_all — Symbol "Animals.list_all" was removed',
+    );
+  });
+
+  it("matches the resolved method names in the SDK's casing", async () => {
+    // A Node SDK writes `listAll` and `getPet` for the same operations.
+    const spec = write('pets.json', petsDoc);
+    const apiSurface = write(
+      'baseline.json',
+      makeSurface({ classes: { Animals: animals('listAll', 'getPet') }, interfaces }),
+    );
+    mockExtract.mockResolvedValue(makeSurface({ classes: { Animals: animals('getPet') }, interfaces }));
+
+    await expect(
+      verifyCommand({
+        spec,
+        lang: 'test-lang',
+        output: tmpDir,
+        apiSurface,
+        rawResults: write('raw.json', []),
+        maxRetries: 0,
+        ...settings,
+      }),
+    ).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: Animals.listAll — Symbol "Animals.listAll" was removed',
+    );
+  });
+
+  it('finds a remounted service and its methods stale', async () => {
+    const oldSpec = write('old.json', petsDoc);
+    const apiSurface = write(
+      'baseline.json',
+      makeSurface({ classes: { Animals: animals('list_all', 'get_pet') }, interfaces }),
+    );
+    mockExtract.mockResolvedValue(makeSurface({ classes: { Animals: animals('list_all', 'get_pet') }, interfaces }));
+    const opts = { oldSpec, lang: 'test-lang', output: tmpDir, apiSurface, rawResults: write('raw.json', []) };
+
+    // The new spec dropped `GET /pets`: `Animals.list_all` is dead code.
+    const spec = write('new.json', doc({ '/pets/{id}': getPet }));
+    await verifyCommand({ ...opts, spec });
+    expect(consoleSpy).toHaveBeenCalledWith('No stale symbols detected.');
+
+    await verifyCommand({ ...opts, spec, ...settings });
+    expect(consoleSpy).toHaveBeenCalledWith('Found 1 stale symbol(s):');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: Animals.list_all — Method "Animals.list_all" is no longer defined in the OpenAPI spec',
+    );
+
+    // The new spec dropped the `Pets` tag: the `Animals` class is dead code,
+    // reported once.
+    const empty = write('empty.json', doc({}));
+    await verifyCommand({ ...opts, spec: empty, ...settings });
+    expect(consoleSpy).toHaveBeenCalledWith('Found 1 stale symbol(s):');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [staleness] warning: Animals — Class "Animals" is no longer defined in the OpenAPI spec',
+    );
+  });
+
+  it('keeps a baseline method the overlay maps to a spec operation in scope, under its own name', async () => {
+    // `generate --api-surface` wrote `Animals.fetchAll` for `GET /pets`, the
+    // name the manifest in `--output` maps the route to, through the overlay;
+    // the SDK renamed it `listPets`. The method paths for `Animals` were
+    // `list_all`, `list`, `get_pet` and `get`, so `filterSurface` dropped
+    // `fetchAll` from the baseline and the rename passed at `2/2`.
+    const overlay = (routes: Record<string, string>) => ({
+      methodByOperation: new Map(
+        Object.entries(routes).map(([httpKey, methodName]) => [
+          httpKey,
+          { className: 'Animals', methodName, params: [], returnType: 'Pet' },
+        ]),
+      ),
+      httpKeyByMethod: new Map(Object.entries(routes).map(([httpKey, m]) => [`Animals.${m}`, httpKey])),
+      interfaceByName: new Map(),
+      typeAliasByName: new Map(),
+      requiredExports: new Map(),
+      modelNameByIR: new Map(),
+      fileBySymbol: new Map(),
+    });
+    const spec = write('pets.json', petsDoc);
+    const apiSurface = write(
+      'baseline.json',
+      makeSurface({ classes: { Animals: animals('fetchAll', 'getPet', 'legacy') }, interfaces }),
+    );
+    mockExtract.mockResolvedValue(makeSurface({ classes: { Animals: animals('listPets', 'getPet') }, interfaces }));
+    const opts = {
+      spec,
+      lang: 'test-lang',
+      output: tmpDir,
+      apiSurface,
+      rawResults: write('raw.json', []),
+      maxRetries: 0,
+      ...settings,
+    };
+
+    // A route the spec does not declare keeps nothing in scope: `legacy` is
+    // hand-written, and `fetchAll` matches no resolved name.
+    mockBuildOverlayLookup.mockReturnValue(overlay({ 'GET /legacy': 'legacy' }));
+    await verifyCommand(opts);
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith('Compat: passed');
+
+    mockBuildOverlayLookup.mockReturnValue(overlay({ 'GET /pets': 'fetchAll', 'GET /pets/{id}': 'getPet' }));
+    await expect(verifyCommand(opts)).rejects.toThrow('Compat violations found');
+    expect(consoleSpy).toHaveBeenCalledWith('(scoped to spec: 2/2 baseline symbols in scope)');
+    expect(consoleSpy).toHaveBeenCalledWith(
+      '  [symbol_removed] breaking: Animals.fetchAll — Symbol "Animals.fetchAll" was removed',
+    );
+    // Built as `generate --api-surface` builds it: from the baseline, the
+    // manifest in `--output` (none here), the spec and the language's hints.
+    expect(mockBuildOverlayLookup).toHaveBeenLastCalledWith(
+      JSON.parse(readFileSync(apiSurface, 'utf-8')),
+      undefined,
+      expect.objectContaining({ services: expect.any(Array) }),
+      expect.objectContaining({ derivedModelNames: expect.any(Function) }),
+    );
+  });
+});

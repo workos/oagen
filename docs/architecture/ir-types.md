@@ -1058,6 +1058,8 @@ Note that a catch-all also absorbs future tags added to the spec under that pref
 
 `oagen resolve --spec <path> --format table|json` outputs the full resolution table for review. Use `--format json` for programmatic consumption.
 
+The three settings `resolveOperations` takes beside the spec — `operationHints`, `mountRules` and `operationNaming` — are one object, `OperationResolution`, and every command that reads the SDK `generate` writes resolves with the config's: `generate` hands them to the engine, `resolve` prints what they resolve to, `compat-extract` matches the SDK's callables by the names they resolve to, and `verify`'s compat scope and staleness check (`specDerivedNames`, `specDerivedMethodPaths`, `detectStaleSymbols` in `compat`) read the classes and methods they resolve to. Under `mountRules: { Pets: 'Animals' }` and `operationHints: { 'GET /pets': { name: 'list_all' } }`, `GET /pets` and `GET /pets/{id}` tagged `Pets` resolve to `Animals.list_all` and `Animals.get_pet`, so `verify` scopes the SDK's `Animals` class and those two methods (in the language's casing); with no settings, to `Pets.list_pets` and `Pets.get_pet`. See [Non-additive changes](non-additive-changes.md).
+
 ## Versioning
 
 The IR does not currently use a version constant. As a 0.x project with no external consumers yet, formal IR versioning is deferred until post-open-source when external emitters need a stable contract signal.

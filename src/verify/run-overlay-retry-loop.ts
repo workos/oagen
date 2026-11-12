@@ -4,7 +4,7 @@ import { buildOverlayLookup, patchOverlay, isPatchableChange } from '../compat/o
 import { getExtractor } from '../compat/extractor-registry.js';
 import type { ApiSurface } from '../compat/types.js';
 import type { ApiSpec } from '../ir/types.js';
-import type { OperationHint, OperationNaming } from '../ir/operation-hints.js';
+import type { OperationHint, OperationNaming, OperationResolution } from '../ir/operation-hints.js';
 import { getEmitter } from '../engine/registry.js';
 import { generate } from '../engine/orchestrator.js';
 import { runCompatCheck } from './run-compat-check.js';
@@ -79,6 +79,16 @@ export async function runOverlayRetryLoop(opts: {
   onRetry?: (attemptNumber: number, maxRetries: number, patchableCount: number) => void;
 }): Promise<OverlayRetryResult> {
   const { baseline, parsedSpec, outputDir, lang, maxRetries, namespace, onRetry } = opts;
+  // The compat scope reads the classes and methods the same settings resolve
+  // the operations to, so each check compares the SDK `generate` wrote (#600),
+  // and the overlay of the attempt, so a baseline method it keeps (the
+  // manifest's `fetchAll` for `GET /pets`, or one a patch restored) stays in
+  // scope under its own name.
+  const resolution: OperationResolution = {
+    operationHints: opts.operationHints,
+    mountRules: opts.mountRules,
+    operationNaming: opts.operationNaming,
+  };
 
   const manifest = readManifestSync(outputDir);
   // Pass language-specific hints so property-to-class matching works correctly
@@ -89,7 +99,7 @@ export async function runOverlayRetryLoop(opts: {
   const patchedPerIteration: number[] = [];
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec);
+    const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution, overlay);
     if (compatResult.passed) {
       return {
         status: 'passed',
@@ -154,7 +164,7 @@ export async function runOverlayRetryLoop(opts: {
     });
   }
 
-  const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec);
+  const compatResult = await runCompatCheck(baseline, outputDir, lang, parsedSpec, undefined, resolution, overlay);
   return {
     status: 'max-retries',
     attempts: maxRetries,
