@@ -439,7 +439,7 @@ describe('the shared name', () => {
     const pinned = await parseWithWarnings(
       doc(bodies, { ErrorBodyWithCode: obj({ code: { type: 'string', const: 'a' }, message: str }) }),
       [
-        /would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" already holds — keeping models "GetNotesError409", "GetPetsError409" as they are/,
+        /would be named "ErrorBodyWithCode", which component schema "ErrorBodyWithCode" \{ code: "a", message: string \} already holds — keeping models "GetNotesError409", "GetPetsError409" as they are/,
       ],
     );
     expect(modelNames(pinned)).toEqual(['ErrorBodyWithCode', 'GetNotesError409', 'GetPetsError409', 'Note']);
@@ -474,7 +474,7 @@ describe('the shared name', () => {
         { ErrorBody: obj({ unrelated: str }) },
       ),
       [
-        /would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+        /would be named "ErrorBody", which component schema "ErrorBody" \{ unrelated: string \} already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
       ],
     );
     expect(modelNames(ir)).toEqual(['ErrorBody', 'GetNotesError404', 'GetPetsError404', 'Note']);
@@ -930,18 +930,41 @@ describe('#506', () => {
 
   it("keeps a field's flag, default and limits, and a model's, only when every body wrote the same ones", async () => {
     const limited = { ...str, maxLength: 10, deprecated: true, default: 'none' };
-    const differing = await parseWithoutWarnings(
+    // A field's `deprecated` is dropped when the bodies disagree, as the
+    // default and the limits are, and said (#629): the field is the flag's
+    // only carrier.
+    const differing = await parseWithWarnings(
       doc({
         ...getOp('pets', {
           '404': { description: 'nf', content: json({ ...obj({ message: limited }), minProperties: 1 }) },
         }),
         ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
       }),
+      [
+        /The shared error body "ErrorBody" has "message" declared deprecated by "GetPetsError404" and live by "GetNotesError404" — keeping it live/,
+      ],
     );
     expect(modelNames(differing)).toEqual(['ErrorBody', 'Note']);
     const shared = differing.models.find((m) => m.name === 'ErrorBody')!;
     expect(shared.fields[0]).toEqual({ name: 'message', type: { kind: 'primitive', type: 'string' }, required: true });
     expect(shared.constraints).toBeUndefined();
+    // Without the flag the default and the limits are dropped the same way,
+    // silently.
+    const loosened = await parseWithoutWarnings(
+      doc({
+        ...getOp('pets', {
+          '404': {
+            description: 'nf',
+            content: json({ ...obj({ message: { ...str, maxLength: 10, default: 'none' } }), minProperties: 1 }),
+          },
+        }),
+        ...getOp('notes', { '404': { description: 'nf', content: json(messageBody()) } }),
+      }),
+    );
+    expect(modelNames(loosened)).toEqual(['ErrorBody', 'Note']);
+    const loose = loosened.models.find((m) => m.name === 'ErrorBody')!;
+    expect(loose.fields[0]).toEqual({ name: 'message', type: { kind: 'primitive', type: 'string' }, required: true });
+    expect(loose.constraints).toBeUndefined();
     const agreeing = await parseWithoutWarnings(
       doc({
         ...getOp('pets', {
@@ -952,6 +975,7 @@ describe('#506', () => {
         }),
       }),
     );
+    expect(modelNames(agreeing)).toEqual(['ErrorBody', 'Note']);
     const kept = agreeing.models.find((m) => m.name === 'ErrorBody')!;
     expect(kept.fields[0]).toEqual({
       name: 'message',
@@ -979,7 +1003,7 @@ describe('#506', () => {
     // is, with its own shape in the warning, and the other folds onto the
     // component (the review's finding 1).
     const lacking = await parseWithWarnings(doc(bodies, { ErrorBody: obj({ message: str }) }), [
-      /The shared error body \{ message: string, hint\?: string \} would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping model "GetNotesError404" as it is/,
+      /The shared error body \{ message: string, hint\?: string \} would be named "ErrorBody", which component schema "ErrorBody" \{ message: string \} already holds — keeping model "GetNotesError404" as it is/,
     ]);
     expect(modelNames(lacking)).toEqual(['ErrorBody', 'GetNotesError404', 'Note']);
     expect(errorType(lacking, 'getPets', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
@@ -1018,7 +1042,7 @@ describe('#506', () => {
       expect(errorType(before, 'getNotes', 404)).toEqual({ kind: 'model', name: 'ErrorBody' });
       // Only the body that gained `hint` leaves the component.
       const after = await parseWithWarnings(next, [
-        /The shared error body \{ message: string, hint\?: string \} would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping model "GetPetsError404" as it is/,
+        /The shared error body \{ message: string, hint\?: string \} would be named "ErrorBody", which component schema "ErrorBody" \{ message: string \} already holds — keeping model "GetPetsError404" as it is/,
       ]);
       expect(modelNames(after)).toEqual(['ErrorBody', 'GetPetsError404', 'Note']);
       expect(errorType(after, 'getPets', 404)).toEqual({ kind: 'model', name: 'GetPetsError404' });
@@ -1038,14 +1062,14 @@ describe('#506', () => {
     // A component whose `message` carries a limit the bodies do not would
     // narrow them: the bodies stay as they are.
     const stricter = await parseWithWarnings(doc(bodies, { ErrorBody: obj({ message: { ...str, maxLength: 3 } }) }), [
-      /The shared error body \{ message: string \} would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+      /The shared error body \{ message: string \} would be named "ErrorBody", which component schema "ErrorBody" \{ message: string \} already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
     ]);
     expect(modelNames(stricter)).toEqual(['ErrorBody', 'GetNotesError404', 'GetPetsError404', 'Note']);
     expectSound(stricter, ['Note', 'ErrorBody']);
     const strictModel = await parseWithWarnings(
       doc(bodies, { ErrorBody: { ...obj({ message: str }), minProperties: 1 } }),
       [
-        /would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+        /would be named "ErrorBody", which component schema "ErrorBody" \{ message: string \} already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
       ],
     );
     expect(modelNames(strictModel)).toEqual(['ErrorBody', 'GetNotesError404', 'GetPetsError404', 'Note']);
@@ -1072,7 +1096,7 @@ describe('#506', () => {
     const unhinted = await parseWithWarnings(
       doc(bodies, component),
       [
-        /The shared error body \{ message: string, hint\? as tip: string \} would be named "ErrorBody", which component schema "ErrorBody" already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
+        /The shared error body \{ message: string, hint\? as tip: string \} would be named "ErrorBody", which component schema "ErrorBody" \{ message: string, hint\?: string \} already holds — keeping models "GetNotesError404", "GetPetsError404" as they are/,
       ],
       { fieldHints: { GetPetsError404: { hint: 'tip' }, GetNotesError404: { hint: 'tip' } } },
     );

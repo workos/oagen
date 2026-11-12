@@ -31,11 +31,19 @@
  * only in their error code, their prose or their `x-` extensions fold onto
  * one model. An optional field is not shape (#506, #516): a body gains one
  * without leaving its group, and the group's model carries every optional
- * field any member declares. Nor are a field's flags, default and limits,
- * which the shared model keeps where every member agrees — the limits at
- * every level of the field's type, an array's items, a map's values and a
- * union's variants each kept or dropped on their own (#611) — as it keeps
- * a description; an optional field's domain name is kept when the members
+ * field any member declares. Nor is `deprecated` — the body's own or a
+ * field's — shape (#441, #629): a body's name never depends on a flag, as
+ * an inline copy's never depends on its own (`flagAdmits`), so a flag flip
+ * moves no body; the shared model, and each of its fields, is deprecated
+ * only when every member that carries it is, and a deprecated member, or
+ * a member's deprecated field, folds onto a live one with a warning naming
+ * each side (`sharedModelDeprecated`, `sharedDeprecated`), since the model
+ * is a body's only carrier for the flag and the field its own. A field's
+ * other flags, default and limits are not shape either, and the shared
+ * model keeps them where every member agrees — the limits at every level
+ * of the field's type, an array's items, a map's values and a union's
+ * variants each kept or dropped on their own (#611) — as it keeps a
+ * description; an optional field's domain name is kept when the members
  * that hint it agree, and dropped with a warning when they do not. A string
  * inside an array, union or map keeps its value in the key (`L"a"`,
  * `E["a","b"]`), since nothing combines values there, so two bodies that
@@ -84,11 +92,14 @@
  *
  * The pass never numbers a name. A shared name a component schema of that
  * shape already holds is that component for every member it can stand for
- * (`componentAccepts`) — one that declares every field the member has,
- * required or optional as the member has it, of its type and domain name,
- * no stricter in its limits at any level of a field's type (an array's
- * items, a map's values, a union's variants; #611), and admitting every
- * value the member pins:
+ * (`componentAccepts`) — one that is live (a deprecated component takes no
+ * body, as it takes no inline copy anywhere else, #441, #629), that
+ * declares every field the member has, required or optional as the member
+ * has it and deprecated only where the member's is (a live field takes a
+ * deprecated one, with a warning, as the live model takes a deprecated
+ * body), of its type and domain name, no stricter in its limits at any
+ * level of a field's type (an array's items, a map's values, a union's
+ * variants; #611), and admitting every value the member pins:
  * those members fold onto it, and a member it cannot stand for is left as
  * it is, with a warning that prints that member's shape, so a body that
  * gains a field the component lacks moves alone. A name anything else holds
@@ -320,11 +331,23 @@ function fold(
   // Who holds each name a shared model or enum might take.
   const holders = new Map<string, string>();
   for (const model of input.models) if (!errorOnly.has(model.name)) holders.set(model.name, `model "${model.name}"`);
-  for (const name of options.componentNames) holders.set(name, `component schema "${name}"`);
+  // A component holder prints its shape, as a shared-body holder does, so
+  // the warning says what differs — a field flagged on one side alone
+  // included (#629).
+  for (const name of options.componentNames) {
+    const component = byName.get(name);
+    const shape = component === undefined ? '' : ` ${shapeOf(component)}`;
+    holders.set(name, `${component?.deprecated ? 'deprecated ' : ''}component schema "${name}"${shape}`);
+  }
   for (const e of existingEnums) holders.set(e.name, `enum "${e.name}"`);
   const canonical = new Map<string, string>(); // group key → shared name
   const absorbed = new Set<string>(); // group keys folded onto a component of their shape
   const seeds = new Set<string>(); // the models of the groups left as they are
+  // The deprecated bodies, and the deprecated fields, a live component
+  // took, announced once the fold is known to be kept: a name a group
+  // cannot take makes the pass run again (`frozen`), and the same bodies
+  // fold again then.
+  const deprecatedFolds: Array<{ name: string; field?: string; deprecated: string[] }> = [];
   const leave = (name: string, holder: string, left: readonly Model[]): void => {
     for (const member of left) seeds.add(member.name);
     const list = left.map((member) => `"${member.name}"`).join(', ');
@@ -342,13 +365,27 @@ function fold(
     }
     // A component schema of this shape is the shared body of every member
     // it can stand for; a member it cannot — one with a field, a domain
-    // name, a limit or a pinned value the component does not admit — is
-    // left as it is, alone, with its own shape in the warning, and the fold
-    // runs again with the rest (#506).
+    // name, a limit or a pinned value the component does not admit, a live
+    // field the component deprecates, or any member when the component is
+    // deprecated — is left as it is, alone, with its own shape in the
+    // warning, and the fold runs again with the rest (#506, #629).
     const component = byName.get(name);
     if (component && !errorOnly.has(name) && keys.of(name) === key) {
       const left = members.filter((member) => !componentAccepts(component, member, keys));
       if (left.length === 0) {
+        // A deprecated body a live component takes, and a deprecated field
+        // a live field of the component takes, are announced, as a
+        // deprecated inline copy a live component admits is (#441, #629):
+        // the flag has no carrier once the body folds.
+        const deprecated = members.filter((member) => member.deprecated).map((member) => member.name);
+        if (deprecated.length > 0) deprecatedFolds.push({ name, deprecated });
+        for (const field of component.fields) {
+          if (field.deprecated) continue;
+          const flagged = members
+            .filter((member) => member.fields.some((own) => own.name === field.name && own.deprecated))
+            .map((member) => member.name);
+          if (flagged.length > 0) deprecatedFolds.push({ name, field: field.name, deprecated: flagged });
+        }
         canonical.set(key, name);
         absorbed.add(key);
         return;
@@ -420,6 +457,9 @@ function fold(
       }
     }
     return { models: input.models, frozen };
+  }
+  for (const { name, field, deprecated } of deprecatedFolds) {
+    warnDeprecatedFold(name, field, deprecated, `component schema "${name}"`);
   }
 
   // The shared enums, one per field name some group pins to two or more
@@ -551,9 +591,10 @@ const byFieldName = (a: Field, b: Field): number => (a.name < b.name ? -1 : a.na
 
 /**
  * The shape of an error-only model, independent of its name, its optional
- * fields, its documentation, its flags and limits, its `x-` extensions and
- * the values its string fields are pinned to. Memoized per model; a cycle
- * among error bodies reads as the name on the cycle.
+ * fields, its documentation, its flags and limits (its own `deprecated`
+ * and its fields' included, #629), its `x-` extensions and the values its
+ * string fields are pinned to. Memoized per model; a cycle among error
+ * bodies reads as the name on the cycle.
  */
 class ModelKeys {
   private readonly keys = new Map<string, string>();
@@ -688,26 +729,36 @@ const ERROR_CODE_FIELDS = ['code', 'error'];
 
 /**
  * Whether `component`, whose key is the group's, can stand for `member`: it
- * declares every field the member has, required or optional as the member
- * has it, of the member's type and domain name, so no body loses a field or
- * a hint by folding onto it; it is no stricter than the member — every
- * limit it writes, on itself, a field or any level of the field's type
- * (`typeNoStricter`: the type's own, an array's items, a map's values, a
- * union's variants; #611), the member writes the same, so no body is
- * narrowed by folding onto it (the key leaves limits out, as the shared
- * model merges them); and it admits every value the member pins — a string
- * field the member pins is, on the component, a plain string, or, when the
- * member does not leave it free, a literal or inline enum holding every
- * pinned value. The key reads every string as one, so this is what tells a
- * component the body can reference from one that would narrow its codes.
+ * is live — a deprecated component takes no body, live or deprecated, as it
+ * takes no inline copy anywhere else (`ownerFlagAdmits`, #441, #629), so no
+ * live site resolves to a deprecated model; it declares every field the
+ * member has, required or optional as the member has it, and deprecated
+ * only where the member's field is — a component whose field is deprecated
+ * would give a live member's readers a notice its schema never wrote, while
+ * one whose field is live takes a member's deprecated field as the live
+ * model takes a deprecated body (`flagAdmits`), announced by `claim` since
+ * the field is the flag's only carrier — of the member's type and domain
+ * name, so no body loses a field or a hint by folding onto it; it is no
+ * stricter than the member — every limit it writes, on itself, a field or any level
+ * of the field's type (`typeNoStricter`: the type's own, an array's items,
+ * a map's values, a union's variants; #611), the member writes the same, so
+ * no body is narrowed by folding onto it (the key leaves limits out, as the
+ * shared model merges them); and it admits every value the member pins — a
+ * string field the member pins is, on the component, a plain string, or,
+ * when the member does not leave it free, a literal or inline enum holding
+ * every pinned value. The key reads every string as one, so this is what
+ * tells a component the body can reference from one that would narrow its
+ * codes.
  */
 function componentAccepts(component: Model, member: Model, keys: ModelKeys): boolean {
+  if (component.deprecated) return false;
   if (!noStricter(component.constraints, member.constraints)) return false;
   for (const field of member.fields) {
     const own = component.fields.find((f) => f.name === field.name);
     if (
       !own ||
       own.required !== field.required ||
+      (own.deprecated === true && !field.deprecated) ||
       own.domainName !== field.domainName ||
       keys.type(own.type, true) !== keys.type(field.type, true) ||
       !noStricter(own.constraints, field.constraints) ||
@@ -795,13 +846,16 @@ function typeNoStricter(component: TypeRef, member: TypeRef, keys: ModelKeys): b
 /**
  * `{ code: string, message?: string | null, detail as reason: Note }`: a
  * model's fields with their requiredness, domain name and type, so that a
- * warning printing two shapes says what tells them apart (#515).
+ * warning printing two shapes says what tells them apart (#515), and
+ * `(deprecated)` after a deprecated field's name
+ * (`{ message (deprecated): string }`), so a warning says which side
+ * deprecates a field (#629); the model's own flag is said by the holder.
  */
 function shapeOf(model: Model): string {
   if (model.fields.length === 0) return '{ }';
   const fields = model.fields.map(
     (field) =>
-      `${field.name}${field.required ? '' : '?'}${field.domainName === undefined ? '' : ` as ${field.domainName}`}: ${describeType(field.type)}`,
+      `${field.name}${field.required ? '' : '?'}${field.deprecated ? ' (deprecated)' : ''}${field.domainName === undefined ? '' : ` as ${field.domainName}`}: ${describeType(field.type)}`,
   );
   return `{ ${fields.join(', ')} }`;
 }
@@ -1057,11 +1111,15 @@ function nestedName(parentName: string, parent: Model, field: Field, item: Model
 /**
  * One shared model for `members`, carrying every field any member declares
  * (`sharedFieldOrder`): each field's type reads as the group reads it
- * (`sharedFieldType`); its description, flags, default, limits and
+ * (`sharedFieldType`); its description, access flags, default, limits and
  * extensions are kept when every member that has the field wrote the same
- * one, the example only while the type is still the member's own, and its
+ * one, the example only while the type is still the member's own, its
  * domain name when every member that hints the field agrees
- * (`sharedDomainName`).
+ * (`sharedDomainName`), and its `deprecated` when every member that carries
+ * the field deprecates it (`sharedDeprecated`), as the model is deprecated
+ * only when every member is (`sharedModelDeprecated`): a deprecated member,
+ * or a member's deprecated field, folds onto a live one with a warning, as
+ * a deprecated inline copy folds onto its live twin (#441, #629).
  */
 function buildSharedModel(
   name: string,
@@ -1094,8 +1152,7 @@ function buildSharedModel(
     if (readOnly !== undefined) shared.readOnly = readOnly;
     const writeOnly = agree('writeOnly');
     if (writeOnly !== undefined) shared.writeOnly = writeOnly;
-    const deprecated = agree('deprecated');
-    if (deprecated !== undefined) shared.deprecated = deprecated;
+    if (sharedDeprecated(name, members, field.name)) shared.deprecated = true;
     const defaultValue = agree('default');
     if (defaultValue !== undefined) shared.default = defaultValue;
     if (constraints !== undefined) shared.constraints = constraints;
@@ -1116,8 +1173,7 @@ function buildSharedModel(
     members.every((member) => stableJson(member[key]) === stableJson(representative[key]))
       ? representative[key]
       : undefined;
-  const deprecated = agree('deprecated');
-  if (deprecated !== undefined) model.deprecated = deprecated;
+  if (sharedModelDeprecated(name, members)) model.deprecated = true;
   const constraints = agree('constraints');
   if (constraints !== undefined) model.constraints = constraints;
   if (representative.typeParams !== undefined) model.typeParams = representative.typeParams;
@@ -1161,6 +1217,71 @@ function sharedDomainName(name: string, members: readonly Model[], field: string
     `[oagen] Warning: The shared error body "${name}" keeps "${field}" under its own name: its bodies hint it apart (${list}); hint it once, keyed by "${name}"`,
   );
   return undefined;
+}
+
+/**
+ * Whether the shared model `name` is deprecated: every member is. A body's
+ * own `deprecated` is not shape (its name never depends on its own flag,
+ * #441), so a group may mix the flags; it then stays live, since a
+ * deprecated model would type the live members' sites as deprecated, and
+ * the deprecated members are announced (`settleDeprecated`, #629).
+ */
+function sharedModelDeprecated(name: string, members: readonly Model[]): boolean {
+  const flagged = members.map((member) => ({ member: member.name, deprecated: member.deprecated === true }));
+  return settleDeprecated(name, undefined, flagged);
+}
+
+/**
+ * Whether the shared model `name` deprecates its field `field`: every
+ * member that carries the field does. A field's `deprecated` is not shape
+ * either (#629), so the members may flag it apart; the field then stays
+ * live, since a deprecated field would give the live members' readers a
+ * notice their schemas never wrote, and the members that deprecate it are
+ * announced (`settleDeprecated`), the field being the flag's only carrier.
+ */
+function sharedDeprecated(name: string, members: readonly Model[], field: string): boolean {
+  const flagged = members.flatMap((member) => {
+    const own = member.fields.find((f) => f.name === field);
+    return own === undefined ? [] : [{ member: member.name, deprecated: own.deprecated === true }];
+  });
+  return settleDeprecated(name, field, flagged);
+}
+
+/** Whether every one of `flagged` is deprecated; when only some are, they are announced (`warnDeprecatedFold`) and the answer is no. */
+function settleDeprecated(
+  name: string,
+  field: string | undefined,
+  flagged: ReadonlyArray<{ member: string; deprecated: boolean }>,
+): boolean {
+  const deprecated = flagged.filter((entry) => entry.deprecated).map((entry) => entry.member);
+  if (deprecated.length === flagged.length) return flagged.length > 0;
+  if (deprecated.length > 0) {
+    const live = flagged.filter((entry) => !entry.deprecated).map((entry) => `"${entry.member}"`);
+    warnDeprecatedFold(name, field, deprecated, live.join(', '));
+  }
+  return false;
+}
+
+/**
+ * The warning a deprecated body, or a body's deprecated field, folding onto
+ * a live one of its shape is announced with — the shared model its live
+ * twins make, or a live component of the name (`claim`) — as a deprecated
+ * inline copy a live declared model admits is announced everywhere else
+ * (`deprecatedFoldWarning`): the flag has no carrier once the body folds,
+ * so the readers of its site lose the notice (#629). For a component,
+ * printed only once `fold` knows its result is kept, after every group has
+ * claimed a name, so a pass that runs again announces each fold once.
+ */
+function warnDeprecatedFold(
+  name: string,
+  field: string | undefined,
+  deprecated: readonly string[],
+  live: string,
+): void {
+  const subject =
+    field === undefined ? `The shared error body "${name}" is` : `The shared error body "${name}" has "${field}"`;
+  const list = deprecated.map((member) => `"${member}"`).join(', ');
+  console.warn(`[oagen] Warning: ${subject} declared deprecated by ${list} and live by ${live} — keeping it live`);
 }
 
 /**
