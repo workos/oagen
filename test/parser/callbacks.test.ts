@@ -1140,8 +1140,8 @@ describe('#382', () => {
       });
 
       it('names the callbacks of two owners whose operationIds clean to one stem apart, each with its own payload (Greptile)', async () => {
-        // `createPet` and `create_pet` both name their models from `CreatePet`;
-        // each declares `petAdopted` under the same expression.
+        // `createPet` and `create_pet` both clean to `CreatePet`; each
+        // declares `petAdopted` under the same expression.
         // Michael's documents: `POST /pets` and `POST /pet-drafts`, payloads
         // `{ petId: string }` and `{ draftId: integer }`.
         const owners = (second: Record<string, unknown>, otherId = 'create_pet') =>
@@ -1153,11 +1153,12 @@ describe('#382', () => {
 
         const differing = await parseJson(owners(draft));
         const [first, second] = operations(differing).map((op) => payloadNames(op)[0]!);
-        // Both plain stems are `CreatePetPetAdopted`, so both are hashed —
-        // from each callback's site label, never alike — and each callback
+        // `createPet` is spelled as the stem and keeps it; `create_pet` is
+        // path-named (#627), so the two callbacks' stems differ, neither is
+        // hashed (before #627 both plain stems were `CreatePetPetAdopted`
+        // and both were hashed from their site labels), and each callback
         // references its own model with its own field type.
-        expect(first).not.toBe(second);
-        for (const name of [first, second]) expect(name).toMatch(/^CreatePetPetAdopted[0-9A-Fa-f]{6}Payload$/);
+        expect([first, second]).toEqual(['CreatePetPetAdoptedPayload', 'PetDraftsPostPetAdoptedPayload']);
         const fieldOf = (spec: ApiSpec, name: string) => spec.models.find((m) => m.name === name)!.fields[0]!;
         expect(fieldOf(differing, first)).toMatchObject({ name: 'petId', type: { kind: 'primitive', type: 'string' } });
         expect(fieldOf(differing, second)).toMatchObject({
@@ -1172,16 +1173,15 @@ describe('#382', () => {
         // `CreatePet` instead of `create_pet` cleans to the same stem and parts the same way.
         const cased = await parseJson(owners(draft, 'CreatePet'));
         const casedNames = operations(cased).map((op) => payloadNames(op)[0]!);
-        expect(casedNames[0]).toBe(first);
-        expect(casedNames[1]).not.toBe(first);
+        expect(casedNames).toEqual([first, second]);
         expect(fieldOf(cased, casedNames[1]!)).toMatchObject({
           name: 'draftId',
           type: { kind: 'primitive', type: 'integer' },
         });
         expect(warnings()).toEqual([]);
 
-        // Identical payloads part the same way: neither owner is more
-        // canonical, as neither of two webhook keys that flatten to one stem is.
+        // Identical payloads part the same way: the names depend on the
+        // owners' ids alone, never on the payloads' shapes.
         const identical = await parseJson(owners(petIdSchema));
         expect(modelNames(identical).sort()).toEqual([first, second].sort());
         expect(operations(identical).map((op) => payloadNames(op)[0]!)).toEqual([first, second]);
