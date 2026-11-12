@@ -3937,9 +3937,12 @@ const LIFTED_LIMIT_KEYWORDS: readonly string[] = [
  * `unionOfDeclarations` lifts onto a combined declaration when every
  * declaration agrees on them, and which therefore make no shape of their
  * own there, at a declaration's top level or inside its array items and
- * map values (`withoutLiftedKeywords`).
+ * map values (`withoutLiftedKeywords`); the request-body fold carries the
+ * same keywords onto the discriminator it rebuilds, by the same agreement
+ * (`flattenDiscriminatedUnionBody`, each declaration read as a field written
+ * as it is read, `fieldSettings`).
  */
-const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
+export const LIFTED_DECLARATION_KEYWORDS: readonly string[] = [
   'readOnly',
   'writeOnly',
   'deprecated',

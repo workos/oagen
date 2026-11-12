@@ -74,6 +74,9 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nonObjectVariantContexts,
+  fieldSettings,
+  pinnedDeclarationAdmitsNull,
+  pinnedDeclarationValue,
   rehearse,
   unwrapCollapsedWrappers,
   unwrapNullableField,
@@ -95,6 +98,7 @@ import {
 } from '../ir/types.js';
 import {
   agreedDeclarationKeys,
+  LIFTED_DECLARATION_KEYWORDS,
   allOfWrapperLayer,
   annotatingAllOfMembers,
   agreedExtensions,
@@ -4668,7 +4672,7 @@ function typePickedRequestBody(
   // fold it into that object and let the normal object path below emit
   // ergonomic, spread-able arguments. See flattenDiscriminatedUnionBody.
   if (schema.oneOf && schema.discriminator) {
-    const merged = flattenDiscriminatedUnionBody(schema);
+    const merged = flattenDiscriminatedUnionBody(schema, componentSchemas);
     if (merged) schema = merged;
   }
 
@@ -4902,10 +4906,46 @@ function typePickedRequestBody(
  * Returns null — leaving the union intact — unless the body is a clean
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
- * merged. Gating on an *explicit* `discriminator` keeps undiscriminated `oneOf`
- * bodies untouched.
+ * merged. The pin is read as a union's discriminator reads one
+ * (`pinnedDeclarationValue`): a `const` or one-value `enum:` as written,
+ * or behind a nullable wrapper, an `allOf` read as one member, or — with
+ * `componentSchemas` — a `$ref` to a component pinning one value or an
+ * alias of one, so `kind: { allOf: [{ const: 'email' }] }` folds as `kind:
+ * { const: 'email' }` does (#607: the declaration was read as written, and
+ * the body stayed an opaque union of variants named from their content).
+ * The rebuilt discriminator admits `null` exactly when a variant's
+ * declaration does, at any hop (`pinnedDeclarationAdmitsNull`: a nullable
+ * wrapper, a type list naming `null`, OAS 3.0 `nullable: true` beside a
+ * type — never a keyword beside a `$ref`, which the type builder gives
+ * precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
+ * variant beside one pinning `sms` folds to a `kind` typed
+ * `nullable<enum>`, as the variant's own field is `nullable<literal>`
+ * (#607 review: the fold rebuilt the field without `null`, as it had
+ * dropped a `nullable: true` or a type list before). The rebuilt field
+ * carries the settings every variant's declaration agrees on — the flags,
+ * text, default, examples, link, limits and `x-*` keys a field reads
+ * (`LIFTED_DECLARATION_KEYWORDS`), each declaration read off its levels as
+ * `buildFieldFromSchema` reads a field's — the one reading, `fieldSettings`,
+ * the pin walk kept apart: under a wrapper the declaration documents itself
+ * and takes none of the component's text, flags, default, examples or keys,
+ * a bare `$ref` reads the entries it passes, and the limits conjoin from
+ * every entry either way, the stricter bound winning (#607 review: the
+ * settings were read through every hop of the pin walk, so `kind: { allOf:
+ * [{ $ref: CatKind }] }` on every variant, `CatKind` read-only, folded to a
+ * read-only `kind` where each variant's own field is not) — so two
+ * variants writing `kind: { allOf: [{
+ * const: … }], readOnly: true }` fold to a read-only `kind`, as each
+ * variant's own field is (#607 review: `description` alone was carried,
+ * and the fold of a body whose variants all wrote `readOnly: true` dropped
+ * the flag, so `buildForModel` put the field into request examples). The
+ * declaration as written still documents its value — its own `description`
+ * and `deprecated`, the wrapper's for a wrapped const. Gating on an
+ * *explicit* `discriminator` keeps undiscriminated `oneOf` bodies untouched.
  */
-function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | null {
+function flattenDiscriminatedUnionBody(
+  schema: SchemaObject,
+  componentSchemas?: Record<string, SchemaObject>,
+): SchemaObject | null {
   const discProp = schema.discriminator?.propertyName;
   if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
 
@@ -4913,6 +4953,9 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
   // Every declaration that pins each value, in variant order, the values in
   // the order they are first pinned.
   const pins = new Map<string, SchemaObject[]>();
+  // Whether any variant admits `null` beside its value, which the rebuilt
+  // discriminator then admits too.
+  let admitsNull = false;
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
@@ -4921,19 +4964,20 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
       return null;
     }
     const dp = variant.properties[discProp] as SchemaObject | undefined;
-    const constVal =
-      typeof dp?.const === 'string'
-        ? dp.const
-        : Array.isArray(dp?.enum) && dp.enum.length === 1 && typeof dp.enum[0] === 'string'
-          ? dp.enum[0]
-          : undefined;
-    if (constVal === undefined) return null;
+    const constVal = dp ? pinnedDeclarationValue(dp, componentSchemas) : null;
+    if (constVal === null) return null;
+    if (pinnedDeclarationAdmitsNull(dp!, componentSchemas)) admitsNull = true;
     const pinning = pins.get(constVal);
     if (pinning) pinning.push(dp!);
     else pins.set(constVal, [dp!]);
   }
 
   const variantCount = variants.length;
+  // The discriminator's declarations as a field written as each is read
+  // (`fieldSettings`: the reading `buildFieldFromSchema` makes, the pin
+  // walk kept apart), so declarations spelled differently compare alike.
+  const settingsOf = (declared: readonly SchemaObject[]): SchemaObject[] =>
+    declared.map((dp) => fieldSettings(dp, componentSchemas));
   // Every declaration each property receives, in variant order; the first
   // types the field, and the extensions are the ones every declaration
   // agrees on (`agreedExtensions`, the one rule for a property several
@@ -4969,22 +5013,33 @@ function flattenDiscriminatedUnionBody(schema: SchemaObject): SchemaObject | nul
           // repeated shape (`shapeVariant`; workos/oagen#501: the flag was
           // dropped). A lone value stays a one-value `enum`, a literal, where
           // a `oneOf` of one const would be a union. The enum and the field
-          // carry the text and keys every declaration agrees on
+          // carry the settings every declaration agrees on — the flags,
+          // text, default, examples, link, limits and `x-*` keys a field
+          // reads (`LIFTED_DECLARATION_KEYWORDS`), each declaration read
+          // exactly as a field written as it is read (`fieldSettings`) —
           // (workos/oagen#446: the first variant's text, which documents one
-          // value, was the enum's).
+          // value, was the enum's; #607 review: `description` alone was
+          // carried, so a `readOnly` every variant wrote was dropped).
+          // `null` is admitted when any variant admits it beside its value
+          // — the flag on the one-value enum, a `{ type: 'null' }` variant
+          // among the consts, the spellings the type builder reads as
+          // `nullable`.
           {
             type: 'string',
             ...(pins.size === 1
-              ? { enum: [...pins.keys()] }
+              ? { enum: [...pins.keys()], ...(admitsNull ? { nullable: true } : {}) }
               : {
-                  oneOf: [...pins].map(([value, pinning]) => ({
-                    const: value,
-                    ...(pinning[0]!.description !== undefined ? { description: pinning[0]!.description } : {}),
-                    ...(pinning.every((dp) => dp.deprecated === true) ? { deprecated: true } : {}),
-                  })),
+                  oneOf: [
+                    ...[...pins].map(([value, pinning]) => ({
+                      const: value,
+                      ...(pinning[0]!.description !== undefined ? { description: pinning[0]!.description } : {}),
+                      ...(pinning.every((dp) => dp.deprecated === true) ? { deprecated: true } : {}),
+                    })),
+                    ...(admitsNull ? [{ type: 'null' }] : []),
+                  ],
                 }),
-            ...agreedDeclarationKeys(declared, ['description']),
-            ...agreedExtensions(declared),
+            ...agreedDeclarationKeys(settingsOf(declared), LIFTED_DECLARATION_KEYWORDS),
+            ...agreedExtensions(settingsOf(declared)),
           }
         : withAgreedExtensions(declared[0]!, agreedExtensions(declared));
   }
@@ -6380,7 +6435,9 @@ function prefixSpellings(prefix: string): string[] {
  * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
  * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
  * (nameOneOfVariant, nameVariantModel). Every string const or single-value
- * enum of every inline object variant is collected, top level and nested — a
+ * enum of every inline object variant is collected (`constStringOf`: as
+ * written, or behind a nullable wrapper or an `allOf` read as one member,
+ * as the naming reads it; #607), top level and nested — a
  * superset of whichever property each of those picks as the discriminator, so
  * the reservation can never be narrower than the naming. `$ref` targets are
  * components with names of their own and are not followed. A request body
@@ -6450,14 +6507,17 @@ function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>
   }
 }
 
-/** A property's pinned string value: a string `const`, or a single-value string `enum`. */
+/**
+ * A property's pinned string value, read as the naming reads an inline
+ * variant's own property (`pinnedDeclarationValue` without the component
+ * map, the reading `getConstPropertyValue` makes): a string `const` or a
+ * single-value string `enum`, written on the property or behind a nullable
+ * wrapper or an `allOf` read as one member (`kind: { allOf: [{ const:
+ * 'email' }] }`; #607), so the reservation reads every const the naming
+ * reads. A `$ref` on the property is followed by neither.
+ */
 function constStringOf(property: SchemaObject | undefined): string | null {
-  if (!property) return null;
-  if (typeof property.const === 'string') return property.const;
-  if (Array.isArray(property.enum) && property.enum.length === 1 && typeof property.enum[0] === 'string') {
-    return property.enum[0];
-  }
-  return null;
+  return property ? pinnedDeclarationValue(property) : null;
 }
 
 function deriveResponseName(op: OperationObject | undefined, pathModelBaseName: string): string {

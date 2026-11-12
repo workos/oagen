@@ -3544,18 +3544,74 @@ export function buildFieldFromSchema(
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
   // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  const { settings, constraints } = fieldReading(fieldSchema, componentSchemas);
+  const externalDocs = readExternalDocs(settings.externalDocs);
+  const extensions = extensionsOf(settings, SCHEMA_CONSUMED_EXTENSIONS);
+  return {
+    name: fieldName,
+    type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
+    required: requiredSet.has(fieldName),
+    description: settings.description,
+    // The field schema's own link, read like `description`: a sibling of a
+    // `$ref` is the field's, and a bare `$ref` gives none — the referenced
+    // model carries its own — unless the `$ref` names an array component.
+    ...(externalDocs ? { externalDocs } : {}),
+    readOnly: settings.readOnly || undefined,
+    writeOnly: settings.writeOnly || undefined,
+    deprecated: settings.deprecated || undefined,
+    default: settings.default,
+    example: settings.example,
+    // Only materialise the key when there is something to carry so existing
+    // inline snapshots of fields without examples stay byte-identical.
+    ...(settings.examples ? { examples: settings.examples } : {}),
+    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
+    // a bare `$ref` to a model declares none, and the model carries its limits.
+    ...(constraints ? { constraints } : {}),
+    ...(extensions ? { extensions } : {}),
+  };
+}
+
+/**
+ * What a field written as `fieldSchema` reads off its levels, as one
+ * declaration — `settings`: its `description`, `externalDocs`, `readOnly`,
+ * `writeOnly`, `deprecated`, `default`, `example`, `examples` and `x-*`
+ * keys, each as `buildFieldFromSchema` carries it — with the limits it
+ * conjoins (`constraints`: `schemaConstraints`). The levels are the field's
+ * schema and, under it, each `allOf` member that declares no type and so
+ * only annotates or limits the field (`annotatingAllOfMembers`; #555:
+ * `allOf: [{ $ref: Kind }, { description }]` and `allOf: [{ type: 'string'
+ * }, { deprecated: true }]` read neither the text nor the flag) — nearest
+ * first, as `wrappedReference` orders them for a reference to an array or
+ * primitive component — and, for a bare `$ref` alone, the entries the
+ * reference passes (`componentReference`): under a wrapper the field
+ * documents itself, from the wrapper and the members beside the `$ref`,
+ * and takes none of the component's text, flags, default, examples or keys
+ * (#335 review), while its limits conjoin from every entry either way
+ * (#512 review). The one reading of a field's settings, shared with the
+ * request-body fold (`fieldSettings`), so a folded discriminator carries
+ * exactly what the variants' own fields carry (#607 review: the fold read
+ * its settings through every hop of the pin walk, a `$ref` under a wrapper
+ * included, so two variants writing `kind: { allOf: [{ $ref: CatKind }] }`
+ * with `CatKind: { const: 'cat', readOnly: true }` folded to a read-only
+ * `kind` where each variant's own field is not).
+ */
+function fieldReading(
+  fieldSchema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { settings: SchemaObject; constraints: Constraints | undefined } {
+  // What the field reads from an array or primitive component, or an alias
+  // of an enum component, it references (`componentReference`): every
+  // entry's limits, and a bare `$ref`'s documentation too. A `$ref` to a
+  // model, named union or enum leaves all of it on that node but the
+  // `example` and `examples` a field takes from any component a bare `$ref`
+  // names — the enum an alias resolves to included (#560). An enum
+  // component is read on the schema it declares its members on
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
   const reference = componentReference(fieldSchema, componentSchemas);
   const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
   const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
-  // The levels the field documents itself from: its schema and, under it,
-  // each `allOf` member that declares no type and so only annotates or
-  // limits the field (`annotatingAllOfMembers`; #555: `allOf: [{ $ref: Kind
-  // }, { description }]` and `allOf: [{ type: 'string' }, { deprecated: true
-  // }]` read neither the text nor the flag) — nearest first, as
-  // `wrappedReference` orders them for a reference to an array or primitive
-  // component.
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
   const levels = bare ? [...own, ...aliases] : own;
   const { example, examples } = resolveExamples(
@@ -3564,7 +3620,8 @@ export function buildFieldFromSchema(
       examples: nonEmptyExamples(level.examples),
     })),
   );
-  const externalDocs = levels.map((level) => readExternalDocs(level.externalDocs)).find(Boolean);
+  // The first level whose link is usable (`readExternalDocs`) gives the field its link.
+  const linked = levels.find((level) => readExternalDocs(level.externalDocs));
   // Limits conjoin, as JSON Schema applies every level at once
   // (`schemaConstraints`: the same reading the field's type carries, #545);
   // an `x-*` key the nearer level declares wins, as a collapsed wrapper's
@@ -3575,28 +3632,38 @@ export function buildFieldFromSchema(
     const own = extensionsOf(level, SCHEMA_CONSUMED_EXTENSIONS);
     return own ? { ...keys, ...own } : keys;
   }, undefined);
-  return {
-    name: fieldName,
-    type: schemaToTypeRef(fieldSchema, fieldName, contextName, siblingProperties),
-    required: requiredSet.has(fieldName),
-    description: levels.map((level) => level.description).find((text) => text !== undefined && text !== null),
-    // The field schema's own link, read like `description`: a sibling of a
-    // `$ref` is the field's, and a bare `$ref` gives none — the referenced
-    // model carries its own — unless the `$ref` names an array component.
-    ...(externalDocs ? { externalDocs } : {}),
-    readOnly: levels.some((level) => level.readOnly) || undefined,
-    writeOnly: levels.some((level) => level.writeOnly) || undefined,
-    deprecated: levels.some((level) => level.deprecated === true) || undefined,
-    default: levels.find((level) => level.default !== undefined)?.default,
-    example,
-    // Only materialise the key when there is something to carry so existing
-    // inline snapshots of fields without examples stay byte-identical.
+  const description = levels.map((level) => level.description).find((text) => text !== undefined && text !== null);
+  const defaulted = levels.find((level) => level.default !== undefined);
+  const settings: SchemaObject = {
+    ...(description !== undefined ? { description } : {}),
+    ...(linked ? { externalDocs: linked.externalDocs } : {}),
+    ...(levels.some((level) => level.readOnly) ? { readOnly: true } : {}),
+    ...(levels.some((level) => level.writeOnly) ? { writeOnly: true } : {}),
+    ...(levels.some((level) => level.deprecated === true) ? { deprecated: true } : {}),
+    ...(defaulted ? { default: defaulted.default } : {}),
+    ...(example !== undefined ? { example } : {}),
     ...(examples ? { examples } : {}),
-    // Keywords written beside a `$ref` (legal in OAS 3.1) are the field's own;
-    // a bare `$ref` to a model declares none, and the model carries its limits.
-    ...(constraints ? { constraints } : {}),
-    ...(extensions ? { extensions } : {}),
+    ...extensions,
   };
+  return { settings, constraints };
+}
+
+/**
+ * The settings a field written as `schema` carries, as the keywords of one
+ * declaration — `fieldReading`'s settings with the limits it conjoins
+ * beside them — so declarations written through different wrappers and
+ * references compare as written ones do (`agreedDeclarationKeys`,
+ * `agreedExtensions`): the request-body fold reads each variant's
+ * discriminator declaration this way and carries onto the discriminator it
+ * rebuilds the settings every variant agrees on
+ * (`flattenDiscriminatedUnionBody`; #607 review).
+ */
+export function fieldSettings(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): SchemaObject {
+  const { settings, constraints } = fieldReading(schema, componentSchemas);
+  return { ...settings, ...constraints };
 }
 
 /**
@@ -3678,6 +3745,10 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
+ * read as the declaration pins it (`pinnedDeclarationValue`): as written,
+ * or behind the wrappers the type builder reads the declaration through —
+ * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
+ * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
  * through `allOf` wrappers too), and for a schema written as a `$ref`,
  * which pins nothing of its own: nothing but annotations is read beside a
@@ -3687,13 +3758,22 @@ export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[
  * properties: { kind: { const: 'other' } } }` had `kind: 'cat'` as a field
  * while a union mapped `'other'` to it).
  */
-function getConstPropertyValue(schema: SchemaObject, property: string): string | null {
+function getConstPropertyValue(
+  schema: SchemaObject,
+  property: string,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
   if (schema.$ref !== undefined) return null;
   const prop = schema.properties?.[property];
-  return prop ? pinnedStringValue(prop) : null;
+  return prop ? pinnedDeclarationValue(prop, schemas) : null;
 }
 
-/** The one string a schema pins as written — a string `const`, or an `enum:` of exactly one string; null otherwise. */
+/**
+ * The one string a schema pins as written — a string `const`, or an `enum:`
+ * of exactly one string; null otherwise. The leaf `pinnedDeclarationValue`
+ * reads once every wrapper is read through; no other site reads a
+ * declaration as written.
+ */
 function pinnedStringValue(schema: SchemaObject): string | null {
   if (typeof schema.const === 'string') return schema.const;
   if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
@@ -5681,8 +5761,9 @@ function extractAllOfModel(name: string, schema: SchemaObject, schemas?: Record<
  * member read before the variant's own `kind: { const: 'cat' }` (`Cat: {
  * allOf: [{ $ref: Base }, { properties: { kind } }] }`) leaves the variant
  * pinned, in either member order, as it was when the `$ref` member was not
- * followed (#590 review). A pin behind a `$ref` on the declaration counts
- * (`pinnedDeclarationValue`).
+ * followed (#590 review). A pin behind a `$ref`, a nullable wrapper or an
+ * `allOf` read as one member on the declaration counts
+ * (`pinnedDeclarationValue`; #607).
  */
 function getEffectiveProperties(
   schema: SchemaObject,
@@ -5732,37 +5813,128 @@ function getEffectiveProperties(
  * The string const `schema` pins `property` to: in its own `properties`
  * (`getConstPropertyValue`), else through its `allOf` wrappers
  * (`getEffectiveProperties`, a `$ref` member followed to its component when
- * `schemas` is handed in). The declaration found may itself be a `$ref` to
- * a component pinning one value — `kind: { $ref: HamsterKind }` with
+ * `schemas` is handed in). The declaration found — the own one too — is
+ * read as the type builder reads it (`pinnedDeclarationValue`): a `$ref`
+ * to a component pinning one value — `kind: { $ref: HamsterKind }` with
  * `HamsterKind: { const: 'hamster' }`, or `{ enum: ['hamster'] }` in OAS
- * 3.0 — or to an alias chain ending in one; it is followed with the map
- * (#568 review), a chain that repeats pinning nothing. Null when the
- * property is undeclared or pins no one string (an enum of several values,
- * a plain `type: string`).
+ * 3.0 — or to an alias chain ending in one is followed with the map (#568
+ * review), a nullable wrapper and an `allOf` read as one member are read
+ * through at every hop (`kind: { allOf: [{ const: 'cat' }] }`; #607), and
+ * a chain that repeats pins nothing. Null when the property is undeclared
+ * or pins no one string (an enum of several values, a plain `type:
+ * string`).
  */
 function getEffectiveConstPropertyValue(
   schema: SchemaObject,
   property: string,
   schemas?: Record<string, SchemaObject>,
 ): string | null {
-  const direct = getConstPropertyValue(schema, property);
+  const direct = getConstPropertyValue(schema, property, schemas);
   if (direct !== null) return direct;
   const effective = getEffectiveProperties(schema, schemas)[property];
   return effective ? pinnedDeclarationValue(effective, schemas) : null;
 }
 
 /**
- * The one string a property declaration pins, as written (`pinnedStringValue`)
- * or through a `$ref` to a component pinning one value, or an alias chain
- * ending in one, when `schemas` is handed in (`followMemberRefs`; a chain
- * that repeats pins nothing); null otherwise.
+ * The one string a property declaration pins, read as the type builder
+ * reads the declaration (`schemaToTypeRef`): through every wrapper that
+ * reads as what it wraps, at every hop, in the builder's order — a `$ref`
+ * to its component, followed when `schemas` is handed in
+ * (`schemaRefTarget`; without the map a `$ref` declares nothing beyond
+ * what is written beside it, as a `$ref` member of an `allOf` declares
+ * nothing without it); a nullable wrapper of any spelling to its one
+ * variant (`unwrapNullableSchema`); an `allOf` read as one member
+ * (`allOfReadAsMember`: a lone member, one typing member beside members
+ * that only annotate or limit it, or a lone `$ref` member beside such
+ * members) to that member — then the `const` or one-value `enum:` written
+ * on what it lands on (`pinnedStringValue`). So `kind: { allOf: [{ const:
+ * 'cat' }] }`, `kind: { allOf: [{ $ref: HamsterKind }], description: 'The
+ * kind of pet.' }` with `HamsterKind: { const: 'hamster' }`, and `kind: {
+ * $ref: RabbitKind }` with `RabbitKind: { allOf: [{ $ref: RabbitConst }] }`
+ * and `RabbitConst: { const: 'rabbit' }` pin `cat`, `hamster` and `rabbit`
+ * — the literal each model's `kind` field carries — in OAS 3.0 (`enum:
+ * ['cat']`) and 3.1 alike (#607: the bare `$ref` chain alone was followed
+ * and what it landed on read as written, so each pinned nothing and the
+ * union mapped `{}`). Null for a declaration that pins no one string — a
+ * plain type, an enum of several values, an `allOf` of two typing members
+ * (`{ allOf: [{ const: 'cat' }, { const: 'dog' }] }`, which the type
+ * builder reads as neither, so it pins nothing even when the two agree) —
+ * and for a chain that repeats: every schema read is recorded by identity,
+ * and a hop that reaches one again pins nothing. The one reading of a
+ * pinned value, shared by `getConstPropertyValue` (an inline variant's own
+ * property, which the naming reads without the map), by
+ * `getEffectiveProperties`, by the request-body fold
+ * (`flattenDiscriminatedUnionBody`) and by the const-prefix reservation
+ * (`collectOperationConstPrefixes`), so no two sites read a declaration
+ * differently.
  */
-function pinnedDeclarationValue(
+export function pinnedDeclarationValue(
+  declaration: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): string | null {
+  const hops = pinnedDeclarationHops(declaration, schemas);
+  return hops ? pinnedStringValue(hops[hops.length - 1]!) : null;
+}
+
+/**
+ * Whether a property declaration admits `null` beside the value it pins, at
+ * any hop `pinnedDeclarationValue` reads it through (`declaresNull` at each:
+ * a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a
+ * nullable union wrapper, or an `allOf` read as a member that does; a
+ * `nullable: true` beside an `allOf` declares nothing, as the type builder
+ * reads it, and nothing beside a `$ref` is read, since the type builder
+ * gives the `$ref` precedence over every sibling — `kind: { $ref:
+ * EmailKind, type: ['string', 'null'] }` is the non-null field `EmailKind`
+ * types; #607 review round 2) — so `kind: { oneOf: [{ const: 'email' }, {
+ * type: 'null' }] }`, `kind: { type: ['string', 'null'], const: 'email' }`,
+ * `kind: { type: 'string', enum: ['email'], nullable: true }` and a `$ref`
+ * to a component written so admit `null` as the field built from them is
+ * `nullable<literal>`. Read by the request-body fold
+ * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
+ * the pinned values admits `null` exactly when a variant's does (#607
+ * review: the fold dropped the admission). False for a chain that repeats.
+ */
+export function pinnedDeclarationAdmitsNull(
+  declaration: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): boolean {
+  return (pinnedDeclarationHops(declaration, schemas) ?? []).some((hop) => hop.$ref === undefined && declaresNull(hop));
+}
+
+/**
+ * The schemas a property declaration is read through to its pinned value
+ * (`pinnedDeclarationValue`), in order — the declaration, then each hop's
+ * target — ending with the one read as written; `undefined` for a chain
+ * that repeats (every schema read is recorded by identity, and a hop that
+ * reaches one again ends the walk pinning nothing).
+ */
+function pinnedDeclarationHops(
   declaration: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
-): string | null {
-  const target = followMemberRefs(declaration, schemas, new Set());
-  return target ? pinnedStringValue(target) : null;
+): SchemaObject[] | undefined {
+  const hops: SchemaObject[] = [];
+  const seen = new Set<SchemaObject>();
+  let current = declaration;
+  while (!seen.has(current)) {
+    seen.add(current);
+    hops.push(current);
+    const next = current.$ref !== undefined ? schemaRefTarget(current.$ref, schemas) : readAsWrapped(current);
+    if (next === undefined) return hops;
+    current = next;
+  }
+  return undefined;
+}
+
+/**
+ * The schema a wrapper reads as, by the type builder's rule: a nullable
+ * wrapper's one variant (`unwrapNullableSchema`, which also strips a
+ * `null` type-list entry or `nullable: true` to a copy), else the member
+ * an `allOf` is read as (`allOfReadAsMember`); `undefined` for a schema
+ * that wraps nothing, which is then read as written.
+ */
+function readAsWrapped(schema: SchemaObject): SchemaObject | undefined {
+  const bare = unwrapNullableSchema(schema);
+  return bare !== schema ? bare : allOfReadAsMember(schema);
 }
 
 /**
@@ -6361,8 +6533,15 @@ function mergeBranchPropertySchemas(schemas: SchemaObject[]): SchemaObject {
  * them and a `$ref` to a const schema, as the dispatcher detection reads
  * it (`detectAllOfVariantDiscriminator`, `getEffectiveProperties`), so a
  * variant named by an inherited tag dispatches as one tagged directly does
- * (#398 review round 3). Every reader of a variant's name hands the map in,
- * so detection, the variant plan and the builder settle on one name.
+ * (#398 review round 3) — and the declaration found is read as the
+ * detection reads it (`pinnedDeclarationValue`), through a nullable
+ * wrapper and an `allOf` read as one member, so a variant pinning `kind:
+ * { allOf: [{ const: 'cat' }] }` is `<component>Cat` as one pinning `kind:
+ * { const: 'cat' }` is (#607: the declaration was read as written, so the
+ * variant was named as the component, and the detection — which had read
+ * the value through the wrapper — rejected the clash and flattened the
+ * union). Every reader of a variant's name hands the map in, so detection,
+ * the variant plan and the builder settle on one name.
  */
 function deriveDiscriminatedVariantName(
   schema: SchemaObject,
@@ -6377,12 +6556,7 @@ function deriveDiscriminatedVariantName(
 
   const pickConst = (name: string): string | null => {
     const field = effective[name];
-    if (!field) return null;
-    if (typeof field.const === 'string') return field.const;
-    if (field.enum && field.enum.length === 1 && typeof field.enum[0] === 'string') {
-      return field.enum[0];
-    }
-    return null;
+    return field ? pinnedDeclarationValue(field, schemas) : null;
   };
 
   let constValue: string | null = null;
