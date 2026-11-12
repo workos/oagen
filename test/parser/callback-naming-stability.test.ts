@@ -57,15 +57,17 @@ function callbackOpOf(operation: Record<string, unknown>, key: string): Record<s
 }
 
 const reference = (name: string) => ({ $ref: `#/components/callbacks/${name}` });
-/** A title-mapped union: every variant titled and pinning `kind`, the first titled `Shape` with `own` fields. */
-const shaped = (own: Record<string, unknown>, other: string) => {
-  const titled = (title: string, fields: Record<string, unknown>) => ({
-    title,
+/** A title-mapped union: every variant titled and pinning `kind`, the first titled `title` with `own` fields. */
+const titledUnion = (title: string, own: Record<string, unknown>, other: string) => {
+  const titled = (name: string, value: string, fields: Record<string, unknown>) => ({
+    title: name,
     type: 'object',
-    properties: { kind: { type: 'string', const: title.toLowerCase() }, ...fields },
+    properties: { kind: { type: 'string', const: value }, ...fields },
   });
-  return { oneOf: [titled('Shape', own), titled(other, { text: { type: 'string' } })] };
+  return { oneOf: [titled(title, 'first', own), titled(other, 'second', { text: { type: 'string' } })] };
 };
+/** `titledUnion` with the first variant titled `Shape`. */
+const shaped = (own: Record<string, unknown>, other: string) => titledUnion('Shape', own, other);
 const adopted = { Adopted: posting(flag('adopted'), { operationId: 'notifyAdoption' }) };
 const read = { Read: posting(flag('read')) };
 
@@ -291,6 +293,42 @@ const rows: Row[] = [
       postOf(doc, '/pets').callbacks = { petReturned: callbacks.petReturned, petAdopted: callbacks.petAdopted };
     },
     reorder: true,
+  },
+  {
+    name: 'four callbacks reordered, two pairs of differing variants, one pair titled with the name the other pair takes',
+    base: (openapi) =>
+      document(openapi, {
+        '/pets': {
+          post: op('createPet', {
+            a: posting(titledUnion('Shape', { sides: { type: 'integer' } }, 'Note')),
+            b: posting(titledUnion('Shape', { radius: { type: 'number' } }, 'Memo')),
+            c: posting(titledUnion('CreatePetAShape', { width: { type: 'number' } }, 'Tag')),
+            d: posting(titledUnion('CreatePetAShape', { height: { type: 'number' } }, 'Label')),
+          }),
+        },
+      }),
+    edit: (doc) => {
+      const { a, b, c, d } = postOf(doc, '/pets').callbacks as Record<string, unknown>;
+      postOf(doc, '/pets').callbacks = { c, d, a, b };
+    },
+    reorder: true,
+  },
+  {
+    name: 'a callback nested under the last of four whose variant titles collide across pairs',
+    base: (openapi) =>
+      document(openapi, {
+        '/pets': {
+          post: op('createPet', {
+            c: posting(titledUnion('CreatePetAShape', { width: { type: 'number' } }, 'Tag')),
+            d: posting(titledUnion('CreatePetAShape', { height: { type: 'number' } }, 'Label')),
+            a: posting(titledUnion('Shape', { sides: { type: 'integer' } }, 'Note')),
+            b: posting(titledUnion('Shape', { radius: { type: 'number' } }, 'Memo')),
+          }),
+        },
+      }),
+    edit: (doc) => {
+      callbackOpOf(postOf(doc, '/pets'), 'd').callbacks = { e: posting(flag('seen')) };
+    },
   },
   {
     name: 'two paths reordered',
