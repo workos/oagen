@@ -1282,8 +1282,10 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
 
       it('keeps it when the oneOf is one of several allOf members, as the IR model declares the field (MichaelDeBoey)', async () => {
         // Every instance carries every member, so whichever variant is sent, `has_more` is a boolean.
+        // Detection reads a stop field every variant of a flattened union
+        // declares (#622), so the override restates the detected one.
         const meta = { allOf: [issueMeta, object({ trace_id: { type: 'string' } })] };
-        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toBeUndefined();
+        expect(onlyOperation(await parseJson(cursorSpec(meta))).pagination?.endOfIteration).toEqual(endOfIteration);
         const ir = await parseJson(cursorSpec(meta, { endOfIteration }));
         expect(onlyOperation(ir).pagination).toMatchObject({ strategy: 'cursor', param: 'after', endOfIteration });
         expect(warn).not.toHaveBeenCalled();
@@ -2094,13 +2096,17 @@ describe('parseSpec — page pagination and x-pagination overrides', () => {
         expect(referenced.pagination, `${label} ($ref wrapper)`).toMatchObject(expected);
         expect(fieldsOf(referencedIr, 'PetPage'), `${label} ($ref wrapper model)`).toEqual(fields);
         // The same wrapper written inline is not a recognized envelope — the
-        // nullable member declares no properties of its own — and is read alike.
+        // nullable member declares no properties of its own — and is read
+        // alike, unless the member's one non-null variant is an inline object
+        // declaring `has_more`, which detection reads as the member (#622).
         const inlineIr = await parseJson(listOp(PetPage, { dataPath: 'data' }, schemas));
         const inline = onlyOperation(inlineIr);
         expect(inline.pagination, `${label} (inline wrapper)`).toMatchObject(expected);
-        if (label === 'nullableTypeList') {
+        if (label === 'nullableTypeList' || label === 'nullableInline') {
           // A type-list member declares `has_more` as a property of its own,
-          // so written inline the body is a recognized envelope and is
+          // and a nullable `oneOf` member whose one non-null variant is an
+          // inline object declares it through that variant (#622), so
+          // written inline the body is a recognized envelope and is
           // unwrapped on `data`, the stop field among its companions.
           expect(inline.response, label).toEqual({ kind: 'array', items: { kind: 'model', name: 'Pet' } });
           expect(

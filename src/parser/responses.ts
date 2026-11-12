@@ -6,6 +6,7 @@ import {
   endOfIterationProblem,
   END_OF_ITERATION_FIELDS,
   looksLikePaginationMetadata,
+  readFlattenedUnion,
   resolveDataPathArray,
   spellsOneOf,
 } from './pagination.js';
@@ -23,8 +24,10 @@ import {
   isArrayPointerRef,
   isNullSchema,
   collapsedNullableBranch,
+  nullableAxisBranch,
   referenceTypesAsUnknown,
   typesAsUnknown,
+  unionAxesOf,
   warnOnUncarriedProperties,
   withSchemaConstraints,
   withWrapperDocs,
@@ -38,6 +41,7 @@ import {
   mergeAllOfMembers,
   mergedObjectSchema,
   readInlineAllOf,
+  unionOfDeclarations,
   unwrappedAllOfMember,
 } from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
@@ -259,35 +263,41 @@ export function classifyAndExtractResponse(
  * under a parent of any name (`result.total_pages` next to `result.items`),
  * then those beside each object the path passes through, nearest the array
  * first, then the top level, then the metadata companions, and never the
- * array or an object on the path itself. `undefined` when nothing
- * recognizable is declared, or the body resolves to no object at all.
+ * array or an object on the path itself. The properties read are those
+ * every instance carries (`onEveryInstance`): a member's, or every
+ * variant's of a `oneOf`/`anyOf` the `allOf` flattens, so a stop field only
+ * some variants declare — an optional field of the wrapper's model — ends no
+ * iteration (workos/oagen#622). `undefined` when nothing recognizable is
+ * declared, or the body resolves to no object at all.
  */
 function bodyEndOfIteration(
   schema: SchemaObject,
   dataPath: string,
   componentSchemas?: Record<string, SchemaObject>,
 ): PaginationEndOfIteration | undefined {
-  const { properties } = collectObjectProperties(schema, componentSchemas);
-  return detectEndOfIteration(properties, dataPath, componentSchemas);
+  const { onEveryInstance } = collectObjectProperties(schema, componentSchemas);
+  return detectEndOfIteration(onEveryInstance, dataPath, componentSchemas);
 }
 
 /**
  * Why an explicit `endOfIteration` cannot be read from `schema`, or
  * `undefined` when it can: the override's counterpart of
  * `bodyEndOfIteration`, over the very property map that reader collects
- * (`collectObjectProperties`), so a field detection would read is one an
- * override may name and a field it would not see is not there for an
- * override either; `endOfIterationProblem` then walks the path and tests
- * the type. `schema` is the body as written — a `$ref`, an `allOf`, a
- * nullable wrapper — or `undefined` when the operation declares no body,
- * which no path resolves in.
+ * (`collectObjectProperties`, `onEveryInstance`: what every instance
+ * carries, a stop field each variant of a flattened `oneOf` declares
+ * included), so a field detection would read is one an override may name
+ * and a field it would not see is not there for an override either;
+ * `endOfIterationProblem` then walks the path and tests the type. `schema`
+ * is the body as written — a `$ref`, an `allOf`, a nullable wrapper — or
+ * `undefined` when the operation declares no body, which no path resolves
+ * in.
  */
 export function bodyEndOfIterationProblem(
   end: PaginationEndOfIteration,
   schema: SchemaObject | undefined,
   componentSchemas?: Record<string, SchemaObject>,
 ): string | undefined {
-  const properties = schema && collectObjectProperties(schema, componentSchemas).properties;
+  const properties = schema && collectObjectProperties(schema, componentSchemas).onEveryInstance;
   return endOfIterationProblem(end, properties, componentSchemas);
 }
 
@@ -319,7 +329,7 @@ function classifyBody(
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
-  const envelope = detectListEnvelope(schema);
+  const envelope = detectListEnvelope(schema, componentSchemas);
   if (envelope.isEnvelope) {
     const override = options.dataPathOverride;
     if (!options.paginationDisabled && (override === undefined || override === envelope.dataPath)) {
@@ -358,19 +368,108 @@ interface ListEnvelopeResult {
 
 const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entries', 'values', 'nodes', 'edges']);
 
-function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
-  // Collect all property sources (allOf sub-schemas or flat schema)
+/**
+ * Whether an inline body is a list envelope — one array property beside a
+ * companion that looks like pagination metadata — and the array it is
+ * unwrapped on. The properties are read off the set the body's model is
+ * built from: the `allOf` members' own `properties` and the body's own,
+ * and what the variants of a `oneOf`/`anyOf` a member writes declare
+ * (`readFlattenedUnion`, through the reader the model flattens a variant
+ * with — its own properties, its `allOf` members, a `$ref` variant's
+ * component; a union beside the `allOf` is one such member once folded,
+ * `foldSiblingProperties`) — the model's optional fields, typed as it
+ * types them (`unionOfDeclarations`) where no member declares the name,
+ * since a variant can only narrow what every instance carries. So `{
+ * allOf: [{ data }], oneOf: [{ has_more }, { has_more, total }] }` is the
+ * envelope `{ data, has_more?, total? }` is (workos/oagen#622: the variants
+ * were read by the model alone, and the body was that model, no list). The
+ * array must be there whichever variant the wire sends — a member's, or
+ * declared by every non-null variant (`carried`), as an explicit `dataPath`
+ * is resolved through the union (`resolveDataPathArray`) — and it must be
+ * the array the companion walk reads at that name
+ * (`collectObjectProperties`, `onEveryInstance`), the one
+ * `extractListResponse` unwraps on: a declaration a `$ref` member's
+ * component or a nested `allOf` member makes — which detection does not
+ * read — stands over the variants' there as in the model
+ * (`declareProperty`: an always-applying declaration, typeless or not,
+ * over a branch-only one), so `Base: { data: { description } }` beside
+ * `oneOf: [{ data: integer[] }, …]` is no envelope but the model (PR #643
+ * review round 3: it was unwrapped on an array the walk had no items for,
+ * and the response was `string[]`), while `Base: { data: integer[] }` is
+ * unwrapped on `Base`'s array — while a
+ * companion may be any variant's: a stop field only some variants declare,
+ * or one they type differently, still marks the envelope, as an optional
+ * `has_more` written flat does, and `detectEndOfIteration` then finds no
+ * field to stop on. A bare `oneOf`/`anyOf` body, with or without
+ * `properties` beside it, is a union of models and never an envelope, and
+ * so is an `allOf` the parser reads as its lone union member
+ * (`readInlineAllOf`: `allOf: [{ oneOf: [...] }]`, with or without
+ * annotations beside it, is that union, as `resolveBareSchema` reads it
+ * for the companion walk and `extractDirectResource` for the model), so
+ * the variants are read only for an `allOf` the parser merges (PR #643
+ * review: a lone union member was read as a merge here, detected as an
+ * envelope, and extracted off a walk that saw no field — `string[]` with
+ * no companions). A `$ref` member — and whatever is written beside its
+ * `$ref` (`{ $ref: Base, oneOf: [A, B] }`, `{ $ref: Base, properties }`),
+ * which the model (`mergeAllOfMembers`) and the companion walk
+ * (`collectObjectProperties`) ignore for the component the reference names
+ * (PR #643 review round 2: a union beside the `$ref` was read here, so a
+ * `data` every variant declared marked an envelope the walk had no `data`
+ * in, and the response was `string[]`) — is not read here, as before: a
+ * body whose array or companion sits in one is the wrapper an explicit
+ * `dataPath` keeps (workos/oagen#308). A nullable wrapper a member writes
+ * (`{ oneOf: [{ has_more }, { type: 'null' }] }`, `{ enum: [null] }` on
+ * OAS 3.0) is read as its one non-null variant, as the model and the
+ * companion walk read it, so `allOf: [{ data }]` beside it is the list
+ * `allOf: [{ data }, { has_more }]` is, with one non-null variant as with
+ * two (PR #643 review, MichaelDeBoey: the axis was skipped here, and the
+ * body stayed the model `ListPetsResponse { data, has_more }` while a
+ * second non-null variant made it `Pet[]`); a `$ref` branch is a `$ref`
+ * member, unread.
+ */
+function detectListEnvelope(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): ListEnvelopeResult {
+  // Collect all property sources (allOf sub-schemas or flat schema), and
+  // what the variants of a union among the members declare, for an `allOf`
+  // the parser merges into one model.
   const propSources: Record<string, SchemaObject | undefined>[] = [];
-  if (schema.allOf) {
-    for (const sub of schema.allOf) {
-      if (sub.properties) propSources.push(sub.properties);
+  const branchOnly = new Map<string, SchemaObject[]>();
+  const carried = new Set<string>();
+  const merges =
+    schema.allOf !== undefined &&
+    classifyInlineSchema(schema) === 'allOf' &&
+    readInlineAllOf(schema.allOf, schema, componentSchemas) === 'merged';
+  const read = new Set<SchemaObject>();
+  const readMember = (member: SchemaObject): void => {
+    // A `$ref` member is its component, whatever is written beside the
+    // reference, as the model and the walk read it; a member met again
+    // (a nullable wrapper around the body itself) declares nothing more.
+    if (member.$ref || read.has(member)) return;
+    read.add(member);
+    if (member.properties) propSources.push(member.properties);
+    if (!merges) return;
+    for (const variants of unionAxesOf(member)) {
+      // A nullable axis is its one non-null variant, read as the member is.
+      const branch = nullableAxisBranch(member, variants);
+      if (branch) {
+        readMember(branch);
+        continue;
+      }
+      const keyword = variants === member.oneOf ? 'oneOf' : 'anyOf';
+      const flattened = readFlattenedUnion({ schema: member, keyword, variants, origin: null }, componentSchemas);
+      for (const [name, declarations] of flattened.declared) {
+        const held = branchOnly.get(name);
+        if (held) held.push(...declarations);
+        else branchOnly.set(name, [...declarations]);
+        if (flattened.carried.has(name)) carried.add(name);
+      }
     }
-  }
+  };
+  for (const sub of schema.allOf ?? []) readMember(sub);
   if (schema.properties) {
     propSources.push(schema.properties);
   }
 
-  if (propSources.length === 0) return { isEnvelope: false, dataPath: null };
+  if (propSources.length === 0 && branchOnly.size === 0) return { isEnvelope: false, dataPath: null };
 
   // Merge all properties into a single view. A name two members declare is
   // settled as every `allOf` merge settles it (`combineDeclarations`): the
@@ -385,6 +484,13 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
       mergedProps[key] = existing ? combineDeclarations(existing, prop) : prop;
     }
   }
+  // A name a member declares is on every instance; one only the variants
+  // declare is typed as the model types it.
+  const own = new Set(Object.keys(mergedProps));
+  const onEveryInstance = (name: string): boolean => own.has(name) || carried.has(name);
+  for (const [name, declarations] of branchOnly) {
+    if (!own.has(name)) mergedProps[name] = unionOfDeclarations(declarations);
+  }
 
   // Find array properties — typed, `items` with no `type`, or either under a
   // nullable wrapper of any spelling or an `allOf` read as its member
@@ -396,10 +502,12 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   // properties
   const arrayProps: string[] = [];
   const nonArrayKeys: string[] = [];
+  const isArrayDeclaration = (declaration: SchemaObject): boolean =>
+    arraySchemaOf(declaration) !== undefined || isArrayComponentRef(declaration) || isArrayPointerRef(declaration);
 
   for (const [key, propSchema] of Object.entries(mergedProps)) {
     if (!propSchema) continue;
-    if (arraySchemaOf(propSchema) || isArrayComponentRef(propSchema) || isArrayPointerRef(propSchema)) {
+    if (isArrayDeclaration(propSchema)) {
       arrayProps.push(key);
     } else {
       nonArrayKeys.push(key);
@@ -412,6 +520,30 @@ function detectListEnvelope(schema: SchemaObject): ListEnvelopeResult {
   // actual pagination (cursor, metadata, total, etc.).
   if (arrayProps.length === 1 && nonArrayKeys.length >= 1) {
     const arrayPropName = arrayProps[0];
+
+    // The array an iterator unwraps on must be there whichever variant the
+    // wire sends; one only some variants declare leaves the body the model
+    // it is, the array an optional field of it.
+    if (!onEveryInstance(arrayPropName)) return { isEnvelope: false, dataPath: null };
+    // And the shape must be the one the companion walk reads, the one
+    // `extractListResponse` unwraps: a declaration a `$ref` member's
+    // component or a nested `allOf` member makes, which detection does not
+    // read, stands over the variants' there as in the model. So the array
+    // must be an array there (a typeless or object `data` in `Base` beside
+    // variants typing it `integer[]` leaves the body the model it is), and
+    // every other property detection read must be no array there (`Base: {
+    // has_more: integer[] }` beside variants typing it `boolean` is two
+    // arrays and no companion, as `{ data, has_more: integer[] }` written
+    // flat is; PR #643 review round 6: the body was unwrapped on `data` with
+    // the array `has_more` among its companions).
+    const walked = collectObjectProperties(schema, componentSchemas);
+    const walkedArray = walked.onEveryInstance[arrayPropName];
+    if (walkedArray === undefined || !isArrayDeclaration(walkedArray)) return { isEnvelope: false, dataPath: null };
+    const arrayInWalk = (key: string): boolean => {
+      const declaration = walked.fields[key];
+      return declaration === undefined ? arrayProps.includes(key) : isArrayDeclaration(declaration);
+    };
+    if (nonArrayKeys.some(arrayInWalk)) return { isEnvelope: false, dataPath: null };
 
     // A companion is pagination metadata when it is one of the stop fields
     // the end-of-iteration detector reads, in any spelling (`hasMore`,
@@ -450,9 +582,14 @@ function extractListResponse(
   let itemTypeRef: TypeRef = { kind: 'primitive', type: 'string' };
   const inlineModels: Model[] = [];
 
-  const { properties, required } = collectObjectProperties(schema, componentSchemas);
+  // The envelope's fields are its model's (`fields`: a member's, and every
+  // one the variants of a `oneOf`/`anyOf` the `allOf` flattens declare, as
+  // optional fields); the array and the stop field are read among the
+  // fields every instance carries (`onEveryInstance`), the ones detection
+  // found the array in.
+  const { fields, onEveryInstance, required } = collectObjectProperties(schema, componentSchemas);
 
-  const dataProp = properties[dataPath];
+  const dataProp = onEveryInstance[dataPath];
   // The property's own text, as `buildFieldFromSchema` keeps it for every
   // companion beside it; an item schema's description belongs to the item.
   const dataDescription = dataProp?.description;
@@ -499,7 +636,7 @@ function extractListResponse(
   // discriminant such as `object: "list"`. Without these an emitter cannot
   // type the endpoint's actual response or read the next-page details.
   const { envelopeFields, envelopeCompanions } = extractEnvelopeCompanions(
-    properties,
+    fields,
     required,
     dataPath,
     contextName.replace(/Response$/, ''),
@@ -509,8 +646,8 @@ function extractListResponse(
   // The field that says the list is exhausted — `has_more`, `total_pages`,
   // `pagination.totalPages` — so an iterator can stop without a wasted
   // request: the read `bodyEndOfIteration` makes for a kept wrapper, on the
-  // properties already collected above.
-  const endOfIteration = detectEndOfIteration(properties, dataPath, componentSchemas);
+  // properties already collected above, those every instance carries.
+  const endOfIteration = detectEndOfIteration(onEveryInstance, dataPath, componentSchemas);
 
   return {
     // The data array's own nullability is the response's: a `data` declared
@@ -921,7 +1058,7 @@ function directResourceReading(
 export function bodyTypesAsUnknown(schema: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
   if (schema.$ref) return referenceTypesAsUnknown(schema);
   const folded = foldSiblingProperties(schema);
-  if (detectListEnvelope(folded).isEnvelope || isSingleResourceWrapper(folded)) return false;
+  if (detectListEnvelope(folded, componentSchemas).isEnvelope || isSingleResourceWrapper(folded)) return false;
   return directResourceTypesAsUnknown(folded, componentSchemas);
 }
 

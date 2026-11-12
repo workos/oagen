@@ -3811,13 +3811,15 @@ describe('#398', () => {
           ),
         );
         expect(opsOf(split)['listPets']?.pagination?.endOfIteration).toEqual(endOfIteration);
-        // A field one of the `anyOf`'s variants lacks still resolves to none.
+        // A field one of the `anyOf`'s variants lacks still resolves to none;
+        // the rejected override leaves the detected `meta.has_more`, which
+        // every variant declares, in place (#622).
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
         try {
           const ir = await parseTempSpec(
             doc(openapi, {}, listPets({ allOf: [metaBase, members[0]![1]] }, 'meta.next_after')),
           );
-          expect(opsOf(ir)['listPets']?.pagination?.endOfIteration).toBeUndefined();
+          expect(opsOf(ir)['listPets']?.pagination?.endOfIteration).toEqual(endOfIteration);
           expect(warn.mock.calls.map(([m]) => String(m))).toEqual([
             expect.stringContaining('endOfIteration path "meta.next_after" does not resolve to a field'),
           ]);
