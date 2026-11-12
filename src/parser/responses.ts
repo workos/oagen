@@ -1027,9 +1027,13 @@ function extractDirectResource(
     if (merged.properties.length > 0) {
       // The rebuilt schema carries the wrapper's limits, conjoined with its
       // inline members', so it still declares what an instance must satisfy,
-      // the wrapper's own link and its own `deprecated` flag, as a component
-      // `allOf` model carries them; a member's stay on that member (a `$ref`
-      // member's on its component).
+      // and the wrapper layer's text, link, `deprecated` flag and `x-*` keys
+      // — the wrapper's own, else an annotating member's — as a component
+      // `allOf` model and a field's merge carry them; a member's stay on
+      // that member (a `$ref` member's on its component). So the model built
+      // below is described as the same schema's request-body model is
+      // (#604: the text alone was left off, and `CreatePetResponse` had none
+      // while `CreatePetRequest` did).
       const rebuilt = mergedObjectSchema(merged);
       // Fields merged from a $ref carry the referenced model's const
       // discriminant (e.g. object: 'magic_auth'); deriving the name from it
