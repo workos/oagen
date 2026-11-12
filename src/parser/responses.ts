@@ -21,6 +21,7 @@ import {
   deprecatedEntry,
   foldSiblingProperties,
   isArrayComponentRef,
+  namesSeveralTypes,
   isArrayPointerRef,
   isNullSchema,
   collapsedNullableBranch,
@@ -1000,7 +1001,10 @@ function extractWrappedResource(
  * `bodyTypesAsUnknown` predicts by, so a shape is read one way by both:
  * an object declaring properties of its own (`type: 'object'` or none;
  * `composedWithoutFields` leaves an empty `properties: {}` beside a
- * composition to the composition); an `allOf` that types the schema
+ * composition to the composition); a type list naming several types,
+ * `typeRef` whatever sits beside it, so an `allOf` beside the list types
+ * its `object` copy and the other types stay (`namesSeveralTypes`; #616);
+ * an `allOf` that types the schema
  * (`classifyInlineSchema`), read as `readInlineAllOf` reads it — a
  * `reference`, a lone `unwrapped` member carried with the wrapper's limits,
  * flag and link (`unwrappedAllOfMember`), or a `merged` model; an array
@@ -1024,6 +1028,15 @@ function directResourceReading(
   if (schema.properties && !composedWithoutFields(schema) && (schema.type === 'object' || !schema.type)) {
     return { kind: 'object' };
   }
+  // A type list naming several types is the union of its per-type copies
+  // (`typeListCopies`; #616), typed by `schemaToTypeRef` with what the
+  // copies reference materialized under the body's name by the `typeRef`
+  // fall-through, so `{ type: ['object', 'string'], allOf: [{ properties:
+  // { nick } }] }` is `CreateNoteResponse | string` — the merge the
+  // `object` copy is, beside the `string` — as the same body is as a
+  // request body (`typePickedRequestBody`) and a field (#616 review: the
+  // `allOf` branch below read the merge alone, and the `string` was lost).
+  if (namesSeveralTypes(schema)) return { kind: 'typeRef' };
   if (schema.allOf && classifyInlineSchema(schema) === 'allOf') {
     const reading = readInlineAllOf(schema.allOf, schema, componentSchemas);
     if (reading === 'reference') return { kind: 'reference' };

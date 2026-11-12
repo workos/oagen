@@ -909,7 +909,7 @@ function omitKeys(value: object, keys: ReadonlySet<string>): Record<string, unkn
 }
 
 /** `JSON.stringify` with object keys sorted and unset entries dropped, so equal shapes serialize equally. */
-function stableStringify(value: unknown): string {
+export function stableStringify(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   if (value !== null && typeof value === 'object') {
     const record = value as Record<string, unknown>;

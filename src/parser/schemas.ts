@@ -3733,7 +3733,11 @@ function nameInlineObjectVariants(
  * attached them and the named one did not). Each per-type copy of the
  * variant stands for the variant (`derivedCopy`), so a merge the variant
  * carries is the one the extractor builds for it, whichever type it is read
- * as (`materializingMergedAllOfName`; #566 review).
+ * as (`materializingMergedAllOfName`; #566 review), and keeps the keywords
+ * that apply to an instance of its type, as a type list's copies do
+ * everywhere (`typeListCopy`; #616): the `string` member of `{ type:
+ * ['object', 'string'], properties }` is `{ type: 'string' }`. A type two
+ * members are typed alike as is one member (`dedupeTypeRefs`).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
   const modelRef: TypeRef = { kind: 'model', name: refName };
@@ -3742,17 +3746,15 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   const keys = variantMemberKeys(variant, modelName);
   // The variant's limits are the union's, as a type list's are
   // (`schemaToTypeRef`; #545), so the other members are built without them.
-  const members = typeList
-    .filter((t) => t !== 'null')
-    .map((t) =>
-      t === 'object'
-        ? modelRef
-        : buildTypeRef(
-            derivedCopy({ ...variant, type: t, nullable: false }, variant),
-            t === 'array' ? keys.item : keys.value,
-            modelName,
-          ),
-    );
+  const members = dedupeTypeRefs(
+    typeList
+      .filter((t) => t !== 'null')
+      .flatMap((t) => {
+        if (t === 'object') return [modelRef];
+        const copy = typeListCopy(variant, t, { nullable: false });
+        return copy === undefined ? [] : [buildTypeRef(copy, t === 'array' ? keys.item : keys.value, modelName)];
+      }),
+  );
   const ref: TypeRef = members.length > 1 ? { kind: 'union', variants: members } : modelRef;
   return withSchemaConstraints(nullable ? asNullable(ref) : ref, variant);
 }
@@ -4938,9 +4940,11 @@ function isPrimitiveComponentRef(schema: SchemaObject): boolean {
  * { type: ['string'], allOf: [{ $ref: Anything }] }` is the reference, and
  * `unknown`, as `schemaToTypeRef` types it; #569 review: the list stopped
  * the walk, and a `200` naming `Alias` beside a `201` naming `Pet` kept
- * the pick and exposed `unknown`); an empty list, one naming `null` beside
- * a type, or one of several types is `nullable<unknown>`, nullable or a
- * union, never the bare unknown, as `nullable: true` beside a `type` is.
+ * the pick and exposed `unknown`); an empty list or one naming `null`
+ * beside a type is `nullable<unknown>` or nullable, never the bare unknown,
+ * as `nullable: true` beside a `type` is; one of several types is the
+ * union of its per-type copies, each read here in turn, so it is the bare
+ * unknown exactly when every copy is (`typeListCopies`; #616).
  */
 export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) {
@@ -4954,7 +4958,8 @@ export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (typesAsUnknown(schema)) return true;
   if (Array.isArray(schema.type)) {
     const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
-    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
+    if (nonNullTypes.length === 0 || schema.type.includes('null')) return false;
+    if (nonNullTypes.length > 1) return typeListCopies(schema).every((copy) => referenceTypesAsUnknown(copy));
   }
   if (schema.nullable && schema.type) return false;
   const folded = foldSiblingProperties(schema);
@@ -6459,7 +6464,302 @@ export function schemaToTypeRef(
   );
 }
 
-/** `schemaToTypeRef` without the site's limits: the shape of the type, every nested schema typed through `schemaToTypeRef` itself. */
+/**
+ * The keywords JSON Schema applies to an instance of one type alone, by
+ * that type (Validation §6.2–6.5 and the applicators of Core §10.3;
+ * `format`, for the three primitives OAS defines formats for): what a
+ * per-type copy of a type list keeps for its own type and sheds for every
+ * other (`typeListCopy`). A keyword of no family — `const`, `enum`, a
+ * composition, `discriminator`, `not`, an annotation, an `x-*` key —
+ * applies whatever the instance's type and stays on every copy.
+ */
+const TYPE_FAMILY_KEYWORDS: Readonly<Record<string, readonly string[]>> = {
+  object: [
+    'properties',
+    'required',
+    'additionalProperties',
+    'patternProperties',
+    'propertyNames',
+    'minProperties',
+    'maxProperties',
+    'dependentRequired',
+    'dependentSchemas',
+    'unevaluatedProperties',
+  ],
+  array: [
+    'items',
+    'prefixItems',
+    'additionalItems',
+    'contains',
+    'minContains',
+    'maxContains',
+    'minItems',
+    'maxItems',
+    'uniqueItems',
+    'unevaluatedItems',
+  ],
+  string: ['format', 'pattern', 'minLength', 'maxLength', 'contentEncoding', 'contentMediaType', 'contentSchema'],
+  number: ['format', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'],
+  integer: ['format', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'],
+  boolean: [],
+};
+
+/** The types a `type` keyword names, as a set; `number` admits an `integer` (`admits`). */
+function typesNamed(type: string | string[]): ReadonlySet<string> {
+  return new Set(Array.isArray(type) ? type : [type]);
+}
+
+/** Whether `declared` admits an instance of `type`: names it, or names `number` for an `integer`. */
+function admits(declared: ReadonlySet<string>, type: string): boolean {
+  return declared.has(type) || (type === 'integer' && declared.has('number'));
+}
+
+/**
+ * The JSON types `schema` declares an instance may have: its `type`; a
+ * `$ref`'d component's, through a chain of `$ref`s (a cycle, or a `$ref`
+ * no component answers, declares none); a `null` schema's `null`
+ * (`isNullSchema`); what every member of its `allOf` admits (`Puppy: {
+ * allOf: [{ $ref: Dog }] }` declares what `Dog` does, and two members
+ * naming different types nothing at all); or what any variant of its
+ * `oneOf`/`anyOf` does, when each declares some. `undefined` when it
+ * declares none — `{ properties }`, `{ enum: ['a'] }`, `{ description }` —
+ * and so admits an instance of every type, as JSON Schema reads it:
+ * `properties` constrains an object and says nothing of a string, which
+ * is why `Owner: { properties }` beside `type: ['object', 'string']` keeps
+ * the `string` (#616) and `Owner: { type: 'object', properties }` excludes
+ * it (`typeListCopy`).
+ */
+function declaredTypes(schema: SchemaObject, seen: Set<SchemaObject> = new Set()): ReadonlySet<string> | undefined {
+  if (seen.has(schema)) return undefined;
+  seen.add(schema);
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      return target === undefined ? undefined : declaredTypes(target, seen);
+    }
+    if (schema.type !== undefined) return typesNamed(schema.type);
+    if (isNullSchema(schema)) return typesNamed('null');
+    if (schema.allOf !== undefined) {
+      let admitted: ReadonlySet<string> | undefined;
+      for (const member of schema.allOf) {
+        const declared = declaredTypes(member, seen);
+        if (declared === undefined) continue;
+        const both = admitted;
+        admitted =
+          both === undefined
+            ? declared
+            : new Set([...both, ...declared].filter((type) => admits(both, type) && admits(declared, type)));
+      }
+      if (admitted !== undefined) return admitted;
+    }
+    const variants = schema.oneOf ?? schema.anyOf;
+    if (variants !== undefined && variants.length > 0) {
+      const admitted = new Set<string>();
+      for (const variant of variants) {
+        const declared = declaredTypes(variant, seen);
+        if (declared === undefined) return undefined;
+        for (const type of declared) admitted.add(type);
+      }
+      return admitted;
+    }
+    return undefined;
+  } finally {
+    seen.delete(schema);
+  }
+}
+
+/** Whether `schema` admits an instance of `type`: it declares no type (`declaredTypes`), or one that admits it. */
+function admitsType(schema: SchemaObject, type: string): boolean {
+  const declared = declaredTypes(schema);
+  return declared === undefined || admits(declared, type);
+}
+
+/**
+ * Whether `schema` says anything about an instance of `type`: it declares
+ * a type admitting it, pins the value (`const`, `enum`), writes a keyword
+ * of the type's family (`TYPE_FAMILY_KEYWORDS`: `properties` for an
+ * object, `items` for an array, `pattern` for a string), or composes
+ * members one of which does — a `$ref` followed to its component, and
+ * taken to apply when no component answers it. A `null` schema says
+ * nothing of any other type. A member that does not — `{ properties }` or
+ * `{ $ref: Owner }` beside a `string` copy, `{ description }` beside any —
+ * annotates or constrains an instance of another type and is left off the
+ * copy (`typeListCopy`; #616).
+ */
+function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObject> = new Set()): boolean {
+  if (seen.has(schema)) return false;
+  seen.add(schema);
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      return target === undefined || appliesToType(target, type, seen);
+    }
+    if (isNullSchema(schema)) return false;
+    if (schema.type !== undefined) return admits(typesNamed(schema.type), type);
+    if (schema.const !== undefined || schema.enum !== undefined) return true;
+    if ((TYPE_FAMILY_KEYWORDS[type] ?? []).some((keyword) => schema[keyword] !== undefined)) return true;
+    return [schema.allOf, schema.oneOf, schema.anyOf].some(
+      (members) => members?.some((member) => appliesToType(member, type, seen)) ?? false,
+    );
+  } finally {
+    seen.delete(schema);
+  }
+}
+
+/**
+ * `schema` read as `type`, one entry of its type list (#616): a copy with
+ * `type` set to that entry, carrying the keywords that apply to an instance
+ * of it. A type list says the instance is one of the types named, and JSON
+ * Schema applies each keyword to the instances of its own type alone
+ * (`TYPE_FAMILY_KEYWORDS`), so the `object` copy of `{ type: ['object',
+ * 'string'], properties }` is the object with those properties and the
+ * `string` copy is `{ type: 'string' }` — `NoteAuthor | string` for the
+ * issue's `inline.json`. A composition is read against `type` member by
+ * member, and kept or left off whole: a member that declares a type
+ * excluding `type` (`declaredTypes`: its own, its component's, its own
+ * composition's) admits no instance of it, so an `allOf` with such a
+ * member leaves no copy at all (`undefined`), as does a `oneOf`/`anyOf`
+ * whose every variant is one. On an `object` or `array` copy — one the
+ * extractor builds models for (`buildsModels`), from the schema's
+ * composition read whole as a merge or a reference — a composition some
+ * member of which says something about an instance of `type`
+ * (`appliesToType`) stays as written, never trimmed to those members,
+ * since a copy reading a composition of its own would reference a model
+ * nobody builds (Greptile, #616 review: `allOf: [{ properties: { name } },
+ * { items }]` beside `['array', 'string']` was `array<NoteAuthor>` for an
+ * array copy keeping the `items` member alone, while the extractor merged
+ * `NoteAuthor { name }`); one no member of which says anything about an
+ * instance of `type` is left off when the copy is then a bare type — an
+ * object or array declaring no schema of its own (`declaresOwnSchemas`) —
+ * and kept otherwise, so `{ type: ['array', 'string'], items, allOf: [{
+ * $ref: Owner }] }` is `Owner | string`, the reference the `allOf` beside
+ * the items is, not an array of items no extractor builds. A primitive
+ * copy, which nothing of reaches the extractor, keeps of an `allOf` the
+ * members that say something about its type alone (#616 review): `{ type:
+ * ['object', 'string'], allOf: [{ $ref: Owner }, { minLength: 1 }] }` with
+ * `Owner` untyped is `Owner | string`, the `string` copy keeping `{
+ * minLength: 1 }` and shedding the `$ref` as it does when the keyword sits
+ * beside the list, and `['string', 'integer']` beside the same `allOf` is
+ * `string | integer` — not `Owner` and `Owner | integer`, the `$ref`
+ * typing the `string` copy because a member beside it applied. A
+ * `oneOf`/`anyOf` is kept whole while any variant applies, so the union
+ * it types keeps the shape the document wrote. So `Note.author: { type: ['object',
+ * 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string` when `Owner`
+ * declares `properties` and no `type` — its `properties` say nothing of a
+ * string — and `Owner` alone when `Owner` is `type: 'object'`, which no
+ * string satisfies. Before, every copy kept every keyword, so the `string`
+ * copy was typed by the `allOf` as the `object` copy was, and the field
+ * was `Owner | Owner`. `overrides` are spread over the copy before `type`
+ * is set; the copy stands for `schema` (`derivedCopy`), so a merge the
+ * schema carries is the one the extractor is building for the schema
+ * itself (`materializingMergedAllOfName`; #566 review).
+ */
+function typeListCopy(
+  schema: SchemaObject,
+  type: string,
+  overrides: Partial<SchemaObject> = {},
+): SchemaObject | undefined {
+  const copy: SchemaObject = { ...schema, ...overrides, type };
+  const own = TYPE_FAMILY_KEYWORDS[type] ?? [];
+  for (const [family, keywords] of Object.entries(TYPE_FAMILY_KEYWORDS)) {
+    if (family === type) continue;
+    for (const keyword of keywords) if (!own.includes(keyword)) delete copy[keyword];
+  }
+  for (const keyword of ['allOf', 'oneOf', 'anyOf'] as const) {
+    const members = schema[keyword];
+    if (members === undefined || members.length === 0) continue;
+    const excluding = members.filter((member) => !admitsType(member, type)).length;
+    if (keyword === 'allOf' ? excluding > 0 : excluding === members.length) return undefined;
+    const applying = members.filter((member) => appliesToType(member, type));
+    if (keyword === 'allOf' && !buildsModels(type)) {
+      // A primitive copy keeps the members that say something about its
+      // type alone: nothing of it reaches the extractor, so nothing can
+      // disagree with what it builds.
+      if (applying.length === 0) delete copy.allOf;
+      else if (applying.length < members.length) copy.allOf = applying;
+    } else if (applying.length === 0 && !declaresOwnSchemas(copy)) {
+      // Kept or left off whole, never trimmed to the members that apply.
+      delete copy[keyword];
+    }
+  }
+  return derivedCopy(copy, schema);
+}
+
+/** Whether the extractor builds models for a copy of `type` — an object's, or an array's items — so its composition must stay the one the extractor reads. */
+function buildsModels(type: string): boolean {
+  return type === 'object' || type === 'array';
+}
+
+/** The keywords under which a schema declares schemas of its own — an inline object, items, values — that an extractor builds models for. */
+const OWN_SCHEMA_KEYWORDS: readonly string[] = [
+  'properties',
+  'additionalProperties',
+  'patternProperties',
+  'items',
+  'prefixItems',
+  'contains',
+];
+
+/**
+ * Whether `copy` declares a schema of its own (`OWN_SCHEMA_KEYWORDS`), so
+ * that a composition left off it would leave the copy typed by those
+ * schemas alone — items, values, properties the extractor, reading the
+ * composition beside them, never builds a model for (`typeListCopy`).
+ */
+function declaresOwnSchemas(copy: SchemaObject): boolean {
+  return OWN_SCHEMA_KEYWORDS.some((keyword) => copy[keyword] !== undefined);
+}
+
+/** Whether `schema`'s `type` is a list naming several types besides `null` — the lists `buildTypeRef` reads as a union of per-type copies (`typeListCopies`; #616). */
+export function namesSeveralTypes(schema: SchemaObject): boolean {
+  return Array.isArray(schema.type) && schema.type.filter((type) => type !== 'null').length > 1;
+}
+
+/**
+ * The per-type copies a type list naming several types is read as: one per
+ * non-null entry, in the list's order (`typeListCopy`), less the entries
+ * the schema's composition excludes. A list no entry of which survives —
+ * `type: ['string', 'integer']` beside `allOf: [{ $ref: Owner }]` with
+ * `Owner` an object — contradicts itself and is read as written: every
+ * entry, every keyword on each, so the `allOf` types each copy and the
+ * union holds `Owner` once (`dedupeTypeRefs`). Read by `buildTypeRef` to
+ * type the list and by `typesAsUnknown` to answer for it without typing.
+ */
+function typeListCopies(schema: SchemaObject): SchemaObject[] {
+  const types = (Array.isArray(schema.type) ? schema.type : []).filter((type) => type !== 'null');
+  const copies = types
+    .map((type) => typeListCopy(schema, type))
+    .filter((copy): copy is SchemaObject => copy !== undefined);
+  return copies.length > 0 ? copies : types.map((type) => derivedCopy({ ...schema, type }, schema));
+}
+
+/**
+ * `variants` with each repeat of an earlier one dropped — a model or enum
+ * reference repeated by name, any other type by shape (`stableStringify`,
+ * limits and all) — so a union never holds one type twice: the copies of a
+ * type list one keyword types alike (`{ type: ['string', 'integer'], enum:
+ * ['a', 1] }` is the one enum, not that enum twice; #616).
+ */
+function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
+  const seen = new Set<string>();
+  return variants.filter((variant) => {
+    const key =
+      variant.kind === 'model' || variant.kind === 'enum'
+        ? `${variant.kind}:${variant.name}`
+        : stableStringify(variant);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * `schemaToTypeRef` without the site's limits: the shape of the type, every
+ * nested schema typed through `schemaToTypeRef` itself. A type list naming
+ * several types is the union of its per-type copies (`typeListCopies`),
+ * never one type twice, a lone copy the type itself (`dedupeTypeRefs`;
+ * #616).
+ */
 function buildTypeRef(
   schema: SchemaObject,
   contextName?: string,
@@ -6506,31 +6806,37 @@ function buildTypeRef(
         ),
       );
     }
-    // Multiple non-null types → union. The schema's limits are the union's
-    // (`schemaToTypeRef` attaches them to it), not each variant's: a
-    // variant is the same schema read as one of its types, so the limits
-    // are read from the union, once, for whichever type the value takes
-    // (#545). The variants are built without them (`buildTypeRef`); what
-    // they nest — items, values — carries its own. Each per-type copy
-    // stands for the schema it was spread from (`derivedCopy`), so a merge
-    // the schema carries (`allOf` beside `type: ['object', 'string']`) is
-    // the one the extractor is building for the schema itself
-    // (`materializingMergedAllOfName`; #566 review).
+    // Multiple non-null types → union of one variant per type the schema is
+    // read as (`typeListCopies`): each per-type copy keeps the keywords that
+    // apply to an instance of its type and is left out when the schema's
+    // composition admits none of it (`typeListCopy`; #616), a type two
+    // copies are typed alike as is one variant (`dedupeTypeRefs`), and a
+    // single variant is the type itself: `{ type: ['object', 'string'],
+    // allOf: [{ $ref: Owner }] }` is `Owner | string`, or `Owner` when
+    // `Owner` is `type: 'object'` — not `Owner | Owner`. The schema's
+    // limits are the union's (`schemaToTypeRef` attaches them to it), not
+    // each variant's: a variant is the same schema read as one of its
+    // types, so the limits are read from the union, once, for whichever
+    // type the value takes (#545) — or, once the list collapses to one
+    // variant, from that type where it can carry them: a model or enum
+    // reference carries none, as the same limits beside a bare `$ref` carry
+    // none (Greptile, #616 review: `items: { type: ['object', 'string'],
+    // allOf: [{ $ref: Owner }], minProperties: 2 }` is `Owner[]`, as
+    // `items: { allOf: [{ $ref: Owner }], minProperties: 2 }` is). The
+    // variants are built without them
+    // (`buildTypeRef`); what they nest — items, values — carries its own.
+    // Each per-type copy stands for the schema it was spread from
+    // (`derivedCopy`), so a merge the schema carries (`allOf` beside `type:
+    // ['object', 'string']`) is the one the extractor is building for the
+    // schema itself (`materializingMergedAllOfName`; #566 review).
     if (nonNullTypes.length > 1) {
-      const variants = nonNullTypes.map((t: string) =>
-        buildTypeRef(
-          derivedCopy({ ...schema, type: t }, schema),
-          contextName,
-          parentModelName,
-          siblingProperties,
-          reservedNames,
+      const variants = dedupeTypeRefs(
+        typeListCopies(schema).map((copy) =>
+          buildTypeRef(copy, contextName, parentModelName, siblingProperties, reservedNames),
         ),
       );
-      const ref: TypeRef = { kind: 'union', variants };
-      if (schema.type.includes('null')) {
-        return { kind: 'nullable', inner: ref };
-      }
-      return ref;
+      const ref: TypeRef = variants.length === 1 ? variants[0]! : { kind: 'union', variants };
+      return schema.type.includes('null') ? asNullable(ref) : ref;
     }
   }
 
@@ -6975,7 +7281,10 @@ function describesNothing(schema: SchemaObject): boolean {
  * with the type it then gets. It holds for a schema no branch of `schemaToTypeRef`
  * types: no `$ref`; no type list except one naming a single type without
  * `null` (an empty list is `nullable<unknown>`, `null` beside one type is
- * nullable, several types are a union); no `nullable: true` beside a
+ * nullable) or several types each of whose per-type copies is such a
+ * schema (`typeListCopies`: the copies the list's composition admits,
+ * typed alike as one, so `['weird', 'weirder']` is `unknown` and
+ * `['string', 'integer']` a union; #616); no `nullable: true` beside a
  * `type`; then, once sibling properties are folded into a typing
  * composition (`foldSiblingProperties`), a classification of `other`
  * (`classifyInlineSchema`: no composition, union, `const`, `enum`, array,
@@ -6990,7 +7299,11 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
   if (schema.$ref) return false;
   if (Array.isArray(schema.type)) {
     const nonNullTypes = schema.type.filter((t: string) => t !== 'null');
-    if (nonNullTypes.length !== 1 || schema.type.includes('null')) return false;
+    if (nonNullTypes.length === 0 || schema.type.includes('null')) return false;
+    // Several types: the union of their copies, bare `unknown` exactly when
+    // every copy is — the copies the composition admits, one of each type
+    // (`typeListCopies`; #616).
+    if (nonNullTypes.length > 1) return typeListCopies(schema).every((copy) => typesAsUnknown(copy));
   }
   if (schema.nullable && schema.type) return false;
   const folded = foldSiblingProperties(schema);
@@ -7041,6 +7354,7 @@ import {
   resetCombinedDeclarations,
   resetInheritedModelRefs,
   schemaShapeKey,
+  stableStringify,
 } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';
