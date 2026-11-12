@@ -1647,6 +1647,84 @@ describe('#599', () => {
     }
   });
 
+  describe('#659 review round 7 (Greptile, after the merge onto main) — a value the old enum never listed', () => {
+    const kind = (values: Array<string | number>, constraints?: Constraints) => ({
+      type: { kind: 'enum', name: 'Kind', values } as TypeRef,
+      ...(constraints ? { constraints } : {}),
+    });
+    const literal = (value: string | number, constraints?: Constraints) => ({
+      type: { kind: 'literal', value } as TypeRef,
+      ...(constraints ? { constraints } : {}),
+    });
+
+    it('judges only the values both enums list, so one the new enum adds tightens nothing', () => {
+      // The review's document: `'cccc'` fits the old limit and fails the new
+      // one, but the old enum never listed it; `'a'` and `'bb'` still fit.
+      expect(
+        constraintsShift(kind(['a', 'bb'], { maxLength: 5 }), kind(['a', 'bb', 'cccc'], { maxLength: 3 })),
+      ).toEqual({
+        oldConstraints: { maxLength: 5 },
+        newConstraints: { maxLength: 3 },
+        details: 'maxLength 5 → 3',
+        tightened: false,
+      });
+      // A value both list that the new limit rejects still tightens.
+      expect(
+        constraintsShift(kind(['a', 'bbbb'], { maxLength: 5 }), kind(['a', 'bbbb', 'cc'], { maxLength: 3 })),
+      ).toMatchObject({ tightened: true });
+      // A value the new enum drops is the enum change's to report, not the limit's.
+      expect(constraintsShift(kind(['a', 'bbbb'], { maxLength: 5 }), kind(['a'], { maxLength: 3 }))).toMatchObject({
+        tightened: false,
+      });
+      // Numbers alike: `50` is new, `5` still fits.
+      expect(constraintsShift(kind([5], { maximum: 100 }), kind([5, 50], { maximum: 10 }))).toMatchObject({
+        tightened: false,
+      });
+      expect(constraintsShift(kind([5, 50], { maximum: 100 }), kind([5, 50], { maximum: 10 }))).toMatchObject({
+        tightened: true,
+      });
+      // A literal become an enum, and an enum become a literal, by the value they share.
+      expect(constraintsShift(literal('a', { maxLength: 5 }), kind(['a', 'cccc'], { maxLength: 3 }))).toMatchObject({
+        tightened: false,
+      });
+      expect(constraintsShift(kind(['a', 'cccc'], { maxLength: 5 }), literal('cccc', { maxLength: 3 }))).toMatchObject({
+        tightened: true,
+      });
+      // An old type whose values the IR does not carry: every value the new enum lists is judged, as before.
+      expect(
+        constraintsShift(
+          { type: { kind: 'enum', name: 'Kind' } as TypeRef, constraints: { maxLength: 5 } },
+          kind(['a', 'bb', 'cccc'], { maxLength: 3 }),
+        ),
+      ).toMatchObject({ tightened: true });
+    });
+
+    for (const openapi of OPENAPI_VERSIONS) {
+      it(`exits as the enum change alone does when the limit only rejects the value it adds (OpenAPI ${openapi})`, async () => {
+        const doc = (values: string[], maxLength: number) =>
+          petsDoc(
+            openapi,
+            { Pet: petWith({ name: { type: 'string' } }) },
+            {
+              getPet: {
+                parameters: [{ name: 'kind', in: 'query', schema: { type: 'string', enum: values, maxLength } }],
+              },
+            },
+          );
+        const oldSpec = await parse('old', doc(['a', 'bb'], 5));
+        const report = diffSpecs(oldSpec, await parse('new', doc(['a', 'bb', 'cccc'], 3)));
+        expect(
+          paramChangesOf(report.changes, 'getPet')?.filter((change) => change.kind === 'param-constraints-changed'),
+        ).toMatchObject([{ paramName: 'kind', classification: 'additive', details: 'maxLength 5 → 3' }]);
+        // The limit change adds nothing to what adding the value alone exits with.
+        const enumOnly = await exitCodeOf(doc(['a', 'bb'], 5), doc(['a', 'bb', 'cccc'], 5));
+        expect(await exitCodeOf(doc(['a', 'bb'], 5), doc(['a', 'bb', 'cccc'], 3))).toBe(enumOnly);
+        // A value both list that the new limit rejects is breaking.
+        expect(await exitCodeOf(doc(['a', 'bbbb'], 5), doc(['a', 'bbbb', 'cc'], 3))).toBe(2);
+      });
+    }
+  });
+
   describe('#659 review round 5 (Greptile, after the wave-two base merge)', () => {
     const integer = (constraints?: Constraints): TypeRef => ({
       kind: 'primitive',

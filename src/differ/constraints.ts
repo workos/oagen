@@ -136,7 +136,14 @@ function levelShift(
 ): LevelShift {
   const readBefore = readLimits(before, oldType);
   const readAfter = readLimits(after, newType);
-  return { path, before, after, readBefore, readAfter, tightened: levelTightened(readBefore, readAfter, newType) };
+  return {
+    path,
+    before,
+    after,
+    readBefore,
+    readAfter,
+    tightened: levelTightened(readBefore, readAfter, oldType, newType),
+  };
 }
 
 /**
@@ -147,7 +154,13 @@ function levelShift(
  * `values` of (`admittedValues`) — tightened only when some value the old
  * limits admitted the new reject (`admits`): `{ const: 'abc', maxLength:
  * 5 }` → `maxLength: 3` is reported but still admits `'abc'`, while
- * `maxLength: 2` rejects it (Greptile, #659 review round 6). A keyword the
+ * `maxLength: 2` rejects it (Greptile, #659 review round 6). Where the old
+ * type's values are known too, only a value it listed counts: one the new
+ * type adds was never admitted, whatever the old limits say, so `{ enum:
+ * ['a', 'bb'], maxLength: 5 }` → `{ enum: ['a', 'bb', 'cccc'], maxLength:
+ * 3 }` tightens nothing — `'a'` and `'bb'` still fit, and `'cccc'`, which
+ * fits the old limit alone, was no value of the old enum (round 7). A
+ * keyword the
  * differ cannot evaluate on the value — a `pattern`, or a `multipleOf`
  * where either is not an integer — is judged as on any string or number
  * (`keywordTightened`). Every other type is judged keyword by keyword
@@ -156,10 +169,13 @@ function levelShift(
 function levelTightened(
   readBefore: Constraints | undefined,
   readAfter: Constraints | undefined,
+  oldType: TypeRef | undefined,
   newType: TypeRef | undefined,
 ): boolean {
-  const values = admittedValues(newType);
-  if (values === undefined) return constraintsTightened(readBefore, readAfter);
+  const listed = admittedValues(newType);
+  if (listed === undefined) return constraintsTightened(readBefore, readAfter);
+  const before = admittedValues(oldType);
+  const values = before === undefined ? listed : listed.filter((value) => before.includes(value));
   if (values.some((value) => admits(readBefore, value) && !admits(readAfter, value))) return true;
   return UNDECIDABLE_KEYWORDS.some((keyword) => {
     const [x, y] = [readBefore?.[keyword], readAfter?.[keyword]];

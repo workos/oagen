@@ -1018,5 +1018,142 @@ describe('#571', () => {
         expect(warn).not.toHaveBeenCalled();
       },
     );
+
+    it.runIf(openapi === '3.1.0')(
+      'keeps the type names two composed declarations both admit beside object (Greptile)',
+      async () => {
+        // `{ type: ['object', 'string'], allOf: [{ properties: { a } }] }`
+        // beside `{ allOf: [{ properties: { b } }] }`: a string is an
+        // instance of both, and the first alone is `HolderResult | string`
+        // (round 9: the `allOf` conjunction wrote `object`, and the
+        // alternative was lost). The names both admit ride on the
+        // conjunction's `type`; a component typed `object` admits no string.
+        const str = { type: 'string' };
+        const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+        const holderDocument = (Holder: unknown) => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {
+            '/holders/{id}': {
+              get: {
+                operationId: 'getHolder',
+                parameters: [{ name: 'id', in: 'path', required: true, schema: str }],
+                responses: {
+                  '200': { description: 'ok', content: { 'application/json': { schema: ref('Holder') } } },
+                },
+              },
+            },
+          },
+          components: {
+            schemas: {
+              Typed: { type: 'object', properties: { b: str } },
+              Untyped: { properties: { b: str } },
+              Listed: { type: ['object', 'string'], properties: { b: str } },
+              Holder,
+            },
+          },
+        });
+        /** An `allOf` of one member declaring `properties`, with `type` beside it when given. */
+        const composed = (type: string | string[] | undefined, properties: Record<string, unknown>) => ({
+          ...(type !== undefined && { type }),
+          allOf: [{ properties }],
+        });
+        const objectOrString = ['object', 'string'];
+        for (const [label, members, type, fields] of [
+          [
+            'the review: a type list beside the allOf, then a bare allOf',
+            [composed(objectOrString, { a: str }), composed(undefined, { b: str })],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          [
+            'the review, swapped',
+            [composed(undefined, { b: str }), composed(objectOrString, { a: str })],
+            '(HolderResult | string)',
+            ['b', 'a'],
+          ],
+          [
+            'object or string, twice',
+            [composed(objectOrString, { a: str }), composed(objectOrString, { b: str })],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          [
+            'object, string or null, twice',
+            [composed([...objectOrString, 'null'], { a: str }), composed([...objectOrString, 'null'], { b: str })],
+            '(HolderResult | string)?',
+            ['a', 'b'],
+          ],
+          [
+            'object, string or null beside object or string',
+            [composed([...objectOrString, 'null'], { a: str }), composed(objectOrString, { b: str })],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          [
+            'object or string beside object or integer',
+            [composed(objectOrString, { a: str }), composed(['object', 'integer'], { b: str })],
+            'HolderResult',
+            ['a', 'b'],
+          ],
+          [
+            'object or string beside an allOf typed object',
+            [composed(objectOrString, { a: str }), composed('object', { b: str })],
+            'HolderResult',
+            ['a', 'b'],
+          ],
+          [
+            'object or number beside object or integer',
+            [composed(['object', 'number'], { a: str }), composed(['object', 'integer'], { b: str })],
+            '(HolderResult | integer)',
+            ['a', 'b'],
+          ],
+          // A `$ref` admits what its component does: one typed `object`
+          // admits no string, one that writes no `type` constrains none.
+          [
+            'object or string beside a $ref to a component typed object',
+            [composed(objectOrString, { a: str }), ref('Typed')],
+            'HolderResult',
+            ['a', 'b'],
+          ],
+          [
+            'a $ref to a component typed object, then object or string',
+            [ref('Typed'), composed(objectOrString, { a: str })],
+            'HolderResult',
+            ['b', 'a'],
+          ],
+          [
+            'object or string beside a $ref to a component that writes no type',
+            [composed(objectOrString, { a: str }), ref('Untyped')],
+            '(HolderResult | string)',
+            ['a', 'b'],
+          ],
+          // A member that names the string itself — a `$ref` to a component
+          // typed by the list, an inline object typed by it — would type
+          // the `string` copy, so the pair keeps the first as written.
+          [
+            'object or string beside a $ref to a component typed object or string',
+            [composed(objectOrString, { a: str }), ref('Listed')],
+            '(HolderResult | string)',
+            ['a'],
+          ],
+          [
+            'object or string beside an inline object typed object or string',
+            [composed(objectOrString, { a: str }), { type: objectOrString, properties: { b: str } }],
+            '(HolderResult | string)',
+            ['a'],
+          ],
+        ] as const) {
+          const spec = await parseJson(holderDocument({ allOf: members.map(declaring) }));
+          const result = modelNamed(spec, 'Holder')?.fields.find((f) => f.name === 'result');
+          expect(result && show(result.type), label).toBe(type);
+          expect(
+            modelNamed(spec, 'HolderResult')?.fields.map((f) => f.name),
+            label,
+          ).toEqual(fields);
+        }
+        expect(warn).not.toHaveBeenCalled();
+      },
+    );
   });
 });
