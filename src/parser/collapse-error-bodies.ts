@@ -32,8 +32,10 @@
  * one model. An optional field is not shape (#506, #516): a body gains one
  * without leaving its group, and the group's model carries every optional
  * field any member declares. Nor are a field's flags, default and limits,
- * which the shared model keeps where every member agrees, as it keeps a
- * description; an optional field's domain name is kept when the members
+ * which the shared model keeps where every member agrees — the limits at
+ * every level of the field's type, an array's items, a map's values and a
+ * union's variants each kept or dropped on their own (#611) — as it keeps
+ * a description; an optional field's domain name is kept when the members
  * that hint it agree, and dropped with a warning when they do not. A string
  * inside an array, union or map keeps its value in the key (`L"a"`,
  * `E["a","b"]`), since nothing combines values there, so two bodies that
@@ -84,7 +86,9 @@
  * shape already holds is that component for every member it can stand for
  * (`componentAccepts`) — one that declares every field the member has,
  * required or optional as the member has it, of its type and domain name,
- * no stricter in its limits, and admitting every value the member pins:
+ * no stricter in its limits at any level of a field's type (an array's
+ * items, a map's values, a union's variants; #611), and admitting every
+ * value the member pins:
  * those members fold onto it, and a member it cannot stand for is left as
  * it is, with a warning that prints that member's shape, so a body that
  * gains a field the component lacks moves alone. A name anything else holds
@@ -134,10 +138,12 @@ import {
   collectOperationTypeRefs,
   collectWebhookTypeRefs,
   renameTypeRefModels,
+  typeRefConstraints,
 } from '../ir/types.js';
 import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
+import { combineConstraints } from './schemas.js';
 
 /** The stem every shared error body is named from: `ErrorBody`, `ErrorBodyWithCode`, and the enums `ErrorBodyCode`, `ErrorBodyError`. */
 export const ERROR_BODY_BASE = 'ErrorBody';
@@ -685,14 +691,15 @@ const ERROR_CODE_FIELDS = ['code', 'error'];
  * declares every field the member has, required or optional as the member
  * has it, of the member's type and domain name, so no body loses a field or
  * a hint by folding onto it; it is no stricter than the member — every
- * limit it writes, on itself, a field or the field's type, the member
- * writes the same, so no body is narrowed by folding onto it (the key
- * leaves limits out, as the shared model merges them); and it admits every
- * value the member pins — a string field the member pins is, on the
- * component, a plain string, or, when the member does not leave it free, a
- * literal or inline enum holding every pinned value. The key reads every
- * string as one, so this is what tells a component the body can reference
- * from one that would narrow its codes.
+ * limit it writes, on itself, a field or any level of the field's type
+ * (`typeNoStricter`: the type's own, an array's items, a map's values, a
+ * union's variants; #611), the member writes the same, so no body is
+ * narrowed by folding onto it (the key leaves limits out, as the shared
+ * model merges them); and it admits every value the member pins — a string
+ * field the member pins is, on the component, a plain string, or, when the
+ * member does not leave it free, a literal or inline enum holding every
+ * pinned value. The key reads every string as one, so this is what tells a
+ * component the body can reference from one that would narrow its codes.
  */
 function componentAccepts(component: Model, member: Model, keys: ModelKeys): boolean {
   if (!noStricter(component.constraints, member.constraints)) return false;
@@ -704,7 +711,7 @@ function componentAccepts(component: Model, member: Model, keys: ModelKeys): boo
       own.domainName !== field.domainName ||
       keys.type(own.type, true) !== keys.type(field.type, true) ||
       !noStricter(own.constraints, field.constraints) ||
-      !noStricter(typeConstraints(own.type), typeConstraints(field.type))
+      !typeNoStricter(own.type, field.type, keys)
     ) {
       return false;
     }
@@ -738,10 +745,51 @@ function noStricter(component: Constraints | undefined, member: Constraints | un
   );
 }
 
-/** The validation keywords `type` carries at its top level, through a nullable wrapper. */
-function typeConstraints(type: TypeRef): Constraints | undefined {
-  const inner = unwrapNullable(type);
-  return inner.kind === 'model' || inner.kind === 'enum' || inner.kind === 'nullable' ? undefined : inner.constraints;
+/**
+ * Whether `component` admits at least what `member` does at every level of
+ * the type (#611): every limit it carries — its own (`noStricter`), its
+ * items' at every depth, its values' and keys', its variants' and its
+ * inner's under a nullable wrapper — `member` carries the same. The two
+ * read as one key (`ModelKeys.type`), so they are of one kind at every
+ * level, a direct string the key reads as one `S` aside, and that string's
+ * pinned values are compared by `componentAccepts`; a reference to a model
+ * or an enum carries no limit and ends the walk. A union's variants are
+ * matched by their key, not their position, since the key sorts them: each
+ * variant the member writes is admitted when a variant of the component
+ * with the same shape is no stricter than it, whichever order either side
+ * wrote them in.
+ */
+function typeNoStricter(component: TypeRef, member: TypeRef, keys: ModelKeys): boolean {
+  if (!noStricter(typeRefConstraints(component), typeRefConstraints(member))) return false;
+  switch (component.kind) {
+    case 'nullable':
+      return member.kind === 'nullable' && typeNoStricter(component.inner, member.inner, keys);
+    case 'array':
+      return member.kind === 'array' && typeNoStricter(component.items, member.items, keys);
+    case 'map':
+      return (
+        member.kind === 'map' &&
+        (component.keyType === undefined ||
+          member.keyType === undefined ||
+          typeNoStricter(component.keyType, member.keyType, keys)) &&
+        typeNoStricter(component.valueType, member.valueType, keys)
+      );
+    case 'union': {
+      if (member.kind !== 'union') return false;
+      const byKey = new Map<string, TypeRef[]>();
+      for (const variant of component.variants) {
+        const key = keys.type(variant, false);
+        const alike = byKey.get(key);
+        if (alike) alike.push(variant);
+        else byKey.set(key, [variant]);
+      }
+      return member.variants.every((variant) =>
+        (byKey.get(keys.type(variant, false)) ?? []).some((own) => typeNoStricter(own, variant, keys)),
+      );
+    }
+    default:
+      return true;
+  }
 }
 
 /**
@@ -1128,7 +1176,15 @@ function sharedDomainName(name: string, members: readonly Model[], field: string
  * members type differently is the union of the types they wrote, sorted so
  * the order does not depend on the members' (`unionOf`). The type carries
  * the limits the field does: `constraints`, the ones every member wrote,
- * or none when they differ.
+ * or none when they differ; and below its top level — an array's items, a
+ * map's values, a union's variants — the limits every member that wrote
+ * that level agrees on, each level kept or dropped on its own
+ * (`agreedLimits`; #611), since two types that differ only in a limit are
+ * one shape (`limitlessShape`), as are two unions that list one set of
+ * variants in different orders, never two members of a union; and a union
+ * whose variants are left alike once their limits are dropped keeps one of
+ * them, a lone survivor standing for the union (`simplifyType`), so no
+ * `oneOf` of two plain strings, which admits nothing, is ever written.
  */
 function sharedFieldType(
   siblings: readonly Field[],
@@ -1160,17 +1216,208 @@ function sharedFieldType(
   }
   // An inline enum reads by its sorted values, as the key reads it, and not
   // by the name the parser minted it under per operation: two members that
-  // list the same values, in any order, share the first member's enum.
-  const seen = new Map<string, TypeRef>();
+  // list the same values, in any order, share the first member's enum; a
+  // type reads without its limits at any level, so two members that differ
+  // only in a limit on an array's items share one type, carrying the limits
+  // they agree on; and a union reads with its variants sorted, as the key
+  // reads them, so two members that list them in different orders share
+  // one union (`limitlessShape`).
+  const alike = new Map<string, TypeRef[]>();
   for (const sibling of siblings) {
     const own = normalizeInlineEnums(rewritten(sibling.type, renames), true);
     const type = constraints === undefined ? stripConstraints(own) : own;
-    const key = stableJson(normalizeInlineEnums(type, false));
-    if (!seen.has(key)) seen.set(key, type);
+    const key = stableJson(limitlessShape(type));
+    const group = alike.get(key);
+    if (group) group.push(type);
+    else alike.set(key, [type]);
   }
-  if (seen.size === 1) return { type: [...seen.values()][0], changed: false };
-  const types = [...seen.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, type]) => type);
+  if (alike.size === 1) return { type: agreedLimits([...alike.values()][0]), changed: false };
+  const types = [...alike.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, group]) => agreedLimits(group));
   return { type: unionOf(types, constraints), changed: true };
+}
+
+/**
+ * One type for `types`, which read alike but for the limits they carry and
+ * the order of their variants (`limitlessShape`): the first, with the
+ * limits at every level — its own, its items', its values' and keys', its
+ * variants' — kept where every one of them writes the same and dropped
+ * where they differ (#611), as the shared model keeps a field's own
+ * (`buildSharedModel`); a new tree wherever something is dropped, the
+ * first itself when nothing is. A level's limits are kept or dropped as a
+ * whole, as a field's own are: items `{ maxLength: 2, pattern: '^a' }`
+ * beside `{ maxLength: 3, pattern: '^a' }` carry none. A union's variants
+ * are read by shape, not by position, whichever order each member lists
+ * them in: a shape every member lists with the same variants keeps the
+ * first member's, and one they list apart merges into one variant
+ * carrying the limits every variant of the shape, in every member, agrees
+ * on, so no limit survives on one variant of a shape that another lacks
+ * (`oneOf: [{ string, pattern: '^[a-z]+$' }, { string, pattern: '^[0-9]+$' }]`
+ * beside the same with `'^[A-Z]+$'` is a plain `string`, never
+ * `oneOf: [{ string, pattern: '^[a-z]+$' }, string]`, which rejects what
+ * both bodies admit); the result keeps the first member's order, and
+ * variants left alike are one, a lone survivor standing for the union
+ * (`simplifyType`), since a `oneOf` of two plain strings admits nothing —
+ * the survivor, a nested union the outer collapses onto included, taking
+ * the limits the union itself agreed on, conjoined onto its own
+ * (`withLimits`), so none is lost with the union. A `oneOf` the merge
+ * widened a variant of beside a variant it may now overlap — one of the
+ * same JSON value kind, or an untyped one (`mayOverlap`) — is read as
+ * `anyOf`, since its variants can no longer promise to match one value at
+ * a time (`oneOf: [{ string, pattern: '^b' }, { const: 'a' }]` beside the
+ * same with `'^c'` is `anyOf: [string, 'a']`, which admits the `"a"` both
+ * bodies do); one widened beside variants of other kinds only stays
+ * `oneOf`.
+ */
+function agreedLimits(types: readonly TypeRef[]): TypeRef {
+  const first = types[0];
+  if (types.length === 1) return first;
+  const of = <K extends TypeRef['kind']>(kind: K): Extract<TypeRef, { kind: K }>[] =>
+    types.filter((type): type is Extract<TypeRef, { kind: K }> => type.kind === kind);
+  const own = stableJson(typeRefConstraints(first));
+  const agreed = types.every((type) => stableJson(typeRefConstraints(type)) === own);
+  const top = agreed ? first : stripConstraints(first);
+  switch (top.kind) {
+    case 'nullable':
+      return { kind: 'nullable', inner: agreedLimits(of('nullable').map((type) => type.inner)) };
+    case 'array':
+      return { ...top, items: agreedLimits(of('array').map((type) => type.items)) };
+    case 'map': {
+      const maps = of('map');
+      const keyTypes = maps.flatMap((type) => (type.keyType === undefined ? [] : [type.keyType]));
+      return {
+        ...top,
+        valueType: agreedLimits(maps.map((type) => type.valueType)),
+        ...(keyTypes.length === maps.length && { keyType: agreedLimits(keyTypes) }),
+      };
+    }
+    case 'union': {
+      // Each member's variants by shape (`limitlessShape`), each shape's in
+      // the member's order with its index in the union.
+      const byShape = of('union').map((union) => {
+        const shapes = new Map<string, Array<{ variant: TypeRef; index: number }>>();
+        union.variants.forEach((variant, index) => {
+          const shape = stableJson(limitlessShape(variant));
+          const alike = shapes.get(shape);
+          if (alike) alike.push({ variant, index });
+          else shapes.set(shape, [{ variant, index }]);
+        });
+        return shapes;
+      });
+      const variants = [...top.variants];
+      const widened = new Set<string>(); // the shapes merged into one variant that admits more than some member's did
+      for (const [shape, own] of byShape[0]) {
+        // A shape every member lists with the same variants keeps the
+        // first member's; one they list apart merges into one variant
+        // carrying the limits every variant of the shape, in every
+        // member, agrees on, so no limit survives on one variant of a
+        // shape that another lacks (MichaelDeBoey, #639: `^[a-z]+$` kept
+        // on one string beside a plain string rejects what both bodies
+        // admit).
+        const runs = byShape.map((member) => member.get(shape) ?? []);
+        const readings = runs.map((run) =>
+          run
+            .map(({ variant }) => stableJson(variant))
+            .sort()
+            .join('\n'),
+        );
+        if (readings.every((reading) => reading === readings[0])) continue;
+        const merged = agreedLimits(runs.flatMap((run) => run.map(({ variant }) => variant)));
+        for (const { index } of own) variants[index] = merged;
+        widened.add(shape);
+      }
+      const merged = simplifyType({ ...top, variants });
+      // A lone survivor — the one variant left once the alike are dropped,
+      // told by their count rather than by the survivor's kind, since the
+      // survivor may be a union itself — takes the union's own agreed
+      // limits, conjoined onto its own, the stricter bound winning
+      // (`combineConstraints`): the string left of
+      // `{ oneOf: [...], minLength: 1 }` is under `minLength: 1`, not one
+      // that admits the empty string, and so is the `anyOf` or type list
+      // the `oneOf` collapses onto (Greptile, #639).
+      const distinct = new Set(variants.map((variant) => stableJson(variant))).size;
+      if (distinct === 1) return withLimits(merged, top.constraints);
+      if (merged.kind !== 'union' || merged.compositionKind !== 'oneOf' || widened.size === 0) return merged;
+      // A `oneOf` promises its variants match one value at a time, which a
+      // widened variant can break beside a variant it may now overlap —
+      // one of the same JSON value kind, or an untyped one (`mayOverlap`):
+      // `oneOf: [{ string, pattern: '^b' }, { const: 'a' }]` beside the
+      // same with `'^c'` would be `oneOf: [string, 'a']`, rejecting the
+      // `"a"` both bodies admit (Greptile, #639). Such a union is read as
+      // `anyOf`; one widened beside variants of other kinds only (a string
+      // beside an integer) stays `oneOf`.
+      const overlaps = [...byShape[0]].some(([shape, own]) => {
+        if (!widened.has(shape)) return false;
+        const indices = new Set(own.map(({ index }) => index));
+        return own.some(({ index }) =>
+          variants.some((other, i) => !indices.has(i) && mayOverlap(variants[index], other)),
+        );
+      });
+      if (!overlaps) return merged;
+      const open: UnionType = { ...merged, compositionKind: 'anyOf' };
+      return open;
+    }
+    default:
+      return top;
+  }
+}
+
+/**
+ * `type` carrying `limits` conjoined onto its own (`combineConstraints`, the
+ * stricter bound winning) on the node that can — the type itself, or the
+ * `inner` of a nullable wrapper, whose keywords are the value's — as a new
+ * tree; a `model` or `enum` reference carries none and is returned as it
+ * is, as is `type` when `limits` is `undefined`.
+ */
+function withLimits(type: TypeRef, limits: Constraints | undefined): TypeRef {
+  if (limits === undefined) return type;
+  switch (type.kind) {
+    case 'nullable':
+      return { kind: 'nullable', inner: withLimits(type.inner, limits) };
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union':
+      return { ...type, constraints: combineConstraints(type.constraints, limits) };
+    default:
+      return type;
+  }
+}
+
+/**
+ * The JSON value kinds `type` admits — `string`, `number` (an integer is
+ * one), `boolean`, `null`, `array`, `object` (a map or a model) — or
+ * `unknown` for an untyped schema and for a named enum whose values the
+ * reference does not carry; a nullable wrapper adds `null` to its inner's,
+ * a union gathers its variants'.
+ */
+function valueKinds(type: TypeRef): Set<string> {
+  switch (type.kind) {
+    case 'primitive':
+      return new Set([type.type === 'integer' ? 'number' : type.type]);
+    case 'literal':
+      return new Set([type.value === null ? 'null' : typeof type.value]);
+    case 'enum':
+      return new Set(type.values?.map((value) => typeof value) ?? ['unknown']);
+    case 'array':
+      return new Set(['array']);
+    case 'map':
+    case 'model':
+      return new Set(['object']);
+    case 'nullable':
+      return new Set([...valueKinds(type.inner), 'null']);
+    case 'union':
+      return new Set(type.variants.flatMap((variant) => [...valueKinds(variant)]));
+  }
+}
+
+/** Whether one JSON value may match both `a` and `b`: they admit a value kind in common, or either admits any (`valueKinds`). */
+function mayOverlap(a: TypeRef, b: TypeRef): boolean {
+  const kinds = valueKinds(a);
+  const others = valueKinds(b);
+  return kinds.has('unknown') || others.has('unknown') || [...kinds].some((kind) => others.has(kind));
 }
 
 /**
@@ -1262,6 +1509,46 @@ function stripConstraints(type: TypeRef): TypeRef {
     }
     default:
       return type;
+  }
+}
+
+/**
+ * `type` as the merge reads a shape (#611): without the validation keywords
+ * at any level — its own, its items', values', keys' and variants' — every
+ * inline enum unnamed with its values sorted (`normalizeInlineEnums`), and
+ * a union's variants sorted by this reading, as the model key sorts them
+ * (`ModelKeys.type`), so that neither a limit nor the order the variants
+ * are listed in tells two members apart; a new tree.
+ */
+function limitlessShape(type: TypeRef): TypeRef {
+  switch (type.kind) {
+    case 'nullable':
+      return { kind: 'nullable', inner: limitlessShape(type.inner) };
+    case 'enum':
+      return normalizeInlineEnums(type, false);
+    case 'array': {
+      const { constraints: _constraints, ...rest } = type;
+      return { ...rest, items: limitlessShape(type.items) };
+    }
+    case 'map': {
+      const { constraints: _constraints, keyType, ...rest } = type;
+      return {
+        ...rest,
+        valueType: limitlessShape(type.valueType),
+        ...(keyType && { keyType: limitlessShape(keyType) }),
+      };
+    }
+    case 'union': {
+      const { constraints: _constraints, ...rest } = type;
+      const variants = type.variants
+        .map((variant) => limitlessShape(variant))
+        .map((variant) => ({ variant, key: stableJson(variant) }))
+        .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+        .map(({ variant }) => variant);
+      return { ...rest, variants };
+    }
+    default:
+      return stripConstraints(type);
   }
 }
 
