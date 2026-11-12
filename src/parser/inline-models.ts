@@ -73,10 +73,29 @@ import { classifyResponseKey } from './responses.js';
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 
 /**
+ * Whether `baseName` already carries `cleanParent` as its leading part and
+ * adds something after it (`PetOwner` or `PetsItem` under `Pet`), so that
+ * qualifying it would only double the parent (`PetPetOwner`). A name that is
+ * the parent's own (`Reply` under `Reply`, `Pet` under `Pet`) adds nothing
+ * and is not one: it is qualified like any other field's, never left as the
+ * name the component holds (workos/oagen#621). The one test for every
+ * inline name minted under a parent — a model's (`qualifyInlineModelName`)
+ * and an enum's (`inlineEnumName`, `mintedInlineNameEntries`).
+ */
+export function extendsParentName(baseName: string, cleanParent: string): boolean {
+  return baseName.length > cleanParent.length && baseName.startsWith(cleanParent);
+}
+
+/**
  * Qualify an inline model name with the parent schema name.
  * If `parentName` is provided and the field name doesn't already start with
- * the parent, the result is `${parentName}${PascalField}` with the trailing
- * word singularized (e.g., Connection + Domains → ConnectionDomain).
+ * the parent and add something after it (`extendsParentName`: Pet + PetOwner
+ * → PetOwner), the result is `${parentName}${PascalField}` with the trailing
+ * word singularized (e.g., Connection + Domains → ConnectionDomain). A field
+ * named like its parent is qualified too — Reply + Reply → ReplyReply, as
+ * Reply + Replies names its items on its own (beside each other the field
+ * holds ReplyReply and the items step to ReplyRepliesItem) — never left as
+ * the parent's own name, which the component holds (workos/oagen#621).
  */
 export function qualifyInlineModelName(baseName: string, parentName?: string): string {
   if (!parentName) return baseName;
@@ -84,7 +103,7 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // are clean, for response models as much as component ones.
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
-  if (baseName.startsWith(cleanParent)) return baseName;
+  if (extendsParentName(baseName, cleanParent)) return baseName;
   // Singularize the trailing PascalCase word of the combined name.
   // Split baseName into leading words + trailing word, singularize trailing.
   const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
@@ -177,7 +196,10 @@ export function mintedInlineNameEntries(
   const enumName = (): MintedInlineName[] => {
     const cleanParent = parentModelName ? stripListItemMarkers(parentModelName) : undefined;
     return [
-      { name: cleanParent && !base.startsWith(cleanParent) ? `${cleanParent}${base}` : base, contextFree: false },
+      {
+        name: cleanParent && !extendsParentName(base, cleanParent) ? `${cleanParent}${base}` : base,
+        contextFree: false,
+      },
     ];
   };
   if (kind === 'allOf' && s.allOf) {
