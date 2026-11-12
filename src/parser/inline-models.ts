@@ -440,7 +440,7 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
-/** Field properties that only document a field — its extensions included; two shapes that differ in these alone are one shape. */
+/** Field properties that only document a field — its extensions included — or say where it comes from (`inheritedFrom`, the base a component's field is taken from; #591); two shapes that differ in these alone are one shape. */
 const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'name',
   'description',
@@ -448,11 +448,12 @@ const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
   'example',
   'examples',
   'extensions',
+  'inheritedFrom',
 ]);
 /** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold reads from the copy it keeps (`takeModelDocumentation`). */
 const MODEL_DOC_KEYS = ['description', 'externalDocs', 'extensions'] as const satisfies readonly (keyof Model)[];
-/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), and the fields (fingerprinted on their own). */
-const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'fields']);
+/** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), its provenance (`bases`, the components a composed component is built on; #591), and the fields (fingerprinted on their own). */
+const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'bases', 'fields']);
 
 /**
  * Give `into` the documentation of `from` — every `MODEL_DOC_KEYS` property,

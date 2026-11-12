@@ -239,8 +239,11 @@ export function collectReferencedNames(
       }
     }
     // Fields and, for a named union, its variants: a union alias dangles
-    // without the models it is a union of.
-    for (const ref of collectModelTypeRefs(model)) {
+    // without the models it is a union of. Then the bases a composed
+    // component names (`Model.bases`): an emitter that writes the model as
+    // an extension of them needs them emitted, as a dispatcher needs its
+    // variants (#591).
+    for (const ref of [...collectModelTypeRefs(model), ...(model.bases ?? [])]) {
       collectFromTypeRef(ref);
       // If new models were discovered, enqueue them
       for (const m of referencedModels) {
