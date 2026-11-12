@@ -5522,6 +5522,40 @@ function deferPointerMappingEntries(
 }
 
 /**
+ * `deferPointerMappingEntries` for a site that builds an inline union's
+ * variants itself instead of through `schemaToTypeRef` — a request body
+ * written as a `oneOf` (`typePickedRequestBody`) — so the body's union
+ * settles a pointer entry exactly as a field's or a response's does:
+ * `dog: '#/components/schemas/Zoo/properties/dog'` beside the variant
+ * written as that pointer is `ZooDog`, the model the variant settles to,
+ * at all three sites (Greptile, #660 review: the body's variant settled
+ * to `ZooDog` while its entry stayed `Zoo/properties/dog`, a name no model
+ * has). `schema` is the union as written, `inlineNames` the name each
+ * inline object variant's model takes at the site, `variants` the
+ * references built for its non-null variants, in order, and `mapping` the
+ * object the union's discriminator carries (`inlineMappingTargets`), which
+ * the settle writes into.
+ */
+export function deferInlineUnionMappingEntries(
+  schema: SchemaObject,
+  inlineNames: ReadonlyMap<SchemaObject, string>,
+  variants: readonly TypeRef[],
+  mapping: Record<string, string>,
+): void {
+  const written = schema.discriminator?.mapping;
+  if (!written) return;
+  const schemas = documentComponentSchemas();
+  deferPointerMappingEntries(
+    written,
+    unionMembers(schema, inlineNames, schemas),
+    variants,
+    mapping,
+    schemas,
+    inlineMappingTarget,
+  );
+}
+
+/**
  * How `spell` writes a named member's model into the mapping: as the
  * member's own `$ref` to a component — written on the member, or wrapped
  * by it (`wrappedVariantReference`) — else as `name`, the model name it

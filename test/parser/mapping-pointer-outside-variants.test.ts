@@ -138,6 +138,44 @@ describe('#619', () => {
       expect(warnings()).toEqual([]);
     });
 
+    it('reads the same union written inline as a request body the same way (Greptile)', async () => {
+      // The review's document: the body's variant settled to `ZooDog` while
+      // its entry stayed `Zoo/properties/dog`, a name no model has. The
+      // body's entries settle as the response's and the field's do — an
+      // entry written as the variant's own pointer with the variant, one
+      // outside the variants to the model the pointed schema is built as.
+      for (const [dog, settled] of [
+        [ZOO_DOG, 'ZooDog'],
+        [SHELTER_DOG, 'ShelterDog'],
+      ] as const) {
+        const pet = union({ cat: CAT, dog });
+        const spec = await parseJson(
+          documentWith(openapi, components(openapi, { Home: { type: 'object', properties: { pet } } }), {
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                requestBody: { content: { 'application/json': { schema: pet } } },
+                responses: { '200': { description: 'OK', content: { 'application/json': { schema: pet } } } },
+              },
+            },
+            '/homes/{id}': getOp('getHome', '#/components/schemas/Home'),
+          }),
+        );
+        const createPet = spec.services.flatMap((s) => s.operations).find((o) => o.name === 'createPet');
+        const mapping = { cat: 'Cat', dog: settled };
+        expect(createPet?.requestBody, dog).toEqual({
+          kind: 'union',
+          variants: [model('Cat'), model('ZooDog')],
+          discriminator: { property: 'kind', mapping },
+        });
+        expect(createPet?.response, dog).toEqual(expectedInlineUnion(settled));
+        expect(fieldType(spec, 'Home', 'pet'), dog).toEqual(expectedInlineUnion(settled));
+        // Every name the body's mapping carries is a model's.
+        for (const name of Object.values(mapping)) expect(modelNames(spec), dog).toContain(name);
+      }
+      expect(warnings()).toEqual([]);
+    });
+
     it('settles an allOf+oneOf dispatcher’s entry the same way, though it holds no variants', async () => {
       const spec = await parseJson(
         documentWith(
