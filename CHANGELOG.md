@@ -1,5 +1,294 @@
 # Changelog
 
+## [0.35.0](https://github.com/workos/oagen/compare/v0.34.1...v0.35.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **parser:** settle a mapping pointer outside the union's variants to the model it points at ([#660](https://github.com/workos/oagen/issues/660))
+* **differ:** report a validation keyword tightened or loosened on a field, parameter or header ([#659](https://github.com/workos/oagen/issues/659))
+* **parser:** read a component's union beside an allOf that only annotates as the named union ([#658](https://github.com/workos/oagen/issues/658))
+* **compat:** scope verify and staleness to the operations as generate resolves them ([#657](https://github.com/workos/oagen/issues/657))
+* **parser:** read a discriminator's const through an allOf, a nullable wrapper or an alias chain ([#656](https://github.com/workos/oagen/issues/656))
+* **parser:** name the models of two operationIds that clean to one stem apart, never shared ([#655](https://github.com/workos/oagen/issues/655))
+* **parser:** read a nullable wrapper around an inline enum component as the enum, never an alias ([#654](https://github.com/workos/oagen/issues/654))
+* **parser:** conjoin a $ref and an inline allOf, or two $refs, that declare one allOf property ([#653](https://github.com/workos/oagen/issues/653))
+* **parser:** hash a webhook key and an operationId of one text apart, so neither payload is lost ([#652](https://github.com/workos/oagen/issues/652))
+* **parser:** settle an explicit dataPath through a pointer site onto the model its items hold ([#651](https://github.com/workos/oagen/issues/651))
+* **parser:** read each entry of a type list by its own keywords, never as the same model twice ([#650](https://github.com/workos/oagen/issues/650))
+* **parser:** count a response body as received only under media types whose schema is read ([#649](https://github.com/workos/oagen/issues/649))
+* **parser:** name a shared error body's inline enum from its field, never from an operation ([#648](https://github.com/workos/oagen/issues/648))
+* **parser:** keep the live copy when one operation's success bodies differ only by deprecated ([#647](https://github.com/workos/oagen/issues/647))
+* **parser:** read a bare $ref alias of an object component as a model carrying its fields ([#646](https://github.com/workos/oagen/issues/646))
+* **parser:** a content or headers written beside a $ref contests no title, as it types nothing ([#645](https://github.com/workos/oagen/issues/645))
+* **parser:** let a deprecated component, or one that deprecates a field, take no live error body ([#644](https://github.com/workos/oagen/issues/644))
+* **parser:** read a list envelope whose stop field sits in a oneOf beside its allOf as a list ([#643](https://github.com/workos/oagen/issues/643))
+* **parser:** type a request body written as a oneOf of string consts as the enum anyOf gives ([#642](https://github.com/workos/oagen/issues/642))
+* **parser:** wrap a $ref to a nullable object component in nullable, as the same schema inline is ([#641](https://github.com/workos/oagen/issues/641))
+* **parser:** compare limits at every level of a field's type before a component takes an error body ([#639](https://github.com/workos/oagen/issues/639))
+* **parser:** read a list envelope whose data is a pointer to an array as the list it is ([#638](https://github.com/workos/oagen/issues/638))
+* **parser:** spell a stepped discriminated variant's number behind No after a digit (PetV2No2) ([#636](https://github.com/workos/oagen/issues/636))
+* **parser:** qualify a field named like its component as ReplyReply instead of Reply2 ([#635](https://github.com/workos/oagen/issues/635))
+* **utils:** singularize a -ses or -xes word in a model name as a path segment is (causes → Cause) ([#632](https://github.com/workos/oagen/issues/632))
+* **parser:** read an operation's callbacks into the IR as Callback entries, and diff them ([#626](https://github.com/workos/oagen/issues/626))
+* **parser:** let a deprecated component admit no inline copy, so deprecating one is a flag flip ([#625](https://github.com/workos/oagen/issues/625))
+* **differ:** compare the security scheme definitions under components.securitySchemes ([#624](https://github.com/workos/oagen/issues/624))
+* **differ:** classify a moved success status code as breaking unless the old code is still declared ([#623](https://github.com/workos/oagen/issues/623))
+* **parser:** name a shared error body from its required fields alone ([#598](https://github.com/workos/oagen/issues/598))
+* **parser:** give an allOf combined with a oneOf/anyOf one reading at every site ([#597](https://github.com/workos/oagen/issues/597))
+* **parser:** read the names a …Json fold renames per kind, a model's apart from an enum's ([#595](https://github.com/workos/oagen/issues/595))
+* **parser:** skip a Content-Type response header in the sent-only component walk ([#594](https://github.com/workos/oagen/issues/594))
+* **ir:** carry a schema's validation keywords on the type built from it ([#593](https://github.com/workos/oagen/issues/593))
+* **parser:** follow a schema $ref deeper into a component as the JSON Pointer it is ([#592](https://github.com/workos/oagen/issues/592))
+* **parser:** derive an inline union's discriminator mapping from its $ref variants' consts ([#590](https://github.com/workos/oagen/issues/590))
+* **parser:** type a $ref to a const, multi-type or untyped component as the schema inline ([#589](https://github.com/workos/oagen/issues/589))
+* **parser:** type a $ref to an alias of an enum component as the enum ([#588](https://github.com/workos/oagen/issues/588))
+* **parser:** read an allOf of one typing member beside annotating members as that member ([#587](https://github.com/workos/oagen/issues/587))
+* **parser:** read a nullable const union beside an enum list as the enum, not its one variant ([#586](https://github.com/workos/oagen/issues/586))
+* **parser:** walk an explicit dataPath through the variants of a oneOf/anyOf ([#585](https://github.com/workos/oagen/issues/585))
+* **cli:** pass compat-extract and verify the settings generate reads ([#584](https://github.com/workos/oagen/issues/584))
+* **differ:** report a primary replaced among several 2xx responses as removed, not as a move ([#583](https://github.com/workos/oagen/issues/583))
+* **differ:** compare a request body's required flag on a body carried in its contents alone ([#582](https://github.com/workos/oagen/issues/582))
+* **parser:** name a later 2xx's secondary body for its status code, never the primary's ([#581](https://github.com/workos/oagen/issues/581))
+* **parser:** qualify an operation's header and parameter models by its operationId stem ([#579](https://github.com/workos/oagen/issues/579))
+* **parser:** number a parameter or header model stem as it is cased, behind `No` after a digit ([#578](https://github.com/workos/oagen/issues/578))
+* **parser:** read a webhook operationId that names nothing as absent, as an operation's ([#577](https://github.com/workos/oagen/issues/577))
+* **parser:** read an operationIdTransform result that names nothing as no operationId ([#576](https://github.com/workos/oagen/issues/576))
+* **parser:** strip every trailing overload marker from an operationId ([#575](https://github.com/workos/oagen/issues/575))
+* **parser:** ignore the content and headers beside a response $ref that resolves to nothing ([#574](https://github.com/workos/oagen/issues/574))
+* **parser:** type a $ref to a primitive component as the primitive ([#558](https://github.com/workos/oagen/issues/558))
+* **parser:** keep an operation's summary out of its description ([#557](https://github.com/workos/oagen/issues/557))
+* **parser:** resolve a path item $ref to a paths or webhooks entry ([#554](https://github.com/workos/oagen/issues/554))
+* **parser:** read a webhook whose name starts with x- ([#553](https://github.com/workos/oagen/issues/553))
+* **parser:** map a wrapped variant beside an enum or array $ref ([#552](https://github.com/workos/oagen/issues/552))
+* **parser:** keep an allOf-annotated enum $ref over a variant's enum ([#550](https://github.com/workos/oagen/issues/550))
+* **parser:** iterate the items a component field's allOf model holds ([#549](https://github.com/workos/oagen/issues/549))
+* **parser:** reject a stop field the flattened allOf model lacks ([#548](https://github.com/workos/oagen/issues/548))
+* **parser:** read an operationId that names nothing as absent ([#547](https://github.com/workos/oagen/issues/547))
+* **cli:** pass fieldHints to every command that parses a spec ([#546](https://github.com/workos/oagen/issues/546))
+* **parser:** keep deprecated on a flattened discriminator's values ([#544](https://github.com/workos/oagen/issues/544))
+* **parser:** ignore Accept, Content-Type and Authorization headers ([#542](https://github.com/workos/oagen/issues/542))
+* **parser:** keep a field object of a component the SDK only sends off a looser component ([#524](https://github.com/workos/oagen/issues/524))
+* **parser:** share one model between identical field and response copies leaving a name ([#523](https://github.com/workos/oagen/issues/523))
+* **parser:** qualify a dropped inline twin rather than orphan its nested model ([#522](https://github.com/workos/oagen/issues/522))
+* **parser:** fold only what a Json model reaches, off enum names, with its x-* keys ([#521](https://github.com/workos/oagen/issues/521))
+* **parser:** set numbers and hashes in model and enum names off from a trailing digit ([#520](https://github.com/workos/oagen/issues/520))
+* **parser:** share a stepped enum name only within the operation that stepped to it ([#519](https://github.com/workos/oagen/issues/519))
+* **parser:** name a secondary media type's model from what `oagen diff` compares ([#517](https://github.com/workos/oagen/issues/517))
+* **parser:** name a secondary 2xx or 3xx body for itself, not by the primary's shape ([#511](https://github.com/workos/oagen/issues/511))
+* **parser:** step a component response's body past an operation's own inline body ([#510](https://github.com/workos/oagen/issues/510))
+* **parser:** name a component response's headers and bodies before any operation's own ([#509](https://github.com/workos/oagen/issues/509))
+* **parser:** step a parameter or header model past a nested enum in either order ([#504](https://github.com/workos/oagen/issues/504))
+* **parser:** qualify a renamed inline model by its path, not the derived operation name ([#503](https://github.com/workos/oagen/issues/503))
+* **parser:** contest a title between an inline allOf's $ref and inline members ([#498](https://github.com/workos/oagen/issues/498))
+* **parser:** qualify a later variant that repeats a contested title ([#496](https://github.com/workos/oagen/issues/496))
+* **parser:** contest a title only among unions the parser types ([#495](https://github.com/workos/oagen/issues/495))
+* **parser:** step a union variant around names taken at any depth ([#494](https://github.com/workos/oagen/issues/494))
+* **parser:** give a field an array component's limits and docs, a nullable oneOf one included ([#493](https://github.com/workos/oagen/issues/493))
+* **parser:** keep a discriminated variant off its component's name ([#492](https://github.com/workos/oagen/issues/492))
+* **parser:** map a wrapped named-union variant by the one model it wraps ([#490](https://github.com/workos/oagen/issues/490))
+* **parser:** build a component field's array items from the oneOf or allOf beside their properties ([#489](https://github.com/workos/oagen/issues/489))
+* **parser:** keep a variant's const or enum over a wider property written beside its oneOf ([#488](https://github.com/workos/oagen/issues/488))
+* **parser:** keep a response whose one property is a union of tagged objects ([#487](https://github.com/workos/oagen/issues/487))
+* **parser:** name an allOf response body for its operation, not a variant's const ([#485](https://github.com/workos/oagen/issues/485))
+* **parser:** type variant declarations differing only in flags, limits or docs as one shape ([#484](https://github.com/workos/oagen/issues/484))
+* **parser:** conjoin an object $ref and an inline object declaring one property ([#483](https://github.com/workos/oagen/issues/483))
+* **parser:** combine an array's items across allOf members as a property's declarations ([#482](https://github.com/workos/oagen/issues/482))
+* **parser:** give each operation reusing an operationId its own inline models ([#481](https://github.com/workos/oagen/issues/481))
+* **parser:** name an action the same whatever else the document declares ([#480](https://github.com/workos/oagen/issues/480))
+* **parser:** tell two singletons apart by the parent's plural rather than a number ([#479](https://github.com/workos/oagen/issues/479))
+* **parser:** keep a nested collection's name when nothing tells it from the service path ([#478](https://github.com/workos/oagen/issues/478))
+* **parser:** restore an item's service noun as written when the singular is taken ([#477](https://github.com/workos/oagen/issues/477))
+* **parser:** keep a plural segment and its singular as two words of a qualifier ([#476](https://github.com/workos/oagen/issues/476))
+* **parser:** name the service from the first tag that has a name ([#475](https://github.com/workos/oagen/issues/475))
+* **parser:** read no requestBody from a +json media range ([#473](https://github.com/workos/oagen/issues/473))
+* **parser:** read a null variant in any spelling ([#467](https://github.com/workos/oagen/issues/467))
+* **parser:** unwrap a list envelope whose data array is an allOf of the array ([#466](https://github.com/workos/oagen/issues/466))
+* **parser:** keep a secondary 2xx envelope that lacks the override's stop field ([#465](https://github.com/workos/oagen/issues/465))
+* **parser:** read a stop field in any spelling ([#464](https://github.com/workos/oagen/issues/464))
+* **parser:** split a path segment only at a custom method's colon ([#461](https://github.com/workos/oagen/issues/461))
+* **differ:** report a move to or from an unread content map and keep JSON-to-JSON moves additive ([#460](https://github.com/workos/oagen/issues/460))
+* **differ:** keep a variant added to an inline union additive ([#458](https://github.com/workos/oagen/issues/458))
+* **differ:** report an operation gaining or losing its only 2xx/3xx when it has no body ([#456](https://github.com/workos/oagen/issues/456))
+* **differ:** read a moved security default only from a node that inherits it in both documents ([#454](https://github.com/workos/oagen/issues/454))
+* **differ:** compare a webhook's required flag only while both sides carry a payload ([#453](https://github.com/workos/oagen/issues/453))
+
+### Features
+
+* **differ:** compare the security scheme definitions under components.securitySchemes ([#624](https://github.com/workos/oagen/issues/624)) ([3f9f707](https://github.com/workos/oagen/commit/3f9f7076abacfb0455fbbc0c8aa7d9c1e7090c89))
+* **differ:** report a validation keyword tightened or loosened on a field, parameter or header ([#659](https://github.com/workos/oagen/issues/659)) ([f53be48](https://github.com/workos/oagen/commit/f53be48a24e8e855b22d527660b62462cd612076))
+* **ir:** carry a schema's validation keywords on the type built from it ([#593](https://github.com/workos/oagen/issues/593)) ([1d1c7f9](https://github.com/workos/oagen/commit/1d1c7f943ec3f11ebba3a07eb7de68385c7ed9b1))
+* **ir:** let a consumer resolve method names from operationIds ([#472](https://github.com/workos/oagen/issues/472)) ([091b925](https://github.com/workos/oagen/commit/091b9257c14efcbc2e15bc27ce46d30d67abbb61))
+  * The IR gains `Operation.operationId`, the document's id as written (absent on a path-named operation), which an emitter can read without setting `operationNaming`.
+* **parser:** read an operation's callbacks into the IR as Callback entries, and diff them ([#626](https://github.com/workos/oagen/issues/626)) ([0fa9e6d](https://github.com/workos/oagen/commit/0fa9e6d3507fd0ef598d3ed5ea549f1eb82fcb88))
+* **parser:** record a composed component's bases and each inherited field's base in the IR ([#661](https://github.com/workos/oagen/issues/661)) ([5724384](https://github.com/workos/oagen/commit/5724384164e54d8bf09c8ba9bca3ff171c42c160))
+
+
+### Bug Fixes
+
+* **cli:** pass compat-extract and verify the settings generate reads ([#584](https://github.com/workos/oagen/issues/584)) ([f171a9f](https://github.com/workos/oagen/commit/f171a9f6de7c9aa9f70f413691482cbc52f5f025))
+* **cli:** pass fieldHints to every command that parses a spec ([#546](https://github.com/workos/oagen/issues/546)) ([685fd39](https://github.com/workos/oagen/commit/685fd39063aa22db002e369bc8f9ed936be59711))
+* **compat:** scope verify and staleness to the operations as generate resolves them ([#657](https://github.com/workos/oagen/issues/657)) ([948c895](https://github.com/workos/oagen/commit/948c895cde78f1d61fa2dd99119d9e5a2da89862))
+* **differ:** classify a moved success status code as breaking unless the old code is still declared ([#623](https://github.com/workos/oagen/issues/623)) ([8500c98](https://github.com/workos/oagen/commit/8500c98e627b3286883f0b6f8513663d038c6fd4))
+* **differ:** compare a request body's required flag on a body carried in its contents alone ([#582](https://github.com/workos/oagen/issues/582)) ([46034df](https://github.com/workos/oagen/commit/46034df5eb97b6c6e71183c32b1134334e717568))
+* **differ:** compare a webhook's required flag only while both sides carry a payload ([#453](https://github.com/workos/oagen/issues/453)) ([4fdc070](https://github.com/workos/oagen/commit/4fdc0704881c903bf3610ddfcb4d15f8e7fedcd4))
+  * `oagen diff` now exits `0`, instead of `2` or `1`, for a required webhook body that has no typed payload on one side.
+* **differ:** keep a variant added to an inline union additive ([#458](https://github.com/workos/oagen/issues/458)) ([04fd615](https://github.com/workos/oagen/commit/04fd615ece95cd9c5632e48b6d624e788306b5ab))
+  * `oagen diff` now exits `1` (was `2`) for a variant added to an inline union of a field, a response or a request body.
+  * A request-body union's `mapping` targets in the IR drop their `#/components/schemas/` prefix (`Bird` instead of `#/components/schemas/Bird`), which an emitter reading that mapping will see.
+* **differ:** read a moved security default only from a node that inherits it in both documents ([#454](https://github.com/workos/oagen/issues/454)) ([d5125dc](https://github.com/workos/oagen/commit/d5125dc40aa29342984b8e28042e4a783757476d))
+* **differ:** report a body moved between two models both documents declare as retyped ([#455](https://github.com/workos/oagen/issues/455)) ([c2fab5c](https://github.com/workos/oagen/commit/c2fab5cc44eacd42b8c266aedfe953d8157f8290))
+  * `oagen diff` now exits `2` instead of `1` for one change: an operation's form-only `$ref: Note` body that becomes a JSON `Note` beside a form `NoteCopy`, with both documents declaring both models, is reported as `retyped: ['application/x-www-form-urlencoded']`.
+* **differ:** report a list envelope field added, removed or retyped ([#459](https://github.com/workos/oagen/issues/459)) ([5ecb2dd](https://github.com/workos/oagen/commit/5ecb2dd675c77230a218719eba10ebceb6d6f387))
+  * Two list endpoints that share an inline `page_info` now exit `2` instead of `1` in `oagen diff` when a field is added to one of them.
+* **differ:** report a move to or from an unread content map and keep JSON-to-JSON moves additive ([#460](https://github.com/workos/oagen/issues/460)) ([0252f8a](https://github.com/workos/oagen/commit/0252f8a90663fb18ce75bc8113f2c57733dd2923))
+  * The IR gains `Parameter.contentTypes`, and a move between JSON media types now exits `1` instead of `2` in `oagen diff`.
+* **differ:** report a primary replaced among several 2xx responses as removed, not as a move ([#583](https://github.com/workos/oagen/issues/583)) ([97006d3](https://github.com/workos/oagen/commit/97006d31e15f7ebc63525b71253d7a16b12e486c))
+* **differ:** report an operation gaining or losing its only 2xx/3xx when it has no body ([#456](https://github.com/workos/oagen/issues/456)) ([7e858d2](https://github.com/workos/oagen/commit/7e858d265d9e8b2b168306523f08d82f90cf9cef))
+* **differ:** report no header or media type of a 2xx added to an operation that had none ([#457](https://github.com/workos/oagen/issues/457)) ([9228076](https://github.com/workos/oagen/commit/92280767ba9a42a7fdbd79aff890662f3a875ad1))
+* **parser:** a content or headers written beside a $ref contests no title, as it types nothing ([#645](https://github.com/workos/oagen/issues/645)) ([0e8ac8d](https://github.com/workos/oagen/commit/0e8ac8d124d69597266553ee6230e91aa12bdf5f))
+* **parser:** accept an x-pagination stop field every oneOf variant declares ([#463](https://github.com/workos/oagen/issues/463)) ([efc256d](https://github.com/workos/oagen/commit/efc256dfa30070cdecdb605de3416b4c52ba84e2))
+* **parser:** build a component field's array items from the oneOf or allOf beside their properties ([#489](https://github.com/workos/oagen/issues/489)) ([2a3cb22](https://github.com/workos/oagen/commit/2a3cb226d5380f8d1c680a98ac717beacbbc0461))
+* **parser:** combine an array's items across allOf members as a property's declarations ([#482](https://github.com/workos/oagen/issues/482)) ([9001210](https://github.com/workos/oagen/commit/90012109513960d9ea9d93c70b68507eccbaa453))
+  * Typed array items that already worked change (`integer[]` → `string[]`, `Dog[]` → `Pet[]`).
+* **parser:** compare limits at every level of a field's type before a component takes an error body ([#639](https://github.com/workos/oagen/issues/639)) ([d055ef7](https://github.com/workos/oagen/commit/d055ef7e419ef41d1f119c1964d85c6aa8f9264e))
+* **parser:** conjoin a $ref and an inline allOf, or two $refs, that declare one allOf property ([#653](https://github.com/workos/oagen/issues/653)) ([e7da9d8](https://github.com/workos/oagen/commit/e7da9d8d0569f2c4f51285e809cbd03f8d2d821f))
+* **parser:** conjoin an object $ref and an inline object declaring one property ([#483](https://github.com/workos/oagen/issues/483)) ([01ee6d5](https://github.com/workos/oagen/commit/01ee6d5a7f06a310268593c9cb861cc20cbdbaae))
+* **parser:** contest a title between an inline allOf's $ref and inline members ([#498](https://github.com/workos/oagen/issues/498)) ([abf7071](https://github.com/workos/oagen/commit/abf70715d872dd98fff618cbb1bc2ff4b81b8dbc))
+  * When an inline `allOf` merges a component whose union gives a title another shape than a union of the same root does, no variant keeps that title: each takes its context-qualified name (`Circle` → `CircleBaseShape`, `CreateDrawingCircle` → `CircleCreateDrawingRequestMarkerShape`), and the discriminator mappings follow.
+* **parser:** contest a title only among unions the parser types ([#495](https://github.com/workos/oagen/issues/495)) ([7396835](https://github.com/workos/oagen/commit/7396835474ef11974370804da6bcd137d019478d))
+  * A titled union variant whose title only a union the parser never types contested keeps its bare title again (`CircleGetDrawingResponseShape` → `Circle`), and the discriminator mapping follows.
+* **parser:** count a response body as received only under media types whose schema is read ([#649](https://github.com/workos/oagen/issues/649)) ([f31caa5](https://github.com/workos/oagen/commit/f31caa53e1049832c9dfc6c40675352a1b5780e9))
+* **parser:** decide every contested callback name of a round together, in identity order ([#628](https://github.com/workos/oagen/issues/628)) ([fe3c3d4](https://github.com/workos/oagen/commit/fe3c3d438b8e9a132737f3cd7a825dcb0892f916))
+* **parser:** derive an inline union's discriminator mapping from its $ref variants' consts ([#590](https://github.com/workos/oagen/issues/590)) ([f952e3c](https://github.com/workos/oagen/commit/f952e3c98e59531c0ad4afa7f9c273ebf7773345))
+* **parser:** document a wrapped inline enum and request body by the one wrapper rule ([#500](https://github.com/workos/oagen/issues/500)) ([a67bd1d](https://github.com/workos/oagen/commit/a67bd1d5044c2f0c0388225d8c164bcb01f46d70))
+* **parser:** drop text beside an unresolved response $ref in OAS 3.0 ([#543](https://github.com/workos/oagen/issues/543)) ([f629056](https://github.com/workos/oagen/commit/f629056d9191788165a685a4b91d9d627d5772ac))
+* **parser:** end the extraction at a merge it is already materializing ([#566](https://github.com/workos/oagen/issues/566)) ([#596](https://github.com/workos/oagen/issues/596)) ([0f2f8e1](https://github.com/workos/oagen/commit/0f2f8e1aa292498d32621b936eb60ed72c852ac8))
+* **parser:** end the title walk at a conjunction it has already read ([#551](https://github.com/workos/oagen/issues/551)) ([4748709](https://github.com/workos/oagen/commit/4748709e01e9de2dbec01c68d2f536b1c0bd1f77))
+* **parser:** fold only what a Json model reaches, off enum names, with its x-* keys ([#521](https://github.com/workos/oagen/issues/521)) ([3fc4635](https://github.com/workos/oagen/commit/3fc46350ba50d451a8209689ec18cfcf90b19b2b))
+* **parser:** follow a schema $ref deeper into a component as the JSON Pointer it is ([#592](https://github.com/workos/oagen/issues/592)) ([695bfc5](https://github.com/workos/oagen/commit/695bfc5f246ad373d90741b2b99a1d2a6f558142))
+* **parser:** give a field an array component's limits and docs, a nullable oneOf one included ([#493](https://github.com/workos/oagen/issues/493)) ([f9422aa](https://github.com/workos/oagen/commit/f9422aab5d9799a5b632cbd5d2a489e90a0df21c))
+  * The model of a nullable `oneOf` array component is dropped, and its list envelope is paginated.
+* **parser:** give an allOf combined with a oneOf/anyOf one reading at every site ([#597](https://github.com/workos/oagen/issues/597)) ([82b13d0](https://github.com/workos/oagen/commit/82b13d07d475abb4370bf13fc4ae8752c6ae4225))
+* **parser:** give each operation reusing an operationId its own inline models ([#481](https://github.com/workos/oagen/issues/481)) ([6608e0d](https://github.com/workos/oagen/commit/6608e0d1d10817e553fd609196f7c2c558d44d22))
+  * Operations that reuse an `operationId` with identical bodies are split into two models, and the one whose path sorts first keeps the `operationId`'s names.
+* **parser:** give each value of a flattened discriminator its own variant's text ([#499](https://github.com/workos/oagen/issues/499)) ([481afaf](https://github.com/workos/oagen/commit/481afafde8693cf7c51c2f940cfada1c1a5af77b))
+  * Variant descriptions move from `Enum.description` and `Field.description` to `EnumValue.description`.
+* **parser:** hash a webhook key and an operationId of one text apart, so neither payload is lost ([#652](https://github.com/workos/oagen/issues/652)) ([f783779](https://github.com/workos/oagen/commit/f7837792136336fd5f369bc0b4bc65f37f811f52))
+* **parser:** ignore Accept, Content-Type and Authorization headers ([#542](https://github.com/workos/oagen/issues/542)) ([c4b6823](https://github.com/workos/oagen/commit/c4b6823f9a12326ab2625c3458bac26c17f773c7))
+* **parser:** ignore the content and headers beside a response $ref that resolves to nothing ([#574](https://github.com/workos/oagen/issues/574)) ([a696bd8](https://github.com/workos/oagen/commit/a696bd81d14f369f6106a19d9abc941e4d3ecb8d))
+* **parser:** iterate the items a component field's allOf model holds ([#549](https://github.com/workos/oagen/issues/549)) ([249666a](https://github.com/workos/oagen/commit/249666a96cbc1f0277d73a37ae481f4ae5818feb))
+* **parser:** keep a deprecated header schema's flag on the header ([#518](https://github.com/workos/oagen/issues/518)) ([296fcd9](https://github.com/workos/oagen/commit/296fcd94c6ad94e2fe344250e761db6f4106372b))
+  * `ResponseHeader.deprecated` is read from the header's schema, so existing headers can turn deprecated.
+* **parser:** keep a discriminated variant off its component's name ([#492](https://github.com/workos/oagen/issues/492)) ([6540560](https://github.com/workos/oagen/commit/65405602bafd009380db6b00127d2d2a2cdb91a3))
+  * A discriminated `allOf` + `oneOf`/`anyOf` component whose name starts with or equals a variant's const now has a dispatcher model and variant models named `<Component><Const>`, so the variant models it had under the component's own name are renamed.
+* **parser:** keep a field object of a component the SDK only sends off a looser component ([#524](https://github.com/workos/oagen/issues/524)) ([52dd3bd](https://github.com/workos/oagen/commit/52dd3bdcba327d683f90e6475fff51daa7227a23))
+  * A field's object moves to a `…2` model (`Pet.owner` → `PetOwner2`).
+* **parser:** keep a nested collection's name when nothing tells it from the service path ([#478](https://github.com/workos/oagen/issues/478)) ([90076bc](https://github.com/workos/oagen/commit/90076bc1e639799ce7942a83ef0211d63f02ff54))
+  * Nested collections are renamed beyond the fix's subject (`getNote2` → `getNotes`).
+* **parser:** keep a plural segment and its singular as two words of a qualifier ([#476](https://github.com/workos/oagen/issues/476)) ([4342346](https://github.com/workos/oagen/commit/43423468b0776a7f47f13027366c44e436048af2))
+  * An existing name such as `listNotes` can now go to another path.
+* **parser:** keep a response whose one property is a union of tagged objects ([#487](https://github.com/workos/oagen/issues/487)) ([87dccf9](https://github.com/workos/oagen/commit/87dccf9c531ce507ddcaf5b170f9f16a8d57adbf))
+  * `Operation.response` moves from the first variant's model to the body model (`Circle` → `GetShapeResponse`).
+* **parser:** keep a secondary 2xx envelope that lacks the override's stop field ([#465](https://github.com/workos/oagen/issues/465)) ([365b31b](https://github.com/workos/oagen/commit/365b31bde7eafb752627ecb82f549168488d7b72))
+  * `oagen diff` reports a kept secondary `201` as retyped, which it classifies as breaking.
+* **parser:** keep a variant's const or enum over a wider property written beside its oneOf ([#488](https://github.com/workos/oagen/issues/488)) ([0221fbe](https://github.com/workos/oagen/commit/0221fbe0a343271f1e98579fa8381ba4e5197b0d))
+  * Discriminator mappings are filled, variants are renamed, and a discriminated request body is flattened into one model.
+* **parser:** keep an allOf-annotated enum $ref over a variant's enum ([#550](https://github.com/workos/oagen/issues/550)) ([fd38d16](https://github.com/workos/oagen/commit/fd38d16fd1a77ff9727975daa62fe00afd88670c))
+* **parser:** keep an operation's summary out of its description ([#557](https://github.com/workos/oagen/issues/557)) ([c191327](https://github.com/workos/oagen/commit/c19132731c6f50f164a60f5a487917b8c246e251))
+* **parser:** keep deprecated on a flattened discriminator's values ([#544](https://github.com/workos/oagen/issues/544)) ([abd2134](https://github.com/workos/oagen/commit/abd213442c20f241a4fa7fafeba9c8553277ae1f))
+* **parser:** keep requestBodyRequired on a body carried in requestBodyContents alone ([#474](https://github.com/workos/oagen/issues/474)) ([6d8bcda](https://github.com/workos/oagen/commit/6d8bcda2d14cd99c3ef32e2330161fb06b9a6250))
+  * `requestBodyRequired` is set on bodies carried in `requestBodyContents` alone, and dropped from a webhook payload with no media type.
+* **parser:** keep the live copy when one operation's success bodies differ only by deprecated ([#647](https://github.com/workos/oagen/issues/647)) ([6e5d46a](https://github.com/workos/oagen/commit/6e5d46ae2438918e8d289f164b7973bb67080769))
+* **parser:** keep the wrapper layer's description on a response body merged from an inline allOf ([#640](https://github.com/workos/oagen/issues/640)) ([ea8e8b7](https://github.com/workos/oagen/commit/ea8e8b70a9f9798d1b8af852354dbb21770f870f))
+* **parser:** let a deprecated component admit no inline copy, so deprecating one is a flag flip ([#625](https://github.com/workos/oagen/issues/625)) ([dbc08a9](https://github.com/workos/oagen/commit/dbc08a9e11877151bb635f5c0256ed17708925cd))
+* **parser:** let a deprecated component, or one that deprecates a field, take no live error body ([#644](https://github.com/workos/oagen/issues/644)) ([08d3078](https://github.com/workos/oagen/commit/08d3078b2c83d47b908529777449007e778834d4))
+* **parser:** map a wrapped named-union variant by the one model it wraps ([#490](https://github.com/workos/oagen/issues/490)) ([09bc5bd](https://github.com/workos/oagen/commit/09bc5bd60641be12d31497197116193e5467e98b))
+* **parser:** map a wrapped variant beside an enum or array $ref ([#552](https://github.com/workos/oagen/issues/552)) ([c344f40](https://github.com/workos/oagen/commit/c344f40f0d58aff4ad5dd43b1cd8b201072b49b0))
+* **parser:** name a component response's headers and bodies before any operation's own ([#509](https://github.com/workos/oagen/issues/509)) ([1cfac21](https://github.com/workos/oagen/commit/1cfac2119de79b38c494487d837581c53a713c29))
+  * The first operation returning a component can now rename an earlier operation's clashing name.
+* **parser:** name a later 2xx's secondary body for its status code, never the primary's ([#581](https://github.com/workos/oagen/issues/581)) ([22236ec](https://github.com/workos/oagen/commit/22236ecebbe653c8fdfd35c9785a112716e6498f))
+* **parser:** name a secondary 2xx or 3xx body for itself, not by the primary's shape ([#511](https://github.com/workos/oagen/issues/511)) ([658ae06](https://github.com/workos/oagen/commit/658ae0603f871eb165dcb045e656e024f82bf071))
+  * A later 2xx body never shares the primary's models: a `201` identical to the `200` is `CreatePetResponse201`, its nested models and inline enums follow (`CreatePetResponse201Owner`, `CreatePetResponse201Status`), and a component's JSON body at a 3xx is `CardResponse` instead of `CardApplicationJsonResponse`.
+* **parser:** name a secondary media type's model from what `oagen diff` compares ([#517](https://github.com/workos/oagen/issues/517)) ([3b23424](https://github.com/workos/oagen/commit/3b234241ef7570161ee929a083fafe6210c46e70))
+  * A secondary body's model name no longer carries a `charset` value or its parameters' written order (`…CharsetUtf8Response` → `…CharsetResponse`, `…B2A1Response` → `…A1B2Response`).
+* **parser:** name a shared error body from its required fields alone ([#598](https://github.com/workos/oagen/issues/598)) ([080852c](https://github.com/workos/oagen/commit/080852cafe51c31c3f4cf36e689f399ec271a3b6))
+* **parser:** name a shared error body's inline enum from its field, never from an operation ([#648](https://github.com/workos/oagen/issues/648)) ([6cfda41](https://github.com/workos/oagen/commit/6cfda41b8ef667f026b581c3db2bc3426dd90d82))
+* **parser:** name an action the same whatever else the document declares ([#480](https://github.com/workos/oagen/issues/480)) ([5a5ac13](https://github.com/workos/oagen/commit/5a5ac1382c791b39e6b2ba96d6804f771ea9b715))
+  * Actions are renamed in documents that add nothing (`bulkDelete` → `createBulkDelete`, `listAll` → `listAllPets`).
+* **parser:** name an allOf response body for its operation, not a variant's const ([#485](https://github.com/workos/oagen/issues/485)) ([53f6b7b](https://github.com/workos/oagen/commit/53f6b7b48cc8c848a1d5a5e78107494f187c59d3))
+  * `allOf` response bodies are renamed after their operation (`Cat` → `CreatePetResponse`).
+* **parser:** name the models of two operationIds that clean to one stem apart, never shared ([#655](https://github.com/workos/oagen/issues/655)) ([7043154](https://github.com/workos/oagen/commit/7043154faa607d003c0e0f27ab99c382063676e2))
+* **parser:** name the service from the first tag that has a name ([#475](https://github.com/workos/oagen/issues/475)) ([5526a05](https://github.com/workos/oagen/commit/5526a05484630d34a8726245d142281b76846681))
+  * An operation moves out of the `""` service, the models named after it are renamed (`Filter` → `NotesFilter`), and whitespace-only tags are dropped.
+* **parser:** number a parameter or header model stem as it is cased, behind `No` after a digit ([#578](https://github.com/workos/oagen/issues/578)) ([fd74e94](https://github.com/workos/oagen/commit/fd74e944566dd34e7eecf6153c7ec2b6dbabdd6f))
+* **parser:** qualify a dropped inline twin rather than orphan its nested model ([#522](https://github.com/workos/oagen/issues/522)) ([f040398](https://github.com/workos/oagen/commit/f040398f35eee5d13b2d282ead7607c5cf6f39e0))
+  * An operation's response moves to a qualified model (`getA: Note` → `GetANote`).
+* **parser:** qualify a field named like its component as ReplyReply instead of Reply2 ([#635](https://github.com/workos/oagen/issues/635)) ([2aa1d17](https://github.com/workos/oagen/commit/2aa1d17cf5cb8dc838befa433824acb955209fc1))
+* **parser:** qualify a later variant that repeats a contested title ([#496](https://github.com/workos/oagen/issues/496)) ([f23434e](https://github.com/workos/oagen/commit/f23434e6aca93896181bd632ba6e40af0251acdd))
+  * A later union variant that repeats a contested title takes its context-qualified name (`Circle` → `DrawingShapeWithDiameter`, or `CircleDrawingShapeItem` among an array variant's items), and the discriminator mapping follows.
+* **parser:** qualify a renamed inline model by its path, not the derived operation name ([#503](https://github.com/workos/oagen/issues/503)) ([332b118](https://github.com/workos/oagen/commit/332b118f7a1de18f315a784dc534b7e8ee5f7dce))
+* **parser:** qualify an operation's header and parameter models by its operationId stem ([#579](https://github.com/workos/oagen/issues/579)) ([b9343b7](https://github.com/workos/oagen/commit/b9343b7dfbb56f93d8fdac2aea327f66218a1222))
+* **parser:** read a bare $ref alias of an object component as a model carrying its fields ([#646](https://github.com/workos/oagen/issues/646)) ([9475c28](https://github.com/workos/oagen/commit/9475c2812745ca6f2cd13234a6e2512c69736100))
+* **parser:** read a component's union beside an allOf that only annotates as the named union ([#658](https://github.com/workos/oagen/issues/658)) ([5dd50fa](https://github.com/workos/oagen/commit/5dd50fad78daf33884d19258ec6f57e54429b152))
+* **parser:** read a discriminator's const through an allOf, a nullable wrapper or an alias chain ([#656](https://github.com/workos/oagen/issues/656)) ([ff13ab9](https://github.com/workos/oagen/commit/ff13ab9901025d50dc3f0922f5f75d4ae9f2fce1))
+* **parser:** read a list envelope whose data is a pointer to an array as the list it is ([#638](https://github.com/workos/oagen/issues/638)) ([7ea9b2f](https://github.com/workos/oagen/commit/7ea9b2fcfa16e020b15ac88b83b51eb7e4523cd6))
+* **parser:** read a list envelope whose stop field sits in a oneOf beside its allOf as a list ([#643](https://github.com/workos/oagen/issues/643)) ([d3d9ad5](https://github.com/workos/oagen/commit/d3d9ad58368b0f98140979aeca1e45d8b3868b1f))
+* **parser:** read a null variant in any spelling ([#467](https://github.com/workos/oagen/issues/467)) ([171f4d9](https://github.com/workos/oagen/commit/171f4d99b79f7180a9b22f4345d8f99225de01ab))
+  * Some named-union models become nullable enums, which shifts later `variant_<n>` positions.
+* **parser:** read a nullable const union beside an enum list as the enum, not its one variant ([#586](https://github.com/workos/oagen/issues/586)) ([379ecfb](https://github.com/workos/oagen/commit/379ecfba4a18ba537880bdf905acf24ecf7c915a))
+* **parser:** read a nullable wrapper around an inline enum component as the enum, never an alias ([#654](https://github.com/workos/oagen/issues/654)) ([5e78830](https://github.com/workos/oagen/commit/5e78830a26b7e7d31f64c9bf2b59c1f237777d22))
+* **parser:** read a response header's externalDocs from an annotating allOf member ([#637](https://github.com/workos/oagen/issues/637)) ([4b979e6](https://github.com/workos/oagen/commit/4b979e69a89d3f6ef15c6c33ff81bd547df1e266))
+* **parser:** read a stop field in any spelling ([#464](https://github.com/workos/oagen/issues/464)) ([4de4a9c](https://github.com/workos/oagen/commit/4de4a9c2d38ee9a7996baa62712cad679f939686))
+  * `{ data, HasNext }`-style envelopes are no longer read as lists, and the stop field moves in two cases.
+* **parser:** read a webhook operationId that names nothing as absent, as an operation's ([#577](https://github.com/workos/oagen/issues/577)) ([0b369a1](https://github.com/workos/oagen/commit/0b369a1887a7eecef3f7420acfc9e429f6cd7c4d))
+* **parser:** read a webhook whose name starts with x- ([#553](https://github.com/workos/oagen/issues/553)) ([227adce](https://github.com/workos/oagen/commit/227adce4a0e6dcc93a3383bf1d703c00b197a981))
+* **parser:** read an allOf of one typing member beside annotating members as that member ([#587](https://github.com/workos/oagen/issues/587)) ([8426468](https://github.com/workos/oagen/commit/8426468579e90ecf98d7d2836a4f7a76aac1e432))
+* **parser:** read an operationId that names nothing as absent ([#547](https://github.com/workos/oagen/issues/547)) ([b56d496](https://github.com/workos/oagen/commit/b56d496bd491003605404769e0c79b5c1551f6c4))
+* **parser:** read an operationIdTransform result that names nothing as no operationId ([#576](https://github.com/workos/oagen/issues/576)) ([976890e](https://github.com/workos/oagen/commit/976890e7f32b18a401e0d55363150d7e854969f7))
+* **parser:** read each entry of a type list by its own keywords, never as the same model twice ([#650](https://github.com/workos/oagen/issues/650)) ([bdc14b1](https://github.com/workos/oagen/commit/bdc14b1075841b9ed04dbe400736d86e1a220e41))
+* **parser:** read no requestBody from a +json media range ([#473](https://github.com/workos/oagen/issues/473)) ([3eccb5e](https://github.com/workos/oagen/commit/3eccb5e91edebd421a296ec290e20b33e3251e38))
+  * A key the parser reads beside a `+json` range becomes the `requestBody`, and a query parameter named like a property of a range-only body is kept.
+* **parser:** read the names a …Json fold renames per kind, a model's apart from an enum's ([#595](https://github.com/workos/oagen/issues/595)) ([e6a07e0](https://github.com/workos/oagen/commit/e6a07e0387448f2006e61c8005f14945c021910e))
+* **parser:** read the stop field beside every object a nested dataPath passes through ([#462](https://github.com/workos/oagen/issues/462)) ([f2e9b4f](https://github.com/workos/oagen/commit/f2e9b4f09a83a494d6559329d346ec8250e7f8e6))
+  * `pagination.endOfIteration` changes for documents that already parsed (`totalCount@result.page.total` → `hasMore@result.has_more`).
+* **parser:** reject a stop field the flattened allOf model lacks ([#548](https://github.com/workos/oagen/issues/548)) ([04623c0](https://github.com/workos/oagen/commit/04623c07d60b7ae37bf37f3df2e9c4ede71fc892))
+* **parser:** resolve a path item $ref to a paths or webhooks entry ([#554](https://github.com/workos/oagen/issues/554)) ([7fa6747](https://github.com/workos/oagen/commit/7fa6747a1a2498c4f19c5b9f8d8438123de97b32))
+* **parser:** restore an item's service noun as written when the singular is taken ([#477](https://github.com/workos/oagen/issues/477)) ([0234bc1](https://github.com/workos/oagen/commit/0234bc18b2103de4d0fbd27343e4ffdc6e5514db))
+  * Items are renamed beyond the fix's subject (`get3` → `getNotes2`).
+* **parser:** set numbers and hashes in model and enum names off from a trailing digit ([#520](https://github.com/workos/oagen/issues/520)) ([8bf46a1](https://github.com/workos/oagen/commit/8bf46a1c8bab1cd6b554724e01ae84a593110c97))
+* **parser:** settle a mapping pointer outside the union's variants to the model it points at ([#660](https://github.com/workos/oagen/issues/660)) ([c84a8b4](https://github.com/workos/oagen/commit/c84a8b47ae846485a92ccb1e6d4023ee191d0891))
+* **parser:** settle an explicit dataPath through a pointer site onto the model its items hold ([#651](https://github.com/workos/oagen/issues/651)) ([099fca7](https://github.com/workos/oagen/commit/099fca76de87fba121946528f9ddb2da171f6e0e))
+* **parser:** share a stepped enum name only within the operation that stepped to it ([#519](https://github.com/workos/oagen/issues/519)) ([985968f](https://github.com/workos/oagen/commit/985968fb480b7afe454eea956635e54c8438e315))
+* **parser:** share one model between identical field and response copies leaving a name ([#523](https://github.com/workos/oagen/issues/523)) ([6c947ca](https://github.com/workos/oagen/commit/6c947cad19eee46b542257ae1c8b2d807d7402c6))
+  * A field's object moves to a `…2` model (`Pet.owner` → `PetOwner2`).
+* **parser:** skip a Content-Type response header in the sent-only component walk ([#594](https://github.com/workos/oagen/issues/594)) ([a63ef89](https://github.com/workos/oagen/commit/a63ef896535dc069a10b9b12d6e7c3084c3e1112))
+* **parser:** skip a response entry that is not an object with a warning instead of a TypeError ([#633](https://github.com/workos/oagen/issues/633)) ([deadc24](https://github.com/workos/oagen/commit/deadc247e6e5c42a1abc6918d3859f88e5c1533f))
+* **parser:** spell a stepped discriminated variant's number behind No after a digit (PetV2No2) ([#636](https://github.com/workos/oagen/issues/636)) ([956cce9](https://github.com/workos/oagen/commit/956cce9c419b41b0b93942087324a95191da9c28))
+* **parser:** split a path segment only at a custom method's colon ([#461](https://github.com/workos/oagen/issues/461)) ([8e7d939](https://github.com/workos/oagen/commit/8e7d9390982eebbdbf00ba3b0f6fc7f023f44cb9))
+  * A segment a parameter opens with several colons after it (`{petId}:adopt:now`) is read as a literal, so operation, service and model names change (`listNow` → `listPetIdAdoptNow`).
+* **parser:** step a component response's body past an operation's own inline body ([#510](https://github.com/workos/oagen/issues/510)) ([5984eb8](https://github.com/workos/oagen/commit/5984eb8465bdf4a3a89dabc40279e59a260936db))
+  * The body of a response shared through `components/responses` steps by number past every name an operation's own inline success body mints (`CardResponse` → `CardResponse2`, its nested models following as `CardResponse2XMeta`).
+* **parser:** step a parameter or header model past a nested enum in either order ([#504](https://github.com/workos/oagen/issues/504)) ([a7efb54](https://github.com/workos/oagen/commit/a7efb54ab5909a400d4802bd9575de52d1a3cc10))
+  * Models are renamed in documents that declare the object before the enum.
+* **parser:** step a union variant around names taken at any depth ([#494](https://github.com/workos/oagen/issues/494)) ([e158d18](https://github.com/workos/oagen/commit/e158d189deba234d52d097878125ed30e91e0357))
+  * A non-object union variant whose models would take a name already taken under another variant of the same union steps to its next context: its models are renamed (`GetPetResponseShapeVariant2` → `GetPetResponseShapeVariant2Value`), and the shape that was dropped is emitted.
+* **parser:** strip every trailing overload marker from an operationId ([#575](https://github.com/workos/oagen/issues/575)) ([873b8df](https://github.com/workos/oagen/commit/873b8df96643d9c7bee29aff9d66468a16a23eb0))
+* **parser:** tell two singletons apart by the parent's plural rather than a number ([#479](https://github.com/workos/oagen/issues/479)) ([fcb2f37](https://github.com/workos/oagen/commit/fcb2f37188d05947fba7a21de2a67a065a3a7b3c))
+  * Singletons are renamed beyond the fix's subject (`updatePets2` → `updatePet2`).
+* **parser:** type a $ref to a const, multi-type or untyped component as the schema inline ([#589](https://github.com/workos/oagen/issues/589)) ([48fc9f6](https://github.com/workos/oagen/commit/48fc9f6edd6a4d4017468c4de2cb4fa743d6b5dd))
+* **parser:** type a $ref to a primitive component as the primitive ([#558](https://github.com/workos/oagen/issues/558)) ([dd18d8e](https://github.com/workos/oagen/commit/dd18d8e91083462a208a17f1bb8c7e1e2b92ba55))
+* **parser:** type a $ref to an alias of an enum component as the enum ([#588](https://github.com/workos/oagen/issues/588)) ([cb88c06](https://github.com/workos/oagen/commit/cb88c0632a999cad6ff7e408a9100976e3e118cf))
+* **parser:** type a request body written as a oneOf of string consts as the enum anyOf gives ([#642](https://github.com/workos/oagen/issues/642)) ([6f6f1f5](https://github.com/workos/oagen/commit/6f6f1f59dc8a811b9cf1d882b53e6e54bbc7de2f))
+* **parser:** type variant declarations differing only in flags, limits or docs as one shape ([#484](https://github.com/workos/oagen/issues/484)) ([d6438bd](https://github.com/workos/oagen/commit/d6438bdd106461d64686b721912ef1366038868d))
+  * Disputed descriptions are dropped, and `(string[] | string[])`-style unions collapse.
+* **parser:** unwrap a list envelope whose data array is an allOf of the array ([#466](https://github.com/workos/oagen/issues/466)) ([4cca169](https://github.com/workos/oagen/commit/4cca169c5eeb75cfe07a9887dc5fdf828b4de660))
+  * An envelope whose `allOf`-wrapped `data` sits beside a plain array is no longer paginated, and some item models are renamed.
+* **parser:** walk an explicit dataPath through the variants of a oneOf/anyOf ([#585](https://github.com/workos/oagen/issues/585)) ([8ba90dd](https://github.com/workos/oagen/commit/8ba90dd0134aac49e079525c00360458969d2e15))
+* **parser:** warn on a response $ref that is not a string, as the webhook reader does ([#573](https://github.com/workos/oagen/issues/573)) ([2b6c95f](https://github.com/workos/oagen/commit/2b6c95f3433808ae9bf78a3de04eea743d47a9b5))
+* **parser:** wrap a $ref to a nullable object component in nullable, as the same schema inline is ([#641](https://github.com/workos/oagen/issues/641)) ([ebd7095](https://github.com/workos/oagen/commit/ebd70950ab876f25f6af18df3fd5f513a09ae082))
+* **utils:** singularize a -ses or -xes word in a model name as a path segment is (causes → Cause) ([#632](https://github.com/workos/oagen/issues/632)) ([5c3ff40](https://github.com/workos/oagen/commit/5c3ff40c2d2f213c30e7a6cc5dd276198d0e8b78))
+
 ## [0.34.1](https://github.com/workos/oagen/compare/v0.34.0...v0.34.1) (2026-10-30)
 
 
