@@ -893,9 +893,11 @@ function objectProperties(
  * objects merge their properties — `pagination.next` from one member and
  * `pagination.total` from another both belong to the response, as they do
  * to the wrapper's model — two arrays combine their `items` by the same
- * rule, an inline object and a `$ref` to an object component become the
- * `allOf` of both, read through as any `allOf` member is (`result.items`
- * from `PetPage` beside `result.total_pages`), and otherwise the first
+ * rule, two declarations that each describe an object — an inline object,
+ * a `$ref` to an object component, an `allOf` that reaches one — become
+ * the `allOf` of both, read through as any `allOf` member is
+ * (`result.items` from `PetPage` beside `result.total_pages`, written
+ * inline or under an `allOf`; #432, #571), and otherwise the first
  * declaration that declares a type types it, a typeless one only annotating
  * it.
  *
