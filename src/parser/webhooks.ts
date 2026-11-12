@@ -58,6 +58,7 @@ import {
 import { externalDocsEntry } from './external-docs.js';
 import { resolvePathItemRef } from './path-item-refs.js';
 import { followReference, type SiblingDocs } from './reference-objects.js';
+import { isResponseEntry, isResponsesObject } from './response-refs.js';
 import { classifyResponseKey, warnUnrecognizedResponseKey } from './responses.js';
 import { extractSecurityRequirements } from './security.js';
 
@@ -1672,7 +1673,12 @@ function buildWebhook(
  * under `'ignore'` (3.0), as beside every Reference Object
  * (`followReference`). A ref that leads nowhere, or anywhere else, keeps the
  * status code with a warning, and the description beside it by that rule, as
- * an operation's response does. A blank description is omitted.
+ * an operation's response does. A blank description is omitted. An entry at
+ * a status code that is not an object (`200: "oops"`, `null`, `7`) is no
+ * Response Object and no Reference Object: it is warned about once, naming
+ * the site, and skipped, and a `responses` that is not an object at all is
+ * read as absent, with a warning — as on an operation (`isResponseEntry`,
+ * `isResponsesObject`, #617).
  */
 function extractWebhookResponses(
   responses: OperationObject['responses'],
@@ -1681,11 +1687,21 @@ function extractWebhookResponses(
   siblingDocs: SiblingDocs,
 ): WebhookResponse[] {
   const result: WebhookResponse[] = [];
+  // A `responses` that is not an object is no Responses Object: warned
+  // about once and read as absent, as on an operation (#617).
+  if (responses !== undefined && !isResponsesObject(responses, label)) responses = undefined;
   for (const [code, raw] of Object.entries(responses ?? {})) {
     const responseKey = classifyResponseKey(code);
     if (responseKey.kind === 'unrecognized') warnUnrecognizedResponseKey(code, label);
     if (responseKey.kind !== 'status') continue;
-    const description = presentText(resolveResponseDescription(raw, componentResponses, code, label, siblingDocs));
+    // An entry that is not an object (`200: "oops"`) is no Response Object
+    // and no Reference Object: warned about once, naming the site and the
+    // code, and skipped, as on an operation (#617). Only a status code is
+    // checked, since only one is read.
+    if (!isResponseEntry(raw, `${code} response of ${label}`)) continue;
+    const read = resolveResponseDescription(raw, componentResponses, code, label, siblingDocs);
+    if (read.skip) continue;
+    const description = presentText(read.description);
     result.push({ statusCode: responseKey.code, ...(description !== undefined ? { description } : {}) });
   }
   return result;
@@ -1699,17 +1715,26 @@ function extractWebhookResponses(
  * `$ref` that is not a string, or a ref nothing answers is warned about and
  * the walk's last object read as written, by the same rule: the text beside
  * the refs under `'override'`, none under `'ignore'`. The warning says
- * whether that leaves a description beside the status code.
+ * whether that leaves a description beside the status code. A chain that
+ * ends on a `components/responses` entry that is no object (`Gone: []`) is
+ * the inline case behind a pointer: it goes through `isResponseEntry` as an
+ * inline entry does, warned about naming the component and the site, and
+ * `{ skip: true }` tells the caller to skip the status code, as an
+ * operation skips the entry (#617).
  */
 function resolveResponseDescription(
-  raw: unknown,
+  raw: Record<string, unknown>,
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   code: string,
   label: string,
   siblingDocs: SiblingDocs,
-): string | undefined {
-  if (!isRecord(raw)) return undefined;
+): { skip: true } | { skip?: undefined; description?: string } {
   const followed = followReference<{ description?: unknown }>(raw, 'responses', componentResponses, siblingDocs);
+  if (followed.outcome === 'unresolved' && followed.found !== undefined) {
+    const { name, value } = followed.found;
+    if (!isResponseEntry(value, `components/responses/${name} (the ${code} response of ${label})`))
+      return { skip: true };
+  }
   const { description } = followed.value;
   const text = typeof description === 'string' ? description : undefined;
   const keeping =
@@ -1724,5 +1749,5 @@ function resolveResponseDescription(
         `no matching entry under components/responses. Keeping ${keeping}.`,
     );
   }
-  return text;
+  return { description: text };
 }

@@ -125,7 +125,7 @@ import {
 } from './responses.js';
 import type { ResponseKey } from './responses.js';
 import type { ItemSettlement, ResponseExtractionResult } from './responses.js';
-import { resolveResponseRef, type ReferenceObject } from './response-refs.js';
+import { isResponseEntry, isResponsesObject, resolveResponseRef, type ReferenceObject } from './response-refs.js';
 import { shapeWithEnumFlags } from './enum-members.js';
 import {
   materializeInlineSchema,
@@ -6212,6 +6212,9 @@ function collectOperationConstPrefixes(
     // fallback or a key OpenAPI does not define reserves nothing.
     const responseKey = classifyResponseKey(statusCode);
     if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 300) continue;
+    // An entry that is not an object reserves nothing; the operation warns
+    // about it once when it reads it (#617).
+    if (!isResponseEntry(response)) continue;
     // A Reference Object is not followed, and nothing beside its `$ref` is
     // read (#562): a `$ref` into `components/responses` names its inline
     // body after the component, so the consts it pins never prefix a
@@ -6607,7 +6610,13 @@ function operationBodyModelNames(
           const responseKey = classifyResponseKey(statusCode);
           if (responseKey.kind !== 'status' || responseKey.code < 200 || responseKey.code >= 400) return [];
           const code = responseKey.code;
+          // An entry that is not an object mints nothing; the operation
+          // warns about it once when it reads it (#617).
+          if (!isResponseEntry(response)) return [];
           const resolved = resolveResponseRef<ResponseObject>(response, componentResponses, key, 'override', 'silent');
+          // A ref whose chain ends on a component that is no object is left
+          // out, as the operation leaves it out (#617).
+          if (resolved === undefined) return [];
           return [{ code, inline: !('$ref' in response), pick: code < 300 ? primaryBodySchema(resolved) : {} }];
         });
         const primaryCode = primaryResponseEntry(entries, componentSchemas)?.code;
@@ -6639,7 +6648,11 @@ function componentResponseBodySchema(
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
   const component = componentResponses[componentName];
-  if (!component) return undefined;
+  // A component that is not an object (`Bad: "oops"`) declares no body, and
+  // neither does one whose chain ends on such a component; a `$ref` to
+  // either is reported by the operation that writes it, as the malformed
+  // entry it is (#617).
+  if (!isResponseEntry(component)) return undefined;
   const resolved = resolveResponseRef<ResponseObject>(
     component as ResponseObject | ReferenceObject,
     componentResponses,
@@ -6647,7 +6660,7 @@ function componentResponseBodySchema(
     'override',
     'silent',
   );
-  return primaryBodySchema(resolved).schema;
+  return resolved === undefined ? undefined : primaryBodySchema(resolved).schema;
 }
 
 /**
@@ -7063,6 +7076,9 @@ function readFallbackResponse(
     `${key} response of ${sink.opLabel}`,
     sink.ctx.refSiblingDescriptions,
   );
+  // A ref whose chain ends on a component that is no object is left out,
+  // after the warning, as an inline entry that is no object is (#617).
+  if (resolved === undefined) return;
   // A ref into `components/responses` names the body after the component,
   // as it does at a status code, so every operation that returns the
   // component — at any status, `default` or a range — shares one model; its
@@ -7405,28 +7421,50 @@ function extractResponses(
   // steps from (`stepSecondaryBody`), and whether it is a component's.
   const bodyContexts = new Map<number, { context: string; component: boolean }>();
 
-  // Every 2xx, 3xx and error entry is resolved once, here, and the loop
-  // below reads it from this map. The bundler leaves `$ref:
+  // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
+  // `[…]` — is no Responses Object, so no key could be read from it: it is
+  // warned about once and read as absent, as for an operation that declares
+  // none (#617).
+  if (responses !== undefined && !isResponsesObject(responses, opLabel)) responses = undefined;
+  // One pass over the map decides what the loop below reads, in document
+  // order. An entry that is not an object — `200: "oops"`, `null`, `7`,
+  // `true`, `[]` — is no Response Object and no Reference Object, so no
+  // branch below could read it: it is warned about once, naming the
+  // operation and the key, and left out, and the operation is read from its
+  // other entries (#617). Only a key a branch reads is checked: an `x-` key
+  // is an extension, which may hold anything, and a key OpenAPI does not
+  // define is reported on its own (`readFallbackResponse`), whatever it
+  // holds. Every 2xx, 3xx and error entry is then resolved once, here, and
+  // the loop reads it from `resolvedResponses`. The bundler leaves `$ref:
   // '#/components/responses/…'` in place, and a Reference Object has no
   // `headers` or `content` of its own to read, so the ref is resolved before
   // either is — its sibling `description` read by `ctx.refSiblingDescriptions`,
-  // an unresolvable one warned about once. Only a status code one of the
-  // branches below reads is resolved: `default`, a `2XX` range and an `x-`
-  // extension are left as written, as nothing here reads them, and a 1xx is
-  // read as written too.
+  // an unresolvable one warned about once, and one whose chain ends on a
+  // component that is no object (`Gone: []`) left out exactly as the inline
+  // entry is, after the same warning (`resolveResponseRef`). Only a status
+  // code one of the branches below reads is resolved here: `default` and a
+  // `2XX` range are resolved as they are read (`readFallbackResponse`), an
+  // `x-` extension is left as written, as nothing here reads it, and a 1xx
+  // is read as written too.
+  const entries: Array<[string, ResponseObject]> = [];
   const resolvedResponses = new Map<string, ResponseObject>();
-  for (const [statusCode, rawResponse] of Object.entries(responses ?? {})) {
-    const responseKey = classifyResponseKey(statusCode);
-    if (responseKey.kind !== 'status' || responseKey.code < 200) continue;
-    resolvedResponses.set(
-      statusCode,
-      resolveResponseRef<ResponseObject>(
-        rawResponse,
-        ctx.componentResponses,
-        `${statusCode} response of ${opLabel}`,
-        ctx.refSiblingDescriptions,
-      ),
-    );
+  for (const [key, raw] of Object.entries(responses ?? {})) {
+    const responseKey = classifyResponseKey(key);
+    if (responseKey.kind !== 'extension' && responseKey.kind !== 'unrecognized') {
+      const site = `${key} response of ${opLabel}`;
+      if (!isResponseEntry(raw, site)) continue;
+      if (responseKey.kind === 'status' && responseKey.code >= 200) {
+        const resolved = resolveResponseRef<ResponseObject>(
+          raw,
+          ctx.componentResponses,
+          site,
+          ctx.refSiblingDescriptions,
+        );
+        if (resolved === undefined) continue;
+        resolvedResponses.set(key, resolved);
+      }
+    }
+    entries.push([key, raw]);
   }
 
   // The override is accepted or rejected once, before any body is
@@ -7455,7 +7493,7 @@ function extractResponses(
   if (!responses)
     return { response, errors, inlineModels, isPaginated, overrideProblem, componentBodies: componentBodyTypes };
 
-  for (const [statusCode, rawResponse] of Object.entries(responses)) {
+  for (const [statusCode, rawResponse] of entries) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
     // and `1XX`–`5XX` are routed to their own fields, an `x-` extension is
     // skipped, and a key OpenAPI does not define (`6XX`, `600`) is warned

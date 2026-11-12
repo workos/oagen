@@ -34,8 +34,18 @@ export type { ReferenceObject };
  * `{"name":"x"}` — so an array or an object never reads as nothing or as the
  * string it is not, as the webhook reader warns about the same ref (#563).
  * A document that parsed before any response ref was resolved still parses.
- * Only a circular chain throws, since no reader could resolve it. Under
- * `onFailure: 'silent'` neither failure is reported and the ref is returned
+ * An entry that is no object at all — `200: "oops"`, `null`, `7` — never
+ * reaches here: every reader checks `isResponseEntry` first and skips it.
+ * A chain that ends on a `components/responses` entry that is no object —
+ * `Gone: []`, `"oops"`, `null`, `7`, `true` — is that same malformed entry
+ * behind a pointer (`followed.found`), so it goes through `isResponseEntry`
+ * here: warned about naming the component and the site (`components/responses/Gone
+ * (the 200 response of listPets) is not a Response Object ([]); skipping
+ * it.`) under `'report'`, silently under `'silent'`, and `undefined` is
+ * returned for the caller to skip the entry as it skips the inline one, so
+ * the two spellings of one malformed response give one IR (#617). Only a
+ * circular chain throws, since no reader could resolve it. Under
+ * `onFailure: 'silent'` no failure is reported and a bad ref is returned
  * the same way; that is for a reader that only pre-computes names, leaving
  * the report to the operation that declares the ref.
  */
@@ -45,8 +55,13 @@ export function resolveResponseRef<T extends object>(
   context: string,
   siblingDescriptions: SiblingDocs = 'override',
   onFailure: 'report' | 'silent' = 'report',
-): T {
+): T | undefined {
   const followed = followReference<T>(raw, 'responses', componentResponses, siblingDescriptions);
+  if (followed.outcome === 'unresolved' && followed.found !== undefined) {
+    const { name, value } = followed.found;
+    const site = onFailure === 'report' ? `components/responses/${name} (the ${context})` : undefined;
+    if (!isResponseEntry(value, site)) return undefined;
+  }
   if (onFailure === 'report') {
     if (followed.outcome === 'circular') {
       throw new Error(`Circular response $ref chain starting at "${followed.ref}" in ${context}.`);
@@ -74,4 +89,48 @@ export function resolveResponseRef<T extends object>(
     }
   }
   return followed.value;
+}
+
+/**
+ * Whether a Responses Object entry is something a reader can read at all:
+ * a Response Object or a Reference Object, which are objects. An entry
+ * written as a string, a number, a boolean, `null` or an array — `200:
+ * "oops"`, `200: null`, `200: 7`, `200: true`, `200: []` — is neither, so
+ * nothing could be read from it, not even a `$ref`: it is skipped and the
+ * operation is read from its other entries, rather than failing the parse
+ * with a `TypeError` that names neither the operation nor the key (#617).
+ * The reader that reports — the operation's (`extractResponses`) or the
+ * webhook's (`extractWebhookResponses`) — passes the site and warns once,
+ * naming the value as JSON: `200 response of listPets is not a Response
+ * Object (null); skipping it.` A reader that only pre-computes names
+ * passes no site and skips the entry silently, leaving the report to the
+ * operation that declares it, as `resolveResponseRef` does under
+ * `'silent'`. A `$ref` whose chain ends on a `components/responses` entry
+ * that is no object is put through the same check by the resolvers
+ * (`resolveResponseRef`, the webhook's `resolveResponseDescription`), with
+ * the component named in the site.
+ */
+export function isResponseEntry(raw: unknown, site?: string): raw is Record<string, unknown> {
+  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) return true;
+  if (site !== undefined) {
+    console.warn(`[oagen] Warning: ${site} is not a Response Object (${JSON.stringify(raw)}); skipping it.`);
+  }
+  return false;
+}
+
+/**
+ * Whether an operation's or a webhook's `responses` is a Responses Object
+ * at all: an object. One written as a string, a number, a boolean, `null`
+ * or an array — `responses: "oops"` — declares no response under any key:
+ * it is warned about once, naming the operation or webhook and the value as
+ * JSON (`responses of listPets is not a Responses Object ("oops"); reading
+ * no response from it.`), and read as absent, never as the map of its
+ * characters' or elements' indexes, which are no status codes (#617).
+ */
+export function isResponsesObject(responses: unknown, label: string): responses is Record<string, unknown> {
+  if (typeof responses === 'object' && responses !== null && !Array.isArray(responses)) return true;
+  console.warn(
+    `[oagen] Warning: responses of ${label} is not a Responses Object (${JSON.stringify(responses)}); reading no response from it.`,
+  );
+  return false;
 }
