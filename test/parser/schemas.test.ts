@@ -4528,8 +4528,8 @@ describe('#539', () => {
           expect(pet?.variants).toEqual([model('Cat'), model('ZooDog')]);
           expect(pet?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'ZooDog' } });
           expect(fieldOf(spec, 'Home', 'pet')?.type).toEqual(expectedUnion('ZooDog'));
-          // The bundler keeps the hoisted copy as a component `dog`, so a model `Dog` is built for it; nothing references it.
-          expect(modelNames(spec)).toEqual(['Cat', 'Dog', 'Home', 'Pet', 'Zoo', 'ZooDog']);
+          // No `Dog`: the component the bundler hoisted `Zoo.dog` into is dropped with the rewrite it made (#619).
+          expect(modelNames(spec)).toEqual(['Cat', 'Home', 'Pet', 'Zoo', 'ZooDog']);
           expect(warnings).toEqual([]);
         });
 

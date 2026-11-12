@@ -2152,11 +2152,14 @@ export function cloneTypeRef(ref: TypeRef): TypeRef {
           : {}),
       };
       // A mapping entry deferred to a pointer variant (#539) follows the
-      // variant's copy, so the copy's mapping is settled with its own variants.
+      // variant's copy, and one deferred to a reference of its own target's
+      // (#619) a copy of that reference, so the copy's mapping is settled
+      // with the copy's own references.
       if (ref.discriminator && copy.discriminator) {
         carryDeferredMappingEntries(
           { variants: ref.variants, mapping: ref.discriminator.mapping },
           { variants: copy.variants, mapping: copy.discriminator.mapping },
+          cloneTypeRef,
         );
       }
       return copy;

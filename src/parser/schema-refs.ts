@@ -227,36 +227,39 @@ export function pendingSiteLimitsOf(ref: ModelRef): Constraints | undefined {
 
 /**
  * The entries of a discriminator `mapping` whose target is a pointer
- * variant's schema, settled with that variant (#539 review). A mapping
- * target that is a pointer deeper into a component never reaches the parser
- * as written: the bundler hoists the schema it points at into a new
- * component named by the pointer's last token (`#/components/schemas/Zoo/
- * properties/dog` becomes a component `dog`, the same object `Zoo.dog` is)
- * and rewrites the target to `#/components/schemas/dog`, while a variant
- * written as that pointer is left as written. Read by key, the target would
- * name the model built for the hoisted copy (`Dog`), a model outside the
- * union, while the variant settles to the model `Zoo.dog` is built as
- * (`ZooDog`). So a site that builds a discriminated union matches each
- * explicit target's schema (`schemaRefTarget`) by identity against its
- * variants' and, for a variant that is a pointer — unnamed until it is
- * settled — records the entry here against the variant's own reference
- * (`deferMappingEntry`); once `resolveSchemaPointers` has settled the
- * variant, the entry is written as the model it names
- * (`settleDeferredMappingEntries`). A copy of the union carries its
- * entries with its copied variants (`carryDeferredMappingEntries`, from
+ * deeper into a component (`#/components/schemas/Zoo/properties/dog`;
+ * #539 review, #619), each to be written as the model the schema it
+ * points at is built as once every model is. Such a target names no
+ * component — the bundler rewrites one to a component it hoists the schema
+ * into, and that rewrite is undone before the parser reads the document
+ * (`loadAndBundleSpec`), so the entry reaches the parser as written — and
+ * the model it names is known only once the models are built: `ZooDog`
+ * for the variant written as that pointer, and `ShelterDog`, the model
+ * `Shelter.dog` is built as, for a target outside the variants
+ * (`Shelter/properties/dog`). So a site that builds a discriminated union
+ * — a named union, an inline one, an allOf+oneOf dispatcher — records each
+ * such entry here (`deferMappingEntry`): against the variant's own
+ * reference when the target's schema is a pointer variant's, matched by
+ * identity (`deferPointerMappingEntries`), else against a pending
+ * reference of the target's own (`pendingSchemaRef`). Once
+ * `resolveSchemaPointers` has settled the variants, it settles each
+ * target's own reference at the mapping site and writes every entry as the
+ * model its reference names (`settleDeferredMappingEntries`). A copy of the
+ * union carries its entries with its copied variants, and a copy of each
+ * reference of a target's own (`carryDeferredMappingEntries`, from
  * `cloneTypeRef`). Keyed by the mapping object, so a mapping the IR no
  * longer holds is forgotten with it.
  */
 interface DeferredMappingEntry {
   /** The discriminator value whose entry is deferred. */
   value: string;
-  /** The variant the entry names: the pointer's reference, or its nullable wrapper, as the union holds it. */
+  /** The reference the entry follows: the pointer variant, or its nullable wrapper, as the union holds it — or, for a target outside the variants, a pending reference of the target's own. */
   variant: TypeRef;
 }
 
 const deferredMappingEntries = new WeakMap<Record<string, string>, DeferredMappingEntry[]>();
 
-/** Record that `mapping`'s entry for `value` names `variant`, a pointer variant to be settled, and is to be written as the model it settles to. */
+/** Record that `mapping`'s entry for `value` follows `variant` — a pointer variant to be settled, or a pending reference of the target's own — and is to be written as the model it settles to. */
 export function deferMappingEntry(mapping: Record<string, string>, value: string, variant: TypeRef): void {
   const entries = deferredMappingEntries.get(mapping) ?? [];
   entries.push({ value, variant });
@@ -265,37 +268,55 @@ export function deferMappingEntry(mapping: Record<string, string>, value: string
 
 /**
  * Carry the deferred entries of `from`'s mapping onto `to`'s, each against
- * the copy of its variant at the same position — for `cloneTypeRef`, which
- * copies a union's variants and mapping alike.
+ * the copy of its variant at the same position, or against a copy of its
+ * own reference (`copy`) for a target outside the variants — for
+ * `cloneTypeRef`, which copies a union's variants and mapping alike, so
+ * the copy's entries settle with the copy's references and follow their
+ * renames, never the original's.
  */
 export function carryDeferredMappingEntries(
   from: { variants: readonly TypeRef[]; mapping: Record<string, string> },
   to: { variants: readonly TypeRef[]; mapping: Record<string, string> },
+  copy: (ref: TypeRef) => TypeRef,
 ): void {
   for (const { value, variant } of deferredMappingEntries.get(from.mapping) ?? []) {
     const index = from.variants.indexOf(variant);
-    const copy = to.variants[index];
-    if (copy !== undefined) deferMappingEntry(to.mapping, value, copy);
+    const carried = index >= 0 ? to.variants[index] : copy(variant);
+    if (carried !== undefined) deferMappingEntry(to.mapping, value, carried);
   }
 }
 
 /**
- * Write every deferred entry of `mapping` whose variant has settled to a
+ * Write every deferred entry of `mapping` whose reference has settled to a
  * model — directly or under its nullable wrapper — as that model's name,
- * and forget the entries. An entry whose variant settled to no model (a
- * pointer to a string, or one that led nowhere) is left as the bundled
- * document spells it: the hoisted component's name, which names no variant.
- * Run once the variants are settled (`resolveSchemaPointers`).
+ * and forget the entries. A variant's reference, and a redirected inline
+ * variant's (`deferPointerMappingEntries`), is settled by the walk before
+ * this runs; a reference of a target's own — one outside the variants —
+ * is still pending, and is settled here through `settleTarget`, at the
+ * mapping site. An entry whose reference settled to no model — a pointer
+ * to a string, or one that led nowhere, which the warning said — is left
+ * as written. Returns every entry's reference, as the type it settled
+ * into, so the caller can hand the models among them over with the union
+ * (`attachSharedRefs`) when the union does not hold them as variants: a
+ * rename of such a model then reaches its entries as it reaches a
+ * variant's. Run once the variants are settled (`resolveSchemaPointers`).
  */
-export function settleDeferredMappingEntries(mapping: Record<string, string> | undefined): void {
-  if (mapping === undefined) return;
+export function settleDeferredMappingEntries(
+  mapping: Record<string, string> | undefined,
+  settleTarget: (target: ModelRef, value: string) => void,
+): TypeRef[] {
+  const references: TypeRef[] = [];
+  if (mapping === undefined) return references;
   const entries = deferredMappingEntries.get(mapping);
-  if (entries === undefined) return;
+  if (entries === undefined) return references;
   deferredMappingEntries.delete(mapping);
   for (const { value, variant } of entries) {
+    if (variant.kind === 'model' && isPendingSchemaRef(variant)) settleTarget(variant, value);
+    references.push(variant);
     const model = settledVariantModel(variant);
     if (model !== undefined && Object.hasOwn(mapping, value)) mapping[value] = model.name;
   }
+  return references;
 }
 
 /** The model `variant` names, directly or under its nullable wrapper, once settled; `undefined` while pending or for any other type. */

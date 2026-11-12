@@ -64,6 +64,7 @@ import {
   schemaConstraints,
   componentReference,
   constraintsEntry,
+  deferInlineUnionMappingEntries,
   deprecatedEntry,
   enumComponentDeclaration,
   collapsedNullableBranch,
@@ -4851,20 +4852,19 @@ function typePickedRequestBody(
     );
     // The mapping's targets are read as a field's or a response's inline
     // union reads them (`inlineMappingTargets`), so the same union carries the
-    // same discriminator at every site.
+    // same discriminator at every site — an entry written as a pointer
+    // deeper into a component settled to the model the pointed schema is
+    // built as, as theirs is (`deferInlineUnionMappingEntries`; #619).
+    const mapping = schema.discriminator ? inlineMappingTargets(schema.discriminator.mapping) : undefined;
+    if (mapping) deferInlineUnionMappingEntries(schema, objectVariantNames, variants, mapping);
     // The union carries the body's own limits, as `schemaToTypeRef` would
     // have it carry them (#545); each variant carries its own.
     const union: TypeRef = withSchemaConstraints(
       {
         kind: 'union',
         variants,
-        ...(schema.discriminator
-          ? {
-              discriminator: {
-                property: schema.discriminator.propertyName,
-                mapping: inlineMappingTargets(schema.discriminator.mapping),
-              },
-            }
+        ...(schema.discriminator && mapping
+          ? { discriminator: { property: schema.discriminator.propertyName, mapping } }
           : {}),
       },
       schema,
