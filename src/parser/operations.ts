@@ -94,6 +94,8 @@ import {
   collectProperties,
   extractInlineModelsFromProperties,
   isInheritedModelRef,
+  shapeFingerprint,
+  takeModelDocumentation,
   withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -6754,10 +6756,15 @@ function bodyModelNames(
 /**
  * A response body's shape under `contextName`, under every reading
  * (`BODY_READINGS`): its type and every model it mints, each by name and
- * `modelFingerprint` — so the order of its fields and its documentation do
- * not count, while a titled variant's name, which names a model, does. Two
- * later bodies of one operation with one key are one body, named alike
- * (`stepSecondaryBody`), and the reservation of a later body's names
+ * `shapeFingerprint` — so the order of its fields, its documentation and
+ * the model's own `deprecated` do not count, while a titled variant's name,
+ * which names a model, does, and so does a field's own flag (a nested
+ * object's `deprecated` sits on the field that wrote it too). Two later
+ * bodies of one operation with one key are one body, named alike
+ * (`stepSecondaryBody`) — a 202 identical to the 201 but for the flag
+ * shares `CreatePetResponse201`, and the merge in `extractResponses` keeps
+ * the 201's definition, live while either copy is (#630) — and the
+ * reservation of a later body's names
  * (`operationBodyModelNames`) asks the same question of the same schema.
  * Read silently (`rehearse`): the body reports its problems once, when it is
  * read.
@@ -6771,7 +6778,7 @@ function bodyShapeKey(
     JSON.stringify(
       BODY_READINGS.map((reading) => {
         const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
-        const models = body.inlineModels.map((model) => `${model.name} ${modelFingerprint(model)}`).sort();
+        const models = body.inlineModels.map((model) => `${model.name} ${shapeFingerprint(model)}`).sort();
         return [shapeWithEnumFlags(body.response), models];
       }),
     ),
@@ -7389,6 +7396,21 @@ function undescribedBodyType(): TypeRef {
   return { kind: 'primitive', type: 'unknown' };
 }
 
+/**
+ * Read an operation's `responses` map: the primary body (`response` and the
+ * paging fields), every 2xx/3xx entry (`successResponses`), the error
+ * entries, the `default` and range entries, and the inline models all of
+ * them mint. Every 2xx body's models are kept, merged by name: a later
+ * body's model of a kept name resolves to the kept definition when the two
+ * are the same shape but for the model's own `deprecated`
+ * (`shapeFingerprint`), the kept definition — the primary's, its
+ * references with it — going live when any copy is and documented as the
+ * first live copy is, so a live 202 body identical to a deprecated 200
+ * body types both as a live `Pet` carrying the 202's `description`, as a
+ * deprecated 202 beside a live 200 does, and the model is deprecated only
+ * when every copy is; and to the kept definition with a warning when they
+ * differ in a field (#630).
+ */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
   /** The Operation Object as the operation's model names read it (`buildOperation`'s `namingOp`). */
@@ -7776,9 +7798,18 @@ function extractResponses(
   // `<Op>Response<code>`, then a number — whatever the kept bodies hold, so
   // its `successResponses` entry keeps the shape its status code declared
   // under a name no other status code's body decides. A model of a later
-  // body the kept one shares (`modelFingerprint`) resolves to the kept
-  // definition silently; only a clash on a model the stem does not name is
-  // still resolved to the kept definition, with a warning. The
+  // body the kept one shares (`shapeFingerprint`: the model's own
+  // `deprecated` apart) resolves to the kept definition silently — the kept
+  // definition going live when only the flag tells the two apart, as a live
+  // copy owns a shared name across operations in the merge passes, so a
+  // live 202 body identical to a deprecated 200 body keeps a live `Pet`
+  // with the 200's references and the 202's documentation (`description`,
+  // `externalDocs`, extensions: the first live copy's in status order, as
+  // the merge passes keep a live copy's definition), deprecating either
+  // copy leaves no trace, and the model is deprecated only when every copy
+  // is (#630); only a clash on a model the stem does not name — a field more,
+  // a field's own flag, a limit — is still resolved to the kept definition,
+  // with a warning. The
   // models only a dropped copy referenced go with it (`reachedModels`): the
   // primary's models are all read — `response`, the paging fields and their
   // companions — while another status is read only through its
@@ -7811,10 +7842,21 @@ function extractResponses(
       if (!kept) {
         keptByName.set(model.name, { model, status });
         inlineModels.push(model);
-      } else if (modelFingerprint(kept.model) !== modelFingerprint(model)) {
+      } else if (shapeFingerprint(kept.model) !== shapeFingerprint(model)) {
         console.warn(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
         );
+      } else if (kept.model.deprecated && !model.deprecated) {
+        // Identical but for the model's own flag: the shared model is live
+        // while any copy is (#630). The kept definition stays — its
+        // references with it: an explicit `$ref` the primary wrote where
+        // this body nests an inline object of the same name, repointed
+        // apart by the merge passes — and goes live, documented as this
+        // first live copy is (`takeModelDocumentation`), as the merge passes
+        // keep a live copy's definition across operations; the live copy's
+        // object never replaces it.
+        delete kept.model.deprecated;
+        takeModelDocumentation(kept.model, model);
       }
     }
   }
@@ -7927,9 +7969,13 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * code (`CreatePetResponse201`), then a number (`CreatePetResponse2`, `…3`, …),
  * the chain the entry's secondary media-type bodies step through too
  * (`deferredNamingStem`, `later`: `CreatePetApplicationYamlResponse201`), a
- * candidate being taken when no name it would give is kept, or owned in the
- * spec-wide registry by a component or another operation, under a shape the
- * owner does not share (`ownerShares`), nor is a component response's body,
+ * candidate being taken when no name it would give is kept under another
+ * shape (`shapeFingerprint`: the kept model's own `deprecated` apart, so a
+ * copy identical but for the flag takes the name and the caller folds it
+ * onto the kept definition, live while any copy is, #630), or owned in the
+ * spec-wide registry by a component
+ * or another operation, under a shape the owner does not share
+ * (`ownerShares`), nor is a component response's body,
  * whichever operation returning it is read first (`CardResponse3` for `card`'s
  * 201 past a component `Card` at `CardResponse2` when a schema owns
  * `CardResponse201`). So no edit to the primary renames it: a 201 identical to
@@ -7974,11 +8020,13 @@ function stepSecondaryBody(
     // (`resolveComponentResponseModelNames`), so the operation's own body
     // steps past it whether or not an operation returning it came first.
     if (ownBody?.componentBodies.has(name)) return true;
-    const fingerprint = modelFingerprint(model);
+    // A kept model's shape is read with its own `deprecated` apart: a copy
+    // identical to it but for the flag is folded onto the kept definition by
+    // the caller (#630), not stepped past.
     const keptModel = kept.get(name)?.model;
-    if (keptModel && modelFingerprint(keptModel) !== fingerprint) return true;
+    if (keptModel && shapeFingerprint(keptModel) !== shapeFingerprint(model)) return true;
     const owner = registry?.get(name);
-    return owner !== undefined && !ownerShares(owner, model, fingerprint);
+    return owner !== undefined && !ownerShares(owner, model, modelFingerprint(model));
   };
   // Reached through the body's own models, not the kept ones: the body
   // keeps its root once it steps, so everything under that root is its.
