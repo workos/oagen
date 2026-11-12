@@ -2257,13 +2257,24 @@ export interface ResponseHeader {
    */
   type: TypeRef;
   required: boolean;
+  /** The Header Object's own `description`; the schema's is never the header's. */
   description?: string;
+  /**
+   * `true` when the Header Object says `deprecated: true`, or the schema
+   * `type` is read from does — on its own keys, or on an `allOf` member of
+   * it that declares no type and so only annotates it (`allOfWrapperLayer`;
+   * #555), as a field reads the flag. Absent otherwise.
+   */
   deprecated?: boolean;
   /**
    * The header schema's `externalDocs`, when it declares a usable one — the
    * schema `type` is read from, whether the Header Object's `schema` or the
-   * `content` entry's. A Header Object has no `externalDocs` of its own.
-   * Absent otherwise.
+   * `content` entry's: its own, else the first `allOf` member's that
+   * declares no type and so only annotates the schema (`allOfWrapperLayer`;
+   * #605), so `allOf: [{ type: 'integer' }, { externalDocs }]` gives the
+   * header the link `allOf: [{ type: 'integer' }], externalDocs` does, as it
+   * gives a field, a parameter and the model built from the schema. A
+   * Header Object has no `externalDocs` of its own. Absent otherwise.
    */
   externalDocs?: ExternalDocs;
 }
