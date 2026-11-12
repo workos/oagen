@@ -771,5 +771,71 @@ describe('#618', () => {
       expect(show(operation(spec, 'getOwner')!.response)).toBe('model CatAlias');
       expect(warnings()).toEqual([]);
     });
+
+    /** A `type` that names `null`, written beside a `$ref`, in the spelling the OAS version has. */
+    const nullableTypeBeside = (openapi: string) =>
+      openapi.startsWith('3.0') ? { type: 'object', nullable: true } : { type: ['object', 'null'] };
+
+    it.each(['3.1.0', '3.0.3'])(
+      'reads no `null` from a `type` written beside the `$ref`, at the alias or through a chain to it, on OAS %s (Greptile, #646)',
+      async (openapi) => {
+        // Nothing but annotations is read beside a `$ref`: the same schema
+        // on a field is `Owner`, so the component `B` is `B` and its alias
+        // `CatAlias` is `CatAlias` — the walk read `B`'s `type` before it
+        // followed the `$ref`, and both were `nullable`.
+        const beside = nullableTypeBeside(openapi);
+        const spec = await parseJson(
+          documentWith(
+            openapi,
+            {
+              Owner: named,
+              B: { ...ref('Owner'), ...beside },
+              CatAlias: ref('B'),
+              Pet: {
+                type: 'object',
+                properties: { owner: ref('CatAlias'), b: ref('B'), inline: { ...ref('Owner'), ...beside } },
+              },
+            },
+            paths,
+          ),
+        );
+        expect(fieldType(spec, 'Pet', 'inline')).toBe('model Owner');
+        expect(fieldType(spec, 'Pet', 'b')).toBe('model B');
+        expect(fieldType(spec, 'Pet', 'owner')).toBe('model CatAlias');
+        expect(show(operation(spec, 'getOwner')!.response)).toBe('model CatAlias');
+        expect(fieldsOf(modelByName(spec, 'B'))).toEqual(['name: string']);
+        expect(fieldsOf(modelByName(spec, 'CatAlias'))).toEqual(['name: string']);
+        expectSound(spec);
+      },
+    );
+
+    it.each(['3.1.0', '3.0.3'])(
+      'still carries the `null` of the component the `$ref` names past a `type` beside it, on OAS %s',
+      async (openapi) => {
+        // The target's own `null` is the alias's, whatever is written
+        // beside the `$ref`: a `type` naming no `null` takes none away.
+        const owners = nullableOwners(openapi)['typed']!;
+        const spec = await parseJson(
+          documentWith(
+            openapi,
+            {
+              ...owners,
+              B: { ...ref('Owner'), type: 'object' },
+              CatAlias: ref('B'),
+              Pet: {
+                type: 'object',
+                properties: { owner: ref('CatAlias'), b: ref('B'), inline: { ...ref('Owner'), type: 'object' } },
+              },
+            },
+            paths,
+          ),
+        );
+        expect(fieldType(spec, 'Pet', 'inline')).toBe('nullable<model Owner>');
+        expect(fieldType(spec, 'Pet', 'b')).toBe('nullable<model B>');
+        expect(fieldType(spec, 'Pet', 'owner')).toBe('nullable<model CatAlias>');
+        expect(show(operation(spec, 'getOwner')!.response)).toBe('nullable<model CatAlias>');
+        expectSound(spec);
+      },
+    );
   });
 });
