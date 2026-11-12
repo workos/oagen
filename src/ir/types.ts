@@ -1256,7 +1256,14 @@ export interface TypeParam {
  * resolves to the enum (`{ kind: 'enum' }`, under `nullable` when the alias
  * or the enum admits null), what the alias declares is read by a field that
  * names it with a bare `$ref` (`Field`), and the enum keeps its own on the
- * `Enum`. An array component — a schema
+ * `Enum`. An alias is only a chain that ends at a `$ref` to an enum
+ * component: a component that declares its enum inside a lone `allOf`
+ * member (`Kind: { allOf: [{ type: 'string', enum }], description }`) or
+ * inside a nullable `oneOf`/`anyOf` wrapper (`Kind: { oneOf: [{ allOf: [{
+ * type: 'string', enum }] }, { type: 'null' }] }`, `Color: { oneOf: [{
+ * type: 'string', enum }, { type: 'null' }] }`; #606) is the enum `Kind`
+ * or `Color` itself, nullable for the wrapper, never an alias and never a
+ * model. An array component — a schema
  * that is an array and declares `items` (a nullable `oneOf`/`anyOf` around
  * one included), or an alias of one (a bare `$ref`, a nullable
  * `oneOf`/`anyOf` around a `$ref`, or an `allOf` of a `$ref` and limits)
@@ -1549,7 +1556,10 @@ export interface Enum {
    * `Model.description` is a component model's — the wrapper layer's over
    * the member's when the component declares its members inside an
    * `allOf` read as its one typing member (`Kind: { allOf: [{ type:
-   * 'string', enum }], description }`), as its link, `deprecated`,
+   * 'string', enum }], description }`), or the wrapper's over the branch's
+   * when it declares them inside a nullable `oneOf`/`anyOf` wrapper
+   * (`Kind: { oneOf: [{ allOf: [{ type: 'string', enum }, { description
+   * }] }, { type: 'null' }] }`; #606), as its link, `deprecated`,
    * `default` and keys are read (`enumComponentDeclaration`) — or — for an
    * enum lifted
    * from an inline schema on a property, parameter, response header,
