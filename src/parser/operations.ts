@@ -161,6 +161,13 @@ import {
 import { extractSecurityRequirements, type RawSecurityRequirements } from './security.js';
 import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
+import {
+  resolveContestedBodyNames,
+  stemsInContest,
+  yieldBodyNames,
+  type BodyNameYields,
+  type OperationBodyNames,
+} from './contested-body-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { resolvePathItemRef } from './path-item-refs.js';
 import { componentKeyOf } from './schema-refs.js';
@@ -891,16 +898,21 @@ export function extractOperations(
   // step past them: a component response's body
   // (resolveComponentResponseModelNames), or a path-derived prefix that
   // extends an operation's stem (resolvePathModelBaseNames).
-  let operationBodyNames: string[] | undefined;
-  const readOperationBodyNames = (): readonly string[] => {
-    operationBodyNames ??= operationBodyModelNames(
+  const readBodies = (naming: OperationBodyNaming): OperationBodyNames[] =>
+    operationBodyModelNames(
       resolvedPaths,
-      modelOperationIds,
+      naming,
       componentSchemas,
       componentResponses,
       componentRequestBodies,
       registry,
     );
+  let operationBodyNames: string[] | undefined;
+  const readOperationBodyNames = (): readonly string[] => {
+    operationBodyNames ??= readBodies((key, _path, _method, op) => {
+      const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId;
+      return operationId ? { operationId, pathModelBaseName: '' } : undefined;
+    }).flatMap((body) => body.models);
     return operationBodyNames;
   };
   // The model name each component response's inline body takes, decided once
@@ -924,6 +936,19 @@ export function extractOperations(
     modelOperationIds,
     sharedWith,
     readOperationBodyNames,
+  );
+  // A name two operations' bodies would both mint — `createPet`'s nested
+  // `draft_response` and the response of `createPetResponseDraft`, both
+  // `CreatePetResponseDraftResponse` — is settled here, before any operation
+  // is built: what each operation gives up, and the name it takes instead
+  // (see resolveBodyNameYields).
+  const bodyNameYields = resolveBodyNameYields(
+    resolvedPaths,
+    modelOperationIds,
+    sharedWith,
+    pathModelBaseNames,
+    readBodies,
+    [...registry.keys(), ...[...componentResponseNaming.values()].flatMap((naming) => [naming.name, ...naming.minted])],
   );
 
   /** Every operation built, by its plan key (`${method} ${path}`). */
@@ -1020,6 +1045,8 @@ export function extractOperations(
         registeredModels,
         registry,
         modelOperationIds.get(key),
+        // A path that shares another's Operation Object gives up what that path does.
+        bodyNameYields.get(sharedWith.get(key) ?? key),
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
@@ -3369,6 +3396,12 @@ function buildOperation(
    * own.
    */
   modelOperationId?: string | null,
+  /**
+   * The names the operation's inline request and success bodies give up to
+   * another operation, each with the name its model or inline enum takes
+   * instead (`resolveBodyNameYields`, #683); absent when it gives none up.
+   */
+  bodyNameYields?: BodyNameYields,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3476,6 +3509,7 @@ function buildOperation(
     refSiblingDescriptions,
     componentResponseModelNames,
     registry,
+    ...(bodyNameYields && { yields: bodyNameYields }),
   };
   // One location's parameters, typed by `extractParams`. A parameter whose
   // inline schema mints a model is deferred once the responses have been
@@ -3797,6 +3831,22 @@ function buildOperation(
   // the id PascalCased before the cleaning, which no transform changes
   // either — so the rule holds for every model the operation mints.
   const modelQualifier = namingOp.operationId ? operationIdModelBase(namingOp.operationId) : pathModelBaseName;
+  // What the bodies give up to another operation leaves its name here
+  // (`resolveBodyNameYields`, #683), before the operation's models join the
+  // registry and before any pass reads them: the request body's models, the
+  // success bodies' and the envelope companions', each with the references
+  // its own site holds — the ones the bundles below hand the merge passes.
+  // The array items settled against the registry as they were read have
+  // moved already (`ItemSettlement.yields`).
+  if (bodyNameYields) {
+    const companions = envelopeCompanions ?? [];
+    yieldBodyNames(
+      bodyNameYields,
+      [...responseTypeRefs(operation), ...companions.map((companion) => companion.field.type)],
+      [...responseModels, ...companions.flatMap((companion) => companion.models)],
+    );
+    yieldBodyNames(bodyNameYields, requestBody ? [requestBody] : [], reqBodyModels);
+  }
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
   // items may have shared another site's model (`typeInlineItems`), and the
@@ -5448,6 +5498,12 @@ interface ResponseTypingContext {
    * a dry run that only reads the names a body would mint.
    */
   registry?: ModelShapeRegistry;
+  /**
+   * The names the operation's bodies give up to another operation
+   * (`resolveBodyNameYields`, #683), which the array items settled against
+   * the registry leave as they are read (`ItemSettlement.yields`).
+   */
+  yields?: BodyNameYields;
 }
 
 /**
@@ -6981,13 +7037,20 @@ function resolveComponentResponseModelNames(
 }
 
 /**
- * Every model name an operation named from an `operationId` mints for its own
- * inline request and success bodies — the request body's `<Op>Request` and
- * everything under it, the primary response's `<Op>Response` and everything
- * under it, and each later status code's under the stem it moves to
- * (`<Op>Response201`, `stepSecondaryBody`), under every reading
- * (`bodyModelNames`) — the `operationId` being the one its models are named
- * by (`modelOperationIds`). A component response's body steps past these
+ * Every name each operation `naming` names mints for its own inline request
+ * and success bodies, operation by operation in document order — the
+ * request body's `<Op>Request` and everything under it, the primary
+ * response's `<Op>Response` and everything under it, and each later status
+ * code's under the stem it moves to (`<Op>Response201`, `stepSecondaryBody`),
+ * under every reading (`bodyTypeNames`): the models (`models`) and the
+ * inline enums their fields and the bodies' own types carry (`enums`),
+ * beside the stem they are named from (`stem`). `naming` says what an
+ * operation's models are named from — the `operationId` the reuse and
+ * contest passes left it (`modelOperationIds`), or its path-derived prefix
+ * — and leaves an operation out by returning nothing.
+ *
+ * The model names of the operations named from an `operationId` are read
+ * for two reservations. A component response's body steps past these
  * names (`resolveComponentResponseModelNames`), so `card`'s inline 200 keeps
  * `CardResponse` and the body of a component `Card` is `CardResponse2`,
  * whatever the order of the paths (workos/oagen#424), while `card`'s inline
@@ -7014,27 +7077,37 @@ function resolveComponentResponseModelNames(
  * body schema written as a `$ref` mints under its component's name or not
  * at all, and an operation that names its models from its path steps past
  * the components itself (`resolvePathModelBaseNames`), so neither reserves
- * anything. Read silently (`rehearse`): the operation reports its bodies'
- * problems once, when it is built.
+ * anything there. The third reading settles the names two operations would
+ * both mint (`resolveBodyNameYields`, #683), and takes the models and the
+ * enums of every operation a name can be contested between, path-named
+ * ones included. Read silently (`rehearse`): the operation reports its
+ * bodies' problems once, when it is built.
  */
 function operationBodyModelNames(
   paths: Record<string, PathItem>,
-  modelOperationIds: ReadonlyMap<string, string | null>,
+  naming: OperationBodyNaming,
   componentSchemas: Record<string, SchemaObject> | undefined,
   componentResponses: Record<string, Record<string, unknown>> | undefined,
   componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
   registry: ModelShapeRegistry,
-): string[] {
+): OperationBodyNames[] {
   return rehearse(() => {
-    const names: string[] = [];
+    const bodies: OperationBodyNames[] = [];
     for (const [path, pathItem] of Object.entries(paths)) {
       for (const method of HTTP_METHODS) {
         const op = pathItem[method];
         const key = `${method} ${path}`;
-        const operationId = modelOperationIds.has(key) ? modelOperationIds.get(key) : op?.operationId;
-        if (!op || !operationId) continue;
-        const contextName = operationIdModelName(operationId, 'Response');
-        const settle: ItemSettlement = { registry, operation: operationIdModelBase(operationId) };
+        const namedFrom = op && naming(key, path, method, op);
+        if (!op || !namedFrom) continue;
+        const { operationId, pathModelBaseName } = namedFrom;
+        const namingOp: OperationObject = { ...op, operationId };
+        const contextName = deriveResponseName(namingOp, pathModelBaseName);
+        const stem = operationId ? operationIdModelBase(operationId) : pathModelBaseName;
+        const settle: ItemSettlement = { registry, operation: stem };
+        const body: OperationBodyNames = { key, stem, models: [], enums: [] };
+        bodies.push(body);
+        const names = body.models;
+        const enums = new Set<string>();
         // The request body, read as `collectOperationConstPrefixes` reads
         // it: a `$ref` that resolves to nothing is left for buildOperation
         // to report, and a schema that is itself a `$ref` mints nothing.
@@ -7046,8 +7119,15 @@ function operationBodyModelNames(
           // `<Op>Request` itself, where a response reading names them
           // `<Op>RequestItem` and misses what they nest.
           const requestModels: Model[] = [];
-          typePickedRequestBody(selected, { ...op, operationId }, '', requestModels, componentSchemas);
+          const requestType = typePickedRequestBody(
+            selected,
+            namingOp,
+            pathModelBaseName,
+            requestModels,
+            componentSchemas,
+          );
           names.push(...requestModels.map((model) => model.name));
+          for (const name of inlineEnumNames(requestType ? [requestType] : [], requestModels)) enums.add(name);
         }
         const entries = Object.entries(op.responses ?? {}).flatMap(([statusCode, response]) => {
           const responseKey = classifyResponseKey(statusCode);
@@ -7069,20 +7149,123 @@ function operationBodyModelNames(
         const stems = new Map<string, string>();
         for (const { code, inline, pick } of [...entries].sort((a, b) => a.code - b.code)) {
           if (!inline || !pick.schema) continue;
-          const minted = bodyModelNames(pick.schema, contextName, componentSchemas, settle);
-          if (code === primaryCode || !minted.some((name) => name.includes(contextName))) {
-            names.push(...minted);
+          const minted = bodyTypeNames(pick.schema, contextName, componentSchemas, settle);
+          if (code === primaryCode || !minted.models.some((name) => name.includes(contextName))) {
+            names.push(...minted.models);
+            for (const name of minted.enums) enums.add(name);
             continue;
           }
           const key = bodyShapeKey(pick.schema, contextName, componentSchemas);
           const stem = stems.get(key) ?? `${contextName}${code}`;
           stems.set(key, stem);
-          names.push(...minted.map((name) => name.replace(contextName, stem)));
+          names.push(...minted.models.map((name) => name.replace(contextName, stem)));
+          // The enums the body's models and its type carry move with it (`stepSecondaryBody`).
+          for (const name of minted.enums) enums.add(name.replace(contextName, stem));
         }
+        body.enums = [...enums];
       }
     }
-    return names;
+    return bodies;
   });
+}
+
+/**
+ * What an operation's models are named from, for `operationBodyModelNames`:
+ * its `operationId` — the one the reuse of its own or the contest of its
+ * stem left it (`modelOperationIds`) — or, without one, its path-derived
+ * prefix (`pathModelBaseName`, read only then); `undefined` leaves the
+ * operation out.
+ */
+type OperationBodyNaming = (
+  key: string,
+  path: string,
+  method: HttpMethod,
+  op: OperationObject,
+) => { operationId?: string; pathModelBaseName: string } | undefined;
+
+/** The name of every inline enum `roots` and the fields and variants of `models` carry: one with its values on the reference, never a `$ref` to a component enum. */
+function inlineEnumNames(roots: readonly TypeRef[], models: readonly Model[]): string[] {
+  const names: string[] = [];
+  for (const ref of [...roots, ...models.flatMap(collectModelTypeRefs)]) {
+    walkTypeRef(ref, { enum: (enumRef) => void (enumRef.values && names.push(enumRef.name)) });
+  }
+  return names;
+}
+
+/** What settles an operation's array items against the registry (`typeInlineItems`): the operation they are recorded under, and what it gives up to another (`ResponseTypingContext.yields`). */
+function itemSettlement(registry: ModelShapeRegistry, ctx: ResponseTypingContext): ItemSettlement {
+  return { registry, operation: ctx.operationQualifier, ...(ctx.yields && { yields: ctx.yields }) };
+}
+
+/**
+ * What every operation's inline request and success bodies give up to
+ * another operation's, by operation key (`${method} ${path}`), each name
+ * with the one the operation's model or inline enum takes instead (#683).
+ *
+ * Every name the bodies mint carries the stem the operation's models are
+ * named from — its `operationId`'s (`operationIdModelBase`) or its
+ * path-derived prefix — but the names are concatenations, so two operations
+ * can mint one: `createPet` returning a `draft_response` object names it
+ * `CreatePetResponseDraftResponse`, the response of
+ * `operationId: createPetResponseDraft`; a `request` object it returns is
+ * `CreatePetResponseRequest`, the request body of
+ * `operationId: createPetResponse`; an unnamed `GET /pets` nesting a
+ * `foo_get_response` object and an unnamed `GET /pets/get/response/foo`
+ * both mint `PetsGetResponseFooGetResponse`. The merge kept one definition
+ * for both — the one with more fields, the first on a tie — so one
+ * operation was typed with fields it does not take and which one followed
+ * the order of the paths.
+ *
+ * The contest is settled from the stems alone
+ * (`resolveContestedBodyNames`): the operation whose stem contains the
+ * other's keeps the name — the one it mints nearer its own stem,
+ * `createPetResponseDraft`'s own response — and the other operation's model
+ * or enum, nested deeper in its body, takes the next free numbered name
+ * (`CreatePetResponseDraftResponse2`), whatever the two shapes are. The
+ * names are the ones a rehearsal of the bodies reads (`read`:
+ * `operationBodyModelNames`), of the operations a name can be contested
+ * between alone: those whose stem contains another operation's or is
+ * contained in one (`stemsInContest`), each named from the `operationId`
+ * the reuse and contest passes left it (`modelOperationIds`) or, without
+ * one, from its path-derived prefix, which is settled by now
+ * (`pathModelBaseNames`). A document in which no stem contains another
+ * rehearses nothing. A path that shares another's Operation Object
+ * (`sharedWith`) takes no part: it reads the one body and gives up what
+ * that path does. `taken` holds every name decided before the operations.
+ */
+function resolveBodyNameYields(
+  paths: Record<string, PathItem>,
+  modelOperationIds: ReadonlyMap<string, string | null>,
+  sharedWith: ReadonlyMap<string, string>,
+  pathModelBaseNames: ReadonlyMap<string, string>,
+  read: (naming: OperationBodyNaming) => readonly OperationBodyNames[],
+  taken: Iterable<string>,
+): Map<string, BodyNameYields> {
+  /** What each operation's models are named from, by key. */
+  const namings = new Map<string, { operationId?: string; pathModelBaseName: string; stem: string }>();
+  for (const [path, pathItem] of Object.entries(paths)) {
+    for (const method of HTTP_METHODS) {
+      const op = pathItem[method];
+      const key = `${method} ${path}`;
+      if (!op || sharedWith.has(key)) continue;
+      const operationId = (modelOperationIds.has(key) ? modelOperationIds.get(key) : op.operationId) ?? undefined;
+      if (operationId) {
+        namings.set(key, { operationId, pathModelBaseName: '', stem: operationIdModelBase(operationId) });
+      } else {
+        const pathModelBaseName = pathModelBaseNames.get(key) ?? derivePathModelBaseName(path, method);
+        namings.set(key, { pathModelBaseName, stem: pathModelBaseName });
+      }
+    }
+  }
+  const contested = stemsInContest([...namings.values()].map(({ stem }) => stem));
+  if (contested.size === 0) return new Map();
+  return resolveContestedBodyNames(
+    read((key) => {
+      const naming = namings.get(key);
+      return naming && contested.has(naming.stem) ? naming : undefined;
+    }),
+    taken,
+  );
 }
 
 /** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
@@ -7128,16 +7311,41 @@ function bodyModelNames(
   componentSchemas: Record<string, SchemaObject> | undefined,
   settle?: ItemSettlement,
 ): string[] {
+  return bodyTypeNames(schema, contextName, componentSchemas, settle).models;
+}
+
+/**
+ * `bodyModelNames` (`models`) beside every inline enum name the body mints
+ * under the same readings (`enums`): the enums its models' fields and
+ * variants carry and the ones its own type, its item type and its envelope
+ * fields carry (`inlineEnumNames`), each under the name its reference is
+ * created with. An operation's enums are contested with another operation's
+ * names as its models are (`resolveBodyNameYields`).
+ */
+function bodyTypeNames(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+  settle?: ItemSettlement,
+): { models: string[]; enums: string[] } {
   const names = new Set<string>();
+  const enums = new Set<string>();
   for (const reading of BODY_READINGS) {
     const body = classifyAndExtractResponse(schema, contextName, componentSchemas, {
       ...reading,
       ...(settle && { settle: { registry: new Map(settle.registry), operation: settle.operation } }),
     });
+    const companionModels = (body.envelopeCompanions ?? []).flatMap((companion) => companion.models);
     for (const model of body.inlineModels) names.add(model.name);
-    for (const companion of body.envelopeCompanions ?? []) for (const model of companion.models) names.add(model.name);
+    for (const model of companionModels) names.add(model.name);
+    const roots = [
+      body.response,
+      ...(body.itemType ? [body.itemType] : []),
+      ...(body.envelopeFields ?? []).map((field) => field.type),
+    ];
+    for (const name of inlineEnumNames(roots, [...body.inlineModels, ...companionModels])) enums.add(name);
   }
-  return [...names];
+  return { models: [...names], enums: [...enums] };
 }
 
 /**
@@ -8045,7 +8253,7 @@ function extractResponses(
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled,
           dataPathOverride,
-          ...(ctx.registry && { settle: { registry: ctx.registry, operation: ctx.operationQualifier } }),
+          ...(ctx.registry && { settle: itemSettlement(ctx.registry, ctx) }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -8217,7 +8425,7 @@ function extractResponses(
       const { context, component } = bodyContexts.get(status)!;
       const key = component ? undefined : bodyShapeKey(bodySchemas.get(status)!, context, componentSchemas);
       const ownBody = key === undefined ? undefined : { stems: settledStems, key, componentBodies };
-      stepSecondaryBody(result, context, status, keptByName, ctx.registry, ownBody);
+      stepSecondaryBody(result, context, status, keptByName, ctx.registry, ownBody, ctx.yields);
     }
     const reached =
       status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
@@ -8271,7 +8479,7 @@ function extractResponses(
       pagination.dataPath,
       pagination.componentModels ?? [],
       componentSchemas,
-      ctx.registry && { registry: ctx.registry, operation: ctx.operationQualifier },
+      ctx.registry && itemSettlement(ctx.registry, ctx),
     );
     if (resolved) {
       overrideItemType = resolved.itemType;
@@ -8362,7 +8570,9 @@ function reachedModels(root: TypeRef, own: readonly Model[], kept: ReadonlyMap<s
  * onto the kept definition, live while any copy is, #630), or owned in the
  * spec-wide registry by a component
  * or another operation, under a shape the owner does not share
- * (`ownerShares`), nor is a component response's body,
+ * (`ownerShares`; a name the operation gives up to another operation is read
+ * there under the name it takes instead, `yields`, #683), nor is a component
+ * response's body,
  * whichever operation returning it is read first (`CardResponse3` for `card`'s
  * 201 past a component `Card` at `CardResponse2` when a schema owns
  * `CardResponse201`). So no edit to the primary renames it: a 201 identical to
@@ -8401,6 +8611,14 @@ function stepSecondaryBody(
    * `key` is this body's), and the name each component response's body takes.
    */
   ownBody?: { stems: Map<string, string>; key: string; componentBodies: ReadonlySet<string> },
+  /**
+   * The names the operation gives up to another operation
+   * (`resolveBodyNameYields`, #683). A model that would take one is read in
+   * the registry under the name it ends with, so the other operation's
+   * model of the name it gives up is no clash, whichever of the two is read
+   * first, and the body never steps for it.
+   */
+  yields?: BodyNameYields,
 ): boolean {
   const clashes = (model: Model, name: string): boolean => {
     // A component response's body was named before any operation is read
@@ -8412,7 +8630,7 @@ function stepSecondaryBody(
     // the caller (#630), not stepped past.
     const keptModel = kept.get(name)?.model;
     if (keptModel && shapeFingerprint(keptModel) !== shapeFingerprint(model)) return true;
-    const owner = registry?.get(name);
+    const owner = registry?.get(yields?.get(name) ?? name);
     return owner !== undefined && !ownerShares(owner, model, modelFingerprint(model));
   };
   // Reached through the body's own models, not the kept ones: the body
