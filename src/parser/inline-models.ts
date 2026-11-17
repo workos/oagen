@@ -1206,10 +1206,8 @@ function schemaRootsOf(
 ): SchemaObject[] {
   const roots = new Set<SchemaObject>();
   readSchemaSites(document, (schema) => roots.add(schema));
-  // Read by its keys whatever it is, as the reservation reads it
-  // (`Object.keys`): an entry of a map written as an array is `0`.
   const responses = components?.['responses'];
-  if (document['paths'] && typeof responses === 'object' && responses !== null) {
+  if (document['paths'] && isRecord(responses)) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
       if (isSchemaRecord(body)) roots.add(body);

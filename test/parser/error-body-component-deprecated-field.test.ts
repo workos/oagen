@@ -343,41 +343,77 @@ describe('#671 a component that deprecates a field takes no error body carrying 
         ]);
       });
 
-      it('with no holder, the body is `ErrorBody` under every flag and carries its own flags', async () => {
+      it('with no holder, a lone body is `ErrorBody` under every flag and carries its own flags', async () => {
         const at = (flags: { field?: boolean; own?: boolean }): Doc => doc(op('note', flagged(flags)));
         expect(await diffBothWays(at({}), at({ field: true }))).toEqual(eitherWay(fieldFlip('ErrorBody')));
         expect(await diffBothWays(at({}), at({ own: true }))).toEqual(eitherWay(ownFlip('ErrorBody')));
-        // Among twins that share it, one of them flipping is no change at all.
-        const pair = (flags: { field?: boolean; own?: boolean }): Doc =>
-          doc({ ...op('note', flagged({})), ...op('pet', flagged(flags)) });
-        expect(await diffBothWays(pair({}), pair({ field: true }))).toEqual(eitherWay(NOTHING));
-        expect(await diffBothWays(pair({}), pair({ own: true }))).toEqual(eitherWay(NOTHING));
+      });
+
+      it('twins with no holder still read as `docs/cli.md` says: one body, or one body’s `message`, is no change (exit 0), with a warning; every body, or every body’s `message`, one additive change on `ErrorBody` (exit 1)', async () => {
+        type Flags = { field?: boolean; own?: boolean };
+        const pair = (note: Flags, pet: Flags): Doc =>
+          doc({ ...op('note', flagged(note)), ...op('pet', flagged(pet)) });
+        const live = pair({}, {});
+        expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody', 'getPet 404: ErrorBody']);
+        // One body's `message`, then one body.
+        const oneField = await parse(pair({}, { field: true }));
+        expect(modelShapes(oneField.ir)).toEqual(['ErrorBody { message }']);
+        expect(oneField.warnings).toEqual([
+          '[oagen] Warning: The shared error body "ErrorBody" has "message" declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
+        ]);
+        expect(await diffBothWays(live, pair({}, { field: true }))).toEqual(eitherWay(NOTHING));
+        const oneBody = await parse(pair({}, { own: true }));
+        expect(modelShapes(oneBody.ir)).toEqual(['ErrorBody { message }']);
+        expect(oneBody.warnings).toEqual([
+          '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
+        ]);
+        expect(await diffBothWays(live, pair({}, { own: true }))).toEqual(eitherWay(NOTHING));
+        // Every body's `message`, then every body.
+        const everyField = await parse(pair({ field: true }, { field: true }));
+        expect(everyField.warnings).toEqual([]);
+        expect(modelShapes(everyField.ir)).toEqual(['ErrorBody { message (deprecated) }']);
+        expect(await diffBothWays(live, pair({ field: true }, { field: true }))).toEqual(
+          eitherWay(fieldFlip('ErrorBody')),
+        );
+        const everyBody = await parse(pair({ own: true }, { own: true }));
+        expect(everyBody.warnings).toEqual([]);
+        expect(modelShapes(everyBody.ir)).toEqual(['ErrorBody (deprecated) { message }']);
+        expect(await diffBothWays(live, pair({ own: true }, { own: true }))).toEqual(eitherWay(ownFlip('ErrorBody')));
       });
     });
 
     describe('the flip that moves a body is the component’s', () => {
-      it('`ErrorBody` deprecating its `message` moves the body off it, whichever flag the body gives its own, exit 2', async () => {
-        for (const bodyDeprecated of [false, true]) {
-          const live = doc(op('note', messageBody(bodyDeprecated)), { ErrorBody: messageBody(false) });
-          expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody']);
-          expect(await diffBothWays(live, issueDoc(bodyDeprecated))).toEqual({
-            forward: {
-              exitCode: 2,
-              changes: [
-                'model-added GetNoteError404: additive',
-                ...fieldFlip('ErrorBody').changes,
-                'operation-modified getNote errorsChanged: breaking',
-              ],
-            },
-            reverse: {
-              exitCode: 2,
-              changes: [
-                'model-removed GetNoteError404: breaking',
-                ...fieldFlip('ErrorBody').changes,
-                'operation-modified getNote errorsChanged: breaking',
-              ],
-            },
-          });
+      it('`ErrorBody` deprecating its `message`, or becoming deprecated, moves the body off it under each of the body’s four flag combinations, exit 2', async () => {
+        const edits = [
+          { component: flagged({ field: true }), flip: fieldFlip('ErrorBody').changes },
+          { component: flagged({ own: true }), flip: ownFlip('ErrorBody').changes },
+        ];
+        for (const { component, flip } of edits) {
+          for (const field of [false, true]) {
+            for (const own of [false, true]) {
+              const body = flagged({ field, own });
+              const live = doc(op('note', body), { ErrorBody: messageBody(false) });
+              expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody']);
+              expect(await diffBothWays(live, doc(op('note', body), { ErrorBody: component }))).toEqual({
+                forward: {
+                  exitCode: 2,
+                  changes: [
+                    'model-added GetNoteError404: additive',
+                    ...flip,
+                    'operation-modified getNote errorsChanged: breaking',
+                  ],
+                },
+                reverse: {
+                  exitCode: 2,
+                  changes: [
+                    'model-removed GetNoteError404: breaking',
+                    ...flip,
+                    'operation-modified getNote errorsChanged: breaking',
+                  ],
+                },
+              });
+            }
+          }
         }
       });
 
