@@ -114,8 +114,15 @@
  * from, and says so in a warning that prints both shapes with their types;
  * the fold then runs again without them, since a freed name may now suit
  * another group. A name a model component and an enum component both hold
- * — the document's own clash, two keys that resolve to one name, which
- * `extractSchemas` keeps both of and reports (#668) — is the model
+ * — the document's own clash, two keys that resolve to one name (`Size: {
+ * type: 'object', properties }` beside `Sizes: { type: 'string', enum }`,
+ * both `Size`; #668), which `extractSchemas` keeps both of, since each
+ * `$ref` is typed as the component its key names, and reports (`[oagen]
+ * Warning: Component schemas "Size" (a model) and "Sizes" (an enum) both
+ * resolve to "Size" — keeping both, each $ref typed as the component it
+ * names; a schemaNameTransform can give one a name of its own`), and which
+ * a `schemaNameTransform` returning another name for one of the keys (its
+ * `originalName`) parts — is the model
  * component's to a shared body, which folds onto it or is left, and is told
  * of it, exactly as with no enum of the name (the warning named the enum,
  * `which enum "ErrorBodyWithCode" already holds`, where the body had been

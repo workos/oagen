@@ -1072,7 +1072,13 @@ export function collectExistingNames(
  * left out: the document declares one, with a model component and an
  * enum component whose keys resolve to one name (`Size: { type: 'object',
  * properties }` beside `Sizes: { type: 'string', enum }`, both `Size`;
- * #668), which the parser keeps both of and reports (`extractSchemas`). A
+ * #668), which the parser keeps both of, since each `$ref` is typed as
+ * the component its key names, and reports (`extractSchemas`: `[oagen]
+ * Warning: Component schemas "Size" (a model) and "Sizes" (an enum) both
+ * resolve to "Size" — keeping both, each $ref typed as the component it
+ * names; a schemaNameTransform can give one a name of its own`), and which
+ * a `schemaNameTransform` returning another name for one of the keys (its
+ * `originalName`) parts. A
  * webhook model of that name is then settled as one named like a decided
  * model is — by the stem hash, or by the model merge, which shares the
  * component's name when the component admits the shape — as the merge
