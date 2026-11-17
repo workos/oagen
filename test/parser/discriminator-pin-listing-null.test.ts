@@ -274,8 +274,9 @@ describe('#678 a discriminator pin that lists null among its values', () => {
 
       it('a list that holds no one string beside null still pins nothing', async () => {
         const unpinned: Array<[string, Doc, object]> = [
-          // No value at all: an inline enum with no members, nullable.
-          ['null alone', { enum: [null] }, { kind: 'nullable', inner: { kind: 'enum', name: 'CatKind', values: [] } }],
+          // No string at all: the list admits `null` alone and is typed as
+          // `const: null` is (#667; it lifted an enum with no members).
+          ['null alone', { enum: [null] }, { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } }],
           [
             'two strings beside null',
             { type: 'string', enum: ['cat', 'lion', null] },
