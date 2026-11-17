@@ -1025,27 +1025,27 @@ export function extractOperations(
   const componentBodies: TypeRef[] = [];
   // Each operation's `callbacks` map, read after the webhooks (`extractCallbacks`).
   const declaredCallbacks: DeclaredCallbacks[] = [];
-  // The item models each Operation Object's success bodies settle against
-  // the registry, by name (`ResponseTypingContext.settledItems`, #672): one
-  // map per Operation Object, not per path, so two paths that `$ref` one
-  // Path Item read its bodies against the same definitions.
-  const settledItems = new Map<OperationObject, Map<string, KeptDefinition>>();
-  const settledItemsOf = (op: OperationObject): Map<string, KeptDefinition> => {
-    let settled = settledItems.get(op);
-    if (!settled) settledItems.set(op, (settled = new Map()));
-    return settled;
+  // The definitions each Operation Object keeps for the copies its success
+  // bodies declare (`KeptSuccessModels`, #672): one record per Operation
+  // Object, not per path, so two paths that `$ref` one Path Item read its
+  // bodies against the same definitions.
+  const keptModels = new Map<OperationObject, KeptSuccessModels>();
+  const keptModelsOf = (op: OperationObject): KeptSuccessModels => {
+    let kept = keptModels.get(op);
+    if (!kept) keptModels.set(op, (kept = { items: new Map(), secondaryBodies: new Map() }));
+    return kept;
   };
 
   /**
    * Build the operation at `method` `path` into `sink` — the list its
    * deferred schemas join, the registry its array items are settled
-   * against and the definitions its Operation Object keeps for them
-   * (`settledItems`). The loop below passes the document's own; the
-   * rehearsal that reads what an operation's bodies mint (`readBodies`)
-   * passes a list it throws away, a copy of the registry and no kept
-   * definitions — the reading keeps a map of its own
-   * (`extractResponses`) — so nothing of it is kept, and no later body
-   * folds onto a model the rehearsal built.
+   * against and the definitions its Operation Object keeps for its
+   * success bodies' copies (`kept`). The loop below passes the document's
+   * own; the rehearsal that reads what an operation's bodies mint
+   * (`readBodies`) passes a list it throws away, a copy of the registry
+   * and no kept definitions — the reading keeps a map of its own for the
+   * items (`extractResponses`) — so nothing of it is kept, and no later
+   * body folds onto a model the rehearsal built.
    */
   const buildAt = (
     path: string,
@@ -1056,7 +1056,7 @@ export function extractOperations(
     sink: {
       deferred: DeferredInlineType[];
       registry: ModelShapeRegistry;
-      settledItems?: Map<string, KeptDefinition>;
+      kept?: KeptSuccessModels;
     },
     yields?: BodyNameYields,
     /** An `operationId` to name the models from in place of the operation's own naming: the rehearsal's stand-in (`readBodies`). */
@@ -1104,7 +1104,7 @@ export function extractOperations(
       sink.registry,
       namedFrom ?? modelOperationIds.get(key),
       yields,
-      sink.settledItems,
+      sink.kept,
     );
     return { tag, serviceName, ...built };
   };
@@ -1236,7 +1236,7 @@ export function extractOperations(
         method,
         op,
         servers,
-        { deferred, registry, settledItems: settledItemsOf(op) },
+        { deferred, registry, kept: keptModelsOf(op) },
         // A path that shares another's Operation Object gives up what that path does.
         bodyNameYields.get(sharedWith.get(key) ?? key),
       );
@@ -3594,8 +3594,8 @@ function buildOperation(
    * instead (`resolveBodyNameYields`, #683); absent when it gives none up.
    */
   bodyNameYields?: BodyNameYields,
-  /** The item models the Operation Object's success bodies settle, shared by every path that reads it (`ResponseTypingContext.settledItems`, #672). */
-  settledItems?: Map<string, KeptDefinition>,
+  /** The definitions the Operation Object keeps for its success bodies' copies, shared by every path that reads it (`ResponseTypingContext.kept`, #672). */
+  kept?: KeptSuccessModels,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3704,7 +3704,7 @@ function buildOperation(
     componentResponseModelNames,
     registry,
     ...(bodyNameYields && { yields: bodyNameYields }),
-    ...(settledItems && { settledItems }),
+    ...(kept && { kept }),
   };
   // One location's parameters, typed by `extractParams`. A parameter whose
   // inline schema mints a model is deferred once the responses have been
@@ -5654,6 +5654,22 @@ interface DeferredInlineType {
    * body is the component's wherever it is mounted and is never this.
    */
   later?: boolean;
+  /**
+   * Set for the secondary media-type body of the operation's own 2xx or 3xx
+   * entry: the definitions its Operation Object keeps for those bodies
+   * (`KeptSuccessModels.secondaryBodies`, #672). The sites of one bare name
+   * share one model while their schemas are identical — a `201` and a
+   * `202` both declaring `application/yaml: { name }` are
+   * `…ApplicationYamlResponse201`, a `200` and a `302` are
+   * `…ApplicationYamlResponse` — and with this a copy that differs only in
+   * the model's own `deprecated` shares it too, folded as the operation's
+   * array items are (`MaterializeInlineOptions.kept`), where it stepped to
+   * `…Response202` or `…Response302`. Absent for every other site: a
+   * header and a parameter carry the flag on their own node and keep a
+   * model of their own, a fallback or error body is named for its own key,
+   * and a component response's body is one schema wherever it is mounted.
+   */
+  kept?: Map<string, KeptDefinition>;
   /** Qualifies a name taken across operations (see `headerOperationQualifier`). */
   operationQualifier: string;
   /**
@@ -5717,19 +5733,41 @@ interface ResponseTypingContext {
    */
   yields?: BodyNameYields;
   /**
-   * The item models the Operation Object's success bodies have settled
-   * against the registry so far, by the name each settled on
-   * (`ItemSettlement.kept`, #672): the definitions a later body's items
-   * share when they repeat them but for the model's own `deprecated`. One
-   * map per Operation Object (`extractOperations`), so a path that `$ref`s
-   * the Path Item another path reads meets the definitions that path
-   * settled — the same bodies, read again — and gives every status code the
-   * type the first reading gave it. Absent — a rehearsal that builds the
+   * The definitions the Operation Object keeps for the copies its success
+   * bodies declare (`KeptSuccessModels`, #672): what a later body's items,
+   * or a later entry's secondary media-type body, share when they repeat
+   * an earlier one's but for the model's own `deprecated`. One record per
+   * Operation Object (`extractOperations`), so a path that `$ref`s the
+   * Path Item another path reads meets the definitions that path settled
+   * — the same bodies, read again — and gives every status code the type
+   * the first reading gave it. Absent — a rehearsal that builds the
    * operation against a copy of the registry (`readBodies`) —
-   * `extractResponses` keeps a map of its own for the one reading, so the
-   * rehearsal folds as the operation will and leaves nothing behind.
+   * `extractResponses` keeps a map of its own for the items of the one
+   * reading, so the rehearsal folds as the operation will and leaves
+   * nothing behind; the secondary bodies it defers are never resolved.
    */
-  settledItems?: Map<string, KeptDefinition>;
+  kept?: KeptSuccessModels;
+}
+
+/**
+ * The definitions one Operation Object keeps for the copies its success
+ * bodies declare, each filed under the name it settled on with the shape it
+ * settled with (`KeptDefinition`; #672). One map per group of sites that
+ * share one model through the shape registry when their schemas are
+ * identical, since those are the sites a flag flip split: a copy of one of
+ * these definitions but for the model's own `deprecated` shares it and is
+ * folded onto it (`MaterializeInlineOptions.kept`, `foldLiveCopy`), as two
+ * success bodies that resolve to one name are (`extractResponses`, #630).
+ * A model of one group is no definition of the other's: an item and a
+ * secondary body are named apart, and a name both mint — a variant named
+ * from its title — is shared across the groups as before, on an identical
+ * shape.
+ */
+interface KeptSuccessModels {
+  /** The item models the array bodies and list envelopes of the operation's 2xx entries settle as they are read (`ItemSettlement.kept`). */
+  items: Map<string, KeptDefinition>;
+  /** The models the secondary media-type bodies of its 2xx and 3xx entries settle once every operation has been read (`DeferredInlineType.kept`). */
+  secondaryBodies: Map<string, KeptDefinition>;
 }
 
 /**
@@ -5769,7 +5807,14 @@ interface ResponseTypingContext {
  * earlier took (`materializeInlineSchema`); the later 2xx bodies of a name
  * keep a record apart from the primary's and step through a numbered run of
  * their own (`deferredNamingStem`), so neither group shares the other's
- * model or steps into its names.
+ * model or steps into its names. One kind of site shares a sibling's model
+ * on more than an identical shape: the secondary media-type body of an
+ * operation's own 2xx or 3xx entry, which repeats an earlier such body of
+ * its Operation Object but for the model's own `deprecated`
+ * (`DeferredInlineType.kept`, #672) — it is folded onto that body's model,
+ * live while either copy is, as the operation's array items are
+ * (`MaterializeInlineOptions.kept`), where it stepped to its own status
+ * code.
  *
  * An enum keeps a name a model also derives, wherever the document declares
  * the two. One typed as an operation is built — one a parameter, a request
@@ -6043,6 +6088,7 @@ function materializeDeferredType(
     registry,
     operation: registryOwner(item),
     sent: isSentSite(item),
+    ...(item.kept && { kept: item.kept }),
     models,
   });
 }
@@ -7856,6 +7902,8 @@ function extractResponseContents(
   primaryType: TypeRef | undefined,
   naming: ContentModelNaming,
   ctx: ResponseTypingContext,
+  /** The definitions the Operation Object keeps for its success entries' secondary bodies (`DeferredInlineType.kept`); given for a 2xx or 3xx entry only. */
+  kept?: Map<string, KeptDefinition>,
 ): { contentTypes: string[]; contents: ResponseContent[] } | undefined {
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
@@ -7870,7 +7918,7 @@ function extractResponseContents(
     entry.type =
       primaryType !== undefined && contentType === primaryContentType
         ? primaryType
-        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes);
+        : typeSecondaryContent(contentType, content[contentType]?.schema, naming, ctx, entry, contentTypes, kept);
   }
   return { contentTypes, contents };
 }
@@ -7905,6 +7953,8 @@ function typeSecondaryContent(
   ctx: ResponseTypingContext,
   target: ResponseContent,
   siblings: readonly string[],
+  /** The kept definitions a success entry's body is read against (`DeferredInlineType.kept`); a component response's body takes none. */
+  kept?: Map<string, KeptDefinition>,
 ): TypeRef {
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
@@ -7925,6 +7975,7 @@ function typeSecondaryContent(
     targets: [target],
     ...(naming.component !== undefined && { componentSite: naming.component }),
     ...(naming.later && { later: true }),
+    ...(kept && naming.component === undefined && { kept }),
   });
   return target.type;
 }
@@ -8406,10 +8457,10 @@ function extractResponses(
   // that repeat an earlier body's but for the model's own `deprecated`
   // share that body's model and are folded onto it as they are read
   // (#672), where the registry alone would step them to `<Op>ResponseItem`.
-  // The Operation Object's own map when it has one (`ctx.settledItems`):
-  // another path may read these bodies again. A rehearsal has none, and
-  // keeps this reading's to itself.
-  const settledItems = ctx.settledItems ?? new Map<string, KeptDefinition>();
+  // The Operation Object's own map when it has one (`ctx.kept`): another
+  // path may read these bodies again. A rehearsal has none, and keeps this
+  // reading's to itself.
+  const settledItems = ctx.kept?.items ?? new Map<string, KeptDefinition>();
 
   // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
   // `[…]` — is no Responses Object, so no key could be read from it: it is
@@ -8590,6 +8641,9 @@ function extractResponses(
         extractedType,
         contentModelNaming(site, 'Response', code, code !== primaryEntry?.code),
         ctx,
+        // A secondary body that repeats an earlier entry's but for the
+        // model's own `deprecated` shares that entry's model (#672).
+        ctx.kept?.secondaryBodies,
       );
       // The component's body wherever it is mounted, so an enum it is steps
       // by number, never by this status code (`collectInlineEnumsFromOperations`).
@@ -8616,6 +8670,7 @@ function extractResponses(
         json && typeFallbackBody(json.schema, componentModelName!, String(code), fallback, targets, componentModelName),
         contentModelNaming(site, 'Response', code),
         ctx,
+        ctx.kept?.secondaryBodies,
       );
       const own = json && contents?.contents.find((content) => content.contentType === json.contentType);
       if (own) targets.push(own);

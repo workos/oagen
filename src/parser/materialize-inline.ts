@@ -289,9 +289,11 @@ export interface MaterializeInlineOptions {
    * this kind declare, by name: every model an earlier call given this map
    * minted, with its shape as it settled (`KeptDefinition`), to which this
    * call adds its own. Given by one operation's
-   * success bodies for their array items (`ItemSettlement.kept`, #672) —
-   * the sites whose copies the operation folds into one model, as it folds
-   * two success bodies that resolve to one name (`extractResponses`, #630).
+   * success bodies for their array items (`ItemSettlement.kept`, #672) and,
+   * apart from those, for the secondary media-type bodies of its success
+   * entries (`DeferredInlineType.kept`) — the sites whose copies the
+   * operation folds into one model, as it folds two success bodies that
+   * resolve to one name (`extractResponses`, #630).
    * A model of the trial named like one of them and of its shape but for
    * the model's own `deprecated` (`keptTwin`) shares the name where the
    * registry alone, which reads an operation's model flag included
@@ -342,7 +344,8 @@ const MAX_RENAME_ROUNDS = 64;
  * admits simply references it, and so is a name under which the site's own
  * operation keeps a definition of the model's shape but for the model's own
  * `deprecated` (`options.kept`, `keptTwin`: the items of one operation's
- * success bodies, #672); any other owned name clashes. On a clash the
+ * success bodies, and the secondary bodies of its success entries, #672);
+ * any other owned name clashes. On a clash the
  * loop makes the cheapest move that can still change something:
  *
  *   1. reserve the clashing names — a `oneOf`/`anyOf` variant named from its

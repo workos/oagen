@@ -1011,3 +1011,48 @@ describe('#676 a member that is itself an `allOf` votes as the members it holds,
     expect(schemaAdmitsNull({ allOf: [nullableInline, { allOf: [{ ...nullableInline }] }] })).toBe(true);
   });
 });
+
+describe('#676 a JSON Pointer into an `allOf` of nullable wrappers', () => {
+  it.each(VERSIONS)('settles to what the field is typed as, the `null` included (%s)', async (openapi) => {
+    const pointer = (path: string) => ({ $ref: `#/components/schemas/Pet/properties/${path}` });
+    const typedNullable = (member: unknown) =>
+      openapi === '3.0.3'
+        ? { type: 'object', nullable: true, allOf: [member] }
+        : { type: ['object', 'null'], allOf: [member] };
+    const spec = await parse(
+      document(openapi, {
+        A: { type: 'object', properties: { a: string } },
+        B: { type: 'object', properties: { b: string } },
+        Pet: {
+          type: 'object',
+          properties: {
+            bare: { allOf: [{ allOf: [Owner] }, { allOf: [Tag] }] },
+            typed: { allOf: [typedNullable(ref('A')), typedNullable(ref('B'))] },
+            rejecting: { allOf: [{ type: 'object', allOf: [Owner] }, Tag] },
+          },
+        },
+        Holder: {
+          type: 'object',
+          properties: {
+            to_bare: pointer('bare'),
+            to_typed: pointer('typed'),
+            to_rejecting: pointer('rejecting'),
+            // Through a wrapper to the `$ref` it holds: the reference, as written.
+            through_bare: pointer('bare/allOf/0/allOf/0'),
+            through_typed: pointer('typed/allOf/1/allOf/0'),
+          },
+        },
+      }),
+    );
+    const types = (name: string) => Object.fromEntries(modelOf(spec, name)!.fields.map((f) => [f.name, show(f.type)]));
+    expect(types('Pet')).toEqual({ bare: 'nullable<PetBare>', typed: 'nullable<PetTyped>', rejecting: 'PetRejecting' });
+    expect(types('Holder')).toEqual({
+      to_bare: 'nullable<PetBare>',
+      to_typed: 'nullable<PetTyped>',
+      to_rejecting: 'PetRejecting',
+      through_bare: 'nullable<Owner>',
+      through_typed: 'B',
+    });
+    expect(warnings()).toEqual([]);
+  });
+});
