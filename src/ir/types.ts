@@ -8,12 +8,30 @@ import type { SdkBehavior } from './sdk-behavior.js';
  * `Operation.security` refer to the same key, so emitters join a requirement to
  * its scheme on that field. `description` is present only when the document
  * declares one.
+ *
+ * Every Security Scheme Object `type` has a kind, and `type: http` has
+ * three, told apart by its `scheme`: `basic` and `bearer` are their own
+ * kinds, and `http` is any other HTTP authentication scheme (`Digest`,
+ * `HOBA`, `Negotiate`, …) with `scheme` spelled as in the document. Scheme
+ * names are case-insensitive (RFC 9110 §11.1), so `BASIC` is `kind:
+ * 'basic'`, the `http` kind's `scheme` is never `basic` or `bearer` in any
+ * case, and an emitter compares it folded: `foldHttpAuthScheme(auth.scheme)
+ * === 'digest'` (`ir/http-auth-scheme.ts`). `openIdConnect` carries its
+ * discovery URL exactly as written, and `mutualTLS` nothing but its kind —
+ * the Security Scheme Object has no other field for it.
+ *
+ * An emitter that switches over `kind` should end in a `never` check such
+ * as `assertNever`, so a kind added here fails its build instead of being
+ * skipped unnoticed.
  */
 export type AuthScheme = { description?: string; schemeName: string } & (
   | { kind: 'basic' }
   | { kind: 'bearer' }
   | { kind: 'apiKey'; in: 'header' | 'query' | 'cookie'; name: string }
   | { kind: 'oauth2'; flows: Record<string, unknown> }
+  | { kind: 'openIdConnect'; openIdConnectUrl: string }
+  | { kind: 'mutualTLS' }
+  | { kind: 'http'; scheme: string }
 );
 
 /**

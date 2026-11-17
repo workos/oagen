@@ -8,7 +8,7 @@
  * — fallback, explicit status code, webhook — can resolve the same way.
  */
 
-import { followReference, type ReferenceObject, type SiblingDocs } from './reference-objects.js';
+import { followReference, isReferenceEntry, type ReferenceObject, type SiblingDocs } from './reference-objects.js';
 
 export type { ReferenceObject };
 
@@ -111,11 +111,8 @@ export function resolveResponseRef<T extends object>(
  * the component named in the site.
  */
 export function isResponseEntry(raw: unknown, site?: string): raw is Record<string, unknown> {
-  if (typeof raw === 'object' && raw !== null && !Array.isArray(raw)) return true;
-  if (site !== undefined) {
-    console.warn(`[oagen] Warning: ${site} is not a Response Object (${JSON.stringify(raw)}); skipping it.`);
-  }
-  return false;
+  // The check, and the sentence, every Reference Object site shares (#664).
+  return isReferenceEntry(raw, 'responses', site);
 }
 
 /**
