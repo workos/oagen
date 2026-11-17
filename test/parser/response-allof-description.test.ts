@@ -272,7 +272,10 @@ describe('#604', () => {
         expect(operationOf(spec, 'getPet').errors?.map((e) => e.description)).toEqual(['Bad.']);
       });
 
-      it("the error-body fold's own rule is unchanged: the shared model carries no text, as two plain bodies' does", async () => {
+      // #666: this pinned the shared model without text whatever the bodies
+      // wrote. The fold now keeps the text every body wrote, so the two rows
+      // whose bodies agree carry it and the row whose bodies differ does not.
+      it("the error-body fold reads the wrapper layer's text as it reads a plain body's: kept when every body wrote the same one (#666)", async () => {
         const merged = (text: string) => ({
           allOf: [base, { type: 'object', properties: { message: { type: 'string' } } }, { description: text }],
         });
@@ -298,14 +301,14 @@ describe('#604', () => {
               ),
             },
           });
-        for (const [a, b] of [
-          [merged('An error.'), merged('An error.')],
-          [merged('An error.'), merged('Another error.')],
-          [plain('An error.'), plain('An error.')],
-        ]) {
+        for (const [a, b, text] of [
+          [merged('An error.'), merged('An error.'), 'An error.'],
+          [merged('An error.'), merged('Another error.'), undefined],
+          [plain('An error.'), plain('An error.'), 'An error.'],
+        ] as const) {
           const spec = await parseJson(twoErrors(a, b));
           const shared = modelOf(spec, 'OptionalErrorBodyWithId');
-          expect(shared.description).toBeUndefined();
+          expect(shared.description).toBe(text);
           expect(shared.fields.map((f) => f.name)).toEqual(['id', 'message']);
           expect(operationOf(spec, 'getA').errors?.[0]?.type).toEqual({
             kind: 'model',

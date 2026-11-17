@@ -8,12 +8,30 @@ import type { SdkBehavior } from './sdk-behavior.js';
  * `Operation.security` refer to the same key, so emitters join a requirement to
  * its scheme on that field. `description` is present only when the document
  * declares one.
+ *
+ * Every Security Scheme Object `type` has a kind, and `type: http` has
+ * three, told apart by its `scheme`: `basic` and `bearer` are their own
+ * kinds, and `http` is any other HTTP authentication scheme (`Digest`,
+ * `HOBA`, `Negotiate`, …) with `scheme` spelled as in the document. Scheme
+ * names are case-insensitive (RFC 9110 §11.1), so `BASIC` is `kind:
+ * 'basic'`, the `http` kind's `scheme` is never `basic` or `bearer` in any
+ * case, and an emitter compares it folded: `foldHttpAuthScheme(auth.scheme)
+ * === 'digest'` (`ir/http-auth-scheme.ts`). `openIdConnect` carries its
+ * discovery URL exactly as written, and `mutualTLS` nothing but its kind —
+ * the Security Scheme Object has no other field for it.
+ *
+ * An emitter that switches over `kind` should end in a `never` check such
+ * as `assertNever`, so a kind added here fails its build instead of being
+ * skipped unnoticed.
  */
 export type AuthScheme = { description?: string; schemeName: string } & (
   | { kind: 'basic' }
   | { kind: 'bearer' }
   | { kind: 'apiKey'; in: 'header' | 'query' | 'cookie'; name: string }
   | { kind: 'oauth2'; flows: Record<string, unknown> }
+  | { kind: 'openIdConnect'; openIdConnectUrl: string }
+  | { kind: 'mutualTLS' }
+  | { kind: 'http'; scheme: string }
 );
 
 /**
@@ -1022,15 +1040,50 @@ export interface Parameter {
    */
   type: TypeRef;
   required: boolean;
+  /**
+   * The first non-empty `description` of, in order, the Parameter Object,
+   * the parameter's schema, and the schema a bare `$ref` in it points at.
+   * A component that becomes a model or a named union is read there as the
+   * model documents itself: its own keys, else those of the first `allOf`
+   * member of its that declares no type and so only annotates it. So
+   * `PetId: { allOf: [{ description: 'A pet id.', deprecated: true }],
+   * oneOf: [{ type: 'string' }, { type: 'integer' }] }` gives `{ schema: {
+   * $ref: PetId } }` the text and the flag `PetId: { description: 'A pet
+   * id.', deprecated: true, oneOf: [...] }` gives it, the ones the model
+   * `PetId` carries in both (#679: the component's own keys alone were
+   * read). An enum component is read on the schema it declares its members
+   * on, as the `Enum` is; an array or primitive component, or an alias of
+   * an enum component, level by level through every alias the reference
+   * passes, nearest first, as a field reads one (see `Field.description`).
+   * `deprecated`, `externalDocs`, `default`, `example` and `examples` read
+   * the same component, each by its own rule. Absent when no level gives a
+   * text.
+   */
   description?: string;
+  /**
+   * Present, and `true`, when the Parameter Object, the parameter's schema
+   * or the schema a bare `$ref` in it points at says `deprecated: true` —
+   * for a component that becomes a model or a named union, the component
+   * itself or any `allOf` member of its that declares no type (see
+   * `description`).
+   */
   deprecated?: boolean;
   /**
    * The parameter schema's `externalDocs`, when it declares a usable one;
    * a schema that is a `$ref` falls back to the component it points at,
-   * the way `description` and `deprecated` do. A Parameter Object has no
+   * the way `description` and `deprecated` do — for a component that
+   * becomes a model or a named union, its own link, else the first `allOf`
+   * member's of its that declares no type. A Parameter Object has no
    * `externalDocs` of its own. Absent when neither level gives one.
    */
   externalDocs?: ExternalDocs;
+  /**
+   * The parameter schema's `default`, else (`??`, so `false` and `0` are
+   * kept) that of the schema a bare `$ref` in it points at — for a
+   * component that becomes a model or a named union, its own, else the
+   * first `allOf` member's of its that declares no type (see
+   * `description`). A Parameter Object has no `default` of its own.
+   */
   default?: unknown;
   /**
    * A single illustrative value, resolved level by level: the parameter's own
@@ -1038,8 +1091,9 @@ export interface Parameter {
    * parameter declared with `content` — the same on the Media Type Object
    * its schema was read from, then the parameter schema's `example` (else
    * the first of its `examples` list), then the same on the component schema
-   * its `$ref` points at. A level with neither falls through; an explicit
-   * `null` is kept. Absent when no level gives one.
+   * its `$ref` points at, an `allOf` member of its that declares no type
+   * included (see `description`). A level with neither falls through; an
+   * explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
@@ -1049,7 +1103,8 @@ export interface Parameter {
    * declared with `content` — the same map on the Media Type Object its
    * schema was read from, else the JSON Schema `examples` list on the
    * parameter's schema, else the list on the component schema its `$ref`
-   * points at. Present only when at least one value exists.
+   * points at, or on an `allOf` member of that component that declares no
+   * type (see `description`). Present only when at least one value exists.
    */
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
@@ -1150,6 +1205,16 @@ export interface EnumRef {
   values?: (string | number)[];
 }
 
+/**
+ * A schema that admits one string, number or boolean, typed as that value:
+ * a `const`, or an `enum:` list of the value alone — the OAS 3.0 spelling
+ * of a `const` — read alike, the value kept as the document writes it, so
+ * `{ type: 'boolean', enum: [true] }` is `{ kind: 'literal', value: true }`
+ * as `{ type: 'boolean', const: true }` is, not the string `'true'` (#667).
+ * A one-value list of anything else is typed as its `const` is too: `null`
+ * is `nullable<unknown>`, an array an array of `unknown`, an object a map
+ * of `unknown`.
+ */
 export interface LiteralType {
   kind: 'literal';
   value: string | number | boolean | null;
@@ -1196,11 +1261,15 @@ export interface UnionType {
    * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — the
    * declaration read as the type builder reads it, at every hop: a `$ref`
    * to its component, a nullable wrapper to its one variant, an `allOf`
-   * read as one member to that member, then the `const` or one-value
-   * `enum:` written there, so `kind: { allOf: [{ const: 'cat' }] }`,
+   * read as one member to that member, then the string `const` written
+   * there, or the one string its `enum:` list holds beside any `null` it
+   * names, so `kind: { allOf: [{ const: 'cat' }] }`,
    * `kind: { allOf: [{ $ref: HamsterKind }], description }` and a `$ref`
    * to `RabbitKind: { allOf: [{ $ref: RabbitConst }] }` pin as `kind: {
-   * const: … }` does, in OAS 3.0 and 3.1 alike (#607) — a
+   * const: … }` does, in OAS 3.0 and 3.1 alike (#607), and `kind: { type:
+   * ['string', 'null'], enum: ['cat', null] }` pins `cat` as `kind: { type:
+   * ['string', 'null'], const: 'cat' }` does, the field `nullable<"cat">`
+   * in both (#678) — a
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
@@ -1326,10 +1395,18 @@ export interface Model {
    * own, else the first `allOf` member's that declares no type (`allOf:
    * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
    * }]`; #555 review). A typing member's text stays on that member, a
-   * `$ref` member's on its component.
+   * `$ref` member's on its component. A shared error body
+   * (`collapseErrorBodies`) stands for several inline schemas: it carries
+   * the text every body folded onto it wrote, and none when two wrote
+   * different texts or one wrote none (#666).
    */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
+  /**
+   * The schema's `externalDocs`, when it declares a usable one; for an
+   * `allOf` model, the wrapper layer's, as `description` is; for a shared
+   * error body, the link every body folded onto it wrote — the same `url`
+   * and the same `description` — settled apart from the text (#666).
+   */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says
@@ -1615,7 +1692,11 @@ export interface Field {
   /**
    * A single illustrative value. The field schema's `example` when present,
    * otherwise the first entry of its `examples`; when the schema is a `$ref`
-   * with neither, the same taken from the component it points at — for an
+   * with neither, the same taken from the component it points at — for a
+   * model or named union, from its own keys, else the first `allOf`
+   * member's of its that declares no type (`Pet: { type: 'object',
+   * properties, allOf: [{ example }] }` gives a field `{ $ref: Pet }` the
+   * example `example` beside the `allOf` gives it; #679); for an
    * array or primitive component, from the nearest level the reference
    * passes on its way to the array or primitive (an alias's own, else the
    * component's), as `description` is read; for an alias of an enum
