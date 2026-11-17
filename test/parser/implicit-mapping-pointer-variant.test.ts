@@ -1053,6 +1053,250 @@ describe('#682 a discriminator with no mapping and a variant written as a pointe
         });
       });
 
+      describe('a reading that comes back to the pointer through the union that holds it (Greptile, review round 2)', () => {
+        const S = '#/components/schemas/';
+        const base = { type: 'object', properties: { id: { type: 'string' } } };
+        const cat = animal('cat', openapi);
+        const dog = animal('dog', openapi);
+        const hound = animal('hound', openapi);
+        const kinds = ['keyword', 'none'] as const;
+        /** The keyword alone, nothing, or the keyword with the mapping the document would write for the union. */
+        const written = (kind: Discriminator, mapping: Record<string, string>) =>
+          kind === 'none'
+            ? {}
+            : { discriminator: { propertyName: 'kind', ...(kind === 'mapping' ? { mapping } : {}) } };
+        const byName = <T extends { name: string }>(items: readonly T[]) =>
+          [...items].sort((a, b) => a.name.localeCompare(b.name));
+
+        /**
+         * `schemas` parsed as declared and with its components in the reverse
+         * order, every component returned by an operation: the IR as declared,
+         * once the two are found to hold the same models and enums.
+         */
+        async function inEitherOrder(schemas: Record<string, unknown>, options?: ParseOptions): Promise<ApiSpec> {
+          const paths = Object.fromEntries(
+            Object.keys(schemas).map((key) => [`/${key.toLowerCase()}/{id}`, getOp(`get${key}`, ref(key))]),
+          );
+          const declared = await parseJson(documentWith(openapi, schemas, paths), options);
+          const reversed = await parseJson(
+            documentWith(openapi, Object.fromEntries(Object.entries(schemas).reverse()), paths),
+            options,
+          );
+          expect(byName(reversed.models)).toEqual(byName(declared.models));
+          expect(byName(reversed.enums)).toEqual(byName(declared.enums));
+          return declared;
+        }
+
+        /** The finding's document: `Holder` extends `Pet`, whose union has a variant pointing at `Holder`'s own `dog`. */
+        const extending = (kind: Discriminator, holder: unknown, pointer = `${S}Holder/properties/dog`) => ({
+          Cat: cat,
+          Base: base,
+          Pet: {
+            allOf: [ref('Base'), { oneOf: [ref(CAT), ref(pointer)] }],
+            ...written(kind, { cat: CAT, dog: pointer }),
+          },
+          Holder: holder,
+        });
+
+        it.each(kinds)(
+          'a pointer into a component that extends the union’s own: parsed, dispatched to the pointed model, as with the mapping written out (%s)',
+          async (kind) => {
+            const holder = { allOf: [ref('Pet')], properties: { dog } };
+            const spec = await inEitherOrder(extending(kind, holder));
+            expect(modelOf(spec, 'Pet')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'HolderDog' },
+            });
+            expect(fieldNames(spec, 'Pet')).toEqual(['id']);
+            // `Holder` is read as `Pet` is decided: the union left to the dispatcher, no variant's field carried.
+            expect(fieldNames(spec, 'Holder')).toEqual(['dog', 'id']);
+            expect(modelOf(spec, 'Holder')?.discriminator).toBeUndefined();
+            expect(modelNames(spec)).toEqual(['Base', 'Cat', 'Holder', 'HolderDog', 'Pet']);
+            expect(warnings()).toEqual([]);
+            const explicit = await inEitherOrder(extending('mapping', holder));
+            expect(diffSpecs(explicit, spec).changes).toEqual([]);
+          },
+        );
+
+        it.each(kinds)(
+          'the same with the field declared by an `allOf` member, and two components away (%s)',
+          async (kind) => {
+            const member = await inEitherOrder(
+              extending(
+                kind,
+                { allOf: [ref('Pet'), { type: 'object', properties: { dog } }] },
+                `${S}Holder/allOf/1/properties/dog`,
+              ),
+            );
+            expect(modelOf(member, 'Pet')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'HolderDog' },
+            });
+            expect(fieldNames(member, 'Holder')).toEqual(['id', 'dog']);
+            const deep = await inEitherOrder({
+              ...extending(
+                kind,
+                { allOf: [ref('Pet')], properties: { size: { type: 'integer' } } },
+                `${S}Deep/properties/dog`,
+              ),
+              Deep: { allOf: [ref('Holder')], properties: { dog } },
+            });
+            expect(modelOf(deep, 'Pet')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'DeepDog' },
+            });
+            expect(fieldNames(deep, 'Holder')).toEqual(['size', 'id']);
+            expect(fieldNames(deep, 'Deep')).toEqual(['dog', 'size', 'id']);
+          },
+        );
+
+        it.each(kinds)('a pointer through an alias back to the union (%s)', async (kind) => {
+          const spec = await inEitherOrder({
+            ...extending(kind, { allOf: [ref('Alias')], properties: { dog } }),
+            Alias: ref('Pet'),
+          });
+          expect(modelOf(spec, 'Pet')?.discriminator).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Cat', dog: 'HolderDog' },
+          });
+          expect(fieldNames(spec, 'Holder')).toEqual(['dog', 'id']);
+          expect(fieldNames(spec, 'Alias')).toEqual(['id']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it.each(kinds)('a pointer into the union’s own component (%s)', async (kind) => {
+          const pointer = `${S}Pet/properties/dog`;
+          const spec = await inEitherOrder({
+            Cat: cat,
+            Pet: {
+              type: 'object',
+              properties: { dog },
+              oneOf: [ref(CAT), ref(pointer)],
+              ...written(kind, { cat: CAT, dog: pointer }),
+            },
+          });
+          expect(modelOf(spec, 'Pet')?.discriminator).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Cat', dog: 'PetDog' },
+          });
+          expect(fieldNames(spec, 'Pet')).toEqual(['dog']);
+          expect(warnings()).toEqual([]);
+        });
+
+        it.each(kinds)(
+          'two unions whose pointer variants point into each other, and into a component extending the other (%s)',
+          async (kind) => {
+            const each = (mine: Record<string, unknown>, theirs: string, value: string) => ({
+              type: 'object',
+              properties: mine,
+              oneOf: [ref(CAT), ref(theirs)],
+              ...written(kind, { cat: CAT, [value]: theirs }),
+            });
+            const direct = await inEitherOrder({
+              Cat: cat,
+              A: each({ dog }, `${S}B/properties/hound`, 'hound'),
+              B: each({ hound }, `${S}A/properties/dog`, 'dog'),
+            });
+            expect(modelOf(direct, 'A')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', hound: 'BHound' },
+            });
+            expect(modelOf(direct, 'B')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'ADog' },
+            });
+            const dispatcher = (pointer: string, value: string) => ({
+              allOf: [ref('Base'), { oneOf: [ref(CAT), ref(pointer)] }],
+              ...written(kind, { cat: CAT, [value]: pointer }),
+            });
+            const extended = await inEitherOrder({
+              Cat: cat,
+              Base: base,
+              A: dispatcher(`${S}HolderB/properties/hound`, 'hound'),
+              B: dispatcher(`${S}HolderA/properties/dog`, 'dog'),
+              HolderA: { allOf: [ref('A')], properties: { dog } },
+              HolderB: { allOf: [ref('B')], properties: { hound } },
+            });
+            expect(modelOf(extended, 'A')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', hound: 'HolderBHound' },
+            });
+            expect(modelOf(extended, 'B')?.discriminator).toEqual({
+              property: 'kind',
+              mapping: { cat: 'Cat', dog: 'HolderADog' },
+            });
+            expect(fieldNames(extended, 'HolderA')).toEqual(['dog', 'id']);
+            expect(fieldNames(extended, 'HolderB')).toEqual(['hound', 'id']);
+            expect(warnings()).toEqual([]);
+          },
+        );
+
+        it('a title-mapped union and an inline union beside the cycle read the pointer the same', async () => {
+          const pointer = `${S}Holder/properties/dog`;
+          const spec = await inEitherOrder({
+            ...extending('none', {
+              allOf: [ref('Pet')],
+              properties: { dog, pet: { oneOf: [ref(CAT), ref(pointer)] } },
+            }),
+            Titled: { oneOf: [{ ...cat, title: 'Tabby' }, ref(pointer)] },
+          });
+          const mapped = { property: 'kind', mapping: { cat: 'Cat', dog: 'HolderDog' } };
+          expect(modelOf(spec, 'Pet')?.discriminator).toEqual(mapped);
+          expect(discriminatorOf(fieldType(spec, 'Holder', 'pet'))).toEqual(mapped);
+          expect(modelOf(spec, 'Titled')?.discriminator).toEqual({
+            property: 'kind',
+            mapping: { cat: 'Tabby', dog: 'HolderDog' },
+          });
+          expect(warnings()).toEqual([]);
+        });
+
+        it.each(kinds)(
+          'a chain of pointers that reaches itself, which only `transformSpec` can write: unnamed (%s)',
+          async (kind) => {
+            const keyword = written(kind, {});
+            // Each union's second variant is rewritten to point at the other's.
+            const spec = await inEitherOrder(
+              {
+                Cat: cat,
+                Dog: dog,
+                Base: base,
+                A: { allOf: [ref('Base'), { oneOf: [ref(CAT), ref('Dog')] }], ...keyword },
+                B: { allOf: [ref('Base'), { oneOf: [ref(CAT), ref('Dog')] }], ...keyword },
+                C: { oneOf: [ref(CAT), ref('Dog')], ...keyword },
+                D: { oneOf: [ref(CAT), ref('Dog')], ...keyword },
+              },
+              {
+                transformSpec: (document) => {
+                  type Variants = { oneOf: Array<{ $ref: string }> };
+                  const schemas = (document.components as { schemas: Record<string, unknown> }).schemas;
+                  const axis = (name: string) => (schemas[name] as { allOf: Variants[] }).allOf[1]!.oneOf[1]!;
+                  const variant = (name: string) => (schemas[name] as Variants).oneOf[1]!;
+                  axis('A').$ref = `${S}B/allOf/1/oneOf/1`;
+                  axis('B').$ref = `${S}A/allOf/1/oneOf/1`;
+                  variant('C').$ref = `${S}D/oneOf/1`;
+                  variant('D').$ref = `${S}C/oneOf/1`;
+                  return document;
+                },
+              },
+            );
+            // The dispatchers name no model for the pointer, so their unions are flattened.
+            for (const name of ['A', 'B']) {
+              expect(modelOf(spec, name)?.discriminator).toBeUndefined();
+              expect(fieldNames(spec, name)).toEqual(['id', 'kind', 'name']);
+            }
+            // The named unions hold the variant, which the settle types `unknown` and reports: nothing is derived.
+            for (const name of ['C', 'D']) {
+              expect(modelOf(spec, name)?.variants).toEqual([model('Cat'), UNKNOWN]);
+              expect(modelOf(spec, name)?.discriminator).toEqual(
+                kind === 'keyword' ? { property: 'kind', mapping: {} } : undefined,
+              );
+            }
+            expect(warnings().every((message: string) => message.includes('Circular schema $ref chain'))).toBe(true);
+            expect(warnings()).not.toEqual([]);
+          },
+        );
+      });
+
       it('leaves to the settle what the document alone cannot refuse: a pointer through a primitive component’s `properties` derives nothing on a union, and leaves a dispatcher’s entry as the pointer, as the explicit entry naming it is left', async () => {
         const pointer = '#/components/schemas/Code/properties/dog';
         const schemas = (kind: Discriminator) => ({
