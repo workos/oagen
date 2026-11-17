@@ -155,6 +155,7 @@ import {
   registerInlineModels,
   reserveEnumNames,
   type InlineModelRegistry,
+  type KeptDefinition,
   type InlineModelOwner,
   type SiblingSites,
   createSiblingSites,
@@ -1011,8 +1012,8 @@ export function extractOperations(
   // the registry, by name (`ResponseTypingContext.settledItems`, #672): one
   // map per Operation Object, not per path, so two paths that `$ref` one
   // Path Item read its bodies against the same definitions.
-  const settledItems = new Map<OperationObject, Map<string, Model>>();
-  const settledItemsOf = (op: OperationObject): Map<string, Model> => {
+  const settledItems = new Map<OperationObject, Map<string, KeptDefinition>>();
+  const settledItemsOf = (op: OperationObject): Map<string, KeptDefinition> => {
     let settled = settledItems.get(op);
     if (!settled) settledItems.set(op, (settled = new Map()));
     return settled;
@@ -3444,7 +3445,7 @@ function buildOperation(
    */
   bodyNameYields?: BodyNameYields,
   /** The item models the Operation Object's success bodies settle, shared by every path that reads it (`ResponseTypingContext.settledItems`, #672). */
-  settledItems?: Map<string, Model>,
+  settledItems?: Map<string, KeptDefinition>,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -5577,7 +5578,7 @@ interface ResponseTypingContext {
    * type the first reading gave it. Absent, `extractResponses` keeps a map
    * of its own for the one reading.
    */
-  settledItems?: Map<string, Model>;
+  settledItems?: Map<string, KeptDefinition>;
 }
 
 /**
@@ -7277,7 +7278,7 @@ function inlineEnumNames(roots: readonly TypeRef[], models: readonly Model[]): s
 function itemSettlement(
   registry: ModelShapeRegistry,
   ctx: ResponseTypingContext,
-  kept: Map<string, Model>,
+  kept: Map<string, KeptDefinition>,
 ): ItemSettlement {
   return { registry, operation: ctx.operationQualifier, ...(ctx.yields && { yields: ctx.yields }), kept };
 }
@@ -8196,7 +8197,7 @@ function extractResponses(
   // (#672), where the registry alone would step them to `<Op>ResponseItem`.
   // The Operation Object's own map when it has one (`ctx.settledItems`):
   // another path may read these bodies again.
-  const settledItems = ctx.settledItems ?? new Map<string, Model>();
+  const settledItems = ctx.settledItems ?? new Map<string, KeptDefinition>();
 
   // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
   // `[…]` — is no Responses Object, so no key could be read from it: it is
@@ -8655,10 +8656,10 @@ function extractResponses(
  * own step; an explicit `$ref` to a component and a reference an `allOf`
  * merge copied stay as written, as in `stepSecondaryBody`.
  */
-function followMovedItems(result: ResponseExtractionResult, settled: ReadonlyMap<string, Model>): void {
+function followMovedItems(result: ResponseExtractionResult, settled: ReadonlyMap<string, KeptDefinition>): void {
   const own = new Set(result.inlineModels.map((model) => model.name));
   const moved = new Map<string, string>();
-  for (const [name, model] of settled) if (model.name !== name && !own.has(name)) moved.set(name, model.name);
+  for (const [name, { model }] of settled) if (model.name !== name && !own.has(name)) moved.set(name, model.name);
   if (moved.size === 0) return;
   const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
   renameTypeRefModels(result.response, moved, admit);

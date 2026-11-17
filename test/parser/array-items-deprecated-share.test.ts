@@ -10,6 +10,7 @@ import {
   materializeInlineSchema,
   modelFingerprint,
   type InlineModelRegistry,
+  type KeptDefinition,
 } from '../../src/parser/materialize-inline.js';
 import { collectModelRefs, collectOperationTypeRefs } from '../../src/ir/types.js';
 import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
@@ -938,6 +939,49 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
         ['the 201 deprecated', true, false, false],
         ['the 202 deprecated', false, true, false],
         ['both deprecated', true, true, true],
+      ])('when the items move with a model they nest, %s', async (_label, deprecated201, deprecated202, deprecated) => {
+        // The moved item references its moved child (`ListPetsResponse201ItemOwner`); the second path's copy
+        // still mints `ListPetsResponseItemOwner`, and is compared with the definition as it settled.
+        const nesting = (flagged: boolean): Doc =>
+          arrayOf({
+            type: 'object',
+            ...flag(flagged),
+            properties: { owner: { type: 'object', properties: { id: { type: 'string' } } } },
+          });
+        const spec = await parseJson(
+          sharedPathItem(
+            {
+              '200': json({
+                type: 'object',
+                properties: { item: { type: 'object', properties: { id: { type: 'integer' } } } },
+              }),
+              '201': json(nesting(deprecated201)),
+              '202': json(nesting(deprecated202)),
+            },
+            { ListPetsItem: { type: 'object', properties: { other: { type: 'boolean' } } } },
+          ),
+        );
+        expect(modelNames(spec)).toEqual([
+          'ListPetsItem',
+          'ListPetsResponse',
+          'ListPetsResponseItem',
+          `ListPetsResponse201Item${deprecated ? ' (deprecated)' : ''}`,
+          'ListPetsResponse201ItemOwner',
+        ]);
+        const read = ['200: ListPetsResponse', '201: ListPetsResponse201Item[]', '202: ListPetsResponse201Item[]'];
+        expect(types(spec)).toEqual([read, read]);
+        expect(
+          modelOf(spec, 'ListPetsResponse201Item').fields.map(({ name, type }) => `${name}: ${show(type)}`),
+        ).toEqual(['owner: ListPetsResponse201ItemOwner']);
+        expectSound(spec);
+        expect(warnings()).toEqual([]);
+      });
+
+      it.each([
+        ['both live', false, false, false],
+        ['the 201 deprecated', true, false, false],
+        ['the 202 deprecated', false, true, false],
+        ['both deprecated', true, true, true],
       ])('when the items move, %s', async (_label, deprecated201, deprecated202, deprecated) => {
         // As below: the 201's items step to `ListPetsResponseItem`, the name the primary's nested `item` holds, and move.
         const spec = await parseJson(
@@ -1120,7 +1164,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
     const stem = (index: number): string => (index === 0 ? 'ListPetsItem' : `ListPetsItem${index + 1}`);
     const schema = (deprecated: boolean, text: string): Doc => item(deprecated, { description: text });
     /** Settle `first` then `second` as one operation's sites, with `kept` when given. */
-    function settle(first: Doc, second: Doc, kept?: Map<string, Model>) {
+    function settle(first: Doc, second: Doc, kept?: Map<string, KeptDefinition>) {
       const registry: InlineModelRegistry = new Map();
       const models: Model[] = [];
       const options = { stem, registry, operation: 'ListPets', models, ...(kept && { kept }) };
@@ -1129,13 +1173,13 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
     }
 
     it('shares the kept definition with a copy identical but for the flag, and folds the copy onto it', () => {
-      const kept = new Map<string, Model>();
+      const kept = new Map<string, KeptDefinition>();
       const { registry, models, types } = settle(schema(true, 'Old item.'), schema(false, 'New item.'), kept);
       expect(types).toEqual(['ListPetsItem', 'ListPetsItem']);
       expect(models).toHaveLength(1);
       expect(models[0]).toMatchObject({ name: 'ListPetsItem', description: 'New item.' });
       expect(models[0]!.deprecated).toBeUndefined();
-      expect(kept.get('ListPetsItem')).toBe(models[0]);
+      expect(kept.get('ListPetsItem')!.model).toBe(models[0]);
       // The registry reads the model as it now is.
       expect([...registry.keys()]).toEqual(['ListPetsItem']);
       expect(registry.get('ListPetsItem')).toEqual({
@@ -1145,7 +1189,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
     });
 
     it('keeps a live definition as it is beside a deprecated copy', () => {
-      const kept = new Map<string, Model>();
+      const kept = new Map<string, KeptDefinition>();
       const { models, types } = settle(schema(false, 'New item.'), schema(true, 'Old item.'), kept);
       expect(types).toEqual(['ListPetsItem', 'ListPetsItem']);
       expect(models).toEqual([expect.objectContaining({ name: 'ListPetsItem', description: 'New item.' })]);
@@ -1153,7 +1197,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
     });
 
     it('replaces the registry entry rather than editing it, so a copy of the registry keeps what it read', () => {
-      const kept = new Map<string, Model>();
+      const kept = new Map<string, KeptDefinition>();
       const registry: InlineModelRegistry = new Map();
       const models: Model[] = [];
       const options = { stem, registry, operation: 'ListPets', models, kept };
@@ -1197,7 +1241,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
     });
 
     it('reads a definition under the name it settled on, even once the caller has renamed the model', () => {
-      const kept = new Map<string, Model>();
+      const kept = new Map<string, KeptDefinition>();
       const registry: InlineModelRegistry = new Map();
       const models: Model[] = [];
       const options = { stem, registry, operation: 'ListPets', models, kept };
@@ -1208,6 +1252,35 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
       expect(models).toHaveLength(1);
       expect(models[0]).toMatchObject({ name: 'ListPetsResponse201Item', description: 'New item.' });
       expect(models[0]!.deprecated).toBeUndefined();
+    });
+
+    it('compares a copy with the definition as it settled, whatever its nested models are called since', () => {
+      // An item that nests an `owner`: `ListPetsItem { owner: ListPetsItemOwner }`.
+      const nesting = (deprecated: boolean): Doc => ({
+        type: 'object',
+        ...flag(deprecated),
+        properties: { owner: { type: 'object', properties: { id: { type: 'string' } } } },
+      });
+      const kept = new Map<string, KeptDefinition>();
+      const registry: InlineModelRegistry = new Map();
+      const models: Model[] = [];
+      const options = { stem, registry, operation: 'ListPets', models, kept };
+      materializeInlineSchema(nesting(true), options);
+      expect(models.map(({ name }) => name).sort()).toEqual(['ListPetsItem', 'ListPetsItemOwner']);
+      // The caller moves both, as a later status code's step does: the root now references the moved child.
+      const [root, owner] = [kept.get('ListPetsItem')!.model, kept.get('ListPetsItemOwner')!.model];
+      root.name = 'ListPetsResponse201Item';
+      owner.name = 'ListPetsResponse201ItemOwner';
+      root.fields[0]!.type = { kind: 'model', name: owner.name };
+
+      // The same schema read again mints the names it settled on, and still shares the definition.
+      expect(show(materializeInlineSchema(nesting(false), options))).toBe('ListPetsItem');
+      expect(models).toHaveLength(2);
+      expect(root.deprecated).toBeUndefined();
+      // The registry files the definition as it settled: an identical copy shares it too.
+      expect(show(materializeInlineSchema(nesting(false), options))).toBe('ListPetsItem');
+      expect(show(materializeInlineSchema(nesting(true), options))).toBe('ListPetsItem');
+      expect(models).toHaveLength(2);
     });
 
     describe('in the settling pass, where a clash no stem can move renames in place', () => {
@@ -1240,7 +1313,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
       it('keeps a kept twin shared when another model of the trial is renamed under the root', () => {
         const registry: InlineModelRegistry = new Map([[circle.name, { fingerprint: modelFingerprint(circle) }]]);
         const models: Model[] = [];
-        const options = { stem: bodyStem, registry, operation: 'Op', models, kept: new Map<string, Model>() };
+        const options = { stem: bodyStem, registry, operation: 'Op', models, kept: new Map<string, KeptDefinition>() };
         expect(show(materializeInlineSchema(body({ square: true }), options))).toBe('Body');
         expect(flags(models)).toEqual(['Body', 'BodyCircle', 'BodyOwner', 'Square (deprecated)']);
 
@@ -1261,7 +1334,7 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
         // Minted once without the component, so the registered `Body` still points at `Circle`.
         const first: InlineModelRegistry = new Map();
         const minted: Model[] = [];
-        const kept = new Map<string, Model>();
+        const kept = new Map<string, KeptDefinition>();
         materializeInlineSchema(body({ owner: true }), { stem: bodyStem, registry: first, models: minted, kept });
         expect(flags(minted)).toEqual(['Body', 'BodyOwner (deprecated)', 'Circle', 'Square']);
         // Then `Circle` is a component's, of another shape; `Body` and `BodyOwner` stay this operation's.
@@ -1283,13 +1356,13 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
           '(Body2Circle | Square)',
           'BodyOwner[]',
         ]);
-        expect(kept.get('BodyOwner')!.deprecated).toBeUndefined();
-        expect(registry.get('BodyOwner')!.fingerprint).toBe(modelFingerprint(kept.get('BodyOwner')!));
+        expect(kept.get('BodyOwner')!.model.deprecated).toBeUndefined();
+        expect(registry.get('BodyOwner')!.fingerprint).toBe(modelFingerprint(kept.get('BodyOwner')!.model));
       });
     });
 
     it('still steps a copy that differs in a field’s own flag', () => {
-      const kept = new Map<string, Model>();
+      const kept = new Map<string, KeptDefinition>();
       const flagged = { type: 'object', properties: { name: { type: 'string', deprecated: true } } };
       const { types } = settle(schema(true, 'Old item.'), flagged, kept);
       expect(types).toEqual(['ListPetsItem', 'ListPetsItem2']);

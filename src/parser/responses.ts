@@ -48,7 +48,7 @@ import {
 } from './inline-models.js';
 import { externalDocsEntry } from './external-docs.js';
 import { schemaExtensionsEntry } from './extensions.js';
-import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
+import { materializeInlineSchema, type InlineModelRegistry, type KeptDefinition } from './materialize-inline.js';
 import type { BodyNameYields } from './contested-body-names.js';
 
 /**
@@ -71,7 +71,7 @@ export interface ItemSettlement {
    * onto it. Absent — a rehearsal that reads one body's names — nothing is
    * folded.
    */
-  kept?: Map<string, Model>;
+  kept?: Map<string, KeptDefinition>;
 }
 
 export interface ResponseExtractionResult {

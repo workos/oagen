@@ -71,6 +71,20 @@ export interface InlineModelOwner {
 }
 
 /**
+ * A definition a site's operation keeps for the copies its sites declare
+ * (`MaterializeInlineOptions.kept`): the model, and its shape as it settled
+ * — `shapeFingerprint` when the model was minted, under the names its
+ * references carried then. A copy is compared with that shape, never with
+ * the model as it stands (`keptTwin`): a caller may since have moved the
+ * model and the models it nests to other names (`stepSecondaryBody`), and
+ * the same schema read again still mints the names it settled on.
+ */
+export interface KeptDefinition {
+  model: Model;
+  shape: string;
+}
+
+/**
  * Whether the owner of a name shares it with `model`, whose fingerprint is
  * `fingerprint`: a declared model (`owner.model`) when it admits the shape
  * (`modelShares`: the same fields and types, the owner no stricter on
@@ -261,7 +275,8 @@ export interface MaterializeInlineOptions {
   /**
    * The definitions the site's operation keeps for the copies its sites of
    * this kind declare, by name: every model an earlier call given this map
-   * minted, to which this call adds its own. Given by one operation's
+   * minted, with its shape as it settled (`KeptDefinition`), to which this
+   * call adds its own. Given by one operation's
    * success bodies for their array items (`ItemSettlement.kept`, #672) —
    * the sites whose copies the operation folds into one model, as it folds
    * two success bodies that resolve to one name (`extractResponses`, #630).
@@ -272,15 +287,16 @@ export interface MaterializeInlineOptions {
    * folded onto the kept definition at commit (`foldLiveCopy`): the
    * definition stays, live while any copy is and documented as the first
    * live copy is, and the registry's entry follows its flag. A definition is
-   * filed under the name it settled on and read under it even once the
-   * caller has renamed the model, as the registry still files it; the
-   * caller repoints what shares it. The map is the
+   * filed under the name it settled on and read under it, by the shape it
+   * settled with, even once the caller has renamed the model or the models
+   * it nests, as the registry still files it; the caller repoints what
+   * shares it. The map is the
    * operation's identity here: a name another operation minted is never in
    * it, whatever the two operations are called, so across operations the
    * flag stays part of the shape. Absent, an operation's model shares its
    * name on an identical fingerprint only.
    */
-  kept?: Map<string, Model>;
+  kept?: Map<string, KeptDefinition>;
   /** Where the materialized models go. */
   models: Model[];
 }
@@ -609,15 +625,21 @@ function sharesName(owner: InlineModelOwner, model: Model, fingerprint: string, 
  * with the same type, requiredness, limits and flag, and the same
  * properties of the model beside its flag — a field's own `deprecated`, a
  * limit or another field type is another shape); none otherwise, and none
- * for a site given no such definitions. The definition is read under the
- * name it settled on, the one the registry files it by, whatever it is
- * called since: one a later step renamed (`stepSecondaryBody`) is still
- * the operation's definition of that name here, and the caller repoints
- * the site that shares it to where it moved (`followMovedItems`).
+ * for a site given no such definitions. The definition is read as it
+ * settled (`KeptDefinition.shape`), under the name the registry files it
+ * by, whatever it and the models it nests are called since: a later step
+ * may have moved a `201`'s `ListPetsResponseItem { owner:
+ * ListPetsResponseItemOwner }` to `ListPetsResponse201Item { owner:
+ * ListPetsResponse201ItemOwner }` (`stepSecondaryBody`), and the same
+ * schema read again, from another path that `$ref`s the Path Item, still
+ * mints the first pair of names — compared with the model as it stands,
+ * the copy would differ in its child's name and take a model of its own.
+ * The caller repoints the site that shares it to where the definition
+ * moved (`followMovedItems`).
  */
 function keptTwin(model: Model, options: ResolvedOptions): Model | undefined {
   const kept = options.kept?.get(model.name);
-  return kept !== undefined && shapeFingerprint(kept) === shapeFingerprint(model) ? kept : undefined;
+  return kept !== undefined && kept.shape === shapeFingerprint(model) ? kept.model : undefined;
 }
 
 function sameNames(a: string[], b: string[]): boolean {
@@ -637,10 +659,11 @@ function sameNames(a: string[], b: string[]): boolean {
  * silently, as two success bodies of one operation are folded
  * (`foldLiveCopy`): the definition goes live when it was deprecated and the
  * copy is not, documented as the copy is, and the registry's entry is
- * replaced by one of the definition's new fingerprint — replaced, never
+ * replaced by one of the live copy's fingerprint, which is the
+ * definition's as it settled with the flag cleared — replaced, never
  * edited, since a rehearsal reads a shallow copy of the registry
  * (`bodyTypeNames`) — so every later comparison, this operation's or
- * another's, reads the model as the IR will carry it. The trial has no
+ * another's, reads the model's flag as the IR will carry it. The trial has no
  * clash left when it gets here
  * (`runTrial` found none, or `renameClashing` cleared them all), so the
  * remaining branch is a guard against a regression, not an expected path.
@@ -670,8 +693,7 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
     }
     const twin = owner && keptTwin(model, options);
     if (owner && twin) {
-      if (foldLiveCopy(twin, model))
-        options.registry.set(model.name, { ...owner, fingerprint: modelFingerprint(twin) });
+      if (foldLiveCopy(twin, model)) options.registry.set(model.name, { ...owner, fingerprint });
       continue;
     }
     if (owner !== undefined) {
@@ -681,7 +703,7 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
     }
     options.registry.set(model.name, { fingerprint, operation: options.operation });
     options.models.push(model);
-    options.kept?.set(model.name, model);
+    options.kept?.set(model.name, { model, shape: shapeFingerprint(model) });
   }
   const { siblings, enumSite: enumValues } = options;
   const { settledStem } = trial;
