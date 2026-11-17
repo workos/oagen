@@ -2672,6 +2672,31 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     with `Pets` an array became an empty object model). A ref no
  *     component answers declares nothing here, and stays the reference.
  *
+ * A member that is itself an `allOf` is read by what it holds
+ * (workos/oagen#675), since JSON Schema reads `{ allOf: [{ allOf: [A] }, B]
+ * }` as it reads `{ allOf: [A, B] }`. The members are read with each bare
+ * `allOf` among them spliced open into its own members wherever several
+ * members type the schema (`splicedAllOfMembers`, the reading
+ * `spliceNestedAllOf` makes of the schema itself), so `allOf: [{ allOf: [{
+ * $ref: Owner }] }, { $ref: Tag }]` and `allOf: [{ allOf: [{ $ref: Owner }]
+ * }, { allOf: [{ $ref: Tag }] }]` are `'merged'`, as `allOf: [{ $ref:
+ * Owner }, { $ref: Tag }]` is (the first was `'reference'` and typed `Tag`,
+ * `Owner`'s fields lost; the second no reading, and `unknown`), and
+ * `allOf: [{ allOf: [{ type: 'string' }] }, { allOf: [{ minLength: 1 }] }]`
+ * is `'unwrapped'`. The one member that types the schema is still the
+ * member it is read as, a wrapper included (`allOf: [{ allOf: [{ $ref:
+ * Owner }] }]` is `'unwrapped'`, and its member the reference). A member
+ * that composes an object through an `allOf` of its own and is not
+ * spliced open (`composesObjectMember`: a lone wrapper; one that writes
+ * `additionalProperties`, or a `type` naming `null`, beside its `allOf`) is
+ * one of the objects a merge conjoins, as a `$ref` or an inline object
+ * member is: beside a `$ref` or another typing member the schema is
+ * `'merged'` rather than read as the other member alone, and a `required`
+ * list written beside it adds to it as it adds to a `$ref` (`{ allOf: [{
+ * allOf: [{ $ref: Owner }] }], required: [name] }` is `'merged'`, as `{
+ * allOf: [{ $ref: Owner }], required: [name] }` is; it was `'unwrapped'`,
+ * the list lost).
+ *
  * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
  * schema the `allOf` is written on, for its own `required`; a site reading
  * bare members passes none. `componentSchemas` resolves the `$ref`; a site
@@ -2683,24 +2708,54 @@ export function readInlineAllOf(
   wrapper?: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): InlineAllOfReading {
+  // The members as every reader reads them, the bare `allOf`s among them
+  // spliced open (`splicedAllOfMembers`; #675), with the `required` such a
+  // member writes read as `wrapper`'s own, which carries it once spliced.
+  const spliced = splicedAllOfMembers(members);
+  members = spliced.members;
+  const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
+  const composes = (member: SchemaObject): boolean => composesObjectMember(member, componentSchemas);
+  const requires = wrapperRequires || members.some((s) => (s.required?.length ?? 0) > 0);
   const refs = members.filter((m) => m.$ref !== undefined);
   if (refs.length > 0) {
-    if (members.some(isInlineAllOfMember) || refs.length > 1) return 'merged';
-    const addsRequired =
-      [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0) &&
-      contributesProperties(refs[0]!, componentSchemas);
-    return addsRequired ? 'merged' : 'reference';
+    if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(composes)) return 'merged';
+    return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
   }
   if (members.length === 1) {
     const only = members[0]!;
-    const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
+    const addsRequired = wrapperRequires && (declaresInlineProperties(only) || composes(only));
     return addsRequired ? 'merged' : 'unwrapped';
   }
   if (members.some(declaresInlineProperties)) return 'merged';
   // One member types the schema and the others only annotate or limit it
   // (#555): read as that member, as a lone member is. Several typing
-  // members, or none, are no reading at all.
-  return allOfTypingMember(members) !== undefined ? 'unwrapped' : 'reference';
+  // members are a merge when one of them composes an object
+  // (`composesObjectMember`; #675), and otherwise, or with none, no reading
+  // at all.
+  const typing = allOfTypingMember(members);
+  if (typing !== undefined) return requires && composes(typing) ? 'merged' : 'unwrapped';
+  return members.some(composes) ? 'merged' : 'reference';
+}
+
+/**
+ * Whether an `allOf` member composes an object through an `allOf` of its
+ * own: not a `$ref`, and its `allOf` chain reaches properties a merge
+ * reads (`contributesProperties`: a member's own, or those of the
+ * component a `$ref` under it names). Such a member is one of the objects
+ * the `allOf` conjoins, as a `$ref` member or an inline object member is
+ * (`isInlineAllOfMember`), whatever it writes beside its `allOf`: the
+ * members a splice leaves as written (`spliceNestedAllOf`) — a lone
+ * wrapper, and one that says more than its members do, `{
+ * additionalProperties: false, allOf: [{ $ref: Owner }] }` or `{ type:
+ * ['object', 'null'], allOf: [{ $ref: Owner }] }` — which the merge reads
+ * through (`mergeAllOfMembers` follows a member's own `allOf`). So
+ * `readInlineAllOf` never reads an `allOf` as another member alone beside
+ * one, and `allOfTypesSchema` admits two of them as an `allOf` that types
+ * the schema (workos/oagen#675: `allOf: [{ additionalProperties: false,
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }]` was the reference to `Tag`).
+ */
+export function composesObjectMember(member: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  return member.$ref === undefined && member.allOf !== undefined && contributesProperties(member, componentSchemas);
 }
 
 /**
@@ -2738,11 +2793,17 @@ export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObjec
  * (`mergeAllOfMembers`, `extractAllOfModel`), never a component another
  * member references (#555: `allOf: [{ $ref: Kind }, { description }]` was
  * typed `Kind` with no description on the field, and `{ deprecated: true }`
- * or `{ readOnly: true }` beside the `$ref` was dropped). Empty for a
- * schema with no `allOf`.
+ * or `{ readOnly: true }` beside the `$ref` was dropped). The members are
+ * the schema's as every reader reads them (`spliceNestedAllOf`; #675), so
+ * what a bare `allOf` spliced open writes beside its `allOf`, and each
+ * member of its own that declares no type, is among them: `allOf: [{
+ * description: 'The owner.', allOf: [{ $ref: Owner }] }, { $ref: Tag }]`
+ * and `allOf: [{ $ref: Owner }, { allOf: [{ description: 'The owner.' }]
+ * }]` are documented "The owner.", as `allOf: [{ description: 'The owner.'
+ * }, …]` is. Empty for a schema with no `allOf`.
  */
 export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
-  return (schema.allOf ?? []).filter((member) => !declaresType(member));
+  return (spliceNestedAllOf(schema).allOf ?? []).filter((member) => !declaresType(member));
 }
 
 /**
@@ -2763,10 +2824,12 @@ export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
  * documentation, the type builder the layer's documentation
  * (`allOfWrapperLayer`). Read by both, by `typesAsUnknown`,
  * `mintedInlineNameEntries` and `resolveBareSchema`, so every site reads
- * one member.
+ * one member — among the members as every reader reads them
+ * (`spliceNestedAllOf`; #675), so beside wrappers that only annotate or
+ * limit the schema it is the one member that types it.
  */
 export function annotatedTypingMember(wrapper: SchemaObject): SchemaObject {
-  const members = wrapper.allOf ?? [];
+  const members = spliceNestedAllOf(wrapper).allOf ?? [];
   const member = allOfTypingMember(members) ?? members[0] ?? {};
   return annotatingAllOfMembers(wrapper)
     .filter((other) => other !== member)
@@ -3180,9 +3243,11 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // `extractConstraints`), and type the `allOf` by one that is a `$ref`
     // or declares properties inline (`allOfTypesSchema`). A member that is
     // none of these — a composition no splicing opens, an `allOf` of
-    // `$ref`s under a `discriminator` or `additionalProperties` — would be
-    // dropped by the reference reading or leave the conjunction `unknown`,
-    // so such a pair keeps the first, as before (workos/oagen#653 review;
+    // `$ref`s under a `discriminator` or `additionalProperties` — is read
+    // for the object it composes alone (`composesObjectMember`; #675: it
+    // was dropped by the reference reading, or left the conjunction
+    // `unknown`), what it writes beside its `allOf` unread, so such a pair
+    // keeps the first as written, as before (workos/oagen#653 review;
     // round 5: `{ description }` spliced out of a wrapper failed this
     // test, and the pair kept the first where the base merged both).
     const readable =
@@ -3412,40 +3477,79 @@ function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = n
  * }] }`, and `{ allOf: [{ $ref: A }], required: ['a'] }` beside `{ $ref: B
  * }` is `{ allOf: [{ $ref: A }, { $ref: B }], required: ['a'] }`
  * (workos/oagen#653 review: the conjunction was the `allOf` of the two
- * wrappers as written, which no reader types — `unknown` — and beside a
- * bare `$ref` the wrapper was dropped by the reference reading).
+ * wrappers as written, which no reader typed — `unknown` — and beside a
+ * bare `$ref` the wrapper was dropped by the reference reading). The
+ * wrappers inside the declaration are opened by the one reading of a bare
+ * `allOf`'s members (`bareAllOfParts`), which an inline `allOf` written
+ * by hand is read by too (`spliceNestedAllOf`; workos/oagen#675).
  */
 function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
-  const members: SchemaObject[] = [];
-  const required: string[] = [];
-  const splice = (schema: SchemaObject, nested: boolean): void => {
-    if (!splicesOpen(schema)) {
-      members.push(schema);
-      return;
-    }
-    for (const name of schema.required ?? []) if (!required.includes(name)) required.push(name);
-    // A wrapper spliced open inside the declaration keeps what it wrote
-    // for the field — its limits, documentation and extensions — as a
-    // member that declares no type, which the readers conjoin onto the
-    // schema as they do the wrapper's own keywords (`extractConstraints`,
-    // the stricter bound winning; `allOfWrapperLayer`, where the schema
-    // writes none itself). The declaration's own ride on the conjunction
-    // (`declarationKeywords`; workos/oagen#653 review, round 5: `{ allOf:
-    // [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
-    if (nested) {
-      const keywords = declarationKeywords(schema);
-      if (Object.keys(keywords).length > 0) members.push(keywords);
-    }
-    for (const member of schema.allOf ?? []) splice(member, true);
-  };
-  splice(declaration, false);
-  return { members, required };
+  if (!splicesOpen(declaration)) return { members: [declaration], required: [] };
+  // The declaration's own keywords ride on the conjunction
+  // (`declarationKeywords`); a wrapper spliced open inside it keeps its own
+  // as a member (`bareAllOfParts`; workos/oagen#653 review, round 5: `{
+  // allOf: [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
+  const parts = bareAllOfParts(declaration.allOf ?? [], () => true);
+  return { members: parts.members, required: [...new Set([...(declaration.required ?? []), ...parts.required])] };
 }
 
 /**
- * Whether a declaration is a bare `allOf` a conjunction splices open
- * (`conjunctionMembers`): every keyword beside the `allOf` is one the
- * conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
+ * `members`, the members of an `allOf`, with each member that is a bare
+ * `allOf` (`splicesOpen`) and that `opens` admits — asked with the parts
+ * the member's own `allOf` reads as — read as what it says: JSON Schema
+ * applies `{ allOf: [{ allOf: [A] }, B] }` as it applies `{ allOf: [A, B]
+ * }`, at any depth. Such a wrapper is replaced, in place, by what it
+ * writes for the schema beside its `allOf` — its limits, documentation,
+ * flags and extensions (`declarationKeywords`), as one member that
+ * declares no type, which the readers conjoin onto the schema as they do
+ * the schema's own keywords (`extractConstraints`, the stricter bound
+ * winning; `allOfWrapperLayer`, where the schema writes none itself) —
+ * and then by its own members, each read the same way. The `required` it
+ * writes is returned beside the members, in document order and each name
+ * once, for the schema the `allOf` is written on to carry: JSON Schema
+ * applies it to the instance at any depth of a conjunction. Nothing else
+ * a bare `allOf` may write is a part: a `title`, a `$comment` and an `xml`
+ * constrain nothing, and its `type`, with the `null` it admits, is the
+ * caller's to settle (`opens`). A member that is no bare `allOf`, or that
+ * `opens` keeps closed, stays the document's own object, as written.
+ * `spliced` says whether any member was opened. The one reading of "the
+ * members of a bare `allOf`": a conjunction of two declarations reads its
+ * parts by it (`conjunctionMembers`), and every reader of an inline
+ * `allOf` its members (`splicedAllOfMembers`; workos/oagen#675).
+ */
+function bareAllOfParts(
+  members: readonly SchemaObject[],
+  opens: (wrapper: SchemaObject, parts: readonly SchemaObject[]) => boolean,
+): { members: SchemaObject[]; required: string[]; spliced: boolean } {
+  const out: SchemaObject[] = [];
+  const required: string[] = [];
+  let spliced = false;
+  const requires = (names: readonly string[] | undefined): void => {
+    for (const name of names ?? []) if (!required.includes(name)) required.push(name);
+  };
+  for (const member of members) {
+    const inner = splicesOpen(member) ? bareAllOfParts(member.allOf ?? [], opens) : undefined;
+    if (inner === undefined || !opens(member, inner.members)) {
+      out.push(member);
+      continue;
+    }
+    spliced = true;
+    requires(member.required);
+    const keywords = declarationKeywords(member);
+    if (Object.keys(keywords).length > 0) out.push(keywords);
+    out.push(...inner.members);
+    requires(inner.required);
+  }
+  return { members: out, required, spliced };
+}
+
+/**
+ * Whether a declaration is a bare `allOf` — one a conjunction splices
+ * open (`conjunctionMembers`), and, written as a member of an inline
+ * `allOf`, a reader of that `allOf` too (`splicedAllOfMembers`, which
+ * leaves a wrapper its `type` where a conjunction settles it,
+ * `splicesIntoAllOf`; workos/oagen#675): every keyword beside the `allOf`
+ * is one the conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
  * an `x-*` extension, `required`, `nullable`, a `type` naming `object`
  * alone or beside other names, which the conjunction writes for itself
  * from what every declaration admits (`conjunctionType`; round 9: a
@@ -3474,6 +3578,170 @@ function splicesOpen(schema: SchemaObject): boolean {
       LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
       key.startsWith('x-'),
   );
+}
+
+/**
+ * `schema` with the members of its `allOf` as every reader reads them: a
+ * member that is a bare `allOf` spliced open into its own members, at any
+ * depth (`splicedAllOfMembers`; workos/oagen#675). JSON Schema applies `{
+ * allOf: [{ allOf: [A] }, B] }` as it applies `{ allOf: [A, B] }`, but
+ * the readers decide an `allOf` by the members written on it — a `$ref`,
+ * an inline object, the one member that types it (`readInlineAllOf`) — so
+ * a `$ref` inside a wrapper was no `$ref` to them: `owner: { allOf: [{
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }] }` was read as the reference
+ * to `Tag`, `Owner`'s fields lost, and with both members wrapped the
+ * schema was `unknown`, where `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }`
+ * is the merged `PetOwner { name, label }`. Spliced, the nested spelling
+ * is the flat one to every reader, and `oagen diff` between the two
+ * reports nothing.
+ *
+ * A member is a bare `allOf` when what it writes beside its `allOf` can
+ * be said of the `allOf` it sits in (`splicesOpen`, the test a
+ * conjunction of two declarations opens a wrapper by): limits,
+ * documentation and flags (`LIFTED_DECLARATION_KEYWORDS`) and `x-*` keys,
+ * which take the wrapper's place as one member that declares no type —
+ * `{ description: 'The owner.', allOf: [{ $ref: Owner }] }` beside `{
+ * $ref: Tag }` is read as `{ description: 'The owner.' }`, `{ $ref: Owner
+ * }` and `{ $ref: Tag }` are, the text the schema's own where it writes
+ * none (`allOfWrapperLayer`); a `required`, which the copy carries beside
+ * the schema's own; a `title`, a `$comment`, an `xml` and a `nullable`
+ * with no `type` beside it, which constrain nothing; and `type: 'object'`
+ * when the wrapper's own parts hold a `$ref` or declare properties
+ * inline, since the readers then type the wrapper by its `allOf` and not
+ * by its `type` (`splicesIntoAllOf`). Any other wrapper says more than
+ * its members do and stays a member as written: one that writes
+ * `properties`, a `oneOf`/`anyOf`, a `discriminator`,
+ * `additionalProperties`, an `enum` or a `const`; one typed anything but
+ * `object`, or whose `type` admits `null` (`['object', 'null']`, OAS 3.0
+ * `nullable: true` beside it), which the readers take the wrapper's word
+ * for; and one typed `object` around members that only annotate or limit
+ * it, which is the object its `type` says. Such a wrapper around a `$ref`
+ * is still one of the objects the `allOf` merges (`composesObjectMember`).
+ *
+ * Returns `schema` itself when nothing splices — no `allOf`, a `$ref`
+ * (nothing beside one is read), no member opened — else a copy that
+ * stands for it (`derivedCopy`), made once per schema, so every reader
+ * meets one object for it, the members left closed the document's own.
+ * The last step of every fold of an inline schema
+ * (`foldSiblingProperties`), after a union and the `properties` written
+ * beside the `allOf` have joined its members, and read by the readers
+ * that are handed a schema as written (`annotatingAllOfMembers`,
+ * `annotatedTypingMember`, `allOfReferenceMember`), a component's among
+ * them.
+ */
+export function spliceNestedAllOf(schema: SchemaObject): SchemaObject {
+  if (schema.$ref !== undefined || schema.allOf === undefined) return schema;
+  let spliced = splicedSchemas.get(schema);
+  if (spliced === undefined) {
+    const parts = splicedAllOfMembers(schema.allOf);
+    if (parts.spliced) {
+      const required = [...new Set([...(schema.required ?? []), ...parts.required])];
+      spliced = derivedCopy({ ...schema, allOf: [...parts.members], ...(required.length > 0 && { required }) }, schema);
+      // Splicing a spliced schema changes nothing, and gives the same object.
+      splicedSchemas.set(spliced, spliced);
+    } else spliced = schema;
+    splicedSchemas.set(schema, spliced);
+  }
+  return spliced;
+}
+
+/**
+ * `members`, the members of an `allOf`, as every reader reads them
+ * (workos/oagen#675), with the `required` the members spliced open write:
+ * the reading `spliceNestedAllOf` makes of a schema, for a reader that is
+ * handed the members alone (`readInlineAllOf`, `allOfTypesSchema`), so it
+ * decides alike whether or not the schema was spliced first.
+ *
+ * A bare `allOf` among them (`bareAllOfParts`, by `splicesIntoAllOf`) is
+ * spliced open into its own members wherever another member declares a
+ * type beside it (`declaresType`, which a wrapper does): `allOf: [{
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }]` is `allOf: [{ $ref: Owner
+ * }, { $ref: Tag }]`. One member that declares a type is the member the
+ * `allOf` is read as (`readInlineAllOf`: `'unwrapped'`), a wrapper
+ * included, its own `allOf` read in turn and what it writes its own —
+ * `allOf: [{ allOf: [{ $ref: Owner }] }]` and `allOf: [{ description:
+ * 'Inner.', allOf: [{ $ref: Owner }] }, { deprecated: true }]` are read
+ * as before, the reference to `Owner`, the second deprecated and its
+ * member's text the member's own (#399, #555) — and so is the one member
+ * that types the `allOf` beside wrappers that only annotate or limit it,
+ * which are spliced open around it: `allOf: [{ allOf: [{ $ref: Owner }]
+ * }, { allOf: [{ description: 'The owner.' }] }]` is `allOf: [{ allOf: [{
+ * $ref: Owner }] }, { description: 'The owner.' }]`. `members` itself
+ * when nothing is spliced open.
+ */
+export function splicedAllOfMembers(members: readonly SchemaObject[]): {
+  members: readonly SchemaObject[];
+  required: readonly string[];
+  spliced: boolean;
+} {
+  const asWritten = { members, required: [], spliced: false };
+  if (!members.some((member) => member.allOf !== undefined)) return asWritten;
+  // A lone member that declares a type — a wrapper declares one
+  // (`declaresType`) — is the member the `allOf` is read as, as written.
+  if (members.filter(declaresType).length < 2) return asWritten;
+  const read = members.map((member) => bareAllOfParts([member], splicesIntoAllOf));
+  const typing = read.filter((parts) => parts.members.some(declaresType));
+  const out: SchemaObject[] = [];
+  const required: string[] = [];
+  let spliced = false;
+  read.forEach((parts, index) => {
+    // So is the one member that types the `allOf` beside wrappers that
+    // only annotate or limit it.
+    if (!parts.spliced || (typing.length === 1 && parts === typing[0])) {
+      out.push(members[index]!);
+      return;
+    }
+    spliced = true;
+    out.push(...parts.members);
+    for (const name of parts.required) if (!required.includes(name)) required.push(name);
+  });
+  return spliced ? { members: out, required, spliced } : asWritten;
+}
+
+/**
+ * The `$ref` member an `allOf` read as a plain reference names
+ * (`readInlineAllOf`: `'reference'`): the first among its members, each
+ * bare `allOf` spliced open (`spliceNestedAllOf`), so `{ allOf: [{ allOf:
+ * [{ $ref: Owner }] }, { description }] }` names `Owner` as `{ allOf: [{
+ * $ref: Owner }, { description }] }` does. `undefined` for a schema whose
+ * `allOf` holds none.
+ */
+export function allOfReferenceMember(schema: SchemaObject): SchemaObject | undefined {
+  return spliceNestedAllOf(schema).allOf?.find((member) => member.$ref !== undefined);
+}
+
+/** The schema each schema with an `allOf` splices to (`spliceNestedAllOf`): itself when no member is spliced open. Keyed by the schema, which the document owns; forgotten per document (`resetSplicedSchemas`), where the folded schemas are. */
+let splicedSchemas = new WeakMap<SchemaObject, SchemaObject>();
+
+/** Forget every spliced schema: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+export function resetSplicedSchemas(): void {
+  splicedSchemas = new WeakMap();
+}
+
+/**
+ * Whether a bare `allOf` (`splicesOpen`) written as a member of an
+ * `allOf` may be spliced open into `parts`, the members its own `allOf`
+ * reads as (`splicedAllOfMembers`): so unless its `type` says something
+ * they do not. A conjunction writes its own `type` from every declaration
+ * at any depth (`conjunctionType`, `conjunctionAdmitsNull`), so it opens
+ * a wrapper whatever `type` naming `object` it writes; an `allOf` written
+ * in the document has no `type` of its own to settle, so a wrapper keeps
+ * its `type` — and stays a member as written — where the readers read
+ * it: a list naming another type or `null`, OAS 3.0 `nullable: true`
+ * beside it (`{ allOf: [{ type: ['object', 'null'], allOf: [{ $ref: Owner
+ * }] }] }` is `nullable<Owner>`, the wrapper's word for it), or `object`
+ * around parts none of which is a `$ref` or declares properties inline
+ * (`{ type: 'object', allOf: [{ minProperties: 1 }] }` is the map its
+ * `type` says). Around a `$ref` or properties the readers type the
+ * wrapper by its `allOf` (`allOfTypesSchema`) and its `type: 'object'`
+ * adds nothing.
+ */
+function splicesIntoAllOf(wrapper: SchemaObject, parts: readonly SchemaObject[]): boolean {
+  const { type } = wrapper;
+  if (type === undefined) return true;
+  const object = type === 'object' || (Array.isArray(type) && type.length === 1 && type[0] === 'object');
+  if (!object || wrapper.nullable === true) return false;
+  return parts.some((part) => part.$ref !== undefined || declaresInlineProperties(part));
 }
 
 /**
