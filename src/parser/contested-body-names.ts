@@ -30,7 +30,15 @@ import { numberedName } from '../utils/naming.js';
 import { isInheritedModelRef } from './inline-models.js';
 import { isComponentModelRef } from './schemas.js';
 
-/** What one operation's inline request and success bodies mint, read off a rehearsal of them. */
+/**
+ * What one operation's inline request and success bodies mint from its stem,
+ * read off a rehearsal of them: the names that would be other names under
+ * another stem. A name the document gives a model itself — a response named
+ * from its `object` const (`PetOwner`), a variant named from its `title` or
+ * its bare const, and what such a model nests — is no operation's: every
+ * operation that returns it shares it, whatever stems its name happens to
+ * hold, so it is not among these.
+ */
 export interface OperationBodyNames {
   /** The operation's plan key, `${method} ${path}`. */
   key: string;
@@ -40,9 +48,9 @@ export interface OperationBodyNames {
    * (`resolvePathModelBaseNames`).
    */
   stem: string;
-  /** Every model name the bodies mint, nested models and envelope companions included. */
+  /** Every model name the bodies mint from the stem, nested models and envelope companions included. */
   models: string[];
-  /** Every inline enum name the bodies mint — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
+  /** Every inline enum name the bodies mint from the stem — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
   enums: string[];
 }
 
@@ -75,16 +83,16 @@ export function stemsInContest(stems: Iterable<string>): Set<string> {
  * operations' stems alone, and return what each operation gives up, by its
  * key.
  *
- * An operation _claims_ a name its bodies mint when its stem occurs in the
- * name, wherever it stands: at its start — `CreatePetResponse`,
- * `CreatePetResponseDraftResponse`, as in every name a body mints under the
- * stem — behind the const a union variant is named from
- * (`EmailCreatePetRequest`), or anywhere else the document's own words put
- * it — a response an operation `pet` names `GetPetResponse` from its
- * `object: get_pet_response` const. A name the stem does not occur in — a
- * variant named from its `title` or its bare const, that response on an
- * operation `listDogs` — is no claim, and is left to the merge passes as
- * before. Of the operations that claim one name,
+ * An operation _claims_ every name its bodies mint from its stem
+ * (`OperationBodyNames`): the stem followed by what the body is and the
+ * fields on the way down — `CreatePetResponse`,
+ * `CreatePetResponseDraftResponse` — or the stem behind the const a union
+ * variant is named from (`EmailCreatePetRequest`). A name the document
+ * gives a model is no claim, whatever it holds: `pet` and `petOwner` both
+ * returning an `object: pet_owner` resource share one `PetOwner`, as every
+ * operation returning it does, and a response `pet` names `GetPetResponse`
+ * from its `object` const beside `getPet`'s own is left to the merge passes
+ * as before. Of the operations that claim one name,
  * each one whose stem another claimant's stem contains gives the name up:
  * `createPet` (`CreatePet`) gives `CreatePetResponseDraftResponse` up to
  * `createPetResponseDraft` (`CreatePetResponseDraft`), and gives
@@ -124,32 +132,27 @@ export function resolveContestedBodyNames(
   bodies: readonly OperationBodyNames[],
   taken?: () => Iterable<string>,
 ): Map<string, BodyNameYields> {
-  /** One stem's claim on a name, and where in the name the stem stands. */
-  interface Claim {
-    stem: string;
-    at: number;
-  }
-  const claims = new Map<string, Claim[]>();
+  /** The stems that claim each name. */
+  const claims = new Map<string, Set<string>>();
   for (const { stem, models, enums } of bodies) {
-    for (const name of new Set([...models, ...enums])) {
-      const at = stem.length > 0 ? name.indexOf(stem) : -1;
-      if (at < 0) continue;
-      const claimants = claims.get(name) ?? [];
+    // An empty stem names nothing and contains nothing.
+    if (stem.length === 0) continue;
+    for (const name of [...models, ...enums]) {
       // One stem, one claim: two paths that read one Operation Object mint one model.
-      if (!claimants.some((claim) => claim.stem === stem)) claimants.push({ stem, at });
-      claims.set(name, claimants);
+      const claimants = claims.get(name) ?? new Set<string>();
+      claims.set(name, claimants.add(stem));
     }
   }
 
   /** Each contested name, in code-unit order, with the stems that give it up, the shorter stem first. */
-  const contested: Array<{ name: string; yielding: Claim[] }> = [];
+  const contested: Array<{ name: string; yielding: string[] }> = [];
   for (const name of [...claims.keys()].sort()) {
-    const claimants = claims.get(name)!;
+    const claimants = [...claims.get(name)!];
     if (claimants.length < 2) continue;
     const yielding = claimants
-      .filter(({ stem }) => claimants.some((other) => other.stem !== stem && other.stem.includes(stem)))
-      // The shorter stem first; two of one length by where the stem stands, then by code unit.
-      .sort((a, b) => a.stem.length - b.stem.length || a.at - b.at || (a.stem < b.stem ? -1 : 1));
+      .filter((stem) => claimants.some((other) => other !== stem && other.includes(stem)))
+      // The shorter stem first; two of one length by code unit.
+      .sort((a, b) => a.length - b.length || (a < b ? -1 : 1));
     if (yielding.length > 0) contested.push({ name, yielding });
   }
   if (contested.length === 0) return new Map();
@@ -160,7 +163,7 @@ export function resolveContestedBodyNames(
   }
   const byStem = new Map<string, Map<string, string>>();
   for (const { name, yielding } of contested) {
-    for (const { stem } of yielding) {
+    for (const stem of yielding) {
       let renamed = taken ? numberedName(name, 2) : setAsideName(name, stem);
       for (let n = 3; taken && inPlay.has(renamed); n++) renamed = numberedName(name, n);
       inPlay.add(renamed);
