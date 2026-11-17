@@ -1397,7 +1397,16 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
  * true` beside a `type`, a schema of nothing but `null` (`isNullSchema`),
  * a `const` of `null`, an `enum:` list naming it, or a `oneOf`/`anyOf`
  * with a `null` variant or the flag that stands for one
- * (`unionFlaggedNullable`), whatever else the union holds. Else it admits
+ * (`unionFlaggedNullable`), whatever else the union holds — and whatever
+ * the schema composes: `{ type: ['object', 'null'], allOf: [{ $ref: A }]
+ * }` over an `A` that admits none admits `null`, the schema's own word,
+ * as the type builder types it `nullable<A>` and as the same `type`
+ * beside a merge wraps the merge. JSON Schema, applying `A` as well, would
+ * reject `null` there; the parser has always read a nullable `type` beside
+ * an `allOf` as the nullable wrapper around what the `allOf` describes,
+ * and two such wrappers conjoin to the same `type` beside both members
+ * (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }] }`),
+ * which is nullable by that reading. Else it admits
  * `null` through an `allOf` whose every member that types it does
  * (`allOfAdmitsNull`), as JSON Schema applies them all — and a `type` of
  * its own that names no `null` rejects it, whatever the schema composes:
@@ -1496,9 +1505,11 @@ function writesNull(schema: SchemaObject): boolean {
  * `null`": the schema writes no `type` (one that names no `null` rejects
  * it) and every member that types it admits `null` (`schemaAdmitsNull`), at
  * least one of them, as JSON Schema applies them all. A member that
- * declares no type (`declaresType`: `{ description }`, `{ required }`, `{
- * minProperties: 1 }`) only annotates or limits the schema and has no
- * vote. The members are the schema's as written, with what it writes
+ * says nothing of what an instance is (`saysType`: `{ description }`, `{
+ * required }`, `{ minProperties: 1 }`, and a wrapper around nothing but
+ * such members, `{ allOf: [{ description }] }`) only annotates or limits
+ * the schema and has no vote, so the nested spelling votes as the flat one
+ * does. The members are the schema's as written, with what it writes
  * beside the `allOf` that the readers read as members of it
  * (`foldBesideAllOf`): its own `properties`, an inline object typed
  * `object` that admits none, and a typing `oneOf`/`anyOf`, which votes as a
@@ -1520,8 +1531,32 @@ function writesNull(schema: SchemaObject): boolean {
  */
 function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
   if (schema.type !== undefined) return false;
-  const typing = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(declaresType);
-  return typing.length > 0 && typing.every((member) => schemaAdmitsNull(member, path));
+  const voting = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(saysType);
+  return voting.length > 0 && voting.every((member) => schemaAdmitsNull(member, path));
+}
+
+/**
+ * Whether an `allOf` member says what an instance is, and so has a vote on
+ * `null` (`allOfAdmitsNull`): it declares a type by a keyword of its own
+ * (`declaresType`), by a `oneOf`/`anyOf` that types it (`unionTypesSchema`),
+ * or through a member of its own `allOf` that does, at any depth. A member
+ * that is an `allOf` of nothing but annotations and limits — `{ allOf: [{
+ * description }] }`, `{ allOf: [] }`, `{ description, allOf: [{
+ * minProperties: 1 }] }` — or a union of bare limits (`{ anyOf: [{
+ * required: ['a'] }, { maxProperties: 1 }] }`) declares none: every
+ * instance it admits, `null` among them, it admits whatever the type, as
+ * the members it would be spliced open into do (`spliceNestedAllOf`; #675),
+ * which have no vote either. Read on the members as written, where
+ * `declaresType` alone counts any `allOf` or union as a type (#676 review:
+ * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
+ * }` over two nullable components was the bare model for the wrapper's
+ * sake, where the same members written flat were nullable).
+ */
+function saysType(member: SchemaObject): boolean {
+  const { allOf, oneOf, anyOf, ...own } = member;
+  if (declaresType(own)) return true;
+  if ([oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants))) return true;
+  return (allOf ?? []).some(saysType);
 }
 
 /**

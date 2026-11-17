@@ -828,3 +828,186 @@ describe('#676 review: a component many members name is read once', () => {
     expect(fieldNames(spec, `Level${depth}`)).toEqual(['name']);
   });
 });
+
+describe('#676 a member that is itself an `allOf` votes as the members it holds, so the nested spelling reads as the flat one', () => {
+  const A = ref('A');
+  const B = ref('B');
+  /** `A { a }` and `B { b }` admit no `null`. */
+  const plain = {
+    A: { type: 'object', properties: { a: string } },
+    B: { type: 'object', properties: { b: string } },
+  };
+  const text = { description: 'The owner.' };
+
+  describe.each(VERSIONS)('OpenAPI %s', (openapi) => {
+    /** A wrapper whose own `type` admits `null`, in the version's spelling. */
+    const nullableTyped = (...members: unknown[]) =>
+      openapi === '3.0.3'
+        ? { type: 'object', nullable: true, allOf: members }
+        : { type: ['object', 'null'], allOf: members };
+
+    it('gives the nested and the flat spelling one type and no `oagen diff`, in either direction', async () => {
+      const spellings: ReadonlyArray<readonly [string, unknown, unknown]> = [
+        // A wrapper's own `type` is its word, as the same `type` beside both members is.
+        [
+          'wrappers typed nullable around `$ref`s that admit no `null`',
+          { allOf: [nullableTyped(A), nullableTyped(B)] },
+          nullableTyped(A, B),
+        ],
+        [
+          'wrappers typed nullable around nullable `$ref`s',
+          { allOf: [nullableTyped(Owner), nullableTyped(Tag)] },
+          nullableTyped(Owner, Tag),
+        ],
+        [
+          'a wrapper typed `object` around a nullable `$ref`',
+          { allOf: [{ type: 'object', allOf: [Owner] }, Tag] },
+          { type: 'object', allOf: [Owner, Tag] },
+        ],
+        // A bare wrapper votes through its members.
+        [
+          'bare wrappers around nullable `$ref`s',
+          { allOf: [{ allOf: [Owner] }, { allOf: [Tag] }] },
+          { allOf: [Owner, Tag] },
+        ],
+        ['a bare wrapper around a `$ref` that admits no `null`', { allOf: [{ allOf: [A] }, Tag] }, { allOf: [A, Tag] }],
+        ['a wrapper two levels down', { allOf: [{ allOf: [{ allOf: [Owner] }] }, Tag] }, { allOf: [Owner, Tag] }],
+        [
+          'a wrapper that requires a field',
+          { allOf: [{ allOf: [Owner], required: ['name'] }, Tag] },
+          { allOf: [Owner, Tag], required: ['name'] },
+        ],
+        [
+          'a wrapper flagged `nullable: true` with no `type`',
+          { allOf: [{ nullable: true, allOf: [Owner] }, Tag] },
+          { allOf: [Owner, Tag] },
+        ],
+        [
+          'the same around a `$ref` that admits no `null`',
+          { allOf: [{ nullable: true, allOf: [A] }, Tag] },
+          { allOf: [A, Tag] },
+        ],
+        // A wrapper around nothing that types has no vote, as its members have none.
+        ['a wrapper around a `description`', { allOf: [Owner, Tag, { allOf: [text] }] }, { allOf: [Owner, Tag, text] }],
+        [
+          'a wrapper around a limit',
+          { allOf: [Owner, Tag, { allOf: [{ minProperties: 1 }] }] },
+          { allOf: [Owner, Tag, { minProperties: 1 }] },
+        ],
+        [
+          'a wrapper around a wrapper around a `description`',
+          { allOf: [Owner, Tag, { allOf: [{ allOf: [text] }] }] },
+          { allOf: [Owner, Tag, text] },
+        ],
+        [
+          'a documented wrapper around a limit',
+          { allOf: [Owner, Tag, { ...text, allOf: [{ minProperties: 1 }] }] },
+          { allOf: [Owner, Tag, text, { minProperties: 1 }] },
+        ],
+        ['an empty wrapper', { allOf: [{ allOf: [] }, Owner, Tag] }, { allOf: [Owner, Tag] }],
+        [
+          'a union of bare limits',
+          { allOf: [Owner, Tag, { anyOf: [{ required: ['name'] }, { maxProperties: 9 }] }] },
+          { allOf: [Owner, Tag] },
+        ],
+      ];
+      const lines: string[] = [];
+      for (const [label, nested, flat] of spellings) {
+        const nestedDoc = document(openapi, { ...plain, Pet: { type: 'object', properties: { owner: nested } } });
+        const flatDoc = document(openapi, { ...plain, Pet: { type: 'object', properties: { owner: flat } } });
+        const [nestedSpec, flatSpec] = [await parse(nestedDoc), await parse(flatDoc)];
+        const type = show(fieldType(nestedSpec, 'Pet', 'owner'));
+        expect(type, label).toBe(show(fieldType(flatSpec, 'Pet', 'owner')));
+        expect(diffSpecs(nestedSpec, flatSpec).changes, label).toEqual([]);
+        expect(diffSpecs(flatSpec, nestedSpec).changes, label).toEqual([]);
+        expect(await diffExit(nestedDoc, flatDoc), label).toBe(0);
+        expect(await diffExit(flatDoc, nestedDoc), label).toBe(0);
+        lines.push(`${label}: ${type}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "wrappers typed nullable around \`$ref\`s that admit no \`null\`: nullable<PetOwner>
+        wrappers typed nullable around nullable \`$ref\`s: nullable<PetOwner>
+        a wrapper typed \`object\` around a nullable \`$ref\`: PetOwner
+        bare wrappers around nullable \`$ref\`s: nullable<PetOwner>
+        a bare wrapper around a \`$ref\` that admits no \`null\`: PetOwner
+        a wrapper two levels down: nullable<PetOwner>
+        a wrapper that requires a field: nullable<PetOwner>
+        a wrapper flagged \`nullable: true\` with no \`type\`: nullable<PetOwner>
+        the same around a \`$ref\` that admits no \`null\`: PetOwner
+        a wrapper around a \`description\`: nullable<PetOwner>
+        a wrapper around a limit: nullable<PetOwner>
+        a wrapper around a wrapper around a \`description\`: nullable<PetOwner>
+        a documented wrapper around a limit: nullable<PetOwner>
+        an empty wrapper: nullable<PetOwner>
+        a union of bare limits: nullable<PetOwner>"
+      `);
+      expect(warnings()).toEqual([]);
+    });
+
+    it("takes a wrapper's nullable `type` at its word, as the two-member spelling and the wrapper alone are read", async () => {
+      // JSON Schema applies the wrapper's `allOf` too, so `null` fails `A`; the parser reads a nullable `type` beside an
+      // `allOf` as the nullable wrapper around what the `allOf` describes, at every site, and the vote follows it.
+      const spec = await parse(
+        document(openapi, {
+          ...plain,
+          Pet: {
+            type: 'object',
+            properties: {
+              alone: nullableTyped(A),
+              lone_member: { allOf: [nullableTyped(A)] },
+              both: { allOf: [nullableTyped(A), nullableTyped(B)] },
+              // Beside a member that rejects `null`, the wrapper's word is not enough.
+              mixed: { allOf: [nullableTyped(A), B] },
+            },
+          },
+        }),
+      );
+      expect(Object.fromEntries(modelOf(spec, 'Pet')!.fields.map((f) => [f.name, show(f.type)]))).toEqual({
+        alone: 'nullable<A>',
+        lone_member: 'nullable<A>',
+        both: 'nullable<PetBoth>',
+        mixed: 'PetMixed',
+      });
+      const members = await parse(membersDoc(openapi, nullableTyped(A), nullableTyped(B), plain));
+      const hand = await parse(byHandDoc(openapi, [nullableTyped(A), nullableTyped(B)], plain));
+      expect(show(fieldType(members, 'Pet', 'owner'))).toBe('nullable<PetOwner>');
+      expect(hand).toEqual(members);
+      expect(
+        await diffExit(
+          membersDoc(openapi, nullableTyped(A), nullableTyped(B), plain),
+          byHandDoc(openapi, [nullableTyped(A), nullableTyped(B)], plain),
+        ),
+      ).toBe(0);
+    });
+  });
+
+  it('counts a member as voting only when it says what an instance is', () => {
+    const nullableInline: SchemaObject = { type: ['object', 'null'], properties: { a: string } };
+    const voteless: SchemaObject[] = [
+      { allOf: [{ description: 'Text.' }] },
+      { allOf: [] },
+      { allOf: [{ allOf: [{ minProperties: 1 }] }] },
+      { description: 'Text.', allOf: [{ minProperties: 1 }] },
+      { anyOf: [{ required: ['a'] }, { maxProperties: 1 }] },
+    ];
+    for (const member of voteless) {
+      expect(schemaAdmitsNull({ allOf: [nullableInline, member] }), JSON.stringify(member)).toBe(true);
+      expect(declaresNull({ allOf: [nullableInline, { ...nullableInline }, member] }), JSON.stringify(member)).toBe(
+        true,
+      );
+      // With no member that votes, nothing admits `null`.
+      expect(schemaAdmitsNull({ allOf: [member] }), JSON.stringify(member)).toBe(false);
+    }
+    // A wrapper that types the instance votes: through its `type`, its union, or a member of its own.
+    expect(schemaAdmitsNull({ allOf: [nullableInline, { type: 'object', allOf: [{ minProperties: 1 }] }] })).toBe(
+      false,
+    );
+    expect(
+      schemaAdmitsNull({ allOf: [nullableInline, { allOf: [{ type: 'object', properties: { b: string } }] }] }),
+    ).toBe(false);
+    expect(schemaAdmitsNull({ allOf: [nullableInline, { anyOf: [{ type: 'string' }, { type: 'integer' }] }] })).toBe(
+      false,
+    );
+    expect(schemaAdmitsNull({ allOf: [nullableInline, { allOf: [{ ...nullableInline }] }] })).toBe(true);
+  });
+});
