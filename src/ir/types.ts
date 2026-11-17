@@ -1040,15 +1040,50 @@ export interface Parameter {
    */
   type: TypeRef;
   required: boolean;
+  /**
+   * The first non-empty `description` of, in order, the Parameter Object,
+   * the parameter's schema, and the schema a bare `$ref` in it points at.
+   * A component that becomes a model or a named union is read there as the
+   * model documents itself: its own keys, else those of the first `allOf`
+   * member of its that declares no type and so only annotates it. So
+   * `PetId: { allOf: [{ description: 'A pet id.', deprecated: true }],
+   * oneOf: [{ type: 'string' }, { type: 'integer' }] }` gives `{ schema: {
+   * $ref: PetId } }` the text and the flag `PetId: { description: 'A pet
+   * id.', deprecated: true, oneOf: [...] }` gives it, the ones the model
+   * `PetId` carries in both (#679: the component's own keys alone were
+   * read). An enum component is read on the schema it declares its members
+   * on, as the `Enum` is; an array or primitive component, or an alias of
+   * an enum component, level by level through every alias the reference
+   * passes, nearest first, as a field reads one (see `Field.description`).
+   * `deprecated`, `externalDocs`, `default`, `example` and `examples` read
+   * the same component, each by its own rule. Absent when no level gives a
+   * text.
+   */
   description?: string;
+  /**
+   * Present, and `true`, when the Parameter Object, the parameter's schema
+   * or the schema a bare `$ref` in it points at says `deprecated: true` —
+   * for a component that becomes a model or a named union, the component
+   * itself or any `allOf` member of its that declares no type (see
+   * `description`).
+   */
   deprecated?: boolean;
   /**
    * The parameter schema's `externalDocs`, when it declares a usable one;
    * a schema that is a `$ref` falls back to the component it points at,
-   * the way `description` and `deprecated` do. A Parameter Object has no
+   * the way `description` and `deprecated` do — for a component that
+   * becomes a model or a named union, its own link, else the first `allOf`
+   * member's of its that declares no type. A Parameter Object has no
    * `externalDocs` of its own. Absent when neither level gives one.
    */
   externalDocs?: ExternalDocs;
+  /**
+   * The parameter schema's `default`, else (`??`, so `false` and `0` are
+   * kept) that of the schema a bare `$ref` in it points at — for a
+   * component that becomes a model or a named union, its own, else the
+   * first `allOf` member's of its that declares no type (see
+   * `description`). A Parameter Object has no `default` of its own.
+   */
   default?: unknown;
   /**
    * A single illustrative value, resolved level by level: the parameter's own
@@ -1056,8 +1091,9 @@ export interface Parameter {
    * parameter declared with `content` — the same on the Media Type Object
    * its schema was read from, then the parameter schema's `example` (else
    * the first of its `examples` list), then the same on the component schema
-   * its `$ref` points at. A level with neither falls through; an explicit
-   * `null` is kept. Absent when no level gives one.
+   * its `$ref` points at, an `allOf` member of its that declares no type
+   * included (see `description`). A level with neither falls through; an
+   * explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
@@ -1067,7 +1103,8 @@ export interface Parameter {
    * declared with `content` — the same map on the Media Type Object its
    * schema was read from, else the JSON Schema `examples` list on the
    * parameter's schema, else the list on the component schema its `$ref`
-   * points at. Present only when at least one value exists.
+   * points at, or on an `allOf` member of that component that declares no
+   * type (see `description`). Present only when at least one value exists.
    */
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
@@ -1630,7 +1667,11 @@ export interface Field {
   /**
    * A single illustrative value. The field schema's `example` when present,
    * otherwise the first entry of its `examples`; when the schema is a `$ref`
-   * with neither, the same taken from the component it points at — for an
+   * with neither, the same taken from the component it points at — for a
+   * model or named union, from its own keys, else the first `allOf`
+   * member's of its that declares no type (`Pet: { type: 'object',
+   * properties, allOf: [{ example }] }` gives a field `{ $ref: Pet }` the
+   * example `example` beside the `allOf` gives it; #679); for an
    * array or primitive component, from the nearest level the reference
    * passes on its way to the array or primitive (an alias's own, else the
    * component's), as `description` is read; for an alias of an enum
