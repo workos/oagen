@@ -19,10 +19,12 @@ import { isComponentModelRef, rehearse, schemaToTypeRef } from './schemas.js';
 import {
   deprecatedFoldWarning,
   extractInlineModelsFromProperties,
+  foldLiveCopy,
   looserFields,
   modelFingerprint,
   modelShares,
   qualifyInlineModelName,
+  shapeFingerprint,
 } from './inline-models.js';
 import { yieldBodyNames, yieldsAmong, type BodyNameYields } from './contested-body-names.js';
 
@@ -54,7 +56,9 @@ export interface InlineModelOwner {
    * The owner itself, for a model the document declares — a component schema
    * or a model a component's field minted — which shares its name with every
    * shape it admits (`modelShares`). Absent for an operation's model, which
-   * shares its name on an identical fingerprint only.
+   * shares its name on an identical fingerprint only — and, at the sites of
+   * its own operation that fold their copies, with a copy identical but for
+   * the model's own `deprecated` (`MaterializeInlineOptions.kept`).
    */
   model?: Model;
   /**
@@ -76,7 +80,9 @@ export interface InlineModelOwner {
  * model beside a deprecated component takes the qualified name its live
  * self takes (#441), a deprecated field model (`owner.fieldMinted`) only
  * with a deprecated copy), and an operation's model when the fingerprints
- * agree, flag included. A shape the SDK sends (`sent`: a request body, a
+ * agree, flag included — the one exception being a copy the site's own
+ * operation folds onto the definition it keeps, which the trial reads beside
+ * this (`keptTwin`, #672). A shape the SDK sends (`sent`: a request body, a
  * parameter) shares a declared model's name on an identical shape only, the
  * flag read the same way: typed as a looser component, a caller could leave
  * out what the operation requires. The one question every clash check
@@ -252,6 +258,29 @@ export interface MaterializeInlineOptions {
    * they end with, whichever of the two operations is read first.
    */
   yields?: BodyNameYields;
+  /**
+   * The definitions the site's operation keeps for the copies its sites of
+   * this kind declare, by name: every model an earlier call given this map
+   * minted, to which this call adds its own. Given by one operation's
+   * success bodies for their array items (`ItemSettlement.kept`, #672) —
+   * the sites whose copies the operation folds into one model, as it folds
+   * two success bodies that resolve to one name (`extractResponses`, #630).
+   * A model of the trial named like one of them and of its shape but for
+   * the model's own `deprecated` (`keptTwin`) shares the name where the
+   * registry alone, which reads an operation's model flag included
+   * (`ownerShares`), would send the site to its next candidate, and is
+   * folded onto the kept definition at commit (`foldLiveCopy`): the
+   * definition stays, live while any copy is and documented as the first
+   * live copy is, and the registry's entry follows its flag. A definition is
+   * filed under the name it settled on and read under it even once the
+   * caller has renamed the model, as the registry still files it; the
+   * caller repoints what shares it. The map is the
+   * operation's identity here: a name another operation minted is never in
+   * it, whatever the two operations are called, so across operations the
+   * flag stays part of the shape. Absent, an operation's model shares its
+   * name on an identical fingerprint only.
+   */
+  kept?: Map<string, Model>;
   /** Where the materialized models go. */
   models: Model[];
 }
@@ -282,7 +311,10 @@ const MAX_RENAME_ROUNDS = 64;
  * it minted with the registry: a name whose owner shares it (`ownerShares`:
  * a component or a component field's model admits the shape, an operation's
  * model has the identical one) is shared, so a header or body a component
- * admits simply references it; any other owned name clashes. On a clash the
+ * admits simply references it, and so is a name under which the site's own
+ * operation keeps a definition of the model's shape but for the model's own
+ * `deprecated` (`options.kept`, `keptTwin`: the items of one operation's
+ * success bodies, #672); any other owned name clashes. On a clash the
  * loop makes the cheapest move that can still change something:
  *
  *   1. reserve the clashing names — a `oneOf`/`anyOf` variant named from its
@@ -552,11 +584,40 @@ function runTrial(
   const clashing = models
     .filter((model) => {
       const owner = options.registry.get(model.name);
-      return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
+      return owner !== undefined && !sharesName(owner, model, fingerprints.get(model)!, options);
     })
     .map((model) => model.name)
     .sort();
   return { schema, propertyName, reserved, models, fingerprints, clashing, type, settledStem: propertyName, renames };
+}
+
+/**
+ * Whether a model of the trial shares the name it was minted under: with
+ * the name's owner (`ownerShares`), or with the definition the site's own
+ * operation keeps under it (`keptTwin`). The one question every clash check
+ * of the loop asks, so the trial, the settling pass and the commit agree on
+ * which names are shared.
+ */
+function sharesName(owner: InlineModelOwner, model: Model, fingerprint: string, options: ResolvedOptions): boolean {
+  return ownerShares(owner, model, fingerprint, options.sent) || keptTwin(model, options) !== undefined;
+}
+
+/**
+ * The definition the site's operation keeps under `model`'s name
+ * (`MaterializeInlineOptions.kept`) when `model` is a copy of it but for
+ * the model's own `deprecated` (`shapeFingerprint`: the same fields, each
+ * with the same type, requiredness, limits and flag, and the same
+ * properties of the model beside its flag — a field's own `deprecated`, a
+ * limit or another field type is another shape); none otherwise, and none
+ * for a site given no such definitions. The definition is read under the
+ * name it settled on, the one the registry files it by, whatever it is
+ * called since: one a later step renamed (`stepSecondaryBody`) is still
+ * the operation's definition of that name here, and the caller repoints
+ * the site that shares it to where it moved (`followMovedItems`).
+ */
+function keptTwin(model: Model, options: ResolvedOptions): Model | undefined {
+  const kept = options.kept?.get(model.name);
+  return kept !== undefined && shapeFingerprint(kept) === shapeFingerprint(model) ? kept : undefined;
 }
 
 function sameNames(a: string[], b: string[]): boolean {
@@ -570,7 +631,17 @@ function sameNames(a: string[], b: string[]): boolean {
  * rewritten is never dropped as "already defined" in favour of an owner that
  * no longer matches it. A deprecated model a live declared owner shares its
  * name with is dropped the same way, with the warning the merge passes give
- * such a copy, once per site. The trial has no such clash left when it gets here
+ * such a copy, once per site. A copy of a definition the site's own
+ * operation keeps under the name, identical but for the model's own
+ * `deprecated` (`keptTwin`), is folded onto that definition and dropped,
+ * silently, as two success bodies of one operation are folded
+ * (`foldLiveCopy`): the definition goes live when it was deprecated and the
+ * copy is not, documented as the copy is, and the registry's entry is
+ * replaced by one of the definition's new fingerprint — replaced, never
+ * edited, since a rehearsal reads a shallow copy of the registry
+ * (`bodyTypeNames`) — so every later comparison, this operation's or
+ * another's, reads the model as the IR will carry it. The trial has no
+ * clash left when it gets here
  * (`runTrial` found none, or `renameClashing` cleared them all), so the
  * remaining branch is a guard against a regression, not an expected path.
  * The site's settlement — the stem it settled on, the renames made under it
@@ -597,6 +668,12 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
       }
       continue;
     }
+    const twin = owner && keptTwin(model, options);
+    if (owner && twin) {
+      if (foldLiveCopy(twin, model))
+        options.registry.set(model.name, { ...owner, fingerprint: modelFingerprint(twin) });
+      continue;
+    }
     if (owner !== undefined) {
       throw new Error(
         `Inline model "${model.name}" would overwrite a model of another shape; this is a bug in materializeInlineSchema.`,
@@ -604,6 +681,7 @@ function commit(trial: Trial, options: ResolvedOptions): TypeRef {
     }
     options.registry.set(model.name, { fingerprint, operation: options.operation });
     options.models.push(model);
+    options.kept?.set(model.name, model);
   }
   const { siblings, enumSite: enumValues } = options;
   const { settledStem } = trial;
@@ -753,7 +831,7 @@ function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (in
           if (model.name === oldRoot) return true;
           if (!model.name.startsWith(oldRoot)) return false;
           const owner = registry.get(model.name);
-          return owner === undefined || !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
+          return owner === undefined || !sharesName(owner, model, fingerprints.get(model)!, options);
         })
         .map((model) => model.name);
       for (const name of moving) {
@@ -776,7 +854,7 @@ function renameClashing(trial: Trial, options: ResolvedOptions, candidateAt: (in
     clashing = trial.models
       .filter((model) => {
         const owner = registry.get(model.name);
-        return owner !== undefined && !ownerShares(owner, model, fingerprints.get(model)!, options.sent);
+        return owner !== undefined && !sharesName(owner, model, fingerprints.get(model)!, options);
       })
       .map((model) => model.name)
       .sort();

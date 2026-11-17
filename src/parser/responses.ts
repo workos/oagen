@@ -61,6 +61,16 @@ export interface ItemSettlement {
   operation: string;
   /** The names the operation gives up to another operation (`MaterializeInlineOptions.yields`, #683). */
   yields?: BodyNameYields;
+  /**
+   * The item models the operation's success bodies have settled so far, by
+   * name (`MaterializeInlineOptions.kept`, #672): one map per reading of an
+   * operation's `responses` (`extractResponses`), handed to every body of
+   * it, so the items of a later body that repeat an earlier body's but for
+   * the model's own `deprecated` share that body's model and are folded
+   * onto it. Absent — a rehearsal that reads one body's names — nothing is
+   * folded.
+   */
+  kept?: Map<string, Model>;
 }
 
 export interface ResponseExtractionResult {
@@ -139,7 +149,9 @@ export interface ResponseClassificationOptions {
   /**
    * With it, the items of an array body or a list envelope are typed under
    * the first `<Op>Item` candidate the registry does not give another shape,
-   * and an identical shape shares the model it finds (`typeInlineItems`).
+   * and an identical shape shares the model it finds (`typeInlineItems`), as
+   * does one identical, but for the model's own `deprecated`, to the items an
+   * earlier success body of the operation settled (`ItemSettlement.kept`).
    * Absent — the dry run that reads a component response's names, a direct
    * call — the items take `<Op>Item` as written; the dry run that reads an
    * operation's own names settles them against a copy of the registry
@@ -750,7 +762,18 @@ export function resolveDataPathFromSchema(
  * recorded under the operation; a reference written by sharing another
  * site's model joins that site (`attachSharedRefs`), so a later rename of
  * the shared model — a deprecated copy named like a live one — reaches this
- * array too. A name the operation gives up to another operation
+ * array too. One exception reads the model's own `deprecated` apart
+ * (`ItemSettlement.kept`, #672): items that repeat, but for that flag, the
+ * items an earlier success body of the same operation settled — a `200` and
+ * a `202` both returning an array of `{ name }`, only one body's `items`
+ * written `deprecated: true` — share that body's model instead of stepping
+ * to `<Op>ResponseItem`, whatever the items mint (the root, a nested object,
+ * a union variant, the objects of a nested array or map), and the shared
+ * model is the one two object bodies of one name would leave
+ * (`foldLiveCopy`): the earlier body's definition, live while any copy is,
+ * documented as the first live copy is. Another operation's model of the
+ * name is still shared on an identical shape only, the flag included. A
+ * name the operation gives up to another operation
  * (`ItemSettlement.yields`, #683) is left before the comparison, in every
  * trial, so that operation's model of the name is no clash and the items
  * never step for it. Without `settle` — the dry run that reads a component
@@ -778,6 +801,7 @@ function typeInlineItems(
       registry: settle.registry,
       operation: settle.operation,
       ...(settle.yields && { yields: settle.yields }),
+      ...(settle.kept && { kept: settle.kept }),
       models: inlineModels,
     });
     return { itemType, inlineModels };

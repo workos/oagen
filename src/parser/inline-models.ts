@@ -462,8 +462,10 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_K
  * every model its fields name, since a nested inline model is a model of its
  * own, kept by its own flag. What a fold does to the definition it keeps
  * when it clears the model's own `deprecated` because a copy identical but
- * for that flag is live — the within-operation merge (`extractResponses`,
- * #630) and the copies an owner refuses (`settleRefusedCopies`, #441): the
+ * for that flag is live (`foldLiveCopy`) — the within-operation merge
+ * (`extractResponses`, #630), the array items of one operation's success
+ * bodies (`materializeInlineSchema`, #672) and the copies an owner refuses
+ * (`settleRefusedCopies`, #441): the
  * shared model is then documented as its first live copy is, as the merge
  * passes keep a live copy's definition whole across operations
  * (`settleSharedNames`), so a text the deprecated copy wrote for the model
@@ -484,6 +486,28 @@ export function takeModelDocumentation(into: Model, from: Model): void {
     const twin = from.variants?.[index];
     if (twin) takeEnumDocumentation(variant, twin);
   });
+}
+
+/**
+ * Fold `copy` onto `kept`, a definition of its shape but for the model's own
+ * `deprecated` (`shapeFingerprint`) that both resolve to: `kept` stays the
+ * definition, its name, structure and references with it, and is live while
+ * either is — when it is deprecated and `copy` is live, its flag is cleared
+ * and it is documented as `copy` is (`takeModelDocumentation`); otherwise
+ * nothing changes, so of several copies folded in order the first live one
+ * documents the model and a deprecated one never does. Returns whether
+ * `kept` went live. The one fold every site that keeps a definition for
+ * copies that differ only in the flag applies: one operation's success
+ * bodies that resolve to one name (`extractResponses`, #630), the array
+ * items of those bodies, which the shape registry settles as they are read
+ * (`materializeInlineSchema`, #672), and the copies an owner refuses
+ * (`settleRefusedCopies`, #441).
+ */
+export function foldLiveCopy(kept: Model, copy: Model): boolean {
+  if (!kept.deprecated || copy.deprecated) return false;
+  delete kept.deprecated;
+  takeModelDocumentation(kept, copy);
+  return true;
 }
 
 /** Give `into` each of `keys` as `from` carries it, a key `from` lacks removed. */
