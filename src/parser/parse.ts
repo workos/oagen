@@ -563,21 +563,28 @@ interface SecuritySchemeObject {
  * What is left has no representation and is omitted with an `Unsupported
  * security scheme "<key>" (<what is wrong>) omitted from spec.auth` warning
  * rather than silently: an entry that is no object — `null`, a string, a
- * number, a boolean, an array — named as JSON (`not a Security Scheme
- * Object: null`, `: "bearer"`, `: 5`, `: true`, `: []`), where reading it
- * as an object used to fail the parse with a `TypeError`; a `type` that is
- * not one of the specification's five, compared as written (`type: saml`,
- * `type: OpenIdConnect`, `type: undefined`); and a
- * definition without the field its type is read by — an `http` scheme with
- * no `scheme` (`type: http, no scheme`) or one that is not an RFC 9110
- * token (`type: http, scheme: "my scheme" is not a token`;
+ * number, a boolean, an array — said in words (`null is not a Security
+ * Scheme Object`, `a string is not …`, `an array is not …`), where reading
+ * it as an object used to fail the parse with a `TypeError`; a `type` that
+ * is not one of the specification's five, compared as written, so `saml`
+ * and `OpenIdConnect` are none (`type is not apiKey, http, mutualTLS,
+ * oauth2 or openIdConnect`), or that is missing (`no type`) or no string
+ * (`type is a number, not a string`); and a definition without the field
+ * its type is read by — an `http` scheme with no `scheme` (`type: http, no
+ * scheme`), one that is no string (`type: http, scheme is a number, not a
+ * string`), a blank one (`type: http, scheme is blank`) or one that is not
+ * an RFC 9110 token (`type: http, scheme is not a token`;
  * `isHttpAuthScheme`), an `openIdConnect` one with no `openIdConnectUrl`
- * (`type: openIdConnect, no openIdConnectUrl`) or one that is not a string
- * (`openIdConnectUrl: 5 is not a string`) or has no content
- * (`openIdConnectUrl: " " is blank`), an `apiKey` with no `in` or no
- * `name` (`type: apiKey, no name`), an `oauth2` with no `flows` (`type:
- * oauth2, no flows`). A requirement naming an omitted scheme is kept, so it
- * joins to nothing.
+ * (`type: openIdConnect, no openIdConnectUrl`), one that is no string
+ * (`openIdConnectUrl is a number, not a string`) or a blank one
+ * (`openIdConnectUrl is blank`), an `apiKey` with no `in` or no `name`
+ * (`type: apiKey, no name`), an `oauth2` with no `flows` (`type: oauth2, no
+ * flows`). A requirement naming an omitted scheme is kept, so it joins to
+ * nothing.
+ *
+ * A warning names the key and what kind of value it met, never the value
+ * (`describeSchemeValue`): this map is where a credential pasted by mistake
+ * lands, and a warning goes to a build log.
  *
  * An entry may be a `$ref` to another entry of the map — OAS 3.0.3 and
  * 3.1.0 both allow a Reference Object under `components.securitySchemes` —
@@ -589,13 +596,15 @@ interface SecuritySchemeObject {
  * it (#384). A `description` written beside the `$ref` overrides the
  * target's under 3.1 and is ignored under 3.0 (`siblingDocs`). A ref the map
  * does not answer — a pointer into another section, or a `$ref` that is not
- * a string — is omitted with the same warning an unsupported scheme gets,
- * naming the ref and how the walk ended; one that ends on an entry the map
- * holds but that is no object (`sharedKey: null`) names what it found
- * (`$ref #/components/securitySchemes/sharedKey is not a Security Scheme
- * Object: null`), beside that entry's own warning; one that names no
- * component at all, or a cycle of refs, fails the bundle before parsing, as
- * any dangling ref does.
+ * a string — is omitted with the same warning an unsupported scheme gets:
+ * a pointer is named with how the walk ended (`$ref
+ * #/components/schemas/Pet unresolved`), and a `$ref` that is no string by
+ * what it is (`$ref is a number, not a string`). One that ends on an entry
+ * the map holds but that is no object (`sharedKey: null`) says what it
+ * found (`$ref #/components/securitySchemes/sharedKey names null, not a
+ * Security Scheme Object`), beside that entry's own warning; one that names
+ * no component at all, or a cycle of refs, fails the bundle before parsing,
+ * as any dangling ref does.
  */
 function extractAuthSchemes(
   securitySchemes: Record<string, SecuritySchemeObject | ReferenceObject> | undefined,
@@ -612,22 +621,26 @@ function extractAuthSchemes(
     const omit = (detail: string): void =>
       console.warn(`[oagen] Warning: Unsupported security scheme "${schemeName}" (${detail}) omitted from spec.auth`);
     // `null`, a string, a number, a boolean or an array declares no scheme,
-    // and is no Reference Object to follow either: name the value, as JSON,
-    // instead of failing the parse on it.
+    // and is no Reference Object to follow either: say what it is instead
+    // of failing the parse on it.
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      omit(`not a Security Scheme Object: ${JSON.stringify(entry)}`);
+      omit(`${describeSchemeValue(entry)} is not a Security Scheme Object`);
       continue;
     }
     const followed = followReference<SecuritySchemeObject>(entry, 'securitySchemes', components, siblingDocs);
     if (followed.outcome !== 'resolved') {
-      // A chain that ends on an entry the map holds but that is no object
-      // (`found`) is that same malformed entry behind a pointer, not a
-      // missing one, and is reported as such.
-      omit(
-        followed.found !== undefined
-          ? `$ref ${followed.ref} is not a Security Scheme Object: ${JSON.stringify(followed.found.value)}`
-          : `$ref ${followed.ref} ${followed.outcome}`,
-      );
+      if (followed.found !== undefined) {
+        // The chain ends on an entry the map holds but that is no object:
+        // that same malformed entry behind a pointer, not a missing one.
+        omit(`$ref ${followed.ref} names ${describeSchemeValue(followed.found.value)}, not a Security Scheme Object`);
+      } else if (followed.outcome === 'malformed') {
+        // A `$ref` that is no string is no pointer to print.
+        const ref = (followed.value as { $ref?: unknown }).$ref;
+        omit(`$ref is ${describeSchemeValue(ref)}, not a string`);
+      } else {
+        // A pointer the bundle resolved and this map does not answer.
+        omit(`$ref ${followed.ref} ${followed.outcome}`);
+      }
       continue;
     }
     const scheme = followed.value;
@@ -644,8 +657,16 @@ function extractAuthSchemes(
           omit('type: http, no scheme');
           break;
         }
+        if (typeof name !== 'string') {
+          omit(`type: http, scheme is ${describeSchemeValue(name)}, not a string`);
+          break;
+        }
+        if (name.trim() === '') {
+          omit('type: http, scheme is blank');
+          break;
+        }
         if (!isHttpAuthScheme(name)) {
-          omit(`type: http, scheme: ${JSON.stringify(name)} is not a token`);
+          omit('type: http, scheme is not a token');
           break;
         }
         // Scheme names are case-insensitive (RFC 9110 §11.1): `Bearer`,
@@ -687,9 +708,9 @@ function extractAuthSchemes(
         if (url === undefined) {
           omit('type: openIdConnect, no openIdConnectUrl');
         } else if (typeof url !== 'string') {
-          omit(`type: openIdConnect, openIdConnectUrl: ${JSON.stringify(url)} is not a string`);
+          omit(`type: openIdConnect, openIdConnectUrl is ${describeSchemeValue(url)}, not a string`);
         } else if (url.trim() === '') {
-          omit(`type: openIdConnect, openIdConnectUrl: ${JSON.stringify(url)} is blank`);
+          omit('type: openIdConnect, openIdConnectUrl is blank');
         } else {
           schemes.push({ kind: 'openIdConnect', ...common, openIdConnectUrl: url });
         }
@@ -699,11 +720,29 @@ function extractAuthSchemes(
         // The Security Scheme Object has no field for it beside `description`.
         schemes.push({ kind: 'mutualTLS', ...common });
         break;
-      default:
+      default: {
         // Not one of the specification's five values, which are compared as
         // written: `OpenIdConnect` and `mutualtls` are not types.
-        omit(`type: ${scheme.type}`);
+        const type: unknown = scheme.type;
+        if (type === undefined) omit('no type');
+        else if (typeof type !== 'string') omit(`type is ${describeSchemeValue(type)}, not a string`);
+        else omit('type is not apiKey, http, mutualTLS, oauth2 or openIdConnect');
+      }
     }
   }
   return schemes.length > 0 ? schemes : undefined;
+}
+
+/**
+ * What a value met where a Security Scheme Object, or one of its fields,
+ * was expected is, in words: `null`, `an array`, `an object`, `a string`,
+ * `a number`, `a boolean`. `extractAuthSchemes`' warnings say this much and
+ * never print the value: `components.securitySchemes` is where a credential
+ * pasted by mistake lands (`petAuth: "sk_live_…"`, `scheme: "Bearer
+ * sk_live_…"`), and a warning goes to a build log.
+ */
+function describeSchemeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
 }
