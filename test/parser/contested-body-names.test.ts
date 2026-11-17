@@ -736,6 +736,154 @@ describe('#683', () => {
         expect(warn).not.toHaveBeenCalled();
       });
 
+      // Greptile (round 1): only the bodies in the contest were read when the
+      // number was chosen, so the nested model took `…2` although an
+      // operation outside it already used that name, and the merge kept the
+      // larger of the two for both.
+      it('steps past a numbered name an operation outside the contest uses, in every order of the paths', async () => {
+        const contest = {
+          '/pets': {
+            post: returning('createPet', obj({ id: str, draft_response: obj({ a: str, b: str, c: str }) })),
+          },
+          '/pet-drafts': { post: returning('createPetResponseDraft', obj({ n: int })) },
+        };
+        /** `contest` beside `animals`, in each of the three places `animals` can stand, forward and reversed. */
+        const everyOrder = async (animals: Record<string, unknown>) => {
+          const [pets, drafts] = Object.entries(contest).map((entry) => Object.fromEntries([entry]));
+          const first = await settled(openapi, { ...animals, ...pets, ...drafts });
+          expect(await settled(openapi, { ...pets, ...animals, ...drafts })).toEqual(first);
+          expect(await settled(openapi, { ...pets, ...drafts, ...animals })).toEqual(first);
+          return first;
+        };
+        // A response named from its `object` const: `updateAnimal` keeps its own fields.
+        expect(
+          await everyOrder({
+            '/animals': {
+              put: returning('updateAnimal', obj({ object: { const: 'CreatePetResponseDraftResponse2' }, z: str })),
+            },
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { id: string, draft_response: CreatePetResponseDraftResponse3 }",
+            "CreatePetResponseDraftResponse { n: integer }",
+            "CreatePetResponseDraftResponse2 { object: "CreatePetResponseDraftResponse2", z: string }",
+            "CreatePetResponseDraftResponse3 { a: string, b: string, c: string }",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse",
+            "POST /pets (createPet): none → CreatePetResponse",
+            "PUT /animals (updateAnimal): none → CreatePetResponseDraftResponse2",
+          ]
+        `);
+        // An inline enum of that name, on a response named from its const: no merge pass renames the model for it.
+        expect(
+          await everyOrder({
+            '/animals': {
+              put: returning(
+                'updateAnimal',
+                obj({ object: { const: 'CreatePetResponseDraft' }, response2: { type: 'string', enum: ['x', 'y'] } }),
+              ),
+            },
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { id: string, draft_response: CreatePetResponseDraftResponse3 }",
+            "CreatePetResponseDraft { object: "CreatePetResponseDraft", response2: CreatePetResponseDraftResponse2 }",
+            "CreatePetResponseDraftResponse { n: integer }",
+            "CreatePetResponseDraftResponse3 { a: string, b: string, c: string }",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse",
+            "POST /pets (createPet): none → CreatePetResponse",
+            "PUT /animals (updateAnimal): none → CreatePetResponseDraft",
+            "enum CreatePetResponseDraftResponse2 [x, y]",
+          ]
+        `);
+        // A list envelope's companion, which takes its bare name.
+        expect(
+          await everyOrder({
+            '/animals': {
+              get: {
+                operationId: 'listAnimals',
+                parameters: [{ name: 'after', in: 'query', schema: str }],
+                responses: ok(
+                  obj({
+                    data: { type: 'array', items: obj({ id: str }) },
+                    list_metadata: obj({ after: str }),
+                    create_pet_response_draft_response2: obj({ z: str }),
+                  }),
+                ),
+              },
+            },
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { id: string, draft_response: CreatePetResponseDraftResponse3 }",
+            "CreatePetResponseDraftResponse { n: integer }",
+            "CreatePetResponseDraftResponse2 { z: string }",
+            "CreatePetResponseDraftResponse3 { a: string, b: string, c: string }",
+            "GET /animals (listAnimals): none → ListAnimalsItem[]",
+            "ListAnimalsItem { id: string }",
+            "ListMetadata { after: string }",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse",
+            "POST /pets (createPet): none → CreatePetResponse",
+          ]
+        `);
+        // A query parameter's enum, named from its service (`CreatePet`) and the parameter.
+        expect(
+          await everyOrder({
+            '/create-pet': {
+              get: returning('searchAnimals', str, {
+                tags: ['CreatePet'],
+                parameters: [
+                  { name: 'response_draft_response2', in: 'query', schema: { type: 'string', enum: ['x', 'y'] } },
+                ],
+              }),
+            },
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { id: string, draft_response: CreatePetResponseDraftResponse3 }",
+            "CreatePetResponseDraftResponse { n: integer }",
+            "CreatePetResponseDraftResponse3 { a: string, b: string, c: string }",
+            "GET /create-pet (searchAnimals): none → string",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse",
+            "POST /pets (createPet): none → CreatePetResponse",
+            "enum CreatePetResponseDraftResponse2 [x, y]",
+          ]
+        `);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      // The same class: the name a body takes was read off a hand-kept copy of
+      // the rules, which gave a later status code's body `…Response201` where
+      // the operation steps it to `…Response2` past a component, so the nested
+      // model took that very name in one path order.
+      it('reads the names off the operation as it is built: a later body that steps to a number keeps it', async () => {
+        expect(
+          await settled(
+            openapi,
+            {
+              '/pets': { post: returning('createPet', obj({ id: str, draft_response: obj({ a: str }) })) },
+              '/pet-drafts': {
+                post: {
+                  operationId: 'createPetResponseDraft',
+                  responses: { ...ok(obj({ b: int })), ...ok(obj({ c: int }), '201') },
+                },
+              },
+            },
+            { components: { schemas: { CreatePetResponseDraftResponse201: obj({ z: str }) } } },
+          ),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { id: string, draft_response: CreatePetResponseDraftResponse3 }",
+            "CreatePetResponseDraftResponse { b: integer }",
+            "CreatePetResponseDraftResponse2 { c: integer }",
+            "CreatePetResponseDraftResponse201 { z: string }",
+            "CreatePetResponseDraftResponse3 { a: string }",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse, 201 → CreatePetResponseDraftResponse2",
+            "POST /pets (createPet): none → CreatePetResponse",
+          ]
+        `);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
       it('leaves a component its name: the nested model is numbered, and the response is settled against the component as before', async () => {
         // `original` is an explicit `$ref` to the component, beside the inline
         // `draft_response` of its name: only the inline object's reference moves.
@@ -964,14 +1112,15 @@ describe('#683', () => {
   }
 
   describe('resolveContestedBodyNames', () => {
-    const body = (key: string, stem: string, models: string[], enums: string[] = []): OperationBodyNames => ({
-      key,
-      stem,
-      models,
-      enums,
-    });
+    const body = (
+      key: string,
+      stem: string,
+      models: string[],
+      enums: string[] = [],
+      others: string[] = [],
+    ): OperationBodyNames => ({ key, stem, models, enums, others });
     const settle = (bodies: OperationBodyNames[], taken: string[] = []) =>
-      Object.fromEntries([...resolveContestedBodyNames(bodies, taken)].map(([key, given]) => [key, [...given]]));
+      Object.fromEntries([...resolveContestedBodyNames(bodies, () => taken)].map(([key, given]) => [key, [...given]]));
 
     it('gives a name up to the operation whose stem contains the other’s, whatever the order of the bodies', () => {
       const pets = body('post /pets', 'CreatePet', ['CreatePetResponse', 'CreatePetResponseDraftResponse']);
@@ -1034,6 +1183,36 @@ describe('#683', () => {
           body('b', 'CreatePetResponseDraft', ['CreatePetResponseDraftResponse201']),
         ]),
       ).toEqual({ a: [['CreatePetResponseDraftResponse201', 'CreatePetResponseDraftResponse201No2']] });
+    });
+
+    it('reads the names in play only when a name is given up, and keeps clear of the other names an operation holds', () => {
+      const pets = body('a', 'CreatePet', ['CreatePetResponseDraftResponse']);
+      const drafts = body('b', 'CreatePetResponseDraft', ['CreatePetResponseDraftResponse']);
+      const taken = vi.fn(() => ['CreatePetResponseDraftResponse2']);
+      // No name both mint: nothing is given up, and nothing else is read.
+      expect([...resolveContestedBodyNames([pets, body('c', 'CreatePetRequestDraft', ['X'])], taken)]).toEqual([]);
+      expect(taken).not.toHaveBeenCalled();
+      expect(
+        Object.fromEntries(
+          [...resolveContestedBodyNames([pets, drafts], taken)].map(([key, given]) => [key, [...given]]),
+        ),
+      ).toEqual({ a: [['CreatePetResponseDraftResponse', 'CreatePetResponseDraftResponse3']] });
+      expect(taken).toHaveBeenCalledTimes(1);
+      // A companion's bare name or a parameter's enum is never claimed, only kept clear of.
+      expect(
+        settle([
+          pets,
+          body(
+            'b',
+            'CreatePetResponseDraft',
+            ['CreatePetResponseDraftResponse'],
+            [],
+            ['CreatePetResponseDraftResponse2'],
+          ),
+        ]),
+      ).toEqual({
+        a: [['CreatePetResponseDraftResponse', 'CreatePetResponseDraftResponse3']],
+      });
     });
 
     it('reads one stem as one claimant: two paths onto one Operation Object give up the same names', () => {
