@@ -745,6 +745,30 @@ const sites: Site[] = [
     build: (s) => parameter({ name: 'note', in: 'query', content: json(s) }),
   },
   {
+    label: 'a Path Item parameter beside an operation `parameters` that is no array',
+    reading: 'sent',
+    build: (s) => get({ parameters: 'oops' }, { parameters: [{ name: 'note', in: 'query', schema: s }] }),
+  },
+  {
+    label: 'a parameter after an entry that is no object',
+    reading: 'sent',
+    build: (s) => get({ parameters: [null, { name: 'note', in: 'query', schema: s }] }),
+  },
+  {
+    label: 'a parameter after an entry whose `$ref` ends on a `components/parameters` entry that is no object',
+    reading: 'sent',
+    build: (s) =>
+      withComponents(
+        get({ parameters: [{ $ref: '#/components/parameters/Bad' }, { name: 'note', in: 'query', schema: s }] }),
+        { parameters: { Bad: [] } },
+      ),
+  },
+  {
+    label: 'a Path Item parameter beside an operation entry of its name that is no object',
+    reading: 'sent',
+    build: (s) => get({ parameters: ['note'] }, { parameters: [{ name: 'note', in: 'query', schema: s }] }),
+  },
+  {
     label: 'a parameter typed through `content` under `application/problem+json`',
     reading: 'sent',
     build: (s) => parameter({ name: 'note', in: 'query', content: under('application/problem+json', s) }),
