@@ -11,9 +11,11 @@ import {
   malformedRefOf,
 } from '../../src/parser/reference-objects.js';
 import { isResponseEntry } from '../../src/parser/response-refs.js';
+import { resolvePathItemRef } from '../../src/parser/path-item-refs.js';
+import { extractCallbacks } from '../../src/parser/callbacks.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffCommand } from '../../src/cli/diff.js';
-import type { ApiSpec, Operation } from '../../src/ir/types.js';
+import type { ApiSpec, Operation, Webhook } from '../../src/ir/types.js';
 
 /**
  * Issue #664: a `$ref` to a `components/parameters` or
@@ -1040,6 +1042,83 @@ describe('#664', () => {
       });
     });
   }
+
+  describe('a name the map holds nothing under, beside an entry that holds a falsy value', () => {
+    // Called directly: the bundler rejects a document with such a pointer before the parser reads it.
+    const components = (entries: Record<string, unknown>) => entries as Record<string, Record<string, unknown>>;
+    const FALSY: Array<[kind: string, value: unknown]> = [
+      ['null', null],
+      ['false', false],
+      ['zero', 0],
+      ['an empty string', ''],
+    ];
+
+    it.each(FALSY)(
+      'resolvePathItemRef keeps `no matching entry` for a missing name and names an entry that is %s as no path item object',
+      (_kind, value) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const said = () => warn.mock.calls.map((call) => String(call[0]));
+        const site = { kind: 'path' as const, key: '/pets' };
+        const pathItems = components({ Pets: value });
+        const document = { paths: { '/cats': value }, webhooks: { catAdopted: value } };
+        const resolve = (ref: string) => resolvePathItemRef({ $ref: ref }, pathItems, site, document);
+
+        expect(resolve('#/components/pathItems/Missing')).toBeUndefined();
+        expect(resolve('#/paths/~1missing')).toBeUndefined();
+        expect(resolve('#/webhooks/missing')).toBeUndefined();
+        expect(said()).toEqual([
+          warning(
+            'Unresolved path item $ref "#/components/pathItems/Missing" for path "/pets": no matching entry under components/pathItems. Skipping the path.',
+          ),
+          warning(
+            'Unresolved path item $ref "#/paths/~1missing" for path "/pets": no matching entry under paths. Skipping the path.',
+          ),
+          warning(
+            'Unresolved path item $ref "#/webhooks/missing" for path "/pets": no matching entry under webhooks. Skipping the path.',
+          ),
+        ]);
+        warn.mockClear();
+
+        expect(resolve('#/components/pathItems/Pets')).toBeUndefined();
+        expect(resolve('#/paths/~1cats')).toBeUndefined();
+        expect(resolve('#/webhooks/catAdopted')).toBeUndefined();
+        const notAPathItem = warning('Path "/pets" is not a path item object; skipping it.');
+        expect(said()).toEqual([notAPathItem, notAPathItem, notAPathItem]);
+      },
+    );
+
+    it.each(FALSY)(
+      'a callback keeps `no matching entry` for a missing name and names an entry that is %s as no Callback Object',
+      (_kind, value) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const owner: Webhook = { name: 'x', httpMethod: 'post', headerParams: [], queryParams: [], responses: [] };
+        const callbacks = {
+          missing: { $ref: '#/components/callbacks/Missing' },
+          falsy: { $ref: '#/components/callbacks/Adopted' },
+          chained: { $ref: '#/components/callbacks/Alias' },
+        };
+        const entries = { Adopted: value, Alias: { $ref: '#/components/callbacks/Adopted' } };
+
+        const result = extractCallbacks(
+          [{ owner, callbacks, label: 'webhooks.x.post', stem: 'Hook' }],
+          { callbacks: components(entries) },
+          [],
+          [],
+          'override',
+        );
+
+        expect(result).toEqual({ inlineModels: [], inlineModelBundles: [] });
+        expect(owner).not.toHaveProperty('callbacks');
+        expect(warn.mock.calls.map((call) => String(call[0]))).toEqual([
+          warning(
+            'Unresolved callback $ref "#/components/callbacks/Missing" for callback "webhooks.x.post.callbacks.missing": no matching entry under components/callbacks. Skipping the callback.',
+          ),
+          warning('Callback "webhooks.x.post.callbacks.falsy" is not a Callback Object; skipping it.'),
+          warning('Callback "webhooks.x.post.callbacks.chained" is not a Callback Object; skipping it.'),
+        ]);
+      },
+    );
+  });
 
   describe('resolveParameterRef', () => {
     const components = (entries: Record<string, unknown>) => entries as Record<string, Record<string, unknown>>;
