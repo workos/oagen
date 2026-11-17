@@ -1289,7 +1289,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   // from every key that resolves to it, as before.
   // An entry that is no object is read as the model it always was, and is
   // no alias target: this walk reads the document as written.
-  const declared = Object.fromEntries(Object.entries(schemas).filter(([, schema]) => isRecord(schema))) as Record<
+  const declared = Object.fromEntries(Object.entries(schemas).filter(([, entry]) => isRecord(entry))) as Record<
     string,
     SchemaObject
   >;
