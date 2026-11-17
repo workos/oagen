@@ -171,7 +171,14 @@ import {
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { resolvePathItemRef } from './path-item-refs.js';
 import { componentKeyOf } from './schema-refs.js';
-import { followReference, siblingDocsMode, type SiblingDocs } from './reference-objects.js';
+import {
+  endsOnNonObject,
+  followReference,
+  isReferenceEntry,
+  malformedRefOf,
+  siblingDocsMode,
+  type SiblingDocs,
+} from './reference-objects.js';
 
 export interface PathItem {
   /**
@@ -344,20 +351,45 @@ export type RawParameterObject = ParameterObject | { $ref: string };
  * `siblingDocs: 'override'` (OAS 3.1), the outermost with content winning
  * along a chain, and is ignored under `'ignore'` (OAS 3.0).
  *
- * Throws when a `$ref` can't be resolved so a malformed spec fails loudly at
- * parse time instead of silently losing the parameter (see `extractParams`,
- * which used to drop any entry with no `in` field — every `$ref` object has
- * none).
+ * An entry that is no object — `parameters: [null]`, `"oops"`, `7`, `true`
+ * or `[]` — is neither a Parameter Object nor a Reference Object, and
+ * nothing could be read from it: it is warned about once, naming the
+ * operation and the value as JSON (`a parameter of listPets is not a
+ * Parameter Object (null); skipping it.`), and `undefined` is returned for
+ * the caller to skip it. A chain that ends on a `components/parameters`
+ * entry that is no object (`Limit: []`) is that same malformed entry behind
+ * a pointer, so it is read the same way, the warning naming the component
+ * (`components/parameters/Limit (a parameter of listPets) is not a
+ * Parameter Object ([]); skipping it.`), and the two spellings of one
+ * malformed parameter give one IR — where the ref used to fail the parse as
+ * one with `no matching entry`, and the inline value, an array apart, with
+ * a `TypeError` naming neither the operation nor the entry (#664).
+ *
+ * Throws for a ref that leads to no entry at all — one the section holds
+ * nothing under (a pointer into another section included), a `$ref` that
+ * is not a string (`Malformed parameter $ref 42 in listPets: a $ref must be
+ * a string.`), or a chain that loops — so a spec that names a parameter
+ * the parser cannot find fails loudly at parse time instead of silently
+ * losing it (see `extractParams`, which used to drop any entry with no `in`
+ * field — every `$ref` object has none).
  */
 export function resolveParameterRef(
   raw: RawParameterObject,
   componentParameters: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
   siblingDocs: SiblingDocs = 'override',
-): ParameterObject {
+): ParameterObject | undefined {
+  const site = `a parameter of ${operationContext}`;
+  if (!isReferenceEntry(raw, 'parameters', site)) return undefined;
   const followed = followReference<ParameterObject>(raw, 'parameters', componentParameters, siblingDocs);
+  if (endsOnNonObject(followed, 'parameters', site)) return undefined;
   if (followed.outcome === 'circular') {
     throw new Error(`Circular parameter $ref chain starting at "${followed.ref}" in ${operationContext}.`);
+  }
+  if (followed.outcome === 'malformed') {
+    throw new Error(
+      `Malformed parameter $ref ${malformedRefOf(followed)} in ${operationContext}: a $ref must be a string.`,
+    );
   }
   if (followed.outcome !== 'resolved') {
     throw new Error(
@@ -365,6 +397,41 @@ export function resolveParameterRef(
     );
   }
   return followed.value;
+}
+
+/**
+ * The raw parameter entries an operation reads, for `resolveParameterRef`
+ * to resolve one by one: the `parameters` of the Path Item it sits on, then
+ * its own, so an operation-level parameter comes after the path-level one
+ * it replaces. A `parameters` field that is absent declares none. One that
+ * holds anything but an array — `parameters: "oops"`, `7`, `true`, `null`
+ * or an object — declares none either: it is warned about once per
+ * operation that reads it, naming the operation, whose field it is and the
+ * value as JSON (`parameters of listPets is not an array ("oops"); reading
+ * no parameter from it.`, `parameters of the path item of listPets …` for
+ * the Path Item's), and read as absent — never as the list of a string's
+ * characters, each of which would be reported as a parameter that is no
+ * object, and never failing the parse with a `TypeError` that names
+ * neither the operation nor the field (#664). Shared by an operation
+ * (`buildOperation`) and a webhook or callback (`readPathItemEntries`).
+ */
+export function declaredParameterEntries(
+  pathItemParameters: unknown,
+  operationParameters: unknown,
+  operationContext: string,
+): RawParameterObject[] {
+  const entries = (parameters: unknown, site: string): RawParameterObject[] => {
+    if (parameters === undefined) return [];
+    if (Array.isArray(parameters)) return parameters;
+    console.warn(
+      `[oagen] Warning: ${site} is not an array (${JSON.stringify(parameters)}); reading no parameter from it.`,
+    );
+    return [];
+  };
+  return [
+    ...entries(pathItemParameters, `parameters of the path item of ${operationContext}`),
+    ...entries(operationParameters, `parameters of ${operationContext}`),
+  ];
 }
 
 /** The header parameter names OpenAPI says to ignore, folded (`foldHeaderName`). */
@@ -421,28 +488,61 @@ export type RawRequestBodyObject = RequestBodyObject | { $ref: string };
  * written beside a ref is the body's own under `siblingDocs: 'override'`
  * (OAS 3.1), the outermost with content winning along a chain, and is
  * ignored under `'ignore'` (OAS 3.0) — so `requestBodyDescriptionOf` reads
- * it ahead of the shared body's. Throws on an unresolvable ref so a
- * malformed spec fails at parse time instead of silently losing the body —
+ * it ahead of the shared body's.
+ *
+ * An operation that writes no `requestBody` has none, without a word. One
+ * written as anything but an object — `requestBody: "oops"`, `7`, `true`,
+ * `null` or `[]` — is neither a Request Body Object nor a Reference Object:
+ * it is warned about once, naming the operation and the value as JSON (`the
+ * request body of createPet is not a Request Body Object ("oops"); skipping
+ * it.`), and the operation is read without a request body. A chain that
+ * ends on a `components/requestBodies` entry that is no object (`NewPet:
+ * []`) is that same malformed entry behind a pointer, so it is read the
+ * same way, the warning naming the component (`components/requestBodies/NewPet
+ * (the request body of createPet) is not a Request Body Object ([]);
+ * skipping it.`), and the two spellings give one IR — where the ref used
+ * to fail the parse as one with `no matching entry`, and a truthy inline
+ * value that is no object with a `TypeError` naming neither the operation
+ * nor the entry (#664).
+ *
+ * Throws for a ref that leads to no entry at all — one the section holds
+ * nothing under (a pointer into another section included), a `$ref` that
+ * is not a string (`Malformed request body $ref 42 in createPet: a $ref
+ * must be a string.`), or a chain that loops — so a spec that names a body
+ * the parser cannot find fails at parse time instead of silently losing it,
  * and with it the body-ownership rule that keeps duplicated secrets out of
  * the query string.
+ *
+ * Under `onFailure: 'silent'` nothing is reported and nothing thrown:
+ * whatever cannot be read is `undefined`. That is for a reader that only
+ * pre-computes names (`collectOperationConstPrefixes`,
+ * `operationBodyModelNames`), leaving the report to the operation that
+ * declares the body (`buildOperation`), once.
  */
 export function resolveRequestBodyRef(
   raw: RawRequestBodyObject | undefined,
   componentRequestBodies: Record<string, Record<string, unknown>> | undefined,
   operationContext: string,
   siblingDocs: SiblingDocs = 'override',
+  onFailure: 'report' | 'silent' = 'report',
 ): RequestBodyObject | undefined {
-  if (!raw) return undefined;
+  if (raw === undefined) return undefined;
+  const site = onFailure === 'report' ? `the request body of ${operationContext}` : undefined;
+  if (!isReferenceEntry(raw, 'requestBodies', site)) return undefined;
   const followed = followReference<RequestBodyObject>(raw, 'requestBodies', componentRequestBodies, siblingDocs);
+  if (followed.outcome === 'resolved') return followed.value;
+  if (endsOnNonObject(followed, 'requestBodies', site) || onFailure === 'silent') return undefined;
   if (followed.outcome === 'circular') {
     throw new Error(`Circular request body $ref chain starting at "${followed.ref}" in ${operationContext}.`);
   }
-  if (followed.outcome !== 'resolved') {
+  if (followed.outcome === 'malformed') {
     throw new Error(
-      `Unresolved request body $ref "${followed.ref}" in ${operationContext}: no matching entry under components/requestBodies.`,
+      `Malformed request body $ref ${malformedRefOf(followed)} in ${operationContext}: a $ref must be a string.`,
     );
   }
-  return followed.value;
+  throw new Error(
+    `Unresolved request body $ref "${followed.ref}" in ${operationContext}: no matching entry under components/requestBodies.`,
+  );
 }
 
 /**
@@ -474,10 +574,17 @@ type RawHeaderObject = HeaderObject | { $ref: string; description?: string };
  * (OAS 3.1), the outermost with content winning along a chain, and is
  * ignored under `'ignore'` (OAS 3.0).
  *
- * Unlike parameters and request bodies, a header that cannot be resolved is
- * warned about and dropped rather than failing the parse: a response header
- * is informational, so losing one costs an emitter a typed accessor, not a
- * wire contract, and should not block generating the rest of the SDK.
+ * Unlike parameters and request bodies, a header whose ref leads to no
+ * entry at all is warned about and dropped rather than failing the parse: a
+ * response header is informational, so losing one costs an emitter a typed
+ * accessor, not a wire contract, and should not block generating the rest
+ * of the SDK. Each failure is named as what it is: a chain that ends on a
+ * `components/headers` entry that is no object (`Rate: []`) as that
+ * malformed entry (`components/headers/Rate (the response header "X-Rate"
+ * of listPets) is not a Header Object ([]); skipping it.`, as a parameter's
+ * is; #664), a `$ref` that is not a string as malformed, the value given as
+ * JSON, and only a ref the section holds nothing under as one with `no
+ * matching entry`.
  */
 function resolveHeaderRef(
   raw: RawHeaderObject,
@@ -487,10 +594,20 @@ function resolveHeaderRef(
   siblingDocs: SiblingDocs = 'override',
 ): HeaderObject | undefined {
   const followed = followReference<HeaderObject>(raw, 'headers', componentHeaders, siblingDocs);
+  if (endsOnNonObject(followed, 'headers', `the response header "${headerName}" of ${operationContext}`)) {
+    return undefined;
+  }
   if (followed.outcome === 'circular') {
     console.warn(
       `[oagen] Warning: Circular header $ref chain starting at "${followed.ref}" for response header ` +
         `"${headerName}" in ${operationContext}. Skipping the header.`,
+    );
+    return undefined;
+  }
+  if (followed.outcome === 'malformed') {
+    console.warn(
+      `[oagen] Warning: Malformed header $ref ${malformedRefOf(followed)} for response header "${headerName}" ` +
+        `in ${operationContext}: a $ref must be a string. Skipping the header.`,
     );
     return undefined;
   }
@@ -866,7 +983,9 @@ export function extractOperations(
     // `summary`/`description` an operation falls back to — comes from this one
     // object: the entry itself, or the Path Item its `$ref` leads to,
     // resolved by `resolvePathItems` above (issues #300, #422).
-    const pathLevelParams = pathItem.parameters ?? [];
+    // The `parameters` are handed to each operation as written: each reads
+    // them ahead of its own (`declaredParameterEntries`).
+    const pathLevelParams = pathItem.parameters;
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
     // the way `responseHeaders` shares its list with `successResponses`.
@@ -3248,7 +3367,8 @@ function buildOperation(
   method: HttpMethod,
   path: string,
   op: OperationObject,
-  pathLevelParams: RawParameterObject[],
+  /** The Path Item's `parameters`, as written (`declaredParameterEntries`). */
+  pathLevelParams: PathItem['parameters'],
   pathItemDocs: PathItemDocs,
   pathModelBaseName: string,
   /** The name the operation starts with (`planOperations`); the naming passes settle the one it ends with. */
@@ -3322,8 +3442,11 @@ function buildOperation(
   // The dropped headers' names, case-folded, for `extractParameterGroups`:
   // a group variant that names one has the member dropped, not the parse failed.
   const ignoredHeaders = new Set<string>();
-  for (const raw of [...pathLevelParams, ...(op.parameters ?? [])]) {
+  for (const raw of declaredParameterEntries(pathLevelParams, op.parameters, opLabel)) {
     const param = resolveParameterRef(raw, componentParameters, opLabel, refSiblingDescriptions);
+    // An entry that is no object, inline or at the end of a `$ref` chain, is
+    // no parameter: warned about there, and skipped (#664).
+    if (!param) continue;
     if (isIgnoredHeaderParameter(param)) {
       ignoredHeaders.add(foldHeaderName(param.name));
       continue;
@@ -4190,7 +4313,14 @@ function exampleObjectValues(
  * parameter would then take its `examples` from the schema instead of the
  * values the document points at. A ref that can't be resolved is skipped
  * with a warning rather than failing the parse: a missing example is a doc
- * gap, not a broken API surface.
+ * gap, not a broken API surface. The warning names each failure as what it
+ * is: a chain that ends on a `components/examples` entry that is no object
+ * (`Small: []`) as that malformed entry (`components/examples/Small (an
+ * example of parameter "limit" in listPets) is not an Example Object ([]);
+ * skipping it.`, as a parameter's is; #664), a `$ref` that is not a string
+ * as malformed, the value given as JSON, and a ref the section holds
+ * nothing under as unresolved. An entry written inline as anything but an
+ * object is no example and is skipped without a word.
  */
 function resolveExampleRef(
   raw: ExampleObject | undefined,
@@ -4205,8 +4335,15 @@ function resolveExampleRef(
   // `'override'` (OAS 3.1) and is ignored under `'ignore'` (OAS 3.0), though
   // only the example's `value` is read into the IR (`exampleObjectValues`).
   const followed = followReference<ExampleObject>(raw, 'examples', componentExamples, siblingDocs);
+  if (endsOnNonObject(followed, 'examples', `an example of ${context}`)) return undefined;
   if (followed.outcome === 'circular') {
     console.warn(`[oagen] Warning: Circular example $ref chain starting at "${followed.ref}" on ${context}; skipping`);
+    return undefined;
+  }
+  if (followed.outcome === 'malformed') {
+    console.warn(
+      `[oagen] Warning: Malformed example $ref ${malformedRefOf(followed)} on ${context}: a $ref must be a string; skipping`,
+    );
     return undefined;
   }
   if (followed.outcome !== 'resolved') {
@@ -4957,7 +5094,10 @@ function typePickedRequestBody(
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
  * merged. The pin is read as a union's discriminator reads one
- * (`pinnedDeclarationValue`): a `const` or one-value `enum:` as written,
+ * (`pinnedDeclarationValue`): a string `const`, or an `enum:` list holding
+ * one string beside any `null` it names (`kind: { type: ['string',
+ * 'null'], enum: ['email', null] }` folds as `kind: { type: ['string',
+ * 'null'], const: 'email' }` does; #678), as written,
  * or behind a nullable wrapper, an `allOf` read as one member, or — with
  * `componentSchemas` — a `$ref` to a component pinning one value or an
  * alias of one, so `kind: { allOf: [{ const: 'email' }] }` folds as `kind:
@@ -4966,8 +5106,9 @@ function typePickedRequestBody(
  * The rebuilt discriminator admits `null` exactly when a variant's
  * declaration does, at any hop (`pinnedDeclarationAdmitsNull`: a nullable
  * wrapper, a type list naming `null`, OAS 3.0 `nullable: true` beside a
- * type — never a keyword beside a `$ref`, which the type builder gives
- * precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
+ * type, or the `null` the pinning list itself names, `kind: { enum:
+ * ['email', null] }` — never a keyword beside a `$ref`, which the type
+ * builder gives precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
  * variant beside one pinning `sms` folds to a `kind` typed
  * `nullable<enum>`, as the variant's own field is `nullable<literal>`
  * (#607 review: the fold rebuilt the field without `null`, as it had
@@ -5009,7 +5150,8 @@ function flattenDiscriminatedUnionBody(
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
-    // string const (or single-value enum); anything else can't be merged.
+    // string const (or an enum of one string, beside any `null` it names);
+    // anything else can't be merged.
     if (variant.$ref || !variant.properties || !(variant.type === 'object' || variant.type === undefined)) {
       return null;
     }
@@ -6490,8 +6632,9 @@ function prefixSpellings(prefix: string): string[] {
  * responses declare inline. A body `oneOf` variant pinning `kind: email`
  * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
  * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
- * (nameOneOfVariant, nameVariantModel). Every string const or single-value
- * enum of every inline object variant is collected (`constStringOf`: as
+ * (nameOneOfVariant, nameVariantModel). Every string const or enum of one
+ * string — beside any `null` it names (#678) — of every inline object
+ * variant is collected (`constStringOf`: as
  * written, or behind a nullable wrapper or an `allOf` read as one member,
  * as the naming reads it; #607), top level and nested — a
  * superset of whichever property each of those picks as the discriminator, so
@@ -6510,12 +6653,7 @@ function collectOperationConstPrefixes(
   opLabel: string,
 ): Set<string> {
   const prefixes = new Set<string>();
-  let body: RequestBodyObject | undefined;
-  try {
-    body = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel);
-  } catch {
-    body = undefined;
-  }
+  const body = resolveRequestBodyRef(op.requestBody, componentRequestBodies, opLabel, 'override', 'silent');
   collectConstPrefixes(selectRequestBodyContent(body)?.schema, prefixes, 0);
   for (const [statusCode, response] of Object.entries(op.responses ?? {})) {
     // Only a key `extractResponses` reads as a 2xx status code: a range, a
@@ -6566,8 +6704,9 @@ function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>
 /**
  * A property's pinned string value, read as the naming reads an inline
  * variant's own property (`pinnedDeclarationValue` without the component
- * map, the reading `getConstPropertyValue` makes): a string `const` or a
- * single-value string `enum`, written on the property or behind a nullable
+ * map, the reading `getConstPropertyValue` makes): a string `const` or an
+ * `enum` of one string, a `null` named beside it set aside (`kind: { enum:
+ * ['email', null] }`; #678), written on the property or behind a nullable
  * wrapper or an `allOf` read as one member (`kind: { allOf: [{ const:
  * 'email' }] }`; #607), so the reservation reads every const the naming
  * reads. A `$ref` on the property is followed by neither.
@@ -6962,12 +7101,7 @@ function operationBodyModelNames(
         // The request body, read as `collectOperationConstPrefixes` reads
         // it: a `$ref` that resolves to nothing is left for buildOperation
         // to report, and a schema that is itself a `$ref` mints nothing.
-        let requestBody: RequestBodyObject | undefined;
-        try {
-          requestBody = resolveRequestBodyRef(op.requestBody, componentRequestBodies, key);
-        } catch {
-          requestBody = undefined;
-        }
+        const requestBody = resolveRequestBodyRef(op.requestBody, componentRequestBodies, key, 'override', 'silent');
         const selected = selectRequestBodyContent(requestBody);
         if (selected) {
           // Typed exactly as `extractRequestBody` will type it, under the id

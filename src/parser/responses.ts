@@ -1,5 +1,5 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
-import { numberedName, toPascalCase, singularize } from '../utils/naming.js';
+import { numberedName, toPascalCase, singularizeTrailingWord } from '../utils/naming.js';
 import {
   collectObjectProperties,
   detectEndOfIteration,
@@ -789,10 +789,16 @@ function typeInlineItems(
 /**
  * Name for inline items reached through an overridden `dataPath`, built from
  * the path the way the inline extractor names a nested field's items: the
- * operation, the enclosing properties, then the singular of the array's own
- * name (`result.items` → `ListPetsResultItem`). It therefore coincides with a
- * model the parser may already have minted for that field, and never takes
- * the bare `<Op>Item` that a recognized envelope's data array owns.
+ * operation, the enclosing properties, then the array's own name with its
+ * trailing word singularized (`singularizeTrailingWord`, the reading
+ * `qualifyInlineModelName` names a field's items by): `result.items` →
+ * `ListPetsResultItem`, `result.tax_series` → `ListPetsResultTaxSeries`,
+ * `result.order_status` → `ListPetsResultOrderStatus` (#665; the whole
+ * PascalCased segment was singularized as one word before, so a safe-listed
+ * or short word after another missed its guard, `ListPetsResultTaxSery`,
+ * `ListPetsResultOrderStatu`). It therefore coincides with a model the
+ * parser may already have minted for that field, and never takes the bare
+ * `<Op>Item` that a recognized envelope's data array owns.
  */
 function inlineItemNameForPath(contextName: string, dataPath: string): string {
   const segments = dataPath.split('.');
@@ -800,7 +806,7 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
     .slice(0, -1)
     .map((segment) => toPascalCase(segment))
     .join('');
-  const own = singularize(toPascalCase(segments[segments.length - 1]));
+  const own = singularizeTrailingWord(toPascalCase(segments[segments.length - 1]));
   return contextName.replace(/Response$/, '') + parents + own;
 }
 

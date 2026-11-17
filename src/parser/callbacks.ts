@@ -43,6 +43,21 @@
  * alike whichever site comes first; the moved names are checked again —
  * and never renames an existing model.
  *
+ * **Sharing a webhook's minting.** A callback may reach the path item a
+ * `webhooks` entry reads: both `$ref` one `components/pathItems` or `paths`
+ * entry, or the callback `$ref`s the webhook itself
+ * (`#/webhooks/petAdopted`). It then reads the very operation object the
+ * webhook's models were minted from, and when the stem it would take is
+ * the stem the webhook took it mints nothing: its `Callback` carries a
+ * copy of the webhook's parameters and payload and references the
+ * webhook's models (`sharedMintingOf` in `webhooks.ts`; #631). An
+ * `operationId` gives both sites one stem — `webhooks.petAdopted` and
+ * `createPet`'s callback `petAdopted` reading `operationId: onPetAdopted`
+ * reference one `OnPetAdoptedPayload`, where the callback's used to be the
+ * hashed copy `OnPetAdoptedF9960APayload` — and without one each site
+ * keeps the models its own stem names (`PetAdoptedPayload`,
+ * `CreatePetPetAdoptedPayload`), neither renamed to the other's.
+ *
  * **Cycles.** A `components/callbacks` entry, or a nested callback, can
  * refer back to a callback it sits in (a callback whose operation `$ref`s
  * the path item declaring the callback). The Callback Objects on the path
@@ -71,6 +86,7 @@ import {
   plainStemOf,
   readPathItemEntries,
   settleStemOperationIds,
+  type SharedMinting,
   type WebhookComponents,
   type WebhookEntry,
 } from './webhooks.js';
@@ -102,6 +118,12 @@ interface PendingCallback {
  * components', the operations', the webhooks' — see `collectExistingNames`.
  * `paths` and `webhooks` are the document's own maps, as written, which a
  * callback path item's `$ref` may name beside `components/pathItems`.
+ * `webhookMintings` is what each group of the `webhooks` map minted
+ * (`extractWebhooks`): a callback entry that reads the operation object
+ * one of them was minted from, under the stem it took, shares that minting
+ * — it joins no group below, mints nothing and moves no stem
+ * (`buildReceivedRequests`, `sharedMintingOf`; #631) — while its own
+ * callbacks are collected, named and nested as any callback's are.
  *
  * Every callback of the document, nested ones included, is collected
  * first (`collectPendingCallbacks`), so an operationId names a stem only
@@ -157,6 +179,7 @@ export function extractCallbacks(
   siblingDocs: SiblingDocs,
   paths?: unknown,
   webhooks?: unknown,
+  webhookMintings: readonly SharedMinting[] = [],
 ): CallbackExtractionResult {
   const pending: PendingCallback[] = [];
   for (const { owner, callbacks, label, stem, identity } of declared) {
@@ -218,6 +241,7 @@ export function extractCallbacks(
     components,
     { all: new Set(reservedNames), enums: new Set(reservedEnumNames) },
     siblingDocs,
+    webhookMintings,
   );
   inlineModels.push(...batch.inlineModels);
   inlineModelBundles.push(...batch.inlineModelBundles);

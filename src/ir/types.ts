@@ -8,12 +8,30 @@ import type { SdkBehavior } from './sdk-behavior.js';
  * `Operation.security` refer to the same key, so emitters join a requirement to
  * its scheme on that field. `description` is present only when the document
  * declares one.
+ *
+ * Every Security Scheme Object `type` has a kind, and `type: http` has
+ * three, told apart by its `scheme`: `basic` and `bearer` are their own
+ * kinds, and `http` is any other HTTP authentication scheme (`Digest`,
+ * `HOBA`, `Negotiate`, …) with `scheme` spelled as in the document. Scheme
+ * names are case-insensitive (RFC 9110 §11.1), so `BASIC` is `kind:
+ * 'basic'`, the `http` kind's `scheme` is never `basic` or `bearer` in any
+ * case, and an emitter compares it folded: `foldHttpAuthScheme(auth.scheme)
+ * === 'digest'` (`ir/http-auth-scheme.ts`). `openIdConnect` carries its
+ * discovery URL exactly as written, and `mutualTLS` nothing but its kind —
+ * the Security Scheme Object has no other field for it.
+ *
+ * An emitter that switches over `kind` should end in a `never` check such
+ * as `assertNever`, so a kind added here fails its build instead of being
+ * skipped unnoticed.
  */
 export type AuthScheme = { description?: string; schemeName: string } & (
   | { kind: 'basic' }
   | { kind: 'bearer' }
   | { kind: 'apiKey'; in: 'header' | 'query' | 'cookie'; name: string }
   | { kind: 'oauth2'; flows: Record<string, unknown> }
+  | { kind: 'openIdConnect'; openIdConnectUrl: string }
+  | { kind: 'mutualTLS' }
+  | { kind: 'http'; scheme: string }
 );
 
 /**
@@ -1150,6 +1168,16 @@ export interface EnumRef {
   values?: (string | number)[];
 }
 
+/**
+ * A schema that admits one string, number or boolean, typed as that value:
+ * a `const`, or an `enum:` list of the value alone — the OAS 3.0 spelling
+ * of a `const` — read alike, the value kept as the document writes it, so
+ * `{ type: 'boolean', enum: [true] }` is `{ kind: 'literal', value: true }`
+ * as `{ type: 'boolean', const: true }` is, not the string `'true'` (#667).
+ * A one-value list of anything else is typed as its `const` is too: `null`
+ * is `nullable<unknown>`, an array an array of `unknown`, an object a map
+ * of `unknown`.
+ */
 export interface LiteralType {
   kind: 'literal';
   value: string | number | boolean | null;
@@ -1196,11 +1224,15 @@ export interface UnionType {
    * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — the
    * declaration read as the type builder reads it, at every hop: a `$ref`
    * to its component, a nullable wrapper to its one variant, an `allOf`
-   * read as one member to that member, then the `const` or one-value
-   * `enum:` written there, so `kind: { allOf: [{ const: 'cat' }] }`,
+   * read as one member to that member, then the string `const` written
+   * there, or the one string its `enum:` list holds beside any `null` it
+   * names, so `kind: { allOf: [{ const: 'cat' }] }`,
    * `kind: { allOf: [{ $ref: HamsterKind }], description }` and a `$ref`
    * to `RabbitKind: { allOf: [{ $ref: RabbitConst }] }` pin as `kind: {
-   * const: … }` does, in OAS 3.0 and 3.1 alike (#607) — a
+   * const: … }` does, in OAS 3.0 and 3.1 alike (#607), and `kind: { type:
+   * ['string', 'null'], enum: ['cat', null] }` pins `cat` as `kind: { type:
+   * ['string', 'null'], const: 'cat' }` does, the field `nullable<"cat">`
+   * in both (#678) — a
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
@@ -1326,10 +1358,18 @@ export interface Model {
    * own, else the first `allOf` member's that declares no type (`allOf:
    * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
    * }]`; #555 review). A typing member's text stays on that member, a
-   * `$ref` member's on its component.
+   * `$ref` member's on its component. A shared error body
+   * (`collapseErrorBodies`) stands for several inline schemas: it carries
+   * the text every body folded onto it wrote, and none when two wrote
+   * different texts or one wrote none (#666).
    */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
+  /**
+   * The schema's `externalDocs`, when it declares a usable one; for an
+   * `allOf` model, the wrapper layer's, as `description` is; for a shared
+   * error body, the link every body folded onto it wrote — the same `url`
+   * and the same `description` — settled apart from the text (#666).
+   */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says
