@@ -34,6 +34,7 @@ import {
 } from './inline-models.js';
 import {
   HTTP_METHODS,
+  declaredParameterEntries,
   extractParams,
   extractTags,
   isIgnoredHeaderParameter,
@@ -277,8 +278,11 @@ export interface SharedMinting {
  * Parameters and request bodies go through the same resolvers and extractors
  * as operations (`components/parameters` and `components/requestBodies` refs
  * resolved, path-item-level parameters overridden by operation-level ones of
- * the same identity), so a malformed reference fails the parse the way it
- * does on an operation. A `path` parameter has nowhere to go — a webhook has
+ * the same identity), so a reference that leads to no entry at all fails
+ * the parse the way it does on an operation, and a parameter entry or a
+ * request body that is no object — written inline, or the component a ref
+ * leads to — is warned about and skipped the way it is there (#664). A
+ * `path` parameter has nowhere to go — a webhook has
  * no path — and is dropped with a warning; an `Accept`, `Content-Type` or
  * `Authorization` header is ignored, as OpenAPI requires and as on an
  * operation (`isIgnoredHeaderParameter`). A response that is a `$ref` into
@@ -1116,13 +1120,19 @@ export interface PathItemEntrySite extends Pick<
  * key order, as the IR promises document order (an entry declaring `put`
  * before `post` keeps `put` first); a method whose value is not an object
  * is skipped. Each entry's parameters are read with the same precedence as
- * `buildOperation`'s — an operation-level parameter replaces a
+ * `buildOperation`'s, from the same entries (`declaredParameterEntries`: a
+ * `parameters` field that is no array is warned about and read as absent)
+ * — an operation-level parameter replaces a
  * path-item-level one of the same identity (`parameterKey`: location and
  * name, a header's name case-folded), in the path-level position; an
  * `Accept`, `Content-Type` or `Authorization` header is dropped — and a
  * `path` parameter, which a received request has no path to place in, is
  * dropped with a warning. The request body's `components/requestBodies`
- * ref is resolved here too. A parameter `content` map or a request body
+ * ref is resolved here too. A parameter entry or a request body that is no
+ * object — written inline, or the `components` entry a `$ref` chain ends on
+ * — is warned about once, naming the entry and this label, and skipped, as
+ * on an operation (`resolveParameterRef`, `resolveRequestBodyRef`; #664);
+ * a ref that leads to no entry at all still fails the parse. A parameter `content` map or a request body
  * none of whose media types is read is reported here, once per entry: the
  * mint runs twice for each (`resolveWebhookModelStems`, then the build), so
  * it must not report. `stemOperationId` is left for `settleStemOperationIds`
@@ -1144,9 +1154,11 @@ export function readPathItemEntries(
     const op = pathItem[method] as OperationObject;
     const label = labelOf(method);
     const paramsByIdentity = new Map<string, ParameterObject>();
-    for (const rawParam of [...(pathItem.parameters ?? []), ...(op.parameters ?? [])]) {
+    for (const rawParam of declaredParameterEntries(pathItem.parameters, op.parameters, label)) {
       const param = resolveParameterRef(rawParam, components.parameters, label, siblingDocs);
-      if (isIgnoredHeaderParameter(param)) continue;
+      // An entry that is no object, inline or at the end of a `$ref` chain,
+      // is no parameter: warned about there, and skipped, as on an operation (#664).
+      if (!param || isIgnoredHeaderParameter(param)) continue;
       paramsByIdentity.set(parameterKey(param.in, param.name), param);
     }
     const params: ParameterObject[] = [];

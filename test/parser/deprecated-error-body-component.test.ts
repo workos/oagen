@@ -13,9 +13,10 @@ import type { ApiSpec, TypeRef } from '../../src/ir/types.js';
  * deprecated took bodies whose `message` was live, so their field read as
  * deprecated. `componentAccepts` read neither the component's `deprecated`
  * nor its fields'. Now a deprecated component takes no body (#441), and a
- * component takes a body only where it deprecates no field the body keeps
- * live; a live component, or a live field of one, takes a deprecated body
- * or a body's deprecated field with a warning. Neither the body's own flag
+ * component takes a body only where it deprecates no field the body
+ * carries — of either flag since #671, where it still took the body that
+ * deprecated the field too; a live component, or a live field of one, takes
+ * a deprecated body or a body's deprecated field with a warning. Neither the body's own flag
  * nor a field's is shape: the shared model, and each of its fields, is
  * deprecated only when every body agrees, so a flag flip never moves a
  * body (the review's findings 1 and 2), and the warning that leaves a
@@ -134,10 +135,17 @@ function describeDiff(oldSpec: ApiSpec, newSpec: ApiSpec): { changes: string[]; 
 }
 
 /** The warning that leaves the issue's two bodies as they are, `holder` printing the component's flag and shape (finding 3). */
-const leftAsTheyAre = (holder: string, shape = '{ message: string }') =>
-  `[oagen] Warning: The shared error body ${shape} would be named "ErrorBody", which ${holder} already holds — keeping models "GetNoteError404", "GetPetError404" as they are; give the two the same shape, or rename one`;
+const leftAsTheyAre = (
+  holder: string,
+  shape = '{ message: string }',
+  remedy = 'give the two the same shape, or rename one',
+) =>
+  `[oagen] Warning: The shared error body ${shape} would be named "ErrorBody", which ${holder} already holds — keeping models "GetNoteError404", "GetPetError404" as they are; ${remedy}`;
 const deprecatedComponent = 'deprecated component schema "ErrorBody" { message: string }';
 const deprecatedFieldComponent = 'component schema "ErrorBody" { message (deprecated): string }';
+/** How the warning ends for a body that only `field`, deprecated on `ErrorBody`, keeps off it: the rule, the same whichever flag the body gives the field (#671). */
+const deprecatedFieldRemedy = (field: string) =>
+  `"ErrorBody" deprecates "${field}", and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; make "${field}" live on "ErrorBody", or rename one`;
 
 const versions = ['3.0.3', '3.1.0'] as const;
 
@@ -180,7 +188,9 @@ describe('#629', () => {
         'GetPetError404 { message }',
         'GetNoteError404 { message }',
       ]);
-      expect(warnings).toEqual([leftAsTheyAre(deprecatedFieldComponent)]);
+      expect(warnings).toEqual([
+        leftAsTheyAre(deprecatedFieldComponent, '{ message: string }', deprecatedFieldRemedy('message')),
+      ]);
     });
 
     it('a live `ErrorBody` of the shape still takes both bodies (`old.json`)', async () => {
@@ -316,19 +326,23 @@ describe('#629', () => {
       }
     });
 
-    it('two bodies that deprecate `message` share `ErrorBody` with the flag, which a component of that name and shape takes', async () => {
+    it('two bodies that deprecate `message` share `ErrorBody` with the flag, and a component of that name and shape takes neither, as it takes neither while their `message` is live (#671)', async () => {
       const paths = ops('pets-first', deprecatedMessageBody());
       const shared = await parse(doc(paths));
       expect(shared.warnings).toEqual([]);
       expect(errorTypes(shared.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
       expect(modelShapes(shared.spec)).toContain('ErrorBody { message (deprecated) }');
       const component = await parse(doc(paths, { ErrorBody: deprecatedMessageBody() }));
-      expect(component.warnings).toEqual([]);
-      expect(errorTypes(component.spec)).toEqual(['getPet 404: ErrorBody', 'getNote 404: ErrorBody']);
+      expect(component.warnings).toEqual([
+        leftAsTheyAre(deprecatedFieldComponent, '{ message (deprecated): string }', deprecatedFieldRemedy('message')),
+      ]);
+      expect(errorTypes(component.spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: GetNoteError404']);
       expect(modelShapes(component.spec)).toEqual([
         'ErrorBody { message (deprecated) }',
         'GetPetResponse { name }',
         'GetNoteResponse { name }',
+        'GetPetError404 { message (deprecated) }',
+        'GetNoteError404 { message (deprecated) }',
       ]);
     });
 
@@ -355,7 +369,7 @@ describe('#629', () => {
       );
       expect(errorTypes(deprecatedHint.spec)).toEqual(['getPet 404: GetPetError404', 'getNote 404: ErrorBody']);
       expect(deprecatedHint.warnings).toEqual([
-        '[oagen] Warning: The shared error body { message: string, hint?: string } would be named "ErrorBody", which component schema "ErrorBody" { message: string, hint? (deprecated): string } already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one',
+        `[oagen] Warning: The shared error body { message: string, hint?: string } would be named "ErrorBody", which component schema "ErrorBody" { message: string, hint? (deprecated): string } already holds — keeping model "GetPetError404" as it is; ${deprecatedFieldRemedy('hint')}`,
       ]);
     });
 

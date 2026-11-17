@@ -24,6 +24,7 @@ import {
   modelShares,
   qualifyInlineModelName,
 } from './inline-models.js';
+import { yieldBodyNames, yieldsAmong, type BodyNameYields } from './contested-body-names.js';
 
 // The model-shape fingerprint lives beside the schema-shape key in
 // inline-models.ts, where the extractor compares models too; re-exported here
@@ -243,6 +244,14 @@ export interface MaterializeInlineOptions {
   operation?: string;
   /** The schema is what the SDK sends (a request body, a parameter): a component shares its name only on an identical shape (`ownerShares`). */
   sent?: boolean;
+  /**
+   * The names the site's operation gives up to another operation, each with
+   * the name it takes instead (`resolveContestedBodyNames`, #683). Every
+   * trial moves them before it is compared with the registry (`runTrial`),
+   * so the models are compared, registered and returned under the names
+   * they end with, whichever of the two operations is read first.
+   */
+  yields?: BodyNameYields;
   /** Where the materialized models go. */
   models: Model[];
 }
@@ -267,7 +276,9 @@ const MAX_RENAME_ROUNDS = 64;
  * Type `schema` and materialize every model it names into `options.models`,
  * under names the registry does not already give another shape.
  *
- * A trial extracts the schema under the current stem and compares every model
+ * A trial extracts the schema under the current stem, moves what the site's
+ * operation gives up to another operation to the name it takes instead
+ * (`options.yields`, #683), and compares every model
  * it minted with the registry: a name whose owner shares it (`ownerShares`:
  * a component or a component field's model admits the shape, an operation's
  * model has the identical one) is shared, so a header or body a component
@@ -528,6 +539,14 @@ function runTrial(
       renames.push([from, to]);
     }
     if (renames.length > 0) type = rewritten;
+  }
+  // What the operation gives up to another (`MaterializeInlineOptions.yields`)
+  // leaves its name here, before the comparison below: the other operation's
+  // model of that name, when it is registered already, is then no clash, and
+  // the stem never steps for it.
+  if (options.yields && yieldsAmong(options.yields, models)) {
+    type ??= schemaToTypeRef(schema, propertyName, options.parentName, undefined, reserved);
+    yieldBodyNames(options.yields, [type], models);
   }
   const fingerprints = new Map(models.map((model) => [model, modelFingerprint(model)]));
   const clashing = models
