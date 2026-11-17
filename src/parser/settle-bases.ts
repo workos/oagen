@@ -118,14 +118,14 @@ export function settleBases(models: readonly Model[], enums: readonly Enum[] = [
   const byName = new Map(models.map((model) => [model.name, model]));
   const enumValues = new Map(enums.map((entry) => [entry.name, entry.values.map((member) => member.value)]));
   // A named union is written as the union of its variants by one emitter
-  // and, from `fields` alone, as their merge by another: a fit has to hold
-  // under both readings.
-  const readings: FitContext[] = (['variants', 'fields'] as const).map((reading) => ({
+  // and, from `fields` alone, as their merge by another, or as whichever
+  // it carries: a fit has to hold under each reading (`FitContext.reading`).
+  const readings: FitContext[] = (['variants', 'fields', 'fieldsFirst'] as const).map((reading) => ({
     reading,
     byName,
     enumValues,
+    leaves: new Map(),
     decided: new Map(),
-    expanding: new Map(),
   }));
   dropCircularBases(models, byName);
   for (const model of models) {
@@ -143,11 +143,20 @@ export function settleBases(models: readonly Model[], enums: readonly Enum[] = [
         field.inheritedFrom?.kind === 'model' ? field.inheritedFrom.name : null,
       ]),
     );
+    // Whether the model carries a base's field, or a variant's: decided
+    // once per field, however many bases and variants are read through it.
+    const verdicts = new Map<Field, boolean>();
     const carried = (field: Field): boolean => {
-      const own = fields.get(field.name);
-      if (!own) return false;
-      if (sameField(own, field, byName, new Map())) return true;
-      return origins.get(field.name) === null && readings.every((context) => fieldFits(own, field, context));
+      let verdict = verdicts.get(field);
+      if (verdict === undefined) {
+        const own = fields.get(field.name);
+        verdict =
+          own !== undefined &&
+          (sameField(own, field, byName, new Map()) ||
+            (origins.get(field.name) === null && readings.every((context) => fieldFits(own, field, context))));
+        verdicts.set(field, verdict);
+      }
+      return verdict;
     };
     // A base that is a union is one of its variants: one of them has to
     // agree with the model on every field the two share, and every such
@@ -438,41 +447,58 @@ function sameModel(a: Model, b: Model, byName: ReadonlyMap<string, Model>, seen:
 /** A value a `const` pins or an enum lists. */
 type Value = LiteralType['value'];
 
-/** A verdict per pair of models, by identity: the model that would fit, then the model it would fit. */
-type Verdicts = Map<Model, Map<Model, boolean>>;
+/**
+ * One side of a comparison `settled` keeps a verdict for, by identity: a
+ * model — whichever reference names it — or, for a type that names none,
+ * the type itself.
+ */
+type Side = Model | TypeRef;
 
-/** A pair of models being settled (`modelFits`): its verdict so far, and the pairs whose own verdict was reached reading it. */
+/** A verdict per comparison, by the identity of its two sides: what would fit, then what it would fit. */
+type Verdicts = Map<Side, Map<Side, boolean>>;
+
+/** A comparison being settled (`settled`): its two sides, how to read it, its verdict so far, and the comparisons whose own verdict was reached reading it. */
 interface Pair {
-  own: Model;
-  base: Model;
+  own: Side;
+  base: Side;
+  read: () => boolean;
   fits: boolean;
   readers: Set<Pair>;
 }
 
-/** The pairs of models `modelFits` is deciding together: each by its two models, those still to be read, and the one being read. */
+/** The comparisons `settled` is deciding together: each by its two sides, those still to be read, and the one being read. */
 interface Settling {
-  pairs: Map<Model, Map<Model, Pair>>;
+  pairs: Map<Side, Map<Side, Pair>>;
   pending: Pair[];
   reading?: Pair;
 }
 
 /**
  * What the fit reads beside the two declarations: how a named union is
- * read (`reading`: as the union of its `variants`, or as the merge of
- * them its `fields` carry, the two ways an emitter may write it), the
- * models by name, each enum's values by name — for a reference to a
- * component enum, which carries none — what `modelFits` has decided
- * (`decided`) and is deciding (`settling`) about pairs of models, and the
- * named unions being read as their variants, each with the types it is
- * being read against (`asVariants`).
+ * read (`reading`), the models by name, each enum's values by name — for
+ * a reference to a component enum, which carries none — each named
+ * union's variants read through the unions among them (`leaves`, kept by
+ * `unionLeaves`), and what `settled` has decided (`decided`) and is
+ * deciding (`settling`) about the comparisons that can be asked more than
+ * once.
+ *
+ * `Model.fields` of a named union keeps the merge of its inline variants,
+ * "so an emitter that does not read `variants` sees the same model as
+ * before", which leaves an emitter three ways to write one: as the union
+ * of its `variants` (`variants`), as the model its `fields` are
+ * (`fields`), or as that model when it has any field and as the union
+ * when it has none, which a union of `$ref` or primitive variants has
+ * (`fieldsFirst`). A fit proved one way can fail `tsc` another, and two
+ * unions under one field can each be read differently by the third, so a
+ * fit is asked under each reading, every named union in it read that way.
  */
 interface FitContext {
-  reading: 'variants' | 'fields';
+  reading: 'variants' | 'fields' | 'fieldsFirst';
   byName: ReadonlyMap<string, Model>;
   enumValues: ReadonlyMap<string, readonly Value[]>;
+  leaves: Map<Model, readonly TypeRef[]>;
   decided: Verdicts;
   settling?: Settling;
-  expanding: Map<Model, Set<TypeRef>>;
 }
 
 /**
@@ -526,15 +552,17 @@ function fieldFits(own: Field, base: Field, context: FitContext): boolean {
  *   union that carries limits of its own (an OAS 3.1 type list) is read
  *   as itself alone: its variants carry none. A union of nothing fits
  *   nothing.
- * - A reference to a named union is read the two ways an emitter may
- *   write it, and has to fit under both (`FitContext.reading`): as its
- *   variants, like an inline union (`asVariants`), and as a model with
- *   the merge of them its `fields` carry (`modelFits`). `pet: { $ref: Cat
- *   }` fits `pet: { $ref: Shape }` over `Shape: { oneOf: [{ $ref: Cat },
- *   { $ref: Dog }] }`; an `Other { r?: string, w?: string }` does not fit
- *   a `Shape` of the inline variants `{ r?: string }` and `{ w?: integer
- *   }`, though it fits the first, since the merge types `w` as an
- *   integer.
+ * - A reference to a named union is read each way an emitter may write
+ *   it, and has to fit under all of them (`FitContext.reading`): as its
+ *   variants, read through the unions among them (`unionLeaves`), like an
+ *   inline union; and as a model with the merge of them its `fields`
+ *   carry (`modelFits`). `pet: { $ref: Cat }` fits `pet: { $ref: Shape }`
+ *   over `Shape: { oneOf: [{ $ref: Cat }, { $ref: Dog }] }`; an `Other {
+ *   r?: string, w?: string }` does not fit a `Shape` of the inline
+ *   variants `{ r?: string }` and `{ w?: integer }`, though it fits the
+ *   first, since the merge types `w` as an integer. A named union is a
+ *   component any number of types can name, so each comparison with one
+ *   is settled once (`settled`).
  * - A primitive fits the same primitive, and `integer` fits `number`,
  *   with the same `format` and limits at least as tight. A `format` under
  *   none, or under another, is no fit: a target language may type the two
@@ -563,17 +591,22 @@ function typeFits(own: TypeRef, base: TypeRef, context: FitContext, limits?: Con
   if (isUntyped(base)) return true;
   if (own.kind === 'nullable') return admitsNull(base) && typeFits(own.inner, base, context, limits);
   if (own.kind === 'union') {
-    return asVariants(own, base, context, (variants) => variants.every((variant) => typeFits(variant, base, context)));
+    const variants = inlineVariants(own);
+    return variants !== undefined && variants.every((variant) => typeFits(variant, base, context));
   }
   const mine = own.kind === 'model' ? context.byName.get(own.name) : undefined;
-  if (mine?.variants && context.reading === 'variants') {
-    return asVariants(mine, base, context, (variants) => variants.every((variant) => typeFits(variant, base, context)));
+  if (mine && readAsUnion(mine, context)) {
+    const leaves = unionLeaves(mine, context);
+    if (!leaves) return false;
+    return settled(mine, sideOf(base, context), context, () => leaves.every((leaf) => typeFits(leaf, base, context)));
   }
   switch (base.kind) {
     case 'nullable':
       return (own.kind === 'literal' && own.value === null) || typeFits(own, base.inner, context, limits);
-    case 'union':
-      return asVariants(base, own, context, (variants) => fitsOneOf(own, variants, context, limits));
+    case 'union': {
+      const variants = inlineVariants(base);
+      return variants !== undefined && fitsOneOf(own, variants, context, limits);
+    }
     case 'primitive': {
       if (own.kind === 'primitive') {
         const typed = own.type === base.type || (own.type === 'integer' && base.type === 'number');
@@ -607,8 +640,10 @@ function typeFits(own: TypeRef, base: TypeRef, context: FitContext, limits?: Con
     }
     case 'model': {
       const theirs = context.byName.get(base.name);
-      if (theirs?.variants && context.reading === 'variants') {
-        return asVariants(theirs, own, context, (variants) => fitsOneOf(own, variants, context, limits));
+      if (theirs && readAsUnion(theirs, context)) {
+        const leaves = unionLeaves(theirs, context);
+        if (!leaves) return false;
+        return settled(mine ?? own, theirs, context, () => fitsOneOf(own, leaves, context, limits));
       }
       return mine !== undefined && theirs !== undefined && modelFits(mine, theirs, context);
     }
@@ -627,32 +662,66 @@ function fitsOneOf(own: TypeRef, variants: readonly TypeRef[], context: FitConte
   );
 }
 
+/** Whether the reading writes the named union `model` as the union of its variants, not as the model its `fields` are (`FitContext.reading`). */
+function readAsUnion(model: Model, context: FitContext): boolean {
+  if (!model.variants || context.reading === 'fields') return false;
+  return context.reading === 'variants' || model.fields.length === 0;
+}
+
+/** The variants an inline union is read through (`typeFits`): none for one that carries limits of its own, which its variants do not, or for a union of nothing. */
+function inlineVariants(union: UnionType): readonly TypeRef[] | undefined {
+  return union.constraints === undefined && union.variants.length > 0 ? union.variants : undefined;
+}
+
 /**
- * Read a union as its variants (`typeFits`), against `other`, the type on
- * the other side: an inline union's, or — in the reading that writes one
- * as a union — a named union's model's. No fit for a union that carries
- * limits of its own, which its variants do not, for a union of nothing,
- * and for a named union met again against the same type while it is
- * being read — one that names itself among its variants — so the walk
- * ends on the answer that drops the base.
+ * The variants a named union is read through (`typeFits`), in a reading
+ * that writes it as a union: its own, with every union among them — an
+ * inline one, a named one the reading writes as a union too
+ * (`readAsUnion`), either under a nullable wrapper, which adds `null` —
+ * replaced by that union's in turn, so what is left names no union to
+ * read further and a union that names itself, or another that names it
+ * back, is read once. A union among them that carries limits of its own
+ * stays as it is, to be read as itself alone. None (`undefined`) for a
+ * named union that carries limits of its own or comes to nothing. Kept
+ * per union (`FitContext.leaves`): unions that share their variants (`U0:
+ * anyOf [U1, U2]`, `U1: anyOf [U2, U3]`, …) are each walked once, not
+ * once per path that reaches them.
  */
-function asVariants(
-  union: UnionType | Model,
-  other: TypeRef,
-  context: FitContext,
-  read: (variants: readonly TypeRef[]) => boolean,
-): boolean {
-  if (union.constraints !== undefined || !union.variants || union.variants.length === 0) return false;
-  if ('kind' in union) return read(union.variants);
-  let against = context.expanding.get(union);
-  if (against?.has(other)) return false;
-  if (!against) context.expanding.set(union, (against = new Set()));
-  against.add(other);
-  try {
-    return read(union.variants);
-  } finally {
-    against.delete(other);
+function unionLeaves(union: Model, context: FitContext): readonly TypeRef[] | undefined {
+  let leaves = context.leaves.get(union);
+  if (!leaves) {
+    const found: TypeRef[] = [];
+    const seen = new Set<Model>([union]);
+    let nullable = false;
+    // What a variant is read through when it is a union to read further; `null` for one already read.
+    const within = (variant: TypeRef): readonly TypeRef[] | null | undefined => {
+      if (variant.kind === 'union') return inlineVariants(variant);
+      const nested = variant.kind === 'model' ? context.byName.get(variant.name) : undefined;
+      if (!nested?.variants || !readAsUnion(nested, context) || nested.constraints !== undefined) return undefined;
+      if (seen.has(nested)) return null;
+      seen.add(nested);
+      return nested.variants;
+    };
+    const pending = union.constraints === undefined ? [...(union.variants ?? [])].reverse() : [];
+    for (let variant = pending.pop(); variant; variant = pending.pop()) {
+      const inner = underNullable(variant);
+      const variants = within(inner);
+      if (variants === undefined) {
+        found.push(variant);
+        continue;
+      }
+      if (inner !== variant) nullable = true;
+      for (let index = (variants?.length ?? 0) - 1; index >= 0; index--) pending.push(variants![index]!);
+    }
+    if (nullable && found.length > 0) found.push({ kind: 'literal', value: null });
+    context.leaves.set(union, (leaves = found));
   }
+  return leaves.length > 0 ? leaves : undefined;
+}
+
+/** The side of a comparison `type` stands for (`settled`): the model it names, or the type itself when it names none. */
+function sideOf(type: TypeRef, context: FitContext): Side {
+  return (type.kind === 'model' ? context.byName.get(type.name) : undefined) ?? type;
 }
 
 /**
@@ -662,31 +731,45 @@ function asVariants(
  * conjunction the merge builds when the model and its base each declare
  * the property as an object, while its fields fit (`data: { $ref: Dog }`
  * over `Envelope.data: { $ref: Animal }` is a `PetData` with the fields
- * of both; see Several declarations of one property).
- *
- * A pair of models can depend on others, and on itself — a model that
- * reaches itself through a field — so the pairs one question reaches are
- * decided together: each is taken to fit until its own fields say
- * otherwise, and a pair that turns out not to fit sends the pairs that
- * read it back to be read again, which leaves exactly the pairs that fit
- * given one another. No pair is read inside another, so a chain of models
- * of any length is walked without recursing, and a verdict, once reached,
- * is kept (`FitContext.decided`), so each pair is settled once however
- * many fields ask.
+ * of both; see Several declarations of one property). Settled once per
+ * pair of models (`settled`).
  */
 function modelFits(own: Model, base: Model, context: FitContext): boolean {
-  if (own === base) return true;
+  return own === base || settled(own, base, context, () => carriesEveryField(own, base, context));
+}
+
+/**
+ * The verdict on a comparison any number of types can ask for — a model
+ * under a model, a named union under a type, a type under a named union:
+ * components, which a document names from wherever it likes — read by
+ * `read`, once.
+ *
+ * Such a comparison can depend on others, and on itself (a model that
+ * reaches itself through a field, a union through a map of itself), so
+ * the comparisons one question reaches are decided together: each is
+ * taken to fit until its own reading says otherwise, and one that turns
+ * out not to fit sends the comparisons that read it back to be read
+ * again, which leaves exactly those that fit given one another. A
+ * comparison never reaches itself without passing a field or a map's
+ * values (`unionLeaves` reads a union that names itself once), so taking
+ * it to fit meanwhile decides nothing by itself. None is read inside
+ * another — a chain of any length is walked without recursing, and
+ * shared ones are not read again along every path that reaches them —
+ * and a verdict, once reached, is kept for the whole run
+ * (`FitContext.decided`), by the identity of its two sides.
+ */
+function settled(own: Side, base: Side, context: FitContext, read: () => boolean): boolean {
   const decided = context.decided.get(own)?.get(base);
   if (decided !== undefined) return decided;
-  if (context.settling) return assumedToFit(context.settling, own, base).fits;
+  if (context.settling) return assumedToFit(context.settling, own, base, read).fits;
   const settling: Settling = { pairs: new Map(), pending: [] };
   context.settling = settling;
   try {
-    const asked = assumedToFit(settling, own, base);
+    const asked = assumedToFit(settling, own, base, read);
     for (let pair = settling.pending.pop(); pair; pair = settling.pending.pop()) {
       if (!pair.fits) continue;
       settling.reading = pair;
-      if (readAlone(pair, context)) continue;
+      if (pair.read()) continue;
       pair.fits = false;
       for (const reader of pair.readers) if (reader.fits) settling.pending.push(reader);
     }
@@ -701,24 +784,13 @@ function modelFits(own: Model, base: Model, context: FitContext): boolean {
   }
 }
 
-/** One pair's own say (`carriesEveryField`), read with no named union being read around it (`FitContext.expanding`), so the verdict kept for the pair is the same wherever the question came from. */
-function readAlone(pair: Pair, context: FitContext): boolean {
-  const around = context.expanding;
-  context.expanding = new Map();
-  try {
-    return carriesEveryField(pair.own, pair.base, context);
-  } finally {
-    context.expanding = around;
-  }
-}
-
-/** The pair of `own` and `base` among those being settled (`modelFits`): taken to fit, and noted to be read, when first met; the pair being read is noted as one of its readers. */
-function assumedToFit(settling: Settling, own: Model, base: Model): Pair {
+/** The comparison of `own` with `base` among those being settled (`settled`): taken to fit, and noted to be read, when first met; the comparison being read is noted as one of its readers. */
+function assumedToFit(settling: Settling, own: Side, base: Side, read: () => boolean): Pair {
   let pairs = settling.pairs.get(own);
   if (!pairs) settling.pairs.set(own, (pairs = new Map()));
   let pair = pairs.get(base);
   if (!pair) {
-    pairs.set(base, (pair = { own, base, fits: true, readers: new Set() }));
+    pairs.set(base, (pair = { own, base, read, fits: true, readers: new Set() }));
     settling.pending.push(pair);
   }
   if (settling.reading) pair.readers.add(settling.reading);
@@ -729,7 +801,7 @@ function assumedToFit(settling: Settling, own: Model, base: Model): Pair {
  * Whether `own` carries every field `base` ends with, as the same field
  * (`sameField`) or one that fits it (`fieldFits`), with model limits at
  * least as tight — one pair's own say in `modelFits`, every other pair
- * read through it. A dispatcher, on either side, is read as itself alone:
+ * read through `settled`. A dispatcher, on either side, is read as itself alone:
  * its `fields` are not the whole of a variant, and it carries no
  * `variants` to read instead. A named union reaches here only in the
  * reading that writes it from its `fields`, as the merge of its variants

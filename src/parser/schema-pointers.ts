@@ -843,7 +843,7 @@ export function pointerTypesAsArray(ref: string, schemas: Record<string, SchemaO
   }
 }
 
-/** The pointers being read for the model they settle to (`pointerModelIdentity`), so a chain that reaches itself ends. */
+/** The pointers being read for the model they settle to (`pointerModelIdentity`), so a chain that reaches itself ends, and so does a reading that comes back to the pointer through the union that holds it. */
 const pointersBeingNamed = new Set<string>();
 
 /**
@@ -883,16 +883,35 @@ export function pointerTypesAsModel(ref: string, schemas: Record<string, SchemaO
  * that site is spelled here — or `undefined` when it settles to no model.
  * It tells the per-type copies of a type list apart: copies that are one
  * model are one variant, and the list is that model.
+ *
+ * The pointer is recorded as being read (`pointersBeingNamed`) before
+ * anything is read for it, the landing included, since either reading can
+ * ask this very question again: the landing of a `properties` step is the
+ * field its component's `allOf` merges (`pointerLanding`), and a component
+ * that extends the union's own — `Holder: { allOf: [{ $ref: Pet }],
+ * properties: { dog } }` beside `Pet: { allOf: [{ $ref: Base }, { oneOf: [{
+ * $ref: Cat }, { $ref: '#/components/schemas/Holder/properties/dog' }] }]
+ * }` — merges `Pet`'s fields by whether `Pet` dispatches that union, which
+ * is decided by whether this pointer names a model (Greptile, #682 review:
+ * the pointer was recorded only once its landing was read, so the question
+ * was asked again without end and the parse overflowed the stack). A
+ * reading that comes back to a pointer still being read is answered that
+ * the pointer names no model, for that reading alone: the union asked
+ * about is read as holding an unnamed variant while the landing is looked
+ * up — flattened, there — and the pointer is then decided by the schema it
+ * lands on, `Holder`'s own `dog` here, a model. Nothing is kept of a
+ * reading made on the way, so the answer is the document's alone, the same
+ * whichever component is read first.
  */
 export function pointerModelIdentity(
   ref: string,
   schemas: Record<string, SchemaObject> | undefined,
 ): string | undefined {
   if (pointersBeingNamed.has(ref)) return undefined;
-  const landed = pointerLanding(ref, schemas);
-  if (!landed) return undefined;
   pointersBeingNamed.add(ref);
   try {
+    const landed = pointerLanding(ref, schemas);
+    if (!landed) return undefined;
     const identity = modelReferenceIdentity(landed, schemas);
     return identity === OWN_MODEL ? `pointer:${ref}` : identity;
   } finally {
