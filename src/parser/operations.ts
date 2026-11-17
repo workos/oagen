@@ -5764,9 +5764,9 @@ interface ResponseTypingContext {
  * shape.
  */
 interface KeptSuccessModels {
-  /** The item models the array bodies and list envelopes of the operation's 2xx entries settle as they are read (`ItemSettlement.kept`). */
+  /** The item models the array bodies and list envelopes of the operation's own 2xx entries settle as they are read (`ItemSettlement.kept`); a component response's body contributes none (`itemSettlement`). */
   items: Map<string, KeptDefinition>;
-  /** The models the secondary media-type bodies of its 2xx and 3xx entries settle once every operation has been read (`DeferredInlineType.kept`). */
+  /** The models the secondary media-type bodies of its own 2xx and 3xx entries settle once every operation has been read (`DeferredInlineType.kept`); a component response's contribute none (`typeSecondaryContent`). */
   secondaryBodies: Map<string, KeptDefinition>;
 }
 
@@ -7441,13 +7441,29 @@ function inlineEnumNames(roots: readonly TypeRef[], models: readonly Model[]): s
   return names;
 }
 
-/** What settles an operation's array items against the registry (`typeInlineItems`): the operation they are recorded under, what it gives up to another (`ResponseTypingContext.yields`), and the item models its success bodies have settled so far (`kept`, one map per reading of its `responses`; #672). */
+/**
+ * What settles an operation's array items against the registry
+ * (`typeInlineItems`): the operation they are recorded under, what it gives
+ * up to another (`ResponseTypingContext.yields`), and, for a body the
+ * operation itself declares, the item models its success bodies have
+ * settled so far (`kept`; #672). The body of a response shared through
+ * `components/responses` is given none: its models are the component's
+ * wherever it is mounted, so they are no definition an operation's own
+ * copy folds onto — which would clear, for every operation that mounts the
+ * component, a flag only this operation's inline body lacks — and its own
+ * copies fold onto none of the operation's.
+ */
 function itemSettlement(
   registry: ModelShapeRegistry,
   ctx: ResponseTypingContext,
-  kept: Map<string, KeptDefinition>,
+  kept: Map<string, KeptDefinition> | undefined,
 ): ItemSettlement {
-  return { registry, operation: ctx.operationQualifier, ...(ctx.yields && { yields: ctx.yields }), kept };
+  return {
+    registry,
+    operation: ctx.operationQualifier,
+    ...(ctx.yields && { yields: ctx.yields }),
+    ...(kept && { kept }),
+  };
 }
 
 /**
@@ -8625,7 +8641,9 @@ function extractResponses(
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled,
           dataPathOverride,
-          ...(ctx.registry && { settle: itemSettlement(ctx.registry, ctx, settledItems) }),
+          ...(ctx.registry && {
+            settle: itemSettlement(ctx.registry, ctx, componentModelName === undefined ? settledItems : undefined),
+          }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -8865,7 +8883,8 @@ function extractResponses(
       pagination.dataPath,
       pagination.componentModels ?? [],
       componentSchemas,
-      ctx.registry && itemSettlement(ctx.registry, ctx, settledItems),
+      ctx.registry &&
+        itemSettlement(ctx.registry, ctx, bodyContexts.get(primaryStatus)?.component ? undefined : settledItems),
     );
     if (resolved) {
       overrideItemType = resolved.itemType;
