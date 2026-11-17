@@ -377,7 +377,20 @@ function requestAndSuccessBodies(op: Operation): Array<{ type: TypeRef; qualifie
  * secondary body, a webhook parameter or payload. A taken name with the same
  * members is shared, as before; the first lifted copy's value descriptions
  * and link are the enum's. A component enum declared under a component
- * model's name is the document's own clash and is left as declared. `steps`
+ * model's name is the document's own clash and is left as declared: a
+ * model component and an enum component whose keys resolve to one name —
+ * `Size: { type: 'object', properties }` beside `Sizes: { type: 'string',
+ * enum }`, both `Size` (#668) — are both kept, a `Size` in `models` and a
+ * `Size` in `enums`, since each `$ref` is typed as the component its key
+ * names, and reported by `extractSchemas`: `[oagen] Warning: Component
+ * schemas "Size" (a model) and "Sizes" (an enum) both resolve to "Size" —
+ * keeping both, each $ref typed as the component it names; a
+ * schemaNameTransform can give one a name of its own`. There the IR does
+ * declare a model and an enum under one name, and a
+ * `schemaNameTransform` that returns another name for one of the keys (its
+ * `originalName`) parts the two. An inline enum of that name is read
+ * against the enum component as against any enum of its name — shared on
+ * the same members, stepped on others — and never against the model. `steps`
  * is the record of the names an operation's own sites stepped to, read and
  * extended here; a site no operation owns passes none.
  */

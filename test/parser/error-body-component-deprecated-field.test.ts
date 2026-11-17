@@ -158,10 +158,19 @@ const NOTHING: DiffOutcome = { exitCode: 0, changes: [] };
 const eitherWay = (outcome: DiffOutcome) => ({ forward: outcome, reverse: outcome });
 
 const quoted = (names: readonly string[]): string => names.map((name) => `"${name}"`).join(', ');
+/** The rule a warning states for a body that carries `fields`, deprecated on the model `name`. */
+const deprecatesRule = (name: string, ...fields: string[]): string =>
+  `"${name}" deprecates ${quoted(fields)}, and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not`;
+/** The rule a warning states for a body beside a deprecated model `name`. */
+const deprecatedRule = (name: string): string =>
+  `"${name}" is deprecated, and takes no inline body, deprecated or live`;
 /** How the warning ends for a body that nothing but `fields`, deprecated on the model `name`, keeps off it. */
 const deprecatesRemedy = (name: string, ...fields: string[]): string =>
-  `"${name}" deprecates ${quoted(fields)}, and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; make ${quoted(fields)} live on "${name}", or rename one`;
+  `${deprecatesRule(name, ...fields)}; make ${quoted(fields)} live on "${name}", or rename one`;
 const SAME_SHAPE_REMEDY = 'give the two the same shape, or rename one';
+/** A copy of `schema` without `key`. */
+const without = (schema: Doc, key: string): Doc =>
+  Object.fromEntries(Object.entries(schema).filter(([name]) => name !== key));
 /** The warning that leaves `models` as they are: the body's `shape`, who holds `name`, and how it ends. */
 const leftWarning = (shape: string, name: string, holder: string, models: string[], remedy: string): string =>
   `[oagen] Warning: The shared error body ${shape} would be named "${name}", which ${holder} already holds — keeping ${
@@ -343,41 +352,77 @@ describe('#671 a component that deprecates a field takes no error body carrying 
         ]);
       });
 
-      it('with no holder, the body is `ErrorBody` under every flag and carries its own flags', async () => {
+      it('with no holder, a lone body is `ErrorBody` under every flag and carries its own flags', async () => {
         const at = (flags: { field?: boolean; own?: boolean }): Doc => doc(op('note', flagged(flags)));
         expect(await diffBothWays(at({}), at({ field: true }))).toEqual(eitherWay(fieldFlip('ErrorBody')));
         expect(await diffBothWays(at({}), at({ own: true }))).toEqual(eitherWay(ownFlip('ErrorBody')));
-        // Among twins that share it, one of them flipping is no change at all.
-        const pair = (flags: { field?: boolean; own?: boolean }): Doc =>
-          doc({ ...op('note', flagged({})), ...op('pet', flagged(flags)) });
-        expect(await diffBothWays(pair({}), pair({ field: true }))).toEqual(eitherWay(NOTHING));
-        expect(await diffBothWays(pair({}), pair({ own: true }))).toEqual(eitherWay(NOTHING));
+      });
+
+      it('twins with no holder still read as `docs/cli.md` says: one body, or one body’s `message`, is no change (exit 0), with a warning; every body, or every body’s `message`, one additive change on `ErrorBody` (exit 1)', async () => {
+        type Flags = { field?: boolean; own?: boolean };
+        const pair = (note: Flags, pet: Flags): Doc =>
+          doc({ ...op('note', flagged(note)), ...op('pet', flagged(pet)) });
+        const live = pair({}, {});
+        expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody', 'getPet 404: ErrorBody']);
+        // One body's `message`, then one body.
+        const oneField = await parse(pair({}, { field: true }));
+        expect(modelShapes(oneField.ir)).toEqual(['ErrorBody { message }']);
+        expect(oneField.warnings).toEqual([
+          '[oagen] Warning: The shared error body "ErrorBody" has "message" declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
+        ]);
+        expect(await diffBothWays(live, pair({}, { field: true }))).toEqual(eitherWay(NOTHING));
+        const oneBody = await parse(pair({}, { own: true }));
+        expect(modelShapes(oneBody.ir)).toEqual(['ErrorBody { message }']);
+        expect(oneBody.warnings).toEqual([
+          '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetPetError404" and live by "GetNoteError404" — keeping it live',
+        ]);
+        expect(await diffBothWays(live, pair({}, { own: true }))).toEqual(eitherWay(NOTHING));
+        // Every body's `message`, then every body.
+        const everyField = await parse(pair({ field: true }, { field: true }));
+        expect(everyField.warnings).toEqual([]);
+        expect(modelShapes(everyField.ir)).toEqual(['ErrorBody { message (deprecated) }']);
+        expect(await diffBothWays(live, pair({ field: true }, { field: true }))).toEqual(
+          eitherWay(fieldFlip('ErrorBody')),
+        );
+        const everyBody = await parse(pair({ own: true }, { own: true }));
+        expect(everyBody.warnings).toEqual([]);
+        expect(modelShapes(everyBody.ir)).toEqual(['ErrorBody (deprecated) { message }']);
+        expect(await diffBothWays(live, pair({ own: true }, { own: true }))).toEqual(eitherWay(ownFlip('ErrorBody')));
       });
     });
 
     describe('the flip that moves a body is the component’s', () => {
-      it('`ErrorBody` deprecating its `message` moves the body off it, whichever flag the body gives its own, exit 2', async () => {
-        for (const bodyDeprecated of [false, true]) {
-          const live = doc(op('note', messageBody(bodyDeprecated)), { ErrorBody: messageBody(false) });
-          expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody']);
-          expect(await diffBothWays(live, issueDoc(bodyDeprecated))).toEqual({
-            forward: {
-              exitCode: 2,
-              changes: [
-                'model-added GetNoteError404: additive',
-                ...fieldFlip('ErrorBody').changes,
-                'operation-modified getNote errorsChanged: breaking',
-              ],
-            },
-            reverse: {
-              exitCode: 2,
-              changes: [
-                'model-removed GetNoteError404: breaking',
-                ...fieldFlip('ErrorBody').changes,
-                'operation-modified getNote errorsChanged: breaking',
-              ],
-            },
-          });
+      it('`ErrorBody` deprecating its `message`, or becoming deprecated, moves the body off it under each of the body’s four flag combinations, exit 2', async () => {
+        const edits = [
+          { component: flagged({ field: true }), flip: fieldFlip('ErrorBody').changes },
+          { component: flagged({ own: true }), flip: ownFlip('ErrorBody').changes },
+        ];
+        for (const { component, flip } of edits) {
+          for (const field of [false, true]) {
+            for (const own of [false, true]) {
+              const body = flagged({ field, own });
+              const live = doc(op('note', body), { ErrorBody: messageBody(false) });
+              expect(errorTypes((await parse(live)).ir)).toEqual(['getNote 404: ErrorBody']);
+              expect(await diffBothWays(live, doc(op('note', body), { ErrorBody: component }))).toEqual({
+                forward: {
+                  exitCode: 2,
+                  changes: [
+                    'model-added GetNoteError404: additive',
+                    ...flip,
+                    'operation-modified getNote errorsChanged: breaking',
+                  ],
+                },
+                reverse: {
+                  exitCode: 2,
+                  changes: [
+                    'model-removed GetNoteError404: breaking',
+                    ...flip,
+                    'operation-modified getNote errorsChanged: breaking',
+                  ],
+                },
+              });
+            }
+          }
         }
       });
 
@@ -489,7 +534,7 @@ describe('#671 a component that deprecates a field takes no error body carrying 
         }
       });
 
-      it('a body another difference keeps off the component is told to match its shape, and the rest the rule, naming every field they carry that it deprecates', async () => {
+      it('the bodies one kind of reason keeps off share a warning naming every field among them, and a body that differs in shape too is told both', async () => {
         const both = { ErrorBody: obj({ message: deprecatedStr, hint: deprecatedStr }, ['message']) };
         const holder = 'component schema "ErrorBody" { message (deprecated): string, hint? (deprecated): string }';
         const { ir, warnings } = await parse(
@@ -509,23 +554,23 @@ describe('#671 a component that deprecates a field takes no error body carrying 
         ]);
         expect(warnings).toEqual([
           leftWarning(
-            '{ message: string, hint?: string, more?: string }',
-            'ErrorBody',
-            holder,
-            ['GetTagError404'],
-            SAME_SHAPE_REMEDY,
-          ),
-          leftWarning(
             '{ message: string }',
             'ErrorBody',
             holder,
             ['GetNoteError404', 'GetPetError404'],
             deprecatesRemedy('ErrorBody', 'hint', 'message'),
           ),
+          leftWarning(
+            '{ message: string, hint?: string, more?: string }',
+            'ErrorBody',
+            holder,
+            ['GetTagError404'],
+            `${deprecatesRule('ErrorBody', 'hint', 'message')}; give the two the same shape, and make "hint", "message" live on "ErrorBody", or rename one`,
+          ),
         ]);
       });
 
-      it('a deprecated component says so as it did, whatever its fields’ flags', async () => {
+      it('a deprecated component that deprecates `message` too is told as both rules, with a remedy for each', async () => {
         const { warnings } = await parse(
           doc(op('note', messageBody(true)), { ErrorBody: flagged({ field: true, own: true }) }),
         );
@@ -535,7 +580,7 @@ describe('#671 a component that deprecates a field takes no error body carrying 
             'ErrorBody',
             'deprecated component schema "ErrorBody" { message (deprecated): string }',
             ['GetNoteError404'],
-            SAME_SHAPE_REMEDY,
+            `${deprecatedRule('ErrorBody')}; ${deprecatesRule('ErrorBody', 'message')}; make "ErrorBody" live, and make "message" live on "ErrorBody", or rename one`,
           ),
         ]);
       });
@@ -561,6 +606,250 @@ describe('#671 a component that deprecates a field takes no error body carrying 
           ),
           '[oagen] Warning: The shared error body "ErrorBody" is declared deprecated by "GetNoteError404" and live by component schema "ErrorBody" — keeping it live',
         ]);
+      });
+    });
+
+    describe('the warning names every reason a holder leaves a body for, each with a remedy that holds (the review’s finding 1)', () => {
+      const WOULD_BE_NAMED = 'would be named "ErrorBody"';
+      const KEEPING = 'keeping model "GetNoteError404" as it is; ';
+      /** What a warning's ending tells its reader to do, read from its text. */
+      interface Named {
+        shape: boolean;
+        limits: boolean;
+        live: boolean;
+        field: boolean;
+      }
+      const NONE: Named = { shape: false, limits: false, live: false, field: false };
+      const namedBy = (warning: string): Named => {
+        const ending = warning.slice(warning.indexOf(KEEPING) + KEEPING.length);
+        expect(ending.endsWith(', or rename one')).toBe(true);
+        return {
+          shape: ending.includes('the same shape'),
+          limits: ending.includes('the same limits on "message"'),
+          live: ending.includes('make "ErrorBody" live'),
+          field: ending.includes('make "message" live on "ErrorBody"'),
+        };
+      };
+      /** `give the two the same shape`, on the holder: it declares the body's fields, required as the body requires them. */
+      const sameShape = (holder: Doc, body: Doc): Doc => {
+        const own = holder.properties as Doc;
+        return {
+          ...holder,
+          required: body.required,
+          properties: Object.fromEntries(Object.keys(body.properties as Doc).map((name) => [name, own[name] ?? str])),
+        };
+      };
+      /** `the same limits on "message"`, on the body: it writes the limit the holder writes. */
+      const sameLimits = (body: Doc, holder: Doc): Doc => {
+        const fields = body.properties as Doc;
+        const limit = ((holder.properties as Doc).message as Doc).maxLength;
+        return { ...body, properties: { ...fields, message: { ...(fields.message as Doc), maxLength: limit } } };
+      };
+      /** `make "message" live on "ErrorBody"`. */
+      const liveMessage = (holder: Doc): Doc => {
+        const fields = holder.properties as Doc;
+        return { ...holder, properties: { ...fields, message: without(fields.message as Doc, 'deprecated') } };
+      };
+      /** The two schemas once the reader has done what `named` says. */
+      const follow = (holder: Doc, body: Doc, named: Named): { holder: Doc; body: Doc } => {
+        const limited = named.limits ? sameLimits(body, holder) : body;
+        let remedied = named.shape ? sameShape(holder, limited) : holder;
+        if (named.live) remedied = without(remedied, 'deprecated');
+        if (named.field) remedied = liveMessage(remedied);
+        return { holder: remedied, body: limited };
+      };
+      const outcome = async (holder: Doc, body: Doc): Promise<{ error: string; left: string[] }> => {
+        const { ir, warnings } = await parse(doc(op('note', body), { ErrorBody: holder }));
+        return { error: errorTypes(ir)[0], left: warnings.filter((warning) => warning.includes(WOULD_BE_NAMED)) };
+      };
+
+      it('the review’s document: `{ message, hint? }` beside `ErrorBody { message (deprecated) }` is told the rule beside the shape, under either flag on `message`', async () => {
+        for (const deprecated of [false, true]) {
+          const body = obj({ message: deprecated ? deprecatedStr : str, hint: str }, ['message']);
+          const shape = `{ message${deprecated ? ' (deprecated)' : ''}: string, hint?: string }`;
+          const first = await parse(doc(op('note', body), { ErrorBody: messageBody(true) }));
+          expect(errorTypes(first.ir)).toEqual(['getNote 404: GetNoteError404']);
+          expect(first.warnings).toEqual([
+            `[oagen] Warning: The shared error body ${shape} would be named "ErrorBody", which component schema "ErrorBody" { message (deprecated): string } already holds — keeping model "GetNoteError404" as it is; "ErrorBody" deprecates "message", and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; give the two the same shape, and make "message" live on "ErrorBody", or rename one`,
+          ]);
+          // Half of it, `hint?` added to `ErrorBody`, leaves the body off with the half that is left.
+          const shaped = await parse(
+            doc(op('note', body), { ErrorBody: obj({ message: deprecatedStr, hint: str }, ['message']) }),
+          );
+          expect(errorTypes(shaped.ir)).toEqual(['getNote 404: GetNoteError404']);
+          expect(shaped.warnings).toEqual([
+            leftWarning(
+              shape,
+              'ErrorBody',
+              'component schema "ErrorBody" { message (deprecated): string, hint?: string }',
+              ['GetNoteError404'],
+              deprecatesRemedy('ErrorBody', 'message'),
+            ),
+          ]);
+          // The other half, `message` made live on `ErrorBody`, leaves it off with the shape.
+          const live = await parse(doc(op('note', body), { ErrorBody: messageBody(false) }));
+          expect(errorTypes(live.ir)).toEqual(['getNote 404: GetNoteError404']);
+          expect(live.warnings).toEqual([
+            leftWarning(
+              shape,
+              'ErrorBody',
+              'component schema "ErrorBody" { message: string }',
+              ['GetNoteError404'],
+              SAME_SHAPE_REMEDY,
+            ),
+          ]);
+          // Both take the body.
+          const both = await parse(doc(op('note', body), { ErrorBody: obj({ message: str, hint: str }, ['message']) }));
+          expect(errorTypes(both.ir)).toEqual(['getNote 404: ErrorBody']);
+          expect(both.warnings).toEqual(
+            deprecated
+              ? [
+                  '[oagen] Warning: The shared error body "ErrorBody" has "message" declared deprecated by "GetNoteError404" and live by component schema "ErrorBody" — keeping it live',
+                ]
+              : [],
+          );
+        }
+      });
+
+      // Every combination of the four reasons a model that holds `ErrorBody`
+      // leaves a `{ message }` body for: another shape (the body has a
+      // `hint?` the holder lacks, or the holder requires a `code` the body
+      // lacks, which is another key), a limit the body does not write
+      // (`maxLength: 3` on `message`), a deprecated holder, and a deprecated
+      // `message` on it.
+      type Shape = 'alike' | 'optional' | 'required';
+      interface Reasons {
+        shape: Shape;
+        limits: boolean;
+        deprecated: boolean;
+        deprecates: boolean;
+      }
+      const combinations: Array<Reasons & { label: string }> = (['alike', 'optional', 'required'] as const)
+        .flatMap((shape) =>
+          [false, true].flatMap((limits) =>
+            [false, true].flatMap((deprecated) =>
+              [false, true].map((deprecates): Reasons => ({ shape, limits, deprecated, deprecates })),
+            ),
+          ),
+        )
+        .filter(({ shape, limits, deprecated, deprecates }) => shape !== 'alike' || limits || deprecated || deprecates)
+        .map((reasons) => ({
+          ...reasons,
+          label: [
+            reasons.shape === 'optional' && 'a `hint?` it lacks',
+            reasons.shape === 'required' && 'a `code` it requires',
+            reasons.limits && 'a limit on `message`',
+            reasons.deprecated && 'its own `deprecated`',
+            reasons.deprecates && 'a deprecated `message`',
+          ]
+            .filter(Boolean)
+            .join(', '),
+        }));
+      const holderOf = ({ shape, limits, deprecated, deprecates }: Reasons): Doc =>
+        obj(
+          {
+            message: { ...str, ...(limits ? { maxLength: 3 } : {}), ...(deprecates ? { deprecated: true } : {}) },
+            ...(shape === 'required' ? { code: str } : {}),
+          },
+          shape === 'required' ? ['message', 'code'] : ['message'],
+          deprecated ? { deprecated: true } : {},
+        );
+      const bodyOf = ({ shape }: Reasons, deprecated: boolean): Doc =>
+        obj({ message: deprecated ? deprecatedStr : str, ...(shape === 'optional' ? { hint: str } : {}) }, ['message']);
+
+      it.each(combinations.map((reasons) => [reasons.label, reasons] as const))(
+        'a holder that leaves the body for %s names a remedy for each, no other, and following them all takes the body',
+        async (_label, reasons) => {
+          const holder = holderOf(reasons);
+          for (const deprecated of [false, true]) {
+            const body = bodyOf(reasons, deprecated);
+            const first = await outcome(holder, body);
+            expect(first.error).toBe('getNote 404: GetNoteError404');
+            expect(first.left).toHaveLength(1);
+            // One remedy per reason, and the rule behind each flag.
+            const named = namedBy(first.left[0]);
+            expect(named).toEqual({
+              shape: reasons.shape !== 'alike',
+              limits: reasons.limits,
+              live: reasons.deprecated,
+              field: reasons.deprecates,
+            });
+            expect(first.left[0].includes(deprecatedRule('ErrorBody'))).toBe(reasons.deprecated);
+            expect(first.left[0].includes(deprecatesRule('ErrorBody', 'message'))).toBe(reasons.deprecates);
+            // Following every remedy takes the body.
+            const all = follow(holder, body, named);
+            expect(await outcome(all.holder, all.body)).toEqual({ error: 'getNote 404: ErrorBody', left: [] });
+            // Each remedy is needed: leaving one out leaves the body off, and the warning then names that one alone.
+            for (const skipped of ['shape', 'limits', 'live', 'field'] as const) {
+              if (!named[skipped]) continue;
+              const partial = follow(holder, body, { ...named, [skipped]: false });
+              const next = await outcome(partial.holder, partial.body);
+              expect(next.error).toBe('getNote 404: GetNoteError404');
+              expect(next.left).toHaveLength(1);
+              expect(namedBy(next.left[0])).toEqual({ ...NONE, [skipped]: true });
+            }
+            // `or rename one`: with the holder under another name the body is `ErrorBody` itself.
+            const renamed = await parse(doc(op('note', body), { Problem: holder }));
+            expect(errorTypes(renamed.ir)).toEqual(['getNote 404: ErrorBody']);
+            expect(renamed.warnings).toEqual([]);
+          }
+        },
+      );
+
+      it('pins each ending: a limit by its place, a deprecated holder by its rule, every reason at once, and a holder that is no model', async () => {
+        const ending = async (holder: Doc, body: Doc = messageBody(false)): Promise<string> => {
+          const { left } = await outcome(holder, body);
+          expect(left).toHaveLength(1);
+          return left[0].slice(left[0].indexOf(KEEPING) + KEEPING.length);
+        };
+        const limitedMessage = { ...str, maxLength: 3 };
+        // The two print one shape here too, so a limit is named by where it is.
+        expect(await ending(obj({ message: limitedMessage }))).toBe(
+          'give the two the same limits on "message", or rename one',
+        );
+        expect(await ending(obj({ message: str }, ['message'], { maxProperties: 3 }))).toBe(
+          'give the two the same limits of their own, or rename one',
+        );
+        expect(await ending(obj({ message: limitedMessage }, ['message'], { maxProperties: 3 }))).toBe(
+          'give the two the same limits of their own and on "message", or rename one',
+        );
+        // The models' own limit, written on the body too, takes it.
+        expect(
+          await outcome(
+            obj({ message: str }, ['message'], { maxProperties: 3 }),
+            obj({ message: str }, ['message'], { maxProperties: 3 }),
+          ),
+        ).toEqual({ error: 'getNote 404: ErrorBody', left: [] });
+        expect(await ending(flagged({ own: true }))).toBe(
+          '"ErrorBody" is deprecated, and takes no inline body, deprecated or live; make "ErrorBody" live, or rename one',
+        );
+        expect(
+          await ending(
+            obj({ message: { ...limitedMessage, deprecated: true } }, ['message'], { deprecated: true }),
+            hinted('live'),
+          ),
+        ).toBe(
+          '"ErrorBody" is deprecated, and takes no inline body, deprecated or live; "ErrorBody" deprecates "message", and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; give the two the same shape and the same limits on "message", make "ErrorBody" live, and make "message" live on "ErrorBody", or rename one',
+        );
+        // Two bodies limits keep off share one warning, which names every place among them.
+        const limited = await parse(
+          doc(
+            { ...op('note', messageBody(false)), ...op('pet', hinted('live')) },
+            { ErrorBody: obj({ message: limitedMessage, hint: limitedMessage }, ['message']) },
+          ),
+        );
+        expect(limited.warnings).toEqual([
+          leftWarning(
+            '{ message: string }',
+            'ErrorBody',
+            'component schema "ErrorBody" { message: string, hint?: string }',
+            ['GetNoteError404', 'GetPetError404'],
+            'give the two the same limits on "hint", "message", or rename one',
+          ),
+        ]);
+        // A holder of another shape that shares no flagged field, and one that is no model, are told as they were.
+        expect(await ending(obj({ reason: deprecatedStr }))).toBe(SAME_SHAPE_REMEDY);
+        expect(await ending({ type: 'string', enum: ['a', 'b'] })).toBe(SAME_SHAPE_REMEDY);
       });
     });
 

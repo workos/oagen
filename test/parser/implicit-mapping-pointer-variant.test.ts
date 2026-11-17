@@ -519,6 +519,44 @@ describe('#682 a discriminator with no mapping and a variant written as a pointe
           expect(discriminators(spec)).toEqual(atEverySite(MAPPED));
         }
       });
+
+      it.each(kinds)(
+        'a pin written as a union of consts that OAS 3.0 `nullable: true` flags, read as the field is typed (%s)',
+        async (kind) => {
+          const dogOf = (kindSchema: unknown) => ({
+            type: 'object',
+            required: ['kind'],
+            properties: { kind: kindSchema, name: { type: 'string' } },
+          });
+          // One const under the flag is the nullable literal: the pin is its value (#677, #678).
+          const flagged = await parseJson(
+            everySite(openapi, shelter(dogOf({ oneOf: [pin('dog', openapi)], nullable: true })), union(kind)),
+          );
+          expect(fieldType(flagged, 'ShelterDog', 'kind')).toEqual(nullable({ kind: 'literal', value: 'dog' }));
+          expect(discriminators(flagged)).toEqual(atEverySite(MAPPED));
+          // Two consts a list restricts to one are the enum of that one, nullable under the flag: pinned too.
+          const restricted = await parseJson(
+            everySite(
+              openapi,
+              shelter(dogOf({ oneOf: [{ const: 'dog' }, { const: 'hound' }], enum: ['dog'], nullable: true })),
+              union(kind),
+            ),
+          );
+          expect(discriminators(restricted)).toEqual(atEverySite(MAPPED));
+          // Two consts with no list are an enum of two values: no pin, so nothing is derived and the component is flattened.
+          const open = await parseJson(
+            everySite(
+              openapi,
+              shelter(dogOf({ oneOf: [{ const: 'dog' }, { const: 'hound' }], nullable: true })),
+              union(kind),
+            ),
+          );
+          expect(discriminators(open)).toEqual({
+            ...atEverySite(kind === 'keyword' ? { property: 'kind', mapping: {} } : undefined),
+            dispatcher: undefined,
+          });
+        },
+      );
     });
 
     describe('how the variant is written around the pointer', () => {

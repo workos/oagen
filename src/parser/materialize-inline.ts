@@ -40,7 +40,9 @@ export { modelFingerprint };
  * request body models, each header, body and parameter model materialized
  * so far — and every enum name, component or minted (`reserveEnumNames`),
  * since a model and an enum under one name reach an emitter as one public
- * symbol. A model's entry carries its shape fingerprint, so a model whose
+ * symbol (a name a model component and an enum component both hold, the
+ * document's own clash, keeps the model's entry; see `reserveEnumNames`).
+ * A model's entry carries its shape fingerprint, so a model whose
  * shape the owner shares can take the name (`ownerShares`), and — for
  * operation-owned models — which operation produced it, so a collision
  * inside one operation can be told apart from one across operations. An
@@ -131,7 +133,17 @@ export function registerInlineModels(registry: InlineModelRegistry, models: Mode
  * or one a component's field or a shared companion carries, which reads as
  * a clash with a component. A name a model or an earlier enum already owns
  * keeps its entry: the first owner keeps a name, and a model's is the
- * document's own clash, not one the registry can move.
+ * document's own clash, not one the registry can move — a model component
+ * and an enum component whose keys resolve to one name (`Size: { type:
+ * 'object', properties }` beside `Sizes: { type: 'string', enum }`, both
+ * `Size`; #668), which `extractSchemas` keeps both of and reports
+ * (`[oagen] Warning: Component schemas "Size" (a model) and "Sizes" (an
+ * enum) both resolve to "Size" — keeping both, each $ref typed as the
+ * component it names; a schemaNameTransform can give one a name of its
+ * own`), and which a `schemaNameTransform` returning another name for one
+ * of the keys (its `originalName`) parts. The model's entry stands, so an
+ * inline model of that name shares the component when the component admits
+ * its shape (`ownerShares`), as it does with no enum of the name.
  */
 export function reserveEnumNames(registry: InlineModelRegistry, names: Iterable<string>, operation?: string): void {
   for (const name of names) {
@@ -277,9 +289,11 @@ export interface MaterializeInlineOptions {
    * this kind declare, by name: every model an earlier call given this map
    * minted, with its shape as it settled (`KeptDefinition`), to which this
    * call adds its own. Given by one operation's
-   * success bodies for their array items (`ItemSettlement.kept`, #672) —
-   * the sites whose copies the operation folds into one model, as it folds
-   * two success bodies that resolve to one name (`extractResponses`, #630).
+   * success bodies for their array items (`ItemSettlement.kept`, #672) and,
+   * apart from those, for the secondary media-type bodies of its success
+   * entries (`DeferredInlineType.kept`) — the sites whose copies the
+   * operation folds into one model, as it folds two success bodies that
+   * resolve to one name (`extractResponses`, #630).
    * A model of the trial named like one of them and of its shape but for
    * the model's own `deprecated` (`keptTwin`) shares the name where the
    * registry alone, which reads an operation's model flag included
@@ -330,7 +344,8 @@ const MAX_RENAME_ROUNDS = 64;
  * admits simply references it, and so is a name under which the site's own
  * operation keeps a definition of the model's shape but for the model's own
  * `deprecated` (`options.kept`, `keptTwin`: the items of one operation's
- * success bodies, #672); any other owned name clashes. On a clash the
+ * success bodies, and the secondary bodies of its success entries, #672);
+ * any other owned name clashes. On a clash the
  * loop makes the cheapest move that can still change something:
  *
  *   1. reserve the clashing names — a `oneOf`/`anyOf` variant named from its

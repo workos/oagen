@@ -121,6 +121,17 @@ const descriptions = (spec: ApiSpec, model: string) =>
   Object.fromEntries(modelOf(spec, model).fields.map(({ name, description }) => [name, description]));
 /** What the issue's script prints for one document. */
 const reading = (spec: ApiSpec) => ({ models: modelNames(spec), successResponses: successResponses(spec) });
+/** A Response Object whose `application/json` body is a string and whose `application/yaml` body is `schema`: a secondary media type's inline body. */
+const yaml = (schema: Doc): Doc => ({
+  description: 'ok',
+  content: { 'application/json': { schema: { type: 'string' } }, 'application/yaml': { schema } },
+});
+/** Each success response's status code with the type of its `application/yaml` body. */
+const yamlBodies = (spec: ApiSpec, name = 'listPets') =>
+  (operationOf(spec, name).successResponses ?? []).map(
+    ({ statusCode, contents }) =>
+      `${statusCode}: ${show(contents?.find(({ contentType }) => contentType === 'application/yaml')?.type)}`,
+  );
 
 describe('#672 array bodies whose items differ only in `deprecated` share one item model', () => {
   let warn: ReturnType<typeof vi.spyOn>;
@@ -821,6 +832,34 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
         expect(warnings()).toEqual([]);
       });
 
+      it('shares one live qualified variant beside a deprecated component of the variant’s title', async () => {
+        // The registry qualifies the variant by its operation (`CircleListAItem`) before any merge pass sees it,
+        // so the copies a deprecated component refuses (`settleRefusedCopies`) never include an array's items.
+        const [deprecatedCircle] = (shapes(true) as { oneOf: Doc[] }).oneOf;
+        const component = { ...deprecatedCircle, title: undefined };
+        for (const [deprecated200, deprecated202] of flags) {
+          const spec = await parseJson(
+            document(
+              openapi,
+              {
+                '/a': operation('listA', {
+                  '200': json(arrayOf(shapes(deprecated200))),
+                  '202': json(arrayOf(shapes(deprecated202))),
+                }),
+              },
+              { Circle: component },
+            ),
+          );
+          expect(modelNames(spec)).toEqual(['Circle (deprecated)', 'CircleListAItem', 'Square']);
+          expect(successResponses(spec, 'listA')).toEqual([
+            '200: (CircleListAItem | Square)[]',
+            '202: (CircleListAItem | Square)[]',
+          ]);
+          expectSound(spec);
+        }
+        expect(warnings()).toEqual([]);
+      });
+
       it('shares one live `ListPetsResponseItem` beside a component of another shape', async () => {
         const other = { type: 'object', properties: { other: { type: 'boolean' } } };
         for (const [deprecated200, deprecated202] of flags) {
@@ -832,6 +871,211 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
           expectSound(spec);
         }
         expect(warnings()).toEqual([]);
+      });
+    });
+
+    describe('a secondary media type’s body on two success entries shares one model the same way', () => {
+      /** `listPets` with a `200` and, at each status code of `flags`, an `application/yaml` body of `body(deprecated)`. */
+      const later = (body: (deprecated: boolean) => Doc, flags: Array<[number, boolean]>): Doc =>
+        document(
+          openapi,
+          listPets({
+            '200': yaml(item(false)),
+            ...Object.fromEntries(flags.map(([code, deprecated]) => [code, yaml(body(deprecated))])),
+          }),
+        );
+      /** The four flag combinations of two entries' bodies, keyed as the issue's documents are. */
+      const edits = (build: (first: boolean, second: boolean) => Doc) => ({
+        old: build(false, false),
+        new: build(true, false),
+        'new-202': build(false, true),
+        both: build(true, true),
+      });
+      const laterEdits = (body: (deprecated: boolean) => Doc) =>
+        edits((deprecated201, deprecated202) =>
+          later(body, [
+            [201, deprecated201],
+            [202, deprecated202],
+          ]),
+        );
+
+      it('types a `201` and a `202` as one `…Response201`, identical or with either body deprecated', async () => {
+        const documents = laterEdits((deprecated) => item(deprecated));
+        const read = async (doc: Doc) => {
+          const spec = await parseJson(doc);
+          expectSound(spec);
+          return { models: modelNames(spec), yaml: yamlBodies(spec) };
+        };
+        const one = {
+          models: ['ListPetsApplicationYamlResponse', 'ListPetsApplicationYamlResponse201'],
+          yaml: [
+            '200: ListPetsApplicationYamlResponse',
+            '201: ListPetsApplicationYamlResponse201',
+            '202: ListPetsApplicationYamlResponse201',
+          ],
+        };
+        expect(await read(documents.old)).toEqual(one);
+        // Before: `…Response201 (deprecated)` beside a `…Response202` the `202` was retyped to.
+        expect(await read(documents.new)).toEqual(one);
+        // Before: `…Response201` beside `…Response202 (deprecated)`.
+        expect(await read(documents['new-202'])).toEqual(one);
+        expect(await read(documents.both)).toEqual({
+          ...one,
+          models: ['ListPetsApplicationYamlResponse', 'ListPetsApplicationYamlResponse201 (deprecated)'],
+        });
+        expect(warnings()).toEqual([]);
+      });
+
+      it('leaves no trace of either edit: the same IR, and `oagen diff` exits 0 in either direction', async () => {
+        const documents = laterEdits((deprecated) => item(deprecated));
+        await expectNoTrace(documents);
+        expect(await changesOf(documents.old, documents.both)).toEqual([
+          'model-modified ListPetsApplicationYamlResponse201 (additive)',
+        ]);
+        expect(await exitCodeOf(documents.old, documents.both)).toBe(1);
+      });
+
+      it('shares the primary’s model with a `302` the same way', async () => {
+        const documents = edits((deprecated200, deprecated302) =>
+          document(openapi, listPets({ '200': yaml(item(deprecated200)), '302': yaml(item(deprecated302)) })),
+        );
+        for (const edit of ['old', 'new', 'new-202'] as const) {
+          const spec = await parseJson(documents[edit]);
+          // Before, with one body deprecated: the `302`'s stepped to `ListPetsApplicationYamlResponse302`.
+          expect(modelNames(spec), edit).toEqual(['ListPetsApplicationYamlResponse']);
+          expect(yamlBodies(spec), edit).toEqual([
+            '200: ListPetsApplicationYamlResponse',
+            '302: ListPetsApplicationYamlResponse',
+          ]);
+        }
+        await expectNoTrace(documents);
+      });
+
+      it('documents the shared model as the first live copy is, an inline enum included', async () => {
+        const documented = (text: string) => (deprecated: boolean) => ({
+          type: 'object',
+          ...flag(deprecated),
+          description: `${text} body.`,
+          properties: {
+            name: { type: 'string', description: `${text} name.` },
+            status: { type: 'string', enum: ['a', 'b'], description: `${text} status.` },
+          },
+        });
+        const spec = await parseJson(
+          document(
+            openapi,
+            listPets({
+              '200': yaml(item(false)),
+              '201': yaml(documented('Old')(true)),
+              '202': yaml(documented('Older')(true)),
+              '203': yaml(documented('New')(false)),
+              '204': yaml(documented('Newer')(false)),
+            }),
+          ),
+        );
+        expect(modelNames(spec)).toEqual(['ListPetsApplicationYamlResponse', 'ListPetsApplicationYamlResponse201']);
+        expect(yamlBodies(spec).slice(1)).toEqual([
+          '201: ListPetsApplicationYamlResponse201',
+          '202: ListPetsApplicationYamlResponse201',
+          '203: ListPetsApplicationYamlResponse201',
+          '204: ListPetsApplicationYamlResponse201',
+        ]);
+        expect(modelOf(spec, 'ListPetsApplicationYamlResponse201').description).toBe('New body.');
+        expect(descriptions(spec, 'ListPetsApplicationYamlResponse201')).toEqual({
+          name: 'New name.',
+          status: 'New status.',
+        });
+        expect(spec.enums.map(({ name, description }) => `${name}: ${description}`)).toEqual([
+          'ListPetsApplicationYamlResponse201Status: New status.',
+        ]);
+        expectSound(spec);
+        expect(warnings()).toEqual([]);
+      });
+
+      it('folds the models the body nests, each by its own flag', async () => {
+        const nested = (deprecated: boolean): Doc =>
+          arrayOf({ type: 'object', properties: { owners: arrayOf(item(deprecated)) } });
+        const documents = laterEdits(nested);
+        const old = await parseJson(documents.old);
+        expect(modelNames(old)).toEqual([
+          'ListPetsApplicationYamlResponse',
+          'ListPetsApplicationYamlResponse201',
+          'ListPetsApplicationYamlResponse201Owner',
+        ]);
+        expect(yamlBodies(old).slice(1)).toEqual([
+          '201: ListPetsApplicationYamlResponse201[]',
+          '202: ListPetsApplicationYamlResponse201[]',
+        ]);
+        await expectNoTrace(documents);
+      });
+
+      it('still steps a `202` whose body differs in anything but the model’s own flag', async () => {
+        const others: Record<string, Doc> = {
+          'a field’s own flag': { type: 'object', properties: { name: { type: 'string', deprecated: true } } },
+          'one more field': { type: 'object', properties: { name: { type: 'string' }, age: { type: 'integer' } } },
+        };
+        for (const [what, other] of Object.entries(others)) {
+          for (const deprecated of [false, true]) {
+            const spec = await parseJson(
+              document(
+                openapi,
+                listPets({ '200': yaml(item(false)), '201': yaml(item(deprecated)), '202': yaml(other) }),
+              ),
+            );
+            expect(modelNames(spec), what).toEqual([
+              'ListPetsApplicationYamlResponse',
+              `ListPetsApplicationYamlResponse201${deprecated ? ' (deprecated)' : ''}`,
+              'ListPetsApplicationYamlResponse202',
+            ]);
+          }
+        }
+        expect(warnings()).toEqual([]);
+      });
+
+      it('reads both paths alike when two paths `$ref` one Path Item', async () => {
+        for (const [deprecated201, deprecated202] of [
+          [true, false],
+          [false, true],
+        ]) {
+          const spec = await parseJson(
+            document(openapi, {
+              '/a': operation('listPets', {
+                '200': yaml(item(false)),
+                '201': yaml(item(deprecated201)),
+                '202': yaml(item(deprecated202)),
+              }),
+              '/b': { $ref: '#/paths/~1a' },
+            }),
+          );
+          expect(modelNames(spec)).toEqual(['ListPetsApplicationYamlResponse', 'ListPetsApplicationYamlResponse201']);
+          for (const op of operations(spec)) {
+            expect(
+              (op.successResponses ?? []).map(({ contents }) => show(contents?.[1]?.type)),
+              `${deprecated201} ${deprecated202}`,
+            ).toEqual([
+              'ListPetsApplicationYamlResponse',
+              'ListPetsApplicationYamlResponse201',
+              'ListPetsApplicationYamlResponse201',
+            ]);
+          }
+          expectSound(spec);
+        }
+      });
+
+      it('never shares the primary’s model with a later `2xx`, as before, whatever the flags', async () => {
+        for (const [deprecated200, deprecated202] of [
+          [false, false],
+          [true, false],
+          [false, true],
+        ]) {
+          const spec = await parseJson(
+            document(openapi, listPets({ '200': yaml(item(deprecated200)), '202': yaml(item(deprecated202)) })),
+          );
+          expect(modelNames(spec)).toEqual([
+            `ListPetsApplicationYamlResponse${deprecated200 ? ' (deprecated)' : ''}`,
+            `ListPetsApplicationYamlResponse202${deprecated202 ? ' (deprecated)' : ''}`,
+          ]);
+        }
       });
     });
 
@@ -891,6 +1135,231 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
             `CreatePetsApplicationXmlRequest${deprecatedXml ? ' (deprecated)' : ''}`,
           ]);
         }
+      });
+
+      it('names a `default` response’s secondary body for the response, whatever the flags', async () => {
+        for (const [deprecated200, deprecatedDefault] of [
+          [false, false],
+          [true, false],
+          [false, true],
+        ]) {
+          const spec = await parseJson(
+            document(openapi, listPets({ '200': yaml(item(deprecated200)), default: yaml(item(deprecatedDefault)) })),
+          );
+          expect(modelNames(spec)).toEqual([
+            `ListPetsApplicationYamlResponse${deprecated200 ? ' (deprecated)' : ''}`,
+            `ListPetsDefaultApplicationYamlResponse${deprecatedDefault ? ' (deprecated)' : ''}`,
+          ]);
+        }
+      });
+
+      it('folds two error bodies as the shared error bodies always were, with their warning', async () => {
+        const spec = await parseJson(
+          document(
+            openapi,
+            listPets({
+              '204': { description: 'done' },
+              '400': json(arrayOf(item(true))),
+              '404': json(arrayOf(item(false))),
+            }),
+          ),
+        );
+        const [model] = spec.models;
+        expect(spec.models).toHaveLength(1);
+        expect(model!.deprecated).toBeUndefined();
+        expect(operationOf(spec, 'listPets').errors.map(({ type }) => show(type))).toEqual([
+          `${model!.name}[]`,
+          `${model!.name}[]`,
+        ]);
+        expect(warnings()).toEqual([
+          `[oagen] Warning: The shared error body "${model!.name}" is declared deprecated by "ListPetsError400" and live by "ListPetsError404" — keeping it live`,
+        ]);
+      });
+
+      it('keeps a component response’s items the component’s, beside an inline array of the operation’s own', async () => {
+        for (const [deprecatedComponent, deprecatedInline] of [
+          [false, false],
+          [true, false],
+          [false, true],
+        ]) {
+          const spec = await parseJson({
+            ...document(
+              openapi,
+              listPets({
+                '200': { $ref: '#/components/responses/Pets' },
+                '202': json(arrayOf(item(deprecatedInline))),
+              }),
+            ),
+            components: { responses: { Pets: json(arrayOf(item(deprecatedComponent))) } },
+          });
+          expect(reading(spec)).toEqual({
+            models: [
+              `PetsItem${deprecatedComponent ? ' (deprecated)' : ''}`,
+              `ListPetsItem${deprecatedInline ? ' (deprecated)' : ''}`,
+            ],
+            successResponses: ['200: PetsItem[]', '202: ListPetsItem[]'],
+          });
+        }
+      });
+
+      it('never folds an operation’s own items onto a component response’s, nor the component’s onto its own', async () => {
+        // `Shapes` returns an array whose `Circle` variant is named from its title, the name the inline body's
+        // variant takes too: shared while identical, and apart on the flag, as before — in either order, and
+        // for every operation that mounts the component.
+        const mounted = (responses: Doc, shapesComponent: Doc, more: Doc = {}): Doc => ({
+          ...document(openapi, { ...listPets(responses), ...more }),
+          components: { responses: { Shapes: json(arrayOf(shapesComponent)) } },
+        });
+        const shapesRef = { $ref: '#/components/responses/Shapes' };
+        const read = async (doc: Doc) => {
+          const spec = await parseJson(doc);
+          expectSound(spec);
+          return {
+            models: modelNames(spec),
+            ...Object.fromEntries(operations(spec).map((op) => [op.name, show(op.response)])),
+            successResponses: successResponses(spec),
+          };
+        };
+        const listCats = { '/cats': operation('listCats', { '200': shapesRef }) };
+
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(false))) }, shapes(false), listCats)),
+        ).toEqual({
+          models: ['Circle', 'Square'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (Circle | Square)[]'],
+        });
+        // The component's deprecated `Circle` stays deprecated for `listCats`; the live inline copy takes its own model.
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(false))) }, shapes(true), listCats)),
+        ).toEqual({
+          models: ['Circle (deprecated)', 'Square', 'CircleListPetsItem'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (CircleListPetsItem | Square)[]'],
+        });
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(true))) }, shapes(false), listCats)),
+        ).toEqual({
+          models: ['Circle', 'Square', 'CircleListPetsItem (deprecated)'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (CircleListPetsItem | Square)[]'],
+        });
+        // The inline body first: its deprecated `Circle` is no definition the component's live copy folds onto.
+        const reversed = await read(mounted({ '200': json(arrayOf(shapes(true))), '202': shapesRef }, shapes(false)));
+        expect(reversed.models.slice(0, 2)).toEqual(['Circle (deprecated)', 'Square']);
+        expect(reversed.models).toHaveLength(3);
+        expect(reversed.successResponses[0]).toBe('200: (Circle | Square)[]');
+        expect(reversed.successResponses[1]).not.toBe('202: (Circle | Square)[]');
+        expect(warnings()).toEqual([]);
+      });
+
+      it('settles the items an overridden `dataPath` names with the operation’s own, and a component response’s apart', async () => {
+        // The primary is a union of two wrappers, so the override's `items` are typed from the document as
+        // `<Op>Item`, the name the `202`'s array items take.
+        const wrapper = (deprecated: boolean): Doc => ({
+          oneOf: [
+            {
+              type: 'object',
+              required: ['a'],
+              properties: { items: arrayOf(item(deprecated)), a: { type: 'string' } },
+            },
+            {
+              type: 'object',
+              required: ['b'],
+              properties: { items: arrayOf(item(deprecated)), b: { type: 'string' } },
+            },
+          ],
+        });
+        const paged = {
+          parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+          'x-pagination': { strategy: 'cursor', param: 'after', dataPath: 'items' },
+        };
+        const itemTypeOf = async (doc: Doc) => {
+          const spec = await parseJson(doc);
+          expectSound(spec);
+          const model = modelOf(spec, 'ListPetsItem');
+          return `${show(operationOf(spec, 'listPets').pagination?.itemType)}, ListPetsItem ${model.deprecated ? 'deprecated' : 'live'}`;
+        };
+        for (const [deprecated200, deprecated202] of [
+          [false, false],
+          [true, false],
+          [false, true],
+        ]) {
+          const own = document(
+            openapi,
+            listPets({ '200': json(wrapper(deprecated200)), '202': json(arrayOf(item(deprecated202))) }, paged),
+          );
+          // Before, with either copy deprecated: `ListPetsResponseItem`, the items stepped off `ListPetsItem`.
+          expect(await itemTypeOf(own), `own ${deprecated200} ${deprecated202}`).toBe(
+            'ListPetsItem, ListPetsItem live',
+          );
+        }
+        const component = (deprecatedComponent: boolean, deprecated202: boolean): Doc => ({
+          ...document(
+            openapi,
+            listPets(
+              { '200': { $ref: '#/components/responses/Page' }, '202': json(arrayOf(item(deprecated202))) },
+              paged,
+            ),
+          ),
+          components: { responses: { Page: json(wrapper(deprecatedComponent)) } },
+        });
+        expect(await itemTypeOf(component(false, false))).toBe('ListPetsItem, ListPetsItem live');
+        expect(await itemTypeOf(component(true, false))).toBe('ListPetsResponseItem, ListPetsItem live');
+        expect(await itemTypeOf(component(false, true))).toBe('ListPetsResponseItem, ListPetsItem deprecated');
+      });
+
+      it('never folds an operation’s own secondary body onto a component response’s', async () => {
+        // `card` mounts the component `Card` at its `200` and declares a `302` of its own: both bodies derive
+        // `CardApplicationYamlResponse`, shared while identical and stepped apart on the flag, as before.
+        const card = (deprecatedComponent: boolean, deprecatedOwn: boolean): Doc => ({
+          ...document(openapi, {
+            '/card': operation('card', {
+              '200': { $ref: '#/components/responses/Card' },
+              '302': yaml(item(deprecatedOwn)),
+            }),
+          }),
+          components: { responses: { Card: yaml(item(deprecatedComponent)) } },
+        });
+        expect(modelNames(await parseJson(card(false, false)))).toEqual(['CardApplicationYamlResponse']);
+        expect(modelNames(await parseJson(card(true, false)))).toEqual([
+          'CardApplicationYamlResponse (deprecated)',
+          'CardApplicationYamlResponse302',
+        ]);
+        expect(modelNames(await parseJson(card(false, true)))).toEqual([
+          'CardApplicationYamlResponse',
+          'CardApplicationYamlResponse302 (deprecated)',
+        ]);
+      });
+
+      it('shares a title-named variant between the items and a secondary body on an identical shape only', async () => {
+        const both = (deprecatedItems: boolean, deprecatedBody: boolean): Doc =>
+          document(
+            openapi,
+            listPets({
+              '200': {
+                description: 'ok',
+                content: {
+                  'application/json': { schema: arrayOf(shapes(deprecatedItems)) },
+                  'application/yaml': { schema: shapes(deprecatedBody) },
+                },
+              },
+            }),
+          );
+        expect(modelNames(await parseJson(both(false, false)))).toEqual(['Circle', 'Square']);
+        expect(modelNames(await parseJson(both(true, false)))).toEqual([
+          'Circle (deprecated)',
+          'Square',
+          'CircleListPetsApplicationYamlResponse',
+        ]);
+        expect(modelNames(await parseJson(both(false, true)))).toEqual([
+          'Circle',
+          'Square',
+          'CircleListPetsApplicationYamlResponse (deprecated)',
+        ]);
       });
 
       it('gives a deprecated header schema a model of its own, the header carrying the flag', async () => {

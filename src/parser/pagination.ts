@@ -23,6 +23,7 @@ import {
   resolveComponentSchemaRef,
   resolveSchemaName,
   unionAxesOf,
+  axisDiscriminatorOf,
   unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
@@ -1037,11 +1038,17 @@ export function collectObjectProperties(
       for (const variants of unionAxesOf(bare)) {
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
+        // A member writing both keywords hands its own `discriminator` to
+        // the first of them that types it (`axisDiscriminatorOf`).
+        const axisDiscriminator =
+          axisDiscriminatorOf(bare, variants) ??
+          (bare === carrier ? undefined : carrier.discriminator) ??
+          wrapperDiscriminator;
         if (branch) {
-          visit(branch, depth, origin, discriminator);
+          visit(branch, depth, origin, axisDiscriminator);
           continue;
         }
-        const union: CollectedUnion = { schema: bare, keyword, variants, origin, discriminator };
+        const union: CollectedUnion = { schema: bare, keyword, variants, origin, discriminator: axisDiscriminator };
         unions.push(union);
         // What the variants declare, when the model flattens the union into
         // the node's model (`unionCounts`): branch-only fields of that model,
