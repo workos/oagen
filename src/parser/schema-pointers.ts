@@ -127,6 +127,7 @@ import {
   modelReferenceIdentity,
   OWN_MODEL,
   referenceTypesAsUnknown,
+  resolveSchemaName,
   schemaToTypeRef,
   unionFlaggedNullable,
   withTypeConstraints,
@@ -677,27 +678,52 @@ function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | und
 }
 
 /**
- * The schema a site written as the pointer `ref` settles to the type of
- * (`pointerLanding`), for the reader that reads the pointer through to it
- * in place of leaving it to the settle (`typedDeclaration`; #669: a
- * property declared `{ $ref: '#/components/schemas/Holder/properties/pets'
- * }` by one variant and as the same array inline by another is one
- * `Pet[]`). That reader must not read on where the settle would refuse, so
- * this answers only for a pointer the document alone tells the settle
- * walks, and is `undefined` for every other, which stays the reference it
- * is and is settled, and reported, as before. Each step must leave a
- * schema the settle holds the right kind of type for: a `properties` step
- * a schema typed as a model (`modelReferenceIdentity`: the component the
- * pointer enters, an inline object, an `allOf` merged into one), an
- * `items` step a schema typed as an array (`arraySchemaOf`, or an array
- * component), each read on the schema whose type the settle holds there —
- * the one before the run of inline `allOf` steps the step sits in, as
- * `pointerLanding` finds a field's owner. An `allOf` step keeps the type
- * at hand. A step through a `oneOf`/`anyOf` or into a map's values is not
- * answered for: the settle reads a variant only off a type that is a union
- * (`Holder/allOf/1/oneOf/0/properties/pets`, into a union the model
- * flattens, is typed `unknown` and reported), and which type that is the
- * document alone does not say.
+ * The schema a site written as the pointer `ref` settles to the type of,
+ * for the reader that reads the pointer through to it in place of leaving
+ * it to the settle (`typedDeclaration`; #669: a property declared `{ $ref:
+ * '#/components/schemas/Holder/properties/pets' }` by one variant and as
+ * the same array inline by another is one `Pet[]`). That reader types the
+ * schema returned where the pointer stands, so the answer is the schema
+ * the settle's own walk ends on a type built from, nullability and limits
+ * included, and `undefined` wherever the document alone does not tell
+ * which that is: such a pointer stays the reference it is and is settled,
+ * and reported, as before.
+ *
+ * The settle walks the IR (`PointerResolver.resolve`): a `properties` step
+ * reads the field of the model at hand, an `items` step the items of the
+ * array at hand, and an inline `allOf` step keeps the type at hand. So:
+ *
+ * - a `properties` step is answered from a schema typed as a model
+ *   (`modelReferenceIdentity`: the component the pointer enters, an inline
+ *   object, an `allOf` merged into one), by the declaration the model's
+ *   field is typed from (`collectObjectProperties`, as `pointerLanding`
+ *   reads it);
+ * - an `items` step from a schema typed as an array, by the items that
+ *   array carries (`arraySchemaOf`: under any nullable wrapper, and
+ *   through an `allOf` read as one member);
+ * - each read on the schema whose type the settle holds there, the one
+ *   before the run of inline `allOf` steps the step sits in. A step must
+ *   lead to the very schema the field or the items are typed from: where
+ *   they are typed from another — a property two members declare, typed
+ *   from the two combined; items a sibling member limits — the pointer is
+ *   left to the settle;
+ * - the component the pointer enters must be the one model of its name:
+ *   the settle finds a model by the name its key resolves to, so with two
+ *   keys of one name (`Note` and `note`) a pointer into the one whose
+ *   model was not kept reads the other's fields, and is left to it;
+ * - a pointer that ends at inline `allOf` members settles to what the
+ *   pointer before them does, since the type at hand stays: `Source/
+ *   properties/code/allOf/0` with `code: { type: 'string', nullable: true,
+ *   maxLength: 8, allOf: [{ type: 'string' }] }` is the nullable, limited
+ *   string `Source/properties/code` is, not the bare member (Greptile,
+ *   #669 review: the member was returned, so beside `{ type: 'string' }`
+ *   the property lost the `null` the pointer admits, and beside the same
+ *   limit the limit); one that ends at a `$ref` member is that reference;
+ * - a step through a `oneOf`/`anyOf` or into a map's values is not
+ *   answered for: the settle reads a variant only off a type that is a
+ *   union (`Holder/allOf/1/oneOf/0/properties/pets`, into a union the
+ *   model flattens, is typed `unknown` and reported), and which type that
+ *   is the document alone does not say.
  */
 export function pointerReadThrough(
   ref: string,
@@ -710,20 +736,41 @@ export function pointerReadThrough(
   if (!component) return undefined;
   const steps = pointerSteps(component, path, schemas);
   if ('problem' in steps) return undefined;
+  const name = resolveSchemaName(key!);
+  if (Object.keys(schemas!).some((other) => other !== key && resolveSchemaName(other) === name)) return undefined;
+  // The component is typed as a `$ref` to it is.
+  const componentRef = { $ref: schemaRefOf([key!]) };
+  // Inline `allOf` members at the end keep the type at hand: the pointer
+  // before them, or the component itself.
+  let end = steps.length;
+  while (end > 0 && steps[end - 1]!.keyword === 'allOf' && !steps[end - 1]!.next.$ref) end--;
+  if (end < steps.length) {
+    if (end === 0) return componentRef;
+    const before = steps
+      .slice(0, end)
+      .flatMap(({ keyword, name }) => (name === undefined ? [keyword] : [keyword, name]));
+    return pointerReadThrough(schemaRefOf([key!, ...before]), schemas);
+  }
   for (const [index, step] of steps.entries()) {
+    // On the way, an inline member keeps the type at hand; at the end, only
+    // a `$ref` member is left, typed as the reference it is.
     if (step.keyword === 'allOf') continue;
     let first = index;
     while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
     const owner = steps[first]!.node;
-    // The component is typed as a `$ref` to it is; any other schema as written.
-    const site = owner === component ? { $ref: schemaRefOf([key!]) } : owner;
-    const walked =
-      step.keyword === 'properties'
-        ? modelReferenceIdentity(site, schemas) !== undefined
-        : step.keyword === 'items' && (arraySchemaOf(site) !== undefined || isArrayComponentRef(site));
-    if (!walked) return undefined;
+    const site = owner === component ? componentRef : owner;
+    let typedFrom: SchemaObject | undefined;
+    if (step.keyword === 'properties') {
+      if (modelReferenceIdentity(site, schemas) === undefined) return undefined;
+      typedFrom = collectObjectProperties(owner, schemas).properties[step.name!];
+    } else if (step.keyword === 'items') {
+      if (owner === component && !isArrayComponentRef(site)) return undefined;
+      const items: unknown = arraySchemaOf(owner)?.items;
+      typedFrom = typeof items === 'object' && items !== null ? (items as SchemaObject) : undefined;
+    }
+    if (typedFrom !== step.next) return undefined;
   }
-  return pointerLanding(ref, schemas);
+  return steps[steps.length - 1]?.next;
 }
 
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */

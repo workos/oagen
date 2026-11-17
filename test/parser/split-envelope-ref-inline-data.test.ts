@@ -806,6 +806,82 @@ describe('#669 declarations of one property the parser types identically are one
       });
     });
 
+    describe('a JSON Pointer is read as the settle types it', () => {
+      /** `Source`, whose properties the pointers below enter, beside `Named`, a string component read as its `allOf` member. */
+      const sources: Record<string, Schema> = {
+        Source: {
+          type: 'object',
+          properties: {
+            code: { ...ownNull(openapi, string), maxLength: 8, allOf: [string] },
+            list: { allOf: [{ type: 'array', items: string }, { items: { maxLength: 5 } }] },
+            owner: { ...ownNull(openapi, { type: 'object' }), allOf: [Pet] },
+            box: { type: 'object', properties: { tags: { type: 'array', items: string } } },
+          },
+        },
+        Named: { allOf: [string, { maxLength: 3 }] },
+        Both: { allOf: [object({ tag: string }, []), object({ tag: { maxLength: 2 } }, [])] },
+      };
+      const to = (place: string): Schema => ({ $ref: `#/components/schemas/${place}` });
+      const typed = async (declarations: Schema[], schemas = sources) => {
+        const { type, constraints } = fieldOf(await parse(flattened(openapi, declarations, schemas)), 'Holder2', 'x')!;
+        return constraints ? `${show(type)} ${JSON.stringify(constraints)}` : show(type);
+      };
+      /** `pointer` beside `twin`, in both orders: one answer. */
+      const beside = async (pointer: Schema, twin: Schema, schemas = sources) => {
+        const forward = await typed([pointer, twin], schemas);
+        expect(await typed([twin, pointer], schemas), JSON.stringify(twin)).toBe(forward);
+        return forward;
+      };
+
+      it('reads one that ends at an inline `allOf` member as the field around it, `null` and limits included', async () => {
+        // `code: { type: 'string', nullable, maxLength: 8, allOf: [{ type: 'string' }] }`: the type at hand stays.
+        const member = to('Source/properties/code/allOf/0');
+        expect(await typed([member, member])).toBe('nullable<string> {"maxLength":8}');
+        expect(await beside(member, string)).toBe('nullable<string>');
+        expect(await beside(member, { ...string, maxLength: 8 })).toBe('nullable<string> {"maxLength":8}');
+        expect(await beside(member, { ...ownNull(openapi, string), maxLength: 8 })).toBe(
+          'nullable<string> {"maxLength":8}',
+        );
+        expect(await beside(member, to('Source/properties/code'))).toBe('nullable<string> {"maxLength":8}');
+        // A component read as its member: `Named: { allOf: [{ type: 'string' }, { maxLength: 3 }] }`.
+        expect(await typed([to('Named/allOf/0'), to('Named/allOf/0')])).toBe('string {"maxLength":3}');
+        expect(await beside(to('Named/allOf/0'), { ...string, maxLength: 3 })).toBe('string {"maxLength":3}');
+        expect(await beside(to('Named/allOf/0'), ref('Named'))).toBe('string {"maxLength":3}');
+        expect(await beside(to('Named/allOf/0'), string)).toBe('string');
+        expect(warnings()).toEqual([]);
+      });
+
+      it('reads one that ends at a `$ref` member as that reference, and one through nested properties', async () => {
+        // `owner: { type: ['object', 'null'], allOf: [{ $ref: Pet }] }`: the member is `Pet`, the wrapper's `null` not its own.
+        expect(await typed([to('Source/properties/owner/allOf/0'), to('Source/properties/owner/allOf/0')])).toBe('Pet');
+        expect(await beside(to('Source/properties/owner/allOf/0'), Pet)).toBe('Pet');
+        expect(await beside(to('Source/properties/owner'), nullableWrapper(openapi, Pet))).toBe('nullable<Pet>');
+        expect(await beside(to('Source/properties/box/properties/tags'), { type: 'array', items: string })).toBe(
+          'string[]',
+        );
+        expect(await beside(to('Source/properties/box/properties/tags/items'), string)).toBe('string');
+        expect(warnings()).toEqual([]);
+      });
+
+      it('leaves one whose field or items are typed from another schema than it names to the settle', async () => {
+        // Items a sibling member limits: the settle reads `string` with `maxLength: 5`.
+        const items = to('Source/properties/list/allOf/0/items');
+        expect(await typed([items, items])).toBe('string {"maxLength":5}');
+        expect(await typed([items, { ...string, maxLength: 5 }])).toBe('(string | string)');
+        // A property two members declare, typed from the two combined.
+        const tag = to('Both/allOf/0/properties/tag');
+        expect(await typed([tag, tag])).toBe('string {"maxLength":2}');
+        expect(await typed([tag, { ...string, maxLength: 2 }])).toBe('(string | string)');
+        // Two keys of one name: the settle reads the kept model's field.
+        const notes = {
+          Note: { type: 'object', properties: { a: string, b: string } },
+          note: { type: 'object', properties: { a: integer } },
+        };
+        expect(await typed([to('note/properties/a'), to('note/properties/a')], notes)).toBe('string');
+        expect(await typed([to('note/properties/a'), integer], notes)).toBe('(string | integer)');
+      });
+    });
+
     describe('references that are not read through', () => {
       it('leaves a pointer the settle refuses to the settle, which reports it as before', async () => {
         // A pointer into a variant of the union the model flattens: the
