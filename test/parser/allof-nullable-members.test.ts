@@ -794,3 +794,37 @@ describe('#676 the conjunction of two declarations settles `null` by the same re
     ).toBe('PetOwner');
   });
 });
+
+describe('#676 review: a component many members name is read once', () => {
+  it('reads a chain of components that each compose the one before twice without revisiting it', async () => {
+    // `Level0` is a nullable object and each `LevelN` the `allOf` of two `$ref`s to the level before, so every
+    // level admits `null` and an unshared walk reads `Level0` 2^40 times for the last one.
+    const depth = 40;
+    const levels: Record<string, unknown> = { Level0: nullableObject('3.1.0', 'name') };
+    for (let level = 1; level <= depth; level++) {
+      levels[`Level${level}`] = { allOf: [ref(`Level${level - 1}`), ref(`Level${level - 1}`)] };
+    }
+    const spec = await parse(
+      document('3.1.0', {
+        ...levels,
+        // The same chain ending on a component that admits no `null`.
+        Plain0: { type: 'object', properties: { id: string } },
+        Plain1: { allOf: [ref('Plain0'), ref(`Level${depth}`)] },
+        Pet: {
+          type: 'object',
+          properties: {
+            top: ref(`Level${depth}`),
+            by_hand: { allOf: [ref(`Level${depth}`), ref(`Level${depth - 1}`)] },
+            plain: ref('Plain1'),
+          },
+        },
+      }),
+    );
+    expect(Object.fromEntries(modelOf(spec, 'Pet')!.fields.map((f) => [f.name, show(f.type)]))).toEqual({
+      top: `nullable<Level${depth}>`,
+      by_hand: 'nullable<PetByHand>',
+      plain: 'Plain1',
+    });
+    expect(fieldNames(spec, `Level${depth}`)).toEqual(['name']);
+  });
+});
