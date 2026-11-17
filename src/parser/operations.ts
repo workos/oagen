@@ -1009,6 +1009,8 @@ export function extractOperations(
     servers: ServerEntry[] | undefined,
     sink: { deferred: DeferredInlineType[]; registry: ModelShapeRegistry },
     yields?: BodyNameYields,
+    /** An `operationId` to name the models from in place of the operation's own naming: the rehearsal's stand-in (`readBodies`). */
+    namedFrom?: string,
   ) => {
     // The first tag with a name (`serviceTag`), read from the list
     // `Operation.tags` carries, so the service is named from one of its
@@ -1050,7 +1052,7 @@ export function extractOperations(
       operationHints?.[`${method.toUpperCase()} ${path}`]?.pagination,
       registeredModels,
       sink.registry,
-      modelOperationIds.get(key),
+      namedFrom ?? modelOperationIds.get(key),
       yields,
     );
     return { tag, serviceName, ...built };
@@ -1076,8 +1078,24 @@ export function extractOperations(
           const key = `${method} ${path}`;
           if (!op || !included(key)) continue;
           try {
-            const sink = { deferred: [], registry: new Map(registry) };
-            bodies.push(bodyNamesOf(key, buildAt(path, pathItem, method, op, undefined, sink), componentResponseNames));
+            // Built as it is, and once more under a stand-in for its stem: a
+            // name both readings mint is one the document gives the model,
+            // not one minted from the stem (`bodyNamesOf`).
+            const build = (namedFrom?: string) =>
+              buildAt(
+                path,
+                pathItem,
+                method,
+                op,
+                undefined,
+                { deferred: [], registry: new Map(registry) },
+                undefined,
+                namedFrom,
+              );
+            const built = build();
+            bodies.push(
+              bodyNamesOf(key, built, build(standInOperationId(built.modelQualifier)), componentResponseNames),
+            );
           } catch {
             // Left out: the loop below fails on it with the operation's own error.
           }
@@ -7304,35 +7322,66 @@ function ownBodyTypeRefs(
 }
 
 /**
- * What the inline request and success bodies of an operation mint, read off
- * the operation built on its own (`built`: `buildOperation` against a copy
- * of the registry as it is seeded before any operation is read, giving
- * nothing up) — so the names are the ones the operation takes, by
- * construction: the reading it gives a list envelope, an array body's items
- * as they settle, a later status code's body under the stem it steps to
- * (`CreatePetResponse201`, or `CreatePetResponse2` past a component
+ * What the inline request and success bodies of an operation mint from its
+ * stem, read off the operation built on its own (`built`: `buildOperation`
+ * against a copy of the registry as it is seeded before any operation is
+ * read, giving nothing up) — so the names are the ones the operation takes,
+ * by construction: the reading it gives a list envelope, an array body's
+ * items as they settle, a later status code's body under the stem it steps
+ * to (`CreatePetResponse201`, or `CreatePetResponse2` past a component
  * `CreatePetResponse201`), an explicit `dataPath`'s items. The models are
  * the request body's, the success bodies' and the envelope companions',
  * less every model a component response's body is shared under or mints
  * (`componentResponseNames`), which is no operation's own; the enums are the
  * inline enums those models and the bodies' own types carry
  * (`ownBodyTypeRefs`).
+ *
+ * Minted from the stem means the name would be another under another stem,
+ * and that is how it is read: the operation is built once more under a
+ * stand-in for its stem (`standIn`, `standInOperationId`), and a name both
+ * readings hold is left out. Such a name is the document's own — a response
+ * named from its `object` const (`PetOwner`), a variant named from its
+ * `title` or bare const, an enum or a model nested under one of those — and
+ * every operation that returns it shares it, whatever stems it happens to
+ * hold: `pet` and `petOwner` returning one `object: pet_owner` resource
+ * hold one `PetOwner` (Michael, #683 review; the stem was looked for in the
+ * name, which found `Pet` in it and split the resource in two).
  */
 function bodyNamesOf(
   key: string,
   built: ReturnType<typeof buildOperation>,
+  standIn: ReturnType<typeof buildOperation>,
   componentResponseNames: ReadonlySet<string>,
 ): OperationBodyNames {
-  const companions = built.envelopeCompanions ?? [];
-  const models = [...built.inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
-    (model) => !componentResponseNames.has(model.name),
-  );
+  const namesOf = (reading: ReturnType<typeof buildOperation>): { models: string[]; enums: string[] } => {
+    const companions = reading.envelopeCompanions ?? [];
+    const models = [...reading.inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
+      (model) => !componentResponseNames.has(model.name),
+    );
+    return {
+      models: models.map((model) => model.name),
+      enums: inlineEnumNames(ownBodyTypeRefs(reading.operation, reading.componentBodies, companions), models),
+    };
+  };
+  const own = namesOf(built);
+  const other = namesOf(standIn);
+  const given = new Set([...other.models, ...other.enums]);
   return {
     key,
     stem: built.modelQualifier,
-    models: models.map((model) => model.name),
-    enums: inlineEnumNames(ownBodyTypeRefs(built.operation, built.componentBodies, companions), models),
+    models: own.models.filter((name) => !given.has(name)),
+    enums: own.enums.filter((name) => !given.has(name)),
   };
+}
+
+/**
+ * An `operationId` to build an operation under in place of its own naming,
+ * to tell the names it mints from its stem from the ones the document gives
+ * (`bodyNamesOf`): any id whose stem is not `stem`, the operation's own.
+ */
+function standInOperationId(stem: string): string {
+  const standIn = 'bodyNamesStandIn';
+  return operationIdModelBase(standIn) === stem ? `${standIn}Other` : standIn;
 }
 
 /**
@@ -7380,7 +7429,8 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * or enum, nested deeper in its body, takes the next free numbered name
  * (`CreatePetResponseDraftResponse2`), whatever the two shapes are. The
  * names are read off a rehearsal of the operations themselves (`read`: each
- * operation `included` names, built on its own, see `bodyNamesOf`), of the
+ * operation `included` names, built on its own, and what it mints from its
+ * stem alone, see `bodyNamesOf`), of the
  * operations a name can be contested between alone: those whose stem
  * contains another operation's or is contained in one (`stemsInContest`),
  * the stem being the `operationId`'s the reuse and contest passes left the

@@ -1002,43 +1002,82 @@ describe('#683', () => {
         expect(warn).not.toHaveBeenCalled();
       });
 
-      // Michael (round 1), finding 2: a name carries a stem wherever the stem
-      // stands in it, so a response named from its `object` const is settled
-      // by the contest when the const happens to hold its operation's stem.
-      it('settles a name that holds its operation’s stem anywhere: a response named from its `object` const', async () => {
-        // `pet` returning `object: get_pet_response` beside `getPet`: `GetPet` contains `Pet`.
+      // Michael (round 1), finding 2: the claim was `name.indexOf(stem)`, so a
+      // name the document gives a model — from an `object` const, a title —
+      // was contested whenever it happened to hold the stems, which the docs
+      // did not say and which split one resource two operations return. A
+      // claim is now a name minted from the stem, as the docs said.
+      it('leaves a model the document names to every operation that returns it, whatever stems its name holds', async () => {
+        const owner = () => obj({ object: { const: 'pet_owner' }, name: str });
+        // One `object: pet_owner` resource from `pet` and `petOwner`: `PetOwner` holds both
+        // stems, and is one model, as on the base.
         expect(
           await settled(openapi, {
-            '/pets': { get: returning('pet', obj({ object: { const: 'get_pet_response' }, a: str })) },
-            '/pets/{id}': { get: returning('getPet', obj({ c: str })) },
+            '/pet': { get: returning('pet', owner()) },
+            '/pet-owner': { get: returning('petOwner', owner()) },
+            '/dogs': { get: returning('listDogs', owner()) },
           }),
         ).toMatchInlineSnapshot(`
           [
-            "GET /pets (pet): none → GetPetResponse2",
-            "GET /pets/{id} (getPet): none → GetPetResponse",
-            "GetPetResponse { c: string }",
-            "GetPetResponse2 { object: "get_pet_response", a: string }",
+            "GET /dogs (listDogs): none → PetOwner",
+            "GET /pet (pet): none → PetOwner",
+            "GET /pet-owner (petOwner): none → PetOwner",
+            "PetOwner { object: "pet_owner", name: string }",
+          ]
+        `);
+        // A `shape` both operations return, whose variants are named from their titles:
+        // `CreatePetResponseDraftShape` holds both stems, and is one model for both.
+        const shaped = (field: string) =>
+          obj({
+            [field]: str,
+            shape: {
+              oneOf: [
+                obj({ kind: { const: 'a' }, side: int }, { title: 'CreatePetResponseDraftShape' }),
+                obj({ kind: { const: 'b' }, radius: int }, { title: 'Round' }),
+              ],
+            },
+          });
+        expect(
+          await settled(openapi, {
+            '/pets': { post: returning('createPet', shaped('p')) },
+            '/pet-drafts': { post: returning('createPetResponseDraft', shaped('d')) },
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreatePetResponse { p: string, shape: CreatePetResponseDraftShape | Round }",
+            "CreatePetResponseDraftResponse { d: string, shape: CreatePetResponseDraftShape | Round }",
+            "CreatePetResponseDraftShape { kind: "a", side: integer }",
+            "POST /pet-drafts (createPetResponseDraft): none → CreatePetResponseDraftResponse",
+            "POST /pets (createPet): none → CreatePetResponse",
+            "Round { kind: "b", radius: integer }",
           ]
         `);
         expect(warn).not.toHaveBeenCalled();
-        // The same response on `listDogs`, whose stem the name does not hold, is no claim:
-        // the merge keeps the larger definition for both, with its warning, as before.
-        const dogs = await parse(
-          document(openapi, {
-            '/dogs': { get: returning('listDogs', obj({ object: { const: 'get_pet_response' }, a: str })) },
-            '/pets/{id}': { get: returning('getPet', obj({ c: str })) },
-          }),
-        );
-        expect(summary(dogs)).toMatchInlineSnapshot(`
-          [
-            "GET /dogs (listDogs): none → GetPetResponse",
-            "GET /pets/{id} (getPet): none → GetPetResponse",
-            "GetPetResponse { object: "get_pet_response", a: string }",
-          ]
-        `);
-        expect(warn.mock.calls.map((call: unknown[]) => call[0])).toEqual([
-          '[oagen] Warning: Inline model "GetPetResponse" has more than one definition with different fields or field types (1 vs 2) — keeping the one with more fields',
-        ]);
+      });
+
+      it('leaves a response named from its `object` const beside an operation’s own response of that name to the merge, as before', async () => {
+        // `object: get_pet_response` names the response `GetPetResponse`, the name `getPet`
+        // mints from its stem. No stem mints the const's name, so nothing is given up —
+        // whether the operation is `pet`, whose stem the name happens to hold, or `listDogs`
+        // — and the merge keeps the larger definition for both, with its warning.
+        for (const [path, operationId] of [
+          ['/pets', 'pet'],
+          ['/dogs', 'listDogs'],
+        ] as const) {
+          warn.mockClear();
+          const spec = await parse(
+            document(openapi, {
+              [path]: { get: returning(operationId, obj({ object: { const: 'get_pet_response' }, a: str })) },
+              '/pets/{id}': { get: returning('getPet', obj({ c: str })) },
+            }),
+          );
+          expect(summary(spec).filter((line) => !line.startsWith('GET'))).toEqual([
+            'GetPetResponse { object: "get_pet_response", a: string }',
+          ]);
+          expect(warn.mock.calls.map((call: unknown[]) => call[0])).toEqual([
+            '[oagen] Warning: Inline model "GetPetResponse" has more than one definition with different fields or field types (1 vs 2) — keeping the one with more fields',
+          ]);
+        }
       });
 
       it('asks an `operationIdTransform` for each operation’s name once, whatever is given up', async () => {
@@ -1342,11 +1381,12 @@ describe('#683', () => {
       ).toEqual({ a: [['CreatePetResponseDraftResponse', 'CreatePetResponseDraftResponse2']] });
     });
 
-    it('settles a name that carries a stem behind a const, and leaves one that carries none', () => {
+    it('settles a name minted from a stem that stands behind a variant’s const', () => {
+      // `EmailCreatePetRequest`: `createPet`'s body variant pinning `kind: email`, and the body of `emailCreatePet`.
       expect(
         settle([
-          body('a', 'CreatePet', ['EmailCreatePetRequest', 'Circle']),
-          body('b', 'EmailCreatePet', ['EmailCreatePetRequest', 'Circle']),
+          body('a', 'CreatePet', ['EmailCreatePetRequest', 'SmsCreatePetRequest']),
+          body('b', 'EmailCreatePet', ['EmailCreatePetRequest']),
         ]),
       ).toEqual({ a: [['EmailCreatePetRequest', 'EmailCreatePetRequest2']] });
     });
