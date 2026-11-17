@@ -649,16 +649,97 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
   });
 
   describe('review 1 — a scheme added under a name the old document already had in use is breaking (MichaelDeBoey)', () => {
+    // What the parser still omits from `auth` (#662): a definition without
+    // the field its type is read by, or of a `type` OpenAPI does not define.
     const omitted: Array<[string, Record<string, unknown>]> = [
+      ['openIdConnect with no openIdConnectUrl', { type: 'openIdConnect' }],
+      ['http with no scheme', { type: 'http' }],
+      ['an unknown type', { type: 'saml' }],
+    ];
+    // The definitions this review named, which `auth` carries since #662.
+    const carried: Array<[string, Record<string, unknown>, AuthScheme]> = [
       [
         'openIdConnect',
         { type: 'openIdConnect', openIdConnectUrl: 'https://auth.pets.example.com/.well-known/openid-configuration' },
+        {
+          kind: 'openIdConnect',
+          schemeName: 'petKey',
+          openIdConnectUrl: 'https://auth.pets.example.com/.well-known/openid-configuration',
+        },
       ],
-      ['http digest', { type: 'http', scheme: 'digest' }],
+      ['http digest', { type: 'http', scheme: 'digest' }, { kind: 'http', schemeName: 'petKey', scheme: 'digest' }],
       // `mutualTLS` is an OAS 3.1 scheme type.
-      ...(openapi === '3.1.0' ? [['mutualTLS', { type: 'mutualTLS' }] as [string, Record<string, unknown>]] : []),
+      ...(openapi === '3.1.0'
+        ? [
+            ['mutualTLS', { type: 'mutualTLS' }, { kind: 'mutualTLS', schemeName: 'petKey' }] as [
+              string,
+              Record<string, unknown>,
+              AuthScheme,
+            ],
+          ]
+        : []),
     ];
     const petKey: AuthScheme = { kind: 'apiKey', schemeName: 'petKey', in: 'header', name: 'X-Key' };
+
+    it.each(carried)(
+      '%s → apiKey under security: [{ petKey: [] }]: security-scheme-modified, breaking, exit 2, in either direction (#662)',
+      async (label, oldDefinition, oldScheme) => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+          const before = await parse({ security: [{ petKey: [] }], securitySchemes: { petKey: oldDefinition } });
+          const after = await parse({ security: [{ petKey: [] }], securitySchemes: { petKey: xKey } });
+          // The parser reads the old definition, without a warning.
+          expect(before.auth).toEqual([oldScheme]);
+          expect(warn).not.toHaveBeenCalled();
+          expect(schemesInUse(before)).toEqual(new Set(['petKey']));
+
+          const diff = diffSpecs(before, after);
+          expect(diff.changes).toEqual([
+            {
+              kind: 'security-scheme-modified',
+              schemeName: 'petKey',
+              oldScheme,
+              newScheme: petKey,
+              details: `${label} → apiKey`,
+              classification: 'breaking',
+            },
+          ]);
+          expect(diff.behaviorChanges).toEqual([
+            {
+              kind: 'security-scheme-changed',
+              schemeName: 'petKey',
+              oldScheme,
+              newScheme: petKey,
+              classification: 'breaking',
+            },
+          ]);
+          expect(diff.summary).toEqual({
+            added: 0,
+            removed: 0,
+            modified: 1,
+            breaking: 1,
+            additive: 0,
+            behaviorChanges: 1,
+          });
+          expect(exitCode(diff)).toBe(2);
+
+          const reverse = diffSpecs(after, before);
+          expect(reverse.changes).toEqual([
+            {
+              kind: 'security-scheme-modified',
+              schemeName: 'petKey',
+              oldScheme: petKey,
+              newScheme: oldScheme,
+              details: `apiKey → ${label}`,
+              classification: 'breaking',
+            },
+          ]);
+          expect(exitCode(reverse)).toBe(2);
+        } finally {
+          warn.mockRestore();
+        }
+      },
+    );
 
     it.each(omitted)(
       '%s → apiKey under security: [{ petKey: [] }]: security-scheme-added, breaking, exit 2; the reverse is the breaking removal',
@@ -704,7 +785,8 @@ describe.each(['3.0.3', '3.1.0'])('#384 on OAS %s', (openapi) => {
       try {
         const before = await parse({
           security: [{ bearer: [] }],
-          securitySchemes: { petKey: { type: 'http', scheme: 'digest' }, bearer },
+          // An `http` scheme with no `scheme`: still omitted (#662).
+          securitySchemes: { petKey: { type: 'http' }, bearer },
         });
         const after = await parse({ security: [{ bearer: [] }], securitySchemes: { petKey: xKey, bearer } });
         const diff = diffSpecs(before, after);

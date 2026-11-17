@@ -184,7 +184,7 @@ components:
     ]);
   });
 
-  it('warns about and omits security schemes the IR cannot represent', async () => {
+  it('carries the http digest, openIdConnect and mutualTLS schemes it used to warn about and omit (#662)', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
       const ir = await parseYaml(`
@@ -206,19 +206,59 @@ components:
       scheme: bearer
 `);
 
+      // Every scheme comes through, each with its definition, in document order.
+      expect(ir.auth).toEqual([
+        { kind: 'http', schemeName: 'digestAuth', scheme: 'digest' },
+        {
+          kind: 'openIdConnect',
+          schemeName: 'oidc',
+          openIdConnectUrl: 'https://auth.example.com/.well-known/openid-configuration',
+        },
+        { kind: 'mutualTLS', schemeName: 'mtls' },
+        { kind: 'bearer', schemeName: 'bearerAuth' },
+      ]);
+
+      // Nothing is unsupported, so nothing is warned about.
+      const messages = warnSpy.mock.calls.map((call) => String(call[0]));
+      expect(messages).toHaveLength(0);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('warns about and omits security schemes the IR still cannot represent', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const ir = await parseYaml(`
+openapi: '3.1.0'
+info: { title: repro, version: '1' }
+paths: {}
+components:
+  securitySchemes:
+    schemeless:
+      type: http
+    oidc:
+      type: openIdConnect
+    saml:
+      type: saml
+    bearerAuth:
+      type: http
+      scheme: bearer
+`);
+
       // Supported schemes still come through; unsupported ones are dropped.
       expect(ir.auth).toEqual([{ kind: 'bearer', schemeName: 'bearerAuth' }]);
 
-      // One diagnostic per unsupported scheme, naming the scheme and its type.
+      // One diagnostic per unsupported scheme, naming the scheme, its type and what it lacks.
       const messages = warnSpy.mock.calls.map((call) => String(call[0]));
       expect(messages).toHaveLength(3);
       for (const message of messages) expect(message).toContain('[oagen] Warning:');
-      expect(messages[0]).toContain('"digestAuth"');
-      expect(messages[0]).toContain('digest');
+      expect(messages[0]).toContain('"schemeless"');
+      expect(messages[0]).toContain('type: http, no scheme');
       expect(messages[1]).toContain('"oidc"');
-      expect(messages[1]).toContain('openIdConnect');
-      expect(messages[2]).toContain('"mtls"');
-      expect(messages[2]).toContain('mutualTLS');
+      expect(messages[1]).toContain('type: openIdConnect, no openIdConnectUrl');
+      expect(messages[2]).toContain('"saml"');
+      expect(messages[2]).toContain('type: saml');
     } finally {
       warnSpy.mockRestore();
     }

@@ -125,6 +125,7 @@ export {
 // Parameter identity: location + name, a header's name case-folded
 export type { ParameterLocation } from './ir/parameter-key.js';
 export { foldHeaderName, foldParameterName, parameterKey } from './ir/parameter-key.js';
+export { foldHttpAuthScheme } from './ir/http-auth-scheme.js';
 
 // Errors
 export {

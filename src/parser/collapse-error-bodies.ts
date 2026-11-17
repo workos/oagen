@@ -179,7 +179,7 @@ import {
   typeRefConstraints,
   walkTypeRef,
 } from '../ir/types.js';
-import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
+import { numberedName, singularizeTrailingWord, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
 import { combineConstraints } from './schemas.js';
@@ -1192,19 +1192,34 @@ function nestedPrefix(item: Model, naming: NamingContext, visiting: ReadonlySet<
  * The name of a nested error body `item` reached through `field` of a body
  * `parent` named `parentName`: the parent's name plus the field, singular
  * for an array item, replacing the field where the parent's name already
- * ends in it. When the field is not among the ones the parent's name reads
- * (an optional one), that name says nothing of the item, so the item's own
- * fields follow after `With`, as they prefix the field in a required
- * parent's name — `ErrorBodyDetailWithReason` for
- * `{ message, detail?: { reason } }` — so two items under one optional field
- * never ask for one name.
+ * ends in it. The singular is the one the same field gives its items on a
+ * component: the field's PascalCased name with its trailing word
+ * singularized (`singularizeTrailingWord`, which `qualifyInlineModelName`
+ * reads a component's field by), so `canvases` is `Canvas`, `series` is
+ * `Series` and `tax_series` is `TaxSeries` — `ErrorBodyCanvasWithReason`
+ * for `{ message, canvases?: [{ reason }] }`, as `Pet` + `canvases` is
+ * `PetCanvas` (#665; the field was singularized as the document spells it
+ * before, so a lowercase `canvases` missed the safe list and was
+ * `ErrorBodyCanvaseWithReason`, and `series` `ErrorBodySeryWithStep`). A
+ * field that is its own singular (`series`, `status`, `tags`, `data`) has
+ * no plural to replace: under a parent whose name ends in it, the
+ * replacement would be the parent's own name, which the parent holds, so
+ * the word follows the parent's name as an object field's does —
+ * `ErrorBodyWithReasonSeriesSeries` for `{ message, series: [{ reason }] }`
+ * on `ErrorBodyWithReasonSeries`, as `detail: { reason }` is
+ * `ErrorBodyWithReasonDetailDetail` on `ErrorBodyWithReasonDetail`. When
+ * the field is not among the ones the parent's name reads (an optional
+ * one), that name says nothing of the item, so the item's own fields follow
+ * after `With`, as they prefix the field in a required parent's name —
+ * `ErrorBodyDetailWithReason` for `{ message, detail?: { reason } }` — so
+ * two items under one optional field never ask for one name.
  */
 function nestedName(parentName: string, parent: Model, field: Field, item: Model, naming: NamingContext): string {
   const word = toPascalCase(field.name);
   const inArray = unwrapNullable(field.type).kind === 'array';
-  const itemWord = inArray ? toPascalCase(singularize(field.name)) : word;
+  const itemWord = inArray ? singularizeTrailingWord(word) : word;
   const base =
-    inArray && word.length > 0 && parentName.endsWith(word)
+    inArray && itemWord !== word && parentName.endsWith(word)
       ? `${parentName.slice(0, -word.length)}${itemWord}`
       : `${parentName}${itemWord}`;
   if (namedFields(parent).includes(field)) return base;

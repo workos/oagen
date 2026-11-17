@@ -191,6 +191,13 @@ const SINGULAR_SAFE_LIST = new Set([
 ]);
 
 /**
+ * The safe list as `singularize` looks a word up in it: in lowercase, so
+ * `Canvas`, `canvas` and `CANVAS` are one entry, however the list or the
+ * caller spells the word (#665).
+ */
+const SAFE_LISTED = new Set([...SINGULAR_SAFE_LIST].map((word) => word.toLowerCase()));
+
+/**
  * The singular of a word read as a plural, by suffix alone: `word` ends in
  * `s`, and the caller has ruled out whatever it does not read as a plural.
  * The one set of rules `singularize` and `singularizePathSegment` share, so a
@@ -237,11 +244,23 @@ function stripPluralSuffix(word: string): string {
 }
 
 /**
- * Conservative singularize for one word of a model name — the leading word
- * of a component name (`cleanSchemaName`), the trailing word of an inline
- * model's name (`qualifyInlineModelName`), the field a nested error body's
- * items are reached through (`collapseErrorBodies`), the array a `dataPath`
- * hint ends in (`inlineItemNameForPath`) — or a raw field name. The suffix
+ * Conservative singularize for ONE word of a model name: the leading word
+ * of a component name (`singularizeLeadingWord`, for `cleanSchemaName`) or
+ * the trailing word of a field's PascalCased name (`singularizeTrailingWord`,
+ * for the three sites that name a model after the field that holds it: a
+ * model inlined under a parent, `qualifyInlineModelName`; the field a nested
+ * error body's array items are reached through, `collapseErrorBodies`; the
+ * array a `dataPath` hint ends in, `inlineItemNameForPath`). Every caller
+ * goes through one of those two helpers, since a name of several words is
+ * read here by its suffix alone and misses the safe list and the
+ * four-letter guard (`TaxSeries` → `TaxSery`, `tax_series` → `tax_sery`,
+ * `OrderStatus` → `OrderStatu`, `ItemTags` → `ItemTag`). The word is read
+ * in lowercase and returned in the case it was given, so the safe list and
+ * the guards hold however it is written: `canvases` → `canvas`, `Canvases`
+ * → `Canvas`, `CANVASES` → `CANVAS`, and `series`, `Series` and `SERIES`
+ * are kept (#665; before it the safe list was looked up as written, so a
+ * lowercase `canvases` was `canvase` and `series` was `sery`, and a word in
+ * capitals was never read as a plural). The suffix
  * rules are the ones a path segment is singularized by (`stripPluralSuffix`,
  * shared with `singularizePathSegment`), so a field and a resource of one
  * noun spell its singular alike: `Directories` → `Directory`, `Organizations`
@@ -272,16 +291,20 @@ function stripPluralSuffix(word: string): string {
  * every version before this one).
  */
 export function singularize(word: string): string {
-  if (SINGULAR_SAFE_LIST.has(word) || word.length <= 4) return word;
+  // Read in lowercase, as stripPluralSuffix reads its suffixes, and sliced
+  // from the word as given: the safe list and the guards below hold for
+  // `canvases`, `Canvases` and `CANVASES` alike (#665).
+  const lower = word.toLowerCase();
+  if (SAFE_LISTED.has(lower) || word.length <= 4) return word;
   // `-ss` is never a plural (`Class`), and neither is `-ysis`, the singular
   // the `-yses` rule writes (`Analysis`), so the singulars the suffix rules
   // write are returned as they are when passed back in, as cleanSchemaName
   // requires — all but the `-us` a consonant + `-uses` plural gives, which
   // is read as a plural again (`Bonuses` → `Bonus` → `Bonu`).
-  if (!word.endsWith('s') || word.endsWith('ss') || word.endsWith('ysis')) return word;
+  if (!lower.endsWith('s') || lower.endsWith('ss') || lower.endsWith('ysis')) return word;
   // A safe-listed word's `-es` plural is that word (`Canvases` → `Canvas`,
   // `Radiuses` → `Radius`), whatever the suffix rules would make of it.
-  if (word.endsWith('es') && SINGULAR_SAFE_LIST.has(word.slice(0, -2))) return word.slice(0, -2);
+  if (lower.endsWith('es') && SAFE_LISTED.has(lower.slice(0, -2))) return word.slice(0, -2);
   return stripPluralSuffix(word);
 }
 
@@ -373,4 +396,33 @@ export function singularizeLeadingWord(name: string): string {
   const leadWord = match[1];
   const singular = singularize(leadWord);
   return singular === leadWord ? name : singular + name.slice(leadWord.length);
+}
+
+/**
+ * `name` with its trailing PascalCase word singularized (`Domains` →
+ * `Domain`, `ShippingAddresses` → `ShippingAddress`, `ErrorCanvases` →
+ * `ErrorCanvas`): the word a model takes from the field that holds it, read
+ * off the field's PascalCased name. The one reading every site that names a
+ * model after a field shares — a model inlined under a parent, an array's
+ * items and a map's values among them (`qualifyInlineModelName`), a nested
+ * error body's array items (`collapseErrorBodies`) and the array a
+ * `dataPath` hint ends in (`inlineItemNameForPath`) — so an array field
+ * names one item word wherever it is declared and however it is spelled:
+ * `canvases`, `Canvases` and `CANVASES` are `Canvas`; `tax_series`,
+ * `tax-series` and `taxSeries` are `TaxSeries`, the safe-listed `Series`
+ * being the word that is read; `order_status` is `OrderStatus`;
+ * `invalid_keys` is `InvalidKeys`, its trailing word being four letters or
+ * fewer (#665; before it, a nested error body's field was singularized as
+ * the document spells it and a `dataPath` segment as one word, so neither
+ * read `tax_series` or `invalid_keys` as a component's field is read, nor
+ * the error body `canvases`). A name that does not end in a PascalCase word
+ * — one a digit ends (`Causes2`, `CausesV2`), the empty name, one that was
+ * never PascalCased (`causes`) — is returned as it is, as
+ * `singularizeLeadingWord` returns a name that does not start with one.
+ */
+export function singularizeTrailingWord(name: string): string {
+  const match = name.match(/^(.*?)([A-Z][a-z]*)$/);
+  if (!match) return name;
+  const [, leading, trailingWord] = match;
+  return `${leading}${singularize(trailingWord)}`;
 }
