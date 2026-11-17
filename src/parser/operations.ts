@@ -79,6 +79,7 @@ import {
   pinnedDeclarationAdmitsNull,
   pinnedDeclarationValue,
   rehearse,
+  unionFlaggedNullable,
   unwrapCollapsedWrappers,
   unwrapNullableField,
   unwrapNullableSchema,
@@ -4732,11 +4733,16 @@ function typePickedRequestBody(
   // `oneOf` is still built as written, the `allOf` aside: `{ allOf:
   // [{ $ref: Owner }], oneOf: [{ type: 'object', properties: { nickname } },
   // { type: 'null' }] }` is `nullable<union[AddPetRequest]>`, as it was
-  // before #535, not the `Owner` a field with the same schema gets.
+  // before #535, not the `Owner` a field with the same schema gets. OAS 3.0
+  // `nullable: true` beside the `oneOf` stands for the `null` variant here
+  // as everywhere (`unionFlaggedNullable`; #677), so `{ oneOf: [{ $ref: Pet
+  // }], nullable: true }` is the wrapper `oneOf: [{ $ref: Pet }, { type:
+  // 'null' }]` is, and takes the fall-through with it.
+  const admitsNull = schema.oneOf !== undefined && (schema.oneOf.some(isNullSchema) || unionFlaggedNullable(schema));
   const nullableWrapper =
     schema.allOf === undefined &&
     schema.oneOf !== undefined &&
-    schema.oneOf.some(isNullSchema) &&
+    admitsNull &&
     schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
   // A `oneOf` of string consts is an enum, not a union to build: whether it
@@ -4847,9 +4853,12 @@ function typePickedRequestBody(
       }
     }
 
-    const hasNull = schema.oneOf.some(
-      (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
-    );
+    // `null` by a `null` variant, or by the OAS 3.0 flag standing for one
+    // (`admitsNull` above; #677: the flag was dropped, so `{ oneOf: [{ $ref:
+    // Cat }, { $ref: Dog }], nullable: true }` was a body that admits no
+    // `null` while the same schema on a field does).
+    const hasNull =
+      admitsNull || schema.oneOf.some((v: SchemaObject) => Array.isArray(v.type) && v.type.includes('null'));
     // The mapping's targets are read as a field's or a response's inline
     // union reads them (`inlineMappingTargets`), so the same union carries the
     // same discriminator at every site — an entry written as a pointer
@@ -4906,7 +4915,11 @@ function typePickedRequestBody(
  * Returns null — leaving the union intact — unless the body is a clean
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
- * merged. The pin is read as a union's discriminator reads one
+ * merged. Nor can a body that admits `null`, which is no single object: a
+ * `null` variant is no inline object, and OAS 3.0 `nullable: true` beside
+ * the `oneOf` stands for one (`unionFlaggedNullable`; #677), so either
+ * spelling keeps the nullable union. The pin is read as a union's
+ * discriminator reads one
  * (`pinnedDeclarationValue`): a string `const`, or an `enum:` list holding
  * one string beside any `null` it names (`kind: { type: ['string',
  * 'null'], enum: ['email', null] }` folds as `kind: { type: ['string',
@@ -4952,6 +4965,12 @@ function flattenDiscriminatedUnionBody(
 ): SchemaObject | null {
   const discProp = schema.discriminator?.propertyName;
   if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
+  // A body that admits `null` is no single object: a `null` variant is no
+  // inline object, so it leaves the union intact below, and OAS 3.0
+  // `nullable: true` beside the `oneOf` stands for one
+  // (`unionFlaggedNullable`; #677: the flagged body folded to the object,
+  // its `null` lost, where the `null` variant kept the nullable union).
+  if (unionFlaggedNullable(schema)) return null;
 
   const variants = schema.oneOf as SchemaObject[];
   // Every declaration that pins each value, in variant order, the values in
