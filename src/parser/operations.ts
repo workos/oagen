@@ -66,7 +66,7 @@ import {
   constraintsEntry,
   deferInlineUnionMappingEntries,
   deprecatedEntry,
-  enumComponentDeclaration,
+  referencedComponentLayer,
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSpelling,
@@ -79,6 +79,7 @@ import {
   pinnedDeclarationAdmitsNull,
   pinnedDeclarationValue,
   rehearse,
+  unionFlaggedNullable,
   unwrapCollapsedWrappers,
   unwrapNullableField,
   unwrapNullableSchema,
@@ -450,6 +451,25 @@ export function isIgnoredHeaderParameter(param: ParameterObject): boolean {
   return param.in === 'header' && IGNORED_HEADER_PARAMETERS.has(foldHeaderName(param.name));
 }
 
+/** The header an operation's idempotency key travels in, folded (`foldHeaderName`). */
+const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
+
+/**
+ * Whether `param` is an operation's idempotency header: a header parameter
+ * named `Idempotency-Key`, whatever its case. The SDK injects that header
+ * itself (`Operation.injectIdempotencyKey`), so `buildOperation` types no
+ * parameter from it: it is on no `headerParams` list, a `content` map on it
+ * is not reported, and its schema mints no model or enum. Asked once its
+ * `$ref` is resolved, by `buildOperation` and by the walk over the sites the
+ * readers type (`readSchemaSites`), which steps over it on an operation
+ * under `paths` for the same reason (#670). A webhook's or a callback's
+ * `Idempotency-Key` is a header the SDK is sent, typed like any other
+ * (`readPathItemEntries`), so neither asks this of one.
+ */
+export function isIdempotencyKeyHeader(param: Pick<ParameterObject, 'in' | 'name'>): boolean {
+  return param.in === 'header' && foldHeaderName(param.name) === IDEMPOTENCY_KEY_HEADER;
+}
+
 /** The response header name OpenAPI says to ignore, folded (`foldHeaderName`). */
 const IGNORED_RESPONSE_HEADER = 'content-type';
 
@@ -461,8 +481,10 @@ const IGNORED_RESPONSE_HEADER = 'content-type';
  * `Accept` or `Authorization` response header is read. Asked by the key the
  * `headers` map declares the header under — its name, whatever a `$ref`
  * there leads to — before anything types it, so neither
- * `extractResponseHeaders` nor the sent-only component walk
- * (`sentOnlyComponentNames`, #540) reads the components its schema names.
+ * `extractResponseHeaders` nor the walk over the sites the readers type
+ * (`readSchemaSites`) reads its schema: a component it names is not thereby
+ * received (`sentOnlyComponentNames`, #540), and a titled union in it
+ * contests no title (`markContestedTitles`, #670).
  */
 export function isIgnoredResponseHeader(name: string): boolean {
   return foldHeaderName(name) === IGNORED_RESPONSE_HEADER;
@@ -627,6 +649,14 @@ export interface ResponseObject {
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
+/**
+ * The Path Item Object's fields that hold an operation, in the order the
+ * operations of one path are read (`extractOperations`); a webhook's and a
+ * callback's path item is read through the same fields
+ * (`readPathItemEntries`), and so is every path item by the walk over the
+ * sites the readers type (`readSchemaSites`). Any other key of a Path Item
+ * holds no operation.
+ */
 export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 /**
@@ -3455,13 +3485,13 @@ function buildOperation(
   }
   const allParams = [...paramsByIdentity.values()];
 
-  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key');
+  const hasIdempotencyHeader = allParams.some(isIdempotencyKeyHeader);
   // Reported here, once per parameter the operation types: `extractParams`
   // runs per location, and the passes that re-read a parameter's schema
   // stay silent. The idempotency header is not typed (see `extract` below),
   // so a `content` map on it is not reported.
   for (const param of allParams) {
-    if (param.in === 'header' && foldHeaderName(param.name) === 'idempotency-key') continue;
+    if (isIdempotencyKeyHeader(param)) continue;
     warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${opLabel}`);
   }
 
@@ -3535,7 +3565,7 @@ function buildOperation(
   // The idempotency header is the SDK's to inject (`injectIdempotencyKey`), not a parameter to type.
   const headerParams = extract(
     'header',
-    wireParams.filter((p) => !(p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key')),
+    wireParams.filter((p) => !isIdempotencyKeyHeader(p)),
   );
   const cookieParams = extract('cookie');
   // Keep the body-owned declarations on the operation so downstream passes
@@ -4138,12 +4168,19 @@ export function extractParams(
       // Object for the examples it may carry. Every read below goes through
       // `schema`, so a parameter declared either way is typed by one rule.
       const { schema, media, contentType, contentTypes } = parameterTyping(p);
-      // The one component a bare `$ref` names; an enum component on the
-      // schema it declares its members on (`enumComponentDeclaration`), so
-      // `Kind: { allOf: [{ type: 'string', enum }], description, deprecated
-      // }` is read as the plain spelling is.
+      // The one schema a bare `$ref` points at, read as the node built from
+      // it documents itself (`referencedComponentLayer`): an enum component
+      // on the schema it declares its members on, so `Kind: { allOf: [{
+      // type: 'string', enum }], description, deprecated }` is read as the
+      // plain spelling is; any other with its wrapper layer folded in — its
+      // own text, link, flag, default and examples, else those of an `allOf`
+      // member that declares no type and so only annotates it — so `PetId:
+      // { allOf: [{ description, deprecated: true }], oneOf: [...] }` is
+      // read as `{ description, deprecated: true, oneOf: [...] }` is, the
+      // way the model `PetId` reads both (#679: the component's own keys
+      // alone were read, and the member's never reached the parameter).
       const target = resolveComponentSchemaRef(schema, componentSchemas);
-      const refTarget = target && (enumComponentDeclaration(target) ?? target);
+      const refTarget = target && referencedComponentLayer(target);
       // A `$ref` to an array or primitive component, or to an alias of an
       // enum component (#560), bare or under a wrapper the type builder
       // reads through, is read as a field reads one (`componentReference`,
@@ -4153,7 +4190,10 @@ export function extractParams(
       // then the enum an alias resolves to, as a bare `$ref` to that enum
       // reads it — while under a wrapper those are the parameter's own, read
       // from the wrapper and the members beside the `$ref`. Any other `$ref`
-      // falls back to the one component it names, as before. Any other
+      // falls back to the one schema it points at, read as one level
+      // (`refTarget` above): a model's, a named union's or an enum's own
+      // layer, never a component an alias among them names in turn, which
+      // keeps its text on its own node. Any other
       // schema reads the `allOf` members that declare no type and so only
       // annotate or limit it (`annotatingAllOfMembers`; #555: `allOf: [{
       // type: 'string' }, { description }]` lost the text), as a field reads
@@ -4919,11 +4959,16 @@ function typePickedRequestBody(
   // `oneOf` is still built as written, the `allOf` aside: `{ allOf:
   // [{ $ref: Owner }], oneOf: [{ type: 'object', properties: { nickname } },
   // { type: 'null' }] }` is `nullable<union[AddPetRequest]>`, as it was
-  // before #535, not the `Owner` a field with the same schema gets.
+  // before #535, not the `Owner` a field with the same schema gets. OAS 3.0
+  // `nullable: true` beside the `oneOf` stands for the `null` variant here
+  // as everywhere (`unionFlaggedNullable`; #677), so `{ oneOf: [{ $ref: Pet
+  // }], nullable: true }` is the wrapper `oneOf: [{ $ref: Pet }, { type:
+  // 'null' }]` is, and takes the fall-through with it.
+  const admitsNull = schema.oneOf !== undefined && (schema.oneOf.some(isNullSchema) || unionFlaggedNullable(schema));
   const nullableWrapper =
     schema.allOf === undefined &&
     schema.oneOf !== undefined &&
-    schema.oneOf.some(isNullSchema) &&
+    admitsNull &&
     schema.oneOf.filter((v) => !isNullSchema(v)).length === 1;
 
   // A `oneOf` of string consts is an enum, not a union to build: whether it
@@ -5034,9 +5079,12 @@ function typePickedRequestBody(
       }
     }
 
-    const hasNull = schema.oneOf.some(
-      (v: SchemaObject) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
-    );
+    // `null` by a `null` variant, or by the OAS 3.0 flag standing for one
+    // (`admitsNull` above; #677: the flag was dropped, so `{ oneOf: [{ $ref:
+    // Cat }, { $ref: Dog }], nullable: true }` was a body that admits no
+    // `null` while the same schema on a field does).
+    const hasNull =
+      admitsNull || schema.oneOf.some((v: SchemaObject) => Array.isArray(v.type) && v.type.includes('null'));
     // The mapping's targets are read as a field's or a response's inline
     // union reads them (`inlineMappingTargets`), so the same union carries the
     // same discriminator at every site — an entry written as a pointer
@@ -5093,7 +5141,11 @@ function typePickedRequestBody(
  * Returns null — leaving the union intact — unless the body is a clean
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
- * merged. The pin is read as a union's discriminator reads one
+ * merged. Nor can a body that admits `null`, which is no single object: a
+ * `null` variant is no inline object, and OAS 3.0 `nullable: true` beside
+ * the `oneOf` stands for one (`unionFlaggedNullable`; #677), so either
+ * spelling keeps the nullable union. The pin is read as a union's
+ * discriminator reads one
  * (`pinnedDeclarationValue`): a string `const`, or an `enum:` list holding
  * one string beside any `null` it names (`kind: { type: ['string',
  * 'null'], enum: ['email', null] }` folds as `kind: { type: ['string',
@@ -5139,6 +5191,12 @@ function flattenDiscriminatedUnionBody(
 ): SchemaObject | null {
   const discProp = schema.discriminator?.propertyName;
   if (!discProp || !Array.isArray(schema.oneOf) || schema.oneOf.length === 0) return null;
+  // A body that admits `null` is no single object: a `null` variant is no
+  // inline object, so it leaves the union intact below, and OAS 3.0
+  // `nullable: true` beside the `oneOf` stands for one
+  // (`unionFlaggedNullable`; #677: the flagged body folded to the object,
+  // its `null` lost, where the `null` variant kept the nullable union).
+  if (unionFlaggedNullable(schema)) return null;
 
   const variants = schema.oneOf as SchemaObject[];
   // Every declaration that pins each value, in variant order, the values in
@@ -6040,7 +6098,8 @@ function extractResponseHeaders(
   for (const [folded, { name, raw }] of declarations) {
     // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
     // media type is already carried by the response's `content` map. The
-    // sent-only component walk skips it by the same rule (#540).
+    // walk over the sites the readers type (`readSchemaSites`) skips it by
+    // the same rule (#540, #670).
     if (isIgnoredResponseHeader(name)) continue;
 
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel, ctx.refSiblingDescriptions);
@@ -6986,7 +7045,13 @@ interface ComponentResponseNaming {
  * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
  * only derives it; the rest are decided in document order, so the outcome
  * never depends on which operation is read first. Every component ends up in
- * the map, so every operation that returns it shares the one model.
+ * the map, so every operation that returns it shares the one model — one
+ * no operation returns too (`OwnerCard` steps to `OwnerCardResponse2` beside
+ * an `OwnerCardResponse` nothing returns), its names read off its body as
+ * any other's. So the body this reads (`componentResponseBodySchema`) is a
+ * root of the contested-title walk whether or not an operation returns the
+ * component (`markContestedTitles`): the names are read under the titles as
+ * they are decided, never under ones no pass has compared.
  */
 function resolveComponentResponseModelNames(
   componentResponses: Record<string, Record<string, unknown>> | undefined,
@@ -7258,8 +7323,14 @@ function resolveBodyNameYields(
   );
 }
 
-/** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
-function componentResponseBodySchema(
+/**
+ * The schema a component response's body is read from, through a chain of
+ * refs, silently; undefined without one. What the name reservation reads of
+ * every `components/responses` entry (`resolveComponentResponseModelNames`),
+ * and so what the contested-title walk takes as that entry's root where no
+ * operation returns it (`markContestedTitles`).
+ */
+export function componentResponseBodySchema(
   componentName: string,
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
@@ -7596,7 +7667,7 @@ function typeSecondaryContent(
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
   // as much a string as `text/plain` (`responseBodyReading`, the one
-  // classification the primary pick and `sentOnlyComponentNames` read too).
+  // classification the primary pick and `readSchemaSites` read too).
   // The key itself stays as written.
   const reading = responseBodyReading(contentType);
   if (reading !== 'schema') return unreadResponseBodyType(reading);
@@ -7920,9 +7991,11 @@ function typeErrorBody(
  * `text/html`, `text/xml`, `application/xml`) media type, typed as a string
  * without reading its schema — the classification `responseBodyReading`
  * shares with every secondary entry (`typeSecondaryContent`) and with the
- * sent/received walk (`sentOnlyComponentNames`), so a body under such a
- * media type reaches no component (#610); else the first media type that
- * declares a schema; else the first declared, which reads as `unknown`.
+ * walk over the sites the readers type (`readSchemaSites`), so a body under
+ * such a media type reaches no component (`sentOnlyComponentNames`, #610)
+ * and contests no title (`markContestedTitles`, #670); else the first media
+ * type that declares a schema; else the first declared, which reads as
+ * `unknown`.
  * Media types are compared by essence (`application/pdf; foo=bar` is as
  * binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much a string
  * as `text/plain`) and `contentType` is the key as written.
@@ -7988,11 +8061,12 @@ function undescribedBodyType(): TypeRef {
  * are the same shape but for the model's own `deprecated`
  * (`shapeFingerprint`), the kept definition — the primary's, its
  * references with it — going live when any copy is and documented as the
- * first live copy is, so a live 202 body identical to a deprecated 200
- * body types both as a live `Pet` carrying the 202's `description`, as a
- * deprecated 202 beside a live 200 does, and the model is deprecated only
- * when every copy is; and to the kept definition with a warning when they
- * differ in a field (#630).
+ * first live copy is (`takeModelDocumentation`), so a live 202 body
+ * identical to a deprecated 200 body types both as a live `Pet` carrying
+ * the 202's `description` and its fields' (#673), as a deprecated 202
+ * beside a live 200 does, and the model is deprecated only when every copy
+ * is; and to the kept definition with a warning when they differ in a
+ * field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -8386,9 +8460,11 @@ function extractResponses(
   // definition going live when only the flag tells the two apart, as a live
   // copy owns a shared name across operations in the merge passes, so a
   // live 202 body identical to a deprecated 200 body keeps a live `Pet`
-  // with the 200's references and the 202's documentation (`description`,
-  // `externalDocs`, extensions: the first live copy's in status order, as
-  // the merge passes keep a live copy's definition), deprecating either
+  // with the 200's references and the 202's documentation (the model's
+  // `description`, `externalDocs` and extensions, each field's text, link,
+  // examples and extensions, and what an inline enum in a field's type
+  // lifts: the first live copy's in status order, as the merge passes keep
+  // a live copy's definition; #673), deprecating either
   // copy leaves no trace, and the model is deprecated only when every copy
   // is (#630); only a clash on a model the stem does not name — a field more,
   // a field's own flag, a limit — is still resolved to the kept definition,
@@ -8435,9 +8511,11 @@ function extractResponses(
         // references with it: an explicit `$ref` the primary wrote where
         // this body nests an inline object of the same name, repointed
         // apart by the merge passes — and goes live, documented as this
-        // first live copy is (`takeModelDocumentation`), as the merge passes
-        // keep a live copy's definition across operations; the live copy's
-        // object never replaces it.
+        // first live copy is (`takeModelDocumentation`): the model and each
+        // of its fields, as the merge passes keep a live copy's definition
+        // across operations (#673: the fields kept the deprecated copy's
+        // text); the live copy's object never replaces it. A model nested
+        // in the body is a model of this loop too, kept by its own flag.
         delete kept.model.deprecated;
         takeModelDocumentation(kept.model, model);
       }

@@ -1040,15 +1040,50 @@ export interface Parameter {
    */
   type: TypeRef;
   required: boolean;
+  /**
+   * The first non-empty `description` of, in order, the Parameter Object,
+   * the parameter's schema, and the schema a bare `$ref` in it points at.
+   * A component that becomes a model or a named union is read there as the
+   * model documents itself: its own keys, else those of the first `allOf`
+   * member of its that declares no type and so only annotates it. So
+   * `PetId: { allOf: [{ description: 'A pet id.', deprecated: true }],
+   * oneOf: [{ type: 'string' }, { type: 'integer' }] }` gives `{ schema: {
+   * $ref: PetId } }` the text and the flag `PetId: { description: 'A pet
+   * id.', deprecated: true, oneOf: [...] }` gives it, the ones the model
+   * `PetId` carries in both (#679: the component's own keys alone were
+   * read). An enum component is read on the schema it declares its members
+   * on, as the `Enum` is; an array or primitive component, or an alias of
+   * an enum component, level by level through every alias the reference
+   * passes, nearest first, as a field reads one (see `Field.description`).
+   * `deprecated`, `externalDocs`, `default`, `example` and `examples` read
+   * the same component, each by its own rule. Absent when no level gives a
+   * text.
+   */
   description?: string;
+  /**
+   * Present, and `true`, when the Parameter Object, the parameter's schema
+   * or the schema a bare `$ref` in it points at says `deprecated: true` —
+   * for a component that becomes a model or a named union, the component
+   * itself or any `allOf` member of its that declares no type (see
+   * `description`).
+   */
   deprecated?: boolean;
   /**
    * The parameter schema's `externalDocs`, when it declares a usable one;
    * a schema that is a `$ref` falls back to the component it points at,
-   * the way `description` and `deprecated` do. A Parameter Object has no
+   * the way `description` and `deprecated` do — for a component that
+   * becomes a model or a named union, its own link, else the first `allOf`
+   * member's of its that declares no type. A Parameter Object has no
    * `externalDocs` of its own. Absent when neither level gives one.
    */
   externalDocs?: ExternalDocs;
+  /**
+   * The parameter schema's `default`, else (`??`, so `false` and `0` are
+   * kept) that of the schema a bare `$ref` in it points at — for a
+   * component that becomes a model or a named union, its own, else the
+   * first `allOf` member's of its that declares no type (see
+   * `description`). A Parameter Object has no `default` of its own.
+   */
   default?: unknown;
   /**
    * A single illustrative value, resolved level by level: the parameter's own
@@ -1056,8 +1091,9 @@ export interface Parameter {
    * parameter declared with `content` — the same on the Media Type Object
    * its schema was read from, then the parameter schema's `example` (else
    * the first of its `examples` list), then the same on the component schema
-   * its `$ref` points at. A level with neither falls through; an explicit
-   * `null` is kept. Absent when no level gives one.
+   * its `$ref` points at, an `allOf` member of its that declares no type
+   * included (see `description`). A level with neither falls through; an
+   * explicit `null` is kept. Absent when no level gives one.
    */
   example?: unknown;
   /**
@@ -1067,7 +1103,8 @@ export interface Parameter {
    * declared with `content` — the same map on the Media Type Object its
    * schema was read from, else the JSON Schema `examples` list on the
    * parameter's schema, else the list on the component schema its `$ref`
-   * points at. Present only when at least one value exists.
+   * points at, or on an `allOf` member of that component that declares no
+   * type (see `description`). Present only when at least one value exists.
    */
   examples?: unknown[];
   style?: 'form' | 'simple' | 'label' | 'matrix';
@@ -1439,18 +1476,35 @@ export interface Model {
    * model's chain of bases reaches itself — a base that does, in a cyclic
    * document or once a fold collapsed it onto a kept model of the same
    * shape, is dropped — and a base stays a base only while every field
-   * it ends with is on the model either as the model's own declaration,
-   * which overrides the base's, or as the same field, the base's
+   * it ends with is on the model as the same field, the base's
    * declaration and not another's (every key; the type as its final
    * shape, an inline model built under either model as it ends and an
-   * inline enum by its values), so the model is its own fields plus its
-   * bases' and an emitter writing `extends` or an intersection types
-   * every field as `fields` does: two bases declaring one property
-   * differently (`Tagged.tag: string` beside `Kinded.tag: enum [cat,
-   * dog]`) keep at most the one whose declaration the model carries, the
-   * other's fields the model's own, and a fold that loosens a base, or a
-   * model nested under it, after the model took its fields drops that
-   * base. A field carries `inheritedFrom` only while its base stays. A `$ref` member naming a named union — flattened into
+   * inline enum by its values), or as a declaration of the model's own
+   * that fits it (#681): one that admits no value the base's does not —
+   * the field required wherever the base requires it; its type the
+   * base's or within it (a pinned value or an enum under an enum that
+   * lists its values or under their primitive, `integer` under `number`,
+   * a non-nullable type under a nullable one, a union when every variant
+   * fits and a type under a union when it fits one variant, an array or
+   * a map by its element, a model under a model it carries every field
+   * of, anything under an untyped schema); its limits at least as tight
+   * — its text, flags, default, examples and extensions being its own to
+   * override, and whatever the IR cannot tell (a `format` under none,
+   * an enum's values under a `pattern` it does not repeat) being no fit.
+   * So the model is its own
+   * fields plus its bases', `interface Pet extends Animal { … }`
+   * compiles, and that spelling and an intersection type every field as
+   * `fields` does: `Pet: { allOf: [{ $ref: Animal }], properties: {
+   * species: { type: 'string' } } }` over `Animal { name?: string,
+   * species?: enum [cat, dog] }` has no `bases` and `name` its own, where
+   * `species: { const: 'cat' }` keeps `Animal`. Two bases declaring one
+   * property differently (`Tagged.tag: string` beside `Kinded.tag: enum
+   * [cat, dog]`) keep only those whose declaration the model's field is,
+   * or fits — `Tagged` alone, with or without `required: [tag]` on the
+   * model — the others' fields the model's own, and a fold that loosens
+   * a base, or a model nested under it, after the model took its fields
+   * drops that base. A field carries `inheritedFrom` only while its base
+   * stays. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
@@ -1648,7 +1702,11 @@ export interface Field {
   /**
    * A single illustrative value. The field schema's `example` when present,
    * otherwise the first entry of its `examples`; when the schema is a `$ref`
-   * with neither, the same taken from the component it points at — for an
+   * with neither, the same taken from the component it points at — for a
+   * model or named union, from its own keys, else the first `allOf`
+   * member's of its that declares no type (`Pet: { type: 'object',
+   * properties, allOf: [{ example }] }` gives a field `{ $ref: Pet }` the
+   * example `example` beside the `allOf` gives it; #679); for an
    * array or primitive component, from the nearest level the reference
    * passes on its way to the array or primitive (an alias's own, else the
    * component's), as `description` is read; for an alias of an enum

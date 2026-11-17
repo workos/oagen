@@ -9,7 +9,9 @@ import type { Field, Model, ModelRef, TypeRef } from '../../src/ir/types.js';
  * `Field.inheritedFrom` against the models as they end — no chain of
  * bases reaching its own model, each base once, a base kept only while
  * every field it ends with is on the model as the model's own declaration
- * or as the same field, so the model is its own fields plus its bases'.
+ * — one that fits the base's, since #681; see
+ * `bases-own-declaration-fit.test.ts` — or as the same field, so the model
+ * is its own fields plus its bases'.
  */
 
 const string: TypeRef = { kind: 'primitive', type: 'string' };
