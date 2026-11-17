@@ -80,15 +80,25 @@ import { isComponentModelRef } from './schemas.js';
  *    A base that is a named union or a dispatcher is one of its variants
  *    to an emitter that writes the union (`Shape & { … }`), so beside its
  *    own `fields` — the merge of a named union's inline variants, none
- *    for `$ref` variants — every field one of its variants declares
- *    (`variantModels`) that the model carries too has to be on the model
- *    the same way: the same field, or a declaration of the model's own
- *    that fits it. `Pet: { allOf: [{ $ref: Shape }], properties: { kind: {
- *    type: 'string' } } }` over `Shape: { oneOf: [{ $ref: Cat }, { $ref:
- *    Dog }] }`, whose variants pin `kind`, is no longer on `Shape` (`Shape
- *    & { kind?: string }` types `kind` as `'cat' | 'dog'`); with `extra`
- *    in place of `kind` it stays. A named union with no variant at all is
- *    no base.
+ *    for `$ref` variants — it is read through the fields its variants
+ *    declare (`unionVariants`), and stays while two things hold. One
+ *    variant agrees with the model on every field the two share, each the
+ *    same field or a declaration of the model's own that fits it: that
+ *    variant's branch of `Shape & { … }` then types every field as
+ *    `fields` does, and every other branch types a part of it. And every
+ *    field a variant declares that the model carries too is agreed by one
+ *    of the variants that declare it, so a union of `$ref` variants reads
+ *    as the merge of an inline one's does. `Pet: { allOf: [{ $ref: Shape
+ *    }], required: [kind], properties: { kind: { const: 'cat' } } }` over
+ *    `Shape: { oneOf: [{ $ref: Cat }, { $ref: Dog }] }`, whose variants
+ *    pin and require `kind`, stays on `Shape`: it is the `Cat` of it.
+ *    With `kind: { type: 'string' }` it does not (`Shape & { kind?: string
+ *    }` types `kind` as `'cat' | 'dog'`), and with `extra` in place of
+ *    `kind` it does. A field agreed by one variant and another by another
+ *    is not enough: `kind: 'cat'` fits `Cat` alone, and a `name: string`
+ *    that fits `Dog.name` alone, over `Cat.name: 'tom'`, is typed `'tom'`,
+ *    the `Dog` branch admitting nothing. A named union with no variant at
+ *    all is no base.
  *    A fold that loosens a base after the model took its fields —
  *    `AnimalJson` declaring `name` optional beside `extra`, folded onto an
  *    `Animal` requiring `name`, under `Pet: { allOf: [{ $ref: Animal }] }`
@@ -139,14 +149,17 @@ export function settleBases(models: readonly Model[], enums: readonly Enum[] = [
       if (sameField(own, field, byName, new Map())) return true;
       return origins.get(field.name) === null && readings.every((context) => fieldFits(own, field, context));
     };
-    // A base that is a union is one of its variants, so no variant may
-    // declare a field the model carries otherwise; a union of nothing
-    // admits no instance, and is no base.
+    // A base that is a union is one of its variants: one of them has to
+    // agree with the model on every field the two share, and every such
+    // field has to be agreed by a variant that declares it.
     const variantsAgree = (target: Model): boolean => {
-      if (target.variants?.length === 0) return false;
-      return variantModels(target, byName).every((variant) =>
-        variant.fields.every((field) => !fields.has(field.name) || carried(field)),
-      );
+      const variants = unionVariants(target, byName);
+      if (!variants) return true;
+      const shared = variants.map((declared) => declared.filter((field) => fields.has(field.name)));
+      if (!shared.some((declared) => declared.every(carried))) return false;
+      const declarations = new Map<string, Field[]>();
+      for (const field of shared.flat()) declarations.set(field.name, [...(declarations.get(field.name) ?? []), field]);
+      return [...declarations.values()].every((declared) => declared.some(carried));
     };
     const dropped: string[] = [];
     for (const base of model.bases) {
@@ -206,28 +219,36 @@ function dropBase(model: Model, name: string): void {
 }
 
 /**
- * The models a union is one of (step 3): a named union's variants that
- * name a model, or — for a dispatcher, which carries none — its mapping's
- * targets, each read in turn when it is a union itself. A variant that
- * names no model (a primitive, an array) declares no field and is passed
- * over, as a name no model carries is; a union met again on the way is
- * read once.
+ * What a base that is a union is one of (step 3), each variant as the
+ * fields it declares: a named union's variants, or — for a dispatcher,
+ * which carries none — the models its mapping names; a model's fields, a
+ * union among them read in turn (a named one once, an inline one through
+ * its own variants, a nullable one through what it wraps), and no field
+ * for a variant that names no model (a primitive, an array), which
+ * declares none. A name no model carries is passed over. `undefined` for
+ * a model that is no union, or a dispatcher none of whose targets is
+ * found: nothing to read but its own `fields`.
  */
-function variantModels(union: Model, byName: ReadonlyMap<string, Model>, seen = new Set<Model>()): Model[] {
-  if (!union.variants && !union.discriminator) return [];
+function unionVariants(
+  union: Model,
+  byName: ReadonlyMap<string, Model>,
+  seen = new Set<Model>(),
+): Field[][] | undefined {
+  if (!union.variants && !union.discriminator) return undefined;
   if (seen.has(union)) return [];
   seen.add(union);
-  const names = union.variants
-    ? union.variants.flatMap((variant) => (variant.kind === 'model' ? [variant.name] : []))
-    : Object.values(union.discriminator?.mapping ?? {});
-  const models: Model[] = [];
-  for (const name of names) {
-    const variant = byName.get(name);
-    if (!variant) continue;
-    if (variant.variants || variant.discriminator) models.push(...variantModels(variant, byName, seen));
-    else models.push(variant);
-  }
-  return models;
+  const declared: Field[][] = [];
+  const read = (variant: TypeRef): void => {
+    if (variant.kind === 'nullable') return read(variant.inner);
+    if (variant.kind === 'union') return variant.variants.forEach(read);
+    if (variant.kind !== 'model') return void declared.push([]);
+    const model = byName.get(variant.name);
+    if (!model) return;
+    declared.push(...(unionVariants(model, byName, seen) ?? [model.fields]));
+  };
+  if (union.variants) union.variants.forEach(read);
+  else for (const name of Object.values(union.discriminator?.mapping ?? {})) read({ kind: 'model', name });
+  return union.variants || declared.length > 0 ? declared : undefined;
 }
 
 /**

@@ -1501,12 +1501,13 @@ export interface Model {
    * stays. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
    * base like any other model, and one of its variants to an emitter
-   * that writes the union: it stays only while every field a variant
-   * declares that the model carries too is on the model the same way
-   * (the same field, or a declaration of the model's own that fits it),
-   * so `properties: { kind: { type: 'string' } }` over variants that pin
-   * `kind` drops it; a named union with no variant is no base. Present
-   * exactly when at least one base is
+   * that writes the union: it stays only while one variant agrees with
+   * the model on every field the two share (the same field, or a
+   * declaration of the model's own that fits it) and every such field is
+   * agreed by a variant that declares it, so restating one variant's
+   * pinned, required `kind` keeps it and `properties: { kind: { type:
+   * 'string' } }` over variants that pin `kind` drops it; a named union
+   * with no variant is no base. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
    * included); never on a model built from an inline `allOf` — a request
    * or response body, a field — nor on a dispatcher's variant models.
