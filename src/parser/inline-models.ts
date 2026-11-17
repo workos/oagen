@@ -14,6 +14,7 @@ import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
+  buildsComponentModel,
   classifyInlineSchema,
   componentPropertyLedger,
   admits,
@@ -456,8 +457,10 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_K
  * every model its fields name, since a nested inline model is a model of its
  * own, kept by its own flag. What a fold does to the definition it keeps
  * when it clears the model's own `deprecated` because a copy identical but
- * for that flag is live — the within-operation merge (`extractResponses`,
- * #630) and the copies an owner refuses (`settleRefusedCopies`, #441): the
+ * for that flag is live (`foldLiveCopy`) — the within-operation merge
+ * (`extractResponses`, #630), the array items of one operation's success
+ * bodies (`materializeInlineSchema`, #672) and the copies an owner refuses
+ * (`settleRefusedCopies`, #441): the
  * shared model is then documented as its first live copy is, as the merge
  * passes keep a live copy's definition whole across operations
  * (`settleSharedNames`), so a text the deprecated copy wrote for the model
@@ -478,6 +481,28 @@ export function takeModelDocumentation(into: Model, from: Model): void {
     const twin = from.variants?.[index];
     if (twin) takeEnumDocumentation(variant, twin);
   });
+}
+
+/**
+ * Fold `copy` onto `kept`, a definition of its shape but for the model's own
+ * `deprecated` (`shapeFingerprint`) that both resolve to: `kept` stays the
+ * definition, its name, structure and references with it, and is live while
+ * either is — when it is deprecated and `copy` is live, its flag is cleared
+ * and it is documented as `copy` is (`takeModelDocumentation`); otherwise
+ * nothing changes, so of several copies folded in order the first live one
+ * documents the model and a deprecated one never does. Returns whether
+ * `kept` went live. The one fold every site that keeps a definition for
+ * copies that differ only in the flag applies: one operation's success
+ * bodies that resolve to one name (`extractResponses`, #630), the array
+ * items of those bodies, which the shape registry settles as they are read
+ * (`materializeInlineSchema`, #672), and the copies an owner refuses
+ * (`settleRefusedCopies`, #441).
+ */
+export function foldLiveCopy(kept: Model, copy: Model): boolean {
+  if (!kept.deprecated || copy.deprecated) return false;
+  delete kept.deprecated;
+  takeModelDocumentation(kept, copy);
+  return true;
 }
 
 /** Give `into` each of `keys` as `from` carries it, a key `from` lacks removed. */
@@ -1074,8 +1099,9 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * and callback readers do (`readSchemaSites`, which the sent/received walk
  * goes through too), so what is never read contests no title (#670): a
  * `103` response, a response key OpenAPI does not define (`600`) or the
- * later of two range keys that differ in case, a `Content-Type` response
- * header or one a later declaration shadows by case, an `Accept`,
+ * later of two range keys that differ in case once the reader has kept the
+ * first, a `Content-Type` response header or one a later declaration
+ * shadows by case, an `Accept`,
  * `Content-Type` or `Authorization` header parameter, an operation's
  * `Idempotency-Key` header, a parameter in no location the readers type
  * (`in: body`), a webhook's or a callback's `path` parameter and its
@@ -1098,10 +1124,15 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * it, and nothing written beside the `$ref` is read, so a union under a
  * `content` or `headers` there is under no root and contests nothing,
  * whether the ref resolves or not (#601). Decided from the document's content
- * alone, so declaration order and depth play no part, and once per
- * document, before any union is named (`extractSchemas`), so the union
- * TypeRef and every extractor read the same decision. `undefined` clears
- * the previous document's marks.
+ * alone and once per document, before any union is named
+ * (`extractSchemas`), so the union TypeRef and every extractor read the same
+ * decision. Within a root, declaration order and depth play no part. Which
+ * declaration is a root follows the readers, so it follows the order of two
+ * keys exactly where their reading does: of two range keys that differ in
+ * case the first the reader keeps is read (`4XX` before `4xx`), and of two
+ * header keys that differ in case the later (`x-note` after `X-Note`), so
+ * swapping the two swaps which one's unions are compared. `undefined`
+ * clears the previous document's marks.
  *
  * Each root is read with visited sets of its own, so a schema object two
  * roots share — one a `transformSpec` assigned in both places, a bundled
@@ -1177,8 +1208,10 @@ function schemaRootsOf(
 ): SchemaObject[] {
   const roots = new Set<SchemaObject>();
   readSchemaSites(document, (schema) => roots.add(schema));
+  // Read by its keys whatever it is, as the reservation reads it
+  // (`Object.keys`): an entry of a map written as an array is `0`.
   const responses = components?.['responses'];
-  if (document['paths'] && isRecord(responses)) {
+  if (document['paths'] && typeof responses === 'object' && responses !== null) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
       if (isSchemaRecord(body)) roots.add(body);
@@ -1227,7 +1260,16 @@ function schemaRootsOf(
  * one that names `Pet` leaves `Pet` as only sent as it was, and is itself
  * not among the result, since the document does not say which way it goes.
  * Two keys that resolve to one name (`Note` and `note`) count as one
- * component only sent when both are.
+ * component only sent when both are — two keys whose own model takes the
+ * name. Under a name a model holds, a key that builds no model
+ * (`buildsComponentModel`: an enum, an array or primitive component, an
+ * alias of an enum) has no field of its own to send and says nothing of
+ * the model: `Sizes: { type: 'string', enum }` beside `Size: { type:
+ * 'object', properties }` leaves `Size` only sent when the object is,
+ * whatever reads the enum (#668: a response typed by the enum, or nothing
+ * reaching it, lost the object its sent-only standing, and its field
+ * object was typed as a looser component of its name). A name no model
+ * holds is read from every key that resolves to it, as it always was.
  *
  * A component field's object is what the SDK sends when its component is
  * (`fieldInlineModelBundles`, `InlineModelBundle.sent`), so it shares a
@@ -1268,10 +1310,26 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   };
   readSchemaSites(document, schema);
 
+  // The names a model component holds: under one, only the keys whose own
+  // model takes the name speak for it (#668). A name no model holds is read
+  // from every key that resolves to it, as before.
+  // An entry that is no object is read as the model it always was, and is
+  // no alias target: this walk reads the document as written.
+  const declared = Object.fromEntries(Object.entries(schemas).filter(([, entry]) => isRecord(entry))) as Record<
+    string,
+    SchemaObject
+  >;
+  const modelKeys = new Set(
+    Object.keys(schemas).filter(
+      (key) => !Object.hasOwn(declared, key) || buildsComponentModel(declared[key]!, declared),
+    ),
+  );
+  const modelNames = new Set([...modelKeys].map((key) => resolveSchemaName(key)));
   const onlySent = new Map<string, boolean>();
   for (const key of Object.keys(schemas)) {
     const directions = reached.get(key);
     const name = resolveSchemaName(key);
+    if (modelNames.has(name) && !modelKeys.has(key)) continue;
     onlySent.set(name, (onlySent.get(name) ?? true) && directions?.size === 1 && directions.has('sent'));
   }
   return new Set([...onlySent].filter(([, only]) => only).map(([name]) => name));

@@ -121,9 +121,10 @@ import {
   isArrayComponentRef,
   isArrayPointerRef,
   isNullSchema,
+  modelReferenceIdentity,
+  OWN_MODEL,
   referenceTypesAsUnknown,
   schemaToTypeRef,
-  typesAsModelReference,
   unionFlaggedNullable,
   withTypeConstraints,
   type SchemaObject,
@@ -697,7 +698,7 @@ export function pointerTypesAsArray(ref: string, schemas: Record<string, SchemaO
   }
 }
 
-/** The pointers being read for the model they settle to (`pointerTypesAsModel`), so a chain that reaches itself ends. */
+/** The pointers being read for the model they settle to (`pointerModelIdentity`), so a chain that reaches itself ends. */
 const pointersBeingNamed = new Set<string>();
 
 /**
@@ -710,25 +711,45 @@ const pointersBeingNamed = new Set<string>();
  * inline variants by their titles only then). True exactly when the
  * pointer lands on a schema (`pointerLanding`) typed as a reference to a
  * model where it stands, read as a property written there is read
- * (`typesAsModelReference`): an inline object, an `allOf` merged into a
- * model, a `$ref` to a component that builds one, or another such pointer
- * in turn, under any nullable wrapper or `allOf` read as its member. False
+ * (`modelReferenceIdentity`): an inline object, an `allOf` merged into a
+ * model, a `$ref` to a component that builds one, a type list whose
+ * per-type copies are all typed as one model, or another such pointer in
+ * turn, under any nullable wrapper or `allOf` read as its member. False
  * when the pointer leads nowhere or to a schema the parser builds no type
  * for at that place — the settle reports it and types the site `unknown`,
  * no model — when it lands on anything typed otherwise (a string, an
- * array, a union, a type list of several types), and for a chain of
- * pointers that reaches itself. What the document alone cannot refuse is
- * left to the settle, as `pointerTypesAsArray` leaves it: a `properties`
- * step through a component typed as a primitive or an enum reads on to the
- * object here, and the settle reports the site and types it `unknown`.
+ * array, a union, a type list read as a union of its types), and for a
+ * chain of pointers that reaches itself. What the document alone cannot
+ * refuse is left to the settle, as `pointerTypesAsArray` leaves it: a
+ * `properties` step through a component typed as a primitive or an enum
+ * reads on to the object here, and the settle reports the site and types
+ * it `unknown`.
  */
 export function pointerTypesAsModel(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
-  if (pointersBeingNamed.has(ref)) return false;
+  return pointerModelIdentity(ref, schemas) !== undefined;
+}
+
+/**
+ * Which model a site written as `ref` settles to, as `pointerTypesAsModel`
+ * asks whether it settles to one: what the schema the pointer lands on is
+ * typed as a reference to (`modelReferenceIdentity`) — a component's model
+ * by its name, wherever the `$ref` to it stands, and the model minted for
+ * the pointed schema where it stands by the pointer itself, the one way
+ * that site is spelled here — or `undefined` when it settles to no model.
+ * It tells the per-type copies of a type list apart: copies that are one
+ * model are one variant, and the list is that model.
+ */
+export function pointerModelIdentity(
+  ref: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): string | undefined {
+  if (pointersBeingNamed.has(ref)) return undefined;
   const landed = pointerLanding(ref, schemas);
-  if (!landed) return false;
+  if (!landed) return undefined;
   pointersBeingNamed.add(ref);
   try {
-    return typesAsModelReference(landed, schemas);
+    const identity = modelReferenceIdentity(landed, schemas);
+    return identity === OWN_MODEL ? `pointer:${ref}` : identity;
   } finally {
     pointersBeingNamed.delete(ref);
   }

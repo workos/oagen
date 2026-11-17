@@ -880,6 +880,141 @@ describe('#682 a discriminator with no mapping and a variant written as a pointe
     });
 
     describe('the two decisions made before any model is built read the pointer ahead', () => {
+      describe('a type list of several types, read as the type builder reads it (Greptile, review round 1)', () => {
+        const kinds = ['keyword', 'none'] as const;
+        const dogs = (dog: unknown, extra: Record<string, unknown> = {}) =>
+          components(openapi, {
+            Dog: animal('dog', openapi),
+            Shelter: { type: 'object', properties: { dog } },
+            ...extra,
+          });
+        const DOG = { property: 'kind', mapping: { cat: 'Cat', dog: 'Dog' } };
+
+        it.each(kinds)('narrowed to one model by its `allOf`: mapped and dispatched (%s)', async (kind) => {
+          // `Dog` declares `type: 'object'`, so the `string` copy is left out and the field is `Dog`.
+          const spec = await parseJson(
+            everySite(openapi, dogs({ type: ['object', 'string'], allOf: [ref('Dog')] }), union(kind)),
+          );
+          expect(fieldType(spec, 'Shelter', 'dog')).toEqual(model('Dog'));
+          expect(discriminators(spec)).toEqual(atEverySite(DOG));
+          expect(fieldNames(spec, 'Dispatcher')).toEqual(['id']);
+        });
+
+        it.each(kinds)('narrowed and nullable, and a list no entry of which survives (%s)', async (kind) => {
+          const nullableList = await parseJson(
+            everySite(openapi, dogs({ type: ['object', 'string', 'null'], allOf: [ref('Dog')] }), union(kind)),
+          );
+          expect(fieldType(nullableList, 'Shelter', 'dog')).toEqual(nullable(model('Dog')));
+          expect(discriminators(nullableList)).toEqual(atEverySite(DOG));
+          // Neither `string` nor `integer` survives `Dog`, so the list is read as written and holds `Dog` once.
+          const contradicted = await parseJson(
+            everySite(openapi, dogs({ type: ['string', 'integer'], allOf: [ref('Dog')] }), union(kind)),
+          );
+          expect(fieldType(contradicted, 'Shelter', 'dog')).toEqual(model('Dog'));
+          expect(discriminators(contradicted)).toEqual(atEverySite(DOG));
+        });
+
+        it.each(kinds)('narrowed to the model its `allOf` merges into (%s)', async (kind) => {
+          const merged = { type: 'object', properties: { size: { type: 'integer' } } };
+          const spec = await parseJson(
+            everySite(openapi, dogs({ type: ['object', 'string'], allOf: [ref('Dog'), merged] }), union(kind)),
+          );
+          expect(fieldType(spec, 'Shelter', 'dog')).toEqual(model('ShelterDog'));
+          expect(discriminators(spec)).toEqual(atEverySite(MAPPED));
+        });
+
+        it.each(kinds)('left a union of its types: nothing derived, and the component flattened (%s)', async (kind) => {
+          // `Typeless` declares no `type`, so the `string` copy survives: `Typeless | string`.
+          const typeless = { properties: animal('dog', openapi).properties, required: ['kind'] };
+          const spec = await parseJson(
+            everySite(
+              openapi,
+              dogs({ type: ['object', 'string'], allOf: [ref('Typeless')] }, { Typeless: typeless }),
+              union(kind),
+            ),
+          );
+          expect(fieldType(spec, 'Shelter', 'dog')).toEqual({ kind: 'union', variants: [model('Typeless'), STRING] });
+          expect(discriminators(spec)).toEqual({
+            ...atEverySite(kind === 'keyword' ? { property: 'kind', mapping: {} } : undefined),
+            dispatcher: undefined,
+          });
+          expect(fieldNames(spec, 'Dispatcher')).toEqual(['id', 'kind', 'name']);
+        });
+      });
+
+      describe('agrees with the settle on whether the pointer names a model', () => {
+        const dog = animal('dog', openapi);
+        const extra = { type: 'object', properties: { size: { type: 'integer' } } };
+        const shared = {
+          Dog: dog,
+          Typeless: { properties: dog.properties, required: ['kind'] },
+          Hound: ref('Dog'),
+          NullableDog: openapi.startsWith('3.0') ? { ...dog, nullable: true } : { ...dog, type: ['object', 'null'] },
+          DogOrCat: { oneOf: [ref('Dog'), ref(CAT)] },
+          Stringy: { type: 'string', properties: dog.properties },
+          Extra: extra,
+        };
+        const shapes: Array<[string, unknown]> = [
+          ['an inline object', dog],
+          ['an inline object with no `type`', { properties: dog.properties }],
+          ['an inline object beside `additionalProperties`', { ...dog, additionalProperties: { type: 'string' } }],
+          ['an inline object beside an `allOf` of bare limits', { ...dog, allOf: [{ minProperties: 1 }] }],
+          ['an inline object beside a `oneOf` that types nothing', { ...dog, oneOf: [{ required: ['name'] }] }],
+          ['an inline object under `type: [object]`', { ...dog, type: ['object'] }],
+          ['an inline object under `nullable: true`', { ...dog, nullable: true }],
+          ['an inline object under `type: [object, string]`', { ...dog, type: ['object', 'string'] }],
+          ['a `$ref` with text beside it', { ...ref('Dog'), description: 'The dog.' }],
+          ['a `$ref` to a component with no `type`', ref('Typeless')],
+          ['a `$ref` to an alias', ref('Hound')],
+          ['a `$ref` to a component that admits null', ref('NullableDog')],
+          ['a `$ref` to a named union', ref('DogOrCat')],
+          ['a `$ref` to a primitive component with stray `properties`', ref('Stringy')],
+          ['an `allOf` of one `$ref`', { allOf: [ref('Dog')] }],
+          ['an `allOf` of one `$ref` and an annotating member', { allOf: [ref('Dog'), { description: 'The dog.' }] }],
+          ['an `allOf` of one `$ref` beside `required`', { allOf: [ref('Dog')], required: ['name'] }],
+          ['an `allOf` of two `$ref`s', { allOf: [ref('Dog'), ref('Extra')] }],
+          ['an `allOf` of a `$ref` and an inline object', { allOf: [ref('Dog'), extra] }],
+          ['an `allOf` of one inline object', { allOf: [dog] }],
+          ['an `allOf` nested in an `allOf`', { allOf: [{ allOf: [ref('Dog')] }] }],
+          ['an `allOf` beside `nullable: true`, which declares nothing', { allOf: [ref('Dog')], nullable: true }],
+          ['an `allOf` beside `type: [object, null]`', { type: ['object', 'null'], allOf: [ref('Dog')] }],
+          ['a nullable `oneOf` around a `$ref`', { oneOf: [ref('Dog'), { type: 'null' }] }],
+          ['a `oneOf` of one `$ref`', { oneOf: [ref('Dog')] }],
+          ['an `anyOf` of a `$ref` and a string', { anyOf: [ref('Dog'), { type: 'string' }] }],
+          ['an array of the object', { type: 'array', items: dog }],
+          ['a map of the object', { type: 'object', additionalProperties: dog }],
+        ];
+
+        it.each(shapes)('%s', async (_label, shape) => {
+          const pointer = '#/components/schemas/Holder/properties/dog';
+          const variants = [ref(CAT), ref(pointer)];
+          const spec = await parseJson(
+            documentWith(
+              openapi,
+              {
+                Cat: animal('cat', openapi),
+                ...shared,
+                Holder: { type: 'object', properties: { dog: shape } },
+                Base: { type: 'object', properties: { id: { type: 'string' } } },
+                Pet: { oneOf: variants, discriminator: { propertyName: 'kind' } },
+                Dispatcher: { allOf: [ref('Base'), { oneOf: variants }], discriminator: { propertyName: 'kind' } },
+              },
+              {
+                '/pets/{id}': getOp('getPet', ref('Pet')),
+                '/dispatchers/{id}': getOp('getDispatcher', ref('Dispatcher')),
+              },
+            ),
+          );
+          const derived = modelOf(spec, 'Pet')?.discriminator;
+          const dispatched = modelOf(spec, 'Dispatcher')?.discriminator;
+          // The union waits for the settle; the dispatcher read ahead. Both name the same model, or neither names one.
+          if (Object.keys(derived?.mapping ?? {}).length > 0) expect(dispatched).toEqual(derived);
+          else expect(dispatched).toBeUndefined();
+          for (const target of Object.values(derived?.mapping ?? {})) expect(modelNames(spec)).toContain(target);
+          expect(warnings()).toEqual([]);
+        });
+      });
+
       it('leaves to the settle what the document alone cannot refuse: a pointer through a primitive component’s `properties` derives nothing on a union, and leaves a dispatcher’s entry as the pointer, as the explicit entry naming it is left', async () => {
         const pointer = '#/components/schemas/Code/properties/dog';
         const schemas = (kind: Discriminator) => ({
