@@ -29,6 +29,7 @@ import {
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
 import {
+  allOfReferenceMember,
   annotatedTypingMember,
   combineDeclarations,
   declareVariant,
@@ -832,7 +833,7 @@ export function resolveBareSchema(
     reading === 'unwrapped'
       ? annotatedTypingMember(bare)
       : reading === 'reference'
-        ? bare.allOf?.find((member) => member.$ref !== undefined)
+        ? allOfReferenceMember(bare)
         : undefined;
   return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
 }

@@ -14,6 +14,7 @@ import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
+  buildsComponentModel,
   classifyInlineSchema,
   componentPropertyLedger,
   admits,
@@ -35,6 +36,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nullableAxisBranch,
+  unionFlaggedNullable,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -52,7 +54,6 @@ import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
-import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import {
   carryDeferredMappingEntries,
   componentKeyOf,
@@ -63,16 +64,8 @@ import {
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
-import {
-  isIgnoredHeaderParameter,
-  isIgnoredResponseHeader,
-  parameterTyping,
-  type ParameterObject,
-  type SchemaOrContent,
-} from './operations.js';
-import { classifyResponseKey } from './responses.js';
-import { responseBodyReading } from './body-media-types.js';
-import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
+import { componentResponseBodySchema } from './operations.js';
+import { readSchemaSites, type SiteDirection } from './schema-sites.js';
 
 /**
  * Whether `baseName` already carries `cleanParent` as its leading part and
@@ -1067,10 +1060,13 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
  * their inline field models into one list and a named union's variants are
- * already compared across every component; every other schema of the
- * document — the `schema` of a request body's or response's media type, of
- * a parameter, of a response header, of a webhook payload, under `paths`,
- * `webhooks` or `components` alike — is a root of its own. The same title
+ * already compared across every component; every other schema the readers
+ * type something from — the `schema` of a request body's or response's
+ * media type, of a parameter, of a response header, of a webhook's or a
+ * callback's payload, written at the site or in the `components` entry the
+ * site references — is a root of its own, and so is the body of each
+ * `components/responses` entry, which is read for the names it reserves
+ * whether or not a site references it (`schemaRootsOf`). The same title
  * given two shapes by two roots is not contested here: the passes that merge
  * the roots' models decide it (the first owner keeps the name, and a later
  * shape is renamed or dropped with a warning). Outside the components root,
@@ -1096,25 +1092,45 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * `$defs`/`definitions`, `dependentSchemas`, `contains`, `prefixItems`,
  * `propertyNames` or another keyword the parser never reads never becomes a
  * model, so it contests no title (`schemaShapeKey` still compares them).
- * The roots are found by following the OpenAPI object model
- * (`schemaRootsOf`), the way the operation, response and webhook readers
- * do, so a name is never mistaken for a specification extension: a header
+ * The roots are the sites the readers type something from, found by the
+ * one walk that follows the document as the operation, response, webhook
+ * and callback readers do (`readSchemaSites`, which the sent/received walk
+ * goes through too), so what is never read contests no title (#670): a
+ * `103` response, a response key OpenAPI does not define (`600`) or the
+ * later of two range keys that differ in case once the reader has kept the
+ * first, a `Content-Type` response header or one a later declaration
+ * shadows by case, an `Accept`,
+ * `Content-Type` or `Authorization` header parameter, an operation's
+ * `Idempotency-Key` header, a parameter in no location the readers type
+ * (`in: body`), a webhook's or a callback's `path` parameter and its
+ * responses, an Encoding Object's `headers`, a response body under a media
+ * type whose schema is not read (`application/xml`), a parameter's
+ * `content` beside its `schema`, and a `components` entry no site that is
+ * read references — the body of a `components/responses` entry aside — are
+ * under no root. A titled union at such a site once
+ * contested the `Tag` of a component's `collar` and renamed it
+ * `TagPetCollar`, though the parser typed nothing from it. A name is never
+ * mistaken for a specification extension: a header
  * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`,
  * a webhook named `x-event` or a property `x-id` is read like any other, and
- * an `x-` key is stepped over only where the readers step over it or read
- * nothing: the Paths Object's (an extension by the specification, which
- * `extractOperations` steps over), a Responses
- * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification, which `extractCallbacks` steps over). An object
- * written as a `$ref` — a parameter, request body, response or header, a
- * path item or a callback — is stepped over whole, as the readers step
- * over it, so a union under a `content` or `headers` written beside the
- * `$ref` is under no root and contests nothing, whether the ref resolves
- * or not (#601). Decided from the document's content
- * alone, so declaration order and depth play no part, and once per
- * document, before any union is named (`extractSchemas`), so the union
- * TypeRef and every extractor read the same decision. `undefined` clears
- * the previous document's marks.
+ * an `x-` key is stepped over only where the readers step over it: the
+ * Paths Object's (`extractOperations`), a Responses Object's
+ * (`readFallbackResponse`) and a Callback Object's (`extractCallbacks`),
+ * extensions by the specification. An object written as a `$ref` — a
+ * parameter, request body, response or header, a path item or a callback —
+ * is followed to the component its chain ends on, as the readers follow
+ * it, and nothing written beside the `$ref` is read, so a union under a
+ * `content` or `headers` there is under no root and contests nothing,
+ * whether the ref resolves or not (#601). Decided from the document's content
+ * alone and once per document, before any union is named
+ * (`extractSchemas`), so the union TypeRef and every extractor read the same
+ * decision. Within a root, declaration order and depth play no part. Which
+ * declaration is a root follows the readers, so it follows the order of two
+ * keys exactly where their reading does: of two range keys that differ in
+ * case the first the reader keeps is read (`4XX` before `4xx`), and of two
+ * header keys that differ in case the later (`x-note` after `X-Note`), so
+ * swapping the two swaps which one's unions are compared. `undefined`
+ * clears the previous document's marks.
  *
  * Each root is read with visited sets of its own, so a schema object two
  * roots share — one a `transformSpec` assigned in both places, a bundled
@@ -1128,9 +1144,11 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * already claimed its title, and again as `wrapper.marker`, where it keeps
  * the title — is read under each, so the two shapes of the title are
  * compared and contested (`markContestedTitlesUnderRoot`). A schema that
- * refers back to itself is stopped by the ancestors on the path to it. The
- * descent over the document keeps a separate guard that never holds a
- * schema. The guards end the walk on a document that refers back to itself.
+ * refers back to itself is stopped by the ancestors on the path to it, and
+ * the descent over the document by the guards `readSchemaSites` keeps: the
+ * refs a chain has already followed, and the Callback Objects on the path
+ * to the one being read. Together they end the walk on a document that
+ * refers back to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
@@ -1154,215 +1172,82 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
   return isRecord(value);
 }
 
-/** The Path Item Object's operation fields, the keys the operation readers dispatch on. */
-const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
-/** The `in` locations a parameter is typed at (`extractParams`); one declared anywhere else is never read. */
-const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'query', 'header', 'cookie']);
-
 /**
- * Every schema root of the document outside `components.schemas`, found by
- * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
+ * Every schema root of the document outside `components.schemas`: the
+ * schemas the parser runs an extractor over. Those are the schemas the
+ * readers type something from (`readSchemaSites`, the walk
+ * `sentOnlyComponentNames` reads the same sites through), each once however
+ * many sites reach it — the body of a `components/responses` entry is one
+ * root whatever number of operations return it, and the marks a root
+ * yields do not depend on how often it is read — so a site the readers step
+ * over yields no root, and a union there contests no title (#670).
  *
- *   - the OpenAPI Object's `paths` (a path per key, an `x-` extension
- *     stepped over) and `webhooks` (a name per key) to Path Item Objects;
- *     the Components Object's `responses`,
- *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
- *     (a name per key);
- *   - a Path Item's `parameters` list and operations; an Operation's
- *     `parameters`, `requestBody`, `responses` (a status code, `default`, a
- *     range or an `x-` extension per key) and `callbacks` (a name per key,
- *     each a Callback Object: an expression or an `x-` extension per key,
- *     each a Path Item);
- *   - a Parameter's or Header's `schema` and `content`; a Request Body's and
- *     a Response's `content` (a media type per key) and a Response's
- *     `headers` (a name per key); a Media Type's `schema` and `encoding` (a
- *     property name per key, each an Encoding Object with `headers`).
- *
- * A map whose keys are names is read whole, whatever the keys look like,
- * the `webhooks` map among them: OpenAPI gives it no extensions, and
- * `extractWebhooks` reads every key as a webhook (#421).
- * An `x-` key is stepped over in the Paths Object, where the specification
- * makes it an extension and `extractOperations` steps over it, in a
- * Responses Object, as
- * `readFallbackResponse` steps over it, and in a Callback Object, where the
- * specification makes it an extension and `extractCallbacks` steps over it
- * (#382). A `$ref` entry
- * anywhere carries no schema of its own: the target is a component, or
- * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
- * read under its own map, and the object around the `$ref` is stepped
- * over whole, as the readers step over it — a Parameter, Header, Request
- * Body or Response Object written as a Reference Object, whose every other
- * key OpenAPI says to ignore (`followReference`, #562), a Path Item's
- * `$ref` entry, whose target is taken whole (`resolvePathItemRef`), and a
- * Callback Object's (`resolveCallbackRef`) — so a `schema`, `content` or
- * `headers` written beside the `$ref` is never read, whether the ref
- * resolves or not, at every site that takes one: on an operation, a
- * webhook or a callback, and as a `components` entry itself (#601: a
- * titled union under a `content` beside a `404`'s `$ref` contested the
- * `Tag` of a component's `collar` and renamed it `TagPetCollar`, though
- * the parser typed nothing from it). A `$ref` key holding `undefined` is
- * no reference, as `followReference` reads it. A `schema` is yielded and
- * not entered, so one shared by two sites is yielded for each; every other
- * object is entered once, which ends the walk on a document that refers
- * back to itself. `example`, `examples`, `links` and extensions are never
- * entered.
+ * One more schema is read, though nothing may be typed from it: the body of
+ * every `components/responses` entry, returned or not, which the operation
+ * pass reads to reserve the names it mints
+ * (`resolveComponentResponseModelNames`, #234: an `OwnerCardResponse`
+ * nothing returns still steps `OwnerCard`'s body to `OwnerCardResponse2`).
+ * Those names are the ones the body's titles are decided under, so that
+ * body — the one schema `componentResponseBodySchema` picks, not the
+ * entry's headers or its other media types — is a root wherever the
+ * reservation runs, which is wherever the document has `paths`
+ * (`extractOperations`). Left out, the reservation would read titles no
+ * pass had compared: a `Hints` nothing returns whose body gives `Circle`
+ * two shapes would reserve the bare `Circle` and step the body of a `Card`
+ * an operation does return to `CardResponse2`. So a `103` written as `$ref:
+ * '#/components/responses/Hints'` adds no root — `Hints` is one where it is
+ * declared, with or without the `103` — and every other `components` entry
+ * nothing that is read references (a parameter, request body, header, path
+ * item or callback) is none.
  */
 function schemaRootsOf(
   document: Record<string, unknown>,
   components: Record<string, unknown> | undefined,
 ): SchemaObject[] {
-  const roots: SchemaObject[] = [];
-  const entered = new WeakSet<object>();
-  /** Enter an object once; false for a non-object or one entered before. */
-  const enter = (value: unknown): value is Record<string, unknown> => {
-    if (!isRecord(value) || entered.has(value)) return false;
-    entered.add(value);
-    return true;
-  };
-  /** Every entry of a map whose keys are names. */
-  const named = (map: unknown, visit: (entry: unknown) => void): void => {
-    if (!enter(map)) return;
-    for (const entry of Object.values(map)) visit(entry);
-  };
-  /** Every entry of a map whose keys OpenAPI defines beside `x-` extensions. */
-  const keyed = (map: unknown, visit: (entry: unknown) => void): void => {
-    if (!enter(map)) return;
-    for (const [key, entry] of Object.entries(map)) if (!key.startsWith('x-')) visit(entry);
-  };
-  const listed = (list: unknown, visit: (entry: unknown) => void): void => {
-    if (!Array.isArray(list) || entered.has(list)) return;
-    entered.add(list);
-    for (const entry of list) visit(entry);
-  };
-  const schema = (value: unknown): void => {
-    if (isSchemaRecord(value)) roots.push(value);
-  };
-  const encoding = (value: unknown): void => {
-    if (enter(value)) named(value['headers'], parameter);
-  };
-  const mediaType = (value: unknown): void => {
-    if (!enter(value)) return;
-    schema(value['schema']);
-    named(value['encoding'], encoding);
-  };
-  /**
-   * Whether `value` is written as a reference: a `$ref` with a value, which
-   * the readers follow to its target and read nothing else of, so every
-   * key beside it is stepped over (#601). A `$ref` holding `undefined` is
-   * no reference, as `followReference` reads it.
-   */
-  const isReference = (value: Record<string, unknown>): boolean => value['$ref'] !== undefined;
-  /** A Parameter Object or a Header Object: the same schema sites. */
-  const parameter = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    schema(value['schema']);
-    named(value['content'], mediaType);
-  };
-  const requestBody = (value: unknown): void => {
-    if (enter(value) && !isReference(value)) named(value['content'], mediaType);
-  };
-  const response = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    named(value['headers'], parameter);
-    named(value['content'], mediaType);
-  };
-  const pathItem = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    listed(value['parameters'], parameter);
-    for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
-  };
-  /** A Callback Object: an expression or an `x-` extension per key, each a Path Item; one written as a reference is stepped over. */
-  const callback = (value: unknown): void => {
-    if (isRecord(value) && isReference(value)) return;
-    keyed(value, pathItem);
-  };
-  const operation = (value: unknown): void => {
-    if (!enter(value)) return;
-    listed(value['parameters'], parameter);
-    requestBody(value['requestBody']);
-    keyed(value['responses'], response);
-    named(value['callbacks'], callback);
-  };
-
-  // `paths` steps over `x-` extensions, as `extractOperations` does; every
-  // `webhooks` key is a webhook, as `extractWebhooks` reads it (#421).
-  keyed(document['paths'], pathItem);
-  named(document['webhooks'], pathItem);
-  if (components) {
-    named(components['responses'], response);
-    named(components['parameters'], parameter);
-    named(components['requestBodies'], requestBody);
-    named(components['headers'], parameter);
-    named(components['pathItems'], pathItem);
-    named(components['callbacks'], callback);
+  const roots = new Set<SchemaObject>();
+  readSchemaSites(document, (schema) => roots.add(schema));
+  // Read by its keys whatever it is, as the reservation reads it
+  // (`Object.keys`): an entry of a map written as an array is `0`.
+  const responses = components?.['responses'];
+  if (document['paths'] && typeof responses === 'object' && responses !== null) {
+    for (const name of Object.keys(responses)) {
+      const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
+      if (isSchemaRecord(body)) roots.add(body);
+    }
   }
-  return roots;
+  return [...roots];
 }
-
-/** Which way a site moves what it types: out with a request the SDK makes, or in. */
-type SiteDirection = 'sent' | 'received';
 
 /**
  * The components the SDK only sends, by resolved name (`resolveSchemaName`):
  * those reached by at least one site the parser reads and by none that the
- * SDK receives. What an operation under `paths` sends is its request body,
+ * SDK receives. The sites are the ones the readers type something from,
+ * found by the walk the contested-title roots come from (`readSchemaSites`,
+ * which states each rule), so a site the readers step over reaches nothing.
+ * What an operation under `paths` sends is its request body,
  * under every media type it declares a schema for — each is typed through
  * it, as `requestBody` or in `requestBodyContents`, so a `postNote` body of
  * `$ref: Pet` under `application/xml` alone, which nothing reads as
- * `requestBody`, still sends `Pet` — and the parameters it types — the Path Item's,
- * then its own, an operation parameter replacing a Path Item one of the same
- * identity (`parameterKey`: location and name, a header's name case-folded)
- * as `buildOperation` merges them, so a Path Item parameter the operation
- * overrides is no site — each written inline or through
- * `components/requestBodies` and `components/parameters`; what it receives
- * is every response `extractResponses` reads — a body and a header under a
- * 200–599 status code, `default` or a `1XX`–`5XX` range, inline or through
- * `components/responses` and `components/headers` — and nothing under a key
- * the reader skips, each key classified as the reader classifies it
- * (`classifyResponseKey`): a 1xx status code, which it keeps as written and
- * types nothing of, an `x-` extension, a key OpenAPI does not define
- * (`600`, `6XX`), warned about and ignored, and the later of two range keys
- * that differ in case alone (`4xx` after `4XX`, `readFallbackResponse`) —
- * so a `103` on `listNotes` with an `X-Pet` header or a body of `$ref: Pet`
- * leaves `Pet` only sent, as the document without it does, while a `1XX`
- * range with the same header receives it (#540 review). The `headers` map
- * is read as `extractResponseHeaders` reads it: of two keys that differ in
- * case alone, the later declaration (#295), and never one keyed
- * `Content-Type`, whatever its case, which OpenAPI says to ignore
- * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
- * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
- * response body is read by the media types whose schema the reader reads
- * (`responseBodyReading`): every one but `application/octet-stream`,
- * `application/pdf`, `text/plain`, `text/html`, `text/xml` and
- * `application/xml`, which `primaryBodySchema` and `typeSecondaryContent`
- * type as a binary string or a string without reading the schema, at a
- * 2xx, 3xx, error, `default` or range entry alike — so a `listNotes` `200`
+ * `requestBody`, still sends `Pet` — and the parameters it types, a Path
+ * Item parameter the operation overrides being no site; what it receives
+ * is every response `extractResponses` reads, body and headers, and nothing
+ * under a key the reader skips — so a `103` on `listNotes` with an `X-Pet`
+ * header or a body of `$ref: Pet` leaves `Pet` only sent, as the document
+ * without it does, while a `1XX` range with the same header receives it
+ * (#540 review); a `Content-Type` header of `$ref: Pet` on `createPet`'s
+ * `204` leaves `Pet` only sent too (#540); and so does a `listNotes` `200`
  * of `$ref: Pet` under `application/xml`, `text/plain` or
  * `application/octet-stream` alone, or under `application/xml` beside a
- * `201` whose `application/json` is `{ type: string }`, leaves `Pet` only
- * sent, as the document without it does, while a body under
+ * `201` whose `application/json` is `{ type: string }`, while a body under
  * `application/json`, `application/yaml` or `*\/*` receives it (#610). A
- * parameter or header is read by the one schema that types it
- * (`parameterTyping`): its `schema`,
- * else the schema of the `content` entry `selectParameterContent` picks, so
- * one the parser types as a string — a `content` map none of whose media
- * types is read, or a map beside a `schema`, which wins — reaches nothing.
- * A parameter the readers never type reaches nothing either: an `Accept`,
- * `Content-Type` or `Authorization` header, which OpenAPI says to ignore
- * (`isIgnoredHeaderParameter`, #414), on an operation or a webhook, a
- * webhook's `path` parameter, which `extractWebhooks` drops, and a
- * `Content-Type` response header (above). A webhook's payload and the
- * parameters it keeps are received, merged the same way (`extractWebhooks`);
- * its responses type no body (`extractWebhookResponses`). An operation's
- * `callbacks` — a webhook's, and a callback operation's own, nested — are
- * read as `extractCallbacks` reads them: each Callback Object (a
- * `components/callbacks` `$ref` followed, a callback referring back to one
- * it sits in read once) maps expressions to path items whose requests the
- * SDK is sent, so their bodies and parameters are received and their
- * responses type no body (#382). A Path Item and every Reference Object are followed as the
- * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths` stepped over, a Responses Object's keys read as above and every
- * `webhooks` key read as a webhook. A schema
+ * parameter the readers never type reaches nothing either: an `Accept`,
+ * `Content-Type` or `Authorization` header (#414), on an operation or a
+ * webhook, an operation's `Idempotency-Key` header, which the SDK injects
+ * and `buildOperation` leaves untyped (#670: a `createPet` header
+ * `Idempotency-Key` of `$ref: Pet` counted as sending `Pet`), and a
+ * webhook's `path` parameter, which `extractWebhooks` drops. A webhook's
+ * payload and the parameters it keeps are received, and so are a
+ * callback's (#382); their responses type no body. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1373,7 +1258,16 @@ type SiteDirection = 'sent' | 'received';
  * one that names `Pet` leaves `Pet` as only sent as it was, and is itself
  * not among the result, since the document does not say which way it goes.
  * Two keys that resolve to one name (`Note` and `note`) count as one
- * component only sent when both are.
+ * component only sent when both are — two keys whose own model takes the
+ * name. Under a name a model holds, a key that builds no model
+ * (`buildsComponentModel`: an enum, an array or primitive component, an
+ * alias of an enum) has no field of its own to send and says nothing of
+ * the model: `Sizes: { type: 'string', enum }` beside `Size: { type:
+ * 'object', properties }` leaves `Size` only sent when the object is,
+ * whatever reads the enum (#668: a response typed by the enum, or nothing
+ * reaching it, lost the object its sent-only standing, and its field
+ * object was typed as a looser component of its name). A name no model
+ * holds is read from every key that resolves to it, as it always was.
  *
  * A component field's object is what the SDK sends when its component is
  * (`fieldInlineModelBundles`, `InlineModelBundle.sent`), so it shares a
@@ -1386,26 +1280,6 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   /** The directions each component is reached in, by `components/schemas` key. */
   const reached = new Map<string, Set<SiteDirection>>();
   const entered: Record<SiteDirection, WeakSet<object>> = { sent: new WeakSet(), received: new WeakSet() };
-  /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
-  const follow = (
-    value: unknown,
-    section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'callbacks',
-  ): Record<string, unknown> | undefined => {
-    const entries = components[section];
-    const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
-    const seen = new Set<string>();
-    let current = value;
-    while (isRecord(current) && current['$ref'] !== undefined) {
-      const ref = current['$ref'];
-      if (typeof ref !== 'string' || seen.has(ref)) return undefined;
-      seen.add(ref);
-      // A Path Item's `$ref` may also name another `paths` or `webhooks`
-      // entry, as `resolvePathItemRef` reads it (#422).
-      current =
-        section === 'pathItems' ? pathItemRefTarget(ref, map, document) : resolveComponentRef(ref, section, map);
-    }
-    return isRecord(current) ? current : undefined;
-  };
   const schema = (value: unknown, direction: SiteDirection): void => {
     if (!isRecord(value) || entered[direction].has(value)) return;
     entered[direction].add(value);
@@ -1432,167 +1306,28 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       if (Array.isArray(members)) for (const member of members) schema(member, direction);
     }
   };
-  /**
-   * A request body's `content` map — an operation's, sent, or a webhook's or
-   * a callback's, received — read as the body readers read it: every media
-   * type that declares a schema is typed through it, as the primary pick
-   * (`selectRequestBodyContent`) or a secondary entry
-   * (`typeSecondaryRequestContent`, `mintPayload`: `requestBodyContents`),
-   * so each reaches what its schema names, under `application/xml` as under
-   * `application/json`.
-   */
-  const requestContent = (value: unknown, direction: SiteDirection): void => {
-    if (!isRecord(value)) return;
-    for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
-  };
-  /**
-   * A response's `content` map, read as `extractResponseContents` reads it:
-   * a media type the reader types as a binary string or a string without
-   * reading its schema (`responseBodyReading`: `application/octet-stream`,
-   * `application/pdf`, `text/plain`, `text/html`, `text/xml`,
-   * `application/xml`, by essence) reaches nothing, as the primary pick
-   * (`primaryBodySchema`) and a secondary entry (`typeSecondaryContent`)
-   * alike leave its schema unread; every other media type types its body
-   * through its schema and reaches what it names (#610).
-   */
-  const responseContent = (value: unknown): void => {
-    if (!isRecord(value)) return;
-    for (const [contentType, mediaType] of Object.entries(value)) {
-      if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
-      schema(mediaType['schema'], 'received');
-    }
-  };
-  /**
-   * A Parameter or Header Object, read by the one schema that types it
-   * (`parameterTyping`): its `schema`, else the schema of the `content`
-   * entry `selectParameterContent` picks. One typed as a string — a
-   * `content` map none of whose media types is read, or no schema at all —
-   * reaches nothing, and a `content` map beside a `schema` is not consulted.
-   */
-  const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
-    const { schema: own, content: map } = declaration;
-    schema(
-      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
-      direction,
-    );
-  };
-  /**
-   * The parameters `operation` types, resolved as `buildOperation` and
-   * `extractWebhooks` resolve them: the Path Item's, then its own, each
-   * Reference Object followed, an operation parameter replacing a Path Item
-   * one of the same identity (`parameterKey`: location and name, a header's
-   * name case-folded). A Path Item parameter the operation overrides is not
-   * read, and one under no operation is read by nothing.
-   */
-  const parameters = (item: Record<string, unknown>, operation: Record<string, unknown>, direction: SiteDirection) => {
-    const byIdentity = new Map<string, Record<string, unknown>>();
-    for (const list of [item['parameters'], operation['parameters']]) {
-      if (!Array.isArray(list)) continue;
-      for (const raw of list) {
-        const resolved = follow(raw, 'parameters');
-        const location = resolved?.['in'];
-        if (!resolved || !PARAMETER_LOCATIONS.has(location as ParameterLocation)) continue;
-        const name = resolved['name'];
-        // Nothing types an `Accept`, `Content-Type` or `Authorization` header
-        // (#414), nor a webhook's `path` parameter, which `extractWebhooks`
-        // drops: neither reaches a component (Greptile, #421 review).
-        if (typeof name === 'string' && isIgnoredHeaderParameter({ in: location, name } as ParameterObject)) continue;
-        if (direction === 'received' && location === 'path') continue;
-        byIdentity.set(parameterKey(location as ParameterLocation, typeof name === 'string' ? name : ''), resolved);
-      }
-    }
-    for (const resolved of byIdentity.values()) typed(resolved, direction);
-  };
-  /**
-   * The Callback Objects on the path to the one being read, by identity
-   * after `$ref` resolution: a callback that refers back to one it sits in
-   * is read once, as `extractCallbacks` reads it (#382).
-   */
-  const readingCallbacks = new Set<object>();
-  /** Each callback of an operation: its path items are read as a webhook's is, since a callback's request is one the SDK is sent. */
-  const callbacks = (map: unknown): void => {
-    if (!isRecord(map)) return;
-    for (const raw of Object.values(map)) {
-      const callback = follow(raw, 'callbacks');
-      if (!callback || readingCallbacks.has(callback)) continue;
-      readingCallbacks.add(callback);
-      for (const [expression, entry] of Object.entries(callback)) {
-        // An `x-` key is a specification extension of the Callback Object.
-        if (expression.startsWith('x-')) continue;
-        const item = follow(entry, 'pathItems');
-        if (item) pathItem(item, true);
-      }
-      readingCallbacks.delete(callback);
-    }
-  };
-  /** A path item's operations, their requests read as sent or — a webhook's or a callback's — received. */
-  const pathItem = (item: Record<string, unknown>, received: boolean): void => {
-    const request: SiteDirection = received ? 'received' : 'sent';
-    for (const method of PATH_ITEM_OPERATIONS) {
-      const operation = item[method];
-      if (!isRecord(operation)) continue;
-      parameters(item, operation, request);
-      requestContent(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
-      callbacks(operation['callbacks']);
-      const responses = operation['responses'];
-      if (received || !isRecord(responses)) continue;
-      // Read as `extractResponses` reads the map, each key classified as
-      // the reader classifies it (`classifyResponseKey`): a 200–599 status
-      // code, `default` and a `1XX`–`5XX` range are read, body and headers
-      // alike, and of two range keys that differ in case alone (`4XX`
-      // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
-      // status code is kept as written and nothing of it typed, an `x-`
-      // key is an extension, and a key OpenAPI does not define (`600`,
-      // `6XX`) is warned about — once, by the reader — and ignored; none
-      // of those reaches a component (#540 review).
-      const ranges = new Set<string>();
-      for (const [code, entry] of Object.entries(responses)) {
-        const key = classifyResponseKey(code);
-        if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
-        if (key.kind === 'status' && key.code < 200) continue;
-        if (key.kind === 'range') {
-          if (ranges.has(key.range)) continue;
-          ranges.add(key.range);
-        }
-        const response = follow(entry, 'responses');
-        if (!response) continue;
-        responseContent(response['content']);
-        const headers = response['headers'];
-        if (!isRecord(headers)) continue;
-        // Read as `extractResponseHeaders` reads the map: header names are
-        // case-insensitive, so of two keys that differ in case alone the
-        // later declaration is the header (#295), and a `Content-Type`
-        // header, which OpenAPI says to ignore, is skipped by its key,
-        // whatever its `$ref` leads to (`isIgnoredResponseHeader`). Nothing
-        // types the dropped declaration or the ignored header, so neither
-        // reaches a component (#540).
-        const declared = new Map<string, unknown>();
-        for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
-        for (const [name, header] of declared) {
-          if (isIgnoredResponseHeader(name)) continue;
-          const resolved = follow(header, 'headers');
-          if (resolved) typed(resolved, 'received');
-        }
-      }
-    }
-  };
-  const pathItems = (map: unknown, webhooks: boolean): void => {
-    if (!isRecord(map)) return;
-    for (const [key, raw] of Object.entries(map)) {
-      // An extension under `paths`; a webhook's name under `webhooks` (#421).
-      if (!webhooks && key.startsWith('x-')) continue;
-      const item = follow(raw, 'pathItems');
-      // A webhook's request is one the SDK is sent.
-      if (item) pathItem(item, webhooks);
-    }
-  };
-  pathItems(document['paths'], false);
-  pathItems(document['webhooks'], true);
+  readSchemaSites(document, schema);
 
+  // The names a model component holds: under one, only the keys whose own
+  // model takes the name speak for it (#668). A name no model holds is read
+  // from every key that resolves to it, as before.
+  // An entry that is no object is read as the model it always was, and is
+  // no alias target: this walk reads the document as written.
+  const declared = Object.fromEntries(Object.entries(schemas).filter(([, entry]) => isRecord(entry))) as Record<
+    string,
+    SchemaObject
+  >;
+  const modelKeys = new Set(
+    Object.keys(schemas).filter(
+      (key) => !Object.hasOwn(declared, key) || buildsComponentModel(declared[key]!, declared),
+    ),
+  );
+  const modelNames = new Set([...modelKeys].map((key) => resolveSchemaName(key)));
   const onlySent = new Map<string, boolean>();
   for (const key of Object.keys(schemas)) {
     const directions = reached.get(key);
     const name = resolveSchemaName(key);
+    if (modelNames.has(name) && !modelKeys.has(key)) continue;
     onlySent.set(name, (onlySent.get(name) ?? true) && directions?.size === 1 && directions.has('sent'));
   }
   return new Set([...onlySent].filter(([, only]) => only).map(([name]) => name));
@@ -2773,6 +2508,31 @@ export type InlineAllOfReading = 'merged' | 'unwrapped' | 'reference';
  *     with `Pets` an array became an empty object model). A ref no
  *     component answers declares nothing here, and stays the reference.
  *
+ * A member that is itself an `allOf` is read by what it holds
+ * (workos/oagen#675), since JSON Schema reads `{ allOf: [{ allOf: [A] }, B]
+ * }` as it reads `{ allOf: [A, B] }`. The members are read with each bare
+ * `allOf` among them spliced open into its own members wherever several
+ * members type the schema (`splicedAllOfMembers`, the reading
+ * `spliceNestedAllOf` makes of the schema itself), so `allOf: [{ allOf: [{
+ * $ref: Owner }] }, { $ref: Tag }]` and `allOf: [{ allOf: [{ $ref: Owner }]
+ * }, { allOf: [{ $ref: Tag }] }]` are `'merged'`, as `allOf: [{ $ref:
+ * Owner }, { $ref: Tag }]` is (the first was `'reference'` and typed `Tag`,
+ * `Owner`'s fields lost; the second no reading, and `unknown`), and
+ * `allOf: [{ allOf: [{ type: 'string' }] }, { allOf: [{ minLength: 1 }] }]`
+ * is `'unwrapped'`. The one member that types the schema is still the
+ * member it is read as, a wrapper included (`allOf: [{ allOf: [{ $ref:
+ * Owner }] }]` is `'unwrapped'`, and its member the reference). A member
+ * that composes an object through an `allOf` of its own and is not
+ * spliced open (`composesObjectMember`: a lone wrapper; one that writes
+ * `additionalProperties`, or a `type` naming `null`, beside its `allOf`) is
+ * one of the objects a merge conjoins, as a `$ref` or an inline object
+ * member is: beside a `$ref` or another typing member the schema is
+ * `'merged'` rather than read as the other member alone, and a `required`
+ * list written beside it adds to it as it adds to a `$ref` (`{ allOf: [{
+ * allOf: [{ $ref: Owner }] }], required: [name] }` is `'merged'`, as `{
+ * allOf: [{ $ref: Owner }], required: [name] }` is; it was `'unwrapped'`,
+ * the list lost).
+ *
  * `allOfTypesSchema` admits no other shape as an `allOf`. `wrapper` is the
  * schema the `allOf` is written on, for its own `required`; a site reading
  * bare members passes none. `componentSchemas` resolves the `$ref`; a site
@@ -2784,24 +2544,54 @@ export function readInlineAllOf(
   wrapper?: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
 ): InlineAllOfReading {
+  // The members as every reader reads them, the bare `allOf`s among them
+  // spliced open (`splicedAllOfMembers`; #675), with the `required` such a
+  // member writes read as `wrapper`'s own, which carries it once spliced.
+  const spliced = splicedAllOfMembers(members);
+  members = spliced.members;
+  const wrapperRequires = (wrapper?.required?.length ?? 0) > 0 || spliced.required.length > 0;
+  const composes = (member: SchemaObject): boolean => composesObjectMember(member, componentSchemas);
+  const requires = wrapperRequires || members.some((s) => (s.required?.length ?? 0) > 0);
   const refs = members.filter((m) => m.$ref !== undefined);
   if (refs.length > 0) {
-    if (members.some(isInlineAllOfMember) || refs.length > 1) return 'merged';
-    const addsRequired =
-      [wrapper, ...members].some((s) => s !== undefined && (s.required?.length ?? 0) > 0) &&
-      contributesProperties(refs[0]!, componentSchemas);
-    return addsRequired ? 'merged' : 'reference';
+    if (members.some(isInlineAllOfMember) || refs.length > 1 || members.some(composes)) return 'merged';
+    return requires && contributesProperties(refs[0]!, componentSchemas) ? 'merged' : 'reference';
   }
   if (members.length === 1) {
     const only = members[0]!;
-    const addsRequired = (wrapper?.required?.length ?? 0) > 0 && declaresInlineProperties(only);
+    const addsRequired = wrapperRequires && (declaresInlineProperties(only) || composes(only));
     return addsRequired ? 'merged' : 'unwrapped';
   }
   if (members.some(declaresInlineProperties)) return 'merged';
   // One member types the schema and the others only annotate or limit it
   // (#555): read as that member, as a lone member is. Several typing
-  // members, or none, are no reading at all.
-  return allOfTypingMember(members) !== undefined ? 'unwrapped' : 'reference';
+  // members are a merge when one of them composes an object
+  // (`composesObjectMember`; #675), and otherwise, or with none, no reading
+  // at all.
+  const typing = allOfTypingMember(members);
+  if (typing !== undefined) return requires && composes(typing) ? 'merged' : 'unwrapped';
+  return members.some(composes) ? 'merged' : 'reference';
+}
+
+/**
+ * Whether an `allOf` member composes an object through an `allOf` of its
+ * own: not a `$ref`, and its `allOf` chain reaches properties a merge
+ * reads (`contributesProperties`: a member's own, or those of the
+ * component a `$ref` under it names). Such a member is one of the objects
+ * the `allOf` conjoins, as a `$ref` member or an inline object member is
+ * (`isInlineAllOfMember`), whatever it writes beside its `allOf`: the
+ * members a splice leaves as written (`spliceNestedAllOf`) — a lone
+ * wrapper, and one that says more than its members do, `{
+ * additionalProperties: false, allOf: [{ $ref: Owner }] }` or `{ type:
+ * ['object', 'null'], allOf: [{ $ref: Owner }] }` — which the merge reads
+ * through (`mergeAllOfMembers` follows a member's own `allOf`). So
+ * `readInlineAllOf` never reads an `allOf` as another member alone beside
+ * one, and `allOfTypesSchema` admits two of them as an `allOf` that types
+ * the schema (workos/oagen#675: `allOf: [{ additionalProperties: false,
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }]` was the reference to `Tag`).
+ */
+export function composesObjectMember(member: SchemaObject, componentSchemas?: Record<string, SchemaObject>): boolean {
+  return member.$ref === undefined && member.allOf !== undefined && contributesProperties(member, componentSchemas);
 }
 
 /**
@@ -2839,11 +2629,17 @@ export function allOfTypingMember(members: readonly SchemaObject[]): SchemaObjec
  * (`mergeAllOfMembers`, `extractAllOfModel`), never a component another
  * member references (#555: `allOf: [{ $ref: Kind }, { description }]` was
  * typed `Kind` with no description on the field, and `{ deprecated: true }`
- * or `{ readOnly: true }` beside the `$ref` was dropped). Empty for a
- * schema with no `allOf`.
+ * or `{ readOnly: true }` beside the `$ref` was dropped). The members are
+ * the schema's as every reader reads them (`spliceNestedAllOf`; #675), so
+ * what a bare `allOf` spliced open writes beside its `allOf`, and each
+ * member of its own that declares no type, is among them: `allOf: [{
+ * description: 'The owner.', allOf: [{ $ref: Owner }] }, { $ref: Tag }]`
+ * and `allOf: [{ $ref: Owner }, { allOf: [{ description: 'The owner.' }]
+ * }]` are documented "The owner.", as `allOf: [{ description: 'The owner.'
+ * }, …]` is. Empty for a schema with no `allOf`.
  */
 export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
-  return (schema.allOf ?? []).filter((member) => !declaresType(member));
+  return (spliceNestedAllOf(schema).allOf ?? []).filter((member) => !declaresType(member));
 }
 
 /**
@@ -2864,10 +2660,12 @@ export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
  * documentation, the type builder the layer's documentation
  * (`allOfWrapperLayer`). Read by both, by `typesAsUnknown`,
  * `mintedInlineNameEntries` and `resolveBareSchema`, so every site reads
- * one member.
+ * one member — among the members as every reader reads them
+ * (`spliceNestedAllOf`; #675), so beside wrappers that only annotate or
+ * limit the schema it is the one member that types it.
  */
 export function annotatedTypingMember(wrapper: SchemaObject): SchemaObject {
-  const members = wrapper.allOf ?? [];
+  const members = spliceNestedAllOf(wrapper).allOf ?? [];
   const member = allOfTypingMember(members) ?? members[0] ?? {};
   return annotatingAllOfMembers(wrapper)
     .filter((other) => other !== member)
@@ -3225,9 +3023,14 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // `null` exactly when both admit it (`conjunctionAdmitsNull`), in the
     // one spelling, whichever side wrote it and however (workos/oagen#653
     // review: the later's `type` or either's `nullable: true` won, so one
-    // nullable object beside a plain one was nullable by member order).
-    const { nullable: _firstFlag, ...firstBare } = first;
-    const { nullable: _secondFlag, ...secondBare } = second;
+    // nullable object beside a plain one was nullable by member order). A
+    // flag that stands for a `null` variant of a declaration's own union
+    // is that union's and stays with it, written out as the variant
+    // (`withFlaggedNullVariant`; #677: it was dropped with the others, so
+    // `{ properties, oneOf: [...], nullable: true }` declared by two members
+    // lost the `null` the 3.1 spelling's variant kept).
+    const { nullable: _firstFlag, ...firstBare } = withFlaggedNullVariant(first);
+    const { nullable: _secondFlag, ...secondBare } = withFlaggedNullVariant(second);
     return {
       ...firstBare,
       ...secondBare,
@@ -3281,9 +3084,11 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // `extractConstraints`), and type the `allOf` by one that is a `$ref`
     // or declares properties inline (`allOfTypesSchema`). A member that is
     // none of these — a composition no splicing opens, an `allOf` of
-    // `$ref`s under a `discriminator` or `additionalProperties` — would be
-    // dropped by the reference reading or leave the conjunction `unknown`,
-    // so such a pair keeps the first, as before (workos/oagen#653 review;
+    // `$ref`s under a `discriminator` or `additionalProperties` — is read
+    // for the object it composes alone (`composesObjectMember`; #675: it
+    // was dropped by the reference reading, or left the conjunction
+    // `unknown`), what it writes beside its `allOf` unread, so such a pair
+    // keeps the first as written, as before (workos/oagen#653 review;
     // round 5: `{ description }` spliced out of a wrapper failed this
     // test, and the pair kept the first where the base merged both).
     const readable =
@@ -3321,6 +3126,26 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     };
   }
   return first;
+}
+
+/**
+ * `schema` with the `null` variant OAS 3.0 `nullable: true` stands for
+ * (`unionFlaggedNullable`) written among the variants of each union it
+ * writes, in the flag's place; `schema` itself when no flag stands for
+ * one. For the one reader that moves the declarations' flags off them
+ * (`conjoinTypedDeclarations`, which writes the conjunction's own `type`):
+ * beside that `type` a flag would no longer stand for the variant, so the
+ * variant is written out, as a 3.1 document writes it.
+ */
+function withFlaggedNullVariant(schema: SchemaObject): SchemaObject {
+  if (!unionFlaggedNullable(schema)) return schema;
+  const { nullable: _flag, ...rest } = schema;
+  const nullVariant: SchemaObject = { type: 'null' };
+  return {
+    ...rest,
+    ...(schema.oneOf && { oneOf: [...schema.oneOf, nullVariant] }),
+    ...(schema.anyOf && { anyOf: [...schema.anyOf, nullVariant] }),
+  };
 }
 
 /**
@@ -3513,40 +3338,79 @@ function conjunctionAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = n
  * }] }`, and `{ allOf: [{ $ref: A }], required: ['a'] }` beside `{ $ref: B
  * }` is `{ allOf: [{ $ref: A }, { $ref: B }], required: ['a'] }`
  * (workos/oagen#653 review: the conjunction was the `allOf` of the two
- * wrappers as written, which no reader types — `unknown` — and beside a
- * bare `$ref` the wrapper was dropped by the reference reading).
+ * wrappers as written, which no reader typed — `unknown` — and beside a
+ * bare `$ref` the wrapper was dropped by the reference reading). The
+ * wrappers inside the declaration are opened by the one reading of a bare
+ * `allOf`'s members (`bareAllOfParts`), which an inline `allOf` written
+ * by hand is read by too (`spliceNestedAllOf`; workos/oagen#675).
  */
 function conjunctionMembers(declaration: SchemaObject): { members: SchemaObject[]; required: string[] } {
-  const members: SchemaObject[] = [];
-  const required: string[] = [];
-  const splice = (schema: SchemaObject, nested: boolean): void => {
-    if (!splicesOpen(schema)) {
-      members.push(schema);
-      return;
-    }
-    for (const name of schema.required ?? []) if (!required.includes(name)) required.push(name);
-    // A wrapper spliced open inside the declaration keeps what it wrote
-    // for the field — its limits, documentation and extensions — as a
-    // member that declares no type, which the readers conjoin onto the
-    // schema as they do the wrapper's own keywords (`extractConstraints`,
-    // the stricter bound winning; `allOfWrapperLayer`, where the schema
-    // writes none itself). The declaration's own ride on the conjunction
-    // (`declarationKeywords`; workos/oagen#653 review, round 5: `{ allOf:
-    // [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
-    if (nested) {
-      const keywords = declarationKeywords(schema);
-      if (Object.keys(keywords).length > 0) members.push(keywords);
-    }
-    for (const member of schema.allOf ?? []) splice(member, true);
-  };
-  splice(declaration, false);
-  return { members, required };
+  if (!splicesOpen(declaration)) return { members: [declaration], required: [] };
+  // The declaration's own keywords ride on the conjunction
+  // (`declarationKeywords`); a wrapper spliced open inside it keeps its own
+  // as a member (`bareAllOfParts`; workos/oagen#653 review, round 5: `{
+  // allOf: [{ allOf: [{ $ref: A }], minProperties: 2 }] }` lost the limit).
+  const parts = bareAllOfParts(declaration.allOf ?? [], () => true);
+  return { members: parts.members, required: [...new Set([...(declaration.required ?? []), ...parts.required])] };
 }
 
 /**
- * Whether a declaration is a bare `allOf` a conjunction splices open
- * (`conjunctionMembers`): every keyword beside the `allOf` is one the
- * conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
+ * `members`, the members of an `allOf`, with each member that is a bare
+ * `allOf` (`splicesOpen`) and that `opens` admits — asked with the parts
+ * the member's own `allOf` reads as — read as what it says: JSON Schema
+ * applies `{ allOf: [{ allOf: [A] }, B] }` as it applies `{ allOf: [A, B]
+ * }`, at any depth. Such a wrapper is replaced, in place, by what it
+ * writes for the schema beside its `allOf` — its limits, documentation,
+ * flags and extensions (`declarationKeywords`), as one member that
+ * declares no type, which the readers conjoin onto the schema as they do
+ * the schema's own keywords (`extractConstraints`, the stricter bound
+ * winning; `allOfWrapperLayer`, where the schema writes none itself) —
+ * and then by its own members, each read the same way. The `required` it
+ * writes is returned beside the members, in document order and each name
+ * once, for the schema the `allOf` is written on to carry: JSON Schema
+ * applies it to the instance at any depth of a conjunction. Nothing else
+ * a bare `allOf` may write is a part: a `title`, a `$comment` and an `xml`
+ * constrain nothing, and its `type`, with the `null` it admits, is the
+ * caller's to settle (`opens`). A member that is no bare `allOf`, or that
+ * `opens` keeps closed, stays the document's own object, as written.
+ * `spliced` says whether any member was opened. The one reading of "the
+ * members of a bare `allOf`": a conjunction of two declarations reads its
+ * parts by it (`conjunctionMembers`), and every reader of an inline
+ * `allOf` its members (`splicedAllOfMembers`; workos/oagen#675).
+ */
+function bareAllOfParts(
+  members: readonly SchemaObject[],
+  opens: (wrapper: SchemaObject, parts: readonly SchemaObject[]) => boolean,
+): { members: SchemaObject[]; required: string[]; spliced: boolean } {
+  const out: SchemaObject[] = [];
+  const required: string[] = [];
+  let spliced = false;
+  const requires = (names: readonly string[] | undefined): void => {
+    for (const name of names ?? []) if (!required.includes(name)) required.push(name);
+  };
+  for (const member of members) {
+    const inner = splicesOpen(member) ? bareAllOfParts(member.allOf ?? [], opens) : undefined;
+    if (inner === undefined || !opens(member, inner.members)) {
+      out.push(member);
+      continue;
+    }
+    spliced = true;
+    requires(member.required);
+    const keywords = declarationKeywords(member);
+    if (Object.keys(keywords).length > 0) out.push(keywords);
+    out.push(...inner.members);
+    requires(inner.required);
+  }
+  return { members: out, required, spliced };
+}
+
+/**
+ * Whether a declaration is a bare `allOf` — one a conjunction splices
+ * open (`conjunctionMembers`), and, written as a member of an inline
+ * `allOf`, a reader of that `allOf` too (`splicedAllOfMembers`, which
+ * leaves a wrapper its `type` where a conjunction settles it,
+ * `splicesIntoAllOf`; workos/oagen#675): every keyword beside the `allOf`
+ * is one the conjunction carries — a lifted keyword (`LIFTED_DECLARATION_KEYWORDS`),
  * an `x-*` extension, `required`, `nullable`, a `type` naming `object`
  * alone or beside other names, which the conjunction writes for itself
  * from what every declaration admits (`conjunctionType`; round 9: a
@@ -3575,6 +3439,170 @@ function splicesOpen(schema: SchemaObject): boolean {
       LIFTED_DECLARATION_KEYWORD_SET.has(key) ||
       key.startsWith('x-'),
   );
+}
+
+/**
+ * `schema` with the members of its `allOf` as every reader reads them: a
+ * member that is a bare `allOf` spliced open into its own members, at any
+ * depth (`splicedAllOfMembers`; workos/oagen#675). JSON Schema applies `{
+ * allOf: [{ allOf: [A] }, B] }` as it applies `{ allOf: [A, B] }`, but
+ * the readers decide an `allOf` by the members written on it — a `$ref`,
+ * an inline object, the one member that types it (`readInlineAllOf`) — so
+ * a `$ref` inside a wrapper was no `$ref` to them: `owner: { allOf: [{
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }] }` was read as the reference
+ * to `Tag`, `Owner`'s fields lost, and with both members wrapped the
+ * schema was `unknown`, where `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }`
+ * is the merged `PetOwner { name, label }`. Spliced, the nested spelling
+ * is the flat one to every reader, and `oagen diff` between the two
+ * reports nothing.
+ *
+ * A member is a bare `allOf` when what it writes beside its `allOf` can
+ * be said of the `allOf` it sits in (`splicesOpen`, the test a
+ * conjunction of two declarations opens a wrapper by): limits,
+ * documentation and flags (`LIFTED_DECLARATION_KEYWORDS`) and `x-*` keys,
+ * which take the wrapper's place as one member that declares no type —
+ * `{ description: 'The owner.', allOf: [{ $ref: Owner }] }` beside `{
+ * $ref: Tag }` is read as `{ description: 'The owner.' }`, `{ $ref: Owner
+ * }` and `{ $ref: Tag }` are, the text the schema's own where it writes
+ * none (`allOfWrapperLayer`); a `required`, which the copy carries beside
+ * the schema's own; a `title`, a `$comment`, an `xml` and a `nullable`
+ * with no `type` beside it, which constrain nothing; and `type: 'object'`
+ * when the wrapper's own parts hold a `$ref` or declare properties
+ * inline, since the readers then type the wrapper by its `allOf` and not
+ * by its `type` (`splicesIntoAllOf`). Any other wrapper says more than
+ * its members do and stays a member as written: one that writes
+ * `properties`, a `oneOf`/`anyOf`, a `discriminator`,
+ * `additionalProperties`, an `enum` or a `const`; one typed anything but
+ * `object`, or whose `type` admits `null` (`['object', 'null']`, OAS 3.0
+ * `nullable: true` beside it), which the readers take the wrapper's word
+ * for; and one typed `object` around members that only annotate or limit
+ * it, which is the object its `type` says. Such a wrapper around a `$ref`
+ * is still one of the objects the `allOf` merges (`composesObjectMember`).
+ *
+ * Returns `schema` itself when nothing splices — no `allOf`, a `$ref`
+ * (nothing beside one is read), no member opened — else a copy that
+ * stands for it (`derivedCopy`), made once per schema, so every reader
+ * meets one object for it, the members left closed the document's own.
+ * The last step of every fold of an inline schema
+ * (`foldSiblingProperties`), after a union and the `properties` written
+ * beside the `allOf` have joined its members, and read by the readers
+ * that are handed a schema as written (`annotatingAllOfMembers`,
+ * `annotatedTypingMember`, `allOfReferenceMember`), a component's among
+ * them.
+ */
+export function spliceNestedAllOf(schema: SchemaObject): SchemaObject {
+  if (schema.$ref !== undefined || schema.allOf === undefined) return schema;
+  let spliced = splicedSchemas.get(schema);
+  if (spliced === undefined) {
+    const parts = splicedAllOfMembers(schema.allOf);
+    if (parts.spliced) {
+      const required = [...new Set([...(schema.required ?? []), ...parts.required])];
+      spliced = derivedCopy({ ...schema, allOf: [...parts.members], ...(required.length > 0 && { required }) }, schema);
+      // Splicing a spliced schema changes nothing, and gives the same object.
+      splicedSchemas.set(spliced, spliced);
+    } else spliced = schema;
+    splicedSchemas.set(schema, spliced);
+  }
+  return spliced;
+}
+
+/**
+ * `members`, the members of an `allOf`, as every reader reads them
+ * (workos/oagen#675), with the `required` the members spliced open write:
+ * the reading `spliceNestedAllOf` makes of a schema, for a reader that is
+ * handed the members alone (`readInlineAllOf`, `allOfTypesSchema`), so it
+ * decides alike whether or not the schema was spliced first.
+ *
+ * A bare `allOf` among them (`bareAllOfParts`, by `splicesIntoAllOf`) is
+ * spliced open into its own members wherever another member declares a
+ * type beside it (`declaresType`, which a wrapper does): `allOf: [{
+ * allOf: [{ $ref: Owner }] }, { $ref: Tag }]` is `allOf: [{ $ref: Owner
+ * }, { $ref: Tag }]`. One member that declares a type is the member the
+ * `allOf` is read as (`readInlineAllOf`: `'unwrapped'`), a wrapper
+ * included, its own `allOf` read in turn and what it writes its own —
+ * `allOf: [{ allOf: [{ $ref: Owner }] }]` and `allOf: [{ description:
+ * 'Inner.', allOf: [{ $ref: Owner }] }, { deprecated: true }]` are read
+ * as before, the reference to `Owner`, the second deprecated and its
+ * member's text the member's own (#399, #555) — and so is the one member
+ * that types the `allOf` beside wrappers that only annotate or limit it,
+ * which are spliced open around it: `allOf: [{ allOf: [{ $ref: Owner }]
+ * }, { allOf: [{ description: 'The owner.' }] }]` is `allOf: [{ allOf: [{
+ * $ref: Owner }] }, { description: 'The owner.' }]`. `members` itself
+ * when nothing is spliced open.
+ */
+export function splicedAllOfMembers(members: readonly SchemaObject[]): {
+  members: readonly SchemaObject[];
+  required: readonly string[];
+  spliced: boolean;
+} {
+  const asWritten = { members, required: [], spliced: false };
+  if (!members.some((member) => member.allOf !== undefined)) return asWritten;
+  // A lone member that declares a type — a wrapper declares one
+  // (`declaresType`) — is the member the `allOf` is read as, as written.
+  if (members.filter(declaresType).length < 2) return asWritten;
+  const read = members.map((member) => bareAllOfParts([member], splicesIntoAllOf));
+  const typing = read.filter((parts) => parts.members.some(declaresType));
+  const out: SchemaObject[] = [];
+  const required: string[] = [];
+  let spliced = false;
+  read.forEach((parts, index) => {
+    // So is the one member that types the `allOf` beside wrappers that
+    // only annotate or limit it.
+    if (!parts.spliced || (typing.length === 1 && parts === typing[0])) {
+      out.push(members[index]!);
+      return;
+    }
+    spliced = true;
+    out.push(...parts.members);
+    for (const name of parts.required) if (!required.includes(name)) required.push(name);
+  });
+  return spliced ? { members: out, required, spliced } : asWritten;
+}
+
+/**
+ * The `$ref` member an `allOf` read as a plain reference names
+ * (`readInlineAllOf`: `'reference'`): the first among its members, each
+ * bare `allOf` spliced open (`spliceNestedAllOf`), so `{ allOf: [{ allOf:
+ * [{ $ref: Owner }] }, { description }] }` names `Owner` as `{ allOf: [{
+ * $ref: Owner }, { description }] }` does. `undefined` for a schema whose
+ * `allOf` holds none.
+ */
+export function allOfReferenceMember(schema: SchemaObject): SchemaObject | undefined {
+  return spliceNestedAllOf(schema).allOf?.find((member) => member.$ref !== undefined);
+}
+
+/** The schema each schema with an `allOf` splices to (`spliceNestedAllOf`): itself when no member is spliced open. Keyed by the schema, which the document owns; forgotten per document (`resetSplicedSchemas`), where the folded schemas are. */
+let splicedSchemas = new WeakMap<SchemaObject, SchemaObject>();
+
+/** Forget every spliced schema: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+export function resetSplicedSchemas(): void {
+  splicedSchemas = new WeakMap();
+}
+
+/**
+ * Whether a bare `allOf` (`splicesOpen`) written as a member of an
+ * `allOf` may be spliced open into `parts`, the members its own `allOf`
+ * reads as (`splicedAllOfMembers`): so unless its `type` says something
+ * they do not. A conjunction writes its own `type` from every declaration
+ * at any depth (`conjunctionType`, `conjunctionAdmitsNull`), so it opens
+ * a wrapper whatever `type` naming `object` it writes; an `allOf` written
+ * in the document has no `type` of its own to settle, so a wrapper keeps
+ * its `type` — and stays a member as written — where the readers read
+ * it: a list naming another type or `null`, OAS 3.0 `nullable: true`
+ * beside it (`{ allOf: [{ type: ['object', 'null'], allOf: [{ $ref: Owner
+ * }] }] }` is `nullable<Owner>`, the wrapper's word for it), or `object`
+ * around parts none of which is a `$ref` or declares properties inline
+ * (`{ type: 'object', allOf: [{ minProperties: 1 }] }` is the map its
+ * `type` says). Around a `$ref` or properties the readers type the
+ * wrapper by its `allOf` (`allOfTypesSchema`) and its `type: 'object'`
+ * adds nothing.
+ */
+function splicesIntoAllOf(wrapper: SchemaObject, parts: readonly SchemaObject[]): boolean {
+  const { type } = wrapper;
+  if (type === undefined) return true;
+  const object = type === 'object' || (Array.isArray(type) && type.length === 1 && type[0] === 'object');
+  if (!object || wrapper.nullable === true) return false;
+  return parts.some((part) => part.$ref !== undefined || declaresInlineProperties(part));
 }
 
 /**
@@ -4151,7 +4179,9 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * it: the admission moves to a `{ type: 'null' }` variant of the `oneOf` —
  * the one place the type builder reads a union's nullability from, and one
  * a union of string consts would otherwise lose when it collapses to an
- * enum — and off the declarations.
+ * enum — and off the declarations. A declaration that is itself a union
+ * keeps the `null` its own variants admit: a `null` variant among them, or
+ * OAS 3.0 `nullable: true` standing for one (`admitsNull`; #677).
  */
 export function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
@@ -4275,13 +4305,26 @@ export function withAgreedExtensions(schema: SchemaObject, extensions: Extension
   return { ...Object.fromEntries(kept), ...extensions };
 }
 
-/** Whether a declaration admits `null` on its own: OAS 3.0 `nullable: true`, or a `type` list naming `null`. */
+/**
+ * Whether a declaration admits `null` on its own: OAS 3.0 `nullable:
+ * true`, or a `type` list naming `null`. A flag that stands for a `null`
+ * variant of the declaration's own `oneOf`/`anyOf` (`unionFlaggedNullable`)
+ * is that union's, not the declaration's: it stays where it is, as the
+ * `null` variant it stands for stays among the union's variants, and the
+ * type builder reads it there (#677: the flag moved to the union of
+ * declarations, so `kind` declared `{ oneOf: [{ type: 'string' }, { type:
+ * 'integer' }], nullable: true }` on one branch and `boolean` on another
+ * was `nullable<(string | integer) | boolean>` in a 3.0.3 document and
+ * `nullable<string | integer> | boolean` in the 3.1.0 one).
+ */
 function admitsNull(schema: SchemaObject): boolean {
+  if (unionFlaggedNullable(schema)) return false;
   return schema.nullable === true || (Array.isArray(schema.type) && schema.type.includes('null'));
 }
 
-/** `schema` with its own `null` admission removed (see `admitsNull`); the type list collapses to its one remaining entry. */
+/** `schema` with its own `null` admission removed (see `admitsNull`, which a flag standing for a union's `null` variant is not); the type list collapses to its one remaining entry. */
 function withoutNull(schema: SchemaObject): SchemaObject {
+  if (unionFlaggedNullable(schema)) return schema;
   const { nullable: _nullable, ...rest } = schema;
   if (Array.isArray(rest.type)) {
     const types = rest.type.filter((t) => t !== 'null');

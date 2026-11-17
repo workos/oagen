@@ -297,7 +297,9 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
     [['object', 'boolean'], '(Owner | boolean) {"minLength":1}'],
     [['string', 'boolean', 'number'], '(string | boolean | number) {"minLength":1}'],
   ])('reads the list %j as %s in every spelling of the two members', async (type, expected) => {
-    const spellings: Array<[string, unknown]> = [
+    // A spelling with a third entry is compared with that entry, its own
+    // flat twin, in the reference's place.
+    const spellings: Array<[string, unknown, unknown?]> = [
       ['flat', flat(type)],
       ['one level down', nested(type)],
       ['two levels down', nested(type, 2)],
@@ -305,7 +307,14 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
       ['a `description` beside each inner `allOf`', nested(type, 2, { description: 'Who wrote it.' })],
       ['a `title` beside the inner `allOf`', nested(type, 1, { title: 'Author' })],
       ['an `x-*` key beside the inner `allOf`', nested(type, 1, { 'x-note': 'internal' })],
-      ['`required` beside the inner `allOf`', { type, allOf: [{ allOf: [owner, min] }], required: ['name'] }],
+      // `required` beside the list adds to `Owner` whichever way the members
+      // are written (#675: one level down it was lost, and the `object` copy
+      // stayed the reference).
+      [
+        '`required` beside the list, the members one level down',
+        { type, allOf: [{ allOf: [owner, min] }], required: ['name'] },
+        { type, allOf: [owner, min], required: ['name'] },
+      ],
       ['the `$ref` wrapped, the limit flat', { type, allOf: [{ allOf: [owner] }, min] }],
       ['the `$ref` flat, the limit wrapped', { type, allOf: [owner, { allOf: [min] }] }],
       ['the limit beside the inner `allOf`', { type, allOf: [{ minLength: 1, allOf: [owner] }] }],
@@ -317,11 +326,17 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
         { type, allOf: [{ allOf: [{ allOf: [min] }] }, owner] },
       ],
     ];
-    const reference = await parseJson(document('3.1.0', flat(type)));
-    for (const [label, schema] of spellings) {
+    const flatReference = await parseJson(document('3.1.0', flat(type)));
+    for (const [label, schema, twin] of spellings) {
       const spec = await parseJson(document('3.1.0', schema));
-      expect(show(author(spec).type), label).toBe(expected);
-      expect(modelNames(spec), label).toEqual(['Owner', 'Note']);
+      const reference = twin === undefined ? flatReference : await parseJson(document('3.1.0', twin));
+      if (twin === undefined) {
+        expect(show(author(spec).type), label).toBe(expected);
+        expect(modelNames(spec), label).toEqual(['Owner', 'Note']);
+      } else {
+        expect(show(author(spec).type), label).toBe(show(author(reference).type));
+        expect(modelNames(spec), label).toEqual(modelNames(reference));
+      }
       expect(diffSpecs(reference, spec).changes, label).toEqual([]);
       expect(diffSpecs(spec, reference).changes, label).toEqual([]);
     }
