@@ -69,18 +69,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A value the readers read as a map without asking what it is: `paths`, a
- * `content` or `headers` map and a `components` section are iterated with
- * `Object.entries` or looked up with `Object.hasOwn`, so one written as an
- * array is read by its indexes (`content: [{ schema }]` types the media type
- * `0`). The maps a reader does check first — `webhooks`, `responses`,
- * `callbacks`, a Callback Object — are asked `isRecord`, as it asks.
- */
-function isKeyed(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
-}
-
-/**
  * Call `visit` with every schema the readers type something from outside
  * `components.schemas`, and the direction its site moves it in. A schema two
  * sites share is visited for each, and one site reached twice — a
@@ -152,6 +140,13 @@ function isKeyed(value: unknown): value is Record<string, unknown> {
  * where a site that is read references it: one nothing references, or one
  * only a site that is stepped over references (`103: { $ref:
  * '#/components/responses/Hints' }`), is no site of this walk.
+ *
+ * **Not followed: a map written as an array.** A map is read here as an
+ * object that is no array. The readers that iterate `paths`, a `content` or
+ * `headers` map or a `components` section without asking what it is read
+ * one written as an array by its indexes (`content: [{ schema }]` types a
+ * media type `0`); this walk leaves such a map out, as both walks it
+ * replaces did.
  */
 export function readSchemaSites(
   document: Record<string, unknown>,
@@ -161,7 +156,7 @@ export function readSchemaSites(
   /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
   const follow = (value: unknown, section: ReferencedSection): Record<string, unknown> | undefined => {
     const entries = components[section];
-    const map = isKeyed(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
+    const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
     const seen = new Set<string>();
     let current = value;
     while (isRecord(current) && current['$ref'] !== undefined) {
@@ -187,7 +182,7 @@ export function readSchemaSites(
    * `encoding` is not read.
    */
   const requestContent = (value: unknown, direction: SiteDirection): void => {
-    if (!isKeyed(value)) return;
+    if (!isRecord(value)) return;
     for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
   };
   /**
@@ -199,7 +194,7 @@ export function readSchemaSites(
    * through its schema (#610).
    */
   const responseContent = (value: unknown): void => {
-    if (!isKeyed(value)) return;
+    if (!isRecord(value)) return;
     for (const [contentType, mediaType] of Object.entries(value)) {
       if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
       schema(mediaType['schema'], 'received');
@@ -215,7 +210,7 @@ export function readSchemaSites(
   const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
     const { schema: own, content: map } = declaration;
     schema(
-      parameterTyping({ schema: own, content: isKeyed(map) ? map : undefined } as SchemaOrContent).schema,
+      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
       direction,
     );
   };
@@ -285,7 +280,7 @@ export function readSchemaSites(
    * dropped declaration or the ignored header.
    */
   const responseHeaders = (headers: unknown): void => {
-    if (!isKeyed(headers)) return;
+    if (!isRecord(headers)) return;
     const declared = new Map<string, unknown>();
     for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
     for (const [name, header] of declared) {
@@ -315,7 +310,7 @@ export function readSchemaSites(
   const operationResponses = (responses: unknown): void => {
     if (!isRecord(responses)) return;
     const entries = components['responses'];
-    const componentResponses = isKeyed(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
+    const componentResponses = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
     const ranges = new Set<string>();
     for (const [code, entry] of Object.entries(responses)) {
       const key = classifyResponseKey(code);
@@ -347,10 +342,8 @@ export function readSchemaSites(
     }
   };
   const pathItems = (map: unknown, webhooks: boolean): void => {
-    // `paths` is read by its keys whatever it is (`resolvePathItems`); `webhooks` only as an object (`extractWebhooks`).
-    const read = webhooks ? isRecord(map) : isKeyed(map);
-    if (!read) return;
-    for (const [key, raw] of Object.entries(map as Record<string, unknown>)) {
+    if (!isRecord(map)) return;
+    for (const [key, raw] of Object.entries(map)) {
       // An extension under `paths`; a webhook's name under `webhooks` (#421).
       if (!webhooks && key.startsWith('x-')) continue;
       const item = follow(raw, 'pathItems');

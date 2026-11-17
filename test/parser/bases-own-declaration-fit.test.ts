@@ -266,7 +266,6 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
           ['required where the base requires', { type: 'string' }, kindEnum, { baseRequired: ['value'] }],
           ['anything under an untyped schema', {}, { type: 'array', items: { type: 'string' } }],
           ['a nullable type under an untyped schema', {}, nullable({ type: 'string' })],
-          ['array items that fit', { type: 'array', items: { type: 'string' } }, { type: 'array', items: kindEnum }],
           [
             'map values that fit',
             { type: 'object', additionalProperties: { type: 'string' } },
@@ -314,6 +313,26 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
             R('Keeper'),
             {
               components: { Owner: owner, Keeper: { allOf: [R('Owner')], properties: { badge: { type: 'integer' } } } },
+            },
+          ],
+          [
+            // Read both ways an emitter writes a named union: as its variants, and as the merge `fields` carry.
+            'one variant under a named union',
+            R('Either'),
+            R('Owner'),
+            { components: { Owner: owner, Keeper: keeper, Either: { oneOf: [R('Owner'), R('Keeper')] } } },
+          ],
+          [
+            'a named union under a wider one',
+            R('Any'),
+            R('Either'),
+            {
+              components: {
+                Owner: owner,
+                Keeper: keeper,
+                Either: { oneOf: [R('Owner'), R('Keeper')] },
+                Any: { oneOf: [R('Owner'), R('Keeper'), { type: 'string' }] },
+              },
             },
           ],
           [
@@ -398,6 +417,12 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
             { type: 'array', items: kindEnum },
             { type: 'array', items: { type: 'string' } },
           ],
+          [
+            // `Animal & { value?: 'cat'[] }` types `value` as `string[] & 'cat'[]`, whose `map` reads a string.
+            'array items narrowed, which an intersection does not type as the model’s',
+            { type: 'array', items: { type: 'string' } },
+            { type: 'array', items: kindEnum },
+          ],
           ['an array over its item', { type: 'string' }, { type: 'array', items: { type: 'string' } }],
           [
             'map values that do not fit',
@@ -443,14 +468,6 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
             { components: { Owner: owner, Keeper: keeper, Either: { oneOf: [R('Owner'), R('Keeper')] } } },
           ],
           [
-            // A named union is read as itself alone: an emitter may write it as
-            // the union of its variants or, from `fields`, as their merge.
-            'one variant under a named union',
-            R('Either'),
-            R('Owner'),
-            { components: { Owner: owner, Keeper: keeper, Either: { oneOf: [R('Owner'), R('Keeper')] } } },
-          ],
-          [
             'a named union with one variant more',
             R('Either'),
             R('Any'),
@@ -464,15 +481,14 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
             },
           ],
           [
-            'a named union under a wider one',
-            R('Any'),
-            R('Either'),
+            // It fits the variant `{ id }`, and not the merge of the variants a reader of `fields` writes.
+            'a component that fits one variant of a named union and not the merge of them',
+            { $ref: '#/components/schemas/Merged' },
+            R('Keeper'),
             {
               components: {
-                Owner: owner,
-                Keeper: keeper,
-                Either: { oneOf: [R('Owner'), R('Keeper')] },
-                Any: { oneOf: [R('Owner'), R('Keeper'), { type: 'string' }] },
+                Keeper: { type: 'object', properties: { id: { type: 'string' }, badge: { type: 'string' } } },
+                Merged: { oneOf: [owner, keeper] },
               },
             },
           ],
@@ -635,6 +651,346 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         ]);
       });
 
+      it('a declaration that only requires or documents a field with limits that cannot be evaluated keeps the base', async () => {
+        // The base's enum, pinned value or enum reference beside a
+        // `pattern` or a `multipleOf`: the model's declaration is the
+        // base's, so it fits whatever the limits say.
+        const pattern = '^[a-z]+$';
+        const fields: Array<[string, Record<string, unknown>, Record<string, unknown>?]> = [
+          ['an enum beside a pattern', { ...kindEnum, pattern }],
+          ['a pinned value beside a pattern', { ...pinned('cat'), pattern }],
+          ['an enum beside multipleOf', { type: 'integer', enum: [2, 4], multipleOf: 2 }],
+          ['a reference to an enum beside a pattern', { allOf: [R('Species')], pattern }, { Species: kindEnum }],
+        ];
+        for (const [label, value, components] of fields) {
+          const base = { type: 'object', properties: { value, name: { type: 'string' } } };
+          for (const own of [{ required: ['value'] }, { properties: { value: { description: 'Its own.' } } }]) {
+            const spec = await parsed({ ...components, Animal: base, Pet: { allOf: [R('Animal')], ...own } });
+            const built = modelNamed(spec, 'Pet');
+            expect(built.bases?.map(refName), label).toEqual(['Animal']);
+            expect(
+              built.fields.map((f) => [f.name, refName(f.inheritedFrom)]),
+              label,
+            ).toEqual([
+              ['value', undefined],
+              ['name', 'Animal'],
+            ]);
+          }
+        }
+      });
+
+      it('settles two deep trees and two meshes of components that type one field, once per pair', async () => {
+        // `Own<i> { l: Own<i+1>, r: Own<i+1> }` over `Base<i>` the same,
+        // twenty levels down: read path by path that is a million walks.
+        const depth = 20;
+        const tree: Record<string, unknown> = {};
+        for (let level = 0; level < depth; level++) {
+          for (const family of ['Own', 'Base']) {
+            const next = R(`${family}${level + 1}`);
+            tree[`${family}${level}`] = { type: 'object', properties: { l: next, r: next } };
+          }
+        }
+        tree[`Own${depth}`] = {
+          type: 'object',
+          required: ['x'],
+          properties: { x: { type: 'string' }, y: { type: 'string' } },
+        };
+        tree[`Base${depth}`] = { type: 'object', properties: { x: { type: 'string' } } };
+        const typing = (base: string, own: string) => ({
+          Holder: { type: 'object', properties: { data: { oneOf: [R(base), { type: 'integer' }] } } },
+          Pet: { allOf: [R('Holder')], properties: { data: R(own) } },
+        });
+        expect(await pet({ ...tree, ...typing('Base0', 'Own0') })).toBe('Pet : Holder { data?: Own0 }');
+        expect(await pet({ ...tree, ...typing('Own0', 'Base0') })).toBe('Pet { data?: Base0 }');
+        // Two families of ten, each model naming every other of its family.
+        const size = 10;
+        const mesh = (last: unknown): Record<string, unknown> => {
+          const schemas: Record<string, unknown> = {};
+          for (const family of ['Own', 'Base']) {
+            for (let index = 0; index < size; index++) {
+              const properties: Record<string, unknown> = {
+                x: family === 'Own' && index === size - 1 ? last : { type: 'string' },
+              };
+              for (let other = 0; other < size; other++) {
+                if (other !== index) properties[`f${other}`] = R(`${family}${other}`);
+              }
+              schemas[`${family}${index}`] = { type: 'object', properties };
+            }
+          }
+          return schemas;
+        };
+        expect(await pet({ ...mesh(kindEnum), ...typing('Base0', 'Own0') })).toBe('Pet : Holder { data?: Own0 }');
+        expect(await pet({ ...mesh({ type: 'integer' }), ...typing('Base0', 'Own0') })).toBe('Pet { data?: Own0 }');
+      });
+
+      it('reads a base that is a union through its variants too', async () => {
+        const text = { type: 'string' };
+        const Cat = { type: 'object', required: ['kind'], properties: { kind: pinned('cat'), meow: text } };
+        const Dog = { type: 'object', required: ['kind'], properties: { kind: pinned('dog'), bark: text } };
+        const Shape = { oneOf: [R('Cat'), R('Dog')] };
+        const on = async (properties: Record<string, unknown>, shape: unknown = Shape) =>
+          pet({ Cat, Dog, Shape: shape, Pet: { allOf: [R('Shape')], properties } });
+        // `Shape`'s variants are `$ref`s, so it has no fields of its own:
+        // the variants' are read. Nothing of `Pet`'s is one of theirs.
+        expect(await on({ extra: text })).toBe('Pet : Shape { extra?: string }');
+        // `kind: string` over the variants' pinned, required `kind`:
+        // `Shape & { kind?: string }` types `kind` as `'cat' | 'dog'`.
+        expect(await on({ kind: text })).toBe('Pet { kind?: string }');
+        // A field typed otherwise than the one variant that declares it.
+        expect(await on({ meow: { type: 'integer' } })).toBe('Pet { meow?: integer }');
+        // Restating one variant's pinned `kind`, and requiring it as that
+        // variant does: `Pet` is the `Cat` of `Shape`, and `Shape & { kind:
+        // 'cat' }` types `kind` as `fields` does — whichever way round the
+        // variants are written, under the `discriminator` keyword or not,
+        // and through a nullable union.
+        const restated = { allOf: [R('Shape')], required: ['kind'], properties: { kind: pinned('cat') } };
+        const maybe =
+          openapi === '3.0.3' ? { ...Shape, nullable: true } : { oneOf: [R('Cat'), R('Dog'), { type: 'null' }] };
+        for (const shape of [
+          Shape,
+          { oneOf: [R('Dog'), R('Cat')] },
+          { ...Shape, discriminator: { propertyName: 'kind' } },
+          maybe,
+        ]) {
+          expect(await pet({ Cat, Dog, Shape: shape, Pet: restated }), JSON.stringify(shape)).toBe(
+            'Pet : Shape { kind: "cat" }',
+          );
+        }
+        expect(await pet({ Cat, Dog, Shape: maybe, Pet: { allOf: [R('Shape')], properties: { kind: text } } })).toBe(
+          'Pet { kind?: string }',
+        );
+        // Not requiring it, where `Cat` does, or pinning a value no variant
+        // pins, fits no variant.
+        expect(await on({ kind: pinned('cat') })).toBe('Pet { kind?: "cat" }');
+        expect(await pet({ Cat, Dog, Shape, Pet: { ...restated, properties: { kind: pinned('bird') } } })).toBe(
+          'Pet { kind: "bird" }',
+        );
+        // One variant has to agree on every field it shares with the
+        // model. `kind: 'cat'` fits `Tabby` alone and `name: string` fits
+        // `Hound` alone: `(Tabby | Hound) & { kind: 'cat'; name: string }`
+        // is `Tabby`'s branch alone, which types `name` as `'tom'`.
+        const Tabby = {
+          type: 'object',
+          required: ['kind', 'name'],
+          properties: { kind: pinned('cat'), name: pinned('tom') },
+        };
+        const Hound = { type: 'object', required: ['kind', 'name'], properties: { kind: pinned('dog'), name: text } };
+        const named = async (name: unknown) =>
+          pet({
+            Tabby,
+            Hound,
+            Shape: { oneOf: [R('Tabby'), R('Hound')] },
+            Pet: { allOf: [R('Shape')], required: ['kind', 'name'], properties: { kind: pinned('cat'), name } },
+          });
+        expect(await named(text)).toBe('Pet { kind: "cat", name: string }');
+        expect(await named(pinned('tom'))).toBe('Pet : Shape { kind: "cat", name: "tom" }');
+        // Beside a model base: a field `Pet` takes from `Animal` has to be
+        // the field of a variant that declares it.
+        const beside = async (meow: unknown) =>
+          pet({
+            Cat,
+            Dog,
+            Shape,
+            Animal: { type: 'object', properties: { name: text, meow } },
+            Pet: { allOf: [R('Animal'), R('Shape')], properties: { extra: text } },
+          });
+        expect(await beside(text)).toBe(
+          'Pet : Animal & Shape { extra?: string, name?: string <- Animal, meow?: string <- Animal }',
+        );
+        expect(await beside({ type: 'integer' })).toBe(
+          'Pet : Animal { extra?: string, name?: string <- Animal, meow?: integer <- Animal }',
+        );
+        // `r: integer` over variants that declare `r` as an enum and as a
+        // pinned value fits neither.
+        expect(
+          await pet({
+            Cat: { type: 'object', properties: { r: { type: 'string', enum: ['a', 'b'] } } },
+            Dog: { type: 'object', properties: { r: pinned('c') } },
+            Shape: { anyOf: [R('Cat'), R('Dog')] },
+            Pet: { allOf: [R('Shape')], properties: { r: { type: 'integer' } } },
+          }),
+        ).toBe('Pet { r?: integer }');
+        // The same under the `discriminator` keyword.
+        const keyed = { ...Shape, discriminator: { propertyName: 'kind' } };
+        expect(await on({ extra: text }, keyed)).toBe('Pet : Shape { extra?: string }');
+        expect(await on({ meow: { type: 'integer' } }, keyed)).toBe('Pet { meow?: integer }');
+        // Variants that pin nothing are flattened into `Pet` as optional
+        // fields: the same fields while the variants leave them optional,
+        // and a narrower declaration of the model's own fits.
+        const A = { type: 'object', properties: { r: kindEnum } };
+        const B = { type: 'object', properties: { w: { type: 'integer' } } };
+        const flat = async (own: Record<string, unknown>, a: unknown = A) =>
+          pet({ A: a, B, Shape: { oneOf: [R('A'), R('B')] }, Pet: { allOf: [R('Shape')], ...own } });
+        expect(await flat({ properties: { extra: text } })).toBe(
+          'Pet : Shape { extra?: string, r?: PetR, w?: integer }',
+        );
+        expect(await flat({ required: ['r'], properties: { r: pinned('cat') } })).toBe(
+          'Pet : Shape { r: "cat", w?: integer }',
+        );
+        expect(await flat({ properties: { r: text } })).toBe('Pet { r?: string, w?: integer }');
+        expect(await flat({ properties: { w: text } })).toBe('Pet { w?: string, r?: PetR }');
+        // A variant that requires its field is not what the optional copy
+        // on `Pet` fits.
+        const requiring = { type: 'object', required: ['r'], properties: { r: kindEnum } };
+        expect(await flat({ properties: { extra: text } }, requiring)).toBe(
+          'Pet { extra?: string, r?: PetR, w?: integer }',
+        );
+        // The variants written inline read as the same variants behind
+        // `$ref`s do, case by case.
+        const inline = async (own: Record<string, unknown>, a: unknown = A) =>
+          pet({ Shape: { oneOf: [a, B] }, Pet: { allOf: [R('Shape')], ...own } });
+        const spellings: Array<[Record<string, unknown>, unknown, string]> = [
+          [{ properties: { extra: text } }, A, 'Pet : Shape { extra?: string, r?: PetR, w?: integer }'],
+          [{ required: ['r'], properties: { r: pinned('cat') } }, A, 'Pet : Shape { r: "cat", w?: integer }'],
+          [{ properties: { r: text } }, A, 'Pet { r?: string, w?: integer }'],
+          [{ properties: { extra: text } }, requiring, 'Pet { extra?: string, r?: PetR, w?: integer }'],
+        ];
+        for (const [own, a, expected] of spellings) {
+          expect(await flat(own, a), expected).toBe(expected);
+          expect(await inline(own, a), expected).toBe(expected);
+        }
+        // A union of unions is read to its models; a variant that is no
+        // model declares nothing; a union of nothing is no base.
+        const nested = {
+          Cat,
+          Dog,
+          Inner: Shape,
+          Shape: { oneOf: [R('Inner'), { type: 'object', properties: { other: text } }] },
+        };
+        expect(await pet({ ...nested, Pet: { allOf: [R('Shape')], properties: { kind: { type: 'integer' } } } })).toBe(
+          'Pet { kind?: integer, meow?: string, bark?: string, other?: string }',
+        );
+        expect(
+          await pet({ A, Shape: { oneOf: [R('A'), text] }, Pet: { allOf: [R('Shape')], properties: { extra: text } } }),
+        ).toBe('Pet : Shape { extra?: string, r?: PetR }');
+        expect(await pet({ Empty: { oneOf: [] }, Pet: { allOf: [R('Empty')], properties: { extra: text } } })).toBe(
+          'Pet { extra?: string }',
+        );
+        // A dispatcher under a model: its variant models carry its fields.
+        const Base = { type: 'object', required: ['id'], properties: { id: text } };
+        const Disp = { allOf: [R('Base'), { oneOf: [Cat, Dog] }] };
+        expect(await pet({ Base, Disp, Pet: { allOf: [R('Disp')], properties: { extra: text } } })).toBe(
+          'Pet : Disp { extra?: string, id: string <- Disp }',
+        );
+        expect(await pet({ Base, Disp, Pet: { allOf: [R('Disp')], properties: { kind: { type: 'integer' } } } })).toBe(
+          'Pet { kind?: integer, id: string }',
+        );
+      });
+
+      it('reads a named union that types a field as itself alone, and an empty one as fitting nothing', async () => {
+        // `Other` fits the variant `ShapeWithR`, and not the merge of the
+        // variants an emitter reading `fields` writes (`w?: number`).
+        const Shape = {
+          oneOf: [
+            { type: 'object', properties: { r: { type: 'string' } } },
+            { type: 'object', properties: { w: { type: 'integer' } } },
+          ],
+        };
+        const Other = { type: 'object', properties: { r: { type: 'string' }, w: { type: 'string' } } };
+        const maybe = (name: string) =>
+          openapi === '3.0.3' ? { allOf: [R(name)], nullable: true } : { anyOf: [R(name), { type: 'null' }] };
+        const fits = await parsed({
+          Shape,
+          Other,
+          Holder: { type: 'object', properties: { shape: maybe('Shape') } },
+          Pet: { allOf: [R('Holder')], properties: { shape: maybe('Other') } },
+        });
+        // (OAS 3.0 reads the nullable `allOf` of a reference as the reference.)
+        expect(print(modelNamed(fits, 'Pet'))).toBe(
+          openapi === '3.0.3' ? 'Pet { shape?: Other }' : 'Pet { shape?: Other | null }',
+        );
+        // The other way round: a union whose every variant requires `id`,
+        // under a model that requires it, where the merge leaves it optional.
+        const variant = (name: string) => ({
+          type: 'object',
+          required: ['id'],
+          properties: { id: { type: 'string' }, [name]: { type: 'string' } },
+        });
+        const under = await parsed({
+          Union: { oneOf: [variant('r'), variant('w')] },
+          Plain: { type: 'object', required: ['id'], properties: { id: { type: 'string' } } },
+          Holder: { type: 'object', properties: { x: maybe('Plain') } },
+          Pet: { allOf: [R('Holder')], properties: { x: maybe('Union') } },
+        });
+        expect(print(modelNamed(under, 'Pet'))).toBe(
+          openapi === '3.0.3' ? 'Pet { x?: Union }' : 'Pet { x?: Union | null }',
+        );
+        // A union of nothing.
+        const empty = await parsed({
+          Empty: { oneOf: [] },
+          Animal: { type: 'object', required: ['v'], properties: { v: { type: 'integer' } } },
+          Pet: { allOf: [R('Animal')], properties: { v: R('Empty') } },
+        });
+        expect(print(modelNamed(empty, 'Pet'))).toBe('Pet { v: Empty }');
+        if (openapi === '3.1.0') {
+          const nothing = await parsed({
+            Nothing: { oneOf: [{ type: 'null' }] },
+            Animal: { type: 'object', properties: { v: { type: ['string', 'null'] } } },
+            Pet: { allOf: [R('Animal')], properties: { v: R('Nothing') } },
+          });
+          expect(print(modelNamed(nothing, 'Pet'))).toBe('Pet { v?: Nothing | null }');
+        }
+      });
+
+      it('an array narrowed in its items drops the base, as a declaration with a looser limit or another format does', async () => {
+        const Named = { type: 'object', properties: { name: { type: 'string' } } };
+        const narrowed = await parsed({
+          Named,
+          Dog: { allOf: [R('Named')], properties: { bark: { type: 'string' } } },
+          Animal: {
+            type: 'object',
+            properties: {
+              friends: { type: 'array', items: R('Named') },
+              tags: { type: 'array', items: kindEnum },
+              name: { type: 'string' },
+            },
+          },
+          Friendly: { allOf: [R('Animal')], properties: { friends: { type: 'array', items: R('Dog') } } },
+          Tagged: { allOf: [R('Animal')], properties: { tags: { type: 'array', items: pinned('cat') } } },
+          Pet: { allOf: [R('Animal')], properties: { tags: { type: 'array', items: kindEnum, maxItems: 3 } } },
+        });
+        const printed = Object.fromEntries(narrowed.models.map((m) => [m.name, print(m)]));
+        expect(printed).toMatchObject({
+          Friendly: 'Friendly { friends?: FriendlyFriend[], tags?: FriendlyTags[], name?: string }',
+          Tagged: 'Tagged { tags?: "cat"[], friends?: Named[], name?: string }',
+          // The same items under a tighter limit is the same array to a type.
+          Pet: 'Pet : Animal { tags?: PetTags[], friends?: Named[] <- Animal, name?: string <- Animal }',
+        });
+        // By the rule, where the base stayed before: the model's `name`
+        // has no `maxLength`, and an enum is not read under a `format`.
+        expect(
+          await pet({
+            Animal: { type: 'object', properties: { name: { type: 'string', maxLength: 50 } } },
+            Pet: { allOf: [R('Animal')], properties: { name: { type: 'string', description: 'Its own.' } } },
+          }),
+        ).toBe('Pet { name?: string }');
+        expect(
+          await pet({
+            Animal: { type: 'object', properties: { code: { type: 'integer', format: 'int32' } } },
+            Pet: { allOf: [R('Animal')], properties: { code: { type: 'integer', format: 'int32', enum: [1, 2] } } },
+          }),
+        ).toBe('Pet { code?: PetCode }');
+      });
+
+      it('an enum fits a union when each of its values fits a variant', async () => {
+        const either = { oneOf: [{ type: 'string' }, { type: 'integer' }] };
+        const on = async (theirs: unknown, own: unknown) =>
+          pet({
+            Animal: { type: 'object', properties: { v: theirs, name: { type: 'string' } } },
+            Pet: { allOf: [R('Animal')], properties: { v: own } },
+          });
+        expect(await on(either, { enum: ['a', 1] })).toBe('Pet : Animal { v?: PetV, name?: string <- Animal }');
+        expect(await on(either, { enum: ['a', 1.5] })).toBe('Pet { v?: PetV, name?: string }');
+        if (openapi === '3.1.0') {
+          expect(await on({ type: ['string', 'integer'] }, { enum: ['a', 1] })).toBe(
+            'Pet : Animal { v?: PetV, name?: string <- Animal }',
+          );
+          expect(await on({ oneOf: [{ const: 'cat' }, { const: 'dog' }] }, { enum: ['cat', 'dog'] })).toBe(
+            'Pet : Animal { v?: PetV, name?: string <- Animal }',
+          );
+        }
+      });
+
       it('a declaration that fits two bases keeps both, one that fits neither drops both', async () => {
         // `'cat'` is one of `Kinded`'s values and one of `Tagged`'s strings.
         expect(await pet({ Tagged, Kinded, Pet: { allOf: bothBases, properties: { tag: pinned('cat') } } })).toBe(
@@ -786,8 +1142,12 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       expect(over(list({ minItems: 1 }), list({ minItems: 2 }))).toEqual(dropped);
       const short: TypeRef = { kind: 'primitive', type: 'string', constraints: { maxLength: 2 } };
       const long: TypeRef = { kind: 'primitive', type: 'string', constraints: { maxLength: 9 } };
-      expect(over(list(undefined, short), list(undefined, long))).toEqual(kept);
+      // An array fits only an array of the same items: narrower items are
+      // not what an intersection types, whichever way the limits go.
+      expect(over(list(undefined, short), list(undefined, long))).toEqual(dropped);
       expect(over(list(undefined, long), list(undefined, short))).toEqual(dropped);
+      expect(over(list({ maxItems: 2 }, short), list({ maxItems: 3 }, short))).toEqual(kept);
+      expect(over(list(undefined, { kind: 'literal', value: 'cat' }), list())).toEqual(dropped);
       expect(over({ type: { kind: 'map', valueType: short } }, { type: { kind: 'map', valueType: long } })).toEqual(
         kept,
       );
@@ -803,6 +1163,36 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       expect(over(owner({ minProperties: 2 }), owner({ minProperties: 1 }), more)).toEqual(kept);
       expect(over(owner(), owner({ minProperties: 1 }), more)).toEqual(dropped);
       expect(over(owner({ minProperties: 1 }), owner(), more)).toEqual(kept);
+    });
+
+    it('reads a union or an enum of nothing as fitting nothing, and two chains of four thousand models without recursing', () => {
+      const nothing: TypeRef = { kind: 'union', variants: [] };
+      const noValues: TypeRef = { kind: 'enum', name: 'PetValue', values: [] };
+      expect(over({ type: nothing }, {})).toEqual(dropped);
+      expect(over({ type: noValues }, {})).toEqual(dropped);
+      expect(over({ type: nothing }, { type: nothing })).toEqual(kept);
+      expect(over({}, { type: nothing })).toEqual(dropped);
+      // A named union of nothing is no base, whatever the model carries.
+      const pet: Model = { name: 'Pet', fields: [field('extra')], bases: [model('Empty')] };
+      settleBases([{ name: 'Empty', fields: [], variants: [], compositionKind: 'oneOf' }, pet]);
+      expect(pet.bases).toBeUndefined();
+      // Components: `Own<i>.next: Own<i+1>` over `Base<i>.next: Base<i+1>`.
+      const named = (name: string): ModelRef => {
+        const ref = model(name);
+        markComponentModelRef(ref);
+        return ref;
+      };
+      const length = 4000;
+      const chain = (prefix: string, last: Field[]): Model[] =>
+        Array.from({ length }, (_, index) => ({
+          name: `${prefix}${index}`,
+          fields: index === length - 1 ? last : [field('next', { type: named(`${prefix}${index + 1}`) })],
+        }));
+      const chains = (last: Field[]) => [...chain('Own', last), ...chain('Base', [field('x')])];
+      expect(over({ type: named('Own0') }, { type: named('Base0') }, chains([field('x', { required: true })]))).toEqual(
+        kept,
+      );
+      expect(over({ type: named('Own0') }, { type: named('Base0') }, chains([]))).toEqual(dropped);
     });
 
     it('reads an untyped schema as fitting nothing but itself, and as fit by anything', () => {
@@ -909,7 +1299,7 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       }
     });
 
-    it('ends on a pair of models that reach each other, and reads a named union or a dispatcher as itself alone', () => {
+    it('reads a named union both ways an emitter writes it, ends on a pair of models that reach each other, and reads a dispatcher as itself alone', () => {
       const integer: TypeRef = { kind: 'primitive', type: 'integer' };
       const named = (name: string): ModelRef => {
         const ref = model(name);
@@ -917,26 +1307,61 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         return ref;
       };
       // A named union is its variants to one emitter and the merge of them
-      // (`fields`) to another: under either side it is itself alone.
+      // (`fields`) to another: a fit has to hold under both. `Shape`'s
+      // variants are references, so it carries no field: `Cat` is one of
+      // its variants, `Bird` is not. `Merged` carries its inline variants'
+      // fields: `Quiet` fits a variant and carries the merge; `Loud` fits
+      // the same variant and types the merge's `bark` otherwise; `Cat`
+      // fits it too and does not carry `bark` at all.
       const cat: Model = { name: 'Cat', fields: [field('meow')] };
+      const dog: Model = { name: 'Dog', fields: [field('bark', { required: true })] };
+      const bird: Model = { name: 'Bird', fields: [field('sing')] };
       const shape: Model = {
         name: 'Shape',
-        fields: [field('meow'), field('bark')],
+        fields: [],
         variants: [named('Cat'), named('Dog')],
         compositionKind: 'oneOf',
       };
+      const merged: Model = {
+        name: 'Merged',
+        fields: [field('meow'), field('bark', { type: integer })],
+        variants: [model('MergedWithMeow'), model('MergedWithBark')],
+        compositionKind: 'oneOf',
+      };
       const loop: Model = { name: 'Loop', fields: [], variants: [named('Loop'), string], compositionKind: 'oneOf' };
-      const unions = [cat, shape, loop];
-      expect(over({ type: named('Cat') }, { type: named('Shape') }, unions)).toEqual(dropped);
+      const unions = [
+        cat,
+        dog,
+        bird,
+        shape,
+        merged,
+        loop,
+        { name: 'MergedWithMeow', fields: [field('meow')] },
+        { name: 'MergedWithBark', fields: [field('bark', { type: integer })] },
+        { name: 'Loud', fields: [field('meow'), field('bark')] },
+        { name: 'Quiet', fields: [field('meow'), field('bark', { type: integer })] },
+      ];
+      expect(over({ type: named('Cat') }, { type: named('Shape') }, unions)).toEqual(kept);
+      expect(over({ type: named('Bird') }, { type: named('Shape') }, unions)).toEqual(dropped);
       expect(over({ type: named('Shape') }, { type: named('Cat') }, unions)).toEqual(dropped);
       expect(over({ type: named('Shape') }, { type: named('Shape') }, unions)).toEqual(kept);
-      expect(over({}, { type: named('Loop') }, unions)).toEqual(dropped);
+      expect(over({ type: named('Quiet') }, { type: named('Merged') }, unions)).toEqual(kept);
+      expect(over({ type: named('Loud') }, { type: named('Merged') }, unions)).toEqual(dropped);
+      expect(over({ type: named('Cat') }, { type: named('Merged') }, unions)).toEqual(dropped);
+      // A union that names itself is met again against the same type, and is no fit there.
+      expect(over({ type: integer }, { type: named('Loop') }, unions)).toEqual(dropped);
       expect(over({ type: named('Loop') }, {}, unions)).toEqual(dropped);
       expect(over({ type: named('Loop') }, { type: named('Loop') }, unions)).toEqual(kept);
       expect(
         over({ type: named('Shape') }, { type: { kind: 'union', variants: [integer, named('Shape')] } }, unions),
       ).toEqual(kept);
       expect(over({ type: named('Shape') }, { type: { kind: 'primitive', type: 'unknown' } }, unions)).toEqual(kept);
+      // A named union with limits of its own, or with no variant, is read as itself alone.
+      const limited: Model = { ...shape, name: 'Limited', constraints: { minProperties: 1 } };
+      const empty: Model = { name: 'Empty', fields: [], variants: [], compositionKind: 'oneOf' };
+      expect(over({ type: named('Cat') }, { type: named('Limited') }, [...unions, limited])).toEqual(dropped);
+      expect(over({ type: named('Cat') }, { type: named('Empty') }, [...unions, empty])).toEqual(dropped);
+      expect(over({ type: named('Empty') }, {}, [...unions, empty])).toEqual(dropped);
       // `Left { peer: Right }` over `Wide { peer: Wider }`, `Right { peer:
       // Left, extra }` over `Wider { peer: Wide }`: each pair is met again
       // on the way and taken to fit; a field that does not fit still answers.
