@@ -267,8 +267,8 @@ let activeDispatcherVariantPlans: Map<readonly SchemaObject[], Map<string, Dispa
 const resolvingArrayComponents = new Set<string>();
 
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
-function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
-  return (values ?? []).filter((v): v is string | number => v !== null);
+function nonNullEnumValues(values: SchemaObject['enum']): unknown[] {
+  return (values ?? []).filter((v) => v !== null);
 }
 
 /**
@@ -676,8 +676,12 @@ export interface SchemaObject {
   properties?: Record<string, SchemaObject | undefined>;
   required?: string[];
   items?: SchemaObject;
-  /** OAS 3.1 allows a literal `null` member when `type` also admits null. */
-  enum?: (string | number | null)[];
+  /**
+   * Any JSON value may be listed, as `const` may hold any: a string, a
+   * number, a boolean, an object, an array. OAS 3.1 allows a literal `null`
+   * member when `type` also admits null.
+   */
+  enum?: unknown[];
   allOf?: SchemaObject[];
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
@@ -3823,10 +3827,12 @@ export function inlineEnumName(contextName: string | undefined, parentModelName:
  * non-null variants are string `const` schemas (`constUnionEnumMembers`)
  * with two or more members, or any number beside an `enum:` list that
  * restricts them, is a `const-union` enum of those members; an `enum:` list
- * of any count of non-null members but one is an `enum-list` enum, one
- * alone being a literal; every other shape — a `$ref`, an `allOf`, a union
- * of other variants, an object, an array — is not an enum here (an array's
- * items are typed on their own).
+ * is an `enum-list` enum unless it admits one value alone (`loneEnumValue`:
+ * one entry beside any `null` entries, or nothing but `null`), which is
+ * typed as the `const` of that value is (`constTypeRef`) and is no enum;
+ * every other shape — a `$ref`, an `allOf`, a union of other variants, an
+ * object, an array — is not an enum here (an array's items are typed on
+ * their own).
  */
 export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | undefined {
   const kind = classifyInlineSchema(schema);
@@ -3837,7 +3843,7 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
     }
     return undefined;
   }
-  if (kind === 'enum' && nonNullEnumValues(schema.enum).length !== 1) return { spelling: 'enum-list' };
+  if (kind === 'enum' && loneEnumValue(schema.enum) === undefined) return { spelling: 'enum-list' };
   return undefined;
 }
 
@@ -3845,12 +3851,52 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
 export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
 
 /**
+ * The one value an `enum:` list admits, when it admits one alone — the OAS
+ * 3.0 spelling of a `const`: its only entry once the `null` entries, which
+ * mark nullability, are set aside (`enum: [true]`, `enum: ['a', null]`), or
+ * `null` for a list of nothing but `null` (`enum: [null]`, the list
+ * `isNullSchema` reads as the `null` schema). `undefined`, which is no JSON
+ * value, for a list of two or more other values and for an empty one: those
+ * are enums (`inlineEnumSpelling`).
+ */
+function loneEnumValue(values: SchemaObject['enum']): unknown {
+  if (values === undefined || values.length === 0) return undefined;
+  const nonNull = nonNullEnumValues(values);
+  if (nonNull.length === 0) return null;
+  return nonNull.length === 1 ? nonNull[0] : undefined;
+}
+
+/**
+ * The type of a schema that admits the one value `value`, whichever keyword
+ * says so — a `const`, or an `enum:` list of that value alone
+ * (`loneEnumValue`) — so the two spellings are one type (#667). A string, a
+ * number or a boolean is the literal of that value, kept as the document
+ * writes it: `enum: [true]` is `{ kind: 'literal', value: true }`, as
+ * `const: true` is, not the string `'true'`. `null` is `nullable<unknown>`.
+ * An array is an array of `unknown` and any other object a map of
+ * `unknown`, their contents not read: `enum: [{ a: 1 }]` is the map `const:
+ * { a: 1 }` is, not the literal `'[object Object]'`. `undefined` for
+ * `undefined`, the absence of a value.
+ */
+function constTypeRef(value: unknown): TypeRef | undefined {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return { kind: 'literal', value };
+  }
+  if (value === null) return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
+  if (Array.isArray(value)) return { kind: 'array', items: { kind: 'primitive', type: 'unknown' } };
+  if (typeof value === 'object') return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
+  return undefined;
+}
+
+/**
  * The string const a schema pins `property` to in its own `properties`, in
  * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
- * read as the declaration pins it (`pinnedDeclarationValue`): as written,
- * or behind the wrappers the type builder reads the declaration through —
+ * read as the declaration pins it (`pinnedDeclarationValue`): as written
+ * — a `null` listed beside the one string set aside, so `{ enum: ["x",
+ * null] }` pins `x` as well (#678) — or behind the wrappers the type
+ * builder reads the declaration through —
  * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
  * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
@@ -3873,17 +3919,41 @@ function getConstPropertyValue(
 }
 
 /**
- * The one string a schema pins as written — a string `const`, or an `enum:`
- * of exactly one string; null otherwise. The leaf `pinnedDeclarationValue`
+ * The one string a schema pins as written, its `const` read before its
+ * `enum:` list, the order the type builder reads the two in
+ * (`classifyInlineSchema`): a `const` when it writes one — a string pins,
+ * any other value pins nothing, and an `enum:` beside it is not read —
+ * else an `enum:` list holding exactly one value once every `null` entry
+ * is set aside (`nonNullEnumValues`), that value a string. A `null` entry
+ * marks the declaration nullable and is no value of its own, as the type
+ * builder reads the list — `enum: ['cat', null]` and `enum: [null, 'cat']`
+ * are the `nullable<"cat">` that `{ type: ['string', 'null'], const: 'cat'
+ * }` is — so both pin `cat` (#678: the list was read by its length, so the
+ * `null` entry made it two values, the declaration pinned nothing, and a
+ * union carried `{}` under the keyword and no discriminator without it
+ * while its variant's field was the nullable literal). Null otherwise:
+ * `enum: [null]` holds no value, `enum: ['cat', 'dog', null]` two. Whether
+ * the list names `null` is `pinListsNull`. The leaf `pinnedDeclarationValue`
  * reads once every wrapper is read through; no other site reads a
  * declaration as written.
  */
 function pinnedStringValue(schema: SchemaObject): string | null {
-  if (typeof schema.const === 'string') return schema.const;
-  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
-    return schema.enum[0];
-  }
-  return null;
+  if (schema.const !== undefined) return typeof schema.const === 'string' ? schema.const : null;
+  const values = Array.isArray(schema.enum) ? nonNullEnumValues(schema.enum) : [];
+  const [value] = values;
+  return values.length === 1 && typeof value === 'string' ? value : null;
+}
+
+/**
+ * Whether the `enum:` list a schema is pinned by (`pinnedStringValue`)
+ * names `null` beside its value, which is how the type builder reads the
+ * list as nullable with no type list or flag beside it (`{ enum: ['cat',
+ * null] }` is `nullable<"cat">`). False beside a `const`, which types the
+ * schema and leaves the list unread: `{ const: 'cat', enum: ['cat', null]
+ * }` is the plain literal.
+ */
+function pinListsNull(schema: SchemaObject): boolean {
+  return schema.const === undefined && Array.isArray(schema.enum) && schema.enum.includes(null);
 }
 
 function resolveVariantModelName(schema: SchemaObject): string | null {
@@ -6384,7 +6454,8 @@ function getEffectiveProperties(
  * through at every hop (`kind: { allOf: [{ const: 'cat' }] }`; #607), and
  * a chain that repeats pins nothing. Null when the property is undeclared
  * or pins no one string (an enum of several values, a plain `type:
- * string`).
+ * string`); a `null` an `enum:` list names beside its one string is not a
+ * second value (`pinnedStringValue`; #678).
  */
 function getEffectiveConstPropertyValue(
   schema: SchemaObject,
@@ -6408,8 +6479,14 @@ function getEffectiveConstPropertyValue(
  * variant (`unwrapNullableSchema`); an `allOf` read as one member
  * (`allOfReadAsMember`: a lone member, one typing member beside members
  * that only annotate or limit it, or a lone `$ref` member beside such
- * members) to that member — then the `const` or one-value `enum:` written
- * on what it lands on (`pinnedStringValue`). So `kind: { allOf: [{ const:
+ * members) to that member — then the string `const` written on what it
+ * lands on, or the one string its `enum:` list holds, a `null` listed
+ * beside it set aside (`pinnedStringValue`): the list names `null` to
+ * admit it, which the type builder reads as `nullable` around the same
+ * literal, so `kind: { type: ['string', 'null'], enum: ['cat', null] }` —
+ * OAS 3.0: `{ type: 'string', enum: ['cat', null], nullable: true }` —
+ * pins `cat` as `kind: { type: ['string', 'null'], const: 'cat' }` does
+ * (#678). So `kind: { allOf: [{ const:
  * 'cat' }] }`, `kind: { allOf: [{ $ref: HamsterKind }], description: 'The
  * kind of pet.' }` with `HamsterKind: { const: 'hamster' }`, and `kind: {
  * $ref: RabbitKind }` with `RabbitKind: { allOf: [{ $ref: RabbitConst }] }`
@@ -6451,7 +6528,15 @@ export function pinnedDeclarationValue(
  * type: 'null' }] }`, `kind: { type: ['string', 'null'], const: 'email' }`,
  * `kind: { type: 'string', enum: ['email'], nullable: true }` and a `$ref`
  * to a component written so admit `null` as the field built from them is
- * `nullable<literal>`. Read by the request-body fold
+ * `nullable<literal>` — or by the list the walk ends on naming `null`
+ * beside the value it pins (`pinListsNull`), the one spelling that needs
+ * no type list, flag or wrapper: `kind: { enum: ['email', null] }` and
+ * `kind: { type: 'string', enum: ['email', null] }` are `nullable<literal>`
+ * fields too (#678). Only the list on the last hop is read, the one the
+ * type builder reads: a list beside an `allOf`, a `$ref` or a nullable
+ * `oneOf`/`anyOf` wrapper the walk reads through types nothing, and a type
+ * list or `nullable: true` is stripped to a copy that keeps the list
+ * (`unwrapNullableSchema`). Read by the request-body fold
  * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
  * the pinned values admits `null` exactly when a variant's does (#607
  * review: the fold dropped the admission). False for a chain that repeats.
@@ -6460,7 +6545,10 @@ export function pinnedDeclarationAdmitsNull(
   declaration: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): boolean {
-  return (pinnedDeclarationHops(declaration, schemas) ?? []).some((hop) => hop.$ref === undefined && declaresNull(hop));
+  const hops = pinnedDeclarationHops(declaration, schemas) ?? [];
+  return hops.some(
+    (hop, index) => hop.$ref === undefined && (declaresNull(hop) || (index === hops.length - 1 && pinListsNull(hop))),
+  );
 }
 
 /**
@@ -8045,39 +8133,33 @@ function buildTypeRef(
     return hasNull ? { kind: 'nullable', inner: union } : union;
   }
 
-  // Handle const → LiteralType (supports string, number, boolean)
+  // Handle a schema that admits one value → the type of that value, by the
+  // one reading of both keywords that say so (`constTypeRef`): the literal
+  // of a string, number or boolean, `nullable<unknown>` for `null`, an array
+  // or map of `unknown` for an array or object.
   if (inlineKind === 'const') {
-    if (typeof schema.const === 'string' || typeof schema.const === 'number' || typeof schema.const === 'boolean') {
-      return { kind: 'literal', value: schema.const };
-    }
-    // null const → nullable unknown
-    if (schema.const === null) {
-      return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
-    }
-    // const of object/array → map or array with unknown values
-    if (typeof schema.const === 'object') {
-      if (Array.isArray(schema.const)) {
-        return { kind: 'array', items: { kind: 'primitive', type: 'unknown' } };
-      }
-      return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
-    }
+    const pinned = constTypeRef(schema.const);
+    if (pinned) return pinned;
   }
+  // A single-value `enum:` list is the OAS 3.0 spelling of a `const` and is
+  // typed as that `const` is (`loneEnumValue`; #667: the value was kept only
+  // when a number and was the literal of its string form otherwise, so
+  // `enum: [true]` was `'true'` and `enum: [{ a: 1 }]` `'[object Object]'`).
   // A `null` member of an inline `enum:` marks nullability, not a value.
   // Strip it before deciding literal-vs-enum, and wrap the result so a
   // bare `type: 'string', enum: ['a', null]` is nullable even without a
   // `type: [..., 'null']` array (the array branch above already wrapped
-  // us when present; `asNullable` keeps that from doubling up).
-  const enumValues = nonNullEnumValues(schema.enum);
-  const enumAdmitsNull = schema.enum !== undefined && enumValues.length !== schema.enum.length;
-  if (inlineKind === 'enum' && enumValues.length === 1) {
-    const v = enumValues[0];
-    const literal: TypeRef = { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
-    return enumAdmitsNull ? asNullable(literal) : literal;
+  // us when present; `asNullable` keeps that from doubling up). A list of
+  // nothing but `null` admits `null` alone, as `const: null` does.
+  const enumAdmitsNull = schema.enum !== undefined && nonNullEnumValues(schema.enum).length !== schema.enum.length;
+  if (inlineKind === 'enum') {
+    const pinned = constTypeRef(loneEnumValue(schema.enum));
+    if (pinned) return enumAdmitsNull ? asNullable(pinned) : pinned;
   }
 
   // Handle enum — the `enum-list` spelling of the one decision the predictor
   // that reserves enum names before typing reads too (`inlineEnumSpelling`);
-  // the single-member list was returned as a literal above.
+  // a list that admits one value alone was typed as that value above.
   if (inlineEnumSpelling(schema)?.spelling === 'enum-list') {
     // Named by the one rule every inline enum follows (`inlineEnumName`):
     // qualified by the parent with its list-item markers stripped, no
