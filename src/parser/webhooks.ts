@@ -695,8 +695,12 @@ function heldShapes(earlier: readonly SharedMinting[]): HeldShapes {
  * `size` enum of that `Shape` goes with its model
  * (`CreateDogDogAdoptedShapeSize`) where the collectors used to number it
  * after the webhook's (`ShapeSize2`). A group that mints something else
- * under a held name — an inline enum where a model is held — does not
- * share it either, and moves.
+ * under a held name — an inline enum where a model is held, `Shape.size`
+ * beside a webhook's variant titled `ShapeSize` — does not share it
+ * either, and moves (`CreatePetPetReturnedShapeSize`): left on the name,
+ * the enum had the model merge rename the webhook's model off it
+ * (`SizedShapeSize`, "enum "ShapeSize" owns the name"), a callback
+ * renaming a webhook's model after all.
  */
 function contestedNames(
   minters: ReadonlyMap<string, WebhookGroup[]>,

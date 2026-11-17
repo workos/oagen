@@ -975,27 +975,66 @@ describe('#634 a contested inline enum moves under its callback stem', () => {
         expect(warn).not.toHaveBeenCalled();
       });
 
-      it("a callback's inline enum named like a model the webhook holds moves under the callback's stem", async () => {
-        // The webhook titles a variant `ShapeSize`, the name the callback's
-        // `Shape.size` enum takes; the callback's `Shape` is its own.
+      describe("an inline enum named like a model the webhook holds (a clause of #631's rule this changes)", () => {
+        // The webhook `sized` titles a variant `ShapeSize`, the name the
+        // `size` enum of a callback's own variant `Shape` takes. With
+        // #631's rule alone (PR #690) an inline enum under a held name was
+        // decided by whether the callbacks disagree, so a lone callback's
+        // enum kept `ShapeSize [tiny, huge]` and the model merge then
+        // renamed the WEBHOOK's model away from it, with `Renamed inline
+        // model "ShapeSize" → "SizedShapeSize": enum "ShapeSize" owns the
+        // name`. The webhook's model now keeps its name and the enum moves.
         const webhooks = {
           sized: hook({ oneOf: [titled('ShapeSize', 'size', { width: { type: 'integer' } }), second('Log', 'log')] }),
         };
-        const spec = await parse(issueDocument(openapi, ['petReturned'], payloads, { webhooks }));
-        expect(names(spec)).toMatchInlineSnapshot(`
-          {
-            "enums": [
-              "CreatePetPetReturnedShapeSize [tiny, huge]",
-            ],
-            "models": [
-              "Log { kind: "log", text: string }",
-              "Memo { kind: "memo", text: string }",
-              "Shape { kind: "shape", radius: number, size: CreatePetPetReturnedShapeSize }",
-              "ShapeSize { kind: "size", width: integer }",
-            ],
-          }
-        `);
-        expect(warn).not.toHaveBeenCalled();
+
+        it("one callback: the enum moves under the callback's stem and the webhook's model keeps its name", async () => {
+          const spec = await parse(issueDocument(openapi, ['petReturned'], payloads, { webhooks }));
+          expect(names(spec)).toMatchInlineSnapshot(`
+            {
+              "enums": [
+                "CreatePetPetReturnedShapeSize [tiny, huge]",
+              ],
+              "models": [
+                "Log { kind: "log", text: string }",
+                "Memo { kind: "memo", text: string }",
+                "Shape { kind: "shape", radius: number, size: CreatePetPetReturnedShapeSize }",
+                "ShapeSize { kind: "size", width: integer }",
+              ],
+            }
+          `);
+          expect(received(spec)).toEqual(['createPet>petReturned: Shape | Memo', 'webhooks.sized: ShapeSize | Log']);
+          // Not even the merge's note: nothing is renamed after the fact.
+          expect(warn).not.toHaveBeenCalled();
+        });
+
+        it("two callbacks whose enums agree: each moves under its own stem, as two models of one shape off a webhook's do", async () => {
+          // With #631's rule alone both kept one `ShapeSize [tiny, huge]`,
+          // the callbacks agreeing, and the webhook's model became
+          // `SizedShapeSize`.
+          const agreeing = {
+            petAdopted: shaped({ sides: { type: 'integer' }, size: size('tiny', 'huge') }),
+            petReturned: shaped({ radius: { type: 'number' }, size: size('tiny', 'huge') }, 'Memo'),
+          };
+          const spec = await eitherOrder(declaring(agreeing, { webhooks }));
+          expect(names(spec)).toMatchInlineSnapshot(`
+            {
+              "enums": [
+                "CreatePetPetAdoptedShapeSize [tiny, huge]",
+                "CreatePetPetReturnedShapeSize [tiny, huge]",
+              ],
+              "models": [
+                "CreatePetPetAdoptedShape { kind: "shape", sides: integer, size: CreatePetPetAdoptedShapeSize }",
+                "CreatePetPetReturnedShape { kind: "shape", radius: number, size: CreatePetPetReturnedShapeSize }",
+                "Log { kind: "log", text: string }",
+                "Memo { kind: "memo", text: string }",
+                "Note { kind: "note", text: string }",
+                "ShapeSize { kind: "size", width: integer }",
+              ],
+            }
+          `);
+          expect(received(spec)).toContain('webhooks.sized: ShapeSize | Log');
+        });
       });
 
       it('a callback posting the very shape the webhook posts shares its model and its enum', async () => {
