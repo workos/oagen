@@ -1051,6 +1051,46 @@ describe('#677 OAS 3.0 nullable: true beside an inline oneOf/anyOf', () => {
       expect(show(operation(unflagged, 'createPet').requestBody)).toBe('CreatePetRequest');
     });
 
+    it('a discriminator pin written as a flagged union of consts admits null in the request-body fold, as the variant field does', async () => {
+      // `kind` pins `cat`: a union of consts an `enum:` list narrows to one member, nullable in each spelling.
+      const pins: Record<string, Doc> = {
+        flagged: { oneOf: [{ const: 'cat' }, { const: 'lion' }], enum: ['cat'], nullable: true },
+        nullVariant: { oneOf: [{ const: 'cat' }, { const: 'lion' }, { type: 'null' }], enum: ['cat', null] },
+        // Neither: the list forbids the `null` variant, and no flag stands for one.
+        forbidden: { oneOf: [{ const: 'cat' }, { const: 'lion' }, { type: 'null' }], enum: ['cat'] },
+        plain: { oneOf: [{ const: 'cat' }, { const: 'lion' }], enum: ['cat'] },
+      };
+      const read: Record<string, string> = {};
+      for (const [name, kind] of Object.entries(pins)) {
+        const cat = (): Doc => object({ kind: structuredClone(kind), lives: { type: 'integer' } });
+        const dog = (): Doc => object({ kind: { type: 'string', enum: ['dog'] }, barks: { type: 'boolean' } });
+        const spec = await parseJson(
+          document('3.0.3', {
+            paths: createPet({
+              requestBody: {
+                required: true,
+                content: json({ oneOf: [cat(), dog()], discriminator: { propertyName: 'kind' } }),
+              },
+            }),
+            schemas: { Cat: cat(), Dog: dog() },
+          }),
+        );
+        // The variant's own field beside the field the fold rebuilds from every variant's pin.
+        const variantField = model(spec, 'Cat').fields[0]!.type;
+        const folded = model(spec, 'CreatePetRequest').fields[0]!.type;
+        expect(folded.kind === 'nullable', name).toBe(variantField.kind === 'nullable');
+        read[name] = `Cat.kind: ${show(variantField)}, CreatePetRequest.kind: ${show(folded)}`;
+      }
+      expect(read).toMatchInlineSnapshot(`
+        {
+          "flagged": "Cat.kind: nullable<CatKind>, CreatePetRequest.kind: nullable<CreatePetRequestKind>",
+          "forbidden": "Cat.kind: CatKind, CreatePetRequest.kind: CreatePetRequestKind",
+          "nullVariant": "Cat.kind: nullable<CatKind>, CreatePetRequest.kind: nullable<CreatePetRequestKind>",
+          "plain": "Cat.kind: CatKind, CreatePetRequest.kind: CreatePetRequestKind",
+        }
+      `);
+    });
+
     it('a response that wraps one resource is nullable when the flag stands beside its oneOf', async () => {
       const resource = (): Doc => object({ object: { type: 'string', enum: ['pet'] }, name: { type: 'string' } });
       const pieces = (nullable: Spelling): Pieces => ({ paths: getPet(object({ pet: nullable([resource()]) })) });
