@@ -93,11 +93,85 @@ export interface FollowedReference<T> {
   /**
    * For `unresolved` only: the entry the section does hold under the ref's
    * name when it is no object — `null`, a string, a number, a boolean or an
-   * array — and so answers nothing, with the name decoded, so a reader can
-   * report it as the malformed entry it is rather than as missing (#617).
-   * Absent when the section holds nothing under that name at all.
+   * array — and so answers nothing, with the name decoded, so a reader
+   * reports it as the malformed entry it is rather than as missing
+   * (`endsOnNonObject`; #617, #664). Absent when the section holds nothing
+   * under that name at all.
    */
   found?: { name: string; value: unknown };
+}
+
+/** The object type each section holds, as a diagnostic names it, with its article. */
+const OBJECT_TYPES: Record<ReferenceSection, string> = {
+  parameters: 'a Parameter Object',
+  requestBodies: 'a Request Body Object',
+  responses: 'a Response Object',
+  headers: 'a Header Object',
+  examples: 'an Example Object',
+  securitySchemes: 'a Security Scheme Object',
+};
+
+/**
+ * Whether a value written where OpenAPI takes an object of `section`'s
+ * type, or a Reference Object to one, is something a reader can read at
+ * all: an object. A string, a number, a boolean, `null` or an array is
+ * neither, so nothing could be read from it, not even a `$ref` — and
+ * `followReference` takes an object. Given a `site`, the value is warned
+ * about once, naming the site and the value as JSON (`a parameter of
+ * listPets is not a Parameter Object (null); skipping it.`), for the caller
+ * to skip; given none it is rejected silently, for a reader that only
+ * pre-computes names and leaves the report to the reader that declares the
+ * site. The entry a chain of refs ends on is put through the same check
+ * with the component named in the site (`endsOnNonObject`), so the inline
+ * and the `$ref` spelling of one malformed value are reported and skipped
+ * alike (#617, #664).
+ */
+export function isReferenceEntry(
+  raw: unknown,
+  section: ReferenceSection,
+  site?: string,
+): raw is Record<string, unknown> {
+  if (isRecord(raw)) return true;
+  if (site !== undefined) warnNotAnObject(raw, section, site);
+  return false;
+}
+
+/** The one sentence a value that is no object is reported with, at `site`, as no object of `section`'s type. */
+function warnNotAnObject(value: unknown, section: ReferenceSection, site: string): void {
+  console.warn(`[oagen] Warning: ${site} is not ${OBJECT_TYPES[section]} (${JSON.stringify(value)}); skipping it.`);
+}
+
+/**
+ * Whether a walk ended on a `components/<section>` entry that is no object
+ * (`FollowedReference.found`): the malformed entry `isReferenceEntry`
+ * rejects when it is written inline, here behind a pointer. It is reported
+ * with the same sentence, the component named ahead of the site that refers
+ * to it — `components/parameters/Limit (a parameter of listPets) is not a
+ * Parameter Object ([]); skipping it.` — or not at all when no `site` is
+ * given, and the caller skips it as it skips the inline value, rather than
+ * report the ref as one nothing answers (#664). False for every other
+ * outcome: a ref the section holds nothing under is still missing.
+ */
+export function endsOnNonObject(
+  followed: FollowedReference<object>,
+  section: ReferenceSection,
+  site?: string,
+): boolean {
+  if (followed.outcome !== 'unresolved' || followed.found === undefined) return false;
+  const { name, value } = followed.found;
+  if (site !== undefined) warnNotAnObject(value, section, `components/${section}/${name} (${site})`);
+  return true;
+}
+
+/**
+ * A `$ref` that is not a string, as a diagnostic names it: as JSON — `42`,
+ * `null`, `[]`, `{"name":"x"}` — read off the Reference Object a
+ * `malformed` walk stopped at, since `FollowedReference.ref` is `String()`
+ * of it, which prints `[]` as nothing and `["#/components/parameters/Limit"]`
+ * as the string it is not (#563).
+ */
+export function malformedRefOf(followed: FollowedReference<object>): string {
+  return JSON.stringify((followed.value as { $ref?: unknown }).$ref);
 }
 
 /**
@@ -108,6 +182,8 @@ export interface FollowedReference<T> {
  * never reports. A `$ref` key holding `undefined` is no reference, and a
  * component that is not an object — an array included — answers nothing:
  * the walk ends `unresolved` on the ref, handing the entry back as `found`.
+ * `raw` itself must be an object: a reader checks an entry that may be
+ * anything first (`isReferenceEntry`).
  */
 export function followReference<T extends object>(
   raw: T | ReferenceObject,
