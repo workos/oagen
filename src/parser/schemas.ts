@@ -17,7 +17,12 @@ import {
   schemaRefTokens,
   type DerivedMappingSource,
 } from './schema-refs.js';
-import { pointerTypesAsArray, pointerTypesAsModel, pointerTypesAsUnknown } from './schema-pointers.js';
+import {
+  pointerModelIdentity,
+  pointerTypesAsArray,
+  pointerTypesAsModel,
+  pointerTypesAsUnknown,
+} from './schema-pointers.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -77,24 +82,36 @@ export function documentComponentSchemas(): Record<string, SchemaObject> | undef
 }
 
 /**
- * Module-level set of resolved schema names whose components/schemas entry is
- * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
+ * Module-level set of the `components/schemas` keys whose entry is an enum
+ * (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
  * string consts). Populated by extractSchemas() so schemaToTypeRef()
  * can classify a `$ref` to a top-level enum schema as `kind: 'enum'` instead of
  * `kind: 'model'`. Without this, every `$ref` was naively returned as a model
- * ref, even when the target was a shared enum like `PaginationOrder`.
+ * ref, even when the target was a shared enum like `PaginationOrder`. Keyed
+ * by the component key the `$ref` names, as the array, primitive, alias and
+ * nullable model components are, never by the name the key resolves to:
+ * `cleanSchemaName` singularizes the leading word, so `Size: { type:
+ * 'object', properties }` and `Sizes: { type: 'string', enum }` both resolve
+ * to `Size`, and only `{ $ref: Sizes }` is the enum — `{ $ref: Size }` is
+ * the model (#668: the set held the resolved name, so both were the enum
+ * and nothing referenced the model `Size`).
  */
-let activeEnumSchemaNames: Set<string> = new Set();
+let activeEnumComponentKeys: Set<string> = new Set();
 
 /**
- * Subset of `activeEnumSchemaNames` whose component schema also admits
+ * Subset of `activeEnumComponentKeys` whose component schema also admits
  * `null` — via an OAS 3.1 `type: [..., 'null']` array, the OAS 3.0
  * `nullable: true` flag, or a literal `null` member in `enum:`. A `$ref` to
  * one of these resolves to `nullable(enum)` so the component's own
  * nullability survives the reference, matching the shape an inline
- * `oneOf: [{ $ref }, { type: 'null' }]` already produces.
+ * `oneOf: [{ $ref }, { type: 'null' }]` already produces. By key too: with
+ * `Size: { type: ['string', 'null'], enum: ['small', 'large', null] }` and
+ * `Sizes: { type: 'string', enum: ['small', 'large'] }`, which resolve to
+ * one enum `Size` (`foldEnumComponents`), `{ $ref: Size }` is
+ * `nullable<Size>` and `{ $ref: Sizes }` the bare `Size` (#668: keyed by
+ * the resolved name, `{ $ref: Sizes }` gained the `null` `Size` admits).
  */
-let activeNullableEnumSchemaNames: Set<string> = new Set();
+let activeNullableEnumComponentKeys: Set<string> = new Set();
 
 /**
  * The `components/schemas` keys of the model components that admit `null`,
@@ -116,10 +133,13 @@ let activeNullableEnumSchemaNames: Set<string> = new Set();
  * field is (#539); and an alias of either — an `allOf` read as its `$ref`
  * member (`PetOwnerAlias: { allOf: [{ $ref: PetOwner }] }`), as the same
  * `allOf` on a field is typed, or a bare `$ref` (`PetOwnerAlias: { $ref:
- * PetOwner }`; #618), at every hop of a chain — while an `allOf` that merges a typing
- * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
- * properties }] }`) is the object its merged fields describe, bare, as it
- * is on a field (`isNullableModelComponentEntry`). Keyed by the component
+ * PetOwner }`; #618), at every hop of a chain — and an `allOf` that merges
+ * admits `null` exactly when every member that types it does
+ * (`allOfAdmitsNull`; #676): `OwnerTag: { allOf: [{ $ref: Owner }, { $ref:
+ * Tag }] }` over two nullable components is `nullable<OwnerTag>` to a
+ * `$ref`, and `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }` the
+ * bare `Cat`, its inline member an object that admits none, as each is on
+ * a field (`isNullableModelComponentEntry`). Keyed by the component
  * key the `$ref` names, as the array, primitive and alias components are,
  * never by the resolved name the reference is minted with: `Note: { type:
  * ['object', 'null'], properties }` and `note: { type: 'object', properties
@@ -1320,23 +1340,167 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
  * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
  * `nullable: true` beside a `type`, a `oneOf`/`anyOf` that collapses to one
- * non-null variant (`nullableUnionBranch`), or an `allOf` read as a member
- * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`).
- * The one test for the places the response path builds an array TypeRef
- * itself (`nullableIf`) or merges two array declarations
- * (`combineDeclarations`), which find the array through the same wrappers
- * (`arraySchemaOf`).
+ * non-null variant (`nullableUnionBranch`), an `allOf` read as a member
+ * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`),
+ * or an `allOf` merged into one model (`readInlineAllOf`: `'merged'`) whose
+ * every member that types it admits `null` (`allOfAdmitsNull`: `allOf: [{
+ * $ref: Owner }, { $ref: Tag }]` over two nullable components; #676: a
+ * merge declared none, whatever its members admitted). A `$ref` the schema
+ * is read as — the schema itself, or the member an `allOf` is read as —
+ * is the component's to answer for and not followed here: the reference
+ * carries the component's own wrapper (`componentTypeRef`).
+ * The one test for the places the response path builds a TypeRef itself —
+ * an array, a merged model (`nullableIf`) — or merges two array
+ * declarations (`combineDeclarations`), which find the array through the
+ * same wrappers (`arraySchemaOf`), and for a component whose model carries
+ * no wrapper of its own (`isNullableModelComponentEntry`).
  */
 export function declaresNull(schema: SchemaObject): boolean {
-  if (
+  if (wrapsOwnType(schema)) return true;
+  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  return member !== undefined ? declaresNull(member) : mergeDeclaresNull(schema);
+}
+
+/** Whether the schema is itself a nullable wrapper the type builder strips (`unwrapNullableSchema`): a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to one non-null variant (`nullableUnionBranch`). */
+function wrapsOwnType(schema: SchemaObject): boolean {
+  return (
     (Array.isArray(schema.type) && schema.type.includes('null')) ||
     (schema.nullable === true && schema.type !== undefined) ||
     nullableUnionBranch(schema) !== undefined
-  ) {
-    return true;
+  );
+}
+
+/**
+ * Whether `schema` is an `allOf` merged into one model that admits `null`
+ * for its members' sake alone (`allOfAdmitsNull`): it is no nullable
+ * wrapper itself (`wrapsOwnType`), no member is the one it is read as
+ * (`allOfReadAsMember`), and every member that types it admits `null`.
+ * The part of `declaresNull` that #676 added, asked on its own by the one
+ * reader that must tell such a merge from a schema that says `null`
+ * itself (`keptAsWritten`).
+ */
+export function mergeDeclaresNull(schema: SchemaObject): boolean {
+  if (wrapsOwnType(schema)) return false;
+  const bare = unwrapNullableSchema(schema);
+  // No member the `allOf` is read as: one that types the schema is a merge.
+  if (bare.allOf === undefined || allOfReadAsMember(bare) !== undefined) return false;
+  return classifyInlineSchema(bare) === 'allOf' && allOfAdmitsNull(bare);
+}
+
+/**
+ * Whether a schema admits `null`, as the type builder types it — the one
+ * reading every reader settles an `allOf`'s `null` by: the vote of each
+ * member of an `allOf` merged into one model (`allOfAdmitsNull`, for the
+ * type builder, `declaresNull` and a component's model alike) and of each
+ * declaration two `allOf` members give one property
+ * (`conjoinTypedDeclarations`), so the property written by hand as the
+ * `allOf` of both and the one the parser conjoins from two members admit
+ * `null` alike (#676).
+ *
+ * A `$ref` admits what the schema it names admits (`componentSchemaOf`: a
+ * component, or the schema a pointer into one lands on), read by this
+ * same rule, and nothing the keywords beside it say: the type builder
+ * gives a `$ref` precedence over every
+ * sibling, so `{ $ref: Plain, type: ['object', 'null'] }` over a `Plain`
+ * that admits none admits none. Any other schema admits `null` when it
+ * writes it (`writesNull`): a type list naming `null`, OAS 3.0 `nullable:
+ * true` beside a `type`, a schema of nothing but `null` (`isNullSchema`),
+ * a `const` of `null`, an `enum:` list naming it, or a `oneOf`/`anyOf`
+ * with a `null` variant or the flag that stands for one
+ * (`unionFlaggedNullable`), whatever else the union holds. Else it admits
+ * `null` through an `allOf` whose every member that types it does
+ * (`allOfAdmitsNull`), as JSON Schema applies them all — and a `type` of
+ * its own that names no `null` rejects it, whatever the schema composes:
+ * `{ type: 'object', allOf: [{ $ref: Owner }] }` over a nullable `Owner`
+ * admits none. Everything else admits none: an inline object with no
+ * `type` is the object the type builder reads it as, and a schema that
+ * declares no type says nothing.
+ *
+ * A schema met again on the path being read (`path`: the schemas above
+ * it, not every schema read so far) admits none, which ends a component
+ * that names itself, through a hop or outright, while a component two
+ * members name is read for each — `{ allOf: [{ $ref: A }, { $ref: A }] }`
+ * over a nullable `A` admits `null` (the #653 review's round 4: the second
+ * `$ref` met `A` in a shared seen set and read it as a cycle).
+ */
+export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  if (path.has(schema)) return false;
+  path.add(schema);
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      return target !== undefined && schemaAdmitsNull(target, path);
+    }
+    return writesNull(schema) || allOfAdmitsNull(schema, path);
+  } finally {
+    path.delete(schema);
   }
-  const member = allOfReadAsMember(unwrapNullableSchema(schema));
-  return member !== undefined && declaresNull(member);
+}
+
+/**
+ * Whether a schema that is no `$ref` writes `null` among what it admits,
+ * in one of the spellings the type builder wraps its type in `nullable`
+ * for (`schemaAdmitsNull`): an OAS 3.1 type list naming `null`; OAS 3.0
+ * `nullable: true` beside a `type`; a schema of nothing but `null`
+ * (`isNullSchema`: `{ type: 'null' }`, `{ const: null }`, `{ enum: [null]
+ * }`); a `const` of `null` or an `enum:` list naming `null` that types the
+ * schema (`classifyInlineSchema`), with or without a `type` beside it; or
+ * a `oneOf`/`anyOf` that types the schema and has a `null` variant
+ * (`isNullSchema`) or OAS 3.0 `nullable: true` standing for one
+ * (`unionFlaggedNullable`) — a nullable wrapper around one variant and a
+ * union of several alike, `{ oneOf: [{ $ref: Cat }, { $ref: Dog }, { type:
+ * 'null' }] }` as a `$ref` to it as a component is nullable
+ * (`isNullableUnionSchema`) — unless the union is read as an enum of
+ * consts whose `enum:` list leaves `null` out (`enumListAdmitsNull`), the
+ * flag apart, as the type builder decides it. A union written beside an
+ * `allOf` that types the schema is one of that `allOf`'s members instead
+ * (`foldSiblingUnions`), and votes there (`allOfAdmitsNull`).
+ */
+function writesNull(schema: SchemaObject): boolean {
+  if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
+  if (schema.nullable === true && schema.type !== undefined) return true;
+  if (isNullSchema(schema)) return true;
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'const') return schema.const === null;
+  if (kind === 'enum') return (schema.enum ?? []).includes(null);
+  if (kind !== 'union') return false;
+  if (unionFlaggedNullable(schema)) return true;
+  if (!(schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema)) return false;
+  return inlineEnumSpelling(schema)?.spelling !== 'const-union' || enumListAdmitsNull(schema);
+}
+
+/**
+ * Whether a schema that writes no `null` of its own (`writesNull`) admits
+ * it through its `allOf` — the one definition of "this `allOf` admits
+ * `null`": the schema writes no `type` (one that names no `null` rejects
+ * it) and every member that types it admits `null` (`schemaAdmitsNull`), at
+ * least one of them, as JSON Schema applies them all. A member that
+ * declares no type (`declaresType`: `{ description }`, `{ required }`, `{
+ * minProperties: 1 }`) only annotates or limits the schema and has no
+ * vote. The members are the schema's as written, with what it writes
+ * beside the `allOf` that the readers read as members of it
+ * (`foldBesideAllOf`): its own `properties`, an inline object typed
+ * `object` that admits none, and a typing `oneOf`/`anyOf`, which votes as a
+ * union does. A member that is itself an `allOf` votes through its own
+ * members by this same rule and is not spliced open first
+ * (`unsplicedAllOf`): spliced, `{ type: 'object', allOf: [{ $ref: Owner }]
+ * }` would lose the `type` that rejects `null` (#675 opens it, since no
+ * other reader asks its `type`).
+ *
+ * So `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
+ * components admits `null`, `{ allOf: [{ $ref: Owner }, { type: 'object',
+ * properties: { extra } }] }` does not, and neither does `{ allOf: [{
+ * $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits none. Read
+ * for an `allOf` merged into one model by the type builder
+ * (`buildTypeRef`), by `declaresNull`, and through it for a component
+ * (`isNullableModelComponentEntry`) and the response path (`nullableIf`),
+ * and for any `allOf` by `schemaAdmitsNull`. `path` is `schemaAdmitsNull`'s: the
+ * schemas above the members.
+ */
+function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
+  if (schema.type !== undefined) return false;
+  const typing = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(declaresType);
+  return typing.length > 0 && typing.every((member) => schemaAdmitsNull(member, path));
 }
 
 /**
@@ -1620,6 +1784,76 @@ export interface ExtractedSchemas {
   enums: Enum[];
 }
 
+/** An enum component as `extractSchemas` reads it: its `components/schemas` key as written, and the `Enum` built from it under the name the key resolves to. */
+interface EnumComponent {
+  key: string;
+  definition: Enum;
+}
+
+/** Component keys as a warning names them: each quoted, in the default string order (UTF-16 code units), never the document's. */
+function quotedKeys(keys: readonly string[]): string {
+  return [...keys]
+    .sort()
+    .map((key) => `"${key}"`)
+    .join(', ');
+}
+
+/**
+ * What two enum components that resolve to one name must agree on to be one
+ * `Enum`: their members, each with its deprecation and in any order
+ * (`enumShapeKey`, the shape two inline enums share a name on), the enum's
+ * own `deprecated` and its `default`. Its text, link and `x-*` keys, and a
+ * member's text, are documentation, not shape, and so is whether the
+ * component admits `null`: that is each reference's (`componentTypeRef`),
+ * never the `Enum`'s.
+ */
+function enumComponentShape(definition: Enum): string {
+  return JSON.stringify([enumShapeKey(definition.values), definition.deprecated === true, definition.default ?? null]);
+}
+
+/**
+ * The one `Enum` each name keeps, in the order the names first appear, with
+ * the keys that resolve to it. Two enum components whose keys resolve to
+ * one name — `Size` and `Sizes`, which `cleanSchemaName` both reads as
+ * `Size`, or `Note` and `note` — are one `Enum`, as two object components
+ * are one model: the definition with more values, and among those of equal
+ * count the one whose key sorts first in the default string order (UTF-16
+ * code units) — never the first in the document, so the reversed document
+ * keeps the same one. Definitions that agree (`enumComponentShape`) fold
+ * silently, the kept one's documentation standing; one that differs from
+ * the kept one is reported before it is dropped, and a `$ref` to its key is
+ * still typed as the enum of that name, with the nullability its own
+ * schema declares (`componentTypeRef`). #668: each key pushed an `Enum` of
+ * its own, so `spec.enums` held two `Size` entries, unreported, and a
+ * reader that indexes the enums by name, as the differ does (`diffEnums`),
+ * kept whichever came last.
+ */
+function foldEnumComponents(components: readonly EnumComponent[]): Array<{ definition: Enum; keys: string[] }> {
+  const byName = new Map<string, EnumComponent[]>();
+  for (const component of components) {
+    const group = byName.get(component.definition.name);
+    if (group) group.push(component);
+    else byName.set(component.definition.name, [component]);
+  }
+  return [...byName.values()].map((group) => {
+    const ordered = [...group].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const kept = ordered.reduce((best, candidate) =>
+      candidate.definition.values.length > best.definition.values.length ? candidate : best,
+    );
+    for (const other of ordered) {
+      if (other === kept || enumComponentShape(other.definition) === enumComponentShape(kept.definition)) continue;
+      const reason =
+        kept.definition.values.length > other.definition.values.length
+          ? 'the one with more values'
+          : 'the first key in string order';
+      console.warn(
+        `[oagen] Warning: Component schemas "${kept.key}" and "${other.key}" both resolve to the enum "${kept.definition.name}" with different values, default or deprecation (${kept.definition.values.length} vs ${other.definition.values.length} values) — keeping "${kept.key}", ${reason}`,
+      );
+    }
+    return { definition: kept.definition, keys: ordered.map(({ key }) => key) };
+  });
+}
+
 export function extractSchemas(
   schemas: Record<string, SchemaObject> | undefined,
   options?: SchemaExtractionOptions,
@@ -1692,13 +1926,14 @@ export function extractSchemas(
   // other inline schema of the document is a root of its own.
   markContestedTitles(options?.document ?? { components: { schemas } });
 
-  // Pre-compute the set of resolved names whose component schema is an enum so
+  // Pre-compute the set of keys whose component schema is an enum so
   // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
   // pass because the per-schema loop mutates models/enums and we want this map
   // available before any TypeRef is resolved (operations + nested fields both
-  // call schemaToTypeRef during extraction).
-  activeEnumSchemaNames = new Set();
-  activeNullableEnumSchemaNames = new Set();
+  // call schemaToTypeRef during extraction). By the key a `$ref` names, never
+  // the name it resolves to, which two keys can share (#668).
+  activeEnumComponentKeys = new Set();
+  activeNullableEnumComponentKeys = new Set();
   activeNullableModelComponentKeys = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
@@ -1720,15 +1955,14 @@ export function extractSchemas(
       .map(([key]) => key),
   );
   for (const [name, schema] of Object.entries(schemas)) {
-    const resolved = resolveSchemaName(name);
     // An enum component is read on the schema it declares its members on
     // (`enumComponentDeclaration`): through an `allOf` wrapper, the
     // member's own nullability is the enum's, and the wrapper's OAS 3.0
     // `nullable: true` declares nothing.
     const declaration = enumComponentDeclaration(schema);
     if (declaration) {
-      activeEnumSchemaNames.add(resolved);
-      if (isNullableEnumSchema(declaration)) activeNullableEnumSchemaNames.add(resolved);
+      activeEnumComponentKeys.add(name);
+      if (isNullableEnumSchema(declaration)) activeNullableEnumComponentKeys.add(name);
     } else if (
       // A named union's `null` variant, or the `null` an object component
       // declares on itself or on the component it is an alias of (#615),
@@ -1853,6 +2087,13 @@ export function extractSchemas(
     if (other === undefined) componentKeysByName.set(model.name, key);
     keepLarger(model);
   };
+  // Every enum component with its key, folded to one `Enum` per name once
+  // all are read (`foldEnumComponents`), so which definition a name keeps
+  // never depends on the order the document lists the keys in.
+  const enumComponents: EnumComponent[] = [];
+  // Every key whose own model is built under each name, for the report of a
+  // name a model component and an enum component both resolve to.
+  const modelComponentKeys = new Map<string, string[]>();
 
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = resolveSchemaName(name);
@@ -1861,7 +2102,7 @@ export function extractSchemas(
     if (!composesComponentModel(schema)) warnOnUnreadUnion(schema, name);
 
     if (isEnumComponentSchema(schema)) {
-      enums.push(extractEnum(pascalName, schema));
+      enumComponents.push({ key: name, definition: extractEnum(pascalName, schema) });
     } else if (activeArrayComponentPlans.has(name)) {
       // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
       for (const inlineModel of extractArrayComponentModels(name, schemas)) keepLarger(inlineModel);
@@ -1885,6 +2126,7 @@ export function extractSchemas(
         );
       }
       keepComponent(name, extractModel(pascalName, schema, schemas));
+      modelComponentKeys.set(pascalName, [...(modelComponentKeys.get(pascalName) ?? []), name]);
 
       for (const inlineModel of [
         ...extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas),
@@ -1892,6 +2134,21 @@ export function extractSchemas(
       ]) {
         keepLarger(inlineModel);
       }
+    }
+  }
+
+  // One `Enum` per name (#668: `Size` and `Sizes`, two enum components that
+  // resolve to `Size`, were two `Size` entries). A name a model component
+  // holds as well keeps both, since each `$ref` is typed as the component
+  // its key names — `{ $ref: Size }` the model, `{ $ref: Sizes }` the enum
+  // — and is reported, because the two reach an emitter under one name.
+  for (const { definition, keys } of foldEnumComponents(enumComponents)) {
+    enums.push(definition);
+    const modelKeys = modelComponentKeys.get(definition.name);
+    if (modelKeys !== undefined) {
+      console.warn(
+        `[oagen] Warning: Component schemas ${quotedKeys(modelKeys)} (a model) and ${quotedKeys(keys)} (an enum) both resolve to "${definition.name}" — keeping both, each $ref typed as the component it names; a schemaNameTransform can give one a name of its own`,
+      );
     }
   }
 
@@ -1935,8 +2192,8 @@ export function extractSchemas(
 /** Clear the module-level schemaNameTransform. Called by parseSpec() after all extraction phases. */
 export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
-  activeEnumSchemaNames = new Set();
-  activeNullableEnumSchemaNames = new Set();
+  activeEnumComponentKeys = new Set();
+  activeNullableEnumComponentKeys = new Set();
   activeNullableModelComponentKeys = new Set();
   activeComponentSchemaKeys = new Set();
   activeComponentSchemas = undefined;
@@ -2728,8 +2985,10 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * component whose own schema `schemaToTypeRef` wraps when it is written
  * inline (`declaresNull`: an OAS 3.1 `type` list naming `'null'`, OAS 3.0
  * `nullable: true` beside a `type`, a nullable `oneOf`/`anyOf` wrapper —
- * `properties` written beside it or not — or a single-member `allOf`
- * around one of these; #615), or a `null`-only schema in either spelling
+ * `properties` written beside it or not — a single-member `allOf`
+ * around one of these; #615 — or an `allOf` merged into the model whose
+ * every member that types it admits `null`; #676), or a `null`-only schema
+ * in either spelling
  * (`isNullSchema`: `{ type: 'null' }`, `{ type: ['null'] }`), which keeps
  * the fieldless model it always became and admits nothing but `null`; or
  * an alias of either — an `allOf`
@@ -2747,11 +3006,17 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * is `B`, and `A: { $ref: B }` is `A`, as `{ $ref: Cat, type: ['object',
  * 'null'] }` on a field is `Cat` (Greptile, #646: the `type` beside the
  * `$ref` made both `nullable`). An `allOf` that merges — a typing member
- * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
- * }`), a second `$ref`, a `required` that adds to the reference — is read
- * as none of its members: the composed model is the object its merged
- * fields describe, bare, as the same `allOf` on a field is, so a member's
- * nullability never wraps it. OAS 3.0 `nullable: true` beside an `allOf`
+ * beside the `$ref`, a second `$ref`, a `required` that adds to the
+ * reference — is read as none of its members, and admits `null` exactly
+ * when every member that types it does (`declaresNull`, by
+ * `allOfAdmitsNull`), as the same `allOf` on a field does: `OwnerTag: {
+ * allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable components
+ * and `Required: { allOf: [{ $ref: PetOwner }], required: ['name'] }`
+ * admit it, while `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }`,
+ * whose inline member is an object that admits none, and a merge beside a
+ * `$ref` to a component that admits none do not (#676: a merge admitted
+ * none, whatever its members did, so `{ $ref: OwnerTag }` was the bare
+ * `OwnerTag`). OAS 3.0 `nullable: true` beside an `allOf`
  * with no `type` declares nothing, as beside any schema with neither a
  * `type` nor a `oneOf`/`anyOf`; beside a nullable wrapper's union it
  * stands for the `null` variant (`unionFlaggedNullable`), which
@@ -4472,7 +4737,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
   // `description` and `deprecated`. A `null` member or `type: 'null'`
   // variant marks the schema as nullable (OAS 3.1); it is not a value.
   // Nullability is carried on the `$ref` side via
-  // `activeNullableEnumSchemaNames`, so it is dropped here instead of
+  // `activeNullableEnumComponentKeys`, so it is dropped here instead of
   // emitting a bogus `NULL = "null"` member.
   const values: EnumValue[] = (enumMembersOf(declaration) ?? []).map(toEnumValue);
 
@@ -5285,6 +5550,27 @@ function isEnumComponentAlias(schema: SchemaObject, schemas: Record<string, Sche
 }
 
 /**
+ * Whether a `components/schemas` entry becomes a model of its own: every
+ * entry but an enum component (`isEnumComponentSchema`), an array
+ * component (`isArrayComponentEntry`), a primitive component
+ * (`isPrimitiveComponentEntry`) and an alias of an enum component
+ * (`isEnumComponentAlias`) — the four kinds `extractSchemas` builds no
+ * model for, by the tests it decides them with. For a reader that asks of
+ * a key what its model is asked, when another key resolves to the same
+ * name: `Sizes: { type: 'string', enum }` beside `Size: { type: 'object',
+ * properties }` holds no model named `Size`, so nothing said of the key
+ * `Sizes` is said of that model (`sentOnlyComponentNames`; #668).
+ */
+export function buildsComponentModel(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
+  return (
+    !isEnumComponentSchema(schema) &&
+    !isArrayComponentEntry(schema, schemas) &&
+    !isPrimitiveComponentEntry(schema, schemas) &&
+    !isEnumComponentAlias(schema, schemas)
+  );
+}
+
+/**
  * The `components/schemas` entries a reference to `schema` reads through to
  * the array, primitive or enum it is — the schema `declares` accepts
  * (`isArrayComponentSchema`, `isPrimitiveComponentSchema`,
@@ -5704,46 +5990,73 @@ export function isArrayPointerRef(
 }
 
 /**
- * Whether `schemaToTypeRef` types `schema` as a reference to a model, bare
- * or under a nullable wrapper — decided from the document without typing
- * it, for the reader that must know before any model is built whether a
- * pointer names one (`pointerTypesAsModel`; #682). Read as the type builder
- * reads the schema: every nullable wrapper stripped and sibling
- * `properties` folded in (`unwrapNullableSchema`), then the one keyword
- * that types it (`classifyInlineSchema`) — a `$ref` to a component that
- * builds a model, which every component does but an enum, an array or a
- * primitive component and an alias of one (`isEnumComponentEntry`,
- * `isArrayComponentEntry`, `isPrimitiveComponentEntry`, the test
- * `wrappedVariantReference` makes of a wrapped reference); a `$ref` deeper
- * into a component that settles to a model in turn; an inline object; an
- * `allOf` merged into a model, or read as a member that is one of these
- * (`allOfReadAsMember`). False for everything else: a `$ref` no component
- * answers, a type list naming several types, which is a union of its
- * per-type copies even when one of them is an object, a `oneOf`/`anyOf`,
- * an array, a map, an enum, a `const` and a primitive.
+ * What `modelReferenceIdentity` answers for a schema typed as the model
+ * minted for it where it stands — an inline object, or an `allOf` merged
+ * into one — which is named from the site and so is one model however
+ * many times the same site is read.
  */
-export function typesAsModelReference(
+export const OWN_MODEL = 'own';
+
+/**
+ * Which model `schemaToTypeRef` types `schema` as a reference to, bare or
+ * under a nullable wrapper, or `undefined` when it types it as anything
+ * else — decided from the document without typing it, for the reader that
+ * must know before any model is built whether a pointer names one
+ * (`pointerTypesAsModel`; #682). The answer says no more than which
+ * references are one model: `component:<name>` for a `$ref` to a component
+ * that builds a model, `OWN_MODEL` for the model minted for the schema
+ * where it stands, and what a `$ref` deeper into a component settles to
+ * (`pointerModelIdentity`). Read as the type builder reads the schema:
+ * every nullable wrapper stripped and sibling `properties` folded in
+ * (`unwrapNullableSchema`), then the one keyword that types it
+ * (`classifyInlineSchema`) — a `$ref` to a component, which builds a model
+ * unless it is an enum, an array or a primitive component or an alias of
+ * one (`isEnumComponentEntry`, `isArrayComponentEntry`,
+ * `isPrimitiveComponentEntry`, the test `wrappedVariantReference` makes of
+ * a wrapped reference); a `$ref` deeper into a component that settles to a
+ * model in turn; an inline object; an `allOf` merged into a model, or read
+ * as a member that is one of these (`allOfReadAsMember`). A type list
+ * naming several types is the union of its per-type copies, never one
+ * type twice (`typeListCopies`, `dedupeTypeRefs`), so it is a model
+ * exactly when every copy is typed as the same one: `{ type: ['object',
+ * 'string'], allOf: [{ $ref: Dog }] }` with `Dog` declaring `type:
+ * 'object'` leaves the one copy the `allOf` admits and is `Dog`, and `{
+ * type: ['string', 'integer'], allOf: [{ $ref: Dog }] }`, no entry of
+ * which survives, is read as written and holds `Dog` once (Greptile, #682
+ * review: every such list was refused, so a component dispatching to a
+ * pointer at one was flattened while the union of the same variants was
+ * mapped) — while `{ type: ['object', 'string'], properties }` is `Model |
+ * string`, no model. `undefined` for everything else: a `$ref` no
+ * component answers, a `oneOf`/`anyOf`, an array, a map, an enum, a
+ * `const` and a primitive.
+ */
+export function modelReferenceIdentity(
   schema: SchemaObject | undefined,
   schemas: Record<string, SchemaObject> | undefined,
-): boolean {
-  if (!schema || !schemas) return false;
+): string | undefined {
+  if (!schema || !schemas) return undefined;
   const bare = unwrapNullableSchema(schema);
   if (bare.$ref) {
-    if (componentKeyOf(bare.$ref) === undefined) return pointerTypesAsModel(String(bare.$ref), schemas);
+    const key = componentKeyOf(bare.$ref);
+    if (key === undefined) return pointerModelIdentity(String(bare.$ref), schemas);
     const target = componentSchemaOf(String(bare.$ref), schemas);
-    return (
-      target !== undefined &&
-      !isEnumComponentEntry(target, schemas) &&
-      !isArrayComponentEntry(target, schemas) &&
-      !isPrimitiveComponentEntry(target, schemas)
-    );
+    const modelless =
+      target === undefined ||
+      isEnumComponentEntry(target, schemas) ||
+      isArrayComponentEntry(target, schemas) ||
+      isPrimitiveComponentEntry(target, schemas);
+    return modelless ? undefined : `component:${resolveSchemaName(key)}`;
   }
-  if (namesSeveralTypes(bare)) return false;
+  if (namesSeveralTypes(bare)) {
+    const identities = new Set(typeListCopies(bare).map((copy) => modelReferenceIdentity(copy, schemas)));
+    const [identity] = identities;
+    return identities.size === 1 ? identity : undefined;
+  }
   const kind = classifyInlineSchema(bare);
-  if (kind === 'object') return true;
-  if (kind !== 'allOf') return false;
+  if (kind === 'object') return OWN_MODEL;
+  if (kind !== 'allOf') return undefined;
   const member = allOfReadAsMember(bare);
-  return member === undefined || typesAsModelReference(member, schemas);
+  return member === undefined ? OWN_MODEL : modelReferenceIdentity(member, schemas);
 }
 
 /**
@@ -5882,11 +6195,10 @@ function namedUnionDiscriminator(
  * The `mapping:` a union's `discriminator` keyword writes, when it writes an
  * entry; `undefined` with no keyword, no `mapping:` or an empty one
  * (`mapping: {}`), each of which leaves the mapping to be derived from the
- * variants (`unionConstMapping`). The one test of "the document wrote a
- * mapping" for the sites that decide how an entry written as a pointer is
- * deferred: an explicit one as written (`deferPointerMappingEntries`), a
- * derived one for the pointer variant it stands for
- * (`deferDerivedPointerEntries`).
+ * variants (`unionConstMapping`). What a named union and an inline one
+ * ask before they defer an entry written as a pointer: an explicit one as
+ * written (`deferPointerMappingEntries`), a derived one for the pointer
+ * variant it stands for (`deferDerivedPointerEntries`).
  */
 function writtenMappingOf(schema: SchemaObject): Record<string, string> | undefined {
   const mapping = schema.discriminator?.mapping;
@@ -7953,10 +8265,26 @@ export function markComponentModelRef(ref: ModelRef): void {
  * a top-level component schema needs to preserve whether the target is a
  * model or an enum, because emitters route imports differently for the two
  * kinds (e.g. com.example.models.X vs com.example.types.X). The set of enum
- * names is precomputed by extractSchemas() in a first pass so it's
+ * keys is precomputed by extractSchemas() in a first pass so it's
  * available even when called recursively for nested $refs. Read by
  * `schemaToTypeRef` for the `$ref` itself and by `resolveSchemaPointers`
  * for the component a pointer enters (#539).
+ *
+ * What the component is, and whether it admits `null`, is read by `key`
+ * for every kind — an array, a primitive, an alias of an enum, an enum, a
+ * model — and never by the name the key resolves to, which two keys can
+ * share (`cleanSchemaName` singularizes the leading word, so `Size` and
+ * `Sizes` are both `Size`; `Note` and `note` are both `Note`). Only the
+ * reference's `name` is the resolved one. #668: an enum and its nullability
+ * were read by that name, so with `Size: { type: ['string', 'null'], enum:
+ * ['small', 'large', null] }` beside `Sizes: { type: 'string', enum:
+ * ['small', 'large'] }` a `$ref` to `Sizes` was `nullable<Size>`, and with
+ * `Size: { type: 'object', properties }` a `$ref` to `Size` was the enum
+ * `Sizes` declares and nothing referenced the model. A `$ref` to `Sizes` is
+ * now the bare enum `Size`, and a `$ref` to the object `Size` the model
+ * `Size`. Two enum components of one name are one `Enum`
+ * (`foldEnumComponents`); a model and an enum of one name are both kept,
+ * and reported (`extractSchemas`).
  *
  * Every kind of component carries its own nullability through the
  * reference, so the two spellings of one schema — written inline, or
@@ -7966,17 +8294,19 @@ export function markComponentModelRef(ref: ModelRef): void {
  * OAS 3.1 `type` list naming `'null'`, OAS 3.0 `nullable: true`, a nullable
  * `oneOf`/`anyOf` wrapper, a single-member `allOf` around one of these —
  * is wrapped in `nullable` here, since the enum or model built for it
- * carries no wrapper (`activeNullableEnumSchemaNames`,
+ * carries no wrapper (`activeNullableEnumComponentKeys`,
  * `activeNullableModelComponentKeys`; #615: `PetOwner: { type: ['object',
  * 'null'], properties }` named by a bare `$ref` was `PetOwner`, while
  * `Pet.owner` written inline, and the JSON Pointer `#/components/schemas/
  * Pet/properties/owner` to it, were `nullable<PetOwner>`). An alias of
  * such a component — an `allOf` read as its `$ref` member, `PetOwnerAlias:
  * { allOf: [{ $ref: PetOwner }] }` — is wrapped as the component is, as the
- * same `allOf` on a field is typed; an `allOf` that merges a typing member
- * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
- * }`) is the object its fields describe, bare, as it is on a field
- * (`isNullableModelComponentEntry`). This holds at every site typed
+ * same `allOf` on a field is typed; an `allOf` that merges is wrapped
+ * exactly when every member that types it admits `null` — `OwnerTag: {
+ * allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable components
+ * is, `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }` is not — as it
+ * is on a field (`isNullableModelComponentEntry`; #676). This holds at
+ * every site typed
  * through `schemaToTypeRef` — a field, array items, map
  * values, a union variant, a body, a parameter, a header, a webhook or
  * callback payload — and a site that wraps the `$ref` itself (`oneOf: [{
@@ -8013,12 +8343,18 @@ export function componentTypeRef(key: string): TypeRef {
   const alias = activeEnumAliasKeys.has(key) ? component : undefined;
   if (alias) return schemaToTypeRef(alias);
   const resolved = resolveSchemaName(key);
-  if (activeEnumSchemaNames.has(resolved)) {
+  // An enum component, by the key the `$ref` names as every kind above is,
+  // never by the name the key resolves to: `Sizes: { type: 'string', enum }`
+  // beside `Size: { type: 'object', properties }` resolve to one name, and
+  // only `{ $ref: Sizes }` is the enum (#668).
+  if (activeEnumComponentKeys.has(key)) {
     const enumRef: TypeRef = { kind: 'enum', name: resolved };
     // Carry the component's own nullability through the reference so
     // `field: { $ref: NullableEnum }` has the same shape as the inline
-    // `oneOf: [{ $ref }, { type: 'null' }]` form.
-    return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
+    // `oneOf: [{ $ref }, { type: 'null' }]` form — the key's own, so a
+    // reference to another enum component of the same resolved name never
+    // gains a `null` its schema does not admit.
+    return activeNullableEnumComponentKeys.has(key) ? { kind: 'nullable', inner: enumRef } : enumRef;
   }
   // Likewise a model component that admits `null` — a named union with a
   // `null` variant, or an object component that declares it (#615): neither
@@ -8610,9 +8946,19 @@ function buildTypeRef(
       // field its inline member redeclares owns in every merge — is that
       // model: the re-entry under this name would build nothing (#566).
       const building = materializingMergedAllOfName(schema);
-      if (building !== undefined) return { kind: 'model', name: building };
-      const baseName = toPascalCase(contextName ?? 'UnknownModel');
-      return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
+      const merged: TypeRef = {
+        kind: 'model',
+        name: building ?? qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName),
+      };
+      // The model carries the merged fields and no wrapper, so the
+      // reference carries the `null` the merge admits: exactly when every
+      // member that types it does (`allOfAdmitsNull`), as the same members
+      // conjoined from two declarations of one property admit it (#676: a
+      // merge was the bare model whatever its members admitted, so `{
+      // allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
+      // components was `PetOwner` where two members declaring `owner` gave
+      // `nullable<PetOwner>`).
+      return allOfAdmitsNull(schema) ? { kind: 'nullable', inner: merged } : merged;
     }
     if (reading === 'reference') {
       const refItem = allOfReferenceMember(schema);
@@ -9104,6 +9450,7 @@ import {
   spliceNestedAllOf,
   splicedAllOfMembers,
   stableStringify,
+  unsplicedAllOf,
 } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';

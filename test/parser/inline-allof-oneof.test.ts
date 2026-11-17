@@ -682,7 +682,9 @@ describe('the one reading of an inline allOf', () => {
     const refPlusUnion: SchemaObject = { allOf: [{ $ref: '#/components/schemas/Base' }, union] };
     const unionPlusLimits: SchemaObject = { allOf: [union, { maxProperties: 3 }] };
     for (const schema of [basePlusVariants, refPlusUnion, unionPlusLimits]) {
-      expect(schemaToTypeRef(schema, 'pet', 'Holder')).toEqual(model('HolderPet'));
+      // The union has a `null` variant, so a merge it alone types admits `null` (#676); beside an object it does not.
+      const merged = schema === unionPlusLimits ? { kind: 'nullable', inner: model('HolderPet') } : model('HolderPet');
+      expect(schemaToTypeRef(schema, 'pet', 'Holder')).toEqual(merged);
       expect(mintedInlineNameEntries('pet', schema, 'Holder').map((e) => e.name)).toEqual(['HolderPet']);
       const results: Model[] = [];
       extractInlineModelsFromProperties({ properties: { pet: schema } }, results, 'Holder', components);

@@ -674,7 +674,7 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
       an empty wrapper: PetOwner ; PetOwner { name?: string, label?: string }
       an empty wrapper beside one \`$ref\`: Tag
       \`type: [object, null]\`: PetOwner ; PetOwner { name?: string, label?: string }
-      \`type: [object, null]\` on both: PetOwner ; PetOwner { name?: string, label?: string }
+      \`type: [object, null]\` on both: nullable<PetOwner> ; PetOwner { name?: string, label?: string }
       \`type: [object, string]\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`additionalProperties\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`additionalProperties\` on both: PetOwner ; PetOwner { name?: string, label?: string }
@@ -704,7 +704,7 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
     ).toMatchInlineSnapshot(`
       "\`nullable: true\` with no \`type\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`nullable: true\` beside \`type: object\`: PetOwner ; PetOwner { name?: string, label?: string }
-      \`nullable: true\` beside \`type: object\`, on both: PetOwner ; PetOwner { name?: string, label?: string }
+      \`nullable: true\` beside \`type: object\`, on both: nullable<PetOwner> ; PetOwner { name?: string, label?: string }
       \`nullable: true\` beside \`type: object\`, lone: nullable<Owner>"
     `);
     expect(warnings()).toEqual([]);
@@ -764,27 +764,66 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
     expect(warnings()).toEqual([]);
   });
 
-  it('reads the `object` copy of a type list through the wrappers, as the primitive copy is read (#674)', async () => {
-    const untyped = { Bare: { properties: { name: string } } };
-    const nested = { type: ['object', 'string'], ...W(W(ref('Bare')), W({ minLength: 1 })) };
-    const flat = { type: ['object', 'string'], ...W(ref('Bare'), { minLength: 1 }) };
-    expect(await read(nested, '3.1.0', untyped)).toBe(await read(flat, '3.1.0', untyped));
-    expect(await read(nested, '3.1.0', untyped)).toMatchInlineSnapshot(
-      `"(Bare | string) {"minLength":1} ; Bare { name?: string }"`,
-    );
-    // `required` beside the list adds to the component whichever way the members are written.
-    const required = { type: ['object', 'string'], ...W(W(ref('Bare'), { minLength: 1 })), required: ['name'] };
-    expect(await read(required, '3.1.0', untyped)).toMatchInlineSnapshot(
-      `"(PetOwner | string) {"minLength":1} ; Bare { name?: string } ; PetOwner { name!: string }"`,
-    );
-    expect(await read(required, '3.1.0', untyped)).toBe(
-      await read(
-        { type: ['object', 'string'], ...W(ref('Bare'), { minLength: 1 }), required: ['name'] },
-        '3.1.0',
-        untyped,
-      ),
-    );
-  });
+  it.each(['3.0.3', '3.1.0'])(
+    'reads the `object` copy of a type list whose `allOf` is wrappers as the flat spelling’s, on a field and on a body (#674), under OAS %s',
+    async (openapi) => {
+      // `Owner` and `Tag` with no `type`, as #674 writes `Owner`: their
+      // `properties` say nothing of a string, so the list keeps both copies.
+      const untyped = { Owner: { properties: { name: string } }, Tag: { properties: { label: string } } };
+      const list = (...members: unknown[]) => ({ type: ['object', 'string'], allOf: members });
+      const spellings: Spelling[] = [
+        // #674 left this one `map<unknown> | string`: no reader typed the two wrappers of the `object` copy.
+        ['a wrapped `$ref` beside a wrapped limit', list(W(Owner), W({ minLength: 1 })), list(Owner, { minLength: 1 })],
+        ['two wrapped `$ref`s', list(W(Owner), W(Tag)), list(Owner, Tag)],
+        [
+          '`required` beside the list, the members one level down',
+          { ...list(W(Owner, { minLength: 1 })), required: ['name'] },
+          { ...list(Owner, { minLength: 1 }), required: ['name'] },
+        ],
+      ];
+      const typeSites: Record<string, { site: (schema: unknown) => unknown; typed: (spec: ApiSpec) => TypeRef }> = {
+        'a field': {
+          site: (schema) => document(openapi, { ...untyped, Pet: object({ owner: schema }) }, ref('Pet')),
+          typed: (spec) => owner(spec).type,
+        },
+        'the `200` body': {
+          site: (schema) => document(openapi, untyped, schema),
+          typed: (spec) => spec.services.flatMap(({ operations }) => operations)[0]!.response,
+        },
+        'a request body': {
+          site: (schema) => document(openapi, untyped, Tag, { requestBody: json(schema) }),
+          typed: (spec) => spec.services.flatMap(({ operations }) => operations)[0]!.requestBody!,
+        },
+      };
+      const lines: string[] = [];
+      for (const [siteName, { site, typed }] of Object.entries(typeSites)) {
+        for (const [label, nested, flat] of spellings) {
+          const nestedSpec = await parseJson(site(nested));
+          const flatSpec = await parseJson(site(flat));
+          expect(nestedSpec, `${label}, as ${siteName}`).toEqual(flatSpec);
+          expect(diffSpecs(flatSpec, nestedSpec).changes, `${label}, as ${siteName}`).toEqual([]);
+          expect(diffSpecs(nestedSpec, flatSpec).changes, `${label}, as ${siteName}`).toEqual([]);
+          const minted = ownModels(nestedSpec).filter((model) => !model.startsWith('Pet {'));
+          lines.push(`${label}, as ${siteName}: ${[show(typed(nestedSpec)), ...minted].join(' ; ')}`);
+        }
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "a wrapped \`$ref\` beside a wrapped limit, as a field: (Owner | string) {"minLength":1}
+        two wrapped \`$ref\`s, as a field: (PetOwner | string) ; PetOwner { name?: string, label?: string }
+        \`required\` beside the list, the members one level down, as a field: (PetOwner | string) {"minLength":1} ; PetOwner { name!: string }
+        a wrapped \`$ref\` beside a wrapped limit, as the \`200\` body: (Owner | string) {"minLength":1}
+        two wrapped \`$ref\`s, as the \`200\` body: (GetPetResponse | string) ; GetPetResponse { name?: string, label?: string }
+        \`required\` beside the list, the members one level down, as the \`200\` body: (GetPetResponse | string) {"minLength":1} ; GetPetResponse { name!: string }
+        a wrapped \`$ref\` beside a wrapped limit, as a request body: (Owner | string) {"minLength":1}
+        two wrapped \`$ref\`s, as a request body: (GetPetRequest | string) ; GetPetRequest { name?: string, label?: string }
+        \`required\` beside the list, the members one level down, as a request body: (GetPetRequest | string) {"minLength":1} ; GetPetRequest { name!: string }"
+      `);
+      // With `Owner` typed `object`, which no string satisfies, the list is the one copy in either spelling.
+      expect(await read(list(W(Owner), W({ minLength: 1 })), openapi)).toBe('Owner');
+      expect(await read(list(Owner, { minLength: 1 }), openapi)).toBe('Owner');
+      expect(warnings()).toEqual([]);
+    },
+  );
 
   it('follows a pointer through a wrapper to the `$ref` it holds', async () => {
     const spec = await parseJson(

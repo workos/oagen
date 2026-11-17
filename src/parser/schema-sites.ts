@@ -23,10 +23,10 @@
  * `isIgnoredResponseHeader`, `classifyResponseKey`, `isResponseEntry`,
  * `resolveResponseRef`, `responseBodyReading`, `parameterTyping`,
  * `parameterKey`, `pathItemRefTarget`), and mirrors the reader's branch
- * where it does not. `test/parser/schema-sites.test.ts`
- * holds one document per site and checks that the reader, this walk and
- * both passes give it one answer, so a site a reader gains or drops fails
- * there until the walk follows.
+ * where it does not. `test/parser/schema-sites.test.ts` holds one document
+ * per site and checks that the reader, this walk and both passes give it
+ * one answer, so a site among them that a reader gains or drops fails there
+ * until the walk follows.
  */
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
 import { responseBodyReading } from './body-media-types.js';
@@ -66,6 +66,18 @@ const TYPED_PARAMETER_LOCATIONS: Record<ParameterObject['in'], true> = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * A value the readers read as a map without asking what it is: `paths`, a
+ * `content` or `headers` map and a `components` section are iterated with
+ * `Object.entries` or looked up with `Object.hasOwn`, so one written as an
+ * array is read by its indexes (`content: [{ schema }]` types the media type
+ * `0`). The maps a reader does check first — `webhooks`, `responses`,
+ * `callbacks`, a Callback Object — are asked `isRecord`, as it asks.
+ */
+function isKeyed(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 /**
@@ -149,7 +161,7 @@ export function readSchemaSites(
   /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
   const follow = (value: unknown, section: ReferencedSection): Record<string, unknown> | undefined => {
     const entries = components[section];
-    const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
+    const map = isKeyed(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
     const seen = new Set<string>();
     let current = value;
     while (isRecord(current) && current['$ref'] !== undefined) {
@@ -175,7 +187,7 @@ export function readSchemaSites(
    * `encoding` is not read.
    */
   const requestContent = (value: unknown, direction: SiteDirection): void => {
-    if (!isRecord(value)) return;
+    if (!isKeyed(value)) return;
     for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
   };
   /**
@@ -187,7 +199,7 @@ export function readSchemaSites(
    * through its schema (#610).
    */
   const responseContent = (value: unknown): void => {
-    if (!isRecord(value)) return;
+    if (!isKeyed(value)) return;
     for (const [contentType, mediaType] of Object.entries(value)) {
       if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
       schema(mediaType['schema'], 'received');
@@ -203,7 +215,7 @@ export function readSchemaSites(
   const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
     const { schema: own, content: map } = declaration;
     schema(
-      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
+      parameterTyping({ schema: own, content: isKeyed(map) ? map : undefined } as SchemaOrContent).schema,
       direction,
     );
   };
@@ -212,11 +224,14 @@ export function readSchemaSites(
    * `readPathItemEntries` resolve them: the Path Item's, then its own, each
    * Reference Object followed, an `Accept`, `Content-Type` or
    * `Authorization` header dropped (#414), an operation parameter replacing
-   * a Path Item one of the same identity (`parameterKey`). Of those left,
-   * the ones in a location the readers type are read, less the one each
-   * reader leaves untyped: an operation's `Idempotency-Key` header, which
-   * the SDK injects, and a received request's `path` parameter, which has no
-   * path to sit in.
+   * a Path Item one of the same identity — the readers' own key
+   * (`parameterKey`), given the `name` as it is written, so two parameters
+   * with no name, or one with none beside one named `''`, are two as they
+   * are to the readers (`query:undefined`, `query:`). Of those left, the
+   * ones in a location the readers type are read, less the one each reader
+   * leaves untyped: an operation's `Idempotency-Key` header, which the SDK
+   * injects, and a received request's `path` parameter, which has no path to
+   * sit in.
    */
   const parameters = (item: Record<string, unknown>, operation: Record<string, unknown>, direction: SiteDirection) => {
     const byIdentity = new Map<string, Record<string, unknown>>();
@@ -227,7 +242,11 @@ export function readSchemaSites(
         const location = resolved?.['in'];
         if (!resolved || typeof location !== 'string' || !Object.hasOwn(TYPED_PARAMETER_LOCATIONS, location)) continue;
         const name = resolved['name'];
-        const identity = { in: location as ParameterLocation, name: typeof name === 'string' ? name : '' };
+        // A header's name is folded before anything asks about it
+        // (`foldHeaderName`), which fails the parse on one that is no
+        // string: no reader gets to type the operation.
+        if (location === 'header' && typeof name !== 'string') continue;
+        const identity = { in: location as ParameterLocation, name: name as string };
         if (isIgnoredHeaderParameter(identity as ParameterObject)) continue;
         if (direction === 'sent' ? isIdempotencyKeyHeader(identity) : identity.in === 'path') continue;
         byIdentity.set(parameterKey(identity.in, identity.name), resolved);
@@ -266,7 +285,7 @@ export function readSchemaSites(
    * dropped declaration or the ignored header.
    */
   const responseHeaders = (headers: unknown): void => {
-    if (!isRecord(headers)) return;
+    if (!isKeyed(headers)) return;
     const declared = new Map<string, unknown>();
     for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
     for (const [name, header] of declared) {
@@ -296,7 +315,7 @@ export function readSchemaSites(
   const operationResponses = (responses: unknown): void => {
     if (!isRecord(responses)) return;
     const entries = components['responses'];
-    const componentResponses = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
+    const componentResponses = isKeyed(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
     const ranges = new Set<string>();
     for (const [code, entry] of Object.entries(responses)) {
       const key = classifyResponseKey(code);
@@ -328,8 +347,10 @@ export function readSchemaSites(
     }
   };
   const pathItems = (map: unknown, webhooks: boolean): void => {
-    if (!isRecord(map)) return;
-    for (const [key, raw] of Object.entries(map)) {
+    // `paths` is read by its keys whatever it is (`resolvePathItems`); `webhooks` only as an object (`extractWebhooks`).
+    const read = webhooks ? isRecord(map) : isKeyed(map);
+    if (!read) return;
+    for (const [key, raw] of Object.entries(map as Record<string, unknown>)) {
       // An extension under `paths`; a webhook's name under `webhooks` (#421).
       if (!webhooks && key.startsWith('x-')) continue;
       const item = follow(raw, 'pathItems');

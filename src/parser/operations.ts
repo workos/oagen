@@ -107,9 +107,9 @@ import {
   agreedExtensions,
   collectProperties,
   extractInlineModelsFromProperties,
+  foldLiveCopy,
   isInheritedModelRef,
   shapeFingerprint,
-  takeModelDocumentation,
   withAgreedExtensions,
   type InlineModelBundle,
 } from './inline-models.js';
@@ -156,6 +156,7 @@ import {
   registerInlineModels,
   reserveEnumNames,
   type InlineModelRegistry,
+  type KeptDefinition,
   type InlineModelOwner,
   type SiblingSites,
   createSiblingSites,
@@ -1008,6 +1009,16 @@ export function extractOperations(
   const componentBodies: TypeRef[] = [];
   // Each operation's `callbacks` map, read after the webhooks (`extractCallbacks`).
   const declaredCallbacks: DeclaredCallbacks[] = [];
+  // The item models each Operation Object's success bodies settle against
+  // the registry, by name (`ResponseTypingContext.settledItems`, #672): one
+  // map per Operation Object, not per path, so two paths that `$ref` one
+  // Path Item read its bodies against the same definitions.
+  const settledItems = new Map<OperationObject, Map<string, KeptDefinition>>();
+  const settledItemsOf = (op: OperationObject): Map<string, KeptDefinition> => {
+    let settled = settledItems.get(op);
+    if (!settled) settledItems.set(op, (settled = new Map()));
+    return settled;
+  };
 
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     // Everything read at path-item level — `parameters`, `servers`, and the
@@ -1078,6 +1089,7 @@ export function extractOperations(
         modelOperationIds.get(key),
         // A path that shares another's Operation Object gives up what that path does.
         bodyNameYields.get(sharedWith.get(key) ?? key),
+        settledItemsOf(op),
       );
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
@@ -3433,6 +3445,8 @@ function buildOperation(
    * instead (`resolveBodyNameYields`, #683); absent when it gives none up.
    */
   bodyNameYields?: BodyNameYields,
+  /** The item models the Operation Object's success bodies settle, shared by every path that reads it (`ResponseTypingContext.settledItems`, #672). */
+  settledItems?: Map<string, KeptDefinition>,
 ): {
   operation: Operation;
   inlineModels: Model[];
@@ -3541,6 +3555,7 @@ function buildOperation(
     componentResponseModelNames,
     registry,
     ...(bodyNameYields && { yields: bodyNameYields }),
+    ...(settledItems && { settledItems }),
   };
   // One location's parameters, typed by `extractParams`. A parameter whose
   // inline schema mints a model is deferred once the responses have been
@@ -5554,6 +5569,18 @@ interface ResponseTypingContext {
    * the registry leave as they are read (`ItemSettlement.yields`).
    */
   yields?: BodyNameYields;
+  /**
+   * The item models the Operation Object's success bodies have settled
+   * against the registry so far, by the name each settled on
+   * (`ItemSettlement.kept`, #672): the definitions a later body's items
+   * share when they repeat them but for the model's own `deprecated`. One
+   * map per Operation Object (`extractOperations`), so a path that `$ref`s
+   * the Path Item another path reads meets the definitions that path
+   * settled — the same bodies, read again — and gives every status code the
+   * type the first reading gave it. Absent, `extractResponses` keeps a map
+   * of its own for the one reading.
+   */
+  settledItems?: Map<string, KeptDefinition>;
 }
 
 /**
@@ -7249,9 +7276,13 @@ function inlineEnumNames(roots: readonly TypeRef[], models: readonly Model[]): s
   return names;
 }
 
-/** What settles an operation's array items against the registry (`typeInlineItems`): the operation they are recorded under, and what it gives up to another (`ResponseTypingContext.yields`). */
-function itemSettlement(registry: ModelShapeRegistry, ctx: ResponseTypingContext): ItemSettlement {
-  return { registry, operation: ctx.operationQualifier, ...(ctx.yields && { yields: ctx.yields }) };
+/** What settles an operation's array items against the registry (`typeInlineItems`): the operation they are recorded under, what it gives up to another (`ResponseTypingContext.yields`), and the item models its success bodies have settled so far (`kept`, one map per reading of its `responses`; #672). */
+function itemSettlement(
+  registry: ModelShapeRegistry,
+  ctx: ResponseTypingContext,
+  kept: Map<string, KeptDefinition>,
+): ItemSettlement {
+  return { registry, operation: ctx.operationQualifier, ...(ctx.yields && { yields: ctx.yields }), kept };
 }
 
 /**
@@ -8068,7 +8099,13 @@ function undescribedBodyType(): TypeRef {
  * the 202's `description` and its fields' (#673), as a deprecated 202
  * beside a live 200 does, and the model is deprecated only when every copy
  * is; and to the kept definition with a warning when they differ in a
- * field (#630).
+ * field (#630). The array items of those bodies are not merged here: they
+ * are settled against the registry as each body is read (`typeInlineItems`),
+ * where items that repeat an earlier body's but for the model's own flag
+ * share that body's model and are folded onto it by the same rule
+ * (`settledItems`, `foldLiveCopy`; #672), so a `200` and a `202` returning
+ * one array of `{ name }` are both `ListPetsItem[]` whichever body's `items`
+ * is deprecated.
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -8155,6 +8192,14 @@ function extractResponses(
   // or the component's shared name — the stem a later status code's body
   // steps from (`stepSecondaryBody`), and whether it is a component's.
   const bodyContexts = new Map<number, { context: string; component: boolean }>();
+  // The item models this operation's success bodies settle against the
+  // registry, by name (`ItemSettlement.kept`): the items of a later body
+  // that repeat an earlier body's but for the model's own `deprecated`
+  // share that body's model and are folded onto it as they are read
+  // (#672), where the registry alone would step them to `<Op>ResponseItem`.
+  // The Operation Object's own map when it has one (`ctx.settledItems`):
+  // another path may read these bodies again.
+  const settledItems = ctx.settledItems ?? new Map<string, KeptDefinition>();
 
   // A `responses` that is not an object — `responses: "oops"`, `7`, `null`,
   // `[…]` — is no Responses Object, so no key could be read from it: it is
@@ -8319,7 +8364,7 @@ function extractResponses(
         const result = classifyAndExtractResponse(bodySchema, contextName, componentSchemas, {
           paginationDisabled,
           dataPathOverride,
-          ...(ctx.registry && { settle: itemSettlement(ctx.registry, ctx) }),
+          ...(ctx.registry && { settle: itemSettlement(ctx.registry, ctx, settledItems) }),
         });
         extractedType = result.response;
         bodyResults.set(code, result);
@@ -8490,6 +8535,9 @@ function extractResponses(
   const componentBodies = new Set(ctx.componentResponseModelNames?.values());
   for (const [status, result] of bodiesByPrimacy) {
     if (status !== primaryStatus) {
+      // A body that shared the items an earlier later body's step has moved
+      // since follows them before it is named for itself.
+      followMovedItems(result, settledItems);
       const { context, component } = bodyContexts.get(status)!;
       const key = component ? undefined : bodyShapeKey(bodySchemas.get(status)!, context, componentSchemas);
       const ownBody = key === undefined ? undefined : { stems: settledStems, key, componentBodies };
@@ -8507,19 +8555,22 @@ function extractResponses(
         console.warn(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
         );
-      } else if (kept.model.deprecated && !model.deprecated) {
+      } else {
         // Identical but for the model's own flag: the shared model is live
         // while any copy is (#630). The kept definition stays — its
         // references with it: an explicit `$ref` the primary wrote where
         // this body nests an inline object of the same name, repointed
-        // apart by the merge passes — and goes live, documented as this
-        // first live copy is (`takeModelDocumentation`): the model and each
-        // of its fields, as the merge passes keep a live copy's definition
-        // across operations (#673: the fields kept the deprecated copy's
-        // text); the live copy's object never replaces it. A model nested
-        // in the body is a model of this loop too, kept by its own flag.
-        delete kept.model.deprecated;
-        takeModelDocumentation(kept.model, model);
+        // apart by the merge passes — and, deprecated beside a live copy,
+        // goes live, documented as this first live copy is (`foldLiveCopy`,
+        // through `takeModelDocumentation`): the model and each of its
+        // fields, as the merge passes keep a live copy's definition across
+        // operations (#673: the fields kept the deprecated copy's text);
+        // the live copy's object never replaces it. A model nested in the
+        // body is a model of this loop too, kept by its own flag. The items
+        // of an array body never get here as a second copy: they were
+        // folded by this very rule as they were settled (`settledItems`,
+        // #672).
+        foldLiveCopy(kept.model, model);
       }
     }
   }
@@ -8549,7 +8600,7 @@ function extractResponses(
       pagination.dataPath,
       pagination.componentModels ?? [],
       componentSchemas,
-      ctx.registry && itemSettlement(ctx.registry, ctx),
+      ctx.registry && itemSettlement(ctx.registry, ctx, settledItems),
     );
     if (resolved) {
       overrideItemType = resolved.itemType;
@@ -8587,6 +8638,34 @@ function extractResponses(
     unpagedEnvelope,
     componentBodies: componentBodyTypes,
   };
+}
+
+/**
+ * Repoint `result`, a later status code's body, to the settled items a
+ * later body's step moved: every definition of `settled` — the item models
+ * the Operation Object's success bodies settled, each filed under the name
+ * it settled on — that no longer carries that name. An array body's items
+ * that repeat an earlier body's — identically, or but for the model's own
+ * `deprecated` (#672) — share that body's model through the registry and
+ * mint none, so the body holds the shared model's name and nothing else;
+ * when `stepSecondaryBody` then moves the model for the body that minted it
+ * (a `201`'s `ListPetsResponseItem` beside a primary whose nested `item`
+ * object holds that name, moved to `ListPetsResponse201Item`), the sharing
+ * body follows, where it was left naming whatever the primary keeps under
+ * the old name — and so does the same body read again from another path
+ * that `$ref`s the Path Item, which finds the registry still holding the
+ * old name. A name the body mints a model of is its own and is left to its
+ * own step; an explicit `$ref` to a component and a reference an `allOf`
+ * merge copied stay as written, as in `stepSecondaryBody`.
+ */
+function followMovedItems(result: ResponseExtractionResult, settled: ReadonlyMap<string, KeptDefinition>): void {
+  const own = new Set(result.inlineModels.map((model) => model.name));
+  const moved = new Map<string, string>();
+  for (const [name, { model }] of settled) if (model.name !== name && !own.has(name)) moved.set(name, model.name);
+  if (moved.size === 0) return;
+  const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
+  renameTypeRefModels(result.response, moved, admit);
+  for (const model of result.inlineModels) renameModelRefs(model, moved, admit);
 }
 
 /**
