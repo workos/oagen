@@ -116,9 +116,15 @@ const tagsField = (ir: ApiSpec, name: string): Field => model(ir, name).fields.f
 /** The type of `tags` on model `name`, as the issue's script prints it. */
 const tagsOf = (ir: ApiSpec, name: string): TypeRef => tagsField(ir, name).type;
 
-/** The issue's warning: the body `shape` left as `GetPetError404`, since the component `name` cannot stand for it; the component's own shape prints beside the body's (#629), the same unless given. */
+/**
+ * The issue's warning: the body `shape` left as `GetPetError404`, since the
+ * component `name` cannot stand for it; the component's own shape prints
+ * beside the body's (#629), the same unless given. The two print one shape,
+ * so the warning ends by naming where the limits differ (#671), where it
+ * said to give the two the same shape.
+ */
 const kept = (shape: string, name: string, componentShape = shape): string =>
-  `[oagen] Warning: The shared error body ${shape} would be named "${name}", which component schema "${name}" ${componentShape} already holds — keeping model "GetPetError404" as it is; give the two the same shape, or rename one`;
+  `[oagen] Warning: The shared error body ${shape} would be named "${name}", which component schema "${name}" ${componentShape} already holds — keeping model "GetPetError404" as it is; give the two the same limits on "tags", or rename one`;
 
 afterEach(() => {
   vi.restoreAllMocks();
