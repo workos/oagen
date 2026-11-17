@@ -1340,10 +1340,18 @@ export interface Model {
    * own, else the first `allOf` member's that declares no type (`allOf:
    * [{ $ref: Base }, { properties: { name } }, { description: 'An owner.'
    * }]`; #555 review). A typing member's text stays on that member, a
-   * `$ref` member's on its component.
+   * `$ref` member's on its component. A shared error body
+   * (`collapseErrorBodies`) stands for several inline schemas: it carries
+   * the text every body folded onto it wrote, and none when two wrote
+   * different texts or one wrote none (#666).
    */
   description?: string;
-  /** The schema's `externalDocs`, when it declares a usable one; for an `allOf` model, the wrapper layer's, as `description` is. */
+  /**
+   * The schema's `externalDocs`, when it declares a usable one; for an
+   * `allOf` model, the wrapper layer's, as `description` is; for a shared
+   * error body, the link every body folded onto it wrote — the same `url`
+   * and the same `description` — settled apart from the text (#666).
+   */
   externalDocs?: ExternalDocs;
   /**
    * Present, and `true`, when the schema this model was built from says

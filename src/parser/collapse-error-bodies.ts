@@ -128,10 +128,22 @@
  * name, the fields stay plain strings, with a warning. One value every
  * member pins stays that literal, and a lone pinned value beside free
  * strings widens to `string`. An optional field the members type
- * differently is the union of the types they wrote. A field's description,
- * example and extensions survive only when every member wrote the same one;
- * the response's own `description` stays on the `errors[]` entry, where it
- * always was.
+ * differently is the union of the types they wrote.
+ *
+ * Documentation is not shape, and is settled by agreement at both levels
+ * (#666). The shared model's own `description`, `externalDocs` and
+ * extensions are the bodies' schemas' — what each body's model carried
+ * until here, an `allOf` body's wrapper layer's included — each of the
+ * three kept, on its own, when every member wrote the same one and absent
+ * otherwise: a member that wrote none disagrees with one that wrote some,
+ * and a model that folds a single body keeps that body's. A nested error
+ * body is documented the same way, by its own members. A field's
+ * description, link and extensions survive only when every member that has
+ * the field wrote the same one, whatever the fold made of its type, and
+ * its example only while that type is still the members' own. A component
+ * that takes the bodies (`componentAccepts`) keeps its own text and link,
+ * or none, and takes nothing of theirs. The response's own `description`
+ * stays on the `errors[]` entry, where it always was.
  *
  * Every other inline enum a shared body's field lists — an integer or
  * number `enum`, a string `enum` under array items or map values or in a
@@ -1230,15 +1242,28 @@ function nestedName(parentName: string, parent: Model, field: Field, item: Model
 /**
  * One shared model for `members`, carrying every field any member declares
  * (`sharedFieldOrder`): each field's type reads as the group reads it
- * (`sharedFieldType`); its description, access flags, default, limits and
- * extensions are kept when every member that has the field wrote the same
- * one, the example only while the type is still the member's own, its
- * domain name when every member that hints the field agrees
- * (`sharedDomainName`), and its `deprecated` when every member that carries
- * the field deprecates it (`sharedDeprecated`), as the model is deprecated
- * only when every member is (`sharedModelDeprecated`): a deprecated member,
- * or a member's deprecated field, folds onto a live one with a warning, as
- * a deprecated inline copy folds onto its live twin (#441, #629).
+ * (`sharedFieldType`); its description, link (`externalDocs`), access
+ * flags, default, limits and extensions are kept when every member that has
+ * the field wrote the same one — the link whatever the fold made of the
+ * type, as the description is (#666: it was dropped with the examples, so
+ * `code: const a` beside `code: const b`, both linking to one page, lost
+ * the link by becoming `ErrorBodyCode`) — the example only while the type
+ * is still the member's own, its domain name when every member that hints
+ * the field agrees (`sharedDomainName`), and its `deprecated` when every
+ * member that carries the field deprecates it (`sharedDeprecated`), as the
+ * model is deprecated only when every member is (`sharedModelDeprecated`):
+ * a deprecated member, or a member's deprecated field, folds onto a live
+ * one with a warning, as a deprecated inline copy folds onto its live twin
+ * (#441, #629).
+ *
+ * The model's own `description` and `externalDocs` are the members' — the
+ * text and link each body's schema gave its model, an `allOf` body's
+ * wrapper layer's included — each kept when every member wrote the same
+ * one and absent otherwise, as its limits and extensions are (#666): two
+ * `{ message }` bodies described "Why the request failed." are an
+ * `ErrorBody` described so, a lone body's are its model's, and a member
+ * that wrote none, or another text, leaves the model without one. Two
+ * links are the same when their `url` and their own `description` are.
  */
 function buildSharedModel(
   name: string,
@@ -1267,6 +1292,10 @@ function buildSharedModel(
     if (domainName !== undefined) shared.domainName = domainName;
     const description = agree('description');
     if (description !== undefined) shared.description = description;
+    // The link is documentation, as the text is: kept whenever the members
+    // agree on it, whatever the fold made of the type (#666).
+    const externalDocs = agree('externalDocs');
+    if (externalDocs !== undefined) shared.externalDocs = externalDocs;
     const readOnly = agree('readOnly');
     if (readOnly !== undefined) shared.readOnly = readOnly;
     const writeOnly = agree('writeOnly');
@@ -1282,8 +1311,6 @@ function buildSharedModel(
       if (example !== undefined) shared.example = example;
       const examples = agree('examples');
       if (examples !== undefined) shared.examples = examples;
-      const externalDocs = agree('externalDocs');
-      if (externalDocs !== undefined) shared.externalDocs = externalDocs;
     }
     return shared;
   });
@@ -1292,6 +1319,13 @@ function buildSharedModel(
     members.every((member) => stableJson(member[key]) === stableJson(representative[key]))
       ? representative[key]
       : undefined;
+  // The bodies' own text and link, each kept when every member wrote the
+  // same one, as their `x-` keys are below; a member that wrote none
+  // disagrees with one that wrote some (#666).
+  const description = agree('description');
+  if (description !== undefined) model.description = description;
+  const externalDocs = agree('externalDocs');
+  if (externalDocs !== undefined) model.externalDocs = externalDocs;
   if (sharedModelDeprecated(name, members)) model.deprecated = true;
   const constraints = agree('constraints');
   if (constraints !== undefined) model.constraints = constraints;
