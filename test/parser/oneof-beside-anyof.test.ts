@@ -116,9 +116,10 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
   /** A property pinned to one string, in this version's spelling. */
   const pinned = (value: string) =>
     openapi === '3.0.3' ? { type: 'string', enum: [value] } : { type: 'string', const: value };
-  /** A union that admits `null`, in this version's spelling: a `null` variant, or OAS 3.0 `nullable: true`. */
-  const withNull = (keyword: 'oneOf' | 'anyOf', variants: unknown[]): Doc =>
-    openapi === '3.0.3' ? { [keyword]: variants, nullable: true } : { [keyword]: [...variants, { type: 'null' }] };
+  /** A nullable wrapper around `variants`: a `null` variant beside them, in this version's spelling. */
+  const withNull = (keyword: 'oneOf' | 'anyOf', variants: unknown[]): Doc => ({
+    [keyword]: [...variants, openapi === '3.0.3' ? { enum: [null] } : { type: 'null' }],
+  });
 
   const components: Record<string, Doc> = {
     Owner: object({ ownerId: str }),
@@ -595,49 +596,62 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
   });
 
   describe('null', () => {
-    it('admits `null` exactly as the composition written out does, whichever union lists it', async () => {
-      const lists: Array<[string, Doc]> = [
-        ['the oneOf', { ...withNull('oneOf', oneOf), anyOf }],
-        ['the anyOf', { oneOf, ...withNull('anyOf', anyOf) }],
+    /** The `null` variant a union lists, in this version's spelling. */
+    const nullVariant = openapi === '3.0.3' ? { enum: [null] } : { type: 'null' };
+    const at = (s: Doc) => doc({ Pick: s, Holder: object({ pick: s, named: ref('Pick') }) });
+    /** The three spellings of two unions; `flag` is written beside both, and on every member once written out. */
+    const three = (unions: { oneOf: unknown[]; anyOf: unknown[] }, flag: Doc = {}) => ({
+      plain: { description: 'A pick.', ...unions, ...flag },
+      beside: { allOf: [{ description: 'A pick.' }], ...unions, ...flag },
+      member: {
+        description: 'A pick.',
+        allOf: [
+          { oneOf: unions.oneOf, ...flag },
+          { anyOf: unions.anyOf, ...flag },
+        ],
+      },
+    });
+    const readThree = async ({ plain, beside, member }: ReturnType<typeof three>, label?: string) => {
+      const read = await expectSameReading(at(plain), at(beside), label);
+      await expectSameReading(at(plain), at(member), label);
+      return read.spec;
+    };
+
+    it('a `null` variant in one union alone admits no `null`: the other union forbids it', async () => {
+      const lists: Array<[string, { oneOf: unknown[]; anyOf: unknown[] }]> = [
+        ['the oneOf', { oneOf: [...oneOf, nullVariant], anyOf }],
+        ['the anyOf', { oneOf, anyOf: [...anyOf, nullVariant] }],
       ];
-      if (openapi !== '3.0.3') lists.push(['both', { ...withNull('oneOf', oneOf), ...withNull('anyOf', anyOf) }]);
       for (const [label, unions] of lists) {
-        const { oneOf: first, anyOf: second, ...flag } = unions as { oneOf: unknown[]; anyOf: unknown[] };
-        const plain = { description: 'A pick.', ...unions };
-        const beside = { allOf: [{ description: 'A pick.' }], ...unions };
-        // The flag goes with every union, as a `null` variant stays in the list it is written in.
-        const member = {
-          description: 'A pick.',
-          allOf: [
-            { oneOf: first, ...flag },
-            { anyOf: second, ...flag },
-          ],
-        };
-        const at = (s: Doc) => doc({ Pick: s, Holder: object({ pick: s, named: ref('Pick') }) });
-        const { spec } = await expectSameReading(at(plain), at(beside), label);
-        await expectSameReading(at(plain), at(member), label);
+        const spec = await readThree(three(unions), label);
         expect(fieldsOf(model(spec, 'Pick')), label).toEqual(four);
-        expect(model(spec, 'Pick').variants, label).toBeUndefined();
+        expect(fieldsOf(model(spec, 'HolderPick')), label).toEqual(four);
+        expect(fieldsOf(model(spec, 'Holder')), label).toEqual(['pick?: HolderPick', 'named?: Pick']);
       }
     });
 
+    it('a `null` variant in both admits `null`, as the `allOf` of the two does (#676)', async () => {
+      const spec = await readThree(three({ oneOf: [...oneOf, nullVariant], anyOf: [...anyOf, nullVariant] }));
+      expect(fieldsOf(model(spec, 'Pick'))).toEqual(four);
+      expect(model(spec, 'Pick').variants).toBeUndefined();
+      expect(fieldsOf(model(spec, 'Holder'))).toEqual(['pick?: nullable<HolderPick>', 'named?: nullable<Pick>']);
+    });
+
+    it('OAS 3.0 `nullable: true` beside the two stands for a `null` variant of each (#677)', async () => {
+      const flagged = three({ oneOf, anyOf }, { nullable: true });
+      const spec = await readThree(flagged);
+      expect(fieldsOf(model(spec, 'Holder'))).toEqual(['pick?: nullable<HolderPick>', 'named?: nullable<Pick>']);
+      const listed = three({ oneOf: [...oneOf, nullVariant], anyOf: [...anyOf, nullVariant] });
+      await expectSameReading(at(flagged.plain), at(listed.plain));
+    });
+
     it('a nullable wrapper on one axis is its one variant, always applying, beside the other union flattened', async () => {
-      const unions = { ...withNull('oneOf', [ref('Pet')]), anyOf } as { oneOf: unknown[]; anyOf: unknown[] };
-      const { oneOf: first, anyOf: second, ...flag } = unions;
-      const plain = { description: 'A pick.', ...unions };
-      const beside = { allOf: [{ description: 'A pick.' }], ...unions };
-      const member = {
-        description: 'A pick.',
-        allOf: [
-          { oneOf: first, ...flag },
-          { anyOf: second, ...flag },
-        ],
-      };
-      const at = (s: Doc) =>
+      const { plain, beside, member } = three({ oneOf: [ref('Pet'), nullVariant], anyOf });
+      const wide = (s: Doc) =>
         doc({ Pick: s, Holder: object({ pick: s, named: ref('Pick') }), Combo: { allOf: [ref('Base'), ref('Pick')] } });
-      const { spec } = await expectSameReading(at(plain), at(beside));
-      await expectSameReading(at(plain), at(member));
-      // No wrapper around `Pet`: the `anyOf` is read, and a `$ref` to the component is nullable by neither axis alone.
+      const { spec } = await expectSameReading(wide(plain), wide(beside));
+      await expectSameReading(wide(plain), wide(member));
+      // No wrapper around `Pet`: the `anyOf` is read, and it admits no `null`.
       expect(fieldsOf(model(spec, 'Pick'))).toEqual(['name?: string', 'ownerId?: string', 'shelterId?: string']);
       expect(basesOf(model(spec, 'Pick'))).toEqual(['Pet']);
       expect(fieldsOf(model(spec, 'HolderPick'))).toEqual(['name?: string', 'ownerId?: string', 'shelterId?: string']);
