@@ -1412,19 +1412,50 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
  * members name is read for each — `{ allOf: [{ $ref: A }, { $ref: A }] }`
  * over a nullable `A` admits `null` (the #653 review's round 4: the second
  * `$ref` met `A` in a shared seen set and read it as a cycle).
+ *
+ * Each schema is read once per document (`nullAdmissions`): what a schema
+ * admits does not depend on the path it was reached by. A schema admits
+ * `null` only when every schema under it was read to the end and admitted
+ * it, so none of them was on the path; and one that does not, because a
+ * schema under it was met again on the path, sits on that loop itself and
+ * admits none from wherever it is read. So a component many members name
+ * is read for the first of them and answered for the rest (#676 review:
+ * each reading forgot its answer, so `A1: { allOf: [{ $ref: A0 }, { $ref:
+ * A0 }] }`, `A2` the same over `A1`, and so on read `A0` twice per level,
+ * a billion times for the thirtieth component).
  */
 export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  const settled = nullAdmissions.get(schema);
+  if (settled !== undefined) return settled;
   if (path.has(schema)) return false;
   path.add(schema);
+  let admits: boolean;
   try {
     if (schema.$ref !== undefined) {
       const target = componentSchemaOf(schema.$ref);
-      return target !== undefined && schemaAdmitsNull(target, path);
+      admits = target !== undefined && schemaAdmitsNull(target, path);
+    } else {
+      admits = writesNull(schema) || allOfAdmitsNull(schema, path);
     }
-    return writesNull(schema) || allOfAdmitsNull(schema, path);
   } finally {
     path.delete(schema);
   }
+  nullAdmissions.set(schema, admits);
+  return admits;
+}
+
+/**
+ * Whether each schema read so far admits `null` (`schemaAdmitsNull`), by
+ * the schema, which the document owns. The answer follows a `$ref` to the
+ * document's components (`componentSchemaOf`), so it is forgotten where
+ * they are set or released (`resetNullAdmissions`), as the folded schemas
+ * are (`resetFoldedSchemas`).
+ */
+let nullAdmissions = new WeakMap<SchemaObject, boolean>();
+
+/** Forget what every schema admits: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+function resetNullAdmissions(): void {
+  nullAdmissions = new WeakMap();
 }
 
 /**
@@ -1869,6 +1900,7 @@ export function extractSchemas(
   resetInheritedModelRefs();
   resetCombinedDeclarations();
   resetFoldedSchemas();
+  resetNullAdmissions();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -2189,6 +2221,7 @@ export function clearSchemaNameTransform(): void {
   activeDispatcherVariantPlans = new Map();
   resetCombinedDeclarations();
   resetFoldedSchemas();
+  resetNullAdmissions();
   markContestedTitles(undefined);
 }
 
