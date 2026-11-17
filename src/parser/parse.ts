@@ -485,9 +485,11 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   assignParameterGroupWrapperNames(result);
 
   // `bases` and `inheritedFrom` as the models end: no chain of bases
-  // reaching its own model, each base once, and no base or inherited field
-  // a fold has since changed under the model (#591).
-  settleBases(result.models);
+  // reaching its own model, each base once, no base or inherited field
+  // a fold has since changed under the model (#591), and no base the
+  // model's own declaration of a field does not fit (#681) — the enums
+  // read for a component enum's values.
+  settleBases(result.models, result.enums);
 
   validateModelRefs(result);
 

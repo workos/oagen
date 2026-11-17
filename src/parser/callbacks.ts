@@ -151,10 +151,14 @@ interface PendingCallback {
  * while a group that spans depths is still one minting, named at its
  * shallowest depth and reused by its deeper members; last, whatever lets
  * two groups mint one name for two shapes past all that — a title-mapped
- * variant no stem hash moves — moves every group minting it, each on its
- * own stem (`separateMintedNames`), so no two callbacks ever share a model
- * by accident, while one shape under one name is the merge's to share, as
- * two webhooks' is. Entries reading one
+ * variant no stem hash moves, or an inline enum under one — moves every
+ * group minting it, each on its own stem (`separateMintedNames`), so no
+ * two callbacks ever share a model or an enum by accident, in whatever
+ * order they are declared (`CreatePetPetAdoptedShape` with
+ * `CreatePetPetAdoptedShapeSize`; #634), while one shape under one name is
+ * the merge's to share, as two webhooks' is; a name one of
+ * `webhookMintings` holds for another shape moves the callback group
+ * minting it, never the webhook's. Entries reading one
  * operation object and named from
  * its operationId form one group whatever their depths (a
  * `components/callbacks` entry an operation references directly and
