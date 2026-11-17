@@ -7998,11 +7998,12 @@ function undescribedBodyType(): TypeRef {
  * are the same shape but for the model's own `deprecated`
  * (`shapeFingerprint`), the kept definition — the primary's, its
  * references with it — going live when any copy is and documented as the
- * first live copy is, so a live 202 body identical to a deprecated 200
- * body types both as a live `Pet` carrying the 202's `description`, as a
- * deprecated 202 beside a live 200 does, and the model is deprecated only
- * when every copy is; and to the kept definition with a warning when they
- * differ in a field (#630).
+ * first live copy is (`takeModelDocumentation`), so a live 202 body
+ * identical to a deprecated 200 body types both as a live `Pet` carrying
+ * the 202's `description` and its fields' (#673), as a deprecated 202
+ * beside a live 200 does, and the model is deprecated only when every copy
+ * is; and to the kept definition with a warning when they differ in a
+ * field (#630).
  */
 function extractResponses(
   responses: Record<string, ResponseObject> | undefined,
@@ -8396,9 +8397,11 @@ function extractResponses(
   // definition going live when only the flag tells the two apart, as a live
   // copy owns a shared name across operations in the merge passes, so a
   // live 202 body identical to a deprecated 200 body keeps a live `Pet`
-  // with the 200's references and the 202's documentation (`description`,
-  // `externalDocs`, extensions: the first live copy's in status order, as
-  // the merge passes keep a live copy's definition), deprecating either
+  // with the 200's references and the 202's documentation (the model's
+  // `description`, `externalDocs` and extensions, each field's text, link,
+  // examples and extensions, and what an inline enum in a field's type
+  // lifts: the first live copy's in status order, as the merge passes keep
+  // a live copy's definition; #673), deprecating either
   // copy leaves no trace, and the model is deprecated only when every copy
   // is (#630); only a clash on a model the stem does not name — a field more,
   // a field's own flag, a limit — is still resolved to the kept definition,
@@ -8445,9 +8448,11 @@ function extractResponses(
         // references with it: an explicit `$ref` the primary wrote where
         // this body nests an inline object of the same name, repointed
         // apart by the merge passes — and goes live, documented as this
-        // first live copy is (`takeModelDocumentation`), as the merge passes
-        // keep a live copy's definition across operations; the live copy's
-        // object never replaces it.
+        // first live copy is (`takeModelDocumentation`): the model and each
+        // of its fields, as the merge passes keep a live copy's definition
+        // across operations (#673: the fields kept the deprecated copy's
+        // text); the live copy's object never replaces it. A model nested
+        // in the body is a model of this loop too, kept by its own flag.
         delete kept.model.deprecated;
         takeModelDocumentation(kept.model, model);
       }
