@@ -143,6 +143,9 @@ const leftAsTheyAre = (
   `[oagen] Warning: The shared error body ${shape} would be named "ErrorBody", which ${holder} already holds — keeping models "GetNoteError404", "GetPetError404" as they are; ${remedy}`;
 const deprecatedComponent = 'deprecated component schema "ErrorBody" { message: string }';
 const deprecatedFieldComponent = 'component schema "ErrorBody" { message (deprecated): string }';
+/** How the warning ends for a body a deprecated `ErrorBody` keeps off it: the rule, where it said to give the two the same shape, which they have (#671). */
+const deprecatedComponentRemedy =
+  '"ErrorBody" is deprecated, and takes no inline body, deprecated or live; make "ErrorBody" live, or rename one';
 /** How the warning ends for a body that only `field`, deprecated on `ErrorBody`, keeps off it: the rule, the same whichever flag the body gives the field (#671). */
 const deprecatedFieldRemedy = (field: string) =>
   `"ErrorBody" deprecates "${field}", and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; make "${field}" live on "ErrorBody", or rename one`;
@@ -175,7 +178,7 @@ describe('#629', () => {
         'GetPetError404 { message }',
         'GetNoteError404 { message }',
       ]);
-      expect(warnings).toEqual([leftAsTheyAre(deprecatedComponent)]);
+      expect(warnings).toEqual([leftAsTheyAre(deprecatedComponent, '{ message: string }', deprecatedComponentRemedy)]);
     });
 
     it('a component whose `message` is deprecated takes no body whose `message` is live, the warning printing which side deprecates it', async () => {
@@ -435,7 +438,9 @@ describe('#629', () => {
         'GetPetError404 (deprecated) { message }',
         'GetNoteError404 (deprecated) { message }',
       ]);
-      expect(ontoDeprecated.warnings).toEqual([leftAsTheyAre(deprecatedComponent)]);
+      expect(ontoDeprecated.warnings).toEqual([
+        leftAsTheyAre(deprecatedComponent, '{ message: string }', deprecatedComponentRemedy),
+      ]);
     });
 
     it('announces a deprecated body a live component takes once, when a name another group cannot take makes the fold run again', async () => {
