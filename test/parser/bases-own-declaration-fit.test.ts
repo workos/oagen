@@ -877,7 +877,7 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         );
       });
 
-      it('reads a named union that types a field as itself alone, and an empty one as fitting nothing', async () => {
+      it('reads a named union that types a field each way an emitter writes one, and an empty one as fitting nothing', async () => {
         // `Other` fits the variant `ShapeWithR`, and not the merge of the
         // variants an emitter reading `fields` writes (`w?: number`).
         const Shape = {
@@ -915,6 +915,24 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         expect(print(modelNamed(under, 'Pet'))).toBe(
           openapi === '3.0.3' ? 'Pet { x?: Union }' : 'Pet { x?: Union | null }',
         );
+        // Two named unions under one field, one of `$ref` variants and one
+        // of inline ones: the object fits a variant of `Fielded` and not
+        // the merge of them, and carries what `Bare`'s `fields` do — none —
+        // without being one of its variants. An emitter that writes a
+        // union as its `fields` when it has any, and as its variants when
+        // it has none, types the object as neither.
+        const mixed = await parsed({
+          Leaf: { type: 'object', properties: { x: { type: 'string' } } },
+          Bare: { oneOf: [R('Leaf'), { type: 'string' }] },
+          Fielded: Shape,
+          Holder: { type: 'object', properties: { f: { oneOf: [R('Bare'), R('Fielded')] } } },
+          Pet: {
+            allOf: [R('Holder')],
+            properties: { f: { type: 'object', properties: { r: pinned('a'), w: { type: 'string' } } } },
+          },
+        });
+        expect(print(modelNamed(mixed, 'Pet'))).toBe('Pet { f?: PetF }');
+        expect(print(modelNamed(mixed, 'PetF'))).toBe('PetF { r?: "a", w?: string }');
         // A union of nothing.
         const empty = await parsed({
           Empty: { oneOf: [] },
@@ -970,6 +988,78 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
             Pet: { allOf: [R('Animal')], properties: { code: { type: 'integer', format: 'int32', enum: [1, 2] } } },
           }),
         ).toBe('Pet { code?: PetCode }');
+      });
+
+      it('reads unions that share their variants once each, wherever the field names them', async () => {
+        // `U<i>: anyOf [U<i+1>, U<i+2>]`, forty levels, the last two of
+        // `leaves`: one component a level, and as many paths through them
+        // as the Fibonacci numbers count. Read path by path, none of these
+        // would end.
+        const levels = 40;
+        const unions = (leaves: [unknown, unknown], prefix = 'U'): Record<string, unknown> => {
+          const schemas: Record<string, unknown> = {};
+          for (let level = 0; level < levels; level++) {
+            schemas[`${prefix}${level}`] =
+              level >= levels - 2
+                ? { anyOf: leaves }
+                : { anyOf: [R(`${prefix}${level + 1}`), R(`${prefix}${level + 2}`)] };
+          }
+          return schemas;
+        };
+        const text = { type: 'string' };
+        const strings: [unknown, unknown] = [
+          { type: 'string', maxLength: 5 },
+          { type: 'string', maxLength: 6 },
+        ];
+        const on = async (theirs: unknown, own: unknown, components: Record<string, unknown>) =>
+          pet({
+            ...components,
+            Animal: { type: 'object', properties: { value: theirs, other: text } },
+            Pet: { allOf: [R('Animal')], properties: { value: own } },
+          });
+        // Greptile's document: the unions type the model's field, over a
+        // base's string. Each variant is a string; the merge of them an
+        // emitter may write from `fields` is none, so the base goes.
+        expect(await on(text, R('U0'), unions(strings))).toBe('Pet { value?: U0, other?: string }');
+        // The unions as the base's type, under a string of the model's own.
+        expect(await on(R('U0'), { type: 'string', maxLength: 4 }, unions(strings))).toBe(
+          'Pet { value?: string, other?: string }',
+        );
+        // Shared unions on both sides: every string of the one is one of the other's.
+        const both = { ...unions(strings), ...unions([text, { type: 'integer' }], 'W') };
+        expect(await on(R('W0'), R('U0'), both)).toBe('Pet : Animal { value?: U0, other?: string <- Animal }');
+        expect(await on(R('U0'), R('W0'), both)).toBe('Pet { value?: W0, other?: string }');
+        // Under a map, and among the variants of an inline union.
+        expect(
+          await on(
+            { type: 'object', additionalProperties: R('W0') },
+            { type: 'object', additionalProperties: R('U0') },
+            both,
+          ),
+        ).toBe('Pet : Animal { value?: { [key]: U0 }, other?: string <- Animal }');
+        expect(
+          await on({ oneOf: [R('W0'), { type: 'boolean' }] }, { oneOf: [R('U0'), R('U1'), { type: 'boolean' }] }, both),
+        ).toBe('Pet : Animal { value?: U0 | U1 | boolean, other?: string <- Animal }');
+        // Unions of models, under a union of the models they are built on:
+        // every leaf is a pair of models, each settled once.
+        const Named = { type: 'object', properties: { name: text } };
+        const models = {
+          Named,
+          Cat: { allOf: [R('Named')], properties: { meow: text } },
+          Dog: { allOf: [R('Named')], properties: { bark: text } },
+          ...unions([R('Cat'), R('Dog')]),
+          ...unions([R('Named'), text], 'W'),
+        };
+        expect(await on(R('W0'), R('U0'), models)).toBe('Pet : Animal { value?: U0, other?: string <- Animal }');
+        // A model whose field the unions type, compared as a nested model.
+        const nested = await parsed({
+          ...both,
+          Inner: { type: 'object', properties: { value: R('W0') } },
+          Mine: { type: 'object', properties: { value: R('U0') } },
+          Holder: { type: 'object', properties: { inner: { oneOf: [R('Inner'), { type: 'integer' }] } } },
+          Pet: { allOf: [R('Holder')], properties: { inner: R('Mine') } },
+        });
+        expect(print(modelNamed(nested, 'Pet'))).toBe('Pet : Holder { inner?: Mine }');
       });
 
       it('an enum fits a union when each of its values fits a variant', async () => {
@@ -1165,6 +1255,82 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       expect(over(owner({ minProperties: 1 }), owner(), more)).toEqual(kept);
     });
 
+    it('settles every comparison with a named union once: shared, under maps, nullable, recursive, and as a base', () => {
+      const integer: TypeRef = { kind: 'primitive', type: 'integer' };
+      const named = (name: string): ModelRef => {
+        const ref = model(name);
+        markComponentModelRef(ref);
+        return ref;
+      };
+      const union = (name: string, variants: TypeRef[]): Model => ({
+        name,
+        fields: [],
+        variants,
+        compositionKind: 'anyOf',
+      });
+      const maybe = (inner: TypeRef): TypeRef => ({ kind: 'nullable', inner });
+      const map = (valueType: TypeRef): TypeRef => ({ kind: 'map', valueType });
+      const levels = 60;
+      /** `<prefix><i>: anyOf [wrap(<prefix><i+1>), wrap(<prefix><i+2>)]`, the last two of `leaves`. */
+      const shared = (prefix: string, leaves: TypeRef[], wrap: (ref: TypeRef) => TypeRef = (ref) => ref): Model[] =>
+        Array.from({ length: levels }, (_, level) =>
+          union(
+            `${prefix}${level}`,
+            level >= levels - 2 ? leaves : [wrap(named(`${prefix}${level + 1}`)), wrap(named(`${prefix}${level + 2}`))],
+          ),
+        );
+      const cat: Model = { name: 'Cat', fields: [field('name', { required: true }), field('meow')] };
+      const dog: Model = { name: 'Dog', fields: [field('name', { required: true }), field('bark')] };
+      const plain: Model = { name: 'Named', fields: [field('name')] };
+      const wide = shared('W', [string, integer, named('Named')]);
+      const all = (...unions: Model[][]) => [cat, dog, plain, ...wide, ...unions.flat()];
+      // Sixty unions, each the union of the next two: as many paths as the
+      // sixtieth Fibonacci number, each union read once.
+      expect(over({ type: named('U0') }, { type: named('W0') }, all(shared('U', [string])))).toEqual(kept);
+      expect(
+        over({ type: named('U0') }, { type: named('W0') }, all(shared('U', [named('Cat'), named('Dog')]))),
+      ).toEqual(kept);
+      const boolean: TypeRef = { kind: 'primitive', type: 'boolean' };
+      expect(over({ type: named('U0') }, { type: named('W0') }, all(shared('U', [string, boolean])))).toEqual(dropped);
+      // The same under nullable wrappers, which add `null` to what the union admits.
+      const nullables = all(shared('U', [string], maybe));
+      expect(over({ type: named('U0') }, { type: named('W0') }, nullables)).toEqual(dropped);
+      expect(over({ type: named('U0') }, { type: maybe(named('W0')) }, nullables)).toEqual(kept);
+      expect(
+        over({ type: maybe(named('U0')) }, { type: maybe(named('W0')) }, all(shared('U', [string, integer]))),
+      ).toEqual(kept);
+      // Under maps: `M<i>: anyOf [map<M<i+1>>, map<M<i+2>>]` against the
+      // same shape on the base's side, which reaches every pair of levels.
+      const maps = (prefix: string, leaf: TypeRef) => shared(prefix, [leaf, map(leaf)], map);
+      expect(over({ type: named('M0') }, { type: named('N0') }, all(maps('M', string), maps('N', string)))).toEqual(
+        kept,
+      );
+      expect(over({ type: named('M0') }, { type: named('N0') }, all(maps('M', integer), maps('N', string)))).toEqual(
+        dropped,
+      );
+      // Unions that reach themselves through a map of themselves are
+      // settled together, as models that reach each other are.
+      const json = (name: string, leaf: TypeRef) => union(name, [leaf, map(named(name))]);
+      const recursive = [json('Json', string), json('Wider', string), json('Other', integer)];
+      expect(over({ type: named('Json') }, { type: named('Wider') }, recursive)).toEqual(kept);
+      expect(over({ type: named('Json') }, { type: named('Other') }, recursive)).toEqual(dropped);
+      // A map is one of `Wider`'s variants, and no model: read as the merge of its variants, `Wider` is one.
+      expect(over({ type: map(string) }, { type: named('Wider') }, recursive)).toEqual(dropped);
+      // A union that names itself with nothing between admits what its other variants do, and no more.
+      const loops = [union('Loop', [named('Loop'), maybe(named('Loop')), string]), union('Strings', [string, integer])];
+      expect(over({ type: named('Loop') }, { type: maybe(named('Strings')) }, loops)).toEqual(kept);
+      expect(over({ type: named('Loop') }, { type: named('Strings') }, loops)).toEqual(dropped);
+      expect(over({ type: integer }, { type: named('Loop') }, loops)).toEqual(dropped);
+      // The shared unions as a base: its variants' fields are read once
+      // each, and one of them has to agree with the model.
+      const based = (fields: Field[]): Model => ({ name: 'Pet', fields, bases: [model('U0')] });
+      const agreeing = based([field('name', { required: true }), field('extra')]);
+      const contradicting = based([field('name', { type: integer }), field('extra')]);
+      settleBases([cat, dog, ...shared('U', [named('Cat'), named('Dog')]), agreeing, contradicting]);
+      expect(agreeing.bases?.map(refName)).toEqual(['U0']);
+      expect(contradicting.bases).toBeUndefined();
+    });
+
     it('reads a union or an enum of nothing as fitting nothing, and two chains of four thousand models without recursing', () => {
       const nothing: TypeRef = { kind: 'union', variants: [] };
       const noValues: TypeRef = { kind: 'enum', name: 'PetValue', values: [] };
@@ -1299,7 +1465,7 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
       }
     });
 
-    it('reads a named union both ways an emitter writes it, ends on a pair of models that reach each other, and reads a dispatcher as itself alone', () => {
+    it('reads a named union each way an emitter writes it, ends on a pair of models that reach each other, and reads a dispatcher as itself alone', () => {
       const integer: TypeRef = { kind: 'primitive', type: 'integer' };
       const named = (name: string): ModelRef => {
         const ref = model(name);
