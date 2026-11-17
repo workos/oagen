@@ -4003,7 +4003,7 @@ export function warnOnUnreadUnion(
   const context =
     contextName === undefined ? '' : ` (context: ${parentModelName ? `${parentModelName}.` : ''}${contextName})`;
   console.warn(
-    `[oagen] Warning: \`anyOf\` beside \`oneOf\` is not read: the two compose no object, so the schema is typed by its \`oneOf\` alone${context}`,
+    `[oagen] Warning: \`anyOf\` beside \`oneOf\` is not read: the two unions cannot both type the schema, which is typed by its \`oneOf\` alone${context}`,
   );
 }
 

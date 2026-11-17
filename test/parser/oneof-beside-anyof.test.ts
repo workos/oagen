@@ -182,6 +182,9 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
     variants: undefined,
   };
   const four = ['name?: string', 'toy?: string', 'ownerId?: string', 'shelterId?: string'];
+  /** The one warning for a typing `anyOf` that is not read beside a typing `oneOf`, under the site's context. */
+  const unread = (context: string) =>
+    `[oagen] Warning: \`anyOf\` beside \`oneOf\` is not read: the two unions cannot both type the schema, which is typed by its \`oneOf\` alone (context: ${context})`;
 
   /** Two documents give one IR, print the same warnings, and `diffSpecs` reports nothing between them. */
   const expectSameReading = async (left: unknown, right: unknown, label?: string) => {
@@ -869,8 +872,6 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
   });
 
   describe('two unions that compose no object', () => {
-    const unread = (context: string) =>
-      `[oagen] Warning: \`anyOf\` beside \`oneOf\` is not read: the two compose no object, so the schema is typed by its \`oneOf\` alone (context: ${context})`;
     const prims = { oneOf: [str, { type: 'integer' }], anyOf: [{ type: 'boolean' }, { type: 'number' }] };
 
     it('two unions of primitives stay the union of the oneOf at every site, and the anyOf is reported once per schema', async () => {
@@ -939,6 +940,979 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
       const { spec, warnings } = await read(doc({ Pick: { properties: { id: str }, ...prims } }));
       expect(fieldsOf(model(spec, 'Pick'))).toEqual(['id?: string']);
       expect(warnings).toEqual([]);
+    });
+  });
+
+  describe('the matrix', () => {
+    /** One pair of unions, with what is written beside them, and how the pair is read. */
+    interface Shape {
+      oneOf: unknown[];
+      anyOf: unknown[];
+      /** Keywords written beside the two. */
+      extra?: Doc;
+      /** Components the variants name beside the suite's own. */
+      schemas?: Record<string, Doc>;
+      /** Whether the two compose (`besideUnionsCompose`): read as the `allOf` of the two. */
+      composes: boolean;
+      /** The contexts the `anyOf` is reported under; none unless two typing unions do not compose. */
+      unread?: string[];
+    }
+    const nullVariant = openapi === '3.0.3' ? { enum: [null] } : { type: 'null' };
+    const int = { type: 'integer' };
+    const prims = [str, int];
+    const objects = (...names: string[]) => names.map((name) => object({ [name]: str }));
+    const cat = object({ kind: pinned('cat'), meow: str }, ['kind']);
+    const dog = object({ kind: pinned('dog'), bark: str }, ['kind']);
+    const mapping = { cat: '#/components/schemas/Cat', dog: '#/components/schemas/Dog' };
+    const titled = (title: string, name: string) => ({ title, ...object({ [name]: str }) });
+    const both = ['Pick', 'Holder.pick'];
+    const nested = { Nest: object({ meta: object({ x: str }) }), Other: object({ info: object({ y: str }) }) };
+    const metas = {
+      CursorMeta: object({ has_more: { type: 'boolean' }, next_after: str }),
+      PageMeta: object({ has_more: { type: 'boolean' }, next_page: { type: 'integer' } }),
+    };
+    const rows: Array<[string, Shape]> = [
+      // The two compose: one model of both unions' properties, or a dispatcher.
+      ['two unions of `$ref`s', { oneOf, anyOf, composes: true }],
+      ['two unions of inline objects', { oneOf: objects('a', 'b'), anyOf: objects('c', 'd'), composes: true }],
+      ['`$ref`s beside inline objects', { oneOf, anyOf: objects('c', 'd'), composes: true }],
+      ['the same union twice', { oneOf, anyOf: oneOf, composes: true }],
+      ['`$ref`s beside primitives', { oneOf, anyOf: prims, composes: true }],
+      ['primitives beside `$ref`s', { oneOf: prims, anyOf, composes: true }],
+      ['one `$ref` beside two', { oneOf: [ref('Pet')], anyOf, composes: true }],
+      [
+        '`properties` beside the two',
+        { oneOf, anyOf, extra: { properties: { id: str }, required: ['id'] }, composes: true },
+      ],
+      [
+        '`properties` beside `$ref`s and inline objects',
+        { oneOf, anyOf: objects('c', 'd'), extra: { properties: { id: str }, required: ['id'] }, composes: true },
+      ],
+      ['an empty `properties` beside the two', { oneOf, anyOf, extra: { properties: {} }, composes: true }],
+      ['`type: object` beside the two', { oneOf, anyOf, extra: { type: 'object' }, composes: true }],
+      [
+        '`additionalProperties: false` beside the two',
+        { oneOf, anyOf, extra: { additionalProperties: false }, composes: true },
+      ],
+      [
+        'a `required` list beside the two',
+        {
+          oneOf: [object({ a: str }, ['a']), object({ b: str }, ['b'])],
+          anyOf: [object({ c: str }, ['c']), object({ d: str })],
+          extra: { required: ['a', 'd'] },
+          composes: true,
+        },
+      ],
+      [
+        'limits, flags, links and `x-*` keys beside the two',
+        {
+          oneOf,
+          anyOf,
+          extra: {
+            deprecated: true,
+            minProperties: 1,
+            'x-internal': true,
+            externalDocs: { url: 'https://example.com/pick' },
+          },
+          composes: true,
+        },
+      ],
+      [
+        'a property several variants declare',
+        {
+          oneOf: [object({ id: str, a: str }), object({ id: int, b: str })],
+          anyOf: [object({ id: str, c: str }), object({ a: { type: 'boolean' } })],
+          composes: true,
+        },
+      ],
+      [
+        '`$ref`s to components with nested objects',
+        { oneOf: [ref('Nest'), ref('Toy')], anyOf: [ref('Other'), ref('Shelter')], schemas: nested, composes: true },
+      ],
+      [
+        'inline variants with nested objects, arrays and enums',
+        {
+          oneOf: [object({ meta: object({ x: str }) }), object({ b: { type: 'string', enum: ['p', 'q'] } })],
+          anyOf: [object({ info: { type: 'array', items: object({ y: str }) } }), object({ d: str })],
+          composes: true,
+        },
+      ],
+      [
+        'titled inline variants',
+        {
+          oneOf: [titled('Alpha', 'a'), titled('Beta', 'b')],
+          anyOf: [titled('Gamma', 'c'), titled('Alpha', 'd')],
+          composes: true,
+        },
+      ],
+      [
+        'a `discriminator` beside the two, the oneOf pinning its property',
+        { oneOf: [ref('Cat'), ref('Dog')], anyOf, extra: { discriminator: { propertyName: 'kind' } }, composes: true },
+      ],
+      [
+        'a mapped `discriminator` beside the two',
+        {
+          oneOf: [ref('Cat'), ref('Dog')],
+          anyOf,
+          extra: { discriminator: { propertyName: 'kind', mapping } },
+          composes: true,
+        },
+      ],
+      ['oneOf variants that pin one property, no keyword', { oneOf: [ref('Cat'), ref('Dog')], anyOf, composes: true }],
+      ['inline oneOf variants that pin one property', { oneOf: [cat, dog], anyOf, composes: true }],
+      [
+        'a `discriminator` beside the two, the anyOf pinning its property',
+        {
+          oneOf: anyOf,
+          anyOf: [ref('Cat'), ref('Dog')],
+          extra: { discriminator: { propertyName: 'kind' } },
+          composes: true,
+        },
+      ],
+      [
+        'one tagged object beside `$ref`s',
+        { oneOf: [object({ object: pinned('pick'), a: str }, ['object'])], anyOf, composes: true },
+      ],
+      ['a `null` variant in the oneOf', { oneOf: [...oneOf, nullVariant], anyOf, composes: true }],
+      ['a `null` variant in the anyOf', { oneOf, anyOf: [...anyOf, nullVariant], composes: true }],
+      ['a `null` variant in both', { oneOf: [...oneOf, nullVariant], anyOf: [...anyOf, nullVariant], composes: true }],
+      ['OAS 3.0 `nullable: true` beside the two', { oneOf, anyOf, extra: { nullable: true }, composes: true }],
+      ['a nullable wrapper beside `$ref`s', { oneOf: [ref('Pet'), nullVariant], anyOf, composes: true }],
+      ['`$ref`s beside a nullable wrapper', { oneOf, anyOf: [ref('Owner'), nullVariant], composes: true }],
+      [
+        'a nullable wrapper around a nested object beside `$ref`s',
+        { oneOf: [ref('Nest'), nullVariant], anyOf, schemas: nested, composes: true },
+      ],
+      [
+        'stop fields on the anyOf’s variants',
+        { oneOf: objects('a', 'b'), anyOf: [ref('CursorMeta'), ref('PageMeta')], schemas: metas, composes: true },
+      ],
+      // One union types the schema: the single union (#613).
+      ['an anyOf of bare limits', { oneOf, anyOf: [{ required: ['name'] }, { required: ['toy'] }], composes: false }],
+      ['an empty anyOf', { oneOf, anyOf: [], composes: false }],
+      [
+        'two unions of bare limits beside `properties`',
+        {
+          oneOf: [{ required: ['a'] }, { required: ['b'] }],
+          anyOf: [{ maxProperties: 1 }, { minProperties: 1 }],
+          extra: { properties: { a: str, b: str } },
+          composes: false,
+        },
+      ],
+      // Two typing unions the `allOf` of which types nothing: the oneOf's reading, the anyOf reported.
+      [
+        'two unions of primitives',
+        { oneOf: prims, anyOf: [{ type: 'boolean' }, { type: 'number' }], composes: false, unread: both },
+      ],
+      ['the same union of primitives twice', { oneOf: prims, anyOf: prims, composes: false, unread: both }],
+      [
+        'two unions of strings beside `type: string`',
+        {
+          oneOf: [
+            { type: 'string', maxLength: 3 },
+            { type: 'string', minLength: 9 },
+          ],
+          anyOf: [
+            { type: 'string', pattern: '^a' },
+            { type: 'string', pattern: '^b' },
+          ],
+          extra: { type: 'string' },
+          composes: false,
+          unread: both,
+        },
+      ],
+      [
+        'two unions of arrays',
+        {
+          oneOf: [{ type: 'array', items: str }],
+          anyOf: [{ type: 'array', items: int }],
+          composes: false,
+          unread: both,
+        },
+      ],
+      ['one `$ref` each', { oneOf: [ref('Pet')], anyOf: [ref('Owner')], composes: false, unread: both }],
+      [
+        'two nullable wrappers',
+        { oneOf: [ref('Pet'), nullVariant], anyOf: [ref('Owner'), nullVariant], composes: false, unread: both },
+      ],
+      [
+        'one `$ref` each beside OAS 3.0 `nullable: true`',
+        { oneOf: [ref('Pet')], anyOf: [ref('Owner')], extra: { nullable: true }, composes: false, unread: both },
+      ],
+      [
+        'two unions of string consts',
+        { oneOf: [pinned('a'), pinned('b')], anyOf: [pinned('a'), pinned('c')], composes: false, unread: both },
+      ],
+      ['string consts beside `$ref`s', { oneOf: [pinned('a'), pinned('b')], anyOf, composes: false, unread: both }],
+      // `properties` of its own compose the component, both unions members; inline the oneOf types the schema.
+      [
+        'two unions of primitives beside `properties`',
+        {
+          oneOf: prims,
+          anyOf: [{ type: 'boolean' }, { type: 'number' }],
+          extra: { properties: { id: str } },
+          composes: false,
+          unread: ['Holder.pick'],
+        },
+      ],
+    ];
+    /** The four sites: the component and a `$ref` to it, and the same schema on a field, in one spelling. */
+    const at = (s: Doc, shape: Shape) =>
+      doc({ ...shape.schemas, Pick: s, Named: object({ pick: ref('Pick') }), Holder: object({ pick: s }) });
+    const plainOf = ({ oneOf: first, anyOf: second, extra = {} }: Shape): Doc => ({
+      description: 'A pick.',
+      ...extra,
+      oneOf: first,
+      anyOf: second,
+    });
+    const besideOf = ({ oneOf: first, anyOf: second, extra = {} }: Shape): Doc => ({
+      allOf: [{ description: 'A pick.' }],
+      ...extra,
+      oneOf: first,
+      anyOf: second,
+    });
+    const describeModel = (m: Model): string =>
+      [
+        `${m.name} { ${fieldsOf(m).join(', ')} }`,
+        m.variants ? `${m.compositionKind} ${show({ kind: 'union', variants: m.variants })}` : '',
+        m.discriminator ? `dispatches on ${m.discriminator.property}: ${JSON.stringify(m.discriminator.mapping)}` : '',
+        m.bases ? `bases [${basesOf(m)!.join(', ')}]` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+    /** What a document's types are, whatever documents them. */
+    const typesOf = (spec: ApiSpec) => ({
+      models: spec.models.map(describeModel),
+      enums: spec.enums.map((e) => `${e.name} [${e.values.map((v) => v.value).join(', ')}]`),
+    });
+
+    it.each(rows)('%s: the component and the schema inline read one way in both spellings', async (_name, shape) => {
+      const plain = plainOf(shape);
+      const beside = besideOf(shape);
+      expect(besideUnionsCompose(plain as SchemaObject)).toBe(shape.composes);
+      expect(besideUnionsCompose(beside as SchemaObject)).toBe(shape.composes);
+      const a = await read(at(plain, shape));
+      const b = await read(at(beside, shape));
+      expect(typesOf(a.spec)).toEqual(typesOf(b.spec));
+      expect(diffSpecs(a.spec, b.spec).changes).toEqual([]);
+      expect(diffSpecs(b.spec, a.spec).changes).toEqual([]);
+      // The union that is not read is named once per schema, in either spelling; a composition drops nothing.
+      const reported = (shape.unread ?? []).map(unread);
+      expect(a.warnings).toEqual(reported);
+      expect(b.warnings).toEqual(reported);
+      // Where the two compose the whole IR is one, documentation included.
+      if (shape.composes) expect(a.spec).toEqual(b.spec);
+    });
+
+    it('reads every shape as written here: the component, a `$ref` to it, the field, and what they mint', async () => {
+      const readings: string[][] = [];
+      for (const [name, shape] of rows) {
+        const { spec, warnings } = await read(at(plainOf(shape), shape));
+        const given = new Set([...Object.keys(components), ...Object.keys(shape.schemas ?? {}), 'Named', 'Holder']);
+        const pick = spec.models.find((m) => m.name === 'Pick');
+        const pickEnum = spec.enums.find((e) => e.name === 'Pick');
+        const listed = (e: { name: string; values: Array<{ value: unknown }> }) =>
+          `enum ${e.name} [${e.values.map((v) => v.value).join(', ')}]`;
+        readings.push([
+          name,
+          `component: ${pick ? describeModel(pick) : pickEnum ? listed(pickEnum) : 'no model'}`,
+          `$ref: ${show(model(spec, 'Named').fields[0]!.type)}`,
+          `field: ${show(model(spec, 'Holder').fields[0]!.type)}`,
+          ...spec.models.filter((m) => m !== pick && !given.has(m.name)).map((m) => `model ${describeModel(m)}`),
+          ...spec.enums.filter((e) => e !== pickEnum).map(listed),
+          ...(warnings.length > 0 ? [`warnings: ${warnings.length}`] : []),
+        ]);
+      }
+      expect(readings).toMatchInlineSnapshot(`
+        [
+          [
+            "two unions of \`$ref\`s",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "two unions of inline objects",
+            "component: Pick { a?: string, b?: string, c?: string, d?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { a?: string, b?: string, c?: string, d?: string }",
+          ],
+          [
+            "\`$ref\`s beside inline objects",
+            "component: Pick { name?: string, toy?: string, c?: string, d?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, c?: string, d?: string }",
+          ],
+          [
+            "the same union twice",
+            "component: Pick { name?: string, toy?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string }",
+          ],
+          [
+            "\`$ref\`s beside primitives",
+            "component: Pick { name?: string, toy?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string }",
+          ],
+          [
+            "primitives beside \`$ref\`s",
+            "component: Pick { ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "one \`$ref\` beside two",
+            "component: Pick { name?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "\`properties\` beside the two",
+            "component: Pick { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { id: string, name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "\`properties\` beside \`$ref\`s and inline objects",
+            "component: Pick { id: string, name?: string, toy?: string, c?: string, d?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { id: string, name?: string, toy?: string, c?: string, d?: string }",
+          ],
+          [
+            "an empty \`properties\` beside the two",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "\`type: object\` beside the two",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "\`additionalProperties: false\` beside the two",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a \`required\` list beside the two",
+            "component: Pick { a: string, b?: string, c?: string, d: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { a: string, b?: string, c?: string, d: string }",
+          ],
+          [
+            "limits, flags, links and \`x-*\` keys beside the two",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a property several variants declare",
+            "component: Pick { id?: (string | integer), a?: (string | boolean), b?: string, c?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { id?: (string | integer), a?: (string | boolean), b?: string, c?: string }",
+          ],
+          [
+            "\`$ref\`s to components with nested objects",
+            "component: Pick { meta?: PickMeta, toy?: string, info?: PickInfo, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model PickMeta { x?: string }",
+            "model PickInfo { y?: string }",
+            "model OtherInfo { y?: string }",
+            "model NestMeta { x?: string }",
+            "model HolderPick { meta?: HolderPickMeta, toy?: string, info?: HolderPickInfo, shelterId?: string }",
+            "model HolderPickMeta { x?: string }",
+            "model HolderPickInfo { y?: string }",
+          ],
+          [
+            "inline variants with nested objects, arrays and enums",
+            "component: Pick { meta?: PickMeta, b?: PickB, info?: PickInfo[], d?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model PickMeta { x?: string }",
+            "model PickInfo { y?: string }",
+            "model HolderPick { meta?: HolderPickMeta, b?: HolderPickB, info?: HolderPickInfo[], d?: string }",
+            "model HolderPickMeta { x?: string }",
+            "model HolderPickInfo { y?: string }",
+            "enum PickB [p, q]",
+            "enum HolderPickB [p, q]",
+          ],
+          [
+            "titled inline variants",
+            "component: Pick { a?: string, b?: string, c?: string, d?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { a?: string, b?: string, c?: string, d?: string }",
+          ],
+          [
+            "a \`discriminator\` beside the two, the oneOf pinning its property",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
+            "enum HolderPickKind [cat, dog]",
+          ],
+          [
+            "a mapped \`discriminator\` beside the two",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
+            "enum HolderPickKind [cat, dog]",
+          ],
+          [
+            "oneOf variants that pin one property, no keyword",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
+            "enum HolderPickKind [cat, dog]",
+          ],
+          [
+            "inline oneOf variants that pin one property",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"PickCat","dog":"PickDog"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model PickCat { ownerId?: string, shelterId?: string, kind: "cat", meow?: string }",
+            "model PickDog { ownerId?: string, shelterId?: string, kind: "dog", bark?: string }",
+            "model HolderPick { kind?: HolderPickKind, meow?: string, bark?: string, ownerId?: string, shelterId?: string }",
+            "enum HolderPickKind [cat, dog]",
+          ],
+          [
+            "a \`discriminator\` beside the two, the anyOf pinning its property",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on kind: {"cat":"Cat","dog":"Dog"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { ownerId?: string, shelterId?: string, kind?: HolderPickKind, meow?: string, bark?: string }",
+            "enum HolderPickKind [cat, dog]",
+          ],
+          [
+            "one tagged object beside \`$ref\`s",
+            "component: Pick { ownerId?: string, shelterId?: string } dispatches on object: {"pick":"PickPick"}",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model PickPick { ownerId?: string, shelterId?: string, object: "pick", a?: string }",
+            "model HolderPick { object?: "pick", a?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a \`null\` variant in the oneOf",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a \`null\` variant in the anyOf",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a \`null\` variant in both",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: nullable<Pick>",
+            "field: nullable<HolderPick>",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "OAS 3.0 \`nullable: true\` beside the two",
+            "component: Pick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+            "$ref: nullable<Pick>",
+            "field: nullable<HolderPick>",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "a nullable wrapper beside \`$ref\`s",
+            "component: Pick { name?: string, ownerId?: string, shelterId?: string } bases [Pet]",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "\`$ref\`s beside a nullable wrapper",
+            "component: Pick { name?: string, toy?: string, ownerId?: string } bases [Owner]",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { name?: string, toy?: string, ownerId?: string }",
+          ],
+          [
+            "a nullable wrapper around a nested object beside \`$ref\`s",
+            "component: Pick { meta?: PickMeta, ownerId?: string, shelterId?: string } bases [Nest]",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model PickMeta { x?: string }",
+            "model OtherInfo { y?: string }",
+            "model NestMeta { x?: string }",
+            "model HolderPick { meta?: NestMeta, ownerId?: string, shelterId?: string }",
+          ],
+          [
+            "stop fields on the anyOf’s variants",
+            "component: Pick { a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { a?: string, b?: string, has_more?: boolean, next_after?: string, next_page?: integer }",
+          ],
+          [
+            "an anyOf of bare limits",
+            "component: Pick {  } oneOf (Pet | Toy)",
+            "$ref: Pick",
+            "field: (Pet | Toy)",
+          ],
+          [
+            "an empty anyOf",
+            "component: Pick {  } oneOf (Pet | Toy)",
+            "$ref: Pick",
+            "field: (Pet | Toy)",
+          ],
+          [
+            "two unions of bare limits beside \`properties\`",
+            "component: Pick { a?: string, b?: string }",
+            "$ref: Pick",
+            "field: HolderPick",
+            "model HolderPick { a?: string, b?: string }",
+          ],
+          [
+            "two unions of primitives",
+            "component: Pick {  } oneOf (string | integer)",
+            "$ref: Pick",
+            "field: (string | integer)",
+            "warnings: 2",
+          ],
+          [
+            "the same union of primitives twice",
+            "component: Pick {  } oneOf (string | integer)",
+            "$ref: Pick",
+            "field: (string | integer)",
+            "warnings: 2",
+          ],
+          [
+            "two unions of strings beside \`type: string\`",
+            "component: Pick {  } oneOf (string | string)",
+            "$ref: Pick",
+            "field: (string | string)",
+            "warnings: 2",
+          ],
+          [
+            "two unions of arrays",
+            "component: Pick {  } oneOf (string[])",
+            "$ref: Pick",
+            "field: (string[])",
+            "warnings: 2",
+          ],
+          [
+            "one \`$ref\` each",
+            "component: Pick {  } oneOf (Pet)",
+            "$ref: Pick",
+            "field: (Pet)",
+            "warnings: 2",
+          ],
+          [
+            "two nullable wrappers",
+            "component: Pick {  } oneOf (Pet)",
+            "$ref: nullable<Pick>",
+            "field: nullable<Pet>",
+            "warnings: 2",
+          ],
+          [
+            "one \`$ref\` each beside OAS 3.0 \`nullable: true\`",
+            "component: Pick {  } oneOf (Pet)",
+            "$ref: nullable<Pick>",
+            "field: nullable<Pet>",
+            "warnings: 2",
+          ],
+          [
+            "two unions of string consts",
+            "component: enum Pick [a, b]",
+            "$ref: Pick",
+            "field: HolderPick",
+            "enum HolderPick [a, b]",
+            "warnings: 2",
+          ],
+          [
+            "string consts beside \`$ref\`s",
+            "component: enum Pick [a, b]",
+            "$ref: Pick",
+            "field: HolderPick",
+            "enum HolderPick [a, b]",
+            "warnings: 2",
+          ],
+          [
+            "two unions of primitives beside \`properties\`",
+            "component: Pick { id?: string }",
+            "$ref: Pick",
+            "field: (string | integer)",
+            "warnings: 1",
+          ],
+        ]
+      `);
+    });
+
+    /** The types and enums a document adds to the fixtures, exactly as the IR holds them. */
+    const exact = (spec: ApiSpec) =>
+      JSON.parse(
+        JSON.stringify({
+          models: spec.models.filter((m) => !Object.hasOwn(components, m.name)),
+          enums: spec.enums,
+        }),
+      );
+
+    it('cell 1, neither union brings properties: the oneOf’s union at all four sites, the anyOf named in the warning', async () => {
+      const shape: Shape = { oneOf: prims, anyOf: [{ type: 'boolean' }, { type: 'number' }], composes: false };
+      const plain = await read(at(plainOf(shape), shape));
+      const beside = await read(at(besideOf(shape), shape));
+      // The component beside the annotating `allOf` was a model with no fields and no variants (#613 review).
+      expect(typesOf(beside.spec)).toEqual(typesOf(plain.spec));
+      expect(model(beside.spec, 'Pick')).toEqual(model(plain.spec, 'Pick'));
+      expect(beside.warnings).toEqual(plain.warnings);
+      expect(plain.warnings).toEqual([unread('Pick'), unread('Holder.pick')]);
+      expect(exact(plain.spec)).toMatchInlineSnapshot(`
+        {
+          "enums": [],
+          "models": [
+            {
+              "compositionKind": "oneOf",
+              "description": "A pick.",
+              "fields": [],
+              "name": "Pick",
+              "variants": [
+                {
+                  "kind": "primitive",
+                  "type": "string",
+                },
+                {
+                  "kind": "primitive",
+                  "type": "integer",
+                },
+              ],
+            },
+            {
+              "fields": [
+                {
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "kind": "model",
+                    "name": "Pick",
+                  },
+                },
+              ],
+              "name": "Named",
+            },
+            {
+              "fields": [
+                {
+                  "description": "A pick.",
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "compositionKind": "oneOf",
+                    "kind": "union",
+                    "variants": [
+                      {
+                        "kind": "primitive",
+                        "type": "string",
+                      },
+                      {
+                        "kind": "primitive",
+                        "type": "integer",
+                      },
+                    ],
+                  },
+                },
+              ],
+              "name": "Holder",
+            },
+          ],
+        }
+      `);
+    });
+
+    it('cell 2, a discriminator on the oneOf: the component dispatches, the field is one model of optional fields', async () => {
+      const shape: Shape = {
+        oneOf: [ref('Cat'), ref('Dog')],
+        anyOf,
+        extra: { discriminator: { propertyName: 'kind' } },
+        composes: true,
+      };
+      const plain = await read(at(plainOf(shape), shape));
+      const beside = await read(at(besideOf(shape), shape));
+      expect(beside.spec).toEqual(plain.spec);
+      expect(plain.warnings).toEqual([]);
+      expect(exact(plain.spec)).toMatchInlineSnapshot(`
+        {
+          "enums": [
+            {
+              "name": "HolderPickKind",
+              "values": [
+                {
+                  "name": "CAT",
+                  "value": "cat",
+                },
+                {
+                  "name": "DOG",
+                  "value": "dog",
+                },
+              ],
+            },
+          ],
+          "models": [
+            {
+              "description": "A pick.",
+              "discriminator": {
+                "mapping": {
+                  "cat": "Cat",
+                  "dog": "Dog",
+                },
+                "property": "kind",
+              },
+              "fields": [
+                {
+                  "name": "ownerId",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+                {
+                  "name": "shelterId",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+              ],
+              "name": "Pick",
+            },
+            {
+              "fields": [
+                {
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "kind": "model",
+                    "name": "Pick",
+                  },
+                },
+              ],
+              "name": "Named",
+            },
+            {
+              "fields": [
+                {
+                  "description": "A pick.",
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "kind": "model",
+                    "name": "HolderPick",
+                  },
+                },
+              ],
+              "name": "Holder",
+            },
+            {
+              "description": "A pick.",
+              "fields": [
+                {
+                  "name": "kind",
+                  "required": false,
+                  "type": {
+                    "kind": "enum",
+                    "name": "HolderPickKind",
+                    "values": [
+                      "cat",
+                      "dog",
+                    ],
+                  },
+                },
+                {
+                  "name": "meow",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+                {
+                  "name": "bark",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+                {
+                  "name": "ownerId",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+                {
+                  "name": "shelterId",
+                  "required": false,
+                  "type": {
+                    "kind": "primitive",
+                    "type": "string",
+                  },
+                },
+              ],
+              "name": "HolderPick",
+            },
+          ],
+        }
+      `);
+    });
+
+    it('cell 3, a oneOf of string consts beside an anyOf of objects: the enum, the anyOf named in the warning', async () => {
+      const shape: Shape = { oneOf: [pinned('a'), pinned('b')], anyOf, composes: false };
+      const plain = await read(at(plainOf(shape), shape));
+      const beside = await read(at(besideOf(shape), shape));
+      expect(typesOf(beside.spec)).toEqual(typesOf(plain.spec));
+      expect(beside.warnings).toEqual(plain.warnings);
+      expect(plain.warnings).toEqual([unread('Pick'), unread('Holder.pick')]);
+      expect(exact(plain.spec)).toMatchInlineSnapshot(`
+        {
+          "enums": [
+            {
+              "description": "A pick.",
+              "name": "Pick",
+              "values": [
+                {
+                  "name": "A",
+                  "value": "a",
+                },
+                {
+                  "name": "B",
+                  "value": "b",
+                },
+              ],
+            },
+            {
+              "description": "A pick.",
+              "name": "HolderPick",
+              "values": [
+                {
+                  "name": "A",
+                  "value": "a",
+                },
+                {
+                  "name": "B",
+                  "value": "b",
+                },
+              ],
+            },
+          ],
+          "models": [
+            {
+              "fields": [
+                {
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "kind": "enum",
+                    "name": "Pick",
+                  },
+                },
+              ],
+              "name": "Named",
+            },
+            {
+              "fields": [
+                {
+                  "description": "A pick.",
+                  "name": "pick",
+                  "required": false,
+                  "type": {
+                    "kind": "enum",
+                    "name": "HolderPick",
+                    "values": [
+                      "a",
+                      "b",
+                    ],
+                  },
+                },
+              ],
+              "name": "Holder",
+            },
+          ],
+        }
+      `);
+    });
+
+    it('names the unread anyOf once per schema, however often the schema is read', async () => {
+      const s = () => ({ oneOf: prims, anyOf: [{ type: 'boolean' }, { type: 'number' }] });
+      const { warnings } = await read(
+        doc(
+          {
+            // Read as the component, at three `$ref`s, as an array's items and as an `allOf` member.
+            Pick: s(),
+            Holder: object({ first: ref('Pick'), second: ref('Pick'), picks: { type: 'array', items: ref('Pick') } }),
+            Combo: { allOf: [ref('Base'), ref('Pick')] },
+          },
+          {
+            '/picks': {
+              post: {
+                operationId: 'createPick',
+                parameters: [{ name: 'pick', in: 'query', schema: s() }],
+                requestBody: { content: { ...json(s()), 'application/x-www-form-urlencoded': { schema: s() } } },
+                responses: {
+                  '200': { description: 'OK', content: { ...json(s()), 'application/hal+json': { schema: s() } } },
+                  '400': { description: 'Bad', content: json(s()) },
+                },
+                callbacks: {
+                  onPick: {
+                    '{$request.body#/url}': {
+                      post: { requestBody: { content: json(s()) }, responses: { '200': { description: 'OK' } } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          openapi === '3.0.3'
+            ? {}
+            : {
+                webhooks: {
+                  picked: {
+                    post: {
+                      operationId: 'onPicked',
+                      requestBody: { content: json(s()) },
+                      responses: { '200': { description: 'OK' } },
+                    },
+                  },
+                },
+              },
+        ),
+      );
+      const notRead = warnings.filter((message) => message.includes('is not read'));
+      // One per schema written in the document: the component, and each inline body, parameter and payload.
+      expect(notRead).toHaveLength(openapi === '3.0.3' ? 8 : 9);
+      expect(new Set(notRead).size).toBe(notRead.length);
+      expect(notRead).toContain(unread('Pick'));
     });
   });
 
