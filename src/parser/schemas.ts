@@ -509,6 +509,37 @@ function withWrapperLayerDefault(declaration: SchemaObject, wrapper: SchemaObjec
 }
 
 /**
+ * The one level a parameter or field reads the schema its bare `$ref`
+ * points at through, when that schema keeps what it declares on a node of
+ * its own — a model, a named union or an enum — or is the schema a JSON
+ * Pointer deeper into a component lands on: `target` as the node built
+ * from it documents itself. An enum component is read on the schema it
+ * declares its members on (`enumComponentDeclaration`). Any other is
+ * `target` with its wrapper layer folded in — its own `description`,
+ * `externalDocs`, `example`, `examples` and `x-*` keys, else the first
+ * `allOf` member's that declares no type and so only annotates it, and
+ * `deprecated` when it or any such member says so (`allOfWrapperLayer`,
+ * the layer `extractModel` and `extractAllOfModel` read a model's text,
+ * link and flag from) — and the layer's `default`, read the same way
+ * (`withWrapperLayerDefault`). A `target` with no such member is read as
+ * written. So `PetId: { allOf: [{ description: 'A pet id.', deprecated:
+ * true }], oneOf: [{ type: 'string' }, { type: 'integer' }] }` gives the
+ * parameter `{ schema: { $ref: PetId } }` the text and the flag `{
+ * description: 'A pet id.', deprecated: true, oneOf: [...] }` gives it, as
+ * both give the model `PetId` (#679: the parameter read the component's
+ * own keys alone, so the member's text, flag, link, default and examples
+ * never reached it and `oagen diff` between the two spellings reported
+ * `param-deprecated-changed`). A typing member's keys stay on that member
+ * and a `$ref` member's on its component, as they do for the model. An
+ * array or primitive component, or an alias of an enum component, keeps
+ * no node and is read through `componentReference` instead, whose entries
+ * list the same members level by level (`aliasEntryLevels`).
+ */
+export function referencedComponentLayer(target: SchemaObject): SchemaObject {
+  return enumComponentDeclaration(target) ?? withWrapperLayerDefault(allOfWrapperLayer(target), target);
+}
+
+/**
  * `{ description }` holding the first of `candidates` that is a string with
  * non-whitespace content, `{}` when none is — spread into an `EnumMember`.
  */
@@ -3651,7 +3682,9 @@ export function buildFieldFromSchema(
   // `example` and `examples` a field takes from any component a bare `$ref`
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
-  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included,
+  // and any other on its wrapper layer, an annotating member's examples
+  // included (`referencedComponentLayer`; #679).
   const { settings, constraints } = fieldReading(fieldSchema, componentSchemas);
   const externalDocs = readExternalDocs(settings.externalDocs);
   const extensions = extensionsOf(settings, SCHEMA_CONSUMED_EXTENSIONS);
@@ -3714,10 +3747,14 @@ function fieldReading(
   // `example` and `examples` a field takes from any component a bare `$ref`
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
-  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included,
+  // and any other on its wrapper layer (`referencedComponentLayer`; #679:
+  // `Pet: { type: 'object', properties, allOf: [{ example }] }` gave a
+  // field `{ $ref: Pet }` no example, while the same key beside the
+  // `allOf` was the field's).
   const reference = componentReference(fieldSchema, componentSchemas);
   const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
-  const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
+  const refTarget = reference ? reference.enumComponent : target && referencedComponentLayer(target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
