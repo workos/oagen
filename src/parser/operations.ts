@@ -5609,8 +5609,20 @@ interface ResponseTypingContext {
  * `SearchPetsError404ListNotesX` whether the `x` enum nested in
  * `searchPets`'s 404 body comes before or after it. Each site then
  * registers the enums it types as it is resolved, under the stem it settled
- * on. So the IR never declares a model and an enum under one name, and the
- * model is always the one that steps. Returns the models materialized and
+ * on. So no site named here puts a model and an enum under one name, and
+ * the model is always the one that steps. The IR still declares a model
+ * and an enum under one name where the document itself does: a model
+ * component and an enum component whose keys resolve to one name — `Size:
+ * { type: 'object', properties }` beside `Sizes: { type: 'string', enum }`,
+ * both `Size` (#668) — are both kept, a `Size` in `models` and a `Size` in
+ * `enums`, since each `$ref` is typed as the component its key names, and
+ * reported: `[oagen] Warning: Component schemas "Size" (a model) and
+ * "Sizes" (an enum) both resolve to "Size" — keeping both, each $ref typed
+ * as the component it names; a schemaNameTransform can give one a name of
+ * its own`. A `schemaNameTransform` that returns another name for one of
+ * the keys (its `originalName`) parts the two. A site named like both is
+ * settled against the model alone, whose entry the registry keeps
+ * (`reserveEnumNames`). Returns the models materialized and
  * one bundle per site, in the order of `deferred` (document order) whatever
  * the order the sites were named in, having set each target's `type`.
  */

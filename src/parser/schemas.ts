@@ -2084,9 +2084,21 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
 /**
  * Walk a model's type refs (its fields' types and, for a named union, its
  * variants) and extract inline enum refs as top-level enum definitions,
- * skipping one whose name is in `modelNames`: a model and an enum must never
- * share a name, and the collision-aware model pass
- * (`collectInlineEnumsFromModels`) renames and promotes that one later.
+ * skipping one whose name is in `modelNames`: an inline enum is never
+ * promoted under a model's name, and the collision-aware model pass
+ * (`collectInlineEnumsFromModels`) renames and promotes that one later —
+ * or shares a component enum of its name and members, which the document
+ * declared beside the model. There the IR does declare a model and an
+ * enum under one name: a model component and an
+ * enum component whose keys resolve to one name — `Size: { type: 'object',
+ * properties }` beside `Sizes: { type: 'string', enum }`, both `Size`
+ * (#668) — are both kept, a `Size` in `models` and a `Size` in `enums`,
+ * since each `$ref` is typed as the component its key names, and reported
+ * by `extractSchemas`: `[oagen] Warning: Component schemas "Size" (a
+ * model) and "Sizes" (an enum) both resolve to "Size" — keeping both, each
+ * $ref typed as the component it names; a schemaNameTransform can give one
+ * a name of its own`. A `schemaNameTransform` that returns another name
+ * for one of the keys (its `originalName`) parts the two.
  * This ensures type alias files are generated for inline enums.
  */
 function collectInlineEnums(model: Model, enums: Enum[], modelNames: ReadonlySet<string>): void {

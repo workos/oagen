@@ -38,7 +38,9 @@ export { modelFingerprint };
  * request body models, each header, body and parameter model materialized
  * so far — and every enum name, component or minted (`reserveEnumNames`),
  * since a model and an enum under one name reach an emitter as one public
- * symbol. A model's entry carries its shape fingerprint, so a model whose
+ * symbol (a name a model component and an enum component both hold, the
+ * document's own clash, keeps the model's entry; see `reserveEnumNames`).
+ * A model's entry carries its shape fingerprint, so a model whose
  * shape the owner shares can take the name (`ownerShares`), and — for
  * operation-owned models — which operation produced it, so a collision
  * inside one operation can be told apart from one across operations. An
@@ -111,7 +113,17 @@ export function registerInlineModels(registry: InlineModelRegistry, models: Mode
  * or one a component's field or a shared companion carries, which reads as
  * a clash with a component. A name a model or an earlier enum already owns
  * keeps its entry: the first owner keeps a name, and a model's is the
- * document's own clash, not one the registry can move.
+ * document's own clash, not one the registry can move — a model component
+ * and an enum component whose keys resolve to one name (`Size: { type:
+ * 'object', properties }` beside `Sizes: { type: 'string', enum }`, both
+ * `Size`; #668), which `extractSchemas` keeps both of and reports
+ * (`[oagen] Warning: Component schemas "Size" (a model) and "Sizes" (an
+ * enum) both resolve to "Size" — keeping both, each $ref typed as the
+ * component it names; a schemaNameTransform can give one a name of its
+ * own`), and which a `schemaNameTransform` returning another name for one
+ * of the keys (its `originalName`) parts. The model's entry stands, so an
+ * inline model of that name shares the component when the component admits
+ * its shape (`ownerShares`), as it does with no enum of the name.
  */
 export function reserveEnumNames(registry: InlineModelRegistry, names: Iterable<string>, operation?: string): void {
   for (const name of names) {

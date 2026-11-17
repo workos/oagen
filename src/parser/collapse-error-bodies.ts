@@ -113,7 +113,14 @@
  * materialized them, with every error-only model they reach or are reached
  * from, and says so in a warning that prints both shapes with their types;
  * the fold then runs again without them, since a freed name may now suit
- * another group. The groups are ordered by shape, never by operation: fewer
+ * another group. A name a model component and an enum component both hold
+ * — the document's own clash, two keys that resolve to one name, which
+ * `extractSchemas` keeps both of and reports (#668) — is the model
+ * component's to a shared body, which folds onto it or is left, and is told
+ * of it, exactly as with no enum of the name (the warning named the enum,
+ * `which enum "ErrorBodyWithCode" already holds`, where the body had been
+ * measured against the component), and the enum component's to a shared
+ * enum. The groups are ordered by shape, never by operation: fewer
  * named fields first, a shape whose name is its field names alone before
  * one a qualifier spelled (`qualified`), then the key, so the same shape
  * keeps a contested name whichever operation declared it, and adding
@@ -377,10 +384,19 @@ function fold(
   // A component holder prints its shape, as a shared-body holder does, so
   // the warning says what differs — a field flagged on one side alone
   // included (#629).
+  // A name a model component and an enum component both hold — the
+  // document's own clash: two keys that resolve to one name, which
+  // `extractSchemas` keeps both of and reports (#668) — is the model's to a
+  // shared body, which is measured against that model below, and the
+  // enum's to a shared enum: `holders` names the enum, as for any enum's
+  // name, and `modelHolders` the component a body is told it met.
+  const modelHolders = new Map<string, string>();
   for (const name of options.componentNames) {
     const component = byName.get(name);
     const shape = component === undefined ? '' : ` ${shapeOf(component)}`;
-    holders.set(name, `${component?.deprecated ? 'deprecated ' : ''}component schema "${name}"${shape}`);
+    const holder = `${component?.deprecated ? 'deprecated ' : ''}component schema "${name}"${shape}`;
+    holders.set(name, holder);
+    if (component !== undefined) modelHolders.set(name, holder);
   }
   for (const e of existingEnums) holders.set(e.name, `enum "${e.name}"`);
   const canonical = new Map<string, string>(); // group key → shared name
@@ -414,12 +430,15 @@ function fold(
     );
   };
   const claim = (name: string, key: string, members: readonly Model[]): void => {
-    const holder = holders.get(name);
-    if (holder === undefined) {
+    const taken = holders.get(name);
+    if (taken === undefined) {
       holders.set(name, `the shared error body "${name}" ${shapeOf(members[0])}`);
       canonical.set(key, name);
       return;
     }
+    // A body is told of the model component it is measured against, where
+    // an enum component holds the name as well (`modelHolders`).
+    const holder = modelHolders.get(name) ?? taken;
     // A component schema of this shape is the shared body of every member
     // it can stand for; a member it cannot — one with a field, a domain
     // name, a limit or a pinned value the component does not admit, one
