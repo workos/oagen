@@ -321,6 +321,106 @@ describe('#678 a discriminator pin that lists null among its values', () => {
         }
       });
 
+      it('reads a list beside a composition that types the declaration as the type builder does (Greptile)', async () => {
+        const c = (value: string): Doc => pin(openapi, value);
+        const catEnum = { kind: 'enum', name: 'CatKind', values: ['cat'] };
+        // A `oneOf`/`anyOf` of consts beside a list is the enum of the consts
+        // the list leaves: one member pins, and the `null` the list names is
+        // admitted only with a `null` variant among the consts.
+        const pinned: Array<[string, Doc, object]> = [
+          ['two consts, the list leaving one', { oneOf: [c('cat'), c('lion')], enum: ['cat', null] }, catEnum],
+          ['two consts, a longer list leaving one', { oneOf: [c('cat'), c('lion')], enum: ['cat', 'puma'] }, catEnum],
+          [
+            'a const and a null variant',
+            { oneOf: [c('cat'), { type: 'null' }], enum: ['cat', null] },
+            { kind: 'nullable', inner: catEnum },
+          ],
+          ['a null variant the list forbids', { oneOf: [c('cat'), { type: 'null' }], enum: ['cat'] }, catEnum],
+          [
+            'an anyOf of consts and a null variant',
+            { anyOf: [c('cat'), c('lion'), { type: 'null' }], enum: [null, 'cat'] },
+            { kind: 'nullable', inner: catEnum },
+          ],
+        ];
+        for (const [label, catKind, type] of pinned) {
+          const spec = await parseJson(catAndDog(openapi, keyword, catKind));
+          expect(fieldType(spec, 'Cat', 'kind'), label).toMatchObject(type);
+          expect(describeUnion(spec, 'pet'), label).toBe('pet: Cat | Dog {"cat":"Cat","dog":"Dog"}');
+          expect(namedUnion(spec), label).toBe('Pet: Cat | Dog {"cat":"Cat","dog":"Dog"}');
+        }
+        // Any other composition types the declaration as something a list
+        // beside it does not pin, whether the list names `null` or not.
+        const plainTypes = [{ type: 'string' }, { type: 'integer' }];
+        const merged = [
+          { type: 'object', properties: { a: { type: 'string' } } },
+          { type: 'object', properties: { b: { type: 'string' } } },
+        ];
+        const unpinned: Array<[string, Doc, object]> = [
+          [
+            'consts the list leaves none of',
+            { oneOf: [c('cat'), c('lion')], enum: ['bird', null] },
+            { kind: 'enum', name: 'CatKind', values: [] },
+          ],
+          ['a union of plain types', { oneOf: plainTypes, enum: ['cat', null] }, { kind: 'union' }],
+          ['a union of plain types, a one-value list', { oneOf: plainTypes, enum: ['cat'] }, { kind: 'union' }],
+          ['a union of plain types, a const', { oneOf: plainTypes, const: 'cat' }, { kind: 'union' }],
+          ['a merged allOf', { allOf: merged, enum: ['cat', null] }, { kind: 'model', name: 'CatKind' }],
+          ['a merged allOf, a const', { allOf: merged, const: 'cat' }, { kind: 'model', name: 'CatKind' }],
+          [
+            'a type list of null alone',
+            { type: ['null'], enum: ['cat', null] },
+            { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } },
+          ],
+        ];
+        for (const [label, catKind, type] of unpinned) {
+          const spec = await parseJson(catAndDog(openapi, keyword, catKind));
+          expect(fieldType(spec, 'Cat', 'kind'), label).toMatchObject(type);
+          expect(describeUnion(spec, 'pet'), label).toBe(`pet: Cat | Dog ${unmapped(keyword)}`);
+          expect(namedUnion(spec), label).toBe(`Pet: Cat | Dog ${unmapped(keyword)}`);
+        }
+      });
+
+      it('reads a $ref to an enum component as the reference is typed: the enum of one member pins it (Greptile)', async () => {
+        const c = (value: string): Doc => pin(openapi, value);
+        const plain = { kind: 'enum', name: 'CatKind' };
+        const nullable = { kind: 'nullable', inner: plain };
+        // Each is the enum component `CatKind` of the one member `cat`, and
+        // a `$ref` to it is nullable by the component's own rule — which is
+        // not always the rule for the same schema written on the property.
+        const components: Array<[string, Doc, object]> = [
+          ['a list naming null', { enum: ['cat', null] }, nullable],
+          ['the flag with no type', { enum: ['cat'], nullable: true }, nullable],
+          [
+            'a list restricting consts and naming null',
+            { oneOf: [c('cat'), c('lion')], enum: ['cat', null] },
+            nullable,
+          ],
+          ['a null variant the list forbids', { oneOf: [c('cat'), { type: 'null' }], enum: ['cat'] }, plain],
+          ['a nullable wrapper around the list', { anyOf: [{ enum: ['cat'] }, { type: 'null' }] }, nullable],
+          ['a union of one const', { oneOf: [c('cat')] }, plain],
+          ['a const beside the list', { const: 5, enum: ['cat'] }, plain],
+        ];
+        for (const [label, component, type] of components) {
+          const spec = await parseJson(catAndDog(openapi, keyword, ref('CatKind'), { CatKind: component }));
+          expect(fieldType(spec, 'Cat', 'kind'), label).toEqual(type);
+          expect(
+            spec.enums.find(({ name }) => name === 'CatKind')?.values.map(({ value }) => value),
+            label,
+          ).toEqual(['cat']);
+          expect(describeUnion(spec, 'pet'), label).toBe('pet: Cat | Dog {"cat":"Cat","dog":"Dog"}');
+          expect(namedUnion(spec), label).toBe('Pet: Cat | Dog {"cat":"Cat","dog":"Dog"}');
+        }
+        // An enum component of no member, or of two, pins nothing.
+        for (const [label, component] of [
+          ['null alone', { enum: [null] }],
+          ['two members', { enum: ['cat', 'lion', null] }],
+        ] as const) {
+          const spec = await parseJson(catAndDog(openapi, keyword, ref('CatKind'), { CatKind: { ...component } }));
+          expect(describeUnion(spec, 'pet'), label).toBe(`pet: Cat | Dog ${unmapped(keyword)}`);
+          expect(namedUnion(spec), label).toBe(`Pet: Cat | Dog ${unmapped(keyword)}`);
+        }
+      });
+
       it('names and maps two inline variants pinning kind by such a list as with the const written', async () => {
         const variants = (spelling: (value: string) => Doc): Doc[] => [
           object(spelling('cat'), { lives: { type: 'integer' } }),
@@ -563,6 +663,11 @@ describe('#678 a discriminator pin that lists null among its values', () => {
           ['the second variant listing it', [pin(openapi, 'cat'), { enum: ['dog', null] }], {}],
           ['an allOf around the list', [{ allOf: [{ enum: ['cat', null] }] }, pin(openapi, 'dog')], {}],
           [
+            'a null variant beside the one const a list leaves',
+            [{ oneOf: [pin(openapi, 'cat'), { type: 'null' }], enum: ['cat', null] }, pin(openapi, 'dog')],
+            {},
+          ],
+          [
             'a $ref to a component listing it',
             [ref('CatKind'), pin(openapi, 'dog')],
             { CatKind: { enum: ['cat', null] } },
@@ -580,6 +685,33 @@ describe('#678 a discriminator pin that lists null among its values', () => {
         expect(kindOf(one, 'one value')).toEqual(nullableCat);
       });
 
+      it('admits null behind a $ref to an enum component exactly when the reference is nullable (Greptile)', async () => {
+        const c = (value: string): Doc => pin(openapi, value);
+        const components: Array<[string, Doc, boolean]> = [
+          ['a list naming null', { enum: ['cat', null] }, true],
+          ['the flag with no type', { enum: ['cat'], nullable: true }, true],
+          ['a list restricting consts and naming null', { oneOf: [c('cat'), c('lion')], enum: ['cat', null] }, true],
+          ['a null variant the list forbids', { oneOf: [c('cat'), { type: 'null' }], enum: ['cat'] }, false],
+          ['a type list naming null beside an allOf', { type: ['string', 'null'], allOf: [{ enum: ['cat'] }] }, false],
+          ['a plain one-value list', { type: 'string', enum: ['cat'] }, false],
+        ];
+        for (const [label, component, nullable] of components) {
+          const spec = await parseJson(
+            document([ref('CatKind'), pin(openapi, 'dog')], { CatKind: component, Holder: object(ref('CatKind')) }),
+          );
+          // The variant's own field, as a component's field written the same way is typed…
+          const own = fieldType(spec, 'Holder', 'kind');
+          expect(own, label).toEqual(
+            nullable
+              ? { kind: 'nullable', inner: { kind: 'enum', name: 'CatKind' } }
+              : { kind: 'enum', name: 'CatKind' },
+          );
+          // …and the folded discriminator admits `null` exactly when it does.
+          expect(kindOf(spec, label).kind, label).toBe(nullable ? 'nullable' : 'enum');
+          expect(kindValues(spec), label).toEqual(['cat', 'dog']);
+        }
+      });
+
       it('admits no null the type builder does not read: a list beside a const, an allOf or a $ref', async () => {
         // The const types the declaration, so the `null` the list names is
         // not read: each variant's own field would be the plain literal.
@@ -595,6 +727,17 @@ describe('#678 a discriminator pin that lists null among its values', () => {
           document([{ ...ref('CatKind'), enum: ['cat', null] }, pin(openapi, 'dog')], { CatKind: pin(openapi, 'cat') }),
         );
         expect(kindOf(besideRef, 'beside a $ref')).toMatchObject({ kind: 'enum', name: 'CreatePetRequestKind' });
+        // A list beside a `oneOf` of consts restricts them, and the `null` it
+        // names is admitted only with a `null` variant among them: the
+        // variant's own field is the non-null enum of `cat` (Greptile).
+        const restricting = await parseJson(
+          document([{ oneOf: [pin(openapi, 'cat'), pin(openapi, 'lion')], enum: ['cat', null] }, pin(openapi, 'dog')]),
+        );
+        expect(kindOf(restricting, 'a list restricting consts')).toMatchObject({
+          kind: 'enum',
+          name: 'CreatePetRequestKind',
+        });
+        expect(kindValues(restricting)).toEqual(['cat', 'dog']);
         const plain = await parseJson(document([pin(openapi, 'cat'), pin(openapi, 'dog')]));
         expect(kindOf(plain, 'no null')).toMatchObject({ kind: 'enum', name: 'CreatePetRequestKind' });
       });
