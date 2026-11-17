@@ -5227,7 +5227,10 @@ describe('a title two unions give different shapes at different depths of one ro
       expect(variantsOf(node.properties!['shape']!).map(isContestedTitle)).toEqual([false, false]);
     });
 
-    it.each<{ label: string; document: (schema: SchemaObject) => Record<string, unknown> }>([
+    // A `components` entry is read where a site that is read references it
+    // (#670), so each one below is referenced from `paths`; without that
+    // reference nothing reads it (the test after this one).
+    const named: Array<{ label: string; document: (schema: SchemaObject) => Record<string, unknown> }> = [
       {
         label: 'a response header named `x-meta`',
         document: (schema) => ({
@@ -5272,26 +5275,37 @@ describe('a title two unions give different shapes at different depths of one ro
       {
         label: 'a `components.responses` entry named `x-resp`',
         document: (schema) => ({
+          paths: { '/d': { get: { responses: { '200': { $ref: '#/components/responses/x-resp' } } } } },
           components: { responses: { 'x-resp': { content: { 'application/json': { schema } } } } },
         }),
       },
       {
         label: 'a `components.parameters` entry named `x-param`',
-        document: (schema) => ({ components: { parameters: { 'x-param': { name: 'p', in: 'query', schema } } } }),
+        document: (schema) => ({
+          paths: { '/d': { get: { parameters: [{ $ref: '#/components/parameters/x-param' }] } } },
+          components: { parameters: { 'x-param': { name: 'p', in: 'query', schema } } },
+        }),
       },
       {
         label: 'a `components.requestBodies` entry named `x-body`',
         document: (schema) => ({
+          paths: { '/d': { post: { requestBody: { $ref: '#/components/requestBodies/x-body' } } } },
           components: { requestBodies: { 'x-body': { content: { 'application/json': { schema } } } } },
         }),
       },
       {
         label: 'a `components.headers` entry named `x-hdr`',
-        document: (schema) => ({ components: { headers: { 'x-hdr': { schema } } } }),
+        document: (schema) => ({
+          paths: {
+            '/d': { get: { responses: { '200': { headers: { 'X-Hdr': { $ref: '#/components/headers/x-hdr' } } } } } },
+          },
+          components: { headers: { 'x-hdr': { schema } } },
+        }),
       },
       {
         label: 'a `components.pathItems` entry named `x-item`',
         document: (schema) => ({
+          paths: { '/d': { $ref: '#/components/pathItems/x-item' } },
           components: {
             pathItems: { 'x-item': { get: { responses: { '200': { content: { 'application/json': { schema } } } } } } },
           },
@@ -5316,6 +5330,7 @@ describe('a title two unions give different shapes at different depths of one ro
       {
         label: 'a `components.callbacks` entry named `x-cb`',
         document: (schema) => ({
+          paths: { '/d': { get: { callbacks: { cb: { $ref: '#/components/callbacks/x-cb' } } } } },
           components: {
             callbacks: {
               'x-cb': {
@@ -5326,7 +5341,9 @@ describe('a title two unions give different shapes at different depths of one ro
         }),
       },
       {
-        label: 'an encoding property named `x-part` with a header named `x-hdr`',
+        // The body's own schema is read; the Encoding Object beside it never
+        // is (#670, the second test below).
+        label: 'a multipart property named `x-part` beside an encoding entry named `x-part`',
         document: (schema) => ({
           paths: {
             '/d': {
@@ -5334,8 +5351,8 @@ describe('a title two unions give different shapes at different depths of one ro
                 requestBody: {
                   content: {
                     'multipart/form-data': {
-                      schema: { type: 'object' },
-                      encoding: { 'x-part': { headers: { 'x-hdr': { schema } } } },
+                      schema: { type: 'object', properties: { 'x-part': schema } },
+                      encoding: { 'x-part': { headers: { 'x-hdr': { schema: { type: 'string' } } } } },
                     },
                   },
                 },
@@ -5344,12 +5361,58 @@ describe('a title two unions give different shapes at different depths of one ro
           },
         }),
       },
-    ])('reads a name that starts with `x-` as a name: $label (Greptile round 2)', ({ document }) => {
+    ];
+    it.each(named)('reads a name that starts with `x-` as a name: $label (Greptile round 2)', ({ document }) => {
       const top = byRadius();
       const inner = byDiameter();
       markContestedTitles(document(nested(top, inner)));
       expect(variantsOf(top).map(isContestedTitle)).toEqual([true, true]);
       expect(variantsOf(inner).map(isContestedTitle)).toEqual([true, true]);
+    });
+
+    it.each(named.filter(({ label }) => label.startsWith('a `components.')))(
+      'reads no `components` entry that nothing references, whatever its name: $label (#670)',
+      ({ document }) => {
+        // The same entries with no site referencing them, as the cases above
+        // were written before #670: no reader reads one, so the walker
+        // reaches none and its unions contest nothing. (A
+        // `components/responses` body is still read for the names it
+        // reserves wherever the operation pass runs — a document with
+        // `paths` — and is a root there: `test/parser/schema-sites.test.ts`.)
+        const top = byRadius();
+        const inner = byDiameter();
+        const { paths: _paths, ...unreferenced } = document(nested(top, inner));
+        expect(Object.keys(unreferenced)).toEqual(['components']);
+        markContestedTitles(unreferenced);
+        expect(variantsOf(top).map(isContestedTitle)).toEqual([false, false]);
+        expect(variantsOf(inner).map(isContestedTitle)).toEqual([false, false]);
+      },
+    );
+
+    it('reads no header of an Encoding Object, which no reader reads: an encoding property named `x-part` with a header named `x-hdr` (#670)', () => {
+      // The document the table above held before #670, asserted `[true,
+      // true]` then: `encoding` is on no reader's path, so its headers are no
+      // site, whatever the names.
+      const top = byRadius();
+      const inner = byDiameter();
+      markContestedTitles({
+        paths: {
+          '/d': {
+            post: {
+              requestBody: {
+                content: {
+                  'multipart/form-data': {
+                    schema: { type: 'object' },
+                    encoding: { 'x-part': { headers: { 'x-hdr': { schema: nested(top, inner) } } } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      });
+      expect(variantsOf(top).map(isContestedTitle)).toEqual([false, false]);
+      expect(variantsOf(inner).map(isContestedTitle)).toEqual([false, false]);
     });
 
     it('reads a property named `x-id` and a component named `x-thing` as names, in the components root', () => {

@@ -35,13 +35,14 @@ export const TEXT_RESPONSE_MEDIA_TYPES: readonly string[] = ['text/plain', 'text
  * declares. The one classification of a response body's media type, read by
  * the fixed-order pick of the primary body (`primaryBodySchema`), by every
  * secondary entry of a 2xx, 3xx, error, `default` or range response
- * (`typeSecondaryContent`), and by the sent/received walk
- * (`sentOnlyComponentNames`), which reads a response body by exactly the
- * media types whose schema the reader reads — so a body of `$ref: Pet` under
+ * (`typeSecondaryContent`), and by the walk over the sites the readers type
+ * (`readSchemaSites`), which reads a response body by exactly the media
+ * types whose schema the reader reads — so a body of `$ref: Pet` under
  * `application/xml` neither types anything as `Pet` nor counts as receiving
- * it (workos/oagen#610). A request body has no such list: every media type
- * that declares a schema is typed through it, as the primary pick
- * (`selectRequestBodyContent`) or a secondary entry
+ * it (`sentOnlyComponentNames`, workos/oagen#610), and a titled union in it
+ * contests no title (`markContestedTitles`, #670). A request body has no
+ * such list: every media type that declares a schema is typed through it,
+ * as the primary pick (`selectRequestBodyContent`) or a secondary entry
  * (`typeSecondaryRequestContent`, a webhook's `mintPayload`), and one
  * without is typed by `schemalessRequestContentType`, so the walk reads a
  * request body — an operation's, sent, a webhook's or a callback's, received

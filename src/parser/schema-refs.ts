@@ -247,8 +247,12 @@ export function pendingSiteLimitsOf(ref: ModelRef): Constraints | undefined {
  * model its reference names (`settleDeferredMappingEntries`). A copy of the
  * union carries its entries with its copied variants, and a copy of each
  * reference of a target's own (`carryDeferredMappingEntries`, from
- * `cloneTypeRef`). Keyed by the mapping object, so a mapping the IR no
- * longer holds is forgotten with it.
+ * `cloneTypeRef`). An entry the document did not write is deferred the same
+ * way: the one a mapping derived from the variants' consts holds for a
+ * variant written as such a pointer (`dog` for the variant
+ * `Shelter/properties/dog` pinning `kind: dog`), which is that very entry
+ * (`derivedMappings`; #682). Keyed by the mapping object, so a mapping the
+ * IR no longer holds is forgotten with it.
  */
 interface DeferredMappingEntry {
   /** The discriminator value whose entry is deferred. */
@@ -267,12 +271,42 @@ export function deferMappingEntry(mapping: Record<string, string>, value: string
 }
 
 /**
+ * The mappings a union derived from its variants' consts — under the
+ * `discriminator` keyword with no `mapping:` (`'keyword'`), or with no
+ * keyword at all (`'implicit'`) — while one of their entries is a pointer
+ * variant's, deferred like an explicit entry naming that pointer (#682). A
+ * derived mapping names models alone, and whether a pointer variant is one
+ * is known only once it is settled: one that settles to a model names it,
+ * and one that settles to anything else is unnamed, so the union derives
+ * nothing, as it does beside any unnamed variant
+ * (`resolveSchemaPointers` withdraws the mapping: `{}` under the keyword,
+ * no discriminator without it). An explicit mapping is the document's own
+ * and is never withdrawn: its entry is left as written. Keyed by the
+ * mapping object, as the deferred entries are.
+ */
+const derivedMappings = new WeakMap<Record<string, string>, DerivedMappingSource>();
+
+/** How a derived mapping came to be: under the `discriminator` keyword with no `mapping:`, or with no keyword (the implicit discriminator). */
+export type DerivedMappingSource = 'keyword' | 'implicit';
+
+/** Record that `mapping` was derived from the union's variants (`derivedMappings`), a pointer variant's entry among them. */
+export function markDerivedMapping(mapping: Record<string, string>, source: DerivedMappingSource): void {
+  derivedMappings.set(mapping, source);
+}
+
+/** How `mapping` was derived (`markDerivedMapping`); `undefined` for the document's own mapping, and for a derived one with no pointer variant's entry. */
+export function derivedMappingSource(mapping: Record<string, string> | undefined): DerivedMappingSource | undefined {
+  return mapping === undefined ? undefined : derivedMappings.get(mapping);
+}
+
+/**
  * Carry the deferred entries of `from`'s mapping onto `to`'s, each against
  * the copy of its variant at the same position, or against a copy of its
  * own reference (`copy`) for a target outside the variants — for
  * `cloneTypeRef`, which copies a union's variants and mapping alike, so
  * the copy's entries settle with the copy's references and follow their
- * renames, never the original's.
+ * renames, never the original's. A derived mapping's copy is a derived
+ * mapping (`markDerivedMapping`), withdrawn as the original is.
  */
 export function carryDeferredMappingEntries(
   from: { variants: readonly TypeRef[]; mapping: Record<string, string> },
@@ -284,6 +318,8 @@ export function carryDeferredMappingEntries(
     const carried = index >= 0 ? to.variants[index] : copy(variant);
     if (carried !== undefined) deferMappingEntry(to.mapping, value, carried);
   }
+  const source = derivedMappings.get(from.mapping);
+  if (source !== undefined) derivedMappings.set(to.mapping, source);
 }
 
 /**
@@ -295,7 +331,9 @@ export function carryDeferredMappingEntries(
  * is still pending, and is settled here through `settleTarget`, at the
  * mapping site. An entry whose reference settled to no model — a pointer
  * to a string, or one that led nowhere, which the warning said — is left
- * as written. Returns every entry's reference, as the type it settled
+ * as written; where the mapping is one the union derived
+ * (`derivedMappingSource`), the caller withdraws it instead, since a
+ * derived mapping names models alone. Returns every entry's reference, as the type it settled
  * into, so the caller can hand the models among them over with the union
  * (`attachSharedRefs`) when the union does not hold them as variants: a
  * rename of such a model then reaches its entries as it reaches a

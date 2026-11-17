@@ -1273,7 +1273,14 @@ export interface UnionType {
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
-   * does as a component.
+   * does as a component. A `$ref` variant written as a JSON Pointer deeper
+   * into a component (`$ref: '#/components/schemas/Shelter/properties/dog'`)
+   * is named by the model the pointed schema is built as and its const read
+   * from that schema, so `oneOf: [{ $ref: Cat }, { $ref:
+   * Shelter/properties/dog }]` carries `{ cat: "Cat", dog: "ShelterDog" }`
+   * with and without the keyword, as the same union with a `mapping:`
+   * naming the pointer does (#682); a pointer that settles to no model
+   * leaves its variant unnamed.
    * A request body's union carries only the spec's own mapping; a body
    * that is a `oneOf` of inline objects under the keyword, each pinning the
    * property by the same reading, is folded into one object instead.
@@ -1551,7 +1558,10 @@ export interface Model {
    * name, after `schemaNameTransform`): an inline variant's model, built
    * for it and named from the const it pins (`PetCat`), or a `$ref`
    * variant's component (`{ cat: "Cat", dog: "Dog" }`), which stands for
-   * it (#398). The const is read as `UnionType.discriminator` reads one —
+   * it (#398) — for a `$ref` variant written as a JSON Pointer deeper into
+   * a component, the model the pointed schema is built as (`{ cat: "Cat",
+   * dog: "ShelterDog" }` for `$ref:
+   * '#/components/schemas/Shelter/properties/dog'`; #682). The const is read as `UnionType.discriminator` reads one —
    * through a `$ref`, a nullable wrapper and an `allOf` read as one member,
    * at every hop — for the value and the variant's name alike, so `kind:
    * { allOf: [{ const: 'cat' }] }` dispatches to `PetCat` as `kind: {
