@@ -14,7 +14,10 @@ import { sentOnlyComponentNames } from '../../src/parser/inline-models.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffCommand } from '../../src/cli/diff.js';
 import { buildEmitterContext, collectReferencedNames, generateAllFiles } from '../../src/engine/generate-files.js';
-import type { Emitter } from '../../src/engine/types.js';
+import { writeFiles } from '../../src/engine/writer.js';
+import type { Emitter, GeneratedFile } from '../../src/engine/types.js';
+import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { assignModelsToServices, collectFieldDependencies } from '../../src/ir/types.js';
 import type { ApiSpec, Enum, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -1239,6 +1242,9 @@ describe('#668 a $ref finds an enum component by its key, not by the name the ke
       const kinds = (from: ApiSpec, to: ApiSpec): string[] =>
         diffSpecs(from, to).changes.map((change) => `${change.kind} ${(change as { name?: string }).name}`);
 
+      // The issue's `object.json` against itself, parsed twice: nothing.
+      expect(diffSpecs(both, both).changes).toEqual([]);
+      expect(kinds(both, await parse(objectJson('3.1.0')))).toEqual([]);
       // The same document, components reversed: nothing.
       expect(kinds(both, await parse(used({ Sizes: plainSizes(), Size: objectSize() })))).toEqual([]);
       // The enum gains a value: the enum alone.
@@ -1308,6 +1314,192 @@ describe('#668 a $ref finds an enum component by its key, not by the name the ke
       expect(warnings()).toEqual([
         '[oagen] Warning: Component schemas "Size" (a model) and "Sizes" (an enum) both resolve to "Size" — keeping both, each $ref typed as the component it names; a schemaNameTransform can give one a name of its own',
       ]);
+    });
+
+    it("reads the issue's `object.json` by kind wherever a name is looked up", async () => {
+      /** `object.json` with `Size` carrying a field typed by the enum of its own name, read by two services. */
+      const spec = await parse(
+        document(
+          '3.1.0',
+          {
+            Size: { type: 'object', properties: { width: { type: 'integer' }, like: ref('Sizes') } },
+            Sizes: plainSizes(),
+            Pet: pet(),
+          },
+          {
+            paths: {
+              '/sizes': {
+                get: {
+                  operationId: 'listSizes',
+                  tags: ['Sizes'],
+                  parameters: [{ name: 'sizes', in: 'query', schema: ref('Sizes') }],
+                  responses: { '200': { description: 'OK', content: json(ref('Size')) } },
+                },
+              },
+              '/pets': {
+                get: {
+                  operationId: 'listPets',
+                  tags: ['Pets'],
+                  responses: { '200': { description: 'OK', content: json(ref('Pet')) } },
+                },
+              },
+            },
+          },
+        ),
+      );
+      expect(fieldTypes(spec, 'Size')).toEqual({
+        width: { kind: 'primitive', type: 'integer' },
+        like: enumRef('Size'),
+      });
+
+      // `validateModelRefs`: one set of model and enum names, in which the model `Size` is found.
+      warn.mockClear();
+      validateModelRefs(spec);
+      expect(warnings()).toEqual([]);
+      // A model reference no model answers is not reported while an enum has its name, as before this change.
+      validateModelRefs({
+        ...spec,
+        models: [{ name: 'Pet', fields: [{ name: 'ghost', type: model('Ghost'), required: false }] }],
+        enums: [{ name: 'Ghost', values: [] }],
+        services: [],
+      });
+      expect(warnings()).toEqual([]);
+      validateModelRefs({
+        ...spec,
+        models: [{ name: 'Pet', fields: [{ name: 'ghost', type: model('Ghost'), required: false }] }],
+        enums: [],
+        services: [],
+      });
+      expect(warnings()).toEqual(['[oagen] Warning: Unresolved model reference "Ghost" (context: Pet.ghost)']);
+
+      // `assignModelsToServices` places models alone: `Size` is the model, in the first service that reaches it.
+      expect(Object.fromEntries(assignModelsToServices(spec.models, spec.services))).toEqual({
+        Size: 'Sizes',
+        Pet: 'Pets',
+      });
+      // `collectFieldDependencies` lists each kind apart: the model `Size` depends on the enum `Size`,
+      // and `Pet` on both.
+      const dependencies = (name: string): { models: string[]; enums: string[] } => {
+        const { models, enums } = collectFieldDependencies(modelOf(spec, name)!);
+        return { models: [...models], enums: [...enums] };
+      };
+      expect(dependencies('Size')).toEqual({ models: [], enums: ['Size'] });
+      expect(dependencies('Pet')).toEqual({ models: ['Size'], enums: ['Size'] });
+    });
+
+    it('writes two generated files of one path by the rules for a file that exists, model first', async () => {
+      // The engine keeps no name-keyed record of types: it hands the model and
+      // the enum to the emitter apart (above) and writes what comes back by
+      // path. Only an emitter that gives both kinds one path makes them meet,
+      // and then the second file meets the first as any file already on disk.
+      const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-668-out-'));
+      dirs.push(outputDir);
+      const read = (file: string): Promise<string> => fs.readFile(path.join(outputDir, file), 'utf-8');
+      const modelFile = (file: string, more: object = {}): GeneratedFile => ({
+        path: file,
+        content: 'model Size\n',
+        ...more,
+      });
+      const enumFile = (file: string, more: object = {}): GeneratedFile => ({
+        path: file,
+        content: 'enum Size\n',
+        ...more,
+      });
+
+      // No grammar for the language: the second file is skipped, and the model's stands.
+      const skipped = await writeFiles([modelFile('plain/size.txt'), enumFile('plain/size.txt')], outputDir);
+      expect(skipped).toMatchObject({ written: ['plain/size.txt'], skipped: ['plain/size.txt'] });
+      expect(await read('plain/size.txt')).toBe('model Size\n');
+      // `overwriteExisting`: the second file replaces the first, and the enum's stands.
+      const overwritten = await writeFiles(
+        [modelFile('forced/size.txt'), enumFile('forced/size.txt', { overwriteExisting: true })],
+        outputDir,
+      );
+      expect(overwritten.written).toEqual(['forced/size.txt', 'forced/size.txt']);
+      expect(await read('forced/size.txt')).toBe('enum Size\n');
+      // Two paths: both stand.
+      await writeFiles([modelFile('models/size.txt'), enumFile('enums/size.txt')], outputDir);
+      expect([await read('models/size.txt'), await read('enums/size.txt')]).toEqual(['model Size\n', 'enum Size\n']);
+    });
+  });
+
+  describe.each(VERSIONS)('a discriminator pin behind `Size` and `Sizes`, on OAS %s', (openapi) => {
+    /** One value and `null`, in the version's spelling: the nullable enum component `Size`. */
+    const nullableSmall = (): Doc =>
+      openapi === '3.1.0'
+        ? { type: ['string', 'null'], enum: ['small', null] }
+        : { type: 'string', nullable: true, enum: ['small', null] };
+    /** The same one value, admitting no `null`: `Sizes`. */
+    const plainSmall = (): Doc => ({ type: 'string', enum: ['small'] });
+    const large = (): Doc => ({ type: 'string', enum: ['large'] });
+    const variant = (size: Doc, extra: Doc): Doc => ({
+      type: 'object',
+      required: ['size'],
+      properties: { size, ...extra },
+    });
+    /**
+     * `createPet`'s body is a `oneOf` of two inline objects under the
+     * keyword, the first pinning `size` through a `$ref` to `key`: the fold
+     * reads the pin and its `null` off the component (`enumComponentPin`,
+     * #678), and the reference is typed by `componentTypeRef`. `Pet` is the
+     * same union of components, and `Holder` holds a `$ref` to each key.
+     */
+    const build = (key: string): Doc =>
+      document(
+        openapi,
+        {
+          Size: nullableSmall(),
+          Sizes: plainSmall(),
+          Small: variant(ref(key), { cuddly: { type: 'boolean' } }),
+          Large: variant(large(), { loud: { type: 'boolean' } }),
+          Pet: { oneOf: [ref('Small'), ref('Large')], discriminator: { propertyName: 'size' } },
+          Holder: { type: 'object', properties: { size: ref('Size'), sizes: ref('Sizes') } },
+        },
+        {
+          paths: {
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                requestBody: {
+                  required: true,
+                  content: json({
+                    oneOf: [
+                      variant(ref(key), { cuddly: { type: 'boolean' } }),
+                      variant(large(), { loud: { type: 'boolean' } }),
+                    ],
+                    discriminator: { propertyName: 'size' },
+                  }),
+                },
+                responses: { '200': { description: 'OK', content: json(ref('Pet')) } },
+              },
+            },
+          },
+        },
+      );
+
+    it.each([
+      ['Size', true],
+      ['Sizes', false],
+    ] as const)('pins `small` through %s, admitting null exactly as the reference does', async (key, admitsNull) => {
+      const spec = await parse(build(key));
+      const reference: TypeRef = admitsNull ? nullable(enumRef('Size')) : enumRef('Size');
+      // The reference, by key: at the pinning field and beside it.
+      expect(fieldTypes(spec, 'Small').size).toEqual(reference);
+      expect(fieldTypes(spec, 'Holder')).toEqual({ size: nullable(enumRef('Size')), sizes: enumRef('Size') });
+      // The pin, by key: the component's one member maps the variant…
+      expect(modelOf(spec, 'Pet')!.discriminator).toEqual({
+        property: 'size',
+        mapping: { small: 'Small', large: 'Large' },
+      });
+      // …and the folded body's `size` admits `null` exactly when the reference is nullable.
+      expect(operationOf(spec, 'createPet').requestBody).toEqual(model('CreatePetRequest'));
+      const folded = fieldTypes(spec, 'CreatePetRequest').size!;
+      expect(folded.kind).toBe(admitsNull ? 'nullable' : 'enum');
+      expect(spec.enums.map((e) => `${e.name}: ${e.values.map((v) => v.value).join(', ')}`)).toEqual([
+        'Size: small',
+        'CreatePetRequestSize: small, large',
+      ]);
+      expect(warnings()).toEqual([]);
     });
   });
 
