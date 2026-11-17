@@ -2007,14 +2007,36 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
       expect(warnings).toEqual([]);
     });
 
-    it('a JSON Pointer into a union of a composed component finds no union to read, and is reported', async () => {
+    it('a JSON Pointer to the schema is the composed model; one into either union finds no union to read, and is reported', async () => {
+      const unresolved = (pointer: string, field: string, owner: string, step: string) =>
+        `[oagen] Warning: Unresolved schema $ref "#/components/schemas/${pointer}" in Holder.${field}: model "${owner}" is no union to read "${step}" from — typing the site as unknown`;
       for (const Pick of [plainPick, besidePick]) {
         const { spec, warnings } = await read(
-          doc({ Pick, Holder: object({ first: { $ref: '#/components/schemas/Pick/oneOf/0' } }) }),
+          doc({
+            Pick,
+            Holder: object({
+              pick: structuredClone(Pick),
+              // The field itself, as the model built for it.
+              whole: { $ref: '#/components/schemas/Holder/properties/pick' },
+              // Into each union, of the component and of the field: the variants are flattened, no union holds them.
+              first: { $ref: '#/components/schemas/Pick/oneOf/0' },
+              second: { $ref: '#/components/schemas/Pick/anyOf/1' },
+              inField: { $ref: '#/components/schemas/Holder/properties/pick/anyOf/0' },
+            }),
+          }),
         );
-        expect(fieldsOf(model(spec, 'Holder'))).toEqual(['first?: unknown']);
+        expect(fieldsOf(model(spec, 'Holder'))).toEqual([
+          'pick?: HolderPick',
+          'whole?: HolderPick',
+          'first?: unknown',
+          'second?: unknown',
+          'inField?: unknown',
+        ]);
+        expect(fieldsOf(model(spec, 'HolderPick'))).toEqual(four);
         expect(warnings).toEqual([
-          '[oagen] Warning: Unresolved schema $ref "#/components/schemas/Pick/oneOf/0" in Holder.first: model "Pick" is no union to read "oneOf/0" from — typing the site as unknown',
+          unresolved('Pick/oneOf/0', 'first', 'Pick', 'oneOf/0'),
+          unresolved('Pick/anyOf/1', 'second', 'Pick', 'anyOf/1'),
+          unresolved('Holder/properties/pick/anyOf/0', 'inField', 'HolderPick', 'anyOf/0'),
         ]);
       }
     });
