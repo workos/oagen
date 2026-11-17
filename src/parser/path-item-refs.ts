@@ -55,7 +55,11 @@ export interface DocumentPathItems {
  * `get` is not lost silently; an `x-` extension beside the `$ref` is not
  * reported, since the parser reads none off a path item. Returns
  * `undefined`, after one warning naming the site, for an entry that is not
- * an object, a `$ref` that is not a string, a ref that names no Path Item
+ * an object — written at the site, or the entry a `$ref` chain ends on,
+ * whatever it holds (`Path "/pets" is not a path item object; skipping
+ * it.`, for `Pets: null`, `false`, `0` or `""` as for `[]` or `"oops"`; a
+ * falsy entry used to be reported as one with `no matching entry`, though
+ * it is there; #664) — a `$ref` that is not a string, a ref that names no Path Item
  * (into another section, deeper into an entry, or to an `x-` extension
  * under `paths`), a dangling ref, or a cycle; the caller skips the entry. A
  * dangling ref and a cycle are only reachable when the document bypassed
@@ -103,7 +107,12 @@ export function resolvePathItemRef(
     }
     seenRefs.add(ref);
     const resolved = pathItemRefTarget(ref, componentPathItems, documentPathItems);
-    if (!resolved) {
+    // Only a pointer that names no entry is unresolved. An entry that holds
+    // anything but an object is there — `null`, `false`, `0` and `""` as
+    // much as `[]` or `"oops"` — and is reported on the next turn as the
+    // value that is no path item object it is, as that value written at the
+    // site is, rather than as missing (#664).
+    if (resolved === undefined) {
       console.warn(
         `[oagen] Warning: Unresolved path item $ref "${ref}" for ${site.kind} "${site.key}": ` +
           `no matching entry under ${documentMapOf(ref) ?? 'components/pathItems'}. Skipping the ${site.kind}.`,
