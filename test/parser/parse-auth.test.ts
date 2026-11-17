@@ -258,7 +258,7 @@ components:
       expect(messages[1]).toContain('"oidc"');
       expect(messages[1]).toContain('type: openIdConnect, no openIdConnectUrl');
       expect(messages[2]).toContain('"saml"');
-      expect(messages[2]).toContain('type: saml');
+      expect(messages[2]).toContain('type is not apiKey, http, mutualTLS, oauth2 or openIdConnect');
     } finally {
       warnSpy.mockRestore();
     }
