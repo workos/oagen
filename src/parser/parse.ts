@@ -7,9 +7,10 @@ import {
   extractSchemas,
   extractInlineModelsFromSchemas,
   clearSchemaNameTransform,
+  rehearse,
   resolveSchemaName,
 } from './schemas.js';
-import { attachSharedRefs, extractOperations } from './operations.js';
+import { attachSharedRefs, extractOperations, type OperationExtractionResult } from './operations.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks, type SharedMinting } from './webhooks.js';
 import { extractCallbacks } from './callbacks.js';
@@ -252,6 +253,65 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     components: componentNames,
   });
 
+  const receivedComponents = {
+    schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
+    requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+    responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
+    pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
+  };
+  /** What a reading of the operations hands the webhooks and the callbacks: the names they step past, and the callbacks the operations declare. */
+  type OperationsReading = Pick<OperationExtractionResult, 'services' | 'inlineModels' | 'declaredCallbacks'>;
+  /**
+   * The webhooks, read beside a reading of the operations: their models are
+   * named against every model and enum decided so far — components, the
+   * operations', and the components' own inline field models.
+   */
+  const readWebhooks = (operations: OperationsReading, mintings: SharedMinting[]) =>
+    extractWebhooks(
+      spec.webhooks,
+      receivedComponents,
+      collectExistingNames([...models, ...operations.inlineModels, ...fieldInlineModels], operations.services, enums),
+      collectExistingEnumNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels],
+        operations.services,
+        enums,
+      ),
+      // Text beside a `$ref` is read by the document's version, as for operations.
+      siblingDocsMode(version),
+      // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
+      spec.paths,
+      mintings,
+    );
+  /** The callbacks the operations and the webhooks declare, read after both and named against every name either holds. */
+  const readCallbacks = (
+    operations: OperationsReading,
+    received: ReturnType<typeof readWebhooks>,
+    mintings: SharedMinting[],
+  ) =>
+    extractCallbacks(
+      [...operations.declaredCallbacks, ...received.declaredCallbacks],
+      receivedComponents,
+      collectExistingNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels, ...received.inlineModels],
+        operations.services,
+        enums,
+        received.webhooks,
+      ),
+      collectExistingEnumNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels, ...received.inlineModels],
+        operations.services,
+        enums,
+        received.webhooks,
+      ),
+      siblingDocsMode(version),
+      spec.paths,
+      spec.webhooks,
+      mintings,
+    );
+
   const { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
@@ -276,6 +336,24 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
     // Or a `$ref` to a `webhooks` entry, as a webhook's may name a `paths` one.
     spec.webhooks,
+    // The webhooks and the callbacks are read after the operations and mint
+    // names too, so a name one operation gives up to another (#683) is
+    // numbered past the ones they mint beside the operations: read here
+    // silently, off the very readings below, into nothing that is kept.
+    {
+      mintedAfter: (operations) =>
+        rehearse(() => {
+          const mintings: SharedMinting[] = [];
+          const received = readWebhooks(operations, mintings);
+          const callbacks = readCallbacks(operations, received, mintings);
+          return collectExistingNames(
+            [...received.inlineModels, ...callbacks.inlineModels],
+            operations.services,
+            [],
+            received.webhooks,
+          );
+        }),
+    },
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -283,35 +361,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Their models are named last, against every model and enum decided so far —
   // components, operations, and the components' own inline field models — so
   // a webhook never takes a name another pass has already minted.
-  const receivedComponents = {
-    schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-    parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
-    requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
-    responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
-    examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
-    pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
-    callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
-  };
   // What each group of webhooks minted, for the callbacks below: a callback
   // reaching the operation object a webhook was minted from shares that
   // minting rather than minting a copy beside it (#631).
   const webhookMintings: SharedMinting[] = [];
-  const {
-    webhooks,
-    inlineModels: webhookInlineModels,
-    inlineModelBundles: webhookInlineModelBundles,
-    declaredCallbacks: webhookCallbacks,
-  } = extractWebhooks(
-    spec.webhooks,
-    receivedComponents,
-    collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
-    collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
-    // Text beside a `$ref` is read by the document's version, as for operations.
-    siblingDocsMode(version),
-    // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
-    spec.paths,
-    webhookMintings,
-  );
+  const received = readWebhooks({ services, inlineModels, declaredCallbacks }, webhookMintings);
+  const { webhooks, inlineModels: webhookInlineModels, inlineModelBundles: webhookInlineModelBundles } = received;
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
   // The callbacks every operation and webhook declares are read last, into
@@ -323,24 +378,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // same way (`collectWebhookTypeRefs`, `collectOperationTypeRefs`). A
   // callback reading the operation object of one of `webhookMintings` under
   // its stem names nothing: it references the webhook's models (#631).
-  const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = extractCallbacks(
-    [...declaredCallbacks, ...webhookCallbacks],
-    receivedComponents,
-    collectExistingNames(
-      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
-      services,
-      enums,
-      webhooks,
-    ),
-    collectExistingEnumNames(
-      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
-      services,
-      enums,
-      webhooks,
-    ),
-    siblingDocsMode(version),
-    spec.paths,
-    spec.webhooks,
+  const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = readCallbacks(
+    { services, inlineModels, declaredCallbacks },
+    received,
     webhookMintings,
   );
   webhookInlineModels.push(...callbackInlineModels);
@@ -564,19 +604,29 @@ interface SecuritySchemeObject {
  *
  * What is left has no representation and is omitted with an `Unsupported
  * security scheme "<key>" (<what is wrong>) omitted from spec.auth` warning
- * rather than silently: an entry that is no object (`not an object`); a
- * `type` that is not one of the specification's five, compared as written
- * (`type: saml`, `type: OpenIdConnect`, `type: undefined`); and a
- * definition without the field its type is read by — an `http` scheme with
- * no `scheme` (`type: http, no scheme`) or one that is not an RFC 9110
- * token (`type: http, scheme: "my scheme" is not a token`;
+ * rather than silently: an entry that is no object — `null`, a string, a
+ * number, a boolean, an array — said in words (`null is not a Security
+ * Scheme Object`, `a string is not …`, `an array is not …`), where reading
+ * it as an object used to fail the parse with a `TypeError`; a `type` that
+ * is not one of the specification's five, compared as written, so `saml`
+ * and `OpenIdConnect` are none (`type is not apiKey, http, mutualTLS,
+ * oauth2 or openIdConnect`), or that is missing (`no type`) or no string
+ * (`type is a number, not a string`); and a definition without the field
+ * its type is read by — an `http` scheme with no `scheme` (`type: http, no
+ * scheme`), one that is no string (`type: http, scheme is a number, not a
+ * string`), a blank one (`type: http, scheme is blank`) or one that is not
+ * an RFC 9110 token (`type: http, scheme is not a token`;
  * `isHttpAuthScheme`), an `openIdConnect` one with no `openIdConnectUrl`
- * (`type: openIdConnect, no openIdConnectUrl`) or one that is not a string
- * (`openIdConnectUrl: 5 is not a string`) or has no content
- * (`openIdConnectUrl: " " is blank`), an `apiKey` with no `in` or no
- * `name` (`type: apiKey, no name`), an `oauth2` with no `flows` (`type:
- * oauth2, no flows`). A requirement naming an omitted scheme is kept, so it
- * joins to nothing.
+ * (`type: openIdConnect, no openIdConnectUrl`), one that is no string
+ * (`openIdConnectUrl is a number, not a string`) or a blank one
+ * (`openIdConnectUrl is blank`), an `apiKey` with no `in` or no `name`
+ * (`type: apiKey, no name`), an `oauth2` with no `flows` (`type: oauth2, no
+ * flows`). A requirement naming an omitted scheme is kept, so it joins to
+ * nothing.
+ *
+ * A warning names the key and what kind of value it met, never the value
+ * (`describeSchemeValue`): this map is where a credential pasted by mistake
+ * lands, and a warning goes to a build log.
  *
  * An entry may be a `$ref` to another entry of the map — OAS 3.0.3 and
  * 3.1.0 both allow a Reference Object under `components.securitySchemes` —
@@ -588,10 +638,15 @@ interface SecuritySchemeObject {
  * it (#384). A `description` written beside the `$ref` overrides the
  * target's under 3.1 and is ignored under 3.0 (`siblingDocs`). A ref the map
  * does not answer — a pointer into another section, or a `$ref` that is not
- * a string — is omitted with the same warning an unsupported scheme gets,
- * naming the ref and how the walk ended; one that names no component at
- * all, or a cycle of refs, fails the bundle before parsing, as any dangling
- * ref does.
+ * a string — is omitted with the same warning an unsupported scheme gets:
+ * a pointer is named with how the walk ended (`$ref
+ * #/components/schemas/Pet unresolved`), and a `$ref` that is no string by
+ * what it is (`$ref is a number, not a string`). One that ends on an entry
+ * the map holds but that is no object (`sharedKey: null`) says what it
+ * found (`$ref #/components/securitySchemes/sharedKey names null, not a
+ * Security Scheme Object`), beside that entry's own warning; one that names
+ * no component at all, or a cycle of refs, fails the bundle before parsing,
+ * as any dangling ref does.
  */
 function extractAuthSchemes(
   securitySchemes: Record<string, SecuritySchemeObject | ReferenceObject> | undefined,
@@ -607,15 +662,27 @@ function extractAuthSchemes(
     // of dropping it silently.
     const omit = (detail: string): void =>
       console.warn(`[oagen] Warning: Unsupported security scheme "${schemeName}" (${detail}) omitted from spec.auth`);
-    // `null`, a string, a number or an array declares no scheme, and is no
-    // Reference Object to follow either.
+    // `null`, a string, a number, a boolean or an array declares no scheme,
+    // and is no Reference Object to follow either: say what it is instead
+    // of failing the parse on it.
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      omit('not an object');
+      omit(`${describeSchemeValue(entry)} is not a Security Scheme Object`);
       continue;
     }
     const followed = followReference<SecuritySchemeObject>(entry, 'securitySchemes', components, siblingDocs);
     if (followed.outcome !== 'resolved') {
-      omit(`$ref ${followed.ref} ${followed.outcome}`);
+      if (followed.found !== undefined) {
+        // The chain ends on an entry the map holds but that is no object:
+        // that same malformed entry behind a pointer, not a missing one.
+        omit(`$ref ${followed.ref} names ${describeSchemeValue(followed.found.value)}, not a Security Scheme Object`);
+      } else if (followed.outcome === 'malformed') {
+        // A `$ref` that is no string is no pointer to print.
+        const ref = (followed.value as { $ref?: unknown }).$ref;
+        omit(`$ref is ${describeSchemeValue(ref)}, not a string`);
+      } else {
+        // A pointer the bundle resolved and this map does not answer.
+        omit(`$ref ${followed.ref} ${followed.outcome}`);
+      }
       continue;
     }
     const scheme = followed.value;
@@ -632,8 +699,16 @@ function extractAuthSchemes(
           omit('type: http, no scheme');
           break;
         }
+        if (typeof name !== 'string') {
+          omit(`type: http, scheme is ${describeSchemeValue(name)}, not a string`);
+          break;
+        }
+        if (name.trim() === '') {
+          omit('type: http, scheme is blank');
+          break;
+        }
         if (!isHttpAuthScheme(name)) {
-          omit(`type: http, scheme: ${JSON.stringify(name)} is not a token`);
+          omit('type: http, scheme is not a token');
           break;
         }
         // Scheme names are case-insensitive (RFC 9110 §11.1): `Bearer`,
@@ -675,9 +750,9 @@ function extractAuthSchemes(
         if (url === undefined) {
           omit('type: openIdConnect, no openIdConnectUrl');
         } else if (typeof url !== 'string') {
-          omit(`type: openIdConnect, openIdConnectUrl: ${JSON.stringify(url)} is not a string`);
+          omit(`type: openIdConnect, openIdConnectUrl is ${describeSchemeValue(url)}, not a string`);
         } else if (url.trim() === '') {
-          omit(`type: openIdConnect, openIdConnectUrl: ${JSON.stringify(url)} is blank`);
+          omit('type: openIdConnect, openIdConnectUrl is blank');
         } else {
           schemes.push({ kind: 'openIdConnect', ...common, openIdConnectUrl: url });
         }
@@ -687,11 +762,29 @@ function extractAuthSchemes(
         // The Security Scheme Object has no field for it beside `description`.
         schemes.push({ kind: 'mutualTLS', ...common });
         break;
-      default:
+      default: {
         // Not one of the specification's five values, which are compared as
         // written: `OpenIdConnect` and `mutualtls` are not types.
-        omit(`type: ${scheme.type}`);
+        const type: unknown = scheme.type;
+        if (type === undefined) omit('no type');
+        else if (typeof type !== 'string') omit(`type is ${describeSchemeValue(type)}, not a string`);
+        else omit('type is not apiKey, http, mutualTLS, oauth2 or openIdConnect');
+      }
     }
   }
   return schemes.length > 0 ? schemes : undefined;
+}
+
+/**
+ * What a value met where a Security Scheme Object, or one of its fields,
+ * was expected is, in words: `null`, `an array`, `an object`, `a string`,
+ * `a number`, `a boolean`. `extractAuthSchemes`' warnings say this much and
+ * never print the value: `components.securitySchemes` is where a credential
+ * pasted by mistake lands (`petAuth: "sk_live_…"`, `scheme: "Bearer
+ * sk_live_…"`), and a warning goes to a build log.
+ */
+function describeSchemeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
 }

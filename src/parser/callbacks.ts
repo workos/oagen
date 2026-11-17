@@ -352,8 +352,13 @@ function collectPendingCallbacks(
  * entry its `$ref` chain leads to. A Callback Object carries no
  * documentation a Reference Object could override, so nothing beside the
  * `$ref` is read. `undefined`, after one warning naming the site, for a
- * value that is not an object, a `$ref` that is not a string, a ref
- * nothing under `components/callbacks` answers (one into another section
+ * value that is not an object — written at the site, or the
+ * `components/callbacks` entry a `$ref` chain ends on, whatever it holds
+ * (`Callback "createPet.callbacks.petAdopted" is not a Callback Object;
+ * skipping it.`, for `Adopted: null`, `false`, `0` or `""` as for `[]` or
+ * `"oops"`; a falsy entry used to be reported as one with `no matching
+ * entry`, though it is there; #664) — a `$ref` that is not a string, a ref
+ * `components/callbacks` holds nothing under (one into another section
  * included), or a chain that loops; the caller skips the callback.
  */
 function resolveCallbackRef(
@@ -381,8 +386,13 @@ function resolveCallbackRef(
       return undefined;
     }
     seen.add(ref);
-    const resolved = resolveComponentRef(ref, 'callbacks', componentCallbacks);
-    if (!resolved) {
+    const resolved: unknown = resolveComponentRef(ref, 'callbacks', componentCallbacks);
+    // Only a pointer the section holds nothing under is unresolved. An entry
+    // that holds anything but an object is there — `null`, `false`, `0` and
+    // `""` as much as `[]` or `"oops"` — and is reported on the next turn
+    // as the value that is no Callback Object it is, as that value written
+    // at the site is, rather than as missing (#664).
+    if (resolved === undefined) {
       console.warn(
         `[oagen] Warning: Unresolved callback $ref "${ref}" for callback "${site}": ` +
           'no matching entry under components/callbacks. Skipping the callback.',
