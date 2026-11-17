@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { foldHttpAuthScheme } from '../ir/http-auth-scheme.js';
 import { foldParameterName } from '../ir/parameter-key.js';
 import type { ApiSpec, AuthScheme, Callback, SecurityRequirementSet } from '../ir/types.js';
 import type { SecuritySchemeChange } from './types.js';
@@ -15,11 +16,13 @@ import type { SecuritySchemeChange } from './types.js';
  *
  * A scheme the new document declares and the old did not is
  * `security-scheme-added`: breaking when the old document already had the
- * scheme in use — its old definition was one the parser omits from `auth`
- * (`openIdConnect`, an `http` scheme such as `digest`, `mutualTLS`), so
- * every old request carried something other than what the new definition
- * reads — and additive otherwise. One the old declared and the new does not
- * is `security-scheme-removed`: breaking when some request read it — the
+ * scheme in use — its requirements named a scheme its `auth` did not
+ * carry, the old definition being one the parser cannot read (an unknown
+ * `type`, an `http` scheme with no `scheme`, an `openIdConnect` one with no
+ * `openIdConnectUrl`; see `extractAuthSchemes`) or not there at all, so
+ * nothing says every old request carried what the new definition reads —
+ * and additive otherwise. One the old declared and the new does not is
+ * `security-scheme-removed`: breaking when some request read it — the
  * scheme is in use in the old document, or in the new one, which then
  * requires what it does not define — and additive when nothing did, as a
  * server variable no template references is (#342). One both declare whose
@@ -31,8 +34,17 @@ import type { SecuritySchemeChange } from './types.js';
  * additive when nothing in the new document uses it, or when the
  * definition only grew.
  *
- * The wire form is the scheme's `kind`; for an `apiKey` also `in` and
- * `name`, a header's name compared folded (`foldHeaderName`, through
+ * The wire form is the scheme's `kind`, the three `http` kinds read as one
+ * family by scheme name (`httpAuthScheme`): `basic`, `bearer`, or the
+ * `http` kind's `scheme` folded (`foldHttpAuthScheme`; scheme names are
+ * case-insensitive, RFC 9110 §11.1), so `Digest` → `hoba` is a change that
+ * breaks in use and `Digest` → `digest` is none, as `Bearer` → `bearer` is
+ * none (#662). For an `openIdConnect` scheme it is also the
+ * `openIdConnectUrl`, compared as written, as an `oauth2` flow's URLs are
+ * — a client discovers the provider there, so any other string breaks in
+ * use — and two `mutualTLS` schemes carry nothing but their kind. For an
+ * `apiKey` it is also `in` and `name`, a header's name compared folded
+ * (`foldHeaderName`, through
  * `foldParameterName`: HTTP header names are case-insensitive, RFC 9110
  * §5.1, so a header respelled `X-Key` → `x-key` is still reported — the
  * spelling is visible in `details` — but additive, as a case-only header
@@ -63,11 +75,12 @@ import type { SecuritySchemeChange } from './types.js';
  *
  * The changes are listed added (new document order), removed (old document
  * order), modified (new document order), as `diffEnums` lists an enum's.
- * A scheme the parser omits from `auth` (see `extractAuthSchemes`) is
- * invisible here except as the old side of an added scheme or the new side
- * of a removed one; one declared as a `$ref` to another entry is read by
- * the parser under the referencing key, so it is compared under that key.
- * `auth` absent and `[]` both read as no schemes.
+ * A definition the parser cannot read is omitted from `auth` with a
+ * warning (see `extractAuthSchemes`) and is invisible here except as the
+ * old side of an added scheme or the new side of a removed one; one
+ * declared as a `$ref` to another entry is read by the parser under the
+ * referencing key, so it is compared under that key. `auth` absent and
+ * `[]` both read as no schemes.
  */
 export function diffAuthSchemes(oldSpec: ApiSpec, newSpec: ApiSpec): SecuritySchemeChange[] {
   const oldByName = new Map((oldSpec.auth ?? []).map((scheme) => [scheme.schemeName, scheme]));
@@ -80,8 +93,9 @@ export function diffAuthSchemes(oldSpec: ApiSpec, newSpec: ApiSpec): SecuritySch
 
   for (const [schemeName, scheme] of newByName) {
     if (oldByName.has(schemeName)) continue;
-    // Every old request carried the scheme under a definition the parser
-    // omitted, so what they carry is not what the new definition reads.
+    // In use in the old document under no definition its `auth` carried —
+    // one the parser could not read, or none — so nothing says the old
+    // requests carried what the new definition reads.
     changes.push({
       kind: 'security-scheme-added',
       schemeName,
@@ -167,17 +181,31 @@ interface DefinitionShift {
  * How `newScheme` differs from `oldScheme` — `description` and `x-*` keys
  * aside — or `undefined` when the two say the same thing. A changed kind
  * breaks: a request carries another credential entirely (`apiKey → http
- * basic`). An `apiKey` breaks when its location or folded name moved
- * (`apiKeyShift`); an `oauth2` scheme when its flows regressed or a scope
- * `requiredScopes` names is no longer offered (`flowsShift`). Two `basic`
- * or two `bearer` schemes carry nothing but their kind, so they never
- * differ.
+ * basic`, `openIdConnect → apiKey`, `mutualTLS → http bearer`). The three
+ * `http` kinds are one family, compared by scheme name before their kinds
+ * are (`httpAuthScheme`): another name breaks (`http basic → http bearer`,
+ * `http Digest → http hoba`), and the same name in another case is no
+ * change (`Digest` → `digest`), as RFC 9110 §11.1 makes the names
+ * case-insensitive. An `apiKey` breaks when its location or folded name
+ * moved (`apiKeyShift`); an `oauth2` scheme when its flows regressed or a
+ * scope `requiredScopes` names is no longer offered (`flowsShift`); an
+ * `openIdConnect` scheme when its `openIdConnectUrl`, compared as written,
+ * is another string (`openIdConnectUrl "https://auth…" → "https://login…"`),
+ * since a client discovers the provider's endpoints there. Two `basic`,
+ * two `bearer` or two `mutualTLS` schemes carry nothing but their kind, so
+ * they never differ.
  */
 function definitionShift(
   oldScheme: AuthScheme,
   newScheme: AuthScheme,
   requiredScopes: Set<string>,
 ): DefinitionShift | undefined {
+  const oldHttp = httpAuthScheme(oldScheme);
+  const newHttp = httpAuthScheme(newScheme);
+  if (oldHttp !== undefined && newHttp !== undefined) {
+    if (oldHttp === newHttp) return undefined;
+    return { details: `${kindLabel(oldScheme)} → ${kindLabel(newScheme)}`, breaks: true };
+  }
   if (oldScheme.kind !== newScheme.kind) {
     return { details: `${kindLabel(oldScheme)} → ${kindLabel(newScheme)}`, breaks: true };
   }
@@ -185,7 +213,28 @@ function definitionShift(
   if (oldScheme.kind === 'oauth2' && newScheme.kind === 'oauth2') {
     return flowsShift(oldScheme.flows, newScheme.flows, requiredScopes);
   }
+  if (oldScheme.kind === 'openIdConnect' && newScheme.kind === 'openIdConnect') {
+    if (oldScheme.openIdConnectUrl === newScheme.openIdConnectUrl) return undefined;
+    return {
+      details: `openIdConnectUrl "${oldScheme.openIdConnectUrl}" → "${newScheme.openIdConnectUrl}"`,
+      breaks: true,
+    };
+  }
   return undefined;
+}
+
+/**
+ * The HTTP authentication scheme a `type: http` definition names, as it is
+ * compared, or `undefined` for a scheme of another type: `basic` and
+ * `bearer` for their kinds, and the `http` kind's `scheme` folded
+ * (`foldHttpAuthScheme`). The parser reads `basic` and `bearer` in any case
+ * as their own kinds, so its `http` entries never fold to either; an
+ * `ApiSpec` built by hand that spells one `{ kind: 'http', scheme: 'Bearer'
+ * }` names the same scheme as `{ kind: 'bearer' }`, and reads so here.
+ */
+function httpAuthScheme(scheme: AuthScheme): string | undefined {
+  if (scheme.kind === 'basic' || scheme.kind === 'bearer') return scheme.kind;
+  return scheme.kind === 'http' ? foldHttpAuthScheme(scheme.scheme) : undefined;
 }
 
 type ApiKeyScheme = Extract<AuthScheme, { kind: 'apiKey' }>;
@@ -303,7 +352,12 @@ function flowsRegressed(oldFlows: Record<string, unknown>, newFlows: Record<stri
   return false;
 }
 
-/** A scheme's kind in words: `http basic`, `http bearer`, `apiKey`, `oauth2`. */
+/**
+ * A scheme's kind in words: `http basic`, `http bearer`, `http Digest` (the
+ * `http` kind's `scheme` as written), `apiKey`, `oauth2`, `openIdConnect`,
+ * `mutualTLS`.
+ */
 function kindLabel(scheme: AuthScheme): string {
-  return scheme.kind === 'basic' || scheme.kind === 'bearer' ? `http ${scheme.kind}` : scheme.kind;
+  if (scheme.kind === 'basic' || scheme.kind === 'bearer') return `http ${scheme.kind}`;
+  return scheme.kind === 'http' ? `http ${scheme.scheme}` : scheme.kind;
 }

@@ -267,8 +267,8 @@ let activeDispatcherVariantPlans: Map<readonly SchemaObject[], Map<string, Dispa
 const resolvingArrayComponents = new Set<string>();
 
 /** Drop `null` from an `enum:` list — it marks nullability, it is not a member. */
-function nonNullEnumValues(values: SchemaObject['enum']): (string | number)[] {
-  return (values ?? []).filter((v): v is string | number => v !== null);
+function nonNullEnumValues(values: SchemaObject['enum']): unknown[] {
+  return (values ?? []).filter((v) => v !== null);
 }
 
 /**
@@ -509,6 +509,37 @@ function withWrapperLayerDefault(declaration: SchemaObject, wrapper: SchemaObjec
 }
 
 /**
+ * The one level a parameter or field reads the schema its bare `$ref`
+ * points at through, when that schema keeps what it declares on a node of
+ * its own — a model, a named union or an enum — or is the schema a JSON
+ * Pointer deeper into a component lands on: `target` as the node built
+ * from it documents itself. An enum component is read on the schema it
+ * declares its members on (`enumComponentDeclaration`). Any other is
+ * `target` with its wrapper layer folded in — its own `description`,
+ * `externalDocs`, `example`, `examples` and `x-*` keys, else the first
+ * `allOf` member's that declares no type and so only annotates it, and
+ * `deprecated` when it or any such member says so (`allOfWrapperLayer`,
+ * the layer `extractModel` and `extractAllOfModel` read a model's text,
+ * link and flag from) — and the layer's `default`, read the same way
+ * (`withWrapperLayerDefault`). A `target` with no such member is read as
+ * written. So `PetId: { allOf: [{ description: 'A pet id.', deprecated:
+ * true }], oneOf: [{ type: 'string' }, { type: 'integer' }] }` gives the
+ * parameter `{ schema: { $ref: PetId } }` the text and the flag `{
+ * description: 'A pet id.', deprecated: true, oneOf: [...] }` gives it, as
+ * both give the model `PetId` (#679: the parameter read the component's
+ * own keys alone, so the member's text, flag, link, default and examples
+ * never reached it and `oagen diff` between the two spellings reported
+ * `param-deprecated-changed`). A typing member's keys stay on that member
+ * and a `$ref` member's on its component, as they do for the model. An
+ * array or primitive component, or an alias of an enum component, keeps
+ * no node and is read through `componentReference` instead, whose entries
+ * list the same members level by level (`aliasEntryLevels`).
+ */
+export function referencedComponentLayer(target: SchemaObject): SchemaObject {
+  return enumComponentDeclaration(target) ?? withWrapperLayerDefault(allOfWrapperLayer(target), target);
+}
+
+/**
  * `{ description }` holding the first of `candidates` that is a string with
  * non-whitespace content, `{}` when none is — spread into an `EnumMember`.
  */
@@ -676,8 +707,12 @@ export interface SchemaObject {
   properties?: Record<string, SchemaObject | undefined>;
   required?: string[];
   items?: SchemaObject;
-  /** OAS 3.1 allows a literal `null` member when `type` also admits null. */
-  enum?: (string | number | null)[];
+  /**
+   * Any JSON value may be listed, as `const` may hold any: a string, a
+   * number, a boolean, an object, an array. OAS 3.1 allows a literal `null`
+   * member when `type` also admits null.
+   */
+  enum?: unknown[];
   allOf?: SchemaObject[];
   oneOf?: SchemaObject[];
   anyOf?: SchemaObject[];
@@ -3647,7 +3682,9 @@ export function buildFieldFromSchema(
   // `example` and `examples` a field takes from any component a bare `$ref`
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
-  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included,
+  // and any other on its wrapper layer, an annotating member's examples
+  // included (`referencedComponentLayer`; #679).
   const { settings, constraints } = fieldReading(fieldSchema, componentSchemas);
   const externalDocs = readExternalDocs(settings.externalDocs);
   const extensions = extensionsOf(settings, SCHEMA_CONSUMED_EXTENSIONS);
@@ -3710,10 +3747,14 @@ function fieldReading(
   // `example` and `examples` a field takes from any component a bare `$ref`
   // names — the enum an alias resolves to included (#560). An enum
   // component is read on the schema it declares its members on
-  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included.
+  // (`enumComponentDeclaration`), its `allOf` wrapper's examples included,
+  // and any other on its wrapper layer (`referencedComponentLayer`; #679:
+  // `Pet: { type: 'object', properties, allOf: [{ example }] }` gave a
+  // field `{ $ref: Pet }` no example, while the same key beside the
+  // `allOf` was the field's).
   const reference = componentReference(fieldSchema, componentSchemas);
   const target = resolveComponentSchemaRef(fieldSchema, componentSchemas);
-  const refTarget = reference ? reference.enumComponent : target && (enumComponentDeclaration(target) ?? target);
+  const refTarget = reference ? reference.enumComponent : target && referencedComponentLayer(target);
   const aliases = reference?.entries ?? [];
   const bare = fieldSchema.$ref !== undefined;
   const own = reference?.own ?? [fieldSchema, ...annotatingAllOfMembers(fieldSchema)];
@@ -3823,10 +3864,12 @@ export function inlineEnumName(contextName: string | undefined, parentModelName:
  * non-null variants are string `const` schemas (`constUnionEnumMembers`)
  * with two or more members, or any number beside an `enum:` list that
  * restricts them, is a `const-union` enum of those members; an `enum:` list
- * of any count of non-null members but one is an `enum-list` enum, one
- * alone being a literal; every other shape — a `$ref`, an `allOf`, a union
- * of other variants, an object, an array — is not an enum here (an array's
- * items are typed on their own).
+ * is an `enum-list` enum unless it admits one value alone (`loneEnumValue`:
+ * one entry beside any `null` entries, or nothing but `null`), which is
+ * typed as the `const` of that value is (`constTypeRef`) and is no enum;
+ * every other shape — a `$ref`, an `allOf`, a union of other variants, an
+ * object, an array — is not an enum here (an array's items are typed on
+ * their own).
  */
 export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | undefined {
   const kind = classifyInlineSchema(schema);
@@ -3837,7 +3880,7 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
     }
     return undefined;
   }
-  if (kind === 'enum' && nonNullEnumValues(schema.enum).length !== 1) return { spelling: 'enum-list' };
+  if (kind === 'enum' && loneEnumValue(schema.enum) === undefined) return { spelling: 'enum-list' };
   return undefined;
 }
 
@@ -3845,12 +3888,52 @@ export function inlineEnumSpelling(schema: SchemaObject): InlineEnumSpelling | u
 export type InlineEnumSpelling = { spelling: 'const-union'; members: EnumMember[] } | { spelling: 'enum-list' };
 
 /**
+ * The one value an `enum:` list admits, when it admits one alone — the OAS
+ * 3.0 spelling of a `const`: its only entry once the `null` entries, which
+ * mark nullability, are set aside (`enum: [true]`, `enum: ['a', null]`), or
+ * `null` for a list of nothing but `null` (`enum: [null]`, the list
+ * `isNullSchema` reads as the `null` schema). `undefined`, which is no JSON
+ * value, for a list of two or more other values and for an empty one: those
+ * are enums (`inlineEnumSpelling`).
+ */
+function loneEnumValue(values: SchemaObject['enum']): unknown {
+  if (values === undefined || values.length === 0) return undefined;
+  const nonNull = nonNullEnumValues(values);
+  if (nonNull.length === 0) return null;
+  return nonNull.length === 1 ? nonNull[0] : undefined;
+}
+
+/**
+ * The type of a schema that admits the one value `value`, whichever keyword
+ * says so — a `const`, or an `enum:` list of that value alone
+ * (`loneEnumValue`) — so the two spellings are one type (#667). A string, a
+ * number or a boolean is the literal of that value, kept as the document
+ * writes it: `enum: [true]` is `{ kind: 'literal', value: true }`, as
+ * `const: true` is, not the string `'true'`. `null` is `nullable<unknown>`.
+ * An array is an array of `unknown` and any other object a map of
+ * `unknown`, their contents not read: `enum: [{ a: 1 }]` is the map `const:
+ * { a: 1 }` is, not the literal `'[object Object]'`. `undefined` for
+ * `undefined`, the absence of a value.
+ */
+function constTypeRef(value: unknown): TypeRef | undefined {
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return { kind: 'literal', value };
+  }
+  if (value === null) return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
+  if (Array.isArray(value)) return { kind: 'array', items: { kind: 'primitive', type: 'unknown' } };
+  if (typeof value === 'object') return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
+  return undefined;
+}
+
+/**
  * The string const a schema pins `property` to in its own `properties`, in
  * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
- * read as the declaration pins it (`pinnedDeclarationValue`): as written,
- * or behind the wrappers the type builder reads the declaration through —
+ * read as the declaration pins it (`pinnedDeclarationValue`): as written
+ * — a `null` listed beside the one string set aside, so `{ enum: ["x",
+ * null] }` pins `x` as well (#678) — or behind the wrappers the type
+ * builder reads the declaration through —
  * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
  * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
@@ -3873,17 +3956,41 @@ function getConstPropertyValue(
 }
 
 /**
- * The one string a schema pins as written — a string `const`, or an `enum:`
- * of exactly one string; null otherwise. The leaf `pinnedDeclarationValue`
+ * The one string a schema pins as written, its `const` read before its
+ * `enum:` list, the order the type builder reads the two in
+ * (`classifyInlineSchema`): a `const` when it writes one — a string pins,
+ * any other value pins nothing, and an `enum:` beside it is not read —
+ * else an `enum:` list holding exactly one value once every `null` entry
+ * is set aside (`nonNullEnumValues`), that value a string. A `null` entry
+ * marks the declaration nullable and is no value of its own, as the type
+ * builder reads the list — `enum: ['cat', null]` and `enum: [null, 'cat']`
+ * are the `nullable<"cat">` that `{ type: ['string', 'null'], const: 'cat'
+ * }` is — so both pin `cat` (#678: the list was read by its length, so the
+ * `null` entry made it two values, the declaration pinned nothing, and a
+ * union carried `{}` under the keyword and no discriminator without it
+ * while its variant's field was the nullable literal). Null otherwise:
+ * `enum: [null]` holds no value, `enum: ['cat', 'dog', null]` two. Whether
+ * the list names `null` is `pinListsNull`. The leaf `pinnedDeclarationValue`
  * reads once every wrapper is read through; no other site reads a
  * declaration as written.
  */
 function pinnedStringValue(schema: SchemaObject): string | null {
-  if (typeof schema.const === 'string') return schema.const;
-  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
-    return schema.enum[0];
-  }
-  return null;
+  if (schema.const !== undefined) return typeof schema.const === 'string' ? schema.const : null;
+  const values = Array.isArray(schema.enum) ? nonNullEnumValues(schema.enum) : [];
+  const [value] = values;
+  return values.length === 1 && typeof value === 'string' ? value : null;
+}
+
+/**
+ * Whether the `enum:` list a schema is pinned by (`pinnedStringValue`)
+ * names `null` beside its value, which is how the type builder reads the
+ * list as nullable with no type list or flag beside it (`{ enum: ['cat',
+ * null] }` is `nullable<"cat">`). False beside a `const`, which types the
+ * schema and leaves the list unread: `{ const: 'cat', enum: ['cat', null]
+ * }` is the plain literal.
+ */
+function pinListsNull(schema: SchemaObject): boolean {
+  return schema.const === undefined && Array.isArray(schema.enum) && schema.enum.includes(null);
 }
 
 function resolveVariantModelName(schema: SchemaObject): string | null {
@@ -6384,7 +6491,8 @@ function getEffectiveProperties(
  * through at every hop (`kind: { allOf: [{ const: 'cat' }] }`; #607), and
  * a chain that repeats pins nothing. Null when the property is undeclared
  * or pins no one string (an enum of several values, a plain `type:
- * string`).
+ * string`); a `null` an `enum:` list names beside its one string is not a
+ * second value (`pinnedStringValue`; #678).
  */
 function getEffectiveConstPropertyValue(
   schema: SchemaObject,
@@ -6408,8 +6516,14 @@ function getEffectiveConstPropertyValue(
  * variant (`unwrapNullableSchema`); an `allOf` read as one member
  * (`allOfReadAsMember`: a lone member, one typing member beside members
  * that only annotate or limit it, or a lone `$ref` member beside such
- * members) to that member — then the `const` or one-value `enum:` written
- * on what it lands on (`pinnedStringValue`). So `kind: { allOf: [{ const:
+ * members) to that member — then the string `const` written on what it
+ * lands on, or the one string its `enum:` list holds, a `null` listed
+ * beside it set aside (`pinnedStringValue`): the list names `null` to
+ * admit it, which the type builder reads as `nullable` around the same
+ * literal, so `kind: { type: ['string', 'null'], enum: ['cat', null] }` —
+ * OAS 3.0: `{ type: 'string', enum: ['cat', null], nullable: true }` —
+ * pins `cat` as `kind: { type: ['string', 'null'], const: 'cat' }` does
+ * (#678). So `kind: { allOf: [{ const:
  * 'cat' }] }`, `kind: { allOf: [{ $ref: HamsterKind }], description: 'The
  * kind of pet.' }` with `HamsterKind: { const: 'hamster' }`, and `kind: {
  * $ref: RabbitKind }` with `RabbitKind: { allOf: [{ $ref: RabbitConst }] }`
@@ -6451,7 +6565,15 @@ export function pinnedDeclarationValue(
  * type: 'null' }] }`, `kind: { type: ['string', 'null'], const: 'email' }`,
  * `kind: { type: 'string', enum: ['email'], nullable: true }` and a `$ref`
  * to a component written so admit `null` as the field built from them is
- * `nullable<literal>`. Read by the request-body fold
+ * `nullable<literal>` — or by the list the walk ends on naming `null`
+ * beside the value it pins (`pinListsNull`), the one spelling that needs
+ * no type list, flag or wrapper: `kind: { enum: ['email', null] }` and
+ * `kind: { type: 'string', enum: ['email', null] }` are `nullable<literal>`
+ * fields too (#678). Only the list on the last hop is read, the one the
+ * type builder reads: a list beside an `allOf`, a `$ref` or a nullable
+ * `oneOf`/`anyOf` wrapper the walk reads through types nothing, and a type
+ * list or `nullable: true` is stripped to a copy that keeps the list
+ * (`unwrapNullableSchema`). Read by the request-body fold
  * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
  * the pinned values admits `null` exactly when a variant's does (#607
  * review: the fold dropped the admission). False for a chain that repeats.
@@ -6460,7 +6582,10 @@ export function pinnedDeclarationAdmitsNull(
   declaration: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): boolean {
-  return (pinnedDeclarationHops(declaration, schemas) ?? []).some((hop) => hop.$ref === undefined && declaresNull(hop));
+  const hops = pinnedDeclarationHops(declaration, schemas) ?? [];
+  return hops.some(
+    (hop, index) => hop.$ref === undefined && (declaresNull(hop) || (index === hops.length - 1 && pinListsNull(hop))),
+  );
 }
 
 /**
@@ -7390,7 +7515,8 @@ export function schemaToTypeRef(
  * that type (Validation §6.2–6.5 and the applicators of Core §10.3;
  * `format`, for the three primitives OAS defines formats for): what a
  * per-type copy of a type list keeps for its own type and sheds for every
- * other (`typeListCopy`). A keyword of no family — `const`, `enum`, a
+ * other (`typeListCopy`), and what a primitive copy keeps of each member
+ * of its `allOf` (`allOfMemberReadAs`). A keyword of no family — `const`, `enum`, a
  * composition, `discriminator`, `not`, an annotation, an `x-*` key —
  * applies whatever the instance's type and stays on every copy.
  */
@@ -7528,6 +7654,106 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
 }
 
 /**
+ * What `member` of an `allOf` says about an instance of the primitive
+ * `type` alone, in document order — the parts a primitive copy of a type
+ * list keeps of it (`typeListCopy`; #674), read at any depth, since
+ * `allOf: [{ allOf: [A, B] }]` says what `allOf: [A, B]` says:
+ *
+ *   - An inline member is opened into its own keywords and the readings of
+ *     its `allOf` members, its own first, whatever is written beside the
+ *     `allOf`: JSON Schema applies `{ minLength: 1, allOf: [A, B] }` as it
+ *     applies `allOf: [{ minLength: 1 }, A, B]`. Its own keywords are one
+ *     part, read as the copy's own are — those of another type's family
+ *     shed (`TYPE_FAMILY_KEYWORDS`), so `{ properties: { name },
+ *     minLength: 1 }` is `{ minLength: 1 }` — and kept when what is left
+ *     says something about an instance of `type` (`appliesToType`: a type
+ *     admitting it, a `const` or `enum`, a keyword of its family, a
+ *     `oneOf`/`anyOf` a variant of which does, kept whole as the copy's
+ *     own is). A member with no `allOf` and no keyword to shed is kept as
+ *     written, the object the document holds.
+ *   - A `$ref` member is the reference while its component is a schema of
+ *     a type of its own (`namesItsOwnType`): one that declares a type, an
+ *     enum component, or a union. It is kept when the component says
+ *     something about `type`, and when no component answers the `$ref`.
+ *     Any other component — `Owner: { properties }`, `Named: { allOf: [{
+ *     $ref: Owner }, { minLength: 1 }] }`, `Mixed: { properties: { name },
+ *     minLength: 1 }`, `Limits: { minLength: 1 }` — is read as its schema
+ *     written in the member's place, so the copy keeps `{ minLength: 1 }`
+ *     of each and nothing of `Owner`: the reference would type the copy as
+ *     the model the component is, or as `unknown`. A union such a
+ *     component composes (`holdsUnion`: `Comp: { allOf: [{ $ref: Owner },
+ *     { oneOf: [{ properties: { a } }, { minLength: 1 }] }] }`) is left
+ *     off with the rest: read in the member's place it would name its
+ *     inline variants from this site, models only the component builds,
+ *     so `Comp` beside `['object', 'string']` is `Comp | string`. A
+ *     keyword written beside a `$ref` is not read, as before
+ *     (`appliesToType`).
+ *   - A member that names several types itself (`namesSeveralTypes`) is a
+ *     union of its own and is kept as written while its list admits
+ *     `type`.
+ *
+ * A member the walk is already reading — `Loop: { allOf: [{ $ref: Loop },
+ * { minLength: 1 }] }` — adds nothing to itself.
+ */
+function allOfMemberReadAs(member: SchemaObject, type: string, seen: Set<SchemaObject> = new Set()): SchemaObject[] {
+  if (seen.has(member)) return [];
+  seen.add(member);
+  try {
+    if (member.$ref !== undefined) {
+      const target = componentSchemaOf(member.$ref);
+      if (target === undefined || namesItsOwnType(target)) return appliesToType(member, type) ? [member] : [];
+      // A union the component composes stays the component's: read in the
+      // member's place it would name its inline variants from this site,
+      // models only the component builds.
+      return allOfMemberReadAs(target, type, seen).filter((part) => !holdsUnion(part));
+    }
+    if (namesSeveralTypes(member)) return appliesToType(member, type) ? [member] : [];
+    const { allOf, ...own } = member;
+    const family = TYPE_FAMILY_KEYWORDS[type] ?? [];
+    let shed = false;
+    for (const keywords of Object.values(TYPE_FAMILY_KEYWORDS)) {
+      for (const keyword of keywords) {
+        if (family.includes(keyword) || own[keyword] === undefined) continue;
+        delete own[keyword];
+        shed = true;
+      }
+    }
+    const parts: SchemaObject[] = [];
+    if (appliesToType(own, type)) parts.push(allOf === undefined && !shed ? member : derivedCopy(own, member));
+    for (const sub of allOf ?? []) parts.push(...allOfMemberReadAs(sub, type, seen));
+    return parts;
+  } finally {
+    seen.delete(member);
+  }
+}
+
+/** Whether a part read from a component for a primitive copy is a union written inline, a `oneOf`/`anyOf` kept whole, which the copy leaves to the component (`allOfMemberReadAs`). */
+function holdsUnion(part: SchemaObject): boolean {
+  return part.$ref === undefined && (part.oneOf ?? part.anyOf) !== undefined;
+}
+
+/**
+ * Whether a component is a schema of a type of its own, which a `$ref` on
+ * a primitive copy of a type list names as a whole (`allOfMemberReadAs`):
+ * it declares a type (`declaredTypes`: its own `type`, or what its
+ * composition admits — `Name: { type: 'string', minLength: 1 }`, `Tag: {
+ * type: ['string', 'integer'] }`, an alias of either), is an enum
+ * component (`enumComponentDeclaration`: `Any: { enum: ['a', 1] }`, typed
+ * or not, inside whatever wrapper the parser reads one through), or is a
+ * union (`oneOf`/`anyOf`), kept whole as one written inline is. Any other
+ * component declares no type: what it says about one it says beside what
+ * it says about the others — the `properties` of an object beside a
+ * `minLength` — so the reference names nothing a primitive copy could be.
+ */
+function namesItsOwnType(component: SchemaObject): boolean {
+  return (
+    declaredTypes(component) !== undefined ||
+    enumComponentDeclaration(component) !== undefined ||
+    (component.oneOf ?? component.anyOf) !== undefined
+  );
+}
+
+/**
  * `schema` read as `type`, one entry of its type list (#616): a copy with
  * `type` set to that entry, carrying the keywords that apply to an instance
  * of it. A type list says the instance is one of the types named, and JSON
@@ -7562,7 +7788,16 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  * minLength: 1 }` and shedding the `$ref` as it does when the keyword sits
  * beside the list, and `['string', 'integer']` beside the same `allOf` is
  * `string | integer` — not `Owner` and `Owner | integer`, the `$ref`
- * typing the `string` copy because a member beside it applied. A
+ * typing the `string` copy because a member beside it applied. A member
+ * is read at any depth, and a `$ref` by what its component says
+ * (`allOfMemberReadAs`; #674): `allOf: [{ allOf: [{ $ref: Owner }, {
+ * minLength: 1 }] }]` says what `allOf: [{ $ref: Owner }, { minLength: 1
+ * }]` says and is `Owner | string` too — the inner `allOf` was kept whole
+ * because one of its members applied, and its `$ref` typed the `string`
+ * copy `Owner` — as is a member that writes both itself, `{ properties: {
+ * name }, minLength: 1 }` (`NoteAuthor | string`), and a `$ref` to a
+ * component that does, `Named: { allOf: [{ $ref: Owner }, { minLength: 1
+ * }] }` (`Named | string`). A
  * `oneOf`/`anyOf` is kept whole while any variant applies, so the union
  * it types keeps the shape the document wrote. So `Note.author: { type: ['object',
  * 'string'], allOf: [{ $ref: Owner }] }` is `Owner | string` when `Owner`
@@ -7591,14 +7826,17 @@ function typeListCopy(
     if (members === undefined || members.length === 0) continue;
     const excluding = members.filter((member) => !admitsType(member, type)).length;
     if (keyword === 'allOf' ? excluding > 0 : excluding === members.length) return undefined;
-    const applying = members.filter((member) => appliesToType(member, type));
     if (keyword === 'allOf' && !buildsModels(type)) {
-      // A primitive copy keeps the members that say something about its
-      // type alone: nothing of it reaches the extractor, so nothing can
-      // disagree with what it builds.
-      if (applying.length === 0) delete copy.allOf;
-      else if (applying.length < members.length) copy.allOf = applying;
-    } else if (applying.length === 0 && !declaresOwnSchemas(copy)) {
+      // A primitive copy keeps what the members say about its type alone,
+      // at any depth (`allOfMemberReadAs`): nothing of it reaches the
+      // extractor, so nothing can disagree with what it builds. Members
+      // all kept as written leave the `allOf` the schema's own.
+      const parts = members.flatMap((member) => allOfMemberReadAs(member, type));
+      if (parts.length === 0) delete copy.allOf;
+      else if (parts.length !== members.length || parts.some((part, index) => part !== members[index])) {
+        copy.allOf = parts;
+      }
+    } else if (!members.some((member) => appliesToType(member, type)) && !declaresOwnSchemas(copy)) {
       // Kept or left off whole, never trimmed to the members that apply.
       delete copy[keyword];
     }
@@ -8045,39 +8283,33 @@ function buildTypeRef(
     return hasNull ? { kind: 'nullable', inner: union } : union;
   }
 
-  // Handle const → LiteralType (supports string, number, boolean)
+  // Handle a schema that admits one value → the type of that value, by the
+  // one reading of both keywords that say so (`constTypeRef`): the literal
+  // of a string, number or boolean, `nullable<unknown>` for `null`, an array
+  // or map of `unknown` for an array or object.
   if (inlineKind === 'const') {
-    if (typeof schema.const === 'string' || typeof schema.const === 'number' || typeof schema.const === 'boolean') {
-      return { kind: 'literal', value: schema.const };
-    }
-    // null const → nullable unknown
-    if (schema.const === null) {
-      return { kind: 'nullable', inner: { kind: 'primitive', type: 'unknown' } };
-    }
-    // const of object/array → map or array with unknown values
-    if (typeof schema.const === 'object') {
-      if (Array.isArray(schema.const)) {
-        return { kind: 'array', items: { kind: 'primitive', type: 'unknown' } };
-      }
-      return { kind: 'map', valueType: { kind: 'primitive', type: 'unknown' } };
-    }
+    const pinned = constTypeRef(schema.const);
+    if (pinned) return pinned;
   }
+  // A single-value `enum:` list is the OAS 3.0 spelling of a `const` and is
+  // typed as that `const` is (`loneEnumValue`; #667: the value was kept only
+  // when a number and was the literal of its string form otherwise, so
+  // `enum: [true]` was `'true'` and `enum: [{ a: 1 }]` `'[object Object]'`).
   // A `null` member of an inline `enum:` marks nullability, not a value.
   // Strip it before deciding literal-vs-enum, and wrap the result so a
   // bare `type: 'string', enum: ['a', null]` is nullable even without a
   // `type: [..., 'null']` array (the array branch above already wrapped
-  // us when present; `asNullable` keeps that from doubling up).
-  const enumValues = nonNullEnumValues(schema.enum);
-  const enumAdmitsNull = schema.enum !== undefined && enumValues.length !== schema.enum.length;
-  if (inlineKind === 'enum' && enumValues.length === 1) {
-    const v = enumValues[0];
-    const literal: TypeRef = { kind: 'literal', value: typeof v === 'number' ? v : String(v) };
-    return enumAdmitsNull ? asNullable(literal) : literal;
+  // us when present; `asNullable` keeps that from doubling up). A list of
+  // nothing but `null` admits `null` alone, as `const: null` does.
+  const enumAdmitsNull = schema.enum !== undefined && nonNullEnumValues(schema.enum).length !== schema.enum.length;
+  if (inlineKind === 'enum') {
+    const pinned = constTypeRef(loneEnumValue(schema.enum));
+    if (pinned) return enumAdmitsNull ? asNullable(pinned) : pinned;
   }
 
   // Handle enum — the `enum-list` spelling of the one decision the predictor
   // that reserves enum names before typing reads too (`inlineEnumSpelling`);
-  // the single-member list was returned as a literal above.
+  // a list that admits one value alone was typed as that value above.
   if (inlineEnumSpelling(schema)?.spelling === 'enum-list') {
     // Named by the one rule every inline enum follows (`inlineEnumName`):
     // qualified by the parent with its list-item markers stripped, no
