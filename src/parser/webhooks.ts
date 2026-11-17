@@ -208,7 +208,7 @@ interface MintedWebhook {
 }
 
 /** The part of a minting a `Webhook` carries: its typed parameters and payload. */
-export type MintedShape = Pick<
+type MintedShape = Pick<
   MintedWebhook,
   | 'headerParams'
   | 'queryParams'
@@ -220,14 +220,27 @@ export type MintedShape = Pick<
   | 'requestBodyContents'
 >;
 
+/** The part of `minted` a node carries (`MintedShape`), holding the minting's own parameters and references. */
+function carriedShape(minted: MintedWebhook): MintedShape {
+  return {
+    headerParams: minted.headerParams,
+    queryParams: minted.queryParams,
+    cookieParams: minted.cookieParams,
+    requestBody: minted.requestBody,
+    requestBodyEncoding: minted.requestBodyEncoding,
+    requestBodyContentType: minted.requestBodyContentType,
+    requestBodyContentTypes: minted.requestBodyContentTypes,
+    requestBodyContents: minted.requestBodyContents,
+  };
+}
+
 /**
  * What one group of a batch minted, kept for a later batch: the `webhooks`
  * map's groups, for the callbacks read after them (`extractCallbacks`). A
  * callback that reads the operation object one of these was minted from,
  * under the stem it took, mints nothing and shares it (`sharedMintingOf`;
- * #631); any other callback minting one of its names for another shape
- * moves off the name, since nothing of a later batch moves what an
- * earlier one minted (`separateMintedNames`; #634).
+ * #631); every other callback steps around the models and the inline
+ * enums it holds (`separateMintedNames`; #634).
  */
 export interface SharedMinting {
   /** The entry the group was minted from: its path item and operation object are what a sharing entry reads too. */
@@ -238,17 +251,14 @@ export interface SharedMinting {
   hashLength: number;
   /** How many times the hash's input had its source put in front (`hashInput`); none unless a key and an operationId of one text met (#580). */
   hashLevel: number;
-  /** The minted parameters and payload, as the owner's node carries them; a sharing node takes a copy (`cloneMintedShape`). */
-  shape: MintedShape;
-  /** The models the group minted, as `BuiltReceivedRequests.inlineModels` lists them. */
-  models: Model[];
   /**
-   * Every model and inline-enum name the group minted. With `models` and
-   * `shape`, what a later batch compares a name it mints against: a name
-   * held here for another shape moves every group minting it there, never
-   * this one (`separateMintedNames`; #634).
+   * The minting itself: the parameters and payload the owner's node
+   * carries, of which a sharing node takes a copy (`carriedShape`,
+   * `cloneMintedShape`), and the models and names behind them, which a
+   * later batch's model or inline enum of another shape may not take
+   * (`separateMintedNames`).
    */
-  names: ReadonlySet<string>;
+  minted: MintedWebhook;
   /**
    * The references of the site that owns the group's models
    * (`InlineModelBundle.roots`), which a sharing node's references join, so
@@ -433,10 +443,12 @@ export interface BuiltReceivedRequests {
  * declares an `operationId` reference one `OnPetAdoptedPayload`, where the
  * callback's models used to step around the names the webhook took
  * (`OnPetAdoptedF9960APayload`), and adding the webhook to a document whose
- * callback already reads the path item renames nothing (#631). Every other
- * entry steps around what those groups minted: a name one of them holds
- * for another shape is contested for the group minting it here, which
- * moves alone (`separateMintedNames`; #634).
+ * callback already reads the path item renames nothing (#631). The models
+ * those mintings hold keep their names against this batch's groups too,
+ * and so do their inline enums (`heldShapes`, `contestedNames`): a group's
+ * model or inline enum of such a name and another shape is renamed under
+ * its stem, never left to merge into the earlier one or to be numbered
+ * after it (#634).
  */
 export function buildReceivedRequests(
   entries: WebhookEntry[],
@@ -542,7 +554,7 @@ export function buildReceivedRequests(
       identities,
       components,
       siblingDocs,
-      earlier,
+      heldShapes(earlier),
     );
   }
   const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
@@ -550,20 +562,7 @@ export function buildReceivedRequests(
 
   // Each group's minted parameters and payload: its owner's node carries
   // them as they are, every other node sharing the minting a copy.
-  const shapes = new Map<WebhookGroup, MintedShape>();
-  for (const group of groups) {
-    const minted = mintedByGroup.get(group)!;
-    shapes.set(group, {
-      headerParams: minted.headerParams,
-      queryParams: minted.queryParams,
-      cookieParams: minted.cookieParams,
-      requestBody: minted.requestBody,
-      requestBodyEncoding: minted.requestBodyEncoding,
-      requestBodyContentType: minted.requestBodyContentType,
-      requestBodyContentTypes: minted.requestBodyContentTypes,
-      requestBodyContents: minted.requestBodyContents,
-    });
-  }
+  const shapes = new Map(groups.map((group) => [group, carriedShape(mintedByGroup.get(group)!)]));
 
   const built: BuiltReceivedRequests['built'] = [];
   const nodesByGroup = new Map<WebhookGroup, Webhook[]>();
@@ -573,7 +572,7 @@ export function buildReceivedRequests(
     // — before any callback is attached to the node, as a group's own are.
     const shared = sharedOf.get(entry);
     if (shared !== undefined) {
-      const node = buildWebhook(entry, cloneMintedShape(shared.shape), components, siblingDocs);
+      const node = buildWebhook(entry, cloneMintedShape(carriedShape(shared.minted)), components, siblingDocs);
       shared.roots?.push(...collectWebhookTypeRefs(node));
       built.push({ entry, node, stem: shared.stem });
       continue;
@@ -605,9 +604,7 @@ export function buildReceivedRequests(
     stem: stems.get(group)!,
     hashLength: hashLength.get(group) ?? 0,
     hashLevel: identities.get(group)!.level,
-    shape: shapes.get(group)!,
-    models: mintedByGroup.get(group)!.inlineModels,
-    names: mintedByGroup.get(group)!.names,
+    minted: mintedByGroup.get(group)!,
     ...(bundleOf.has(group) ? { roots: bundleOf.get(group)!.roots } : {}),
   }));
 
@@ -652,6 +649,77 @@ function sharedMintingOf(entry: WebhookEntry, earlier: readonly SharedMinting[])
     const hash = webhookDisambiguator(hashInput({ identity: stemIdentity(entry), level: hashLevel }), hashLength);
     return plainStem(entry, hash) === stem;
   });
+}
+
+/** The names an earlier batch holds — its models' and its inline enums' — each with every shape (`mintedShape`) it holds the name for. */
+type HeldShapes = ReadonlyMap<string, ReadonlySet<string>>;
+
+/**
+ * The shapes the mintings of an earlier batch hold each of their names for
+ * — every model and every inline enum they minted (`MintedWebhook.names`;
+ * #631, #634) — read off the models and enum references themselves
+ * (`mintedShape`), never assumed from a name: one shape per name, unless
+ * two of those mintings hold one name for two shapes — two webhooks'
+ * title-mapped variants, which the `webhooks` map leaves to the model
+ * merge.
+ */
+function heldShapes(earlier: readonly SharedMinting[]): HeldShapes {
+  const held = new Map<string, Set<string>>();
+  for (const { minted } of earlier) {
+    for (const name of minted.names) {
+      held.set(name, new Set([...(held.get(name) ?? []), mintedShape(minted, name)]));
+    }
+  }
+  return held;
+}
+
+/**
+ * The contested names of one round of `separateMintedNames`, each with the
+ * groups it moves. A name no earlier batch holds is contested when two of
+ * the groups minting it disagree on its shape, and moves every one of
+ * them. A name an earlier batch holds (`held`: a `webhooks` entry's own
+ * model, which a callback sharing the webhook's minting references too;
+ * #631) is not the groups' to take: that model was named before any
+ * callback was read and never moves, as a callback never renames a
+ * webhook's model. So a group minting a model of the name with the one
+ * shape held shares it, as the merge always let it, and stays whatever the
+ * other groups mint under the name; a group minting a model of another
+ * shape moves, a single group included — `createDog`'s callback variant
+ * titled `Shape` with a `radius` beside a webhook's `Shape` with `sides`
+ * is `CreateDogDogAdoptedShape`, where it used to reach the merge and lose
+ * its fields to the webhook's model under a `more than one definition`
+ * warning — and where the earlier batch holds the name for two shapes, no
+ * group's model keeps it. An inline enum the earlier batch minted is held
+ * the same way (#634): a group minting the name for the very members held
+ * shares the enum, and one minting it for other members moves, so the
+ * `size` enum of that `Shape` goes with its model
+ * (`CreateDogDogAdoptedShapeSize`) where the collectors used to number it
+ * after the webhook's (`ShapeSize2`). A group that mints something else
+ * under a held name — an inline enum where a model is held, `Shape.size`
+ * beside a webhook's variant titled `ShapeSize` — does not share it
+ * either, and moves (`CreatePetPetReturnedShapeSize`): left on the name,
+ * the enum had the model merge rename the webhook's model off it
+ * (`SizedShapeSize`, "enum "ShapeSize" owns the name"), a callback
+ * renaming a webhook's model after all.
+ */
+function contestedNames(
+  minters: ReadonlyMap<string, WebhookGroup[]>,
+  mintedByGroup: ReadonlyMap<WebhookGroup, MintedWebhook>,
+  held: HeldShapes,
+): Array<[string, WebhookGroup[]]> {
+  const contested: Array<[string, WebhookGroup[]]> = [];
+  for (const [name, groups] of minters) {
+    const shapeOf = (group: WebhookGroup): string => mintedShape(mintedByGroup.get(group)!, name);
+    const shapes = held.get(name);
+    if (shapes === undefined) {
+      if (new Set(groups.map(shapeOf)).size > 1) contested.push([name, groups]);
+      continue;
+    }
+    const shares = (group: WebhookGroup): boolean => shapes.size === 1 && shapes.has(shapeOf(group));
+    const moving = groups.filter((group) => !shares(group));
+    if (moving.length > 0) contested.push([name, moving]);
+  }
+  return contested;
 }
 
 /**
@@ -699,8 +767,8 @@ function sharedMintingOf(entry: WebhookEntry, earlier: readonly SharedMinting[])
  * enums' values. A group that minted a model and an inline enum under one
  * contested name renames both, the model first and the enum to the next
  * free name (`<Stem><Name>2`), as the collectors step an enum past a
- * model of its name. Every minter of a contested name hashes or renames,
- * so nothing is left to the merge with a warning.
+ * model of its name. Every group a contested name moves hashes or
+ * renames, so nothing is left to the merge with a warning.
  *
  * Every contested name of a round is decided together: each replacement
  * is chosen against the names the round leaves occupied — the names
@@ -723,25 +791,21 @@ function sharedMintingOf(entry: WebhookEntry, earlier: readonly SharedMinting[])
  * `size` enums two enums. The check runs again until no name is
  * contested.
  *
- * `earlier` is what a batch read before this one minted — the `webhooks`
- * map's groups, when the callbacks are read (`SharedMinting`). Nothing
- * here moves one of those: a callback never renames a webhook's model. So
- * a name one of them holds counts among the shapes the name is minted for,
- * and a group of this batch minting it for another shape is contested
- * alone and moves alone, by the rule above: a callback's variant titled
- * `Shape` beside a webhook's `Shape` of other fields is `<Stem>Shape`,
- * its `size` enum `<Stem>ShapeSize`, where the model merge used to keep
- * one definition for both with a "more than one definition" warning. One
- * shape is shared, as between two callbacks. The name is reserved
- * (`reserved`), so it stays occupied whichever groups leave it.
+ * The `webhooks` map is not held to this: the one name the resolution
+ * leaves two webhooks sharing is a title-mapped variant, which the model
+ * merge shares when the shapes agree and otherwise keeps one definition
+ * of with a warning (`keepLargestByName`), as it always has, and a
+ * document without callbacks names its webhooks as before. A callback
+ * batch — nested, shared across depths, its stems built on its owners' —
+ * is held to the stricter rule (#382).
  *
- * The `webhooks` map itself is not held to this: the one name the
- * resolution leaves two webhooks sharing is a title-mapped variant, which
- * the model merge shares when the shapes agree and otherwise keeps one
- * definition of with a warning (`keepLargestByName`), as it always has,
- * and a document without callbacks names its webhooks as before. A
- * callback batch — nested, shared across depths, its stems built on its
- * owners' — is held to the stricter rule (#382).
+ * What the `webhooks` map minted holds its name against the callbacks
+ * (`held`), a model (#631) and an inline enum (#634) alike: it never
+ * moves, and a callback group minting the name for another shape moves as
+ * a contested one does, a single group included (`contestedNames`). So a
+ * callback's variant titled `Shape` beside a webhook's `Shape` of other
+ * fields is `<Stem>Shape` and its `size` enum `<Stem>ShapeSize`, the enum
+ * following its model wherever the webhook's `size` has other members.
  */
 function separateMintedNames(
   order: WebhookGroup[],
@@ -749,13 +813,13 @@ function separateMintedNames(
   hashLength: Map<WebhookGroup, number>,
   mintedByGroup: Map<WebhookGroup, MintedWebhook>,
   reservedOf: Map<WebhookGroup, ReservedNames>,
-  /** The names reserved before the batch, those of `earlier` among them — what a replacement steps around beside the names still minted. */
+  /** The names reserved before the batch, the held ones among them — what a replacement steps around beside the names still minted. */
   reserved: ReservedNames,
   identities: Map<WebhookGroup, HashIdentity>,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
-  /** What an earlier batch minted, which no group of this one moves: a name it holds for another shape is contested for every group minting it here. */
-  earlier: readonly SharedMinting[],
+  /** The names an earlier batch holds, each with the shapes it holds the name for (`heldShapes`). */
+  held: HeldShapes,
 ): void {
   for (;;) {
     // Every name the groups mint, with the groups, in minting order.
@@ -763,17 +827,13 @@ function separateMintedNames(
     for (const group of order) {
       for (const name of mintedByGroup.get(group)!.names) minters.set(name, [...(minters.get(name) ?? []), group]);
     }
-    // Every contested name — minted for two shapes, by two groups or by a
-    // group and an earlier batch; identical shapes are the merge's to
-    // share, as two webhooks' are — decided together, one round at a time,
-    // so no replacement depends on the order the groups were declared in.
-    const contested = [...minters].filter(([name, groups]) => {
-      const shapes = new Set(groups.map((group) => mintedShape(mintedByGroup.get(group)!, name)));
-      for (const { shape, models, names } of earlier) {
-        if (names.has(name)) shapes.add(mintedShape({ ...shape, inlineModels: models }, name));
-      }
-      return shapes.size > 1;
-    });
+    // Every contested name — minted by two groups whose shapes disagree;
+    // identical shapes are the merge's to share, as two webhooks' are —
+    // decided together, one round at a time, so no replacement depends on
+    // the order the groups were declared in. Each comes with the groups it
+    // moves: every group minting it, unless an earlier batch holds the name
+    // (`contestedNames`).
+    const contested = contestedNames(minters, mintedByGroup, held);
     if (contested.length === 0) return;
     // Of a contested name's minters the hash moves, those hashed already
     // that hash one string as another minter of the name — a key and an
@@ -798,11 +858,11 @@ function separateMintedNames(
     );
     const raised = new Set([...raisedBy.values()].flatMap((groups) => [...groups]));
     for (const group of raised) identities.get(group)!.level += 1;
-    // How each minter of a contested name moves: a group whose stem the
-    // name embeds — raised, or with hash to spare where the name raises
-    // none of its minters — hashes once this round and mints again; any
-    // other renames what it minted under the name, a model or an inline
-    // enum alike.
+    // How each group a contested name moves does so: a group whose stem
+    // the name embeds — raised, or with hash to spare where the name
+    // raises none of its minters — hashes once this round and mints again;
+    // any other renames what it minted under the name, a model or an
+    // inline enum alike.
     const hashing = new Set<WebhookGroup>();
     const renaming: Array<{ group: WebhookGroup; name: string }> = [];
     for (const [name, groups] of contested) {
@@ -828,14 +888,14 @@ function separateMintedNames(
       mintedByGroup.set(group, mintWebhook(group.owner, hashed, components, reservedOf.get(group)!, siblingDocs));
     }
     // A rename is chosen against the names this round leaves occupied —
-    // the names reserved before the batch, an earlier batch's among them,
-    // every name still minted once the round's vacations are taken out
-    // (never a wave's old snapshot, which holds names an earlier wave has
-    // since vacated), plus the replacements already chosen — in identity
-    // order, never declaration order, so a name another group vacates is
-    // free to take whichever came first. Every group minting a contested
-    // name leaves it — hashing or renaming — so each is vacated by the
-    // batch.
+    // the names reserved before the batch, every name still minted once
+    // the round's vacations are taken out (never a wave's old snapshot,
+    // which holds names an earlier wave has since vacated), plus the
+    // replacements already chosen — in identity order, never declaration
+    // order, so a name another group vacates is free to take whichever
+    // came first. Every group a contested name moves leaves it, hashing or
+    // renaming; a group that stays on one shares a name an earlier batch
+    // holds, which is reserved.
     const vacated = new Set(contested.map(([name]) => name));
     const occupied = new Set(reserved.all);
     for (const group of order) {
@@ -931,7 +991,7 @@ interface MintedMoves {
  * left to the merge that it would not share. A minting that holds both a
  * model and an inline enum under the name is read on both.
  */
-function mintedShape(minted: MintedParts, name: string): string {
+function mintedShape(minted: MintedWebhook, name: string): string {
   const model = minted.inlineModels.find((m) => m.name === name);
   const enums = new Set(
     mintedEnumRefs(minted, name).map((ref) => JSON.stringify(enumValuesOf(ref).map(enumValueShapeKey))),
@@ -939,16 +999,13 @@ function mintedShape(minted: MintedParts, name: string): string {
   return JSON.stringify([model !== undefined ? shapeFingerprint(model) : null, [...enums].sort()]);
 }
 
-/** What a minting is read by once it is made: its models, and the references its shape holds. */
-type MintedParts = MintedShape & Pick<MintedWebhook, 'inlineModels'>;
-
 /**
  * Every inline enum reference named `name` a minting holds — one carrying
  * its `values`, in a minted model's field or variant or in the shape's own
  * references — each once, by identity. A `$ref` to a component enum of the
  * name carries no `values` and is a reference, not a minting.
  */
-function mintedEnumRefs(minted: MintedParts, name: string): EnumRef[] {
+function mintedEnumRefs(minted: MintedWebhook, name: string): EnumRef[] {
   const refs = new Set<EnumRef>();
   for (const ref of [...minted.inlineModels.flatMap(collectModelTypeRefs), ...mintedShapeRefs(minted)]) {
     walkTypeRef(ref, {
@@ -961,7 +1018,7 @@ function mintedEnumRefs(minted: MintedParts, name: string): EnumRef[] {
 }
 
 /** Every reference a minting's shape holds: its parameters' types, its payload and its content entries' types. */
-function mintedShapeRefs(minted: MintedShape): TypeRef[] {
+function mintedShapeRefs(minted: MintedWebhook): TypeRef[] {
   return [
     ...[...minted.headerParams, ...minted.queryParams, ...minted.cookieParams].map((param) => param.type),
     ...(minted.requestBody ? [minted.requestBody] : []),
@@ -974,7 +1031,7 @@ function mintedShapeRefs(minted: MintedShape): TypeRef[] {
  * its `values`, in a minted model's field or in the shape's own references
  * — which a later wave's model may not take (`ReservedNames.enums`).
  */
-function mintedEnumNames(minted: MintedParts): Set<string> {
+function mintedEnumNames(minted: MintedWebhook): Set<string> {
   const names = new Set<string>();
   const refs: TypeRef[] = [...minted.inlineModels.flatMap(collectModelTypeRefs), ...mintedShapeRefs(minted)];
   for (const ref of refs) {
