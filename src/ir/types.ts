@@ -1150,6 +1150,16 @@ export interface EnumRef {
   values?: (string | number)[];
 }
 
+/**
+ * A schema that admits one string, number or boolean, typed as that value:
+ * a `const`, or an `enum:` list of the value alone — the OAS 3.0 spelling
+ * of a `const` — read alike, the value kept as the document writes it, so
+ * `{ type: 'boolean', enum: [true] }` is `{ kind: 'literal', value: true }`
+ * as `{ type: 'boolean', const: true }` is, not the string `'true'` (#667).
+ * A one-value list of anything else is typed as its `const` is too: `null`
+ * is `nullable<unknown>`, an array an array of `unknown`, an object a map
+ * of `unknown`.
+ */
 export interface LiteralType {
   kind: 'literal';
   value: string | number | boolean | null;
