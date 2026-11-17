@@ -95,11 +95,13 @@
  * (`componentAccepts`) — one that is live (a deprecated component takes no
  * body, as it takes no inline copy anywhere else, #441, #629), that
  * declares every field the member has, required or optional as the member
- * has it and deprecated only where the member's is (a live field takes a
- * deprecated one, with a warning, as the live model takes a deprecated
- * body), of its type and domain name, no stricter in its limits at any
- * level of a field's type (an array's items, a map's values, a union's
- * variants; #611), and admitting every value the member pins:
+ * has it, and deprecates none of them, whichever flag the member gives the
+ * field (#671: the component's flags decide alone, so a body's own flip
+ * never moves it on or off the component; a live field takes a deprecated
+ * one, with a warning, as the live model takes a deprecated body), of its
+ * type and domain name, no stricter in its limits at any level of a field's
+ * type (an array's items, a map's values, a union's variants; #611), and
+ * admitting every value the member pins:
  * those members fold onto it, and a member it cannot stand for is left as
  * it is, with a warning that prints that member's shape, so a body that
  * gains a field the component lacks moves alone. A name anything else holds
@@ -128,10 +130,22 @@
  * name, the fields stay plain strings, with a warning. One value every
  * member pins stays that literal, and a lone pinned value beside free
  * strings widens to `string`. An optional field the members type
- * differently is the union of the types they wrote. A field's description,
- * example and extensions survive only when every member wrote the same one;
- * the response's own `description` stays on the `errors[]` entry, where it
- * always was.
+ * differently is the union of the types they wrote.
+ *
+ * Documentation is not shape, and is settled by agreement at both levels
+ * (#666). The shared model's own `description`, `externalDocs` and
+ * extensions are the bodies' schemas' — what each body's model carried
+ * until here, an `allOf` body's wrapper layer's included — each of the
+ * three kept, on its own, when every member wrote the same one and absent
+ * otherwise: a member that wrote none disagrees with one that wrote some,
+ * and a model that folds a single body keeps that body's. A nested error
+ * body is documented the same way, by its own members. A field's
+ * description, link and extensions survive only when every member that has
+ * the field wrote the same one, whatever the fold made of its type, and
+ * its example only while that type is still the members' own. A component
+ * that takes the bodies (`componentAccepts`) keeps its own text and link,
+ * or none, and takes nothing of theirs. The response's own `description`
+ * stays on the `errors[]` entry, where it always was.
  *
  * Every other inline enum a shared body's field lists — an integer or
  * number `enum`, a string `enum` under array items or map values or in a
@@ -179,7 +193,7 @@ import {
   typeRefConstraints,
   walkTypeRef,
 } from '../ir/types.js';
-import { numberedName, singularize, toPascalCase } from '../utils/naming.js';
+import { numberedName, singularizeTrailingWord, toPascalCase } from '../utils/naming.js';
 import { sameEnumShape } from './enum-members.js';
 import { isErrorStatusRange } from './responses.js';
 import { combineConstraints } from './schemas.js';
@@ -383,9 +397,14 @@ function fold(
     const list = left.map((member) => `"${member.name}"`).join(', ');
     return left.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
   };
-  const leave = (name: string, holder: string, left: readonly Model[]): void => {
+  const leave = (
+    name: string,
+    holder: string,
+    left: readonly Model[],
+    remedy = 'give the two the same shape, or rename one',
+  ): void => {
     console.warn(
-      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; give the two the same shape, or rename one`,
+      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; ${remedy}`,
     );
   };
   // An inline enum whose name is taken leaves its bodies the same way (#612).
@@ -403,8 +422,9 @@ function fold(
     }
     // A component schema of this shape is the shared body of every member
     // it can stand for; a member it cannot — one with a field, a domain
-    // name, a limit or a pinned value the component does not admit, a live
-    // field the component deprecates, or any member when the component is
+    // name, a limit or a pinned value the component does not admit, one
+    // that carries a field the component deprecates, whichever flag the
+    // member gives it (#671), or any member when the component is
     // deprecated — is left as it is, alone, with its own shape in the
     // warning, and the fold runs again with the rest (#506, #629).
     const component = byName.get(name);
@@ -428,7 +448,29 @@ function fold(
         absorbed.add(key);
         return;
       }
-      leave(name, holder, left);
+      // A member nothing but a field the component deprecates keeps off it
+      // may print the component's very shape, so it is told that rule, the
+      // same whichever flag it gives the field, and not to match a shape
+      // (#671); every other member is told as before.
+      const flagged: Model[] = [];
+      const differing: Model[] = [];
+      for (const member of left) {
+        (!component.deprecated && componentFits(component, member, keys) ? flagged : differing).push(member);
+      }
+      if (differing.length > 0) leave(name, holder, differing);
+      if (flagged.length > 0) {
+        const carried = new Set(flagged.flatMap((member) => deprecatedCarried(component, member)));
+        const fields = [...carried]
+          .sort()
+          .map((field) => `"${field}"`)
+          .join(', ');
+        leave(
+          name,
+          holder,
+          flagged,
+          `"${name}" deprecates ${fields}, and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not; make ${fields} live on "${name}", or rename one`,
+        );
+      }
       return;
     }
     leave(name, holder, members);
@@ -823,37 +865,62 @@ const OAUTH_ERROR_FIELDS = ['error', 'error_description'];
 const ERROR_CODE_FIELDS = ['code', 'error'];
 
 /**
- * Whether `component`, whose key is the group's, can stand for `member`: it
- * is live — a deprecated component takes no body, live or deprecated, as it
- * takes no inline copy anywhere else (`ownerFlagAdmits`, #441, #629), so no
- * live site resolves to a deprecated model; it declares every field the
- * member has, required or optional as the member has it, and deprecated
- * only where the member's field is — a component whose field is deprecated
- * would give a live member's readers a notice its schema never wrote, while
- * one whose field is live takes a member's deprecated field as the live
- * model takes a deprecated body (`flagAdmits`), announced by `claim` since
- * the field is the flag's only carrier — of the member's type and domain
- * name, so no body loses a field or a hint by folding onto it; it is no
- * stricter than the member — every limit it writes, on itself, a field or any level
- * of the field's type (`typeNoStricter`: the type's own, an array's items,
- * a map's values, a union's variants; #611), the member writes the same, so
- * no body is narrowed by folding onto it (the key leaves limits out, as the
- * shared model merges them); and it admits every value the member pins — a
- * string field the member pins is, on the component, a plain string, or,
- * when the member does not leave it free, a literal or inline enum holding
- * every pinned value. The key reads every string as one, so this is what
- * tells a component the body can reference from one that would narrow its
- * codes.
+ * Whether `component`, whose key is the group's, can stand for `member`.
+ * Its `deprecated` flags decide on their own, whatever the member's are,
+ * so a flag a body flips never moves the body on or off a component
+ * (#671). It is live: a deprecated component takes no body, live or
+ * deprecated, as it takes no inline copy anywhere else (`ownerFlagAdmits`,
+ * #441, #629), so no live site resolves to a deprecated model. And it
+ * deprecates no field the member carries (`deprecatedCarried`), live or
+ * deprecated there: a component `ErrorBody` whose `message` is deprecated
+ * would give a `{ message }` body whose `message` is live a notice its
+ * schema never wrote (#629), and taking the one whose `message` is
+ * deprecated, as it did until #671, made that body's own flag choose
+ * between `ErrorBody` and `GetNoteError404` — a breaking retype for an edit
+ * that is additive on the body's own model. A field the component
+ * deprecates and the member does not carry is nothing to the member; a
+ * live field of the component takes the member's deprecated one as the
+ * live model takes a deprecated body (`flagAdmits`), announced by `claim`
+ * since the field is the flag's only carrier. The rest of the component
+ * has to fit the member too (`componentFits`).
  */
 function componentAccepts(component: Model, member: Model, keys: ModelKeys): boolean {
-  if (component.deprecated) return false;
+  return (
+    !component.deprecated && deprecatedCarried(component, member).length === 0 && componentFits(component, member, keys)
+  );
+}
+
+/** The names of the fields `member` carries that `component` deprecates, whatever flag the member gives them, sorted. */
+function deprecatedCarried(component: Model, member: Model): string[] {
+  return member.fields
+    .filter((field) => component.fields.some((own) => own.name === field.name && own.deprecated === true))
+    .map((field) => field.name)
+    .sort();
+}
+
+/**
+ * Whether `component`, whose key is the group's, fits `member` in all but
+ * its `deprecated` flags, which `componentAccepts` reads: it declares every
+ * field the member has, required or optional as the member has it, of the
+ * member's type and domain name, so no body loses a field or a hint by
+ * folding onto it; it is no stricter than the member — every limit it
+ * writes, on itself, a field or any level of the field's type
+ * (`typeNoStricter`: the type's own, an array's items, a map's values, a
+ * union's variants; #611), the member writes the same, so no body is
+ * narrowed by folding onto it (the key leaves limits out, as the shared
+ * model merges them); and it admits every value the member pins — a string
+ * field the member pins is, on the component, a plain string, or, when the
+ * member does not leave it free, a literal or inline enum holding every
+ * pinned value. The key reads every string as one, so this is what tells a
+ * component the body can reference from one that would narrow its codes.
+ */
+function componentFits(component: Model, member: Model, keys: ModelKeys): boolean {
   if (!noStricter(component.constraints, member.constraints)) return false;
   for (const field of member.fields) {
     const own = component.fields.find((f) => f.name === field.name);
     if (
       !own ||
       own.required !== field.required ||
-      (own.deprecated === true && !field.deprecated) ||
       own.domainName !== field.domainName ||
       keys.type(own.type, true) !== keys.type(field.type, true) ||
       !noStricter(own.constraints, field.constraints) ||
@@ -1192,19 +1259,34 @@ function nestedPrefix(item: Model, naming: NamingContext, visiting: ReadonlySet<
  * The name of a nested error body `item` reached through `field` of a body
  * `parent` named `parentName`: the parent's name plus the field, singular
  * for an array item, replacing the field where the parent's name already
- * ends in it. When the field is not among the ones the parent's name reads
- * (an optional one), that name says nothing of the item, so the item's own
- * fields follow after `With`, as they prefix the field in a required
- * parent's name — `ErrorBodyDetailWithReason` for
- * `{ message, detail?: { reason } }` — so two items under one optional field
- * never ask for one name.
+ * ends in it. The singular is the one the same field gives its items on a
+ * component: the field's PascalCased name with its trailing word
+ * singularized (`singularizeTrailingWord`, which `qualifyInlineModelName`
+ * reads a component's field by), so `canvases` is `Canvas`, `series` is
+ * `Series` and `tax_series` is `TaxSeries` — `ErrorBodyCanvasWithReason`
+ * for `{ message, canvases?: [{ reason }] }`, as `Pet` + `canvases` is
+ * `PetCanvas` (#665; the field was singularized as the document spells it
+ * before, so a lowercase `canvases` missed the safe list and was
+ * `ErrorBodyCanvaseWithReason`, and `series` `ErrorBodySeryWithStep`). A
+ * field that is its own singular (`series`, `status`, `tags`, `data`) has
+ * no plural to replace: under a parent whose name ends in it, the
+ * replacement would be the parent's own name, which the parent holds, so
+ * the word follows the parent's name as an object field's does —
+ * `ErrorBodyWithReasonSeriesSeries` for `{ message, series: [{ reason }] }`
+ * on `ErrorBodyWithReasonSeries`, as `detail: { reason }` is
+ * `ErrorBodyWithReasonDetailDetail` on `ErrorBodyWithReasonDetail`. When
+ * the field is not among the ones the parent's name reads (an optional
+ * one), that name says nothing of the item, so the item's own fields follow
+ * after `With`, as they prefix the field in a required parent's name —
+ * `ErrorBodyDetailWithReason` for `{ message, detail?: { reason } }` — so
+ * two items under one optional field never ask for one name.
  */
 function nestedName(parentName: string, parent: Model, field: Field, item: Model, naming: NamingContext): string {
   const word = toPascalCase(field.name);
   const inArray = unwrapNullable(field.type).kind === 'array';
-  const itemWord = inArray ? toPascalCase(singularize(field.name)) : word;
+  const itemWord = inArray ? singularizeTrailingWord(word) : word;
   const base =
-    inArray && word.length > 0 && parentName.endsWith(word)
+    inArray && itemWord !== word && parentName.endsWith(word)
       ? `${parentName.slice(0, -word.length)}${itemWord}`
       : `${parentName}${itemWord}`;
   if (namedFields(parent).includes(field)) return base;
@@ -1215,15 +1297,28 @@ function nestedName(parentName: string, parent: Model, field: Field, item: Model
 /**
  * One shared model for `members`, carrying every field any member declares
  * (`sharedFieldOrder`): each field's type reads as the group reads it
- * (`sharedFieldType`); its description, access flags, default, limits and
- * extensions are kept when every member that has the field wrote the same
- * one, the example only while the type is still the member's own, its
- * domain name when every member that hints the field agrees
- * (`sharedDomainName`), and its `deprecated` when every member that carries
- * the field deprecates it (`sharedDeprecated`), as the model is deprecated
- * only when every member is (`sharedModelDeprecated`): a deprecated member,
- * or a member's deprecated field, folds onto a live one with a warning, as
- * a deprecated inline copy folds onto its live twin (#441, #629).
+ * (`sharedFieldType`); its description, link (`externalDocs`), access
+ * flags, default, limits and extensions are kept when every member that has
+ * the field wrote the same one — the link whatever the fold made of the
+ * type, as the description is (#666: it was dropped with the examples, so
+ * `code: const a` beside `code: const b`, both linking to one page, lost
+ * the link by becoming `ErrorBodyCode`) — the example only while the type
+ * is still the member's own, its domain name when every member that hints
+ * the field agrees (`sharedDomainName`), and its `deprecated` when every
+ * member that carries the field deprecates it (`sharedDeprecated`), as the
+ * model is deprecated only when every member is (`sharedModelDeprecated`):
+ * a deprecated member, or a member's deprecated field, folds onto a live
+ * one with a warning, as a deprecated inline copy folds onto its live twin
+ * (#441, #629).
+ *
+ * The model's own `description` and `externalDocs` are the members' — the
+ * text and link each body's schema gave its model, an `allOf` body's
+ * wrapper layer's included — each kept when every member wrote the same
+ * one and absent otherwise, as its limits and extensions are (#666): two
+ * `{ message }` bodies described "Why the request failed." are an
+ * `ErrorBody` described so, a lone body's are its model's, and a member
+ * that wrote none, or another text, leaves the model without one. Two
+ * links are the same when their `url` and their own `description` are.
  */
 function buildSharedModel(
   name: string,
@@ -1252,6 +1347,10 @@ function buildSharedModel(
     if (domainName !== undefined) shared.domainName = domainName;
     const description = agree('description');
     if (description !== undefined) shared.description = description;
+    // The link is documentation, as the text is: kept whenever the members
+    // agree on it, whatever the fold made of the type (#666).
+    const externalDocs = agree('externalDocs');
+    if (externalDocs !== undefined) shared.externalDocs = externalDocs;
     const readOnly = agree('readOnly');
     if (readOnly !== undefined) shared.readOnly = readOnly;
     const writeOnly = agree('writeOnly');
@@ -1267,8 +1366,6 @@ function buildSharedModel(
       if (example !== undefined) shared.example = example;
       const examples = agree('examples');
       if (examples !== undefined) shared.examples = examples;
-      const externalDocs = agree('externalDocs');
-      if (externalDocs !== undefined) shared.externalDocs = externalDocs;
     }
     return shared;
   });
@@ -1277,6 +1374,13 @@ function buildSharedModel(
     members.every((member) => stableJson(member[key]) === stableJson(representative[key]))
       ? representative[key]
       : undefined;
+  // The bodies' own text and link, each kept when every member wrote the
+  // same one, as their `x-` keys are below; a member that wrote none
+  // disagrees with one that wrote some (#666).
+  const description = agree('description');
+  if (description !== undefined) model.description = description;
+  const externalDocs = agree('externalDocs');
+  if (externalDocs !== undefined) model.externalDocs = externalDocs;
   if (sharedModelDeprecated(name, members)) model.deprecated = true;
   const constraints = agree('constraints');
   if (constraints !== undefined) model.constraints = constraints;

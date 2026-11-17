@@ -1,5 +1,5 @@
 import type { TypeRef, Model, Field, PaginationEndOfIteration, StatusRange } from '../ir/types.js';
-import { numberedName, toPascalCase, singularize } from '../utils/naming.js';
+import { numberedName, toPascalCase, singularizeTrailingWord } from '../utils/naming.js';
 import {
   collectObjectProperties,
   detectEndOfIteration,
@@ -49,6 +49,7 @@ import {
 import { externalDocsEntry } from './external-docs.js';
 import { schemaExtensionsEntry } from './extensions.js';
 import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
+import type { BodyNameYields } from './contested-body-names.js';
 
 /**
  * What settles an array body's or list envelope's item models against the
@@ -59,6 +60,8 @@ import { materializeInlineSchema, type InlineModelRegistry } from './materialize
 export interface ItemSettlement {
   registry: InlineModelRegistry;
   operation: string;
+  /** The names the operation gives up to another operation (`MaterializeInlineOptions.yields`, #683). */
+  yields?: BodyNameYields;
 }
 
 export interface ResponseExtractionResult {
@@ -748,7 +751,10 @@ export function resolveDataPathFromSchema(
  * recorded under the operation; a reference written by sharing another
  * site's model joins that site (`attachSharedRefs`), so a later rename of
  * the shared model — a deprecated copy named like a live one — reaches this
- * array too. Without `settle` — the dry run that reads a component
+ * array too. A name the operation gives up to another operation
+ * (`ItemSettlement.yields`, #683) is left before the comparison, in every
+ * trial, so that operation's model of the name is no clash and the items
+ * never step for it. Without `settle` — the dry run that reads a component
  * response's names, a direct call — the items take `<Op>Item` as written;
  * the dry run that reads an operation's own names settles them against a
  * copy of the registry as seeded, so it reads the name the operation takes
@@ -772,6 +778,7 @@ function typeInlineItems(
       componentSchemas,
       registry: settle.registry,
       operation: settle.operation,
+      ...(settle.yields && { yields: settle.yields }),
       models: inlineModels,
     });
     return { itemType, inlineModels };
@@ -783,10 +790,16 @@ function typeInlineItems(
 /**
  * Name for inline items reached through an overridden `dataPath`, built from
  * the path the way the inline extractor names a nested field's items: the
- * operation, the enclosing properties, then the singular of the array's own
- * name (`result.items` → `ListPetsResultItem`). It therefore coincides with a
- * model the parser may already have minted for that field, and never takes
- * the bare `<Op>Item` that a recognized envelope's data array owns.
+ * operation, the enclosing properties, then the array's own name with its
+ * trailing word singularized (`singularizeTrailingWord`, the reading
+ * `qualifyInlineModelName` names a field's items by): `result.items` →
+ * `ListPetsResultItem`, `result.tax_series` → `ListPetsResultTaxSeries`,
+ * `result.order_status` → `ListPetsResultOrderStatus` (#665; the whole
+ * PascalCased segment was singularized as one word before, so a safe-listed
+ * or short word after another missed its guard, `ListPetsResultTaxSery`,
+ * `ListPetsResultOrderStatu`). It therefore coincides with a model the
+ * parser may already have minted for that field, and never takes the bare
+ * `<Op>Item` that a recognized envelope's data array owns.
  */
 function inlineItemNameForPath(contextName: string, dataPath: string): string {
   const segments = dataPath.split('.');
@@ -794,7 +807,7 @@ function inlineItemNameForPath(contextName: string, dataPath: string): string {
     .slice(0, -1)
     .map((segment) => toPascalCase(segment))
     .join('');
-  const own = singularize(toPascalCase(segments[segments.length - 1]));
+  const own = singularizeTrailingWord(toPascalCase(segments[segments.length - 1]));
   return contextName.replace(/Response$/, '') + parents + own;
 }
 

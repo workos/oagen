@@ -27,6 +27,7 @@ import {
   modelShares,
   recordFieldModelRename,
   shapeFingerprint,
+  takeModelDocumentation,
   typeShapeKey,
   type FieldInlineModelGroup,
   type InlineModelBundle,
@@ -872,8 +873,12 @@ function renameClusters(
  * copy's name: two identical live `object: widget` responses beside a
  * deprecated `Widget` share `GetLegacyWidgetWidget`, and still do once
  * either of them is deprecated (#441 review). A cluster that mixes flags
- * keeps the live definition — its members are identical but for the flag,
- * so the first site's model with the flag cleared — and each deprecated
+ * keeps the live definition — its members are identical but for the flag
+ * and the documentation, so the first site's model with the flag cleared,
+ * documented as the first live member is when that site is a deprecated
+ * one (`takeModelDocumentation`: the model's text, each field's and what an
+ * inline enum of a field lifts, as a deprecated copy folding onto its live
+ * twin leaves the twin's; #673) — and each deprecated
  * member folds onto it with the warning a deprecated copy folding onto its
  * live twin gets (`deprecatedFoldWarning`), its own field, parameter or
  * envelope field still carrying the flag; a cluster is deprecated only when
@@ -881,8 +886,9 @@ function renameClusters(
  * (`mintedLeader`) is joined by shape the same way: a live operation copy
  * joining the `PetOwner2` a deprecated `Pet.owner` left the name for makes
  * it live, as its live twin would under no owner, the field keeping its own
- * flag. `noteFor` says why a cluster leaves, and what to say for a member
- * without a site, which stays under `name`.
+ * flag and text and the model taking the live copy's. `noteFor` says why a
+ * cluster leaves, and what to say for a member without a site, which stays
+ * under `name`.
  */
 function settleRefusedCopies(
   name: string,
@@ -896,13 +902,20 @@ function settleRefusedCopies(
     const leader = mintedLeader(name, shapeFingerprint(cluster[0]!), shapeFingerprint, naming, bundleOf, folded);
     const joining = cluster.filter((copy) => naming !== undefined && bundleOf.has(copy));
     const members = leader ? [leader, ...joining] : joining;
-    const live = members.some((member) => !member.deprecated);
-    if (live) {
+    const firstLive = members.find((member) => !member.deprecated);
+    if (firstLive) {
       for (const member of members) if (member.deprecated) console.warn(deprecatedFoldWarning(name, []));
     }
     const [reason, noSite] = noteFor(cluster);
     const kept = renameCluster(name, cluster, leader, naming, bundleOf, folded, reason, noSite);
-    if (kept && live) delete kept.deprecated;
+    // The model the cluster ends under is its first member's. Deprecated
+    // beside a live member, it goes live and is documented as the first
+    // live one is, in document order: the copy whose definition a name
+    // with no owner would keep (`preferredDefinition`).
+    if (kept?.deprecated && firstLive) {
+      delete kept.deprecated;
+      takeModelDocumentation(kept, firstLive);
+    }
   }
 }
 

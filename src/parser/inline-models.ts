@@ -10,7 +10,7 @@ import type {
   UnionType,
 } from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
-import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
+import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
@@ -107,15 +107,10 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
   if (extendsParentName(baseName, cleanParent)) return baseName;
-  // Singularize the trailing PascalCase word of the combined name.
-  // Split baseName into leading words + trailing word, singularize trailing.
-  const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
-  if (trailingMatch) {
-    const [, prefix, trailingWord] = trailingMatch;
-    const singular = singularize(trailingWord);
-    return `${cleanParent}${prefix}${singular}`;
-  }
-  return `${cleanParent}${baseName}`;
+  // Singularize the trailing PascalCase word of the combined name: the one
+  // reading a nested error body's items and a `dataPath` hint's share
+  // (`singularizeTrailingWord`, #665).
+  return `${cleanParent}${singularizeTrailingWord(baseName)}`;
 }
 
 /**
@@ -441,35 +436,112 @@ export function schemaShapeKey(schema: SchemaObject): string {
   return JSON.stringify(schemaKey(schema));
 }
 
-/** Field properties that only document a field — its extensions included — or say where it comes from (`inheritedFrom`, the base a component's field is taken from; #591); two shapes that differ in these alone are one shape. */
-const FIELD_DOC_KEYS: ReadonlySet<string> = new Set([
-  'name',
+/** Field properties that document a field and nothing else — its text, link, examples and extensions — the part of `FIELD_DOC_KEYS` a fold that makes a kept model live reads from the live copy, as it reads the model's own `MODEL_DOC_KEYS` (`takeModelDocumentation`). */
+const FIELD_TEXT_KEYS = [
   'description',
   'externalDocs',
   'example',
   'examples',
   'extensions',
-  'inheritedFrom',
-]);
-/** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold reads from the copy it keeps (`takeModelDocumentation`). */
+] as const satisfies readonly (keyof Field)[];
+/** Field properties that only document a field (`FIELD_TEXT_KEYS`, its extensions included) or say where it comes from (`inheritedFrom`, the base a component's field is taken from; #591); two shapes that differ in these alone are one shape. */
+const FIELD_DOC_KEYS: ReadonlySet<string> = new Set(['name', ...FIELD_TEXT_KEYS, 'inheritedFrom']);
+/** Model properties that only document a model — its description, link and extensions — the part of `MODEL_IDENTITY_KEYS` a fold that makes a kept model live reads from the live copy (`takeModelDocumentation`). */
 const MODEL_DOC_KEYS = ['description', 'externalDocs', 'extensions'] as const satisfies readonly (keyof Model)[];
 /** Model properties outside its shape: the name, its documentation (`MODEL_DOC_KEYS`), its provenance (`bases`, the components a composed component is built on; #591), and the fields (fingerprinted on their own). */
 const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_KEYS, 'bases', 'fields']);
 
 /**
- * Give `into` the documentation of `from` — every `MODEL_DOC_KEYS` property,
- * one `from` lacks removed — leaving its name, fields, flag, structure and
- * references as they are. What the within-operation merge does to the kept
- * definition when a later copy identical but for the model's own
- * `deprecated` is live (`extractResponses`, #630): the shared model is then
- * documented as that live copy is, as the merge passes keep a live copy's
- * definition whole across operations (`settleSharedNames`), so a description
- * written for the deprecated copy never documents a model that is not.
+ * Give `into` the documentation of `from`, a copy of its shape
+ * (`shapeFingerprint`), at every place a model carries any: its own
+ * (`MODEL_DOC_KEYS`), each field's (`FIELD_TEXT_KEYS`, read from the field
+ * of the same name) and what each inline enum in a field's type or in a
+ * variant lifts (`takeEnumDocumentation`) — a key `from` lacks removed.
+ * Everything else stays `into`'s own: its name, flag, structure and
+ * references — the field objects, their order, types, requiredness, flags,
+ * limits and provenance (`inheritedFrom`, which goes with `bases`) — and
+ * every model its fields name, since a nested inline model is a model of its
+ * own, kept by its own flag. What a fold does to the definition it keeps
+ * when it clears the model's own `deprecated` because a copy identical but
+ * for that flag is live — the within-operation merge (`extractResponses`,
+ * #630) and the copies an owner refuses (`settleRefusedCopies`, #441): the
+ * shared model is then documented as its first live copy is, as the merge
+ * passes keep a live copy's definition whole across operations
+ * (`settleSharedNames`), so a text the deprecated copy wrote for the model
+ * or for one of its fields never documents a model that is not (#673: a
+ * deprecated `200` describing `name` as `Use nickname instead.` beside a
+ * live `202` describing it as `The name.` left the first on a live `Pet`).
  */
 export function takeModelDocumentation(into: Model, from: Model): void {
-  for (const key of MODEL_DOC_KEYS) {
+  takeKeys(into, from, MODEL_DOC_KEYS);
+  const namesakes = new Map(from.fields.map((field) => [field.name, field]));
+  for (const field of into.fields) {
+    const namesake = namesakes.get(field.name);
+    if (!namesake) continue;
+    takeKeys(field, namesake, FIELD_TEXT_KEYS);
+    takeEnumDocumentation(field.type, namesake.type);
+  }
+  into.variants?.forEach((variant, index) => {
+    const twin = from.variants?.[index];
+    if (twin) takeEnumDocumentation(variant, twin);
+  });
+}
+
+/** Give `into` each of `keys` as `from` carries it, a key `from` lacks removed. */
+function takeKeys<T extends object>(into: T, from: T, keys: readonly (keyof T)[]): void {
+  for (const key of keys) {
     if (from[key] === undefined) delete into[key];
-    else Object.assign(into, { [key]: from[key] });
+    else into[key] = from[key];
+  }
+}
+
+/**
+ * Give every inline enum in `into` what the enum at the same place in `from`
+ * lifts — each member's description, and the enum's own text, link and
+ * extensions (`copyInlineEnumMeta`) — the two types read in step: an
+ * array's items, a nullable's inner type, a map's values and keys, a
+ * union's variants by position. Two types of one shape (`shapeFingerprint`)
+ * hold the same kinds in the same places and the same values in each enum;
+ * where two disagree — another kind, another list of values — the walk
+ * stops there and `into` keeps what it has. Only the side table is written:
+ * the references stay `into`'s own objects, and a model reference is not
+ * followed.
+ */
+function takeEnumDocumentation(into: TypeRef, from: TypeRef): void {
+  switch (into.kind) {
+    case 'enum': {
+      if (from.kind !== 'enum' || !into.values || !from.values) return;
+      const values = from.values;
+      const sameValues = into.values.length === values.length && into.values.every((value, i) => value === values[i]);
+      if (sameValues) copyInlineEnumMeta(from, into);
+      return;
+    }
+    case 'array':
+      if (from.kind === 'array') takeEnumDocumentation(into.items, from.items);
+      return;
+    case 'nullable':
+      if (from.kind === 'nullable') takeEnumDocumentation(into.inner, from.inner);
+      return;
+    case 'map':
+      if (from.kind !== 'map') return;
+      takeEnumDocumentation(into.valueType, from.valueType);
+      if (into.keyType && from.keyType) takeEnumDocumentation(into.keyType, from.keyType);
+      return;
+    case 'union': {
+      if (from.kind !== 'union') return;
+      const twins = from.variants;
+      into.variants.forEach((variant, index) => {
+        const twin = twins[index];
+        if (twin) takeEnumDocumentation(variant, twin);
+      });
+      return;
+    }
+    case 'model':
+    case 'primitive':
+    case 'literal':
+      return;
+    default:
+      return assertNeverRef(into);
   }
 }
 /** Model properties `modelStructureKey` reads with the reading options — the named-union parts, whose model references are read under `readModelName`. */
