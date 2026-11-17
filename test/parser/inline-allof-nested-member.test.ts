@@ -674,7 +674,7 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
       an empty wrapper: PetOwner ; PetOwner { name?: string, label?: string }
       an empty wrapper beside one \`$ref\`: Tag
       \`type: [object, null]\`: PetOwner ; PetOwner { name?: string, label?: string }
-      \`type: [object, null]\` on both: PetOwner ; PetOwner { name?: string, label?: string }
+      \`type: [object, null]\` on both: nullable<PetOwner> ; PetOwner { name?: string, label?: string }
       \`type: [object, string]\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`additionalProperties\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`additionalProperties\` on both: PetOwner ; PetOwner { name?: string, label?: string }
@@ -704,7 +704,7 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
     ).toMatchInlineSnapshot(`
       "\`nullable: true\` with no \`type\`: PetOwner ; PetOwner { name?: string, label?: string }
       \`nullable: true\` beside \`type: object\`: PetOwner ; PetOwner { name?: string, label?: string }
-      \`nullable: true\` beside \`type: object\`, on both: PetOwner ; PetOwner { name?: string, label?: string }
+      \`nullable: true\` beside \`type: object\`, on both: nullable<PetOwner> ; PetOwner { name?: string, label?: string }
       \`nullable: true\` beside \`type: object\`, lone: nullable<Owner>"
     `);
     expect(warnings()).toEqual([]);
