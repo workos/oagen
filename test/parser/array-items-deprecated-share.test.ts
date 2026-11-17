@@ -1202,6 +1202,116 @@ describe('#672 array bodies whose items differ only in `deprecated` share one it
         }
       });
 
+      it('never folds an operation’s own items onto a component response’s, nor the component’s onto its own', async () => {
+        // `Shapes` returns an array whose `Circle` variant is named from its title, the name the inline body's
+        // variant takes too: shared while identical, and apart on the flag, as before — in either order, and
+        // for every operation that mounts the component.
+        const mounted = (responses: Doc, shapesComponent: Doc, more: Doc = {}): Doc => ({
+          ...document(openapi, { ...listPets(responses), ...more }),
+          components: { responses: { Shapes: json(arrayOf(shapesComponent)) } },
+        });
+        const shapesRef = { $ref: '#/components/responses/Shapes' };
+        const read = async (doc: Doc) => {
+          const spec = await parseJson(doc);
+          expectSound(spec);
+          return {
+            models: modelNames(spec),
+            ...Object.fromEntries(operations(spec).map((op) => [op.name, show(op.response)])),
+            successResponses: successResponses(spec),
+          };
+        };
+        const listCats = { '/cats': operation('listCats', { '200': shapesRef }) };
+
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(false))) }, shapes(false), listCats)),
+        ).toEqual({
+          models: ['Circle', 'Square'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (Circle | Square)[]'],
+        });
+        // The component's deprecated `Circle` stays deprecated for `listCats`; the live inline copy takes its own model.
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(false))) }, shapes(true), listCats)),
+        ).toEqual({
+          models: ['Circle (deprecated)', 'Square', 'CircleListPetsItem'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (CircleListPetsItem | Square)[]'],
+        });
+        expect(
+          await read(mounted({ '200': shapesRef, '202': json(arrayOf(shapes(true))) }, shapes(false), listCats)),
+        ).toEqual({
+          models: ['Circle', 'Square', 'CircleListPetsItem (deprecated)'],
+          listPets: '(Circle | Square)[]',
+          listCats: '(Circle | Square)[]',
+          successResponses: ['200: (Circle | Square)[]', '202: (CircleListPetsItem | Square)[]'],
+        });
+        // The inline body first: its deprecated `Circle` is no definition the component's live copy folds onto.
+        const reversed = await read(mounted({ '200': json(arrayOf(shapes(true))), '202': shapesRef }, shapes(false)));
+        expect(reversed.models.slice(0, 2)).toEqual(['Circle (deprecated)', 'Square']);
+        expect(reversed.models).toHaveLength(3);
+        expect(reversed.successResponses[0]).toBe('200: (Circle | Square)[]');
+        expect(reversed.successResponses[1]).not.toBe('202: (Circle | Square)[]');
+        expect(warnings()).toEqual([]);
+      });
+
+      it('settles the items an overridden `dataPath` names with the operation’s own, and a component response’s apart', async () => {
+        // The primary is a union of two wrappers, so the override's `items` are typed from the document as
+        // `<Op>Item`, the name the `202`'s array items take.
+        const wrapper = (deprecated: boolean): Doc => ({
+          oneOf: [
+            {
+              type: 'object',
+              required: ['a'],
+              properties: { items: arrayOf(item(deprecated)), a: { type: 'string' } },
+            },
+            {
+              type: 'object',
+              required: ['b'],
+              properties: { items: arrayOf(item(deprecated)), b: { type: 'string' } },
+            },
+          ],
+        });
+        const paged = {
+          parameters: [{ name: 'after', in: 'query', schema: { type: 'string' } }],
+          'x-pagination': { strategy: 'cursor', param: 'after', dataPath: 'items' },
+        };
+        const itemTypeOf = async (doc: Doc) => {
+          const spec = await parseJson(doc);
+          expectSound(spec);
+          const model = modelOf(spec, 'ListPetsItem');
+          return `${show(operationOf(spec, 'listPets').pagination?.itemType)}, ListPetsItem ${model.deprecated ? 'deprecated' : 'live'}`;
+        };
+        for (const [deprecated200, deprecated202] of [
+          [false, false],
+          [true, false],
+          [false, true],
+        ]) {
+          const own = document(
+            openapi,
+            listPets({ '200': json(wrapper(deprecated200)), '202': json(arrayOf(item(deprecated202))) }, paged),
+          );
+          // Before, with either copy deprecated: `ListPetsResponseItem`, the items stepped off `ListPetsItem`.
+          expect(await itemTypeOf(own), `own ${deprecated200} ${deprecated202}`).toBe(
+            'ListPetsItem, ListPetsItem live',
+          );
+        }
+        const component = (deprecatedComponent: boolean, deprecated202: boolean): Doc => ({
+          ...document(
+            openapi,
+            listPets(
+              { '200': { $ref: '#/components/responses/Page' }, '202': json(arrayOf(item(deprecated202))) },
+              paged,
+            ),
+          ),
+          components: { responses: { Page: json(wrapper(deprecatedComponent)) } },
+        });
+        expect(await itemTypeOf(component(false, false))).toBe('ListPetsItem, ListPetsItem live');
+        expect(await itemTypeOf(component(true, false))).toBe('ListPetsResponseItem, ListPetsItem live');
+        expect(await itemTypeOf(component(false, true))).toBe('ListPetsResponseItem, ListPetsItem deprecated');
+      });
+
       it('never folds an operation’s own secondary body onto a component response’s', async () => {
         // `card` mounts the component `Card` at its `200` and declares a `302` of its own: both bodies derive
         // `CardApplicationYamlResponse`, shared while identical and stepped apart on the flag, as before.
