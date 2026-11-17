@@ -142,6 +142,7 @@ import {
   isPendingVariant,
   pendingSiteLimitsOf,
   schemaAtPointer,
+  schemaRefOf,
   schemaRefTokens,
   settleDeferredMappingEntries,
   settlePendingSchemaRef,
@@ -626,6 +627,56 @@ function pointerLanding(ref: string, schemas: Record<string, SchemaObject> | und
   while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
   const owner = steps[first]!.node;
   return collectObjectProperties(owner, schemas).properties[last.name!] ?? last.next;
+}
+
+/**
+ * The schema a site written as the pointer `ref` settles to the type of
+ * (`pointerLanding`), for the reader that reads the pointer through to it
+ * in place of leaving it to the settle (`typedDeclaration`; #669: a
+ * property declared `{ $ref: '#/components/schemas/Holder/properties/pets'
+ * }` by one variant and as the same array inline by another is one
+ * `Pet[]`). That reader must not read on where the settle would refuse, so
+ * this answers only for a pointer the document alone tells the settle
+ * walks, and is `undefined` for every other, which stays the reference it
+ * is and is settled, and reported, as before. Each step must leave a
+ * schema the settle holds the right kind of type for: a `properties` step
+ * a schema typed as a model (`modelReferenceIdentity`: the component the
+ * pointer enters, an inline object, an `allOf` merged into one), an
+ * `items` step a schema typed as an array (`arraySchemaOf`, or an array
+ * component), each read on the schema whose type the settle holds there —
+ * the one before the run of inline `allOf` steps the step sits in, as
+ * `pointerLanding` finds a field's owner. An `allOf` step keeps the type
+ * at hand. A step through a `oneOf`/`anyOf` or into a map's values is not
+ * answered for: the settle reads a variant only off a type that is a union
+ * (`Holder/allOf/1/oneOf/0/properties/pets`, into a union the model
+ * flattens, is typed `unknown` and reported), and which type that is the
+ * document alone does not say.
+ */
+export function pointerReadThrough(
+  ref: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  const tokens = schemaRefTokens(ref);
+  if (!tokens) return undefined;
+  const [key, ...path] = tokens;
+  const component = schemas && Object.hasOwn(schemas, key!) ? schemas[key!] : undefined;
+  if (!component) return undefined;
+  const steps = pointerSteps(component, path, schemas);
+  if ('problem' in steps) return undefined;
+  for (const [index, step] of steps.entries()) {
+    if (step.keyword === 'allOf') continue;
+    let first = index;
+    while (first > 0 && steps[first - 1]!.keyword === 'allOf') first--;
+    const owner = steps[first]!.node;
+    // The component is typed as a `$ref` to it is; any other schema as written.
+    const site = owner === component ? { $ref: schemaRefOf([key!]) } : owner;
+    const walked =
+      step.keyword === 'properties'
+        ? modelReferenceIdentity(site, schemas) !== undefined
+        : step.keyword === 'items' && (arraySchemaOf(site) !== undefined || isArrayComponentRef(site));
+    if (!walked) return undefined;
+  }
+  return pointerLanding(ref, schemas);
 }
 
 /** The pointers being read ahead of the IR (`pointerTypesAsUnknown`), so a chain that reaches itself ends. */

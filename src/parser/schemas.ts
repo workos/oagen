@@ -13,12 +13,14 @@ import {
   pendingSchemaRef,
   pendingSiteLimitsOf,
   recordPendingSiteLimits,
+  schemaRefOf,
   schemaRefTarget,
   schemaRefTokens,
   type DerivedMappingSource,
 } from './schema-refs.js';
 import {
   pointerModelIdentity,
+  pointerReadThrough,
   pointerTypesAsArray,
   pointerTypesAsModel,
   pointerTypesAsUnknown,
@@ -4198,6 +4200,349 @@ export function fieldSettings(
 ): SchemaObject {
   const { settings, constraints } = fieldReading(schema, componentSchemas);
   return { ...settings, ...constraints };
+}
+
+/**
+ * What one declaration of a property is typed as (`typedDeclaration`):
+ * `schema`, the declaration written as the schema the type builder ends up
+ * typing it from, with no `null` of its own; `nullable`, whether the type
+ * built from the declaration is wrapped in `nullable`; and `shape`, the
+ * type built from `schema` as one string, which two declarations share
+ * exactly when the parser types them identically but for that `null` and
+ * for the limits a field reads by agreement.
+ */
+export interface TypedDeclaration {
+  schema: SchemaObject;
+  nullable: boolean;
+  shape: string;
+}
+
+/**
+ * The references `typedDeclaration` is reading through, each by the place
+ * it names (`schemaRefOf`), and those among them met again on the way: a
+ * component or pointer that reaches itself is not read through.
+ */
+const referencesBeingRead = new Set<string>();
+const referencesMetAgain = new Set<string>();
+/**
+ * The pointers whose landing `typedDeclaration` is looking up. The lookup
+ * merges the fields of the model the pointer enters (`pointerLanding`), a
+ * property several of its variants declare among them — the very
+ * declarations being compared, when one of them points into its own model
+ * (`Pet.x: { $ref: '#/components/schemas/Pet/allOf/0/properties/tags' }`
+ * in one variant) — and that merge, which the lookup does not read, asks
+ * for the same pointer again: there it stays the reference it is, and the
+ * lookup goes on to the landing.
+ */
+const landingsBeingRead = new Set<string>();
+
+/**
+ * A declaration of a property as the type builder types it, for the reader
+ * that asks whether several declarations of one property are one shape
+ * (`unionOfDeclarations`; #669: compared as written, `data: { $ref: Pets }`
+ * in one variant of a split list envelope and `data: { type: 'array',
+ * items: { $ref: Pet } }` in the other, both `Pet[]`, were two shapes, the
+ * field `Pet[] | Pet[]` and the body no list). It answers for a
+ * declaration typed alike wherever it is written — a primitive, a literal,
+ * a `$ref`, an array or map of those, a union of them — and reads it as
+ * the type builder does:
+ *
+ * - through every nullable wrapper (`unwrapNullableSchema`: an OAS 3.1
+ *   type list naming `null`, OAS 3.0 `nullable: true`, a `oneOf`/`anyOf`
+ *   with one non-null variant) and every `allOf` read as one member
+ *   (`allOfReadAsMember`), however they alternate;
+ * - through a `$ref` to an array or primitive component, or to an alias of
+ *   one or of an enum component (`activeArrayComponentPlans`,
+ *   `activePrimitiveComponentKeys`, `activeEnumAliasKeys`, each by the key
+ *   the `$ref` names), to the schema the component declares, read in turn;
+ * - through a JSON Pointer `$ref` deeper into a component to the schema it
+ *   settles to the type of, where the document alone tells the settle
+ *   walks there (`pointerReadThrough`), read in turn;
+ * - and the same inside its array items and map values, a map's values
+ *   written under `additionalProperties` whichever keyword types them
+ *   (`mapValueSchema`).
+ *
+ * A reference is read through only to a schema that mints no name either:
+ * a `$ref` to an array component with inline object items is `PetsItem[]`,
+ * which the same array written inline is not, so it stays the reference it
+ * is. So does a `$ref` to a model, an enum or a named union, a pointer the
+ * settle is left to type, and a component or pointer that reaches itself.
+ * A reference that stays is written `{ allOf: [{ $ref }] }`, the `$ref` in
+ * the one spelling every `$ref` to that place shares (`schemaRefOf`), so
+ * the declaration documents itself as every wrapped reference does
+ * (`fieldReading`) and a pointer is compared by the place it names, never
+ * by its text.
+ *
+ * `schema` carries, as its own keywords, exactly what a field written as
+ * the declaration reads: its settings (`fieldReading` — a bare `$ref` to an
+ * array or primitive component reads the component's text, flags, default
+ * and keys, a wrapped one its own alone) and the limits its type carries
+ * (`schemaConstraints`, conjoined through every component on the way; a
+ * pointer's landing conjoined with what the site writes around the
+ * pointer, the landing's first, as the settle conjoins them). The `null`
+ * the declaration admits through any of the wrappers above is `nullable`,
+ * and off `schema`. `shape` is the type built from `schema`
+ * (`typeShape`), so two declarations are one shape exactly when the type
+ * builder builds one type for both: a `$ref` is compared by the reference
+ * its key is typed as (`componentTypeRef`; #668), an array written with or
+ * without `type: 'array'` is one array, `const: 'cat'` and `type: 'string',
+ * enum: ['cat']` one literal, and a `oneOf`/`anyOf` of several variants is
+ * the union the type builder builds from it, its own `null` variant or
+ * flag with it.
+ *
+ * `undefined` for a declaration this reading does not stand for, which is
+ * compared as written, as before: one typed under a name minted from
+ * where it stands (`mintedInlineNames`, and the type built, which must be
+ * the same under another context: an inline object, an inline enum, a
+ * union with an inline object variant, an `allOf` merged into a model, an
+ * array or map of one); one the type builder reports
+ * (`typedLeavingNoTrace`: a shape it types `unknown` with a warning,
+ * `properties` a union cannot carry, an array component that reaches
+ * itself), so the report is made whichever declaration comes first; and
+ * any whose reading the type builder would type otherwise than the
+ * declaration itself, limits included — checked for every declaration but
+ * one still holding a pointer, whose type only the settle knows.
+ */
+export function typedDeclaration(declaration: SchemaObject): TypedDeclaration | undefined {
+  const read = readDeclaration(declaration);
+  if (!read) return undefined;
+  // The reading must stand for the declaration: nothing the type builder
+  // reports about either, a type that names nothing from where it is
+  // typed — the same under another context — and one type from both,
+  // limits included, which the type built says for every declaration but
+  // one still holding a pointer the settle has yet to type. A declaration
+  // that fails any of these is compared as written.
+  const written = typedLeavingNoTrace(declaration, 'declaration');
+  const typed = typedLeavingNoTrace(read.schema, 'declaration');
+  if (written.reported || typed.reported) return undefined;
+  const elsewhere = typedLeavingNoTrace(declaration, 'elsewhere');
+  if (stableStringify(written.type) !== stableStringify(elsewhere.type)) return undefined;
+  const whole = read.nullable ? asNullable(typed.type) : typed.type;
+  if (!holdsPendingReference(written.type) && stableStringify(written.type) !== stableStringify(whole)) {
+    return undefined;
+  }
+  return { ...read, shape: stableStringify(typeShape(typed.type)) };
+}
+
+/** Whether `type` holds a reference the settle has yet to type (`pendingSchemaRef`): a JSON Pointer `$ref` deeper into a component, at any depth. */
+function holdsPendingReference(type: TypeRef): boolean {
+  let pending = false;
+  walkTypeRef(type, {
+    model: (reference) => {
+      if (isPendingSchemaRef(reference)) pending = true;
+    },
+  });
+  return pending;
+}
+
+/**
+ * The type `schema` is read as under `contextName`, built leaving no
+ * trace, and whether the type builder reports anything about it
+ * (`reported`): a shape it does
+ * not read and types `unknown`, `properties` a composition cannot carry,
+ * an array component that reaches itself. Nothing is printed and nothing
+ * remembered as printed — the fold warnings (`rehearse`) and each array
+ * component's own, which is asked afresh — so the extraction that keeps
+ * the models prints every warning the document deserves, once and with
+ * the context it stands in. For `typedDeclaration`, which compares the
+ * type and reads no declaration the type builder reports as another's
+ * twin: it stays a shape of its own, so the report is made whichever
+ * declaration comes first.
+ */
+function typedLeavingNoTrace(schema: SchemaObject, contextName: string): { type: TypeRef; reported: boolean } {
+  const warn = console.warn;
+  const plans = [...activeArrayComponentPlans.values()];
+  const warned = plans.map((plan) => plan.warnedSelfReference);
+  for (const plan of plans) plan.warnedSelfReference = false;
+  let reported = false;
+  try {
+    const type = rehearse(() => {
+      console.warn = () => {
+        reported = true;
+      };
+      return schemaToTypeRef(schema, contextName);
+    });
+    return { type, reported };
+  } finally {
+    console.warn = warn;
+    plans.forEach((plan, index) => {
+      plan.warnedSelfReference = warned[index]!;
+    });
+  }
+}
+
+/**
+ * The type `typedDeclaration` compares two declarations by: `type` without
+ * the limits a field reads by agreement — its own, and those of its array
+ * items and map values, at any depth, under any nullable wrapper — as the
+ * comparison of two declarations as written leaves the same keywords out
+ * (`LIFTED_DECLARATION_KEYWORDS`). A union's variants keep theirs: a field
+ * reads none of them.
+ */
+function typeShape(type: TypeRef): TypeRef {
+  switch (type.kind) {
+    case 'nullable':
+      return { ...type, inner: typeShape(type.inner) };
+    case 'array': {
+      const { constraints: _constraints, ...array } = type;
+      return { ...array, items: typeShape(type.items) };
+    }
+    case 'map': {
+      const { constraints: _constraints, ...map } = type;
+      return { ...map, valueType: typeShape(type.valueType) };
+    }
+    case 'primitive':
+    case 'literal':
+    case 'union': {
+      const { constraints: _constraints, ...bare } = type;
+      return bare;
+    }
+    case 'model':
+    case 'enum':
+      return type;
+  }
+  return assertNever(type);
+}
+
+/** `typedDeclaration`'s reading of a declaration, without the type built from it: the reading it makes of a reference's target and of array items and map values in turn. */
+function readDeclaration(declaration: SchemaObject): Omit<TypedDeclaration, 'shape'> | undefined {
+  const schemas = documentComponentSchemas();
+  const { settings } = fieldReading(declaration, schemas);
+  const nullable = declaresNull(declaration);
+  const wrapped = wrappedReference(declaration);
+  if (!wrapped) {
+    if (mintedInlineNames('declaration', declaration, undefined).length > 0) return undefined;
+    let typed = unwrapNullableSchema(declaration);
+    for (let member = allOfReadAsMember(typed); member !== undefined; member = allOfReadAsMember(typed)) {
+      typed = unwrapNullableSchema(member);
+    }
+    return { schema: { ...typedKeywords(typed), ...settings, ...schemaConstraints(declaration, schemas) }, nullable };
+  }
+  const tokens = schemaRefTokens(wrapped.reference.$ref);
+  // The reference as it stays: wrapped, so the declaration reads no setting
+  // from the component but the limits the wire enforces.
+  const reference = (): Omit<TypedDeclaration, 'shape'> => ({
+    schema: {
+      allOf: [{ $ref: tokens ? schemaRefOf(tokens) : wrapped.reference.$ref }],
+      ...settings,
+      ...schemaConstraints(declaration, schemas),
+    },
+    nullable,
+  });
+  if (!tokens) return reference();
+  const place = schemaRefOf(tokens);
+  if (referencesBeingRead.has(place)) {
+    referencesMetAgain.add(place);
+    return reference();
+  }
+  if (landingsBeingRead.has(place)) return reference();
+  landingsBeingRead.add(place);
+  let target: SchemaObject | undefined;
+  try {
+    target = referenceReadThrough(tokens, schemas);
+  } finally {
+    landingsBeingRead.delete(place);
+  }
+  if (!target) return reference();
+  referencesBeingRead.add(place);
+  let read: Omit<TypedDeclaration, 'shape'> | undefined;
+  try {
+    read = readDeclaration(target);
+  } finally {
+    referencesBeingRead.delete(place);
+  }
+  if (referencesMetAgain.delete(place) || !read) return reference();
+  // A component's limits are conjoined by the one reading a field's are
+  // (`schemaConstraints`); a pointer's landing is typed first and the site's
+  // own conjoined onto it, level by level outward (`resolveSchemaPointers`).
+  const limits =
+    tokens.length === 1
+      ? schemaConstraints(declaration, schemas)
+      : wrapped.levels.reduceRight<Constraints | undefined>(
+          (held, level) => combineConstraints(held, extractConstraints(level)),
+          extractConstraints(read.schema),
+        );
+  return { schema: { ...typingKeywords(read.schema), ...settings, ...limits }, nullable: nullable || read.nullable };
+}
+
+/**
+ * The schema a reference to `tokens` (`schemaRefTokens`) is read through to
+ * by `typedDeclaration`: the array or primitive component, or the alias of
+ * one or of an enum component, a `$ref` names by its key, or the schema a
+ * pointer deeper into a component settles to the type of
+ * (`pointerLanding`). `undefined` for any other reference — a `$ref` to a
+ * model, an enum or a named union, to a key the document lacks, or a
+ * pointer the settle types nothing at the end of — and outside an
+ * extraction, as `isArrayComponentRef` is.
+ */
+function referenceReadThrough(
+  tokens: readonly string[],
+  schemas: Record<string, SchemaObject> | undefined,
+): SchemaObject | undefined {
+  if (tokens.length > 1) return pointerReadThrough(schemaRefOf(tokens), schemas);
+  const key = tokens[0]!;
+  const reads =
+    activeArrayComponentPlans.has(key) || activePrimitiveComponentKeys.has(key) || activeEnumAliasKeys.has(key);
+  return reads && schemas && Object.hasOwn(schemas, key) ? schemas[key] : undefined;
+}
+
+/**
+ * The keywords of `schema` that type it: everything but the keywords a
+ * field reads from its own schema (`LIFTED_DECLARATION_KEYWORDS`) and its
+ * `x-*` keys, which `typedDeclaration` writes as the declaration reads
+ * them.
+ */
+function typingKeywords(schema: SchemaObject): SchemaObject {
+  const keys = extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS) ?? {};
+  const lifted = new Set(LIFTED_DECLARATION_KEYWORDS);
+  return Object.fromEntries(Object.entries(schema).filter(([key]) => !lifted.has(key) && !Object.hasOwn(keys, key)));
+}
+
+/**
+ * The typing keywords (`typingKeywords`) of `typed`, a schema every
+ * nullable wrapper and `allOf` read as one member has been stripped from,
+ * with no `null` of its own left — a type list of several types names it
+ * no more, and `nullable` stays only where it stands for a `null` variant
+ * of the schema's own union (`unionFlaggedNullable`) — and with its array
+ * items and map values read in turn (`typedDeclaration`), a nullable one
+ * written as the nullable wrapper around what it is (`withNullVariant`).
+ */
+function typedKeywords(typed: SchemaObject): SchemaObject {
+  const typing = typingKeywords(typed);
+  if (Array.isArray(typing.type) && typing.type.includes('null')) {
+    const types = typing.type.filter((type) => type !== 'null');
+    if (types.length === 0) delete typing.type;
+    else typing.type = types.length === 1 ? types[0] : types;
+  }
+  if (!unionFlaggedNullable(typed)) delete typing.nullable;
+  const nested = (schema: SchemaObject): SchemaObject => {
+    const read = readDeclaration(schema);
+    return read ? (read.nullable ? withNullVariant(read.schema) : read.schema) : schema;
+  };
+  const items: unknown = typing.items;
+  if (typeof items === 'object' && items !== null && !Array.isArray(items))
+    typing.items = nested(items as SchemaObject);
+  // A map's values are typed from one schema (`mapValueSchema`), written
+  // under `additionalProperties` whichever keyword the document wrote it
+  // under, so every map declares its values at one place.
+  const values = classifyInlineSchema(typed) === 'map' ? mapValueSchema(typed) : null;
+  if (values) typing.additionalProperties = nested(values);
+  return typing;
+}
+
+/**
+ * `schema` under a nullable wrapper: a `oneOf` of its typing keywords
+ * (`typingKeywords`) and `{ type: 'null' }`, the wrapper carrying the
+ * keywords a field reads from its own schema and the `x-*` keys, so a
+ * field written as the wrapper reads what one written as `schema` reads
+ * and its type is `schema`'s under `nullable`. The one spelling
+ * `typedDeclaration` and `unionOfDeclarations` write a `null` in that the
+ * declarations of one shape admit.
+ */
+export function withNullVariant(schema: SchemaObject): SchemaObject {
+  const typing = typingKeywords(schema);
+  const said = Object.fromEntries(Object.entries(schema).filter(([key]) => !Object.hasOwn(typing, key)));
+  return { ...said, oneOf: [typing, { type: 'null' }] };
 }
 
 /**
@@ -9191,6 +9536,7 @@ import {
   extractInlineModelsFromSchemas,
   firstFreeElementContext,
   isContestedTitle,
+  LIFTED_DECLARATION_KEYWORDS,
   mapValueSchema,
   markContestedTitles,
   materializingMergedAllOfName,

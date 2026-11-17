@@ -396,7 +396,13 @@ const KNOWN_DATA_PATHS = new Set(['data', 'items', 'results', 'records', 'entrie
  * component; a union beside the `allOf` is one such member once folded,
  * `foldSiblingProperties`) — the model's optional fields, typed as it
  * types them (`unionOfDeclarations`) where no member declares the name,
- * since a variant can only narrow what every instance carries. So `{
+ * since a variant can only narrow what every instance carries:
+ * declarations the parser types identically are one shape there, so an
+ * array one variant writes as `{ $ref: Pets }` and another inline, as a
+ * JSON Pointer to it or under an `allOf`, is the one array detection looks
+ * for (workos/oagen#669: compared as written the two were `Pet[] |
+ * Pet[]`, no array, and the body stayed the model while the same envelope
+ * spelled one way in both variants was `Pet[]`). So `{
  * allOf: [{ data }], oneOf: [{ has_more }, { has_more, total }] }` is the
  * envelope `{ data, has_more?, total? }` is (workos/oagen#622: the variants
  * were read by the model alone, and the body was that model, no list). The
