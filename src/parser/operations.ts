@@ -5044,7 +5044,10 @@ function typePickedRequestBody(
  * inline-object discriminated union: a variant that is a `$ref`, a non-object,
  * or that doesn't pin the discriminator to a string const can't be safely
  * merged. The pin is read as a union's discriminator reads one
- * (`pinnedDeclarationValue`): a `const` or one-value `enum:` as written,
+ * (`pinnedDeclarationValue`): a string `const`, or an `enum:` list holding
+ * one string beside any `null` it names (`kind: { type: ['string',
+ * 'null'], enum: ['email', null] }` folds as `kind: { type: ['string',
+ * 'null'], const: 'email' }` does; #678), as written,
  * or behind a nullable wrapper, an `allOf` read as one member, or — with
  * `componentSchemas` — a `$ref` to a component pinning one value or an
  * alias of one, so `kind: { allOf: [{ const: 'email' }] }` folds as `kind:
@@ -5053,8 +5056,9 @@ function typePickedRequestBody(
  * The rebuilt discriminator admits `null` exactly when a variant's
  * declaration does, at any hop (`pinnedDeclarationAdmitsNull`: a nullable
  * wrapper, a type list naming `null`, OAS 3.0 `nullable: true` beside a
- * type — never a keyword beside a `$ref`, which the type builder gives
- * precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
+ * type, or the `null` the pinning list itself names, `kind: { enum:
+ * ['email', null] }` — never a keyword beside a `$ref`, which the type
+ * builder gives precedence), so a `kind: { oneOf: [{ const: 'email' }, { type: 'null' }] }`
  * variant beside one pinning `sms` folds to a `kind` typed
  * `nullable<enum>`, as the variant's own field is `nullable<literal>`
  * (#607 review: the fold rebuilt the field without `null`, as it had
@@ -5096,7 +5100,8 @@ function flattenDiscriminatedUnionBody(
 
   for (const variant of variants) {
     // Every variant must be an inline object that pins the discriminator to a
-    // string const (or single-value enum); anything else can't be merged.
+    // string const (or an enum of one string, beside any `null` it names);
+    // anything else can't be merged.
     if (variant.$ref || !variant.properties || !(variant.type === 'object' || variant.type === undefined)) {
       return null;
     }
@@ -6571,8 +6576,9 @@ function prefixSpellings(prefix: string): string[] {
  * responses declare inline. A body `oneOf` variant pinning `kind: email`
  * yields `EmailTagsPostRequest` (deriveOneOfVariantName); a nested
  * `oneOf`/`anyOf` object variant yields `<Const><Parent><Field>`
- * (nameOneOfVariant, nameVariantModel). Every string const or single-value
- * enum of every inline object variant is collected (`constStringOf`: as
+ * (nameOneOfVariant, nameVariantModel). Every string const or enum of one
+ * string — beside any `null` it names (#678) — of every inline object
+ * variant is collected (`constStringOf`: as
  * written, or behind a nullable wrapper or an `allOf` read as one member,
  * as the naming reads it; #607), top level and nested — a
  * superset of whichever property each of those picks as the discriminator, so
@@ -6642,8 +6648,9 @@ function collectConstPrefixes(schema: SchemaObject | undefined, out: Set<string>
 /**
  * A property's pinned string value, read as the naming reads an inline
  * variant's own property (`pinnedDeclarationValue` without the component
- * map, the reading `getConstPropertyValue` makes): a string `const` or a
- * single-value string `enum`, written on the property or behind a nullable
+ * map, the reading `getConstPropertyValue` makes): a string `const` or an
+ * `enum` of one string, a `null` named beside it set aside (`kind: { enum:
+ * ['email', null] }`; #678), written on the property or behind a nullable
  * wrapper or an `allOf` read as one member (`kind: { allOf: [{ const:
  * 'email' }] }`; #607), so the reservation reads every const the naming
  * reads. A `$ref` on the property is followed by neither.

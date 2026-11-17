@@ -206,7 +206,7 @@ interface MintedWebhook {
 }
 
 /** The part of a minting a `Webhook` carries: its typed parameters and payload. */
-type MintedShape = Pick<
+export type MintedShape = Pick<
   MintedWebhook,
   | 'headerParams'
   | 'queryParams'
@@ -217,6 +217,33 @@ type MintedShape = Pick<
   | 'requestBodyContentTypes'
   | 'requestBodyContents'
 >;
+
+/**
+ * What one group of a batch minted, kept for a later batch: the `webhooks`
+ * map's groups, for the callbacks read after them (`extractCallbacks`). A
+ * callback that reads the operation object one of these was minted from,
+ * under the stem it took, mints nothing and shares it (`sharedMintingOf`;
+ * #631).
+ */
+export interface SharedMinting {
+  /** The entry the group was minted from: its path item and operation object are what a sharing entry reads too. */
+  owner: WebhookEntry;
+  /** The stem the group's models are named from, any collision hash included. */
+  stem: string;
+  /** How many hex characters of its hash the stem carries; none for a plain stem. */
+  hashLength: number;
+  /** How many times the hash's input had its source put in front (`hashInput`); none unless a key and an operationId of one text met (#580). */
+  hashLevel: number;
+  /** The minted parameters and payload, as the owner's node carries them; a sharing node takes a copy (`cloneMintedShape`). */
+  shape: MintedShape;
+  /**
+   * The references of the site that owns the group's models
+   * (`InlineModelBundle.roots`), which a sharing node's references join, so
+   * a merge pass that renames one of the models repoints them too. Absent
+   * when the group minted no model.
+   */
+  roots?: TypeRef[];
+}
 
 /**
  * Read the document's top-level `webhooks` map (OpenAPI 3.1) into the IR.
@@ -269,7 +296,11 @@ type MintedShape = Pick<
  * A webhook operation's `callbacks` are not read here: each map is
  * recorded (`declaredCallbacks`) with the webhook's label and stem for
  * `extractCallbacks` to read once every webhook is named, so a callback's
- * models step around the webhooks' too (#382).
+ * models step around the webhooks' too (#382). What each group of
+ * webhooks minted is collected into `mintings`, when given, for that
+ * reader too: a callback reaching the operation object a webhook was
+ * minted from, under the stem the webhook took, shares the minting rather
+ * than stepping around it (`SharedMinting`; #631).
  */
 export function extractWebhooks(
   webhooks: unknown,
@@ -284,6 +315,9 @@ export function extractWebhooks(
   // The document's `paths` map, as written, whose entries a webhook entry's
   // `$ref` may name (`resolvePathItemRef`), as it may name another webhook's.
   paths?: unknown,
+  // Filled with what each group of webhooks minted, in document order, for
+  // `extractCallbacks` to share (#631).
+  mintings?: SharedMinting[],
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [], declaredCallbacks: [] };
   if (!isRecord(webhooks)) {
@@ -293,7 +327,9 @@ export function extractWebhooks(
 
   const entries = collectWebhookEntries(webhooks, components, siblingDocs, paths);
   const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
-  const { built, inlineModels, inlineModelBundles } = buildReceivedRequests(entries, components, reserved, siblingDocs);
+  const batch = buildReceivedRequests(entries, components, reserved, siblingDocs);
+  const { built, inlineModels, inlineModelBundles } = batch;
+  mintings?.push(...batch.mintings);
   // Each webhook's `callbacks`, read after every webhook is named, under
   // the webhook's label and the stem its own models took.
   const declaredCallbacks: DeclaredCallbacks[] = built
@@ -319,6 +355,8 @@ export interface BuiltReceivedRequests {
   inlineModelBundles: InlineModelBundle[];
   /** Every model and inline-enum name the batch minted, for a later batch to reserve. */
   names: Set<string>;
+  /** What each group of the batch minted, in document order, for a later batch to share (`SharedMinting`). */
+  mintings: SharedMinting[];
 }
 
 /**
@@ -370,14 +408,35 @@ export interface BuiltReceivedRequests {
  * shares the minting and nothing else. The bundle is recorded before any
  * callback is attached to a node, so it owns the node's own references and
  * not a nested callback's, which has a bundle of its own.
+ *
+ * `earlier` is what a batch read before this one minted: the `webhooks`
+ * map's groups, when the callbacks are read. An entry that reads the
+ * operation object one of those was minted from, under the stem it took
+ * (`sharedMintingOf`), is no part of this batch's naming: it joins no
+ * group, mints nothing and moves no stem, and its node carries a copy of
+ * that minting's parameters and payload, as a second member of the group
+ * would, its references joining the site that owns the models. So a
+ * `webhooks` entry and a callback reaching one path item whose operation
+ * declares an `operationId` reference one `OnPetAdoptedPayload`, where the
+ * callback's models used to step around the names the webhook took
+ * (`OnPetAdoptedF9960APayload`), and adding the webhook to a document whose
+ * callback already reads the path item renames nothing (#631).
  */
 export function buildReceivedRequests(
   entries: WebhookEntry[],
   components: WebhookComponents,
   reserved: ReservedNames,
   siblingDocs: SiblingDocs,
+  earlier: readonly SharedMinting[] = [],
 ): BuiltReceivedRequests {
-  const { groups, groupOf } = groupEntries(entries);
+  // The entries an earlier batch already minted for, each with the minting
+  // it shares; every other entry is grouped, named and minted here.
+  const sharedOf = new Map<WebhookEntry, SharedMinting>();
+  for (const entry of entries) {
+    const minting = sharedMintingOf(entry, earlier);
+    if (minting !== undefined) sharedOf.set(entry, minting);
+  }
+  const { groups, groupOf } = groupEntries(entries.filter((entry) => !sharedOf.has(entry)));
   // The groups a group descends from: those of its members' parents, at
   // every remove. None for the `webhooks` map.
   const ancestorsOf = new Map<WebhookGroup, Set<WebhookGroup>>();
@@ -472,12 +531,12 @@ export function buildReceivedRequests(
   const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
   const names = new Set(order.flatMap((group) => [...mintedByGroup.get(group)!.names]));
 
-  const built: BuiltReceivedRequests['built'] = [];
-  const nodesByGroup = new Map<WebhookGroup, Webhook[]>();
-  for (const entry of entries) {
-    const group = groupOf.get(entry)!;
+  // Each group's minted parameters and payload: its owner's node carries
+  // them as they are, every other node sharing the minting a copy.
+  const shapes = new Map<WebhookGroup, MintedShape>();
+  for (const group of groups) {
     const minted = mintedByGroup.get(group)!;
-    const shape: MintedShape = {
+    shapes.set(group, {
       headerParams: minted.headerParams,
       queryParams: minted.queryParams,
       cookieParams: minted.cookieParams,
@@ -486,24 +545,94 @@ export function buildReceivedRequests(
       requestBodyContentType: minted.requestBodyContentType,
       requestBodyContentTypes: minted.requestBodyContentTypes,
       requestBodyContents: minted.requestBodyContents,
-    };
+    });
+  }
+
+  const built: BuiltReceivedRequests['built'] = [];
+  const nodesByGroup = new Map<WebhookGroup, Webhook[]>();
+  for (const entry of entries) {
+    // An entry sharing an earlier batch's minting: a copy of its shape,
+    // under its stem, the references joining the site that owns its models
+    // — before any callback is attached to the node, as a group's own are.
+    const shared = sharedOf.get(entry);
+    if (shared !== undefined) {
+      const node = buildWebhook(entry, cloneMintedShape(shared.shape), components, siblingDocs);
+      shared.roots?.push(...collectWebhookTypeRefs(node));
+      built.push({ entry, node, stem: shared.stem });
+      continue;
+    }
+    const group = groupOf.get(entry)!;
+    const shape = shapes.get(group)!;
     const node = buildWebhook(entry, entry === group.owner ? shape : cloneMintedShape(shape), components, siblingDocs);
     built.push({ entry, node, stem: stems.get(group)! });
     nodesByGroup.set(group, [...(nodesByGroup.get(group) ?? []), node]);
   }
 
   const inlineModelBundles: InlineModelBundle[] = [];
+  const bundleOf = new Map<WebhookGroup, InlineModelBundle>();
   for (const group of groups) {
     const minted = mintedByGroup.get(group)!;
     if (minted.inlineModels.length === 0) continue;
-    inlineModelBundles.push({
+    const bundle: InlineModelBundle = {
       qualifier: toPascalCase(stems.get(group)!),
       roots: (nodesByGroup.get(group) ?? []).flatMap((node) => collectWebhookTypeRefs(node)),
       models: minted.inlineModels,
-    });
+    };
+    inlineModelBundles.push(bundle);
+    bundleOf.set(group, bundle);
   }
 
-  return { built, inlineModels, inlineModelBundles, names };
+  // What each group minted, for a batch read after this one to share.
+  const mintings: SharedMinting[] = groups.map((group) => ({
+    owner: group.owner,
+    stem: stems.get(group)!,
+    hashLength: hashLength.get(group) ?? 0,
+    hashLevel: identities.get(group)!.level,
+    shape: shapes.get(group)!,
+    ...(bundleOf.has(group) ? { roots: bundleOf.get(group)!.roots } : {}),
+  }));
+
+  return { built, inlineModels, inlineModelBundles, names, mintings };
+}
+
+/**
+ * The minting of an earlier batch `entry` shares, if any (#631): one made
+ * from the very operation `entry` reads — the same Operation Object on the
+ * same Path Item, by identity, so the parameters and the body are the
+ * minting's own — under the very stem `entry` would take: its plain stem
+ * (`plainStem`), hashed as far as the minting's is from `entry`'s own
+ * identity (`stemIdentity`). Two entries named from one operation's
+ * `operationId` have one base and one hash input, so a callback reaching
+ * the path item a `webhooks` entry reads shares the webhook's minting
+ * however far a collision hashed it (`OnPetAdoptedPayload`; beside a
+ * component of that name, `OnPetAdoptedF9960APayload`). Two key-named
+ * entries agree only when their keys spell one stem and nothing hashed
+ * it: the callback `petAdopted` of `subscribe` beside a webhook keyed
+ * `subscribePetAdopted`, both `SubscribePetAdopted`. Wherever the stems
+ * differ, each entry keeps its own models, neither renamed to the
+ * other's: a webhook keyed `petAdopted` and `createPet`'s callback
+ * `petAdopted` without an `operationId` are `PetAdoptedPayload` and
+ * `CreatePetPetAdoptedPayload`, as each was before the other was added; an
+ * `operationId` starting with a digit takes the noun of the map it is read
+ * in (`Webhook2FaEnabledPayload`, `Callback2FaEnabledPayload`); and
+ * key-named stems hashed from two identities part.
+ *
+ * The path item is compared beside the operation because a YAML alias can
+ * put one Operation Object under two path items whose `parameters` differ.
+ * The decision reads the entry and the minting alone, never a name another
+ * entry mints nor the order anything is declared in — so not the stem the
+ * callbacks alone would have settled on either: `onPetAdopted` beside
+ * another callback operation's `on_pet_adopted`, which hash each other
+ * while only callbacks read them, takes the webhook's plain
+ * `OnPetAdoptedPayload` once a `webhooks` entry reads it, the webhooks
+ * being named first.
+ */
+function sharedMintingOf(entry: WebhookEntry, earlier: readonly SharedMinting[]): SharedMinting | undefined {
+  return earlier.find(({ owner, stem, hashLength, hashLevel }) => {
+    if (entry.op !== owner.op || entry.pathItem !== owner.pathItem) return false;
+    const hash = webhookDisambiguator(hashInput({ identity: stemIdentity(entry), level: hashLevel }), hashLength);
+    return plainStem(entry, hash) === stem;
+  });
 }
 
 /**
@@ -1313,6 +1442,12 @@ function partsBy(group: HashIdentity, other: HashIdentity): boolean {
  * however many sites reach it (#382). Every other entry is a group of its
  * own: two keys reading one path item without an operationId keep their
  * key-derived stems, and two owners' inline callbacks are two objects.
+ *
+ * The groups are those of one batch. A callback reading the operation a
+ * `webhooks` entry was minted from joins no group of the callback batch:
+ * it shares the webhook group's minting, which the batch before made
+ * (`sharedMintingOf`; #631), and is taken out before the entries are
+ * grouped (`buildReceivedRequests`).
  */
 interface WebhookGroup {
   owner: WebhookEntry;
