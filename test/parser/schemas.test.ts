@@ -4561,7 +4561,7 @@ describe('#539', () => {
     });
   });
 
-  it('names a named union’s pointer variant by nothing: no implicit discriminator is derived from it', async () => {
+  it('names a named union’s pointer variant by the model it settles to: the implicit discriminator maps it (#682)', async () => {
     captureWarnings();
     const spec = await parse(
       {
@@ -4576,7 +4576,7 @@ describe('#539', () => {
     );
     const animal = spec.models.find((m) => m.name === 'Animal');
     expect(animal?.variants).toEqual([model('Cat'), model('PetDog')]);
-    expect(animal?.discriminator).toBeUndefined();
+    expect(animal?.discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat', dog: 'PetDog' } });
     expect(modelNames(spec)).toEqual(['Animal', 'Cat', 'Pet', 'PetDog']);
     expect(warnings).toEqual([]);
   });
