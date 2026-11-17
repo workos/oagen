@@ -6,7 +6,8 @@
  * joins to a definition. The `Unsupported security scheme … omitted from
  * spec.auth` warning is left for what still has no representation: an
  * entry that is no object, an unknown `type`, or a definition missing the
- * field its type requires.
+ * field its type requires. It says what kind of value it met and never
+ * prints one.
  */
 import { describe, it, expect, afterAll, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
@@ -340,57 +341,71 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         [
           'openIdConnect with an empty openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: '' },
-          'type: openIdConnect, openIdConnectUrl: "" is blank',
+          'type: openIdConnect, openIdConnectUrl is blank',
         ],
         [
           'openIdConnect with a blank openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: '  ' },
-          'type: openIdConnect, openIdConnectUrl: "  " is blank',
+          'type: openIdConnect, openIdConnectUrl is blank',
         ],
         [
           'openIdConnect with a number for openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: 5 },
-          'type: openIdConnect, openIdConnectUrl: 5 is not a string',
+          'type: openIdConnect, openIdConnectUrl is a number, not a string',
         ],
         [
           'openIdConnect with a null openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: null },
-          'type: openIdConnect, openIdConnectUrl: null is not a string',
+          'type: openIdConnect, openIdConnectUrl is null, not a string',
         ],
         [
           'openIdConnect with a list for openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: ['https://auth.example.com/x'] },
-          'type: openIdConnect, openIdConnectUrl: ["https://auth.example.com/x"] is not a string',
+          'type: openIdConnect, openIdConnectUrl is an array, not a string',
+        ],
+        [
+          'openIdConnect with an object for openIdConnectUrl',
+          { type: 'openIdConnect', openIdConnectUrl: { url: 'https://auth.example.com/x' } },
+          'type: openIdConnect, openIdConnectUrl is an object, not a string',
         ],
         // An `http` scheme is its `scheme`, an RFC 9110 token.
         ['http with no scheme', { type: 'http' }, 'type: http, no scheme'],
-        ['http with a null scheme', { type: 'http', scheme: null }, 'type: http, scheme: null is not a token'],
-        ['http with an empty scheme', { type: 'http', scheme: '' }, 'type: http, scheme: "" is not a token'],
-        ['http with a blank scheme', { type: 'http', scheme: '  ' }, 'type: http, scheme: "  " is not a token'],
-        ['http with a number for scheme', { type: 'http', scheme: 5 }, 'type: http, scheme: 5 is not a token'],
+        ['http with a null scheme', { type: 'http', scheme: null }, 'type: http, scheme is null, not a string'],
+        ['http with a number for scheme', { type: 'http', scheme: 5 }, 'type: http, scheme is a number, not a string'],
+        ['http with true for scheme', { type: 'http', scheme: true }, 'type: http, scheme is a boolean, not a string'],
         [
-          'http with a padded scheme',
-          { type: 'http', scheme: ' Bearer ' },
-          'type: http, scheme: " Bearer " is not a token',
+          'http with a list for scheme',
+          { type: 'http', scheme: ['digest'] },
+          'type: http, scheme is an array, not a string',
         ],
-        [
-          'http with two words for scheme',
-          { type: 'http', scheme: 'my scheme' },
-          'type: http, scheme: "my scheme" is not a token',
-        ],
+        ['http with an empty scheme', { type: 'http', scheme: '' }, 'type: http, scheme is blank'],
+        ['http with a blank scheme', { type: 'http', scheme: '  ' }, 'type: http, scheme is blank'],
+        ['http with a padded scheme', { type: 'http', scheme: ' Bearer ' }, 'type: http, scheme is not a token'],
+        ['http with two words for scheme', { type: 'http', scheme: 'my scheme' }, 'type: http, scheme is not a token'],
         [
           'http with a header line for scheme',
           { type: 'http', scheme: 'Digest\r\nX-Injected: 1' },
-          'type: http, scheme: "Digest\\r\\nX-Injected: 1" is not a token',
+          'type: http, scheme is not a token',
         ],
         // `type` is one of the specification's values, spelled as it spells them.
-        ['an unknown type', { type: 'saml' }, 'type: saml'],
-        ['type OpenIdConnect', { type: 'OpenIdConnect', openIdConnectUrl: oidcUrl }, 'type: OpenIdConnect'],
-        ['type mutualtls', { type: 'mutualtls' }, 'type: mutualtls'],
-        ['type HTTP', { type: 'HTTP', scheme: 'digest' }, 'type: HTTP'],
-        ['no type', { description: 'Nothing.' }, 'type: undefined'],
-        ['a number for type', { type: 5 }, 'type: 5'],
-        ['an empty object', {}, 'type: undefined'],
+        ['an unknown type', { type: 'saml' }, 'type is not apiKey, http, mutualTLS, oauth2 or openIdConnect'],
+        [
+          'type OpenIdConnect',
+          { type: 'OpenIdConnect', openIdConnectUrl: oidcUrl },
+          'type is not apiKey, http, mutualTLS, oauth2 or openIdConnect',
+        ],
+        ['type mutualtls', { type: 'mutualtls' }, 'type is not apiKey, http, mutualTLS, oauth2 or openIdConnect'],
+        [
+          'type HTTP',
+          { type: 'HTTP', scheme: 'digest' },
+          'type is not apiKey, http, mutualTLS, oauth2 or openIdConnect',
+        ],
+        ['an empty type', { type: '' }, 'type is not apiKey, http, mutualTLS, oauth2 or openIdConnect'],
+        ['no type', { description: 'Nothing.' }, 'no type'],
+        ['an empty object', {}, 'no type'],
+        ['a number for type', { type: 5 }, 'type is a number, not a string'],
+        ['a null type', { type: null }, 'type is null, not a string'],
+        ['a list for type', { type: ['http'] }, 'type is an array, not a string'],
         // The existing kinds keep their checks.
         ['apiKey with no name', { type: 'apiKey', in: 'header' }, 'type: apiKey, no name'],
         ['apiKey with no in', { type: 'apiKey', name: 'X-Key' }, 'type: apiKey, no in'],
@@ -398,23 +413,19 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         [
           'openIdConnect with a one-space openIdConnectUrl',
           { type: 'openIdConnect', openIdConnectUrl: ' ' },
-          'type: openIdConnect, openIdConnectUrl: " " is blank',
+          'type: openIdConnect, openIdConnectUrl is blank',
         ],
         ['oauth2 with no flows', { type: 'oauth2' }, 'type: oauth2, no flows'],
-        // An entry that is no object declares nothing, and is named as JSON.
-        ['a null entry', null, 'not a Security Scheme Object: null'],
-        ['a string entry', 'bearer', 'not a Security Scheme Object: "bearer"'],
-        ['an empty string entry', '', 'not a Security Scheme Object: ""'],
-        ['a number entry', 5, 'not a Security Scheme Object: 5'],
-        ['a zero entry', 0, 'not a Security Scheme Object: 0'],
-        ['a true entry', true, 'not a Security Scheme Object: true'],
-        ['a false entry', false, 'not a Security Scheme Object: false'],
-        ['an empty array entry', [], 'not a Security Scheme Object: []'],
-        [
-          'an array of a scheme',
-          [{ type: 'http', scheme: 'bearer' }],
-          'not a Security Scheme Object: [{"type":"http","scheme":"bearer"}]',
-        ],
+        // An entry that is no object declares nothing, and is said in words.
+        ['a null entry', null, 'null is not a Security Scheme Object'],
+        ['a string entry', 'bearer', 'a string is not a Security Scheme Object'],
+        ['an empty string entry', '', 'a string is not a Security Scheme Object'],
+        ['a number entry', 5, 'a number is not a Security Scheme Object'],
+        ['a zero entry', 0, 'a number is not a Security Scheme Object'],
+        ['a true entry', true, 'a boolean is not a Security Scheme Object'],
+        ['a false entry', false, 'a boolean is not a Security Scheme Object'],
+        ['an empty array entry', [], 'an array is not a Security Scheme Object'],
+        ['an array of a scheme', [{ type: 'http', scheme: 'bearer' }], 'an array is not a Security Scheme Object'],
       ];
 
       it.each(unreadable)('%s', async (_label, definition, detail) => {
@@ -448,16 +459,16 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
 
       const nonObjects: Array<[string, unknown, string]> = [
         ['null', null, 'null'],
-        ['a string', 'bearer', '"bearer"'],
-        ['a number', 5, '5'],
-        ['true', true, 'true'],
-        ['false', false, 'false'],
-        ['an array', [], '[]'],
+        ['a string', 'bearer', 'a string'],
+        ['a number', 5, 'a number'],
+        ['true', true, 'a boolean'],
+        ['false', false, 'a boolean'],
+        ['an array', [], 'an array'],
       ];
 
       it.each(nonObjects)(
-        'a $ref entry landing on %s is omitted naming what it found, beside that entry’s own warning',
-        async (_label, target, json) => {
+        'a $ref entry landing on %s is omitted saying what it found, beside that entry’s own warning',
+        async (_label, target, kind) => {
           vi.spyOn(console, 'warn').mockImplementation(() => {});
           const ir = await parse(
             single(
@@ -468,8 +479,8 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
           );
           expect(ir.auth).toEqual([{ kind: 'bearer', schemeName: 'petToken' }]);
           expect(warnings()).toEqual([
-            `[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: ${json}) omitted from spec.auth`,
-            `[oagen] Warning: Unsupported security scheme "Other" (not a Security Scheme Object: ${json}) omitted from spec.auth`,
+            `[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other names ${kind}, not a Security Scheme Object) omitted from spec.auth`,
+            `[oagen] Warning: Unsupported security scheme "Other" (${kind} is not a Security Scheme Object) omitted from spec.auth`,
           ]);
         },
       );
@@ -485,13 +496,13 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         );
         expect(ir.auth).toBeUndefined();
         expect(warnings()).toEqual([
-          '[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: null) omitted from spec.auth',
-          '[oagen] Warning: Unsupported security scheme "alias" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: null) omitted from spec.auth',
-          '[oagen] Warning: Unsupported security scheme "Other" (not a Security Scheme Object: null) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other names null, not a Security Scheme Object) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "alias" ($ref #/components/securitySchemes/Other names null, not a Security Scheme Object) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "Other" (null is not a Security Scheme Object) omitted from spec.auth',
         ]);
       });
 
-      it('a $ref that is not a string, or points into another section, keeps its warning', async () => {
+      it('a $ref that is not a string says what it is, and one into another section names the pointer', async () => {
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         const ir = await parse({
           openapi,
@@ -500,6 +511,8 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
           components: {
             securitySchemes: {
               numbered: { $ref: 5 },
+              nulled: { $ref: null },
+              listed: { $ref: ['#/components/securitySchemes/numbered'] },
               elsewhere: { $ref: '#/components/schemas/Pet' },
             },
             schemas: { Pet: { type: 'object' } },
@@ -507,7 +520,9 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         });
         expect(ir.auth).toBeUndefined();
         expect(warnings()).toEqual([
-          '[oagen] Warning: Unsupported security scheme "numbered" ($ref 5 malformed) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "numbered" ($ref is a number, not a string) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "nulled" ($ref is null, not a string) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "listed" ($ref is an array, not a string) omitted from spec.auth',
           '[oagen] Warning: Unsupported security scheme "elsewhere" ($ref #/components/schemas/Pet unresolved) omitted from spec.auth',
         ]);
       });
@@ -516,6 +531,49 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         const ir = await parse(single(openapi, { type: 'http' }));
         expect(ir.auth).toBeUndefined();
+      });
+
+      // `components.securitySchemes` is where a credential pasted by mistake
+      // lands, so a warning says what kind of value it met, never the value.
+      describe('never prints a value of the definition it omits', () => {
+        const secret = 'sk_live_do_not_log';
+        const leaky: Array<[string, unknown, Record<string, unknown>?]> = [
+          ['a string entry', secret],
+          ['an array entry', [secret]],
+          ['an array of objects', [{ password: secret }]],
+          ['a $ref landing on a string', { $ref: '#/components/securitySchemes/Other' }, { Other: secret }],
+          [
+            'a $ref landing on an array',
+            { $ref: '#/components/securitySchemes/Other' },
+            { Other: [{ password: secret }] },
+          ],
+          ['a $ref that is an array', { $ref: [secret] }],
+          ['a $ref that is an object', { $ref: { password: secret } }],
+          ['an http scheme with the credentials in it', { type: 'http', scheme: `Bearer ${secret}` }],
+          ['an http scheme that is an object', { type: 'http', scheme: { password: secret } }],
+          ['an http scheme that is a list', { type: 'http', scheme: [secret] }],
+          [
+            'an openIdConnectUrl that is an object',
+            { type: 'openIdConnect', openIdConnectUrl: { clientSecret: secret } },
+          ],
+          ['an openIdConnectUrl that is a list', { type: 'openIdConnect', openIdConnectUrl: [secret] }],
+          ['an unknown type', { type: secret }],
+          ['a type that is a list', { type: [secret] }],
+          ['a type that is an object', { type: { password: secret } }],
+          ['an apiKey with no in', { type: 'apiKey', name: secret }],
+          ['an apiKey with no name', { type: 'apiKey', in: secret }],
+          ['an oauth2 scheme with no flows', { type: 'oauth2', description: secret, clientSecret: secret }],
+        ];
+
+        it.each(leaky)('%s', async (_label, definition, more = {}) => {
+          vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const ir = await parse(single(openapi, definition, more));
+          expect(ir.auth).toBeUndefined();
+          // Each is warned about, naming the key, and none of them with the value.
+          expect(warnings().length).toBeGreaterThan(0);
+          expect(warnings()[0]).toContain('Unsupported security scheme "petAuth" (');
+          for (const warning of warnings()) expect(warning).not.toContain(secret);
+        });
       });
     });
   });
