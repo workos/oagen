@@ -3702,7 +3702,8 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * chain declares, so that the reference's declarations are recorded under
  * the component rather than under an origin of their own
  * (`memberOrigin`, and the owner the inline merge keeps,
- * `mergeAllOfMembers`): a component written with an `allOf`, a bare `$ref`
+ * `mergeAllOfMembers`): a component its `allOf` composes
+ * (`allOfComposesComponent`), a bare `$ref`
  * alias (#618), or one composed of the typing `oneOf` and the typing
  * `anyOf` it writes together (`besideUnionsCompose`; #680) — `Pick: {
  * oneOf: [{ $ref: Pet }, { type: 'null' }], anyOf: [{ $ref: Owner }, {
@@ -3711,10 +3712,16 @@ function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
  * anyOf: [...] }` is, so a model naming it as a member has the bases
  * `Pick` gives it in either spelling. Any other component a chain passes
  * through — a nullable alias, a named union — builds no model for the
- * fields, and the reference starts an origin of its own.
+ * fields, and the reference starts an origin of its own, with an `allOf`
+ * that only annotates the union beside it as without one (#680 review:
+ * any `allOf` made the component the owner, so `Alias: { allOf: [{
+ * description }], oneOf: [{ $ref: Base }, { type: 'null' }] }` named in an
+ * inline merge typed `Base`'s nested object `AliasMeta`, which nothing
+ * built, and a model naming it had `Alias` for a base where the
+ * description beside the union gave `Base`).
  */
 export function composesOwnChain(schema: SchemaObject): boolean {
-  return schema.allOf !== undefined || schema.$ref !== undefined || besideUnionsCompose(schema);
+  return allOfComposesComponent(schema) || schema.$ref !== undefined || besideUnionsCompose(schema);
 }
 
 /**
@@ -3851,9 +3858,13 @@ function composesComponentModel(schema: SchemaObject): boolean {
  * that writes both unions is read alike with the description beside them
  * and with it in an `allOf` member (#680: the second spelling was read as
  * a component, and a dispatcher among its unions was lost to the model
- * naming it, variants and all, where the first kept it).
+ * naming it, variants and all, where the first kept it). The one test of
+ * every reader that asks whether a referenced component's `allOf` composes
+ * it or only annotates it: the owner of a chain (`composesOwnChain`), the
+ * wrapper that declares nothing (`declaresOnlyNullable`) and the
+ * pagination walk's direct member (`collectObjectProperties`).
  */
-function allOfComposesComponent(schema: SchemaObject): boolean {
+export function allOfComposesComponent(schema: SchemaObject): boolean {
   if (schema.allOf === undefined) return false;
   // Beside a `$ref` nothing but annotations is read: the reference
   // composes the component (#618).
@@ -7332,14 +7343,20 @@ function declareUnder(
 
 /**
  * Whether a schema is only a nullable wrapper — every union it writes a
- * `null` variant beside one other (`nullableAxisBranch`), with no `allOf`,
- * no property and no `required` of its own — which declares nothing
- * itself: its one variant is read in its place (`readComponentAllOfMember`)
- * and names the base when it is a `$ref` (`memberOrigin`), so the wrapper
- * is not noted as one on landing (`noteBase`).
+ * `null` variant beside one other (`nullableAxisBranch`), with no `allOf`
+ * that composes it (`allOfComposesComponent`: one whose members only
+ * annotate the wrapper is part of it, as `nullableAxisBranch` reads it),
+ * no property and no `required` of its own, a list such a member writes
+ * included — which declares nothing itself: its one variant is read in
+ * its place (`readComponentAllOfMember`) and names the base when it is a
+ * `$ref` (`memberOrigin`), so the wrapper is not noted as one on landing
+ * (`noteBase`).
  */
 function declaresOnlyNullable(schema: SchemaObject): boolean {
-  if (schema.allOf || hasFoldableProperties(schema) || (schema.required?.length ?? 0) > 0) return false;
+  if (allOfComposesComponent(schema) || hasFoldableProperties(schema)) return false;
+  // A `required` list is the schema's own wherever it writes it: beside the
+  // union, or in an `allOf` member that only annotates it (#613 review).
+  if ([schema, ...annotatingAllOfMembers(schema)].some((level) => (level.required?.length ?? 0) > 0)) return false;
   const axes = unionAxesOf(schema);
   return axes.length > 0 && axes.every((variants) => nullableAxisBranch(schema, variants) !== undefined);
 }
