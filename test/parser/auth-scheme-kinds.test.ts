@@ -401,11 +401,20 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
           'type: openIdConnect, openIdConnectUrl: " " is blank',
         ],
         ['oauth2 with no flows', { type: 'oauth2' }, 'type: oauth2, no flows'],
-        // An entry that is no object declares nothing.
-        ['a null entry', null, 'not an object'],
-        ['a string entry', 'bearer', 'not an object'],
-        ['a number entry', 5, 'not an object'],
-        ['an array entry', [], 'not an object'],
+        // An entry that is no object declares nothing, and is named as JSON.
+        ['a null entry', null, 'not a Security Scheme Object: null'],
+        ['a string entry', 'bearer', 'not a Security Scheme Object: "bearer"'],
+        ['an empty string entry', '', 'not a Security Scheme Object: ""'],
+        ['a number entry', 5, 'not a Security Scheme Object: 5'],
+        ['a zero entry', 0, 'not a Security Scheme Object: 0'],
+        ['a true entry', true, 'not a Security Scheme Object: true'],
+        ['a false entry', false, 'not a Security Scheme Object: false'],
+        ['an empty array entry', [], 'not a Security Scheme Object: []'],
+        [
+          'an array of a scheme',
+          [{ type: 'http', scheme: 'bearer' }],
+          'not a Security Scheme Object: [{"type":"http","scheme":"bearer"}]',
+        ],
       ];
 
       it.each(unreadable)('%s', async (_label, definition, detail) => {
@@ -416,6 +425,90 @@ describe('#662 — openIdConnect, mutualTLS and every http scheme in spec.auth',
         expect(ir.security).toEqual([[{ schemeName: 'petAuth', scopes: [] }]]);
         expect(warnings()).toEqual([
           `[oagen] Warning: Unsupported security scheme "petAuth" (${detail}) omitted from spec.auth`,
+        ]);
+      });
+
+      // A `$ref` entry is a Reference Object: it is followed, and what it
+      // lands on is read under the referencing key.
+      it('a $ref entry is read under its own key with the target’s definition', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ir = await parse(
+          single(
+            openapi,
+            { $ref: '#/components/securitySchemes/Other' },
+            { Other: { type: 'apiKey', in: 'header', name: 'X-Key' } },
+          ),
+        );
+        expect(ir.auth).toEqual([
+          { kind: 'apiKey', schemeName: 'petAuth', in: 'header', name: 'X-Key' },
+          { kind: 'apiKey', schemeName: 'Other', in: 'header', name: 'X-Key' },
+        ]);
+        expect(warnings()).toEqual([]);
+      });
+
+      const nonObjects: Array<[string, unknown, string]> = [
+        ['null', null, 'null'],
+        ['a string', 'bearer', '"bearer"'],
+        ['a number', 5, '5'],
+        ['true', true, 'true'],
+        ['false', false, 'false'],
+        ['an array', [], '[]'],
+      ];
+
+      it.each(nonObjects)(
+        'a $ref entry landing on %s is omitted naming what it found, beside that entry’s own warning',
+        async (_label, target, json) => {
+          vi.spyOn(console, 'warn').mockImplementation(() => {});
+          const ir = await parse(
+            single(
+              openapi,
+              { $ref: '#/components/securitySchemes/Other' },
+              { Other: target, petToken: { type: 'http', scheme: 'bearer' } },
+            ),
+          );
+          expect(ir.auth).toEqual([{ kind: 'bearer', schemeName: 'petToken' }]);
+          expect(warnings()).toEqual([
+            `[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: ${json}) omitted from spec.auth`,
+            `[oagen] Warning: Unsupported security scheme "Other" (not a Security Scheme Object: ${json}) omitted from spec.auth`,
+          ]);
+        },
+      );
+
+      it('a chain of $refs landing on an entry that is no object names the ref the walk stopped at', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ir = await parse(
+          single(
+            openapi,
+            { $ref: '#/components/securitySchemes/alias' },
+            { alias: { $ref: '#/components/securitySchemes/Other' }, Other: null },
+          ),
+        );
+        expect(ir.auth).toBeUndefined();
+        expect(warnings()).toEqual([
+          '[oagen] Warning: Unsupported security scheme "petAuth" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: null) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "alias" ($ref #/components/securitySchemes/Other is not a Security Scheme Object: null) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "Other" (not a Security Scheme Object: null) omitted from spec.auth',
+        ]);
+      });
+
+      it('a $ref that is not a string, or points into another section, keeps its warning', async () => {
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
+        const ir = await parse({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {},
+          components: {
+            securitySchemes: {
+              numbered: { $ref: 5 },
+              elsewhere: { $ref: '#/components/schemas/Pet' },
+            },
+            schemas: { Pet: { type: 'object' } },
+          },
+        });
+        expect(ir.auth).toBeUndefined();
+        expect(warnings()).toEqual([
+          '[oagen] Warning: Unsupported security scheme "numbered" ($ref 5 malformed) omitted from spec.auth',
+          '[oagen] Warning: Unsupported security scheme "elsewhere" ($ref #/components/schemas/Pet unresolved) omitted from spec.auth',
         ]);
       });
 
