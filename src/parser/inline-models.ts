@@ -52,7 +52,6 @@ import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
 import { copyInlineEnumMeta, shapeWithEnumFlags } from './enum-members.js';
 import { readDiscriminator } from './union-shape.js';
-import { pathItemRefTarget, resolveComponentRef } from './path-item-refs.js';
 import {
   carryDeferredMappingEntries,
   componentKeyOf,
@@ -63,16 +62,8 @@ import {
   schemaRefTarget,
   schemaRefTokens,
 } from './schema-refs.js';
-import {
-  isIgnoredHeaderParameter,
-  isIgnoredResponseHeader,
-  parameterTyping,
-  type ParameterObject,
-  type SchemaOrContent,
-} from './operations.js';
-import { classifyResponseKey } from './responses.js';
-import { responseBodyReading } from './body-media-types.js';
-import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
+import { componentResponseBodySchema } from './operations.js';
+import { readSchemaSites, type SiteDirection } from './schema-sites.js';
 
 /**
  * Whether `baseName` already carries `cleanParent` as its leading part and
@@ -971,10 +962,13 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * A root is a schema whose inline models are collected together: every
  * `components.schemas` entry is read as one root, because one pass collects
  * their inline field models into one list and a named union's variants are
- * already compared across every component; every other schema of the
- * document — the `schema` of a request body's or response's media type, of
- * a parameter, of a response header, of a webhook payload, under `paths`,
- * `webhooks` or `components` alike — is a root of its own. The same title
+ * already compared across every component; every other schema the readers
+ * type something from — the `schema` of a request body's or response's
+ * media type, of a parameter, of a response header, of a webhook's or a
+ * callback's payload, written at the site or in the `components` entry the
+ * site references — is a root of its own, and so is the body of each
+ * `components/responses` entry, which is read for the names it reserves
+ * whether or not a site references it (`schemaRootsOf`). The same title
  * given two shapes by two roots is not contested here: the passes that merge
  * the roots' models decide it (the first owner keeps the name, and a later
  * shape is renamed or dropped with a warning). Outside the components root,
@@ -1000,21 +994,35 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * `$defs`/`definitions`, `dependentSchemas`, `contains`, `prefixItems`,
  * `propertyNames` or another keyword the parser never reads never becomes a
  * model, so it contests no title (`schemaShapeKey` still compares them).
- * The roots are found by following the OpenAPI object model
- * (`schemaRootsOf`), the way the operation, response and webhook readers
- * do, so a name is never mistaken for a specification extension: a header
+ * The roots are the sites the readers type something from, found by the
+ * one walk that follows the document as the operation, response, webhook
+ * and callback readers do (`readSchemaSites`, which the sent/received walk
+ * goes through too), so what is never read contests no title (#670): a
+ * `103` response, a response key OpenAPI does not define (`600`) or the
+ * later of two range keys that differ in case, a `Content-Type` response
+ * header or one a later declaration shadows by case, an `Accept`,
+ * `Content-Type` or `Authorization` header parameter, an operation's
+ * `Idempotency-Key` header, a parameter in no location the readers type
+ * (`in: body`), a webhook's or a callback's `path` parameter and its
+ * responses, an Encoding Object's `headers`, a response body under a media
+ * type whose schema is not read (`application/xml`), a parameter's
+ * `content` beside its `schema`, and a `components` entry no site that is
+ * read references — the body of a `components/responses` entry aside — are
+ * under no root. A titled union at such a site once
+ * contested the `Tag` of a component's `collar` and renamed it
+ * `TagPetCollar`, though the parser typed nothing from it. A name is never
+ * mistaken for a specification extension: a header
  * named `x-meta`, a component named `x-thing`, a media type `x-custom/json`,
  * a webhook named `x-event` or a property `x-id` is read like any other, and
- * an `x-` key is stepped over only where the readers step over it or read
- * nothing: the Paths Object's (an extension by the specification, which
- * `extractOperations` steps over), a Responses
- * Object's (`readFallbackResponse`) and a Callback Object's (extensions by
- * the specification, which `extractCallbacks` steps over). An object
- * written as a `$ref` — a parameter, request body, response or header, a
- * path item or a callback — is stepped over whole, as the readers step
- * over it, so a union under a `content` or `headers` written beside the
- * `$ref` is under no root and contests nothing, whether the ref resolves
- * or not (#601). Decided from the document's content
+ * an `x-` key is stepped over only where the readers step over it: the
+ * Paths Object's (`extractOperations`), a Responses Object's
+ * (`readFallbackResponse`) and a Callback Object's (`extractCallbacks`),
+ * extensions by the specification. An object written as a `$ref` — a
+ * parameter, request body, response or header, a path item or a callback —
+ * is followed to the component its chain ends on, as the readers follow
+ * it, and nothing written beside the `$ref` is read, so a union under a
+ * `content` or `headers` there is under no root and contests nothing,
+ * whether the ref resolves or not (#601). Decided from the document's content
  * alone, so declaration order and depth play no part, and once per
  * document, before any union is named (`extractSchemas`), so the union
  * TypeRef and every extractor read the same decision. `undefined` clears
@@ -1032,9 +1040,11 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * already claimed its title, and again as `wrapper.marker`, where it keeps
  * the title — is read under each, so the two shapes of the title are
  * compared and contested (`markContestedTitlesUnderRoot`). A schema that
- * refers back to itself is stopped by the ancestors on the path to it. The
- * descent over the document keeps a separate guard that never holds a
- * schema. The guards end the walk on a document that refers back to itself.
+ * refers back to itself is stopped by the ancestors on the path to it, and
+ * the descent over the document by the guards `readSchemaSites` keeps: the
+ * refs a chain has already followed, and the Callback Objects on the path
+ * to the one being read. Together they end the walk on a document that
+ * refers back to itself.
  */
 export function markContestedTitles(document: unknown): void {
   contestedTitledVariants = new WeakSet();
@@ -1058,215 +1068,80 @@ function isSchemaRecord(value: unknown): value is SchemaObject {
   return isRecord(value);
 }
 
-/** The Path Item Object's operation fields, the keys the operation readers dispatch on. */
-const PATH_ITEM_OPERATIONS = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'] as const;
-/** The `in` locations a parameter is typed at (`extractParams`); one declared anywhere else is never read. */
-const PARAMETER_LOCATIONS: ReadonlySet<ParameterLocation> = new Set(['path', 'query', 'header', 'cookie']);
-
 /**
- * Every schema root of the document outside `components.schemas`, found by
- * walking the OpenAPI 3.0/3.1 object model (see `markContestedTitles`):
+ * Every schema root of the document outside `components.schemas`: the
+ * schemas the parser runs an extractor over. Those are the schemas the
+ * readers type something from (`readSchemaSites`, the walk
+ * `sentOnlyComponentNames` reads the same sites through), each once however
+ * many sites reach it — the body of a `components/responses` entry is one
+ * root whatever number of operations return it, and the marks a root
+ * yields do not depend on how often it is read — so a site the readers step
+ * over yields no root, and a union there contests no title (#670).
  *
- *   - the OpenAPI Object's `paths` (a path per key, an `x-` extension
- *     stepped over) and `webhooks` (a name per key) to Path Item Objects;
- *     the Components Object's `responses`,
- *     `parameters`, `requestBodies`, `headers`, `pathItems` and `callbacks`
- *     (a name per key);
- *   - a Path Item's `parameters` list and operations; an Operation's
- *     `parameters`, `requestBody`, `responses` (a status code, `default`, a
- *     range or an `x-` extension per key) and `callbacks` (a name per key,
- *     each a Callback Object: an expression or an `x-` extension per key,
- *     each a Path Item);
- *   - a Parameter's or Header's `schema` and `content`; a Request Body's and
- *     a Response's `content` (a media type per key) and a Response's
- *     `headers` (a name per key); a Media Type's `schema` and `encoding` (a
- *     property name per key, each an Encoding Object with `headers`).
- *
- * A map whose keys are names is read whole, whatever the keys look like,
- * the `webhooks` map among them: OpenAPI gives it no extensions, and
- * `extractWebhooks` reads every key as a webhook (#421).
- * An `x-` key is stepped over in the Paths Object, where the specification
- * makes it an extension and `extractOperations` steps over it, in a
- * Responses Object, as
- * `readFallbackResponse` steps over it, and in a Callback Object, where the
- * specification makes it an extension and `extractCallbacks` steps over it
- * (#382). A `$ref` entry
- * anywhere carries no schema of its own: the target is a component, or
- * another `paths` or `webhooks` entry a Path Item's `$ref` names (#422),
- * read under its own map, and the object around the `$ref` is stepped
- * over whole, as the readers step over it — a Parameter, Header, Request
- * Body or Response Object written as a Reference Object, whose every other
- * key OpenAPI says to ignore (`followReference`, #562), a Path Item's
- * `$ref` entry, whose target is taken whole (`resolvePathItemRef`), and a
- * Callback Object's (`resolveCallbackRef`) — so a `schema`, `content` or
- * `headers` written beside the `$ref` is never read, whether the ref
- * resolves or not, at every site that takes one: on an operation, a
- * webhook or a callback, and as a `components` entry itself (#601: a
- * titled union under a `content` beside a `404`'s `$ref` contested the
- * `Tag` of a component's `collar` and renamed it `TagPetCollar`, though
- * the parser typed nothing from it). A `$ref` key holding `undefined` is
- * no reference, as `followReference` reads it. A `schema` is yielded and
- * not entered, so one shared by two sites is yielded for each; every other
- * object is entered once, which ends the walk on a document that refers
- * back to itself. `example`, `examples`, `links` and extensions are never
- * entered.
+ * One more schema is read, though nothing may be typed from it: the body of
+ * every `components/responses` entry, returned or not, which the operation
+ * pass reads to reserve the names it mints
+ * (`resolveComponentResponseModelNames`, #234: an `OwnerCardResponse`
+ * nothing returns still steps `OwnerCard`'s body to `OwnerCardResponse2`).
+ * Those names are the ones the body's titles are decided under, so that
+ * body — the one schema `componentResponseBodySchema` picks, not the
+ * entry's headers or its other media types — is a root wherever the
+ * reservation runs, which is wherever the document has `paths`
+ * (`extractOperations`). Left out, the reservation would read titles no
+ * pass had compared: a `Hints` nothing returns whose body gives `Circle`
+ * two shapes would reserve the bare `Circle` and step the body of a `Card`
+ * an operation does return to `CardResponse2`. So a `103` written as `$ref:
+ * '#/components/responses/Hints'` adds no root — `Hints` is one where it is
+ * declared, with or without the `103` — and every other `components` entry
+ * nothing that is read references (a parameter, request body, header, path
+ * item or callback) is none.
  */
 function schemaRootsOf(
   document: Record<string, unknown>,
   components: Record<string, unknown> | undefined,
 ): SchemaObject[] {
-  const roots: SchemaObject[] = [];
-  const entered = new WeakSet<object>();
-  /** Enter an object once; false for a non-object or one entered before. */
-  const enter = (value: unknown): value is Record<string, unknown> => {
-    if (!isRecord(value) || entered.has(value)) return false;
-    entered.add(value);
-    return true;
-  };
-  /** Every entry of a map whose keys are names. */
-  const named = (map: unknown, visit: (entry: unknown) => void): void => {
-    if (!enter(map)) return;
-    for (const entry of Object.values(map)) visit(entry);
-  };
-  /** Every entry of a map whose keys OpenAPI defines beside `x-` extensions. */
-  const keyed = (map: unknown, visit: (entry: unknown) => void): void => {
-    if (!enter(map)) return;
-    for (const [key, entry] of Object.entries(map)) if (!key.startsWith('x-')) visit(entry);
-  };
-  const listed = (list: unknown, visit: (entry: unknown) => void): void => {
-    if (!Array.isArray(list) || entered.has(list)) return;
-    entered.add(list);
-    for (const entry of list) visit(entry);
-  };
-  const schema = (value: unknown): void => {
-    if (isSchemaRecord(value)) roots.push(value);
-  };
-  const encoding = (value: unknown): void => {
-    if (enter(value)) named(value['headers'], parameter);
-  };
-  const mediaType = (value: unknown): void => {
-    if (!enter(value)) return;
-    schema(value['schema']);
-    named(value['encoding'], encoding);
-  };
-  /**
-   * Whether `value` is written as a reference: a `$ref` with a value, which
-   * the readers follow to its target and read nothing else of, so every
-   * key beside it is stepped over (#601). A `$ref` holding `undefined` is
-   * no reference, as `followReference` reads it.
-   */
-  const isReference = (value: Record<string, unknown>): boolean => value['$ref'] !== undefined;
-  /** A Parameter Object or a Header Object: the same schema sites. */
-  const parameter = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    schema(value['schema']);
-    named(value['content'], mediaType);
-  };
-  const requestBody = (value: unknown): void => {
-    if (enter(value) && !isReference(value)) named(value['content'], mediaType);
-  };
-  const response = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    named(value['headers'], parameter);
-    named(value['content'], mediaType);
-  };
-  const pathItem = (value: unknown): void => {
-    if (!enter(value) || isReference(value)) return;
-    listed(value['parameters'], parameter);
-    for (const method of PATH_ITEM_OPERATIONS) operation(value[method]);
-  };
-  /** A Callback Object: an expression or an `x-` extension per key, each a Path Item; one written as a reference is stepped over. */
-  const callback = (value: unknown): void => {
-    if (isRecord(value) && isReference(value)) return;
-    keyed(value, pathItem);
-  };
-  const operation = (value: unknown): void => {
-    if (!enter(value)) return;
-    listed(value['parameters'], parameter);
-    requestBody(value['requestBody']);
-    keyed(value['responses'], response);
-    named(value['callbacks'], callback);
-  };
-
-  // `paths` steps over `x-` extensions, as `extractOperations` does; every
-  // `webhooks` key is a webhook, as `extractWebhooks` reads it (#421).
-  keyed(document['paths'], pathItem);
-  named(document['webhooks'], pathItem);
-  if (components) {
-    named(components['responses'], response);
-    named(components['parameters'], parameter);
-    named(components['requestBodies'], requestBody);
-    named(components['headers'], parameter);
-    named(components['pathItems'], pathItem);
-    named(components['callbacks'], callback);
+  const roots = new Set<SchemaObject>();
+  readSchemaSites(document, (schema) => roots.add(schema));
+  const responses = components?.['responses'];
+  if (document['paths'] && isRecord(responses)) {
+    for (const name of Object.keys(responses)) {
+      const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
+      if (isSchemaRecord(body)) roots.add(body);
+    }
   }
-  return roots;
+  return [...roots];
 }
-
-/** Which way a site moves what it types: out with a request the SDK makes, or in. */
-type SiteDirection = 'sent' | 'received';
 
 /**
  * The components the SDK only sends, by resolved name (`resolveSchemaName`):
  * those reached by at least one site the parser reads and by none that the
- * SDK receives. What an operation under `paths` sends is its request body,
+ * SDK receives. The sites are the ones the readers type something from,
+ * found by the walk the contested-title roots come from (`readSchemaSites`,
+ * which states each rule), so a site the readers step over reaches nothing.
+ * What an operation under `paths` sends is its request body,
  * under every media type it declares a schema for — each is typed through
  * it, as `requestBody` or in `requestBodyContents`, so a `postNote` body of
  * `$ref: Pet` under `application/xml` alone, which nothing reads as
- * `requestBody`, still sends `Pet` — and the parameters it types — the Path Item's,
- * then its own, an operation parameter replacing a Path Item one of the same
- * identity (`parameterKey`: location and name, a header's name case-folded)
- * as `buildOperation` merges them, so a Path Item parameter the operation
- * overrides is no site — each written inline or through
- * `components/requestBodies` and `components/parameters`; what it receives
- * is every response `extractResponses` reads — a body and a header under a
- * 200–599 status code, `default` or a `1XX`–`5XX` range, inline or through
- * `components/responses` and `components/headers` — and nothing under a key
- * the reader skips, each key classified as the reader classifies it
- * (`classifyResponseKey`): a 1xx status code, which it keeps as written and
- * types nothing of, an `x-` extension, a key OpenAPI does not define
- * (`600`, `6XX`), warned about and ignored, and the later of two range keys
- * that differ in case alone (`4xx` after `4XX`, `readFallbackResponse`) —
- * so a `103` on `listNotes` with an `X-Pet` header or a body of `$ref: Pet`
- * leaves `Pet` only sent, as the document without it does, while a `1XX`
- * range with the same header receives it (#540 review). The `headers` map
- * is read as `extractResponseHeaders` reads it: of two keys that differ in
- * case alone, the later declaration (#295), and never one keyed
- * `Content-Type`, whatever its case, which OpenAPI says to ignore
- * (`isIgnoredResponseHeader`, #540) — so a `Content-Type` header of
- * `$ref: Pet` on `createPet`'s `204` leaves `Pet` only sent too. A
- * response body is read by the media types whose schema the reader reads
- * (`responseBodyReading`): every one but `application/octet-stream`,
- * `application/pdf`, `text/plain`, `text/html`, `text/xml` and
- * `application/xml`, which `primaryBodySchema` and `typeSecondaryContent`
- * type as a binary string or a string without reading the schema, at a
- * 2xx, 3xx, error, `default` or range entry alike — so a `listNotes` `200`
+ * `requestBody`, still sends `Pet` — and the parameters it types, a Path
+ * Item parameter the operation overrides being no site; what it receives
+ * is every response `extractResponses` reads, body and headers, and nothing
+ * under a key the reader skips — so a `103` on `listNotes` with an `X-Pet`
+ * header or a body of `$ref: Pet` leaves `Pet` only sent, as the document
+ * without it does, while a `1XX` range with the same header receives it
+ * (#540 review); a `Content-Type` header of `$ref: Pet` on `createPet`'s
+ * `204` leaves `Pet` only sent too (#540); and so does a `listNotes` `200`
  * of `$ref: Pet` under `application/xml`, `text/plain` or
  * `application/octet-stream` alone, or under `application/xml` beside a
- * `201` whose `application/json` is `{ type: string }`, leaves `Pet` only
- * sent, as the document without it does, while a body under
+ * `201` whose `application/json` is `{ type: string }`, while a body under
  * `application/json`, `application/yaml` or `*\/*` receives it (#610). A
- * parameter or header is read by the one schema that types it
- * (`parameterTyping`): its `schema`,
- * else the schema of the `content` entry `selectParameterContent` picks, so
- * one the parser types as a string — a `content` map none of whose media
- * types is read, or a map beside a `schema`, which wins — reaches nothing.
- * A parameter the readers never type reaches nothing either: an `Accept`,
- * `Content-Type` or `Authorization` header, which OpenAPI says to ignore
- * (`isIgnoredHeaderParameter`, #414), on an operation or a webhook, a
- * webhook's `path` parameter, which `extractWebhooks` drops, and a
- * `Content-Type` response header (above). A webhook's payload and the
- * parameters it keeps are received, merged the same way (`extractWebhooks`);
- * its responses type no body (`extractWebhookResponses`). An operation's
- * `callbacks` — a webhook's, and a callback operation's own, nested — are
- * read as `extractCallbacks` reads them: each Callback Object (a
- * `components/callbacks` `$ref` followed, a callback referring back to one
- * it sits in read once) maps expressions to path items whose requests the
- * SDK is sent, so their bodies and parameters are received and their
- * responses type no body (#382). A Path Item and every Reference Object are followed as the
- * readers follow them (`resolvePathItemRef`, `followReference`), an `x-` key
- * of `paths` stepped over, a Responses Object's keys read as above and every
- * `webhooks` key read as a webhook. A schema
+ * parameter the readers never type reaches nothing either: an `Accept`,
+ * `Content-Type` or `Authorization` header (#414), on an operation or a
+ * webhook, an operation's `Idempotency-Key` header, which the SDK injects
+ * and `buildOperation` leaves untyped (#670: a `createPet` header
+ * `Idempotency-Key` of `$ref: Pet` counted as sending `Pet`), and a
+ * webhook's `path` parameter, which `extractWebhooks` drops. A webhook's
+ * payload and the parameters it keeps are received, and so are a
+ * callback's (#382); their responses type no body. A schema
  * reaches the components it names through the keywords the parser types it
  * through — `properties`, `patternProperties`, `additionalProperties`,
  * `items`, `allOf`/`oneOf`/`anyOf` — and a discriminator's mapping, a `$ref`
@@ -1290,26 +1165,6 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   /** The directions each component is reached in, by `components/schemas` key. */
   const reached = new Map<string, Set<SiteDirection>>();
   const entered: Record<SiteDirection, WeakSet<object>> = { sent: new WeakSet(), received: new WeakSet() };
-  /** What a Reference Object chain into `section` leads to; `undefined` for one that loops or leads nowhere. */
-  const follow = (
-    value: unknown,
-    section: 'pathItems' | 'parameters' | 'requestBodies' | 'responses' | 'headers' | 'callbacks',
-  ): Record<string, unknown> | undefined => {
-    const entries = components[section];
-    const map = isRecord(entries) ? (entries as Record<string, Record<string, unknown>>) : undefined;
-    const seen = new Set<string>();
-    let current = value;
-    while (isRecord(current) && current['$ref'] !== undefined) {
-      const ref = current['$ref'];
-      if (typeof ref !== 'string' || seen.has(ref)) return undefined;
-      seen.add(ref);
-      // A Path Item's `$ref` may also name another `paths` or `webhooks`
-      // entry, as `resolvePathItemRef` reads it (#422).
-      current =
-        section === 'pathItems' ? pathItemRefTarget(ref, map, document) : resolveComponentRef(ref, section, map);
-    }
-    return isRecord(current) ? current : undefined;
-  };
   const schema = (value: unknown, direction: SiteDirection): void => {
     if (!isRecord(value) || entered[direction].has(value)) return;
     entered[direction].add(value);
@@ -1336,162 +1191,7 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
       if (Array.isArray(members)) for (const member of members) schema(member, direction);
     }
   };
-  /**
-   * A request body's `content` map — an operation's, sent, or a webhook's or
-   * a callback's, received — read as the body readers read it: every media
-   * type that declares a schema is typed through it, as the primary pick
-   * (`selectRequestBodyContent`) or a secondary entry
-   * (`typeSecondaryRequestContent`, `mintPayload`: `requestBodyContents`),
-   * so each reaches what its schema names, under `application/xml` as under
-   * `application/json`.
-   */
-  const requestContent = (value: unknown, direction: SiteDirection): void => {
-    if (!isRecord(value)) return;
-    for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
-  };
-  /**
-   * A response's `content` map, read as `extractResponseContents` reads it:
-   * a media type the reader types as a binary string or a string without
-   * reading its schema (`responseBodyReading`: `application/octet-stream`,
-   * `application/pdf`, `text/plain`, `text/html`, `text/xml`,
-   * `application/xml`, by essence) reaches nothing, as the primary pick
-   * (`primaryBodySchema`) and a secondary entry (`typeSecondaryContent`)
-   * alike leave its schema unread; every other media type types its body
-   * through its schema and reaches what it names (#610).
-   */
-  const responseContent = (value: unknown): void => {
-    if (!isRecord(value)) return;
-    for (const [contentType, mediaType] of Object.entries(value)) {
-      if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
-      schema(mediaType['schema'], 'received');
-    }
-  };
-  /**
-   * A Parameter or Header Object, read by the one schema that types it
-   * (`parameterTyping`): its `schema`, else the schema of the `content`
-   * entry `selectParameterContent` picks. One typed as a string — a
-   * `content` map none of whose media types is read, or no schema at all —
-   * reaches nothing, and a `content` map beside a `schema` is not consulted.
-   */
-  const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
-    const { schema: own, content: map } = declaration;
-    schema(
-      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
-      direction,
-    );
-  };
-  /**
-   * The parameters `operation` types, resolved as `buildOperation` and
-   * `extractWebhooks` resolve them: the Path Item's, then its own, each
-   * Reference Object followed, an operation parameter replacing a Path Item
-   * one of the same identity (`parameterKey`: location and name, a header's
-   * name case-folded). A Path Item parameter the operation overrides is not
-   * read, and one under no operation is read by nothing.
-   */
-  const parameters = (item: Record<string, unknown>, operation: Record<string, unknown>, direction: SiteDirection) => {
-    const byIdentity = new Map<string, Record<string, unknown>>();
-    for (const list of [item['parameters'], operation['parameters']]) {
-      if (!Array.isArray(list)) continue;
-      for (const raw of list) {
-        const resolved = follow(raw, 'parameters');
-        const location = resolved?.['in'];
-        if (!resolved || !PARAMETER_LOCATIONS.has(location as ParameterLocation)) continue;
-        const name = resolved['name'];
-        // Nothing types an `Accept`, `Content-Type` or `Authorization` header
-        // (#414), nor a webhook's `path` parameter, which `extractWebhooks`
-        // drops: neither reaches a component (Greptile, #421 review).
-        if (typeof name === 'string' && isIgnoredHeaderParameter({ in: location, name } as ParameterObject)) continue;
-        if (direction === 'received' && location === 'path') continue;
-        byIdentity.set(parameterKey(location as ParameterLocation, typeof name === 'string' ? name : ''), resolved);
-      }
-    }
-    for (const resolved of byIdentity.values()) typed(resolved, direction);
-  };
-  /**
-   * The Callback Objects on the path to the one being read, by identity
-   * after `$ref` resolution: a callback that refers back to one it sits in
-   * is read once, as `extractCallbacks` reads it (#382).
-   */
-  const readingCallbacks = new Set<object>();
-  /** Each callback of an operation: its path items are read as a webhook's is, since a callback's request is one the SDK is sent. */
-  const callbacks = (map: unknown): void => {
-    if (!isRecord(map)) return;
-    for (const raw of Object.values(map)) {
-      const callback = follow(raw, 'callbacks');
-      if (!callback || readingCallbacks.has(callback)) continue;
-      readingCallbacks.add(callback);
-      for (const [expression, entry] of Object.entries(callback)) {
-        // An `x-` key is a specification extension of the Callback Object.
-        if (expression.startsWith('x-')) continue;
-        const item = follow(entry, 'pathItems');
-        if (item) pathItem(item, true);
-      }
-      readingCallbacks.delete(callback);
-    }
-  };
-  /** A path item's operations, their requests read as sent or — a webhook's or a callback's — received. */
-  const pathItem = (item: Record<string, unknown>, received: boolean): void => {
-    const request: SiteDirection = received ? 'received' : 'sent';
-    for (const method of PATH_ITEM_OPERATIONS) {
-      const operation = item[method];
-      if (!isRecord(operation)) continue;
-      parameters(item, operation, request);
-      requestContent(follow(operation['requestBody'], 'requestBodies')?.['content'], request);
-      callbacks(operation['callbacks']);
-      const responses = operation['responses'];
-      if (received || !isRecord(responses)) continue;
-      // Read as `extractResponses` reads the map, each key classified as
-      // the reader classifies it (`classifyResponseKey`): a 200–599 status
-      // code, `default` and a `1XX`–`5XX` range are read, body and headers
-      // alike, and of two range keys that differ in case alone (`4XX`
-      // beside `4xx`) only the first is (`readFallbackResponse`). A 1xx
-      // status code is kept as written and nothing of it typed, an `x-`
-      // key is an extension, and a key OpenAPI does not define (`600`,
-      // `6XX`) is warned about — once, by the reader — and ignored; none
-      // of those reaches a component (#540 review).
-      const ranges = new Set<string>();
-      for (const [code, entry] of Object.entries(responses)) {
-        const key = classifyResponseKey(code);
-        if (key.kind === 'extension' || key.kind === 'unrecognized') continue;
-        if (key.kind === 'status' && key.code < 200) continue;
-        if (key.kind === 'range') {
-          if (ranges.has(key.range)) continue;
-          ranges.add(key.range);
-        }
-        const response = follow(entry, 'responses');
-        if (!response) continue;
-        responseContent(response['content']);
-        const headers = response['headers'];
-        if (!isRecord(headers)) continue;
-        // Read as `extractResponseHeaders` reads the map: header names are
-        // case-insensitive, so of two keys that differ in case alone the
-        // later declaration is the header (#295), and a `Content-Type`
-        // header, which OpenAPI says to ignore, is skipped by its key,
-        // whatever its `$ref` leads to (`isIgnoredResponseHeader`). Nothing
-        // types the dropped declaration or the ignored header, so neither
-        // reaches a component (#540).
-        const declared = new Map<string, unknown>();
-        for (const [name, header] of Object.entries(headers)) declared.set(foldHeaderName(name), header);
-        for (const [name, header] of declared) {
-          if (isIgnoredResponseHeader(name)) continue;
-          const resolved = follow(header, 'headers');
-          if (resolved) typed(resolved, 'received');
-        }
-      }
-    }
-  };
-  const pathItems = (map: unknown, webhooks: boolean): void => {
-    if (!isRecord(map)) return;
-    for (const [key, raw] of Object.entries(map)) {
-      // An extension under `paths`; a webhook's name under `webhooks` (#421).
-      if (!webhooks && key.startsWith('x-')) continue;
-      const item = follow(raw, 'pathItems');
-      // A webhook's request is one the SDK is sent.
-      if (item) pathItem(item, webhooks);
-    }
-  };
-  pathItems(document['paths'], false);
-  pathItems(document['webhooks'], true);
+  readSchemaSites(document, schema);
 
   const onlySent = new Map<string, boolean>();
   for (const key of Object.keys(schemas)) {

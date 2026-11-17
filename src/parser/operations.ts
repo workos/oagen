@@ -376,6 +376,25 @@ export function isIgnoredHeaderParameter(param: ParameterObject): boolean {
   return param.in === 'header' && IGNORED_HEADER_PARAMETERS.has(foldHeaderName(param.name));
 }
 
+/** The header an operation's idempotency key travels in, folded (`foldHeaderName`). */
+const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
+
+/**
+ * Whether `param` is an operation's idempotency header: a header parameter
+ * named `Idempotency-Key`, whatever its case. The SDK injects that header
+ * itself (`Operation.injectIdempotencyKey`), so `buildOperation` types no
+ * parameter from it: it is on no `headerParams` list, a `content` map on it
+ * is not reported, and its schema mints no model or enum. Asked once its
+ * `$ref` is resolved, by `buildOperation` and by the walk over the sites the
+ * readers type (`readSchemaSites`), which steps over it on an operation
+ * under `paths` for the same reason (#670). A webhook's or a callback's
+ * `Idempotency-Key` is a header the SDK is sent, typed like any other
+ * (`readPathItemEntries`), so neither asks this of one.
+ */
+export function isIdempotencyKeyHeader(param: Pick<ParameterObject, 'in' | 'name'>): boolean {
+  return param.in === 'header' && foldHeaderName(param.name) === IDEMPOTENCY_KEY_HEADER;
+}
+
 /** The response header name OpenAPI says to ignore, folded (`foldHeaderName`). */
 const IGNORED_RESPONSE_HEADER = 'content-type';
 
@@ -387,8 +406,10 @@ const IGNORED_RESPONSE_HEADER = 'content-type';
  * `Accept` or `Authorization` response header is read. Asked by the key the
  * `headers` map declares the header under — its name, whatever a `$ref`
  * there leads to — before anything types it, so neither
- * `extractResponseHeaders` nor the sent-only component walk
- * (`sentOnlyComponentNames`, #540) reads the components its schema names.
+ * `extractResponseHeaders` nor the walk over the sites the readers type
+ * (`readSchemaSites`) reads its schema: a component it names is not thereby
+ * received (`sentOnlyComponentNames`, #540), and a titled union in it
+ * contests no title (`markContestedTitles`, #670).
  */
 export function isIgnoredResponseHeader(name: string): boolean {
   return foldHeaderName(name) === IGNORED_RESPONSE_HEADER;
@@ -503,6 +524,14 @@ export interface ResponseObject {
   content?: Record<string, { schema?: SchemaObject }>;
 }
 
+/**
+ * The Path Item Object's fields that hold an operation, in the order the
+ * operations of one path are read (`extractOperations`); a webhook's and a
+ * callback's path item is read through the same fields
+ * (`readPathItemEntries`), and so is every path item by the walk over the
+ * sites the readers type (`readSchemaSites`). Any other key of a Path Item
+ * holds no operation.
+ */
 export const HTTP_METHODS: HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 /**
@@ -3299,13 +3328,13 @@ function buildOperation(
   }
   const allParams = [...paramsByIdentity.values()];
 
-  const hasIdempotencyHeader = allParams.some((p) => p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key');
+  const hasIdempotencyHeader = allParams.some(isIdempotencyKeyHeader);
   // Reported here, once per parameter the operation types: `extractParams`
   // runs per location, and the passes that re-read a parameter's schema
   // stay silent. The idempotency header is not typed (see `extract` below),
   // so a `content` map on it is not reported.
   for (const param of allParams) {
-    if (param.in === 'header' && foldHeaderName(param.name) === 'idempotency-key') continue;
+    if (isIdempotencyKeyHeader(param)) continue;
     warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${opLabel}`);
   }
 
@@ -3378,7 +3407,7 @@ function buildOperation(
   // The idempotency header is the SDK's to inject (`injectIdempotencyKey`), not a parameter to type.
   const headerParams = extract(
     'header',
-    wireParams.filter((p) => !(p.in === 'header' && foldHeaderName(p.name) === 'idempotency-key')),
+    wireParams.filter((p) => !isIdempotencyKeyHeader(p)),
   );
   const cookieParams = extract('cookie');
   // Keep the body-owned declarations on the operation so downstream passes
@@ -5842,7 +5871,8 @@ function extractResponseHeaders(
   for (const [folded, { name, raw }] of declarations) {
     // OAS 3.x: a response header named `Content-Type` SHALL be ignored; the
     // media type is already carried by the response's `content` map. The
-    // sent-only component walk skips it by the same rule (#540).
+    // walk over the sites the readers type (`readSchemaSites`) skips it by
+    // the same rule (#540, #670).
     if (isIgnoredResponseHeader(name)) continue;
 
     const header = resolveHeaderRef(raw, ctx.componentHeaders, name, operationLabel, ctx.refSiblingDescriptions);
@@ -6791,7 +6821,13 @@ interface ComponentResponseNaming {
  * (`OwnerCardResponse` → `OwnerCardResponse`) keeps it ahead of one that
  * only derives it; the rest are decided in document order, so the outcome
  * never depends on which operation is read first. Every component ends up in
- * the map, so every operation that returns it shares the one model.
+ * the map, so every operation that returns it shares the one model — one
+ * no operation returns too (`OwnerCard` steps to `OwnerCardResponse2` beside
+ * an `OwnerCardResponse` nothing returns), its names read off its body as
+ * any other's. So the body this reads (`componentResponseBodySchema`) is a
+ * root of the contested-title walk whether or not an operation returns the
+ * component (`markContestedTitles`): the names are read under the titles as
+ * they are decided, never under ones no pass has compared.
  */
 function resolveComponentResponseModelNames(
   componentResponses: Record<string, Record<string, unknown>> | undefined,
@@ -6941,8 +6977,14 @@ function operationBodyModelNames(
   });
 }
 
-/** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
-function componentResponseBodySchema(
+/**
+ * The schema a component response's body is read from, through a chain of
+ * refs, silently; undefined without one. What the name reservation reads of
+ * every `components/responses` entry (`resolveComponentResponseModelNames`),
+ * and so what the contested-title walk takes as that entry's root where no
+ * operation returns it (`markContestedTitles`).
+ */
+export function componentResponseBodySchema(
   componentName: string,
   componentResponses: Record<string, Record<string, unknown>>,
 ): SchemaObject | undefined {
@@ -7254,7 +7296,7 @@ function typeSecondaryContent(
   // Parameters and case do not change what a body is: `application/pdf;
   // version=1.7` is as binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8`
   // as much a string as `text/plain` (`responseBodyReading`, the one
-  // classification the primary pick and `sentOnlyComponentNames` read too).
+  // classification the primary pick and `readSchemaSites` read too).
   // The key itself stays as written.
   const reading = responseBodyReading(contentType);
   if (reading !== 'schema') return unreadResponseBodyType(reading);
@@ -7578,9 +7620,11 @@ function typeErrorBody(
  * `text/html`, `text/xml`, `application/xml`) media type, typed as a string
  * without reading its schema — the classification `responseBodyReading`
  * shares with every secondary entry (`typeSecondaryContent`) and with the
- * sent/received walk (`sentOnlyComponentNames`), so a body under such a
- * media type reaches no component (#610); else the first media type that
- * declares a schema; else the first declared, which reads as `unknown`.
+ * walk over the sites the readers type (`readSchemaSites`), so a body under
+ * such a media type reaches no component (`sentOnlyComponentNames`, #610)
+ * and contests no title (`markContestedTitles`, #670); else the first media
+ * type that declares a schema; else the first declared, which reads as
+ * `unknown`.
  * Media types are compared by essence (`application/pdf; foo=bar` is as
  * binary as `application/pdf`, `TEXT/PLAIN; charset=utf-8` as much a string
  * as `text/plain`) and `contentType` is the key as written.
