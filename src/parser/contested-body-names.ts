@@ -44,6 +44,16 @@ export interface OperationBodyNames {
   models: string[];
   /** Every inline enum name the bodies mint — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
   enums: string[];
+  /**
+   * Every other name the operation holds: the one each list-envelope
+   * companion model takes when it is named from its property alone
+   * (`EnvelopeCompanion.bareNames`: `ListMetadata`), which
+   * `resolveEnvelopeCompanionNames` may settle it on, and the inline enums
+   * its parameters carry, named from its service (`PetsStatus`). No body
+   * mints them under the stem, so they are never claimed — only kept clear
+   * of when a name is numbered.
+   */
+  others: string[];
 }
 
 /** The names one operation gives up, each with the name its model or inline enum takes instead. */
@@ -94,19 +104,25 @@ export function stemsInContest(stems: Iterable<string>): Set<string> {
  *
  * What an operation gives up takes the name numbered (`numberedName`:
  * `CreatePetResponseDraftResponse2`, `…3`), the first number under which it
- * is no name in play — `taken`, every name decided before the operations
- * (the component models and enums, the models and enums their fields mint,
- * the component responses' bodies), every name the bodies of `bodies` mint,
- * and every name already handed out here — so a field `draft_response2`, a
- * component or an enum of the numbered name moves it on to the next. The
- * names are taken in code-unit order and, when several operations give one
- * name up (`get` and `getResponse` beside `getResponseResponse`), the
- * shorter stem takes the lower number, so the outcome depends on the
- * document's stems and never on the order of its paths.
+ * is no name in play: every name the operations of `bodies` mint or hold
+ * (`others`), every name `taken` gives — the names
+ * decided before the operations (the component models and enums, the models
+ * and enums their fields mint, the component responses' bodies) and the
+ * names of every operation that is not among `bodies` — and every
+ * name already handed out here. So a field `draft_response2`, a component
+ * or an enum of the numbered name, or a response of an operation outside
+ * the contest named `CreatePetResponseDraftResponse2` from its `object`
+ * const, moves it on to the next. `taken` is read once, and only when a
+ * name is given up: the caller reads the other operations' bodies for it,
+ * which a document with no contested name never needs. The names are taken
+ * in code-unit order and, when several operations give one name up (`get`
+ * and `getResponse` beside `getResponseResponse`), the shorter stem takes
+ * the lower number, so the outcome depends on the document's stems and
+ * never on the order of its paths.
  */
 export function resolveContestedBodyNames(
   bodies: readonly OperationBodyNames[],
-  taken: Iterable<string>,
+  taken: () => Iterable<string>,
 ): Map<string, BodyNameYields> {
   /** One stem's claim on a name, and where in the name the stem stands. */
   interface Claim {
@@ -114,10 +130,8 @@ export function resolveContestedBodyNames(
     at: number;
   }
   const claims = new Map<string, Claim[]>();
-  const inPlay = new Set(taken);
   for (const { stem, models, enums } of bodies) {
     for (const name of new Set([...models, ...enums])) {
-      inPlay.add(name);
       const at = stem.length > 0 ? name.indexOf(stem) : -1;
       if (at < 0) continue;
       const claimants = claims.get(name) ?? [];
@@ -127,7 +141,8 @@ export function resolveContestedBodyNames(
     }
   }
 
-  const byStem = new Map<string, Map<string, string>>();
+  /** Each contested name, in code-unit order, with the stems that give it up, the shorter stem first. */
+  const contested: Array<{ name: string; yielding: Claim[] }> = [];
   for (const name of [...claims.keys()].sort()) {
     const claimants = claims.get(name)!;
     if (claimants.length < 2) continue;
@@ -135,6 +150,16 @@ export function resolveContestedBodyNames(
       .filter(({ stem }) => claimants.some((other) => other.stem !== stem && other.stem.includes(stem)))
       // The shorter stem first; two of one length by where the stem stands, then by code unit.
       .sort((a, b) => a.stem.length - b.stem.length || a.at - b.at || (a.stem < b.stem ? -1 : 1));
+    if (yielding.length > 0) contested.push({ name, yielding });
+  }
+  if (contested.length === 0) return new Map();
+
+  const inPlay = new Set(taken());
+  for (const { models, enums, others } of bodies) {
+    for (const name of [...models, ...enums, ...others]) inPlay.add(name);
+  }
+  const byStem = new Map<string, Map<string, string>>();
+  for (const { name, yielding } of contested) {
     for (const { stem } of yielding) {
       let renamed = numberedName(name, 2);
       for (let n = 3; inPlay.has(renamed); n++) renamed = numberedName(name, n);
