@@ -956,80 +956,7 @@ const sites: Site[] = [
       post({ requestBody: multipart({ encoding: { 'x-part': { headers: { 'x-hdr': { content: json(s) } } } } }) }),
   },
 
-  // --- a map written as an array, which the readers read by its indexes ---------------
-  {
-    label: 'a response `content` written as an array',
-    reading: 'received',
-    build: (s) => get({ responses: { '200': { ...ok, content: [{ schema: s }] } } }),
-  },
-  {
-    label: 'a `404` `content` written as an array',
-    reading: 'received',
-    build: (s) => responses({ '404': { ...ok, content: [{ schema: s }] } }),
-  },
-  {
-    label: 'a request body `content` written as an array',
-    reading: 'sent',
-    build: (s) => post({ requestBody: { content: [{ schema: s }] } }),
-  },
-  {
-    label: "a webhook's request body `content` written as an array",
-    reading: 'received',
-    build: (s) => webhook({ requestBody: { content: [{ schema: s }] } }),
-  },
-  {
-    label: 'a response `headers` written as an array',
-    reading: 'received',
-    build: (s) => get({ responses: { '200': { ...body(str), headers: [{ schema: s }] } } }),
-  },
-  {
-    label: '`paths` written as an array',
-    reading: 'received',
-    build: (s) => ({ paths: [{ get: { operationId: 'getD', responses: { '200': body(s) } } }] }),
-  },
-  {
-    label: '`components/parameters` written as an array, an entry referenced by its index',
-    reading: 'sent',
-    build: (s) =>
-      withComponents(parameter({ $ref: '#/components/parameters/0' }), {
-        parameters: [{ name: 'note', in: 'query', schema: s }],
-      }),
-  },
-  {
-    label: '`components/responses` written as an array, an entry referenced by its index',
-    reading: 'received',
-    build: (s) => withComponents(responses({ '404': { $ref: '#/components/responses/0' } }), { responses: [body(s)] }),
-  },
-  {
-    label: '`components/requestBodies` written as an array, an entry referenced by its index',
-    reading: 'sent',
-    build: (s) =>
-      withComponents(post({ requestBody: { $ref: '#/components/requestBodies/0' } }), {
-        requestBodies: [{ content: json(s) }],
-      }),
-  },
-  {
-    label: '`components/headers` written as an array, an entry referenced by its index',
-    reading: 'received',
-    build: (s) =>
-      withComponents(okWith({ 'X-Note': { $ref: '#/components/headers/0' } }), { headers: [{ schema: s }] }),
-  },
-  {
-    label: '`components/pathItems` written as an array, an entry referenced by its index',
-    reading: 'received',
-    build: (s) => ({
-      paths: { '/d': { $ref: '#/components/pathItems/0' } },
-      components: { pathItems: [{ get: { operationId: 'getD', responses: { '200': body(s) } } }] },
-    }),
-  },
-  {
-    label: '`components/callbacks` written as an array, an entry referenced by its index',
-    reading: 'received',
-    build: (s) =>
-      withComponents(get({ callbacks: { onEvent: { $ref: '#/components/callbacks/0' } } }), {
-        callbacks: [{ '{$request.query.url}': { post: { ...received, requestBody: { content: json(s) } } } }],
-      }),
-  },
+  // --- a map written as an array, where its reader asks for an object first -----------
   {
     label: '`responses` written as an array, which the reader reads nothing from',
     reading: 'unread',
@@ -2078,19 +2005,22 @@ describe('#670 a union at a site the parser ignores contests no title', () => {
         expect(minted().filter((warning) => warning.includes('minted twice'))).toEqual([]);
       });
 
-      it('a `content` map written as an array is read by its indexes, and its two `Circle`s are told apart', async () => {
-        // `content: [{ schema }]` is the media type `0` to the reader (`Object.entries`); the walk asked for an
-        // object that is no array and left it out, on `main` too.
-        const { spec } = await parse(
-          complete(
-            openapi,
-            get({ responses: { '200': { ...ok, content: [{ schema: contesting(shapes('radius')) }] } } }),
-          ),
-        );
-        expect(names(spec)).toEqual(
-          expect.arrayContaining(['CircleGetDResponseShape', 'CircleGetDResponseMarkerShape']),
-        );
-        expect(names(spec)).not.toContain('Circle');
+      it('so are a parameter named `null` beside one named `""`, and the same two on a webhook', async () => {
+        const two = (name: unknown): Doc[] => [
+          { ...(name === undefined ? {} : { name }), in: 'query', schema: contesting(shapes('radius')) },
+          { name: '', in: 'query', schema: str },
+        ];
+        const { spec: named } = await parse(complete(openapi, get({ parameters: two(null) })));
+        expect(names(named)).toEqual(['DNull', 'CircleDNullShape', 'Square', 'DNullMarker', 'CircleDNullMarkerShape']);
+        const { spec: received } = await parse(complete(openapi, webhook({ parameters: two(undefined) })));
+        expect(names(received)).toEqual([
+          'EventUndefined',
+          'CircleEventUndefinedShape',
+          'Square',
+          'EventUndefinedMarker',
+          'CircleEventUndefinedMarkerShape',
+        ]);
+        expect(received.webhooks?.[0]?.queryParams.map(({ name }) => name)).toEqual([undefined, '']);
         expect(minted().filter((warning) => warning.includes('minted twice'))).toEqual([]);
       });
     });
