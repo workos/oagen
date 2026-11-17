@@ -736,8 +736,80 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         // `kind: string` over the variants' pinned, required `kind`:
         // `Shape & { kind?: string }` types `kind` as `'cat' | 'dog'`.
         expect(await on({ kind: text })).toBe('Pet { kind?: string }');
-        // One variant's field typed otherwise is enough.
+        // A field typed otherwise than the one variant that declares it.
         expect(await on({ meow: { type: 'integer' } })).toBe('Pet { meow?: integer }');
+        // Restating one variant's pinned `kind`, and requiring it as that
+        // variant does: `Pet` is the `Cat` of `Shape`, and `Shape & { kind:
+        // 'cat' }` types `kind` as `fields` does — whichever way round the
+        // variants are written, under the `discriminator` keyword or not,
+        // and through a nullable union.
+        const restated = { allOf: [R('Shape')], required: ['kind'], properties: { kind: pinned('cat') } };
+        const maybe =
+          openapi === '3.0.3' ? { ...Shape, nullable: true } : { oneOf: [R('Cat'), R('Dog'), { type: 'null' }] };
+        for (const shape of [
+          Shape,
+          { oneOf: [R('Dog'), R('Cat')] },
+          { ...Shape, discriminator: { propertyName: 'kind' } },
+          maybe,
+        ]) {
+          expect(await pet({ Cat, Dog, Shape: shape, Pet: restated }), JSON.stringify(shape)).toBe(
+            'Pet : Shape { kind: "cat" }',
+          );
+        }
+        expect(await pet({ Cat, Dog, Shape: maybe, Pet: { allOf: [R('Shape')], properties: { kind: text } } })).toBe(
+          'Pet { kind?: string }',
+        );
+        // Not requiring it, where `Cat` does, or pinning a value no variant
+        // pins, fits no variant.
+        expect(await on({ kind: pinned('cat') })).toBe('Pet { kind?: "cat" }');
+        expect(await pet({ Cat, Dog, Shape, Pet: { ...restated, properties: { kind: pinned('bird') } } })).toBe(
+          'Pet { kind: "bird" }',
+        );
+        // One variant has to agree on every field it shares with the
+        // model. `kind: 'cat'` fits `Tabby` alone and `name: string` fits
+        // `Hound` alone: `(Tabby | Hound) & { kind: 'cat'; name: string }`
+        // is `Tabby`'s branch alone, which types `name` as `'tom'`.
+        const Tabby = {
+          type: 'object',
+          required: ['kind', 'name'],
+          properties: { kind: pinned('cat'), name: pinned('tom') },
+        };
+        const Hound = { type: 'object', required: ['kind', 'name'], properties: { kind: pinned('dog'), name: text } };
+        const named = async (name: unknown) =>
+          pet({
+            Tabby,
+            Hound,
+            Shape: { oneOf: [R('Tabby'), R('Hound')] },
+            Pet: { allOf: [R('Shape')], required: ['kind', 'name'], properties: { kind: pinned('cat'), name } },
+          });
+        expect(await named(text)).toBe('Pet { kind: "cat", name: string }');
+        expect(await named(pinned('tom'))).toBe('Pet : Shape { kind: "cat", name: "tom" }');
+        // Beside a model base: a field `Pet` takes from `Animal` has to be
+        // the field of a variant that declares it.
+        const beside = async (meow: unknown) =>
+          pet({
+            Cat,
+            Dog,
+            Shape,
+            Animal: { type: 'object', properties: { name: text, meow } },
+            Pet: { allOf: [R('Animal'), R('Shape')], properties: { extra: text } },
+          });
+        expect(await beside(text)).toBe(
+          'Pet : Animal & Shape { extra?: string, name?: string <- Animal, meow?: string <- Animal }',
+        );
+        expect(await beside({ type: 'integer' })).toBe(
+          'Pet : Animal { extra?: string, name?: string <- Animal, meow?: integer <- Animal }',
+        );
+        // `r: integer` over variants that declare `r` as an enum and as a
+        // pinned value fits neither.
+        expect(
+          await pet({
+            Cat: { type: 'object', properties: { r: { type: 'string', enum: ['a', 'b'] } } },
+            Dog: { type: 'object', properties: { r: pinned('c') } },
+            Shape: { anyOf: [R('Cat'), R('Dog')] },
+            Pet: { allOf: [R('Shape')], properties: { r: { type: 'integer' } } },
+          }),
+        ).toBe('Pet { r?: integer }');
         // The same under the `discriminator` keyword.
         const keyed = { ...Shape, discriminator: { propertyName: 'kind' } };
         expect(await on({ extra: text }, keyed)).toBe('Pet : Shape { extra?: string }');
@@ -758,14 +830,25 @@ describe('#681 a base stays only while the model’s own declaration fits its fi
         expect(await flat({ properties: { r: text } })).toBe('Pet { r?: string, w?: integer }');
         expect(await flat({ properties: { w: text } })).toBe('Pet { w?: string, r?: PetR }');
         // A variant that requires its field is not what the optional copy
-        // on `Pet` fits — written as a `$ref` or inline.
+        // on `Pet` fits.
         const requiring = { type: 'object', required: ['r'], properties: { r: kindEnum } };
         expect(await flat({ properties: { extra: text } }, requiring)).toBe(
           'Pet { extra?: string, r?: PetR, w?: integer }',
         );
-        expect(
-          await pet({ Shape: { oneOf: [requiring, B] }, Pet: { allOf: [R('Shape')], properties: { extra: text } } }),
-        ).toBe('Pet { extra?: string, r?: PetR, w?: integer }');
+        // The variants written inline read as the same variants behind
+        // `$ref`s do, case by case.
+        const inline = async (own: Record<string, unknown>, a: unknown = A) =>
+          pet({ Shape: { oneOf: [a, B] }, Pet: { allOf: [R('Shape')], ...own } });
+        const spellings: Array<[Record<string, unknown>, unknown, string]> = [
+          [{ properties: { extra: text } }, A, 'Pet : Shape { extra?: string, r?: PetR, w?: integer }'],
+          [{ required: ['r'], properties: { r: pinned('cat') } }, A, 'Pet : Shape { r: "cat", w?: integer }'],
+          [{ properties: { r: text } }, A, 'Pet { r?: string, w?: integer }'],
+          [{ properties: { extra: text } }, requiring, 'Pet { extra?: string, r?: PetR, w?: integer }'],
+        ];
+        for (const [own, a, expected] of spellings) {
+          expect(await flat(own, a), expected).toBe(expected);
+          expect(await inline(own, a), expected).toBe(expected);
+        }
         // A union of unions is read to its models; a variant that is no
         // model declares nothing; a union of nothing is no base.
         const nested = {
