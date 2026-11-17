@@ -1406,11 +1406,16 @@ function markContestedTitlesUnderRoot(
       } else if ((keyword === 'items' || keyword === 'additionalProperties') && isSchemaRecord(value)) {
         walk(value, claims);
       } else if ((keyword === 'allOf' || keyword === 'oneOf' || keyword === 'anyOf') && Array.isArray(value)) {
+        // An `allOf`'s members are the ones every reader reads
+        // (`spliceNestedAllOf`; #675), so a lone member is one in either
+        // spelling: `allOf: [{ allOf: [] }, union]` continues the group
+        // through `union`, as `allOf: [union]` does.
+        const members: unknown[] = keyword === 'allOf' ? (spliceNestedAllOf(schema).allOf ?? value) : value;
         const inherited =
-          keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && value.length === 1)
+          keyword === 'oneOf' || keyword === 'anyOf' || (keyword === 'allOf' && members.length === 1)
             ? claims
             : undefined;
-        for (const sub of value) if (isSchemaRecord(sub)) walk(sub, inherited);
+        for (const sub of members) if (isSchemaRecord(sub)) walk(sub, inherited);
       }
     }
     ancestors.delete(schema);
@@ -2634,16 +2639,41 @@ export function annotatingAllOfMembers(schema: SchemaObject): SchemaObject[] {
  * documentation, the type builder the layer's documentation
  * (`allOfWrapperLayer`). Read by both, by `typesAsUnknown`,
  * `mintedInlineNameEntries` and `resolveBareSchema`, so every site reads
- * one member — among the members as every reader reads them
- * (`spliceNestedAllOf`; #675), so beside wrappers that only annotate or
- * limit the schema it is the one member that types it.
+ * one member: the one `writtenTypingMember` picks.
  */
 export function annotatedTypingMember(wrapper: SchemaObject): SchemaObject {
-  const members = spliceNestedAllOf(wrapper).allOf ?? [];
-  const member = allOfTypingMember(members) ?? members[0] ?? {};
+  const member = writtenTypingMember(wrapper) ?? {};
   return annotatingAllOfMembers(wrapper)
     .filter((other) => other !== member)
     .reduce((typing, other) => withAnnotatedItems(typing, other), member);
+}
+
+/**
+ * The member an `allOf` read as `'unwrapped'` (`readInlineAllOf`) is read
+ * as, as the document writes it: the one member that declares a type
+ * (`allOfTypingMember`) among the members as every reader reads them
+ * (`spliceNestedAllOf`; #675), or the first where none types. Read
+ * through the splice, it is the member the reading picks and not the one
+ * the members as written would give: in `allOf: [{ allOf: [{ minLength: 1
+ * }] }, { allOf: [{ type: 'string' }] }]` both members declare a type as
+ * written (a wrapper does, `declaresType`), and the `allOf` is read as the
+ * second, the wrapper around the limit only limiting it. A member that
+ * types the `allOf` is one of its own members as written, never a part
+ * spliced out of one: a wrapper that types the `allOf` alone is kept as
+ * written (`splicedAllOfMembers`), and where several members type it the
+ * `allOf` is read as none of them.
+ * The one pick for every reader that asks which member an `allOf` is read
+ * as — `annotatedTypingMember`, which lays the annotating members'
+ * `items` on it, `referenceTypesAsUnknown`, and the pointer walk, which
+ * types a pointer ending at `allOf/<n>` as the `allOf` exactly when it
+ * ends at this member (`pointerSteps`; Greptile, #675 review: the walk
+ * picked among the members as written, so in the `allOf` above a pointer
+ * to `allOf/0`, a limit alone, was the `string`, and one to `allOf/1`
+ * `unknown`). `undefined` for an `allOf` with no member.
+ */
+export function writtenTypingMember(wrapper: SchemaObject): SchemaObject | undefined {
+  const members = spliceNestedAllOf(wrapper).allOf ?? [];
+  return allOfTypingMember(members) ?? members[0];
 }
 
 /**

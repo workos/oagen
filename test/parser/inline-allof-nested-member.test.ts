@@ -847,6 +847,230 @@ describe('#675 an inline `allOf` member that is itself an `allOf` is read as its
     expect(warnings()).toEqual([]);
   });
 
+  describe.each(['3.0.3', '3.1.0'])(
+    'a pointer that ends at an `allOf` member (Greptile, #675 review), under OAS %s',
+    (openapi) => {
+      const pointer = (path: string) => ({ $ref: `#/components/schemas/Pet/properties/value${path}` });
+      const limit = { minLength: 1 };
+      /** The pointers into `Pet.value` the parser reported as naming no type, by the path after `value`. */
+      const untyped = (): string[] =>
+        warnings().map((warning) => {
+          expect(warning).toContain('is an inline allOf member, which has no type of its own');
+          const at = warning.indexOf('/properties/value') + '/properties/value'.length;
+          return warning.slice(at, warning.indexOf('"', at));
+        });
+      /** `Pet.value` written as `value`, and a field of `Other` per pointer into it: each field's type, then the pointers that name no type. */
+      const pointed = async (value: unknown, paths: readonly string[]): Promise<string> => {
+        warn.mockClear();
+        const fields = Object.fromEntries(paths.map((path) => [path === '' ? 'value' : path, pointer(path)]));
+        const spec = await parseJson(
+          document(openapi, { Pet: object({ value }), Other: object(fields) }, ref('Other')),
+        );
+        const lines = modelOf(spec, 'Other').fields.map((field) => `${field.name}: ${show(field.type)}`);
+        return [...lines, `no type: ${untyped().join(', ') || 'none'}`].join('\n');
+      };
+
+      it('is the `allOf`’s type at the member the spliced reading picks, and no type at a wrapper that only limits it', async () => {
+        // The finding's document: both members declare a type as written (a
+        // wrapper does), and the `allOf` is read as the second. The walk
+        // picked the first, so the limit was the `string` and the wrapper
+        // around the type `unknown`.
+        expect(
+          await pointed(W(W(limit), W(string)), ['', '/allOf/0', '/allOf/1', '/allOf/0/allOf/0', '/allOf/1/allOf/0']),
+        ).toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: unknown
+          /allOf/1: string {"minLength":1}
+          /allOf/0/allOf/0: unknown
+          /allOf/1/allOf/0: string {"minLength":1}
+          no type: /allOf/0, /allOf/0/allOf/0"
+        `);
+        // The same members in the other order, and each spelling one member is wrapped in.
+        expect(
+          await pointed(W(W(string), W(limit)), ['', '/allOf/0', '/allOf/1', '/allOf/0/allOf/0', '/allOf/1/allOf/0']),
+        ).toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: string {"minLength":1}
+          /allOf/1: unknown
+          /allOf/0/allOf/0: string {"minLength":1}
+          /allOf/1/allOf/0: unknown
+          no type: /allOf/1, /allOf/1/allOf/0"
+        `);
+        expect(await pointed(W(W(limit), string), ['', '/allOf/0', '/allOf/1', '/allOf/0/allOf/0']))
+          .toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: unknown
+          /allOf/1: string {"minLength":1}
+          /allOf/0/allOf/0: unknown
+          no type: /allOf/0, /allOf/0/allOf/0"
+        `);
+        expect(await pointed(W(limit, W(string)), ['', '/allOf/0', '/allOf/1', '/allOf/1/allOf/0']))
+          .toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: unknown
+          /allOf/1: string {"minLength":1}
+          /allOf/1/allOf/0: string {"minLength":1}
+          no type: /allOf/0"
+        `);
+        // An empty wrapper is spliced away, and the `allOf` is its other member.
+        expect(await pointed(W(W(), string), ['', '/allOf/0', '/allOf/1'])).toMatchInlineSnapshot(`
+          "value: string
+          /allOf/0: unknown
+          /allOf/1: string
+          no type: /allOf/0"
+        `);
+        // The flat spelling, as before.
+        expect(await pointed(W(limit, string), ['', '/allOf/0', '/allOf/1'])).toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: unknown
+          /allOf/1: string {"minLength":1}
+          no type: /allOf/0"
+        `);
+      });
+
+      it('reads each `allOf` on the way as the member the pointer goes through', async () => {
+        // A lone wrapper at every level: each is the member the one above is read as.
+        expect(
+          await pointed(W(W(W(string), limit)), [
+            '',
+            '/allOf/0',
+            '/allOf/0/allOf/0',
+            '/allOf/0/allOf/0/allOf/0',
+            '/allOf/0/allOf/1',
+          ]),
+        ).toMatchInlineSnapshot(`
+          "value: string {"minLength":1}
+          /allOf/0: string {"minLength":1}
+          /allOf/0/allOf/0: string {"minLength":1}
+          /allOf/0/allOf/0/allOf/0: string {"minLength":1}
+          /allOf/0/allOf/1: unknown
+          no type: /allOf/0/allOf/1"
+        `);
+        // A wrapped `$ref` beside a wrapped description: the wrapper around
+        // the `$ref` is the member, the `$ref` is followed, the text names no type.
+        expect(
+          await pointed(W(W(Owner), W(text)), ['', '/allOf/0', '/allOf/1', '/allOf/0/allOf/0', '/allOf/1/allOf/0']),
+        ).toMatchInlineSnapshot(`
+          "value: Owner
+          /allOf/0: Owner
+          /allOf/1: unknown
+          /allOf/0/allOf/0: Owner
+          /allOf/1/allOf/0: unknown
+          no type: /allOf/1, /allOf/1/allOf/0"
+        `);
+        // An array behind a wrapper: its items are read on through it.
+        expect(
+          await pointed(W(W(text), W({ type: 'array', items: Owner })), [
+            '',
+            '/allOf/1',
+            '/allOf/1/allOf/0',
+            '/allOf/1/allOf/0/items',
+          ]),
+        ).toMatchInlineSnapshot(`
+          "value: array<Owner>
+          /allOf/1: array<Owner>
+          /allOf/1/allOf/0: array<Owner>
+          /allOf/1/allOf/0/items: Owner
+          no type: none"
+        `);
+      });
+
+      it('is no type at a member of a merge, wrapped or not, while a property behind it reads on to the merged model’s field', async () => {
+        expect(await pointed(W(W(Owner), W(Tag)), ['', '/allOf/0', '/allOf/1', '/allOf/0/allOf/0', '/allOf/1/allOf/0']))
+          .toMatchInlineSnapshot(`
+          "value: PetValue
+          /allOf/0: unknown
+          /allOf/1: unknown
+          /allOf/0/allOf/0: Owner
+          /allOf/1/allOf/0: Tag
+          no type: /allOf/0, /allOf/1"
+        `);
+        // The inline object two levels down declares into the merged model, as the flat one does.
+        expect(
+          await pointed(W(W(a), Tag), [
+            '',
+            '/allOf/0',
+            '/allOf/1',
+            '/allOf/0/allOf/0',
+            '/allOf/0/allOf/0/properties/a',
+          ]),
+        ).toMatchInlineSnapshot(`
+          "value: PetValue
+          /allOf/0: unknown
+          /allOf/1: Tag
+          /allOf/0/allOf/0: unknown
+          /allOf/0/allOf/0/properties/a: string
+          no type: /allOf/0, /allOf/0/allOf/0"
+        `);
+        expect(await pointed(W(a, Tag), ['', '/allOf/0', '/allOf/1', '/allOf/0/properties/a'])).toMatchInlineSnapshot(`
+          "value: PetValue
+          /allOf/0: unknown
+          /allOf/1: Tag
+          /allOf/0/properties/a: string
+          no type: /allOf/0"
+        `);
+      });
+
+      it('types a body written as the pointer the same way', async () => {
+        const body = async (path: string): Promise<string> => {
+          warn.mockClear();
+          const spec = await parseJson(
+            document(openapi, { Pet: object({ value: W(W(limit), W(string)) }) }, pointer(path), {
+              requestBody: json(pointer(path)),
+            }),
+          );
+          const [operation] = spec.services.flatMap(({ operations }) => operations);
+          return `response ${show(operation!.response)}, request body ${show(operation!.requestBody!)}, no type: ${untyped().join(', ') || 'none'}`;
+        };
+        expect(await body('/allOf/1')).toBe(
+          'response string {"minLength":1}, request body string {"minLength":1}, no type: none',
+        );
+        expect(await body('/allOf/1/allOf/0')).toBe(
+          'response string {"minLength":1}, request body string {"minLength":1}, no type: none',
+        );
+        expect(await body('/allOf/0')).toBe('response unknown, request body unknown, no type: /allOf/0, /allOf/0');
+        expect(await body('/allOf/0/allOf/0')).toBe(
+          'response unknown, request body unknown, no type: /allOf/0/allOf/0, /allOf/0/allOf/0',
+        );
+      });
+    },
+  );
+
+  it('continues a title group through a lone `allOf` member, an empty wrapper beside it or not', async () => {
+    // Two title-mapped unions one field reaches without entering an object:
+    // one claim set, so the first `Cat` keeps its title and the second
+    // steps off it. The walk read the members as written, a longer `allOf`
+    // beginning a group of its own, where both `Cat`s were claims and
+    // contested the title.
+    const titled = (title: string, properties: Record<string, unknown>) => ({
+      title,
+      properties: { kind: { const: title.toLowerCase() }, ...properties },
+    });
+    const first = { oneOf: [titled('Cat', { a: string }), titled('Bird', { c: string })] };
+    const second = { oneOf: [titled('Cat', { z: string }), titled('Dog', { b: string })] };
+    const pet = (values: unknown) =>
+      document(
+        '3.1.0',
+        {
+          Pet: object({
+            x: {
+              oneOf: [
+                { type: 'array', items: first },
+                { type: 'object', additionalProperties: values },
+              ],
+            },
+          }),
+        },
+        ref('Pet'),
+      );
+    const lone = await parseJson(pet(W(second)));
+    expect(show(fieldOf(lone, 'Pet', 'x').type)).toBe('(array<(Cat | Bird)> | map<(CatPetXValue | Dog)>)');
+    for (const values of [W(W(), second), W(W(second)), W(W(W()), W(second))]) {
+      expect(await parseJson(pet(values))).toEqual(lone);
+    }
+    expect(warnings()).toEqual([]);
+  });
+
   it('is decided once, by the readers every site shares', () => {
     const wrappedOwner: SchemaObject = { allOf: [Owner] };
     // Two members that type the `allOf`: the wrapper is read as its members.
