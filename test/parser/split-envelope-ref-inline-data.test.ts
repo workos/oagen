@@ -462,6 +462,104 @@ describe('#669 declarations of one property the parser types identically are one
       });
     });
 
+    describe('behind a model that composes the union (#680)', () => {
+      // `Combo: { allOf: [Base, Pick] }` reads the union `Pick` writes as its own, whether `Pick` documents
+      // itself beside the union or in an `allOf` member that only annotates it.
+      const picks = (variants: Schema[]): Array<[string, Schema]> => [
+        ['beside its union', { description: 'One of two.', oneOf: variants }],
+        ['in an annotating `allOf` member', { allOf: [{ description: 'One of two.' }], oneOf: variants }],
+      ];
+      const composed = (pick: Schema) => ({
+        Base: { type: 'object', properties: { trace_id: string } },
+        Pick: pick,
+        Combo: { allOf: [ref('Base'), ref('Pick')] },
+      });
+      const paging = (spec: ApiSpec) => {
+        const [{ pagination, response }] = operations(spec);
+        return {
+          response: show(response),
+          dataPath: pagination?.dataPath,
+          endOfIteration: pagination?.endOfIteration,
+          itemType: show(pagination?.itemType),
+        };
+      };
+
+      it.each(picks([]).map(([label], index) => [label, index] as const))(
+        'stops on `meta.has_more`, a `$ref` in one variant of `Pick` and inline in the other, with `Pick` documented %s',
+        async (_, index) => {
+          const pick = (first: Schema, second: Schema) =>
+            picks([object({ has_more: first }), object({ has_more: second, total: integer }, ['has_more'])])[index]![1];
+          const body = object({ data: inlineArray(), meta: ref('Combo') });
+          const list = {
+            response: 'Pet[]',
+            dataPath: 'data',
+            endOfIteration: { kind: 'hasMore', path: 'meta.has_more' },
+            itemType: 'Pet',
+          };
+          for (const override of [
+            {},
+            { 'x-pagination': { dataPath: 'data' } },
+            { 'x-pagination': { endOfIteration: { kind: 'hasMore', path: 'meta.has_more' } } },
+          ]) {
+            const label = JSON.stringify(override);
+            const mixed = await parse(document(openapi, body, override, composed(pick(ref('Flag'), boolean))));
+            expect(paging(mixed), label).toEqual(list);
+            expect(fieldsOf(mixed, 'Combo'), label).toEqual([
+              'trace_id?: string',
+              'has_more?: boolean',
+              'total?: integer',
+            ]);
+            expect(mixed, label).toEqual(
+              await parse(document(openapi, body, override, composed(pick(boolean, boolean)))),
+            );
+            expect(mixed, label).toEqual(
+              await parse(document(openapi, body, override, composed(pick(boolean, ref('Flag'))))),
+            );
+          }
+          expect(warnings()).toEqual([]);
+        },
+      );
+
+      it.each(picks([]).map(([label], index) => [label, index] as const))(
+        'types `data` once where the body reaches it through a `$ref` member, with `Pick` documented %s',
+        async (_, index) => {
+          const pick = (first: Schema, second: Schema) =>
+            picks([object({ data: first }), object({ data: second, total: integer }, ['data'])])[index]![1];
+          // A `$ref` member is not read by detection (#308): the body is the wrapper an explicit `dataPath` keeps.
+          const body = { allOf: [ref('Combo'), object({ has_more: boolean })] };
+          const fields = ['trace_id?: string', 'data?: Pet[]', 'total?: integer', 'has_more: boolean'];
+          const detected = await parse(document(openapi, body, {}, composed(pick(Pets, inlineArray()))));
+          expect(paging(detected)).toEqual({
+            response: 'ListPetsResponse',
+            dataPath: undefined,
+            endOfIteration: undefined,
+            itemType: 'ListPetsResponse',
+          });
+          expect(fieldsOf(detected, 'ListPetsResponse')).toEqual(fields);
+          expect(fieldsOf(detected, 'Combo')).toEqual(['trace_id?: string', 'data?: Pet[]', 'total?: integer']);
+          const override = { 'x-pagination': { dataPath: 'data' } };
+          const explicit = await parse(document(openapi, body, override, composed(pick(Pets, inlineArray()))));
+          expect(paging(explicit)).toEqual({
+            response: 'ListPetsResponse',
+            dataPath: 'data',
+            endOfIteration: { kind: 'hasMore', path: 'has_more' },
+            itemType: 'Pet',
+          });
+          expect(fieldsOf(explicit, 'ListPetsResponse')).toEqual(fields);
+          for (const [spec, operation] of [
+            [detected, {}],
+            [explicit, override],
+          ] as const) {
+            const inline = composed(pick(inlineArray(), inlineArray()));
+            expect(spec).toEqual(await parse(document(openapi, body, operation, inline)));
+            const swapped = composed(pick(inlineArray(), Pets));
+            expect(spec).toEqual(await parse(document(openapi, body, operation, swapped)));
+          }
+          expect(warnings()).toEqual([]);
+        },
+      );
+    });
+
     describe('a field several variants declare, outside a list envelope', () => {
       /** Spellings the parser types identically, by the type each is. */
       const families: Array<[type: string, spellings: Schema[]]> = [
@@ -691,6 +789,39 @@ describe('#669 declarations of one property the parser types identically are one
         expect(await xOf(openapi, [string, integer, ownNull(openapi, string)])).toEqual({
           type: 'nullable<(string | integer)>',
         });
+      });
+
+      it('types a reference that admits `null` through its component once, under one `nullable` (#676)', async () => {
+        // `Owner` and `Tag` are nullable objects, so `OwnerTag: { allOf: [Owner, Tag] }` and `Required: {
+        // allOf: [Owner], required }` admit `null` through their members, and a `$ref` to each is nullable.
+        const owner = ownNull(openapi, { type: 'object', properties: { name: string } });
+        const schemas = {
+          Owner: owner,
+          Tag: ownNull(openapi, { type: 'object', properties: { label: string } }),
+          OwnerTag: { allOf: [ref('Owner'), ref('Tag')] },
+          Required: { allOf: [ref('Owner')], required: ['name'] },
+        };
+        for (const name of ['OwnerTag', 'Required', 'Owner']) {
+          const type = `nullable<${name}>`;
+          expect(await xOf(openapi, [ref(name), ref(name)], schemas), name).toEqual({ type });
+          expect(await xOf(openapi, [ref(name), { allOf: [ref(name)] }], schemas), name).toEqual({ type });
+          expect(await xOf(openapi, [{ allOf: [ref(name)] }, ref(name)], schemas), name).toEqual({ type });
+          expect(
+            await xOf(openapi, [nullableWrapper(openapi, ref(name)), ref(name), { allOf: [ref(name)] }], schemas),
+            name,
+          ).toEqual({ type });
+        }
+        // An `allOf` merged where it stands mints its model there, so it is compared as written: the same
+        // members in another order are a second variant model, and the component of those members another type.
+        const merged = { allOf: [ref('Owner'), ref('Tag')] };
+        expect(await xOf(openapi, [merged, merged], schemas)).toEqual({ type: 'nullable<Holder2X>' });
+        expect(await xOf(openapi, [merged, { allOf: [ref('Tag'), ref('Owner')] }], schemas)).toEqual({
+          type: '(nullable<Holder2X> | nullable<Holder2XVariant2>)',
+        });
+        expect(await xOf(openapi, [merged, ref('OwnerTag')], schemas)).toEqual({
+          type: '(nullable<Holder2X> | nullable<OwnerTag>)',
+        });
+        expect(warnings()).toEqual([]);
       });
 
       it('carries the agreed keywords of a nullable shape on the field', async () => {
