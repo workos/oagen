@@ -1563,4 +1563,352 @@ paths:
       `);
     });
   });
+  describe.each(['3.0.3', '3.1.0'])(
+    'OpenAPI %s: a callback model named like one a webhook minted for another shape',
+    (openapi) => {
+      const titled = (title: string, value: string, fields: Record<string, unknown>) => ({
+        title,
+        type: 'object',
+        properties: { kind: { type: 'string', const: value }, ...fields },
+      });
+      /** A union whose first variant is titled `Shape` and holds `own`, beside a `Note`. */
+      const shaped = (own: Record<string, unknown>) => ({
+        oneOf: [titled('Shape', 'shape', own), titled('Note', 'note', { text: { type: 'string' } })],
+      });
+      const sides = shaped({ sides: { type: 'integer' } });
+      const radius = shaped({ radius: { type: 'number' } });
+      /** The webhook `petAdopted`, whose operation `onPetAdopted` posts a `Shape` with `sides`. */
+      const webhooks = { petAdopted: { $ref: COMPONENT } };
+      const components = { pathItems: { PetAdopted: posting({ operationId: 'onPetAdopted' }, sides) } };
+      /** `createPet`'s callback, reading the webhook's operation. */
+      const pets = createPet();
+      /** A callback of `operationId`'s operation on an operation object of its own, posting `schema`. */
+      const unrelated = (operationId: string, key: string, schema: unknown) =>
+        registering(operationId, { [key]: { [EXPRESSION]: posting({}, schema) } });
+      /** `createDog`'s callback `dogAdopted`: an operation of its own, posting a `Shape` with `radius`. */
+      const dogs = { '/dogs': unrelated('createDog', 'dogAdopted', radius) };
+
+      const parted = {
+        models: [
+          'CreateDogRequest { callbackUrl }',
+          'Shape { kind, sides }',
+          'Note { kind, text }',
+          'CreateDogDogAdoptedShape { kind, radius }',
+        ],
+        enums: [],
+        webhooks: [{ site: 'petAdopted post', payload: 'Shape | Note' }],
+        callbacks: [{ site: `dogAdopted ${EXPRESSION} post`, payload: 'CreateDogDogAdoptedShape | Note' }],
+      };
+
+      it('a webhook and an unrelated callback: the callback model is renamed under its stem, never merged', async () => {
+        // The callback's `Shape` used to be merged into the webhook's with a
+        // "more than one definition" warning, its `radius` variant lost.
+        const doc = { openapi, info, paths: dogs, webhooks, components };
+        const spec = await parse(doc);
+        expect(summary(spec)).toEqual(parted);
+        expect(warn).not.toHaveBeenCalled();
+        // Whichever of `paths` and `webhooks` the document declares first.
+        expect(await parse({ openapi, info, webhooks, components, paths: dogs })).toEqual(spec);
+        expect(await parse({ openapi, info, components, paths: dogs, webhooks })).toEqual(spec);
+      });
+
+      it('the webhook, a callback sharing its minting and the unrelated callback: the same, in every order', async () => {
+        const doc = { openapi, info, paths: { ...pets, ...dogs }, webhooks, components };
+        const spec = await parse(doc);
+        expect(summary(spec)).toEqual({
+          models: ['CreatePetRequest { callbackUrl }', ...parted.models],
+          enums: [],
+          webhooks: parted.webhooks,
+          callbacks: [{ site: `petAdopted ${EXPRESSION} post`, payload: 'Shape | Note' }, ...parted.callbacks],
+        });
+        expect(warn).not.toHaveBeenCalled();
+        expect(await parse({ openapi, info, webhooks, components, paths: { ...pets, ...dogs } })).toEqual(spec);
+        // The unrelated callback's owner declared before the sharing one's.
+        const reversed = await parse({ openapi, info, webhooks, paths: { ...dogs, ...pets }, components });
+        expect(summary(reversed)).toEqual({
+          models: ['CreateDogRequest { callbackUrl }', 'CreatePetRequest { callbackUrl }', ...parted.models.slice(1)],
+          enums: [],
+          webhooks: parted.webhooks,
+          callbacks: [...parted.callbacks, { site: `petAdopted ${EXPRESSION} post`, payload: 'Shape | Note' }],
+        });
+        expect(await diff(doc, { openapi, info, webhooks, paths: { ...dogs, ...pets }, components })).toEqual({
+          exit: 0,
+          changes: [],
+        });
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('adding the sharing callback, or the unrelated one, renames nothing', async () => {
+        const all = { openapi, info, paths: { ...pets, ...dogs }, webhooks, components };
+        expect(await diff({ openapi, info, paths: dogs, webhooks, components }, all)).toEqual({
+          exit: 1,
+          changes: ['model-added CreatePetRequest (additive)', 'service-added Pets (additive)'],
+        });
+        expect(await diff({ openapi, info, paths: pets, webhooks, components }, all)).toEqual({
+          exit: 1,
+          changes: [
+            'model-added CreateDogRequest (additive)',
+            'model-added CreateDogDogAdoptedShape (additive)',
+            'service-added Dogs (additive)',
+          ],
+        });
+      });
+
+      it('adding the webhook to the document of the two callbacks: the unrelated callback keeps its model', async () => {
+        // Callbacks only, the two part each other's `Shape`, each under its
+        // stem. The webhook's minting is named where the webhooks are, so the
+        // callback sharing it follows the webhook's `Shape` (the exception
+        // above, for a title-mapped variant); the unrelated callback's model
+        // is the one it had.
+        const before = { openapi, info, paths: { ...pets, ...dogs }, components };
+        const after = { ...before, webhooks };
+        expect(summary(await parse(before))).toEqual({
+          models: [
+            'CreatePetRequest { callbackUrl }',
+            'CreateDogRequest { callbackUrl }',
+            'OnPetAdoptedShape { kind, sides }',
+            'Note { kind, text }',
+            'CreateDogDogAdoptedShape { kind, radius }',
+          ],
+          enums: [],
+          webhooks: [],
+          callbacks: [
+            { site: `petAdopted ${EXPRESSION} post`, payload: 'OnPetAdoptedShape | Note' },
+            { site: `dogAdopted ${EXPRESSION} post`, payload: 'CreateDogDogAdoptedShape | Note' },
+          ],
+        });
+        expect(await diff(before, after)).toMatchInlineSnapshot(`
+          {
+            "changes": [
+              "model-added Shape (additive)",
+              "model-removed OnPetAdoptedShape (breaking)",
+              "callback-modified petAdopted (breaking)",
+              "webhook-added petAdopted (additive)",
+            ],
+            "exit": 2,
+          }
+        `);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('adding the webhook to the document of the unrelated callback alone moves the callback model under its stem', async () => {
+        // The callback alone holds `Shape`; a webhook minting `Shape` for
+        // another shape takes the name, as a webhook takes any name a callback
+        // held, and the callback's model keeps its fields under its own stem.
+        const before = { openapi, info, paths: dogs, components };
+        const after = { ...before, webhooks };
+        expect(summary(await parse(before)).models).toEqual([
+          'CreateDogRequest { callbackUrl }',
+          'Shape { kind, radius }',
+          'Note { kind, text }',
+        ]);
+        expect(await diff(before, after)).toMatchInlineSnapshot(`
+          {
+            "changes": [
+              "model-added CreateDogDogAdoptedShape (additive)",
+              "model-modified Shape (breaking)",
+              "callback-modified dogAdopted (breaking)",
+              "webhook-added petAdopted (additive)",
+            ],
+            "exit": 2,
+          }
+        `);
+      });
+
+      it('one shape under the name is still one model, shared by the webhook and the callback', async () => {
+        const same = { '/dogs': unrelated('createDog', 'dogAdopted', sides) };
+        const spec = await parse({ openapi, info, paths: same, webhooks, components });
+        expect(summary(spec)).toEqual({
+          models: ['CreateDogRequest { callbackUrl }', 'Shape { kind, sides }', 'Note { kind, text }'],
+          enums: [],
+          webhooks: [{ site: 'petAdopted post', payload: 'Shape | Note' }],
+          callbacks: [{ site: `dogAdopted ${EXPRESSION} post`, payload: 'Shape | Note' }],
+        });
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it("a callback of the webhook's shape keeps the name while one of another shape moves, in either order", async () => {
+        const same = { '/dogs': unrelated('createDog', 'dogAdopted', sides) };
+        const other = { '/cats': unrelated('createCat', 'catAdopted', radius) };
+        const before = { openapi, info, paths: same, webhooks, components };
+        const after = { openapi, info, paths: { ...same, ...other }, webhooks, components };
+        const reversed = { openapi, info, paths: { ...other, ...same }, webhooks, components };
+        const callbacks = (spec: ApiSpec) =>
+          Object.fromEntries(callbacksOf(spec).map(({ name, requestBody }) => [name, typeName(requestBody)]));
+        const expected = { dogAdopted: 'Shape | Note', catAdopted: 'CreateCatCatAdoptedShape | Note' };
+        expect(callbacks(await parse(after))).toEqual(expected);
+        expect(callbacks(await parse(reversed))).toEqual(expected);
+        expect(await diff(before, after)).toEqual({
+          exit: 1,
+          changes: [
+            'model-added CreateCatRequest (additive)',
+            'model-added CreateCatCatAdoptedShape (additive)',
+            'service-added Cats (additive)',
+          ],
+        });
+        expect(await diff(after, reversed)).toEqual({ exit: 0, changes: [] });
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('a model nested in the variant is parted first, and the variant holding it follows', async () => {
+        // The two `Shape`s differ only in the object under `detail`, which both mint as `ShapeDetail`.
+        const detailed = (own: Record<string, unknown>) => shaped({ detail: { type: 'object', properties: own } });
+        const doc = {
+          openapi,
+          info,
+          paths: { '/dogs': unrelated('createDog', 'dogAdopted', detailed({ radius: { type: 'number' } })) },
+          webhooks,
+          components: {
+            pathItems: {
+              PetAdopted: posting({ operationId: 'onPetAdopted' }, detailed({ sides: { type: 'integer' } })),
+            },
+          },
+        };
+        expect(summary(await parse(doc))).toMatchInlineSnapshot(`
+          {
+            "callbacks": [
+              {
+                "payload": "CreateDogDogAdoptedShape | Note",
+                "site": "dogAdopted {$request.body#/callbackUrl} post",
+              },
+            ],
+            "enums": [],
+            "models": [
+              "CreateDogRequest { callbackUrl }",
+              "Shape { kind, detail }",
+              "ShapeDetail { sides }",
+              "Note { kind, text }",
+              "CreateDogDogAdoptedShape { kind, detail }",
+              "CreateDogDogAdoptedShapeDetail { radius }",
+            ],
+            "webhooks": [
+              {
+                "payload": "Shape | Note",
+                "site": "petAdopted post",
+              },
+            ],
+          }
+        `);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it("a parameter's variant named like the webhook's payload variant is parted the same way", async () => {
+        const filter = { name: 'filter', in: 'query', schema: radius };
+        const doc = {
+          openapi,
+          info,
+          paths: {
+            '/dogs': registering('createDog', {
+              dogAdopted: { [EXPRESSION]: posting({ parameters: [filter] }, flag('ok')) },
+            }),
+          },
+          webhooks,
+          components,
+        };
+        expect(summary(await parse(doc))).toMatchInlineSnapshot(`
+          {
+            "callbacks": [
+              {
+                "params": [
+                  "filter: CreateDogDogAdoptedShape | Note",
+                ],
+                "payload": "CreateDogDogAdoptedPayload",
+                "site": "dogAdopted {$request.body#/callbackUrl} post",
+              },
+            ],
+            "enums": [],
+            "models": [
+              "CreateDogRequest { callbackUrl }",
+              "Shape { kind, sides }",
+              "Note { kind, text }",
+              "CreateDogDogAdoptedPayload { ok }",
+              "CreateDogDogAdoptedShape { kind, radius }",
+            ],
+            "webhooks": [
+              {
+                "payload": "Shape | Note",
+                "site": "petAdopted post",
+              },
+            ],
+          }
+        `);
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it("a webhook's own callback, and a shared operation's, are parted from the webhook's model the same way", async () => {
+        const confirmed = { confirmed: { [EXPRESSION]: posting({}, radius) } };
+        const own = {
+          openapi,
+          info,
+          paths: {},
+          webhooks: { petAdopted: posting({ callbacks: confirmed }, sides) },
+        };
+        expect(summary(await parse(own))).toEqual({
+          models: ['Shape { kind, sides }', 'Note { kind, text }', 'PetAdoptedConfirmedShape { kind, radius }'],
+          enums: [],
+          webhooks: [
+            {
+              site: 'petAdopted post',
+              payload: 'Shape | Note',
+              callbacks: [{ site: `confirmed ${EXPRESSION} post`, payload: 'PetAdoptedConfirmedShape | Note' }],
+            },
+          ],
+          callbacks: [],
+        });
+
+        // Declared by the shared operation: read under the webhook and under the callback sharing it, minted once.
+        const nested = [{ site: `confirmed ${EXPRESSION} post`, payload: 'OnPetAdoptedConfirmedShape | Note' }];
+        const shared = {
+          openapi,
+          info,
+          paths: pets,
+          webhooks,
+          components: {
+            pathItems: { PetAdopted: posting({ operationId: 'onPetAdopted', callbacks: confirmed }, sides) },
+          },
+        };
+        expect(summary(await parse(shared))).toEqual({
+          models: [
+            'CreatePetRequest { callbackUrl }',
+            'Shape { kind, sides }',
+            'Note { kind, text }',
+            'OnPetAdoptedConfirmedShape { kind, radius }',
+          ],
+          enums: [],
+          webhooks: [{ site: 'petAdopted post', payload: 'Shape | Note', callbacks: nested }],
+          callbacks: [{ site: `petAdopted ${EXPRESSION} post`, payload: 'Shape | Note', callbacks: nested }],
+        });
+        expect(warn).not.toHaveBeenCalled();
+      });
+
+      it('where two webhooks disagree on the name, the callback model is still its own', async () => {
+        // Two webhooks minting `Shape` for two shapes are the `webhooks` map's
+        // own to settle, as they always were; a callback is merged into neither.
+        const width = shaped({ width: { type: 'number' } });
+        const doc = {
+          openapi,
+          info,
+          paths: dogs,
+          webhooks: { ...webhooks, petMeasured: posting({}, width) },
+          components,
+        };
+        const spec = await parse(doc);
+        expect(callbacksOf(spec).map(({ requestBody }) => typeName(requestBody))).toEqual([
+          'CreateDogDogAdoptedShape | Note',
+        ]);
+        expect(summary(spec).models).toContain('CreateDogDogAdoptedShape { kind, radius }');
+
+        // Not even a callback with the shape of one of the two: which of the
+        // webhooks' shapes the name ends on is not the callback's to rely on.
+        const second = await parse({
+          ...doc,
+          paths: { '/dogs': unrelated('createDog', 'dogAdopted', width) },
+        });
+        expect(callbacksOf(second).map(({ requestBody }) => typeName(requestBody))).toEqual([
+          'CreateDogDogAdoptedShape | Note',
+        ]);
+        expect(summary(second).models).toContain('CreateDogDogAdoptedShape { kind, width }');
+      });
+    },
+  );
 });
