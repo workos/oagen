@@ -13,7 +13,12 @@ import {
 import { sentOnlyComponentNames } from '../../src/parser/inline-models.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffCommand } from '../../src/cli/diff.js';
-import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
+import { buildEmitterContext, collectReferencedNames, generateAllFiles } from '../../src/engine/generate-files.js';
+import { writeFiles } from '../../src/engine/writer.js';
+import type { Emitter, GeneratedFile } from '../../src/engine/types.js';
+import { validateModelRefs } from '../../src/parser/normalize-model-refs.js';
+import { assignModelsToServices, collectFieldDependencies } from '../../src/ir/types.js';
+import type { ApiSpec, Enum, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
  * Issue #668: `componentTypeRef` read an enum component, and its
@@ -154,6 +159,19 @@ describe('#668 a $ref finds an enum component by its key, not by the name the ke
       expect(fieldTypes(object, 'Size')).toEqual({ width: { kind: 'primitive', type: 'integer' } });
       expect(fieldTypes(object, 'Pet')).toEqual({ size: model('Size'), sizes: enumRef('Size') });
       expect(enumSummary(object)).toEqual(['Size: small, large']);
+    });
+
+    it('holds exactly one `Size` in `spec.enums` for `nullable.json`, in either component order, unreported', async () => {
+      // The issue: "`spec.enums` holds two `Size` entries for `nullable.json`, with no warning".
+      const schemas = (nullableJson(openapi) as { components: { schemas: Schemas } }).components.schemas;
+      for (const ordered of [schemas, reversed(schemas)]) {
+        const spec = await parse(document(openapi, ordered));
+        expect(spec.enums.map((e) => e.name)).toEqual(['Size']);
+        expect(spec.enums.filter((e) => e.name === 'Size')).toHaveLength(1);
+        expect(fieldTypes(spec, 'Pet')).toEqual({ size: nullable(enumRef('Size')), sizes: enumRef('Size') });
+      }
+      // The two definitions agree (nullability is each reference's), so nothing is said.
+      expect(warnings()).toEqual([]);
     });
 
     it('gives the same IR with the components in the opposite order', async () => {
@@ -934,6 +952,554 @@ describe('#668 a $ref finds an enum component by its key, not by the name the ke
           }),
         ),
       ).toEqual([]);
+    });
+  });
+
+  /**
+   * "The IR never declares a model and an enum under one name" holds for
+   * every name the parser mints; a model component and an enum component
+   * of one name are the document's own, and both are kept. Every pass that
+   * relies on the rule must then read the name as the model's where it
+   * settles a model and as the enum's where it settles an enum, and
+   * neither may be dropped or overwritten downstream.
+   */
+  describe('what reads a name a model component and an enum component share', () => {
+    /** An object with one optional `name`, or one that requires it. */
+    const owner = (required: boolean): Doc => ({
+      type: 'object',
+      ...(required ? { required: ['name'] } : {}),
+      properties: { name: { type: 'string' } },
+    });
+    /** An object of another shape. */
+    const tall = (): Doc => ({ type: 'object', properties: { height: { type: 'integer' } } });
+
+    /**
+     * A document every inline site of which mints a model from `inline`: an
+     * operation's bodies, an array body's items, a second success entry, a
+     * secondary media type, a `default` response, an error body, a model
+     * nested under each, a body pinned by an `object` const, a title-mapped
+     * request variant, a header, a parameter object, a webhook's payload,
+     * header and title-mapped variants, and a callback's payload and header.
+     * `e` and `m` are the keys of the enum and of the model component.
+     */
+    const sites = (schemas: Schemas, e: string, m: string, inline: Doc): Doc =>
+      document('3.1.0', schemas, {
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [
+                { name: 'owner', in: 'query', schema: inline },
+                { name: 'e', in: 'query', schema: ref(e) },
+              ],
+              responses: {
+                '200': { description: 'OK', headers: { 'X-Owner': { schema: inline } }, content: json(inline) },
+                '404': { description: 'Not found', content: json(ref(m)) },
+              },
+            },
+            post: {
+              operationId: 'createPet',
+              requestBody: { content: json(inline) },
+              responses: {
+                '200': {
+                  description: 'OK',
+                  content: json({ type: 'object', properties: { owner: inline, e: ref(e) } }),
+                },
+              },
+              callbacks: {
+                onOwned: {
+                  '{$request.body#/url}': {
+                    post: {
+                      parameters: [{ name: 'X-Cb', in: 'header', schema: inline }],
+                      requestBody: { content: json({ type: 'object', properties: { owner: inline, e: ref(e) } }) },
+                      responses: { '200': { description: 'OK' } },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '/notes': {
+            get: {
+              operationId: 'listNotes',
+              responses: {
+                '200': {
+                  description: 'OK',
+                  content: {
+                    ...json({ type: 'array', items: inline }),
+                    'application/yaml': { schema: { type: 'object', properties: { alt: inline } } },
+                  },
+                },
+                '201': { description: 'Made', content: json({ type: 'object', properties: { made: inline } }) },
+                '422': {
+                  description: 'Bad',
+                  content: json({
+                    type: 'object',
+                    required: ['code'],
+                    properties: { code: { type: 'integer' }, detail: inline },
+                  }),
+                },
+                default: {
+                  description: 'Other',
+                  content: json({ type: 'object', properties: { fallback: inline } }),
+                },
+              },
+            },
+            put: {
+              operationId: 'replaceNote',
+              requestBody: {
+                content: json({
+                  oneOf: [
+                    { title: 'Shelter', type: 'object', properties: { city: { type: 'string' } } },
+                    { title: 'Keeper', ...inline },
+                  ],
+                }),
+              },
+              responses: {
+                '200': {
+                  description: 'OK',
+                  content: json({
+                    type: 'object',
+                    properties: { object: { type: 'string', const: 'note_thing' }, at: inline },
+                  }),
+                },
+              },
+            },
+          },
+        },
+        webhooks: {
+          petOwned: {
+            post: {
+              parameters: [{ name: 'X-Owner', in: 'header', schema: inline }],
+              requestBody: {
+                content: json({ type: 'object', properties: { owner: inline, e: ref(e), m: ref(m) } }),
+              },
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+          petSold: {
+            post: {
+              requestBody: {
+                content: json({
+                  oneOf: [
+                    { title: 'Buyer', ...inline },
+                    { title: 'Seller', type: 'object', properties: { shop: { type: 'string' }, e: ref(e) } },
+                  ],
+                }),
+              },
+              responses: { '200': { description: 'OK' } },
+            },
+          },
+        },
+      });
+
+    /** Every model `sites` mints with no component in its way, by the site that mints it. */
+    const SITE_NAMES = [
+      'ListPetsResponse',
+      'CreatePetResponse',
+      'CreatePetResponseOwner',
+      'CreatePetRequest',
+      'ListNotesItem',
+      'ListNotesResponse201',
+      'ListNotesResponse201Made',
+      'NoteThing',
+      'NoteThingAt',
+      'ShelterReplaceNoteRequest',
+      'KeeperReplaceNoteRequest',
+      'PetsXOwner',
+      'PetsOwner',
+      'ListNotesApplicationYamlResponse',
+      'ListNotesApplicationYamlResponseAlt',
+      'ListNotesDefaultResponse',
+      'ListNotesDefaultResponseFallback',
+      'PetOwnedPayload',
+      'PetOwnedPayloadOwner',
+      'PetOwnedXOwner',
+      'BuyerPetSoldPayload',
+      'SellerPetSoldPayload',
+      'CreatePetOnOwnedPayload',
+      'CreatePetOnOwnedPayloadOwner',
+      'CreatePetOnOwnedXCb',
+      'ErrorBodyWithCodeIntegerWithoutMessage',
+      'ErrorBodyWithCodeIntegerWithoutMessageDetailWithName',
+    ];
+    /** A key that resolves to `name` and is not `name`: its snake-case spelling. */
+    const snake = (name: string): string =>
+      name.replace(/[A-Z]/g, (letter, index: number) => `${index ? '_' : ''}${letter.toLowerCase()}`);
+    /** The IR in name order, the enum `enumName` standing under `as` wherever it is named. */
+    const withEnumNamed = (spec: ApiSpec, enumName: string, as: string): unknown =>
+      JSON.parse(
+        JSON.stringify(
+          sortedIr({ ...spec, enums: spec.enums.map((e) => (e.name === enumName ? { ...e, name: as } : e)) }),
+        )
+          .split(`"kind":"enum","name":"${enumName}"`)
+          .join(`"kind":"enum","name":"${as}"`),
+      );
+
+    it('mints one model per site when no component is in the way', async () => {
+      const spec = await parse(sites({ Tint: plainSizes(), Zed: owner(false) }, 'Tint', 'Zed', owner(true)));
+      expect(spec.models.map((m) => m.name)).toEqual(['Zed', ...SITE_NAMES]);
+    });
+
+    it.each(SITE_NAMES)(
+      'settles the inline model that would be %s against the model component, as with the enum under another key',
+      async (shared) => {
+        const enumKey = snake(shared);
+        for (const [label, component, inline] of [
+          ['the component admits the site', owner(false), owner(true)],
+          ['the component is the site', owner(true), owner(true)],
+          ['the component is another shape', tall(), owner(true)],
+        ] as const) {
+          warn.mockClear();
+          const apart = withEnumNamed(
+            await parse(sites({ Tint: plainSizes(), [shared]: component }, 'Tint', shared, inline)),
+            'Tint',
+            shared,
+          );
+          const apartWarnings = warnings();
+          const colliding: Schemas = { [enumKey]: plainSizes(), [shared]: component };
+          for (const ordered of [colliding, reversed(colliding)]) {
+            warn.mockClear();
+            const spec = await parse(sites(ordered, enumKey, shared, inline));
+            // Both are there, under the one name.
+            expect(spec.models.filter((m) => m.name === shared)).toHaveLength(1);
+            expect(spec.enums.filter((e) => e.name === shared)).toHaveLength(1);
+            expect(withEnumNamed(spec, shared, shared), label).toEqual(apart);
+            expect(warnings(), label).toEqual([
+              `[oagen] Warning: Component schemas "${shared}" (a model) and "${enumKey}" (an enum) both resolve to "${shared}" — keeping both, each $ref typed as the component it names; a schemaNameTransform can give one a name of its own`,
+              ...apartWarnings,
+            ]);
+          }
+        }
+      },
+    );
+
+    it('reads an inline enum of the shared name against the enum component, as beside the enum alone', async () => {
+      const build = (withModel: boolean, members: string[]): Doc =>
+        document('3.1.0', {
+          pet_owner: plainSizes(),
+          ...(withModel ? { PetOwner: owner(false) } : {}),
+          Pet: {
+            type: 'object',
+            properties: { owner: { type: 'string', enum: members }, e: ref('pet_owner') },
+          },
+        });
+      for (const withModel of [true, false]) {
+        // The same members: the component enum's name is shared.
+        const same = await parse(build(withModel, ['small', 'large']));
+        expect(fieldTypes(same, 'Pet').owner).toEqual({ kind: 'enum', name: 'PetOwner', values: ['small', 'large'] });
+        expect(enumSummary(same)).toEqual(['PetOwner: small, large']);
+        // Other members: the inline enum steps, the component enum stays.
+        const other = await parse(build(withModel, ['y', 'z']));
+        expect(fieldTypes(other, 'Pet').owner).toEqual({ kind: 'enum', name: 'PetOwner2', values: ['y', 'z'] });
+        expect(enumSummary(other)).toEqual(['PetOwner: small, large', 'PetOwner2: y, z']);
+        expect((withModel ? [same, other] : []).every((spec) => modelOf(spec, 'PetOwner') !== undefined)).toBe(true);
+      }
+    });
+
+    it("reads the error bodies' shared enum against the enum component, as beside the enum alone", async () => {
+      const error = (code: string): Doc => ({
+        description: 'Error',
+        content: json({
+          type: 'object',
+          required: ['message', 'code'],
+          properties: { message: { type: 'string' }, code: { type: 'string', const: code } },
+        }),
+      });
+      /** Two error bodies that pin `code` to two values: the shared enum would be `ErrorBodyCode`. */
+      const build = (schemas: Schemas): Doc =>
+        document('3.1.0', schemas, {
+          paths: {
+            '/a': { get: { operationId: 'getA', responses: { '204': { description: 'OK' }, '404': error('gone') } } },
+            '/b': { get: { operationId: 'getB', responses: { '204': { description: 'OK' }, '404': error('lost') } } },
+          },
+        });
+      const named = { type: 'object', properties: { name: { type: 'string' } } };
+      const sameMembers = { type: 'string', enum: ['gone', 'lost'] };
+      const otherMembers = { type: 'string', enum: ['x', 'y'] };
+      const plainStrings =
+        '[oagen] Warning: The values error bodies pin "code" to would be the shared enum "ErrorBodyCode", which enum "ErrorBodyCode" already holds — keeping those fields plain strings';
+      for (const [members, code, said] of [
+        [sameMembers, { kind: 'enum', name: 'ErrorBodyCode', values: ['gone', 'lost'] }, []],
+        [otherMembers, { kind: 'primitive', type: 'string' }, [plainStrings]],
+      ] as const) {
+        warn.mockClear();
+        const alone = await parse(build({ error_body_code: members }));
+        expect(fieldTypes(alone, 'ErrorBodyWithCode').code).toEqual(code);
+        expect(warnings()).toEqual(said);
+        warn.mockClear();
+        const beside = await parse(build({ error_body_code: members, ErrorBodyCode: named }));
+        expect(fieldTypes(beside, 'ErrorBodyWithCode').code).toEqual(code);
+        expect(beside.enums).toEqual(alone.enums);
+        expect(fieldTypes(beside, 'ErrorBodyCode')).toEqual({ name: { kind: 'primitive', type: 'string' } });
+        expect(warnings().slice(1)).toEqual(said);
+      }
+    });
+
+    it('diffs the model and the enum of one name each among its own kind', async () => {
+      const used = (schemas: Schemas): Doc => document('3.1.0', { ...schemas, Pet: pet() });
+      const both = await parse(used({ Size: objectSize(), Sizes: plainSizes() }));
+      const kinds = (from: ApiSpec, to: ApiSpec): string[] =>
+        diffSpecs(from, to).changes.map((change) => `${change.kind} ${(change as { name?: string }).name}`);
+
+      // The issue's `object.json` against itself, parsed twice: nothing.
+      expect(diffSpecs(both, both).changes).toEqual([]);
+      expect(kinds(both, await parse(objectJson('3.1.0')))).toEqual([]);
+      // The same document, components reversed: nothing.
+      expect(kinds(both, await parse(used({ Sizes: plainSizes(), Size: objectSize() })))).toEqual([]);
+      // The enum gains a value: the enum alone.
+      const widerEnum = await parse(
+        used({ Size: objectSize(), Sizes: { type: 'string', enum: ['small', 'large', 'huge'] } }),
+      );
+      expect(kinds(both, widerEnum)).toEqual(['enum-modified Size']);
+      // The model gains a field: the model alone.
+      const widerModel = await parse(
+        used({
+          Size: { type: 'object', properties: { width: { type: 'integer' }, depth: { type: 'integer' } } },
+          Sizes: plainSizes(),
+        }),
+      );
+      expect(kinds(both, widerModel)).toEqual(['model-modified Size']);
+      // The object `Size` becomes an enum like `Sizes`: the model goes, the enum stays, `Pet.size` is retyped.
+      const enumsOnly = await parse(used({ Size: plainSizes(), Sizes: plainSizes() }));
+      expect(kinds(both, enumsOnly)).toEqual(['model-removed Size', 'model-modified Pet']);
+      expect(kinds(enumsOnly, both)).toEqual(['model-added Size', 'model-modified Pet']);
+    });
+
+    it('hands both to an emitter, each among its own kind', async () => {
+      const spec = await parse(
+        document(
+          '3.1.0',
+          { Size: objectSize(), Sizes: plainSizes() },
+          {
+            paths: {
+              '/sizes': {
+                get: {
+                  operationId: 'listSizes',
+                  parameters: [{ name: 'sizes', in: 'query', schema: ref('Sizes') }],
+                  responses: { '200': { description: 'OK', content: json(ref('Size')) } },
+                },
+              },
+            },
+          },
+        ),
+      );
+      const referenced = collectReferencedNames(spec.services, spec.models);
+      expect([...referenced.models]).toEqual(['Size']);
+      expect([...referenced.enums]).toEqual(['Size']);
+
+      const seen = { models: [] as Model[], enums: [] as Enum[] };
+      const emitter = {
+        language: 'recording',
+        fileHeader: () => '',
+        generateModels: (models: Model[]) => {
+          seen.models = models;
+          return [];
+        },
+        generateEnums: (enums: Enum[]) => {
+          seen.enums = enums;
+          return [];
+        },
+        generateResources: () => [],
+        generateClient: () => [],
+        generateErrors: () => [],
+        generateTests: () => [],
+      } as unknown as Emitter;
+      generateAllFiles(spec, emitter, buildEmitterContext(spec, { namespace: 'test', outputDir: '/tmp/out' }));
+      expect(seen.models.map((m) => `${m.name}: ${m.fields.map((f) => f.name).join(', ')}`)).toEqual(['Size: width']);
+      expect(seen.enums.map((e) => `${e.name}: ${e.values.map((v) => v.value).join(', ')}`)).toEqual([
+        'Size: small, large',
+      ]);
+      // Nothing but the shared name is reported: `validateModelRefs` finds the model its references name.
+      expect(warnings()).toEqual([
+        '[oagen] Warning: Component schemas "Size" (a model) and "Sizes" (an enum) both resolve to "Size" — keeping both, each $ref typed as the component it names; a schemaNameTransform can give one a name of its own',
+      ]);
+    });
+
+    it("reads the issue's `object.json` by kind wherever a name is looked up", async () => {
+      /** `object.json` with `Size` carrying a field typed by the enum of its own name, read by two services. */
+      const spec = await parse(
+        document(
+          '3.1.0',
+          {
+            Size: { type: 'object', properties: { width: { type: 'integer' }, like: ref('Sizes') } },
+            Sizes: plainSizes(),
+            Pet: pet(),
+          },
+          {
+            paths: {
+              '/sizes': {
+                get: {
+                  operationId: 'listSizes',
+                  tags: ['Sizes'],
+                  parameters: [{ name: 'sizes', in: 'query', schema: ref('Sizes') }],
+                  responses: { '200': { description: 'OK', content: json(ref('Size')) } },
+                },
+              },
+              '/pets': {
+                get: {
+                  operationId: 'listPets',
+                  tags: ['Pets'],
+                  responses: { '200': { description: 'OK', content: json(ref('Pet')) } },
+                },
+              },
+            },
+          },
+        ),
+      );
+      expect(fieldTypes(spec, 'Size')).toEqual({
+        width: { kind: 'primitive', type: 'integer' },
+        like: enumRef('Size'),
+      });
+
+      // `validateModelRefs`: one set of model and enum names, in which the model `Size` is found.
+      warn.mockClear();
+      validateModelRefs(spec);
+      expect(warnings()).toEqual([]);
+      // A model reference no model answers is not reported while an enum has its name, as before this change.
+      validateModelRefs({
+        ...spec,
+        models: [{ name: 'Pet', fields: [{ name: 'ghost', type: model('Ghost'), required: false }] }],
+        enums: [{ name: 'Ghost', values: [] }],
+        services: [],
+      });
+      expect(warnings()).toEqual([]);
+      validateModelRefs({
+        ...spec,
+        models: [{ name: 'Pet', fields: [{ name: 'ghost', type: model('Ghost'), required: false }] }],
+        enums: [],
+        services: [],
+      });
+      expect(warnings()).toEqual(['[oagen] Warning: Unresolved model reference "Ghost" (context: Pet.ghost)']);
+
+      // `assignModelsToServices` places models alone: `Size` is the model, in the first service that reaches it.
+      expect(Object.fromEntries(assignModelsToServices(spec.models, spec.services))).toEqual({
+        Size: 'Sizes',
+        Pet: 'Pets',
+      });
+      // `collectFieldDependencies` lists each kind apart: the model `Size` depends on the enum `Size`,
+      // and `Pet` on both.
+      const dependencies = (name: string): { models: string[]; enums: string[] } => {
+        const { models, enums } = collectFieldDependencies(modelOf(spec, name)!);
+        return { models: [...models], enums: [...enums] };
+      };
+      expect(dependencies('Size')).toEqual({ models: [], enums: ['Size'] });
+      expect(dependencies('Pet')).toEqual({ models: ['Size'], enums: ['Size'] });
+    });
+
+    it('writes two generated files of one path by the rules for a file that exists, model first', async () => {
+      // The engine keeps no name-keyed record of types: it hands the model and
+      // the enum to the emitter apart (above) and writes what comes back by
+      // path. Only an emitter that gives both kinds one path makes them meet,
+      // and then the second file meets the first as any file already on disk.
+      const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oagen-668-out-'));
+      dirs.push(outputDir);
+      const read = (file: string): Promise<string> => fs.readFile(path.join(outputDir, file), 'utf-8');
+      const modelFile = (file: string, more: object = {}): GeneratedFile => ({
+        path: file,
+        content: 'model Size\n',
+        ...more,
+      });
+      const enumFile = (file: string, more: object = {}): GeneratedFile => ({
+        path: file,
+        content: 'enum Size\n',
+        ...more,
+      });
+
+      // No grammar for the language: the second file is skipped, and the model's stands.
+      const skipped = await writeFiles([modelFile('plain/size.txt'), enumFile('plain/size.txt')], outputDir);
+      expect(skipped).toMatchObject({ written: ['plain/size.txt'], skipped: ['plain/size.txt'] });
+      expect(await read('plain/size.txt')).toBe('model Size\n');
+      // `overwriteExisting`: the second file replaces the first, and the enum's stands.
+      const overwritten = await writeFiles(
+        [modelFile('forced/size.txt'), enumFile('forced/size.txt', { overwriteExisting: true })],
+        outputDir,
+      );
+      expect(overwritten.written).toEqual(['forced/size.txt', 'forced/size.txt']);
+      expect(await read('forced/size.txt')).toBe('enum Size\n');
+      // Two paths: both stand.
+      await writeFiles([modelFile('models/size.txt'), enumFile('enums/size.txt')], outputDir);
+      expect([await read('models/size.txt'), await read('enums/size.txt')]).toEqual(['model Size\n', 'enum Size\n']);
+    });
+  });
+
+  describe.each(VERSIONS)('a discriminator pin behind `Size` and `Sizes`, on OAS %s', (openapi) => {
+    /** One value and `null`, in the version's spelling: the nullable enum component `Size`. */
+    const nullableSmall = (): Doc =>
+      openapi === '3.1.0'
+        ? { type: ['string', 'null'], enum: ['small', null] }
+        : { type: 'string', nullable: true, enum: ['small', null] };
+    /** The same one value, admitting no `null`: `Sizes`. */
+    const plainSmall = (): Doc => ({ type: 'string', enum: ['small'] });
+    const large = (): Doc => ({ type: 'string', enum: ['large'] });
+    const variant = (size: Doc, extra: Doc): Doc => ({
+      type: 'object',
+      required: ['size'],
+      properties: { size, ...extra },
+    });
+    /**
+     * `createPet`'s body is a `oneOf` of two inline objects under the
+     * keyword, the first pinning `size` through a `$ref` to `key`: the fold
+     * reads the pin and its `null` off the component (`enumComponentPin`,
+     * #678), and the reference is typed by `componentTypeRef`. `Pet` is the
+     * same union of components, and `Holder` holds a `$ref` to each key.
+     */
+    const build = (key: string): Doc =>
+      document(
+        openapi,
+        {
+          Size: nullableSmall(),
+          Sizes: plainSmall(),
+          Small: variant(ref(key), { cuddly: { type: 'boolean' } }),
+          Large: variant(large(), { loud: { type: 'boolean' } }),
+          Pet: { oneOf: [ref('Small'), ref('Large')], discriminator: { propertyName: 'size' } },
+          Holder: { type: 'object', properties: { size: ref('Size'), sizes: ref('Sizes') } },
+        },
+        {
+          paths: {
+            '/pets': {
+              post: {
+                operationId: 'createPet',
+                requestBody: {
+                  required: true,
+                  content: json({
+                    oneOf: [
+                      variant(ref(key), { cuddly: { type: 'boolean' } }),
+                      variant(large(), { loud: { type: 'boolean' } }),
+                    ],
+                    discriminator: { propertyName: 'size' },
+                  }),
+                },
+                responses: { '200': { description: 'OK', content: json(ref('Pet')) } },
+              },
+            },
+          },
+        },
+      );
+
+    it.each([
+      ['Size', true],
+      ['Sizes', false],
+    ] as const)('pins `small` through %s, admitting null exactly as the reference does', async (key, admitsNull) => {
+      const spec = await parse(build(key));
+      const reference: TypeRef = admitsNull ? nullable(enumRef('Size')) : enumRef('Size');
+      // The reference, by key: at the pinning field and beside it.
+      expect(fieldTypes(spec, 'Small').size).toEqual(reference);
+      expect(fieldTypes(spec, 'Holder')).toEqual({ size: nullable(enumRef('Size')), sizes: enumRef('Size') });
+      // The pin, by key: the component's one member maps the variant…
+      expect(modelOf(spec, 'Pet')!.discriminator).toEqual({
+        property: 'size',
+        mapping: { small: 'Small', large: 'Large' },
+      });
+      // …and the folded body's `size` admits `null` exactly when the reference is nullable.
+      expect(operationOf(spec, 'createPet').requestBody).toEqual(model('CreatePetRequest'));
+      const folded = fieldTypes(spec, 'CreatePetRequest').size!;
+      expect(folded.kind).toBe(admitsNull ? 'nullable' : 'enum');
+      expect(spec.enums.map((e) => `${e.name}: ${e.values.map((v) => v.value).join(', ')}`)).toEqual([
+        'Size: small',
+        'CreatePetRequestSize: small, large',
+      ]);
+      expect(warnings()).toEqual([]);
     });
   });
 

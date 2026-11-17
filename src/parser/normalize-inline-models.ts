@@ -368,9 +368,21 @@ function keepLargestByName(models: Model[], naming?: InlineModelNaming): Model[]
  * A contender named like an enum (`naming.enums`) with no owner of that
  * name takes a name of its own whatever its shape or flag, with a note —
  * identical copies one name per shape, as under an owner (`renameClusters`):
- * an enum admits no model, so the IR never declares a model and an enum
- * under one name. A name both a component model and an enum hold is the
- * document's own clash and is settled as the model's.
+ * an enum admits no model, so no inline model is ever declared under an
+ * enum's name. A name both a component model and an enum hold is the
+ * document's own clash and is settled as the model's: a model component
+ * and an enum component whose keys resolve to one name — `Size: { type:
+ * 'object', properties }` beside `Sizes: { type: 'string', enum }`, both
+ * `Size` (#668) — are both kept, a `Size` in `models` and a `Size` in
+ * `enums`, since each `$ref` is typed as the component its key names, and
+ * reported by `extractSchemas`: `[oagen] Warning: Component schemas "Size"
+ * (a model) and "Sizes" (an enum) both resolve to "Size" — keeping both,
+ * each $ref typed as the component it names; a schemaNameTransform can
+ * give one a name of its own`. There the IR does declare a model and an
+ * enum under one name, and a `schemaNameTransform` that returns another
+ * name for one of the keys (its `originalName`) parts the two. A
+ * contender of that name is measured against the model as against any
+ * owner, and never against the enum.
  *
  * A renamed copy takes its site's qualifier prefixed (`mintQualifiedName`) —
  * `GetLegacyWidgetWidget` or `GetWidgetWidget` for a response of
@@ -1221,8 +1233,23 @@ export function mergeInlineResponseModels(
  * later becomes `GetPetResponseOwner2`. A field model named like one of the
  * document's enums (`naming.enums`) — a `Pet.owner` object beside a
  * component enum `PetOwner` — takes its qualified name here too (`PetOwner2`),
- * whatever its shape, so the IR never declares a model and an enum under one
- * name. Returns the field models still competing for a name, the renamed
+ * whatever its shape, so no field model is declared under an enum's name.
+ * The IR does declare a model and an enum under one name where the
+ * document does: a model component and an enum component whose keys
+ * resolve to one name — `Size: { type: 'object', properties }` beside
+ * `Sizes: { type: 'string', enum }`, both `Size` (#668) — are both kept, a
+ * `Size` in `models` and a `Size` in `enums`, since each `$ref` is typed
+ * as the component its key names, and reported by `extractSchemas`:
+ * `[oagen] Warning: Component schemas "Size" (a model) and "Sizes" (an
+ * enum) both resolve to "Size" — keeping both, each $ref typed as the
+ * component it names; a schemaNameTransform can give one a name of its
+ * own`. A `schemaNameTransform` that returns another name for one of the
+ * keys (its `originalName`) parts the two. A field model named like both —
+ * `Pet.owner` beside a model component `PetOwner` and an enum component
+ * `pet_owner` — is settled against the model component as against any
+ * component (`settleSharedNames`): it shares the name when the component
+ * admits it and takes its qualified name otherwise. Returns the field
+ * models still competing for a name, the renamed
  * ones under their new names; the response merge that follows settles the
  * operations' and webhooks' models against them as against the components
  * (`mergeInlineResponseModels`, `declared`), and the field merge folds them
