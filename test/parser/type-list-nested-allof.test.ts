@@ -455,6 +455,79 @@ describe('#674 a type list’s primitive copy reads its `allOf` at any depth', (
     expect(warn).not.toHaveBeenCalled();
   });
 
+  it('keeps a member that declares a type the wrapper the readers read, its values with it (Greptile, round 1)', async () => {
+    // Opened into `{ type: 'string' }` beside `{ enum }`, the wrapper was two
+    // typing members, which the readers read as neither: the values were
+    // lost, where the base read the wrapper whole.
+    const kinds = { enum: ['a', 'b'] };
+    const pinned = { const: 'a' };
+    expect(
+      await table([
+        ['enum under a typed wrapper', { type: ['string', 'integer'], allOf: [{ type: 'string', allOf: [kinds] }] }],
+        ['const under a typed wrapper', { type: ['string', 'integer'], allOf: [{ type: 'string', allOf: [pinned] }] }],
+        [
+          'two typed wrappers',
+          { type: ['string', 'integer'], allOf: [{ type: 'string', allOf: [{ type: 'string', allOf: [kinds] }] }] },
+        ],
+        [
+          'a nullable typed wrapper',
+          { type: ['string', 'integer'], allOf: [{ type: ['string', 'null'], allOf: [kinds] }] },
+        ],
+        [
+          'a limit beside the inner allOf',
+          { type: ['string', 'integer'], allOf: [{ minLength: 1, allOf: [{ type: 'string', ...kinds }] }] },
+        ],
+        [
+          'a format beside the type',
+          { type: ['string', 'integer'], allOf: [{ type: 'string', format: 'date-time', allOf: [min] }] },
+        ],
+        // The wrapper sheds its `$ref` and stays the wrapper of what is left.
+        [
+          'enum and `$ref` under a typed wrapper',
+          { type: ['object', 'string'], allOf: [{ type: 'string', allOf: [owner, kinds] }] },
+        ],
+        [
+          'const and `$ref` under a typed wrapper',
+          { type: ['string', 'integer'], allOf: [{ type: 'string', allOf: [owner, pinned] }] },
+        ],
+        [
+          'enum and `$ref` under a described wrapper',
+          { type: ['object', 'string'], allOf: [{ description: 'Kinds.', allOf: [owner, kinds] }] },
+        ],
+        [
+          'enum and `$ref` under a limit',
+          { type: ['object', 'string'], allOf: [{ maxLength: 9, allOf: [owner, kinds] }] },
+        ],
+        [
+          'a wrapper that pins the value itself',
+          { type: ['object', 'string'], allOf: [{ ...kinds, allOf: [owner, min] }] },
+        ],
+      ]),
+    ).toMatchInlineSnapshot(`
+      "enum under a typed wrapper: enum NoteAuthor
+      const under a typed wrapper: "a"
+      two typed wrappers: enum NoteAuthor
+      a nullable typed wrapper: nullable<enum NoteAuthor>
+      a limit beside the inner allOf: enum NoteAuthor
+      a format beside the type: string:date-time {"minLength":1}
+      enum and \`$ref\` under a typed wrapper: enum NoteAuthor
+      const and \`$ref\` under a typed wrapper: "a"
+      enum and \`$ref\` under a described wrapper: (Owner | enum NoteAuthor)
+      enum and \`$ref\` under a limit: (Owner | enum NoteAuthor) {"maxLength":9}
+      a wrapper that pins the value itself: (Owner | enum NoteAuthor) {"minLength":1}"
+    `);
+
+    // A wrapper that sheds nothing is the document's own object: its text
+    // and keys reach the enum as they do without a type list.
+    const described = { description: 'Kinds.', 'x-note': 'n', allOf: [{ type: 'string', ...kinds }] };
+    const listed = await parseJson(document('3.1.0', { type: ['string', 'integer'], allOf: [described] }));
+    const single = await parseJson(document('3.1.0', { allOf: [described] }));
+    expect(author(listed).type).toEqual({ kind: 'enum', name: 'NoteAuthor', values: ['a', 'b'] });
+    expect(listed.enums).toEqual(single.enums);
+    expect(listed.enums).toMatchObject([{ name: 'NoteAuthor', description: 'Kinds.' }]);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('reads a `$ref` to a component that composes or mixes the two as the model beside the primitive', async () => {
     const schemas = {
       Named: { allOf: [owner, min] },
