@@ -10,7 +10,7 @@ import type {
   UnionType,
 } from '../ir/types.js';
 import { collectModelRefs, collectModelTypeRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
-import { toPascalCase, stripListItemMarkers, singularize } from '../utils/naming.js';
+import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../utils/naming.js';
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
@@ -106,15 +106,10 @@ export function qualifyInlineModelName(baseName: string, parentName?: string): s
   // e.g., ConnectionListItem + Domains → Connection + Domain = ConnectionDomain
   const cleanParent = stripListItemMarkers(parentName);
   if (extendsParentName(baseName, cleanParent)) return baseName;
-  // Singularize the trailing PascalCase word of the combined name.
-  // Split baseName into leading words + trailing word, singularize trailing.
-  const trailingMatch = baseName.match(/^(.*?)([A-Z][a-z]*)$/);
-  if (trailingMatch) {
-    const [, prefix, trailingWord] = trailingMatch;
-    const singular = singularize(trailingWord);
-    return `${cleanParent}${prefix}${singular}`;
-  }
-  return `${cleanParent}${baseName}`;
+  // Singularize the trailing PascalCase word of the combined name: the one
+  // reading a nested error body's items and a `dataPath` hint's share
+  // (`singularizeTrailingWord`, #665).
+  return `${cleanParent}${singularizeTrailingWord(baseName)}`;
 }
 
 /**
