@@ -35,6 +35,7 @@ import {
   isInlineObjectSchema,
   isNullSchema,
   nullableAxisBranch,
+  unionFlaggedNullable,
   unwrapNullableField,
   unwrapNullableSchema,
   withWrapperDeprecation,
@@ -2901,9 +2902,14 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     // `null` exactly when both admit it (`conjunctionAdmitsNull`), in the
     // one spelling, whichever side wrote it and however (workos/oagen#653
     // review: the later's `type` or either's `nullable: true` won, so one
-    // nullable object beside a plain one was nullable by member order).
-    const { nullable: _firstFlag, ...firstBare } = first;
-    const { nullable: _secondFlag, ...secondBare } = second;
+    // nullable object beside a plain one was nullable by member order). A
+    // flag that stands for a `null` variant of a declaration's own union
+    // is that union's and stays with it, written out as the variant
+    // (`withFlaggedNullVariant`; #677: it was dropped with the others, so
+    // `{ properties, oneOf: [...], nullable: true }` declared by two members
+    // lost the `null` the 3.1 spelling's variant kept).
+    const { nullable: _firstFlag, ...firstBare } = withFlaggedNullVariant(first);
+    const { nullable: _secondFlag, ...secondBare } = withFlaggedNullVariant(second);
     return {
       ...firstBare,
       ...secondBare,
@@ -2997,6 +3003,26 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
     };
   }
   return first;
+}
+
+/**
+ * `schema` with the `null` variant OAS 3.0 `nullable: true` stands for
+ * (`unionFlaggedNullable`) written among the variants of each union it
+ * writes, in the flag's place; `schema` itself when no flag stands for
+ * one. For the one reader that moves the declarations' flags off them
+ * (`conjoinTypedDeclarations`, which writes the conjunction's own `type`):
+ * beside that `type` a flag would no longer stand for the variant, so the
+ * variant is written out, as a 3.1 document writes it.
+ */
+function withFlaggedNullVariant(schema: SchemaObject): SchemaObject {
+  if (!unionFlaggedNullable(schema)) return schema;
+  const { nullable: _flag, ...rest } = schema;
+  const nullVariant: SchemaObject = { type: 'null' };
+  return {
+    ...rest,
+    ...(schema.oneOf && { oneOf: [...schema.oneOf, nullVariant] }),
+    ...(schema.anyOf && { anyOf: [...schema.anyOf, nullVariant] }),
+  };
 }
 
 /**
@@ -3827,7 +3853,9 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * it: the admission moves to a `{ type: 'null' }` variant of the `oneOf` —
  * the one place the type builder reads a union's nullability from, and one
  * a union of string consts would otherwise lose when it collapses to an
- * enum — and off the declarations.
+ * enum — and off the declarations. A declaration that is itself a union
+ * keeps the `null` its own variants admit: a `null` variant among them, or
+ * OAS 3.0 `nullable: true` standing for one (`admitsNull`; #677).
  */
 export function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
@@ -3951,13 +3979,26 @@ export function withAgreedExtensions(schema: SchemaObject, extensions: Extension
   return { ...Object.fromEntries(kept), ...extensions };
 }
 
-/** Whether a declaration admits `null` on its own: OAS 3.0 `nullable: true`, or a `type` list naming `null`. */
+/**
+ * Whether a declaration admits `null` on its own: OAS 3.0 `nullable:
+ * true`, or a `type` list naming `null`. A flag that stands for a `null`
+ * variant of the declaration's own `oneOf`/`anyOf` (`unionFlaggedNullable`)
+ * is that union's, not the declaration's: it stays where it is, as the
+ * `null` variant it stands for stays among the union's variants, and the
+ * type builder reads it there (#677: the flag moved to the union of
+ * declarations, so `kind` declared `{ oneOf: [{ type: 'string' }, { type:
+ * 'integer' }], nullable: true }` on one branch and `boolean` on another
+ * was `nullable<(string | integer) | boolean>` in a 3.0.3 document and
+ * `nullable<string | integer> | boolean` in the 3.1.0 one).
+ */
 function admitsNull(schema: SchemaObject): boolean {
+  if (unionFlaggedNullable(schema)) return false;
   return schema.nullable === true || (Array.isArray(schema.type) && schema.type.includes('null'));
 }
 
-/** `schema` with its own `null` admission removed (see `admitsNull`); the type list collapses to its one remaining entry. */
+/** `schema` with its own `null` admission removed (see `admitsNull`, which a flag standing for a union's `null` variant is not); the type list collapses to its one remaining entry. */
 function withoutNull(schema: SchemaObject): SchemaObject {
+  if (unionFlaggedNullable(schema)) return schema;
   const { nullable: _nullable, ...rest } = schema;
   if (Array.isArray(rest.type)) {
     const types = rest.type.filter((t) => t !== 'null');
