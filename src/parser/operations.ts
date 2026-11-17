@@ -782,6 +782,29 @@ export interface OperationExtractionResult {
   declaredCallbacks: DeclaredCallbacks[];
 }
 
+/**
+ * What `extractOperations` is told about the names two operations' bodies
+ * both mint (`resolveBodyNameYields`, #683).
+ */
+export interface BodyNameSettling {
+  /**
+   * The names the passes that read the document after the operations mint
+   * beside a reading of them — the webhooks, then the callbacks, each named
+   * against every name the operations hold — so the number a given-up name
+   * takes steps past those too. Called at most once, with the reading in
+   * which the given-up names are set aside, and only when a name is given
+   * up; a caller that reads neither leaves it out.
+   */
+  mintedAfter?: (operations: OperationExtractionResult) => Iterable<string>;
+  /**
+   * Set by `extractOperations` itself, never by a caller: the silent
+   * reading that learns every name the pass mints when what the operations
+   * give up to one another is set aside, whose result is read for its names
+   * and thrown away.
+   */
+  setAside?: true;
+}
+
 /** A top-level `tags[]` entry as it appears in the OpenAPI document. */
 export interface TagObject {
   name?: string;
@@ -809,6 +832,8 @@ export function extractOperations(
   componentPathItems?: Record<string, Record<string, unknown>>,
   /** The document's `webhooks` map, as written, whose entries a `paths` entry's `$ref` may name. */
   documentWebhooks?: unknown,
+  /** How a name two operations' bodies both mint is numbered (`BodyNameSettling`). */
+  bodyNames?: BodyNameSettling,
 ): OperationExtractionResult {
   if (!paths) {
     return { services: [], inlineModels: [], inlineModelBundles: [], componentSites: new Set(), declaredCallbacks: [] };
@@ -820,9 +845,18 @@ export function extractOperations(
   // that names nothing — or that the operationIdTransform makes nothing of —
   // left out of its operation, every other one's name settled (see
   // readOperationIds).
+  // What the transform returned for each id, so the silent reading below
+  // (`namesInPlay`) hears the same answers without asking it again: a
+  // transform sees each operation's id once.
+  const transformedIds = new Map<string, string>();
   const { paths: resolvedPaths, names: operationIdNames } = readOperationIds(
     resolvePathItems(paths, componentPathItems, documentWebhooks),
-    operationIdTransform,
+    operationIdTransform &&
+      ((id) => {
+        const name = operationIdTransform(id);
+        transformedIds.set(id, name);
+        return name;
+      }),
   );
 
   // Whether text written beside a `$ref` overrides the referenced component's
@@ -1051,13 +1085,52 @@ export function extractOperations(
       }
       return bodies;
     });
+  // The number a given-up name takes is the first one free among every name
+  // in play, and a name is in play wherever a site mints it: another
+  // operation's body, an envelope companion, a parameter's enum, a header,
+  // parameter, fallback, error or secondary-body model named after this
+  // loop, a webhook's or a callback's payload named after this pass
+  // (`bodyNames.mintedAfter`). So the pass itself is read once more, silently
+  // and only when a name is given up, with the given-up models set aside
+  // under names no site can mint (`setAside`): every other site is then
+  // named as it is named with them out of the way, and a number none of
+  // those names is changes none of them.
+  const namesInPlay = (): string[] =>
+    rehearse(() => {
+      const setAside = extractOperations(
+        paths,
+        operationIdTransform && ((id) => transformedIds.get(id)!),
+        componentSchemas,
+        componentParameters,
+        componentRequestBodies,
+        componentModels,
+        documentTags,
+        componentExamples,
+        componentHeaders,
+        componentResponses,
+        componentFieldModels,
+        documentServers,
+        openapiVersion,
+        operationHints,
+        componentEnums,
+        componentPathItems,
+        documentWebhooks,
+        { setAside: true },
+      );
+      return [
+        ...registry.keys(),
+        ...componentResponseNames,
+        ...typeNamesOf(setAside),
+        ...(bodyNames?.mintedAfter?.(setAside) ?? []),
+      ];
+    });
   const bodyNameYields = resolveBodyNameYields(
     resolvedPaths,
     modelOperationIds,
     sharedWith,
     pathModelBaseNames,
     readBodies,
-    [...registry.keys(), ...componentResponseNames],
+    bodyNames?.setAside ? undefined : namesInPlay,
   );
 
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
@@ -7243,11 +7316,7 @@ function ownBodyTypeRefs(
  * less every model a component response's body is shared under or mints
  * (`componentResponseNames`), which is no operation's own; the enums are the
  * inline enums those models and the bodies' own types carry
- * (`ownBodyTypeRefs`); the other names are the ones the companions may
- * settle on (`EnvelopeCompanion.bareNames`) and every inline enum any of the
- * operation's references carries as it is built (`collectOperationTypeRefs`:
- * a parameter's, named from the service), which a numbered name must keep
- * clear of as well.
+ * (`ownBodyTypeRefs`).
  */
 function bodyNamesOf(
   key: string,
@@ -7263,11 +7332,26 @@ function bodyNamesOf(
     stem: built.modelQualifier,
     models: models.map((model) => model.name),
     enums: inlineEnumNames(ownBodyTypeRefs(built.operation, built.componentBodies, companions), models),
-    others: [
-      ...companions.flatMap((companion) => companion.bareNames),
-      ...inlineEnumNames(collectOperationTypeRefs(built.operation), []),
-    ],
   };
+}
+
+/**
+ * Every model and enum name a reading of the operations holds: its inline
+ * models — the bodies', the envelope companions' and every model named
+ * after the loop, a header's, a parameter's, a fallback, error or
+ * secondary body's — and every model and enum any of them or any operation
+ * references, a parameter's inline enum among them.
+ */
+function typeNamesOf({ services, inlineModels }: OperationExtractionResult): string[] {
+  const names = inlineModels.map((model) => model.name);
+  const refs = [
+    ...inlineModels.flatMap(collectModelTypeRefs),
+    ...services.flatMap((service) => service.operations.flatMap(collectOperationTypeRefs)),
+  ];
+  for (const ref of refs) {
+    walkTypeRef(ref, { model: (modelRef) => void names.push(modelRef.name), enum: (e) => void names.push(e.name) });
+  }
+  return names;
 }
 
 /**
@@ -7296,21 +7380,23 @@ function bodyNamesOf(
  * or enum, nested deeper in its body, takes the next free numbered name
  * (`CreatePetResponseDraftResponse2`), whatever the two shapes are. The
  * names are read off a rehearsal of the operations themselves (`read`: each
- * operation `included` names, built on its own, see `bodyNamesOf`), first of
- * the operations a name can be contested between alone: those whose stem
+ * operation `included` names, built on its own, see `bodyNamesOf`), of the
+ * operations a name can be contested between alone: those whose stem
  * contains another operation's or is contained in one (`stemsInContest`),
  * the stem being the `operationId`'s the reuse and contest passes left the
  * operation (`modelOperationIds`) or, without one, its path-derived prefix,
  * which is settled by now (`pathModelBaseNames`). A document in which no
  * stem contains another rehearses nothing. The number is chosen against
- * every name in play: `taken`, every name decided before the operations,
- * and every name any other operation mints or holds — `updateAnimal`
- * returning an object named `CreatePetResponseDraftResponse2` from its
- * `object` const keeps that name and its fields, and the nested model is
- * `…3` (Greptile) — so the operations outside the contest are rehearsed
- * too, but only once a name is given up, which most documents never see. A
- * path that shares another's Operation Object (`sharedWith`) takes no part:
- * it reads the one body and gives up what that path does.
+ * every name in play (`taken`, read only once a name is given up, which
+ * most documents never see): `updateAnimal` returning an object named
+ * `CreatePetResponseDraftResponse2` from its `object` const keeps that name
+ * and its fields (Greptile), a `Response2` header model of an operation in
+ * a service `CreatePetResponseDraft` keeps it too, and the nested model is
+ * `…3` beside either. Without `taken`, what is given up is set aside under
+ * names no site can mint, for the reading that learns the names in play
+ * (`resolveContestedBodyNames`). A path that shares another's Operation
+ * Object (`sharedWith`) takes no part: it reads the one body and gives up
+ * what that path does.
  */
 function resolveBodyNameYields(
   paths: Record<string, PathItem>,
@@ -7318,7 +7404,7 @@ function resolveBodyNameYields(
   sharedWith: ReadonlyMap<string, string>,
   pathModelBaseNames: ReadonlyMap<string, string>,
   read: (included: (key: string) => boolean) => readonly OperationBodyNames[],
-  taken: Iterable<string>,
+  taken?: () => Iterable<string>,
 ): Map<string, BodyNameYields> {
   /** The stem each operation's models are named from, by key. */
   const stemOf = new Map<string, string>();
@@ -7338,15 +7424,10 @@ function resolveBodyNameYields(
   }
   const contested = stemsInContest(stemOf.values());
   if (contested.size === 0) return new Map();
-  const inContest = (key: string): boolean => contested.has(stemOf.get(key) ?? '');
-  return resolveContestedBodyNames(read(inContest), () => [
-    ...taken,
-    ...read((key) => stemOf.has(key) && !inContest(key)).flatMap(({ models, enums, others }) => [
-      ...models,
-      ...enums,
-      ...others,
-    ]),
-  ]);
+  return resolveContestedBodyNames(
+    read((key) => contested.has(stemOf.get(key) ?? '')),
+    taken,
+  );
 }
 
 /** The schema a component response's body is read from, through a chain of refs, silently; undefined without one. */
