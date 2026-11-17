@@ -37,6 +37,17 @@ const NON_OBJECTS: Array<[kind: string, value: unknown, rendered: string]> = [
   ['a number', 7, '7'],
   ['a boolean', true, 'true'],
 ];
+/** Every value that is no object an entry can hold, the falsy ones a truthiness test would take for a missing entry first. */
+const ENTRIES: Array<[kind: string, value: unknown]> = [
+  ['null', null],
+  ['false', false],
+  ['zero', 0],
+  ['an empty string', ''],
+  ['an array', []],
+  ['a string', 'oops'],
+  ['a number', 7],
+  ['true', true],
+];
 /** Everything but an array a `parameters` field can hold, with how the warning renders it. */
 const NON_ARRAYS: Array<[kind: string, value: unknown, rendered: string]> = [
   ['a string', 'oops', '"oops"'],
@@ -142,9 +153,14 @@ function webhookDoc(
   };
 }
 
-/** `createPet`, declaring a `petAdopted` callback whose `post` is the given Operation Object. */
-function callbackDoc(operation: Record<string, unknown>, openapi: string, extra: Record<string, unknown> = {}) {
-  const callback = { '{$request.body#/callbackUrl}': { post: { responses: ok, ...operation } } };
+/** `createPet`, declaring a `petAdopted` callback whose `post` is the given Operation Object, beside the given path item fields. */
+function callbackDoc(
+  operation: Record<string, unknown>,
+  openapi: string,
+  extra: Record<string, unknown> = {},
+  pathItem: Record<string, unknown> = {},
+) {
+  const callback = { '{$request.body#/callbackUrl}': { ...pathItem, post: { responses: ok, ...operation } } };
   return {
     openapi,
     info,
@@ -425,6 +441,12 @@ describe('#664', () => {
             const inline = await parse(callbackDoc({ parameters: [value, offset], requestBody: payload }, openapi));
             expect(inline.warnings).toEqual([parameterSkipped(CALLBACK, rendered)]);
             expect(spec).toEqual(inline.spec);
+            // Among the parameters of the callback's path item, too.
+            const onPathItem = await parse(
+              callbackDoc({ requestBody: payload }, openapi, limitAs(value), { parameters: [limitRef, offset] }),
+            );
+            expect(onPathItem.warnings).toEqual([limitSkipped(CALLBACK, rendered)]);
+            expect(onPathItem.spec).toEqual(spec);
           },
         );
 
@@ -691,6 +713,224 @@ describe('#664', () => {
           expect(await diffExitCode(viaRef, viaRef)).toBe(0);
           expect(await diffExitCode(inline, viaRef)).toBe(0);
           expect(await diffExitCode(viaRef, inline)).toBe(0);
+        });
+      });
+
+      describe('written inline, where every value but an array failed the parse with a TypeError', () => {
+        // On the base: `TypeError: Cannot use 'in' operator to search for '$ref' in null` for a
+        // parameter entry that is `null`, a string, a number or a boolean, and for a request body
+        // that is a string, a number or `true`; an array parsed without a word.
+        it.each(NON_OBJECTS)(
+          'skips a parameter entry that is %s at every site that reads one, with one warning naming the operation',
+          async (_kind, value, rendered) => {
+            const onOperation = await parse(paramDoc([value, offset], openapi));
+            expect(onOperation.warnings).toEqual([parameterSkipped('listPets', rendered)]);
+            expect(parameterNames(onlyOperation(onOperation.spec))).toEqual(onlyOffset);
+
+            const onPathItem = await parse(pathItemParamDoc([value, offset], openapi));
+            expect(onPathItem.warnings).toEqual([parameterSkipped('listPets', rendered)]);
+            expect(parameterNames(onlyOperation(onPathItem.spec))).toEqual(onlyOffset);
+
+            const onWebhook = await parse(webhookDoc({ parameters: [value, offset], requestBody: payload }, openapi));
+            expect(onWebhook.warnings).toEqual([parameterSkipped(WEBHOOK, rendered)]);
+            expect(parameterNames(onWebhook.spec.webhooks![0])).toEqual(onlyOffset);
+
+            const onWebhookPathItem = await parse(
+              webhookDoc({ requestBody: payload }, openapi, {}, { parameters: [value, offset] }),
+            );
+            expect(onWebhookPathItem.warnings).toEqual([parameterSkipped(WEBHOOK, rendered)]);
+            expect(parameterNames(onWebhookPathItem.spec.webhooks![0])).toEqual(onlyOffset);
+
+            const onCallback = await parse(callbackDoc({ parameters: [value, offset], requestBody: payload }, openapi));
+            expect(onCallback.warnings).toEqual([parameterSkipped(CALLBACK, rendered)]);
+            expect(parameterNames(onlyOperation(onCallback.spec).callbacks![0])).toEqual(onlyOffset);
+
+            const onCallbackPathItem = await parse(
+              callbackDoc({ requestBody: payload }, openapi, {}, { parameters: [value, offset] }),
+            );
+            expect(onCallbackPathItem.warnings).toEqual([parameterSkipped(CALLBACK, rendered)]);
+            expect(parameterNames(onlyOperation(onCallbackPathItem.spec).callbacks![0])).toEqual(onlyOffset);
+          },
+        );
+
+        it.each(NON_OBJECTS)(
+          'reads an operation, a webhook and a callback without a request body that is %s, with one warning each',
+          async (_kind, value, rendered) => {
+            const onOperation = await parse(bodyDoc(value, openapi));
+            expect(onOperation.warnings).toEqual([bodySkipped('createPet', rendered)]);
+            const op = onlyOperation(onOperation.spec);
+            expect(op.requestBody).toBeUndefined();
+            expect(op.responseStatusCode).toBe(204);
+
+            const onWebhook = await parse(webhookDoc({ parameters: [offset], requestBody: value }, openapi));
+            expect(onWebhook.warnings).toEqual([bodySkipped(WEBHOOK, rendered)]);
+            expect(onWebhook.spec.webhooks).toHaveLength(1);
+            expect(onWebhook.spec.webhooks![0].requestBody).toBeUndefined();
+            expect(parameterNames(onWebhook.spec.webhooks![0])).toEqual(onlyOffset);
+
+            const onCallback = await parse(callbackDoc({ parameters: [offset], requestBody: value }, openapi));
+            expect(onCallback.warnings).toEqual([bodySkipped(CALLBACK, rendered)]);
+            const [callback] = onlyOperation(onCallback.spec).callbacks!;
+            expect(callback.requestBody).toBeUndefined();
+            expect(parameterNames(callback)).toEqual(onlyOffset);
+          },
+        );
+      });
+
+      describe('a path item or callback $ref to an entry that is not an object', () => {
+        // Both spellings were skipped already; the ref to an entry holding `null`, `false`, `0`
+        // or `""` was reported as one with `no matching entry`, though the entry is there.
+        const kept = { get: { operationId: 'listKept', responses: ok } };
+        const notAPathItem = (label: string) => warning(`${label} is not a path item object; skipping it.`);
+        const notACallback = (site: string) => warning(`Callback "${site}" is not a Callback Object; skipping it.`);
+        const petsRef = { $ref: '#/components/pathItems/Pets' };
+        const adoptedRef = { $ref: '#/components/callbacks/Adopted' };
+        const withCallbacks = (callbacks: unknown, components?: Record<string, unknown>) => ({
+          openapi,
+          info,
+          paths: { '/pets': { post: { operationId: 'createPet', responses: ok, callbacks } } },
+          ...(components ? { components } : {}),
+        });
+        const EXPRESSION = 'createPet.callbacks.petAdopted.{$request.body#/callbackUrl}';
+
+        it.each(ENTRIES)(
+          'names a components/pathItems entry that is %s as no path item object, behind a path, a chain and a webhook',
+          async (_kind, value) => {
+            const inline = await parse({ openapi, info, paths: { '/pets': value, '/kept': kept } });
+            expect(inline.warnings).toEqual([notAPathItem('Path "/pets"')]);
+            expect(inline.spec.services.flatMap((service) => service.operations).map((op) => op.name)).toEqual([
+              'listKept',
+            ]);
+
+            const viaRef = await parse({
+              openapi,
+              info,
+              paths: { '/pets': petsRef, '/kept': kept },
+              components: { pathItems: { Pets: value } },
+            });
+            expect(viaRef.warnings).toEqual(inline.warnings);
+            expect(viaRef.spec).toEqual(inline.spec);
+
+            const viaChain = await parse({
+              openapi,
+              info,
+              paths: { '/pets': { $ref: '#/components/pathItems/Alias' }, '/kept': kept },
+              components: { pathItems: { Alias: petsRef, Pets: value } },
+            });
+            expect(viaChain.warnings).toEqual(inline.warnings);
+            expect(viaChain.spec).toEqual(inline.spec);
+
+            const webhookInline = await parse({
+              openapi,
+              info,
+              paths: { '/kept': kept },
+              webhooks: { petAdopted: value },
+            });
+            const webhookViaRef = await parse({
+              openapi,
+              info,
+              paths: { '/kept': kept },
+              webhooks: { petAdopted: petsRef },
+              components: { pathItems: { Pets: value } },
+            });
+            expect(webhookInline.warnings).toEqual([notAPathItem('Webhook "petAdopted"')]);
+            expect(webhookViaRef.warnings).toEqual(webhookInline.warnings);
+            expect(webhookViaRef.spec).toEqual(webhookInline.spec);
+            expect(webhookViaRef.spec.webhooks ?? []).toEqual([]);
+          },
+        );
+
+        it.each(ENTRIES)(
+          'names a paths or webhooks entry that is %s as no path item object, behind a pointer into either map',
+          async (_kind, value) => {
+            const intoPaths = await parse({
+              openapi,
+              info,
+              paths: { '/animals': { $ref: '#/paths/~1pets' }, '/pets': value, '/kept': kept },
+            });
+            expect(intoPaths.warnings).toEqual([notAPathItem('Path "/animals"'), notAPathItem('Path "/pets"')]);
+
+            const intoWebhooks = await parse({
+              openapi,
+              info,
+              paths: { '/animals': { $ref: '#/webhooks/petAdopted' }, '/kept': kept },
+              webhooks: { petAdopted: value },
+            });
+            expect(intoWebhooks.warnings).toEqual([
+              notAPathItem('Path "/animals"'),
+              notAPathItem('Webhook "petAdopted"'),
+            ]);
+            for (const { spec } of [intoPaths, intoWebhooks]) {
+              expect(spec.services.flatMap((service) => service.operations).map((op) => op.name)).toEqual(['listKept']);
+            }
+          },
+        );
+
+        it.each(ENTRIES)(
+          'names a components/callbacks entry that is %s as no Callback Object, direct and at the end of a chain',
+          async (_kind, value) => {
+            const inline = await parse(withCallbacks({ petAdopted: value }));
+            expect(inline.warnings).toEqual([notACallback('createPet.callbacks.petAdopted')]);
+            expect(onlyOperation(inline.spec).callbacks).toBeUndefined();
+
+            const viaRef = await parse(withCallbacks({ petAdopted: adoptedRef }, { callbacks: { Adopted: value } }));
+            expect(viaRef.warnings).toEqual(inline.warnings);
+            expect(viaRef.spec).toEqual(inline.spec);
+
+            const viaChain = await parse(
+              withCallbacks(
+                { petAdopted: { $ref: '#/components/callbacks/Alias' } },
+                { callbacks: { Alias: adoptedRef, Adopted: value } },
+              ),
+            );
+            expect(viaChain.warnings).toEqual(inline.warnings);
+            expect(viaChain.spec).toEqual(inline.spec);
+          },
+        );
+
+        it.each(ENTRIES)(
+          "names a components/pathItems entry that is %s as no path item object behind a callback's expression",
+          async (_kind, value) => {
+            const inline = await parse(withCallbacks({ petAdopted: { '{$request.body#/callbackUrl}': value } }));
+            const viaRef = await parse(
+              withCallbacks(
+                { petAdopted: { '{$request.body#/callbackUrl}': petsRef } },
+                { pathItems: { Pets: value } },
+              ),
+            );
+
+            expect(inline.warnings).toEqual([notAPathItem(`Callback "${EXPRESSION}"`)]);
+            expect(viaRef.warnings).toEqual(inline.warnings);
+            expect(viaRef.spec).toEqual(inline.spec);
+            expect(onlyOperation(viaRef.spec).callbacks).toBeUndefined();
+          },
+        );
+
+        it('still reports a pointer that names no entry as unresolved, a same-named entry of the section notwithstanding', async () => {
+          const components = { schemas: { Pets: { type: 'object' }, Adopted: { type: 'object' } } };
+          const path = await parse({
+            openapi,
+            info,
+            paths: { '/pets': { $ref: '#/components/schemas/Pets' }, '/kept': kept },
+            components: { ...components, pathItems: { Pets: null } },
+          });
+          const callback = await parse(
+            withCallbacks(
+              { petAdopted: { $ref: '#/components/schemas/Adopted' } },
+              { ...components, callbacks: { Adopted: null } },
+            ),
+          );
+
+          expect(path.warnings).toEqual([
+            warning(
+              'Unresolved path item $ref "#/components/schemas/Pets" for path "/pets": no matching entry under components/pathItems. Skipping the path.',
+            ),
+          ]);
+          expect(callback.warnings).toEqual([
+            warning(
+              'Unresolved callback $ref "#/components/schemas/Adopted" for callback "createPet.callbacks.petAdopted": no matching entry under components/callbacks. Skipping the callback.',
+            ),
+          ]);
         });
       });
 
