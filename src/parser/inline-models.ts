@@ -456,8 +456,9 @@ const MODEL_IDENTITY_KEYS: ReadonlySet<string> = new Set(['name', ...MODEL_DOC_K
  * own, kept by its own flag. What a fold does to the definition it keeps
  * when it clears the model's own `deprecated` because a copy identical but
  * for that flag is live (`foldLiveCopy`) — the within-operation merge
- * (`extractResponses`, #630), the array items of one operation's success
- * bodies (`materializeInlineSchema`, #672) and the copies an owner refuses
+ * (`extractResponses`, #630), the array items and secondary media-type
+ * bodies of one operation's success entries (`materializeInlineSchema`,
+ * #672) and the copies an owner refuses
  * (`settleRefusedCopies`, #441): the
  * shared model is then documented as its first live copy is, as the merge
  * passes keep a live copy's definition whole across operations
@@ -492,9 +493,9 @@ export function takeModelDocumentation(into: Model, from: Model): void {
  * `kept` went live. The one fold every site that keeps a definition for
  * copies that differ only in the flag applies: one operation's success
  * bodies that resolve to one name (`extractResponses`, #630), the array
- * items of those bodies, which the shape registry settles as they are read
- * (`materializeInlineSchema`, #672), and the copies an owner refuses
- * (`settleRefusedCopies`, #441).
+ * items of those bodies and the secondary media-type bodies of its success
+ * entries, which the shape registry settles (`materializeInlineSchema`,
+ * #672), and the copies an owner refuses (`settleRefusedCopies`, #441).
  */
 export function foldLiveCopy(kept: Model, copy: Model): boolean {
   if (!kept.deprecated || copy.deprecated) return false;
