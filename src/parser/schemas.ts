@@ -5858,7 +5858,8 @@ export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
     const member = allOfReferenceMember(folded);
     return member !== undefined && referenceTypesAsUnknown(member);
   }
-  return reading === 'unwrapped' && referenceTypesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0]);
+  const member = reading === 'unwrapped' ? writtenTypingMember(folded) : undefined;
+  return member !== undefined && referenceTypesAsUnknown(member);
 }
 
 /**
@@ -9208,6 +9209,7 @@ import {
   readInlineAllOf,
   unionOfDeclarations,
   unwrappedAllOfMember,
+  writtenTypingMember,
   agreedExtensions,
   withAgreedExtensions,
   type MintedInlineName,
