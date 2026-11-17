@@ -105,7 +105,7 @@ The `httpKeyByMethod` reverse map is only populated when an `operations` map is 
 
 Emitters should handle these additional variants introduced for open-source readiness:
 
-- **Auth:** `'cookie'` in the `apiKey` auth scheme `in` field
+- **Auth:** `'cookie'` in the `apiKey` auth scheme `in` field; the `openIdConnect` (with `openIdConnectUrl`), `mutualTLS` and `http` (any HTTP scheme other than `basic` and `bearer`, with `scheme` as written — compare it with `foldHttpAuthScheme`) kinds of `AuthScheme`, beside `basic`, `bearer`, `apiKey` and `oauth2`, so every well-formed scheme a requirement names is in `spec.auth`. End a `switch` over `kind` in a `never` check such as `assertNever`; see [AuthScheme](ir-types.md#authscheme)
 - **Pagination:** `'page'` strategy for page-number pagination — send `pageStart` first and advance `param` by one per request — next to `'link-header'` for RFC 5988 Link header pagination; optional `endOfIteration` (`{ kind: 'hasMore' | 'totalPages' | 'totalCount', path }`) naming the response field that ends the iteration, whatever the strategy (`hasMore === false`; pages fetched so far `>= totalPages` — `page - pageStart + 1` under `page`, `floor(offset / limit) + 1` under `offset`, the number of requests made under `cursor`; items received `>= totalCount`), in addition to the empty-page stop every strategy has; `dataPath` may be `undefined` (meaning the response IS the data)
 - **Encoding:** `'form-urlencoded'` for `application/x-www-form-urlencoded` request bodies; every request body media type is matched by essence (parameters and case aside), and a concrete `+json` media type is `'json'`
 - **HTTP methods:** `head`, `options`, `trace` — HEAD returns no body, OPTIONS/TRACE are informational

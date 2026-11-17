@@ -1416,18 +1416,22 @@ export interface DocumentSecurityChanged {
  * `components.securitySchemes` (`ApiSpec.auth`) and the old did not,
  * matched by `schemeName` (#384). Breaking when the old document already
  * had the scheme in use — named by the effective requirement list,
- * `node.security ?? spec.security ?? []`, of one of its operations or
- * webhooks — under a definition the parser omits from `auth`
- * (`openIdConnect`, an `http` scheme such as `digest`, `mutualTLS`): every
- * old request carried that, not what the new definition reads, so `petKey:
- * { type: openIdConnect, … }` becoming `{ type: apiKey, in: header, name:
- * X-Key }` under `security: [{ petKey: [] }]` breaks, as the reverse (a
- * `security-scheme-removed` a requirement still names) does. Additive
- * otherwise: no request built for the old document carried it, and a
- * requirement that starts naming it is reported as the requirement change
- * it is (`security-changed`, `securityChanged`). Listed after the
- * document's `security-changed` change and before the models, with the
- * removed and modified schemes after it.
+ * `node.security ?? spec.security ?? []`, of one of its operations,
+ * webhooks or callbacks — under no definition its `auth` carried: one the
+ * parser cannot read and omits (an unknown `type`, an `http` scheme with
+ * no `scheme`, an `openIdConnect` one with no `openIdConnectUrl`), or none
+ * at all. Nothing says every old request carried what the new definition
+ * reads, so `petKey: { type: http }` becoming `{ type: apiKey, in: header,
+ * name: X-Key }` under `security: [{ petKey: [] }]` breaks, as the reverse
+ * (a `security-scheme-removed` a requirement still names) does. A
+ * definition the parser reads on both sides is never this change: an
+ * `openIdConnect`, `mutualTLS` or `http digest` scheme becoming an
+ * `apiKey` is a `security-scheme-modified` (`openIdConnect → apiKey`,
+ * #662). Additive otherwise: no request built for the old document carried
+ * it, and a requirement that starts naming it is reported as the
+ * requirement change it is (`security-changed`, `securityChanged`). Listed
+ * after the document's `security-changed` change and before the models,
+ * with the removed and modified schemes after it.
  */
 export interface SecuritySchemeAdded {
   kind: 'security-scheme-added';
@@ -1473,8 +1477,15 @@ export interface SecuritySchemeRemoved {
  * carries the old form to the new server), or when the definition only
  * grew.
  *
- * The wire form is the `kind`; an `apiKey`'s `in` and `name`, a header's
- * name compared folded (`foldHeaderName`) since HTTP header names are
+ * The wire form is the `kind`, the three `http` kinds read as one family
+ * by scheme name — `basic`, `bearer`, or the `http` kind's `scheme`
+ * compared folded (`foldHttpAuthScheme`), since HTTP authentication scheme
+ * names are case-insensitive (RFC 9110 §11.1): `Digest` → `hoba` is
+ * breaking in use, and `Digest` → `digest` is not a change at all, as
+ * `Bearer` → `bearer` is none (#662); an `openIdConnect` scheme's
+ * `openIdConnectUrl`, compared as written, any other string breaking in
+ * use; an `apiKey`'s `in` and `name`, a header's name compared folded
+ * (`foldHeaderName`) since HTTP header names are
  * case-insensitive (RFC 9110 §5.1) — a header respelled `X-Key` → `x-key`
  * is still reported, with the spelling in `details`, but is additive, as a
  * case-only header parameter rename is, while a query or cookie name is
@@ -1502,9 +1513,13 @@ export interface SecuritySchemeModified {
   /** The definition as the new document declares it. */
   newScheme: AuthScheme;
   /**
-   * What changed, in words: `apiKey → http basic` (`http bearer`, `oauth2`)
-   * for a changed kind; `apiKey in header "X-Key" → in header "X-Api-Key"`
-   * for an `apiKey` whose location or name moved; `oauth2 flows changed`
+   * What changed, in words: `apiKey → http basic` (`http bearer`, `http
+   * Digest` with the scheme as written, `oauth2`, `openIdConnect`,
+   * `mutualTLS`) for a changed kind, and `http Digest → http hoba` for an
+   * `http` scheme renamed; `openIdConnectUrl "https://auth.example.com/…" →
+   * "https://login.example.com/…"` for an `openIdConnect` scheme whose URL
+   * moved; `apiKey in header "X-Key" → in header "X-Api-Key"` for an
+   * `apiKey` whose location or name moved; `oauth2 flows changed`
    * when anything but a `scopes` map moved in an `oauth2` scheme's flows,
    * `oauth2 scopes changed` when only scopes did, either followed by
    * `; required scope "write:pets" removed` (`required scopes "a", "b"
