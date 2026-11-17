@@ -1,0 +1,205 @@
+/**
+ * The names two operations' bodies would both mint, settled before any
+ * operation is built (#683).
+ *
+ * Every model and inline enum an operation's inline request and success
+ * bodies mint is named from the operation's stem — its `operationId`'s
+ * (`CreatePet`) or its path-derived prefix (`PetsPost`) — followed by what
+ * the body is (`Request`, `Response`, `Item`) and by the fields on the way
+ * down (`CreatePetResponseOwner`). The names are concatenations, so they
+ * are not unique by construction: `createPet` returning a `draft_response`
+ * object names it `CreatePetResponseDraftResponse`, which is exactly the
+ * response of `operationId: createPetResponseDraft`. Left alone, the merge
+ * passes kept one definition for both — the one with more fields, the first
+ * on a tie — so one operation was typed with fields it does not return, and
+ * which one followed the order of the paths.
+ *
+ * Such a name is _contested_, and the contest is settled from the stems
+ * alone: an operation gives the name up when another operation that mints it
+ * has a stem that contains its own. `CreatePetResponseDraft` contains
+ * `CreatePet`, so `createPetResponseDraft` keeps
+ * `CreatePetResponseDraftResponse` — the name it mints directly for its own
+ * body — and the model nested in `createPet`'s response takes the next free
+ * numbered name (`CreatePetResponseDraftResponse2`). Whether the two shapes
+ * agree takes no part, so a field added to either later changes that model
+ * and renames nothing.
+ */
+import type { Model, ModelRef, TypeRef } from '../ir/types.js';
+import { collectModelTypeRefs, renameModelRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
+import { numberedName } from '../utils/naming.js';
+import { isInheritedModelRef } from './inline-models.js';
+import { isComponentModelRef } from './schemas.js';
+
+/** What one operation's inline request and success bodies mint, read off a rehearsal of them. */
+export interface OperationBodyNames {
+  /** The operation's plan key, `${method} ${path}`. */
+  key: string;
+  /**
+   * The stem the operation's models are named from: its `operationId`'s
+   * (`operationIdModelBase`), or its path-derived prefix
+   * (`resolvePathModelBaseNames`).
+   */
+  stem: string;
+  /** Every model name the bodies mint, nested models and envelope companions included. */
+  models: string[];
+  /** Every inline enum name the bodies mint — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
+  enums: string[];
+}
+
+/** The names one operation gives up, each with the name its model or inline enum takes instead. */
+export type BodyNameYields = ReadonlyMap<string, string>;
+
+/**
+ * The stems among `stems` that contain another one or that another one
+ * contains — as a prefix (`CreatePetResponseDraft` beside `CreatePet`) or
+ * anywhere else (`EmailCreatePet` beside `CreatePet`). Only between two such
+ * operations can a name be given up (`resolveContestedBodyNames`), so only
+ * their bodies are rehearsed. An empty stem names nothing, so it contains
+ * nothing and nothing contains it.
+ */
+export function stemsInContest(stems: Iterable<string>): Set<string> {
+  const distinct = [...new Set(stems)].filter((stem) => stem.length > 0);
+  const contested = new Set<string>();
+  for (const inner of distinct) {
+    for (const outer of distinct) {
+      if (outer.length <= inner.length || !outer.includes(inner)) continue;
+      contested.add(inner);
+      contested.add(outer);
+    }
+  }
+  return contested;
+}
+
+/**
+ * Settle every name more than one operation's bodies would mint, from the
+ * operations' stems alone, and return what each operation gives up, by its
+ * key.
+ *
+ * An operation _claims_ a name its bodies mint when the name carries its
+ * stem: as a prefix — `CreatePetResponse`, `CreatePetResponseDraftResponse`
+ * — or behind the const a union variant is named from
+ * (`EmailCreatePetRequest`). A name that does not carry the stem — a variant
+ * named from its `title` or its bare const — is not derived from it, and is
+ * left to the merge passes as before. Of the operations that claim one name,
+ * each one whose stem another claimant's stem contains gives the name up:
+ * `createPet` (`CreatePet`) gives `CreatePetResponseDraftResponse` up to
+ * `createPetResponseDraft` (`CreatePetResponseDraft`), and gives
+ * `EmailCreatePetRequest`, a body variant pinning `kind: email`, up to
+ * `operationId: emailCreatePet`. The claimant no other claimant's stem
+ * contains keeps the name; claimants whose stems are unrelated are not
+ * settled here. A stem claims a name once, however many of `bodies` are
+ * named from it: two paths that `$ref` one Path Item read one Operation
+ * Object under one `operationId`, mint one model, and give up the same
+ * names for the same ones.
+ *
+ * What an operation gives up takes the name numbered (`numberedName`:
+ * `CreatePetResponseDraftResponse2`, `…3`), the first number under which it
+ * is no name in play — `taken`, every name decided before the operations
+ * (the component models and enums, the models and enums their fields mint,
+ * the component responses' bodies), every name the bodies of `bodies` mint,
+ * and every name already handed out here — so a field `draft_response2`, a
+ * component or an enum of the numbered name moves it on to the next. The
+ * names are taken in code-unit order and, when several operations give one
+ * name up (`get` and `getResponse` beside `getResponseResponse`), the
+ * shorter stem takes the lower number, so the outcome depends on the
+ * document's stems and never on the order of its paths.
+ */
+export function resolveContestedBodyNames(
+  bodies: readonly OperationBodyNames[],
+  taken: Iterable<string>,
+): Map<string, BodyNameYields> {
+  /** One stem's claim on a name, and where in the name the stem stands. */
+  interface Claim {
+    stem: string;
+    at: number;
+  }
+  const claims = new Map<string, Claim[]>();
+  const inPlay = new Set(taken);
+  for (const { stem, models, enums } of bodies) {
+    for (const name of new Set([...models, ...enums])) {
+      inPlay.add(name);
+      const at = stem.length > 0 ? name.indexOf(stem) : -1;
+      if (at < 0) continue;
+      const claimants = claims.get(name) ?? [];
+      // One stem, one claim: two paths that read one Operation Object mint one model.
+      if (!claimants.some((claim) => claim.stem === stem)) claimants.push({ stem, at });
+      claims.set(name, claimants);
+    }
+  }
+
+  const byStem = new Map<string, Map<string, string>>();
+  for (const name of [...claims.keys()].sort()) {
+    const claimants = claims.get(name)!;
+    if (claimants.length < 2) continue;
+    const yielding = claimants
+      .filter(({ stem }) => claimants.some((other) => other.stem !== stem && other.stem.includes(stem)))
+      // The shorter stem first; two of one length by where the stem stands, then by code unit.
+      .sort((a, b) => a.stem.length - b.stem.length || a.at - b.at || (a.stem < b.stem ? -1 : 1));
+    for (const { stem } of yielding) {
+      let renamed = numberedName(name, 2);
+      for (let n = 3; inPlay.has(renamed); n++) renamed = numberedName(name, n);
+      inPlay.add(renamed);
+      const given = byStem.get(stem) ?? new Map<string, string>();
+      given.set(name, renamed);
+      byStem.set(stem, given);
+    }
+  }
+  const yields = new Map<string, BodyNameYields>();
+  for (const { key, stem } of bodies) {
+    const given = byStem.get(stem);
+    if (given) yields.set(key, given);
+  }
+  return yields;
+}
+
+/**
+ * Move what an operation gives up (`resolveContestedBodyNames`) to the names
+ * it takes instead, in place: each of `models` named like one, every
+ * reference to it among the `roots` — the types the operation's bodies are
+ * read through — and in the models' fields and variants, a union's
+ * discriminator mapping following its variant (`renameTypeRefModels`,
+ * `renameModelRefs`), and every inline enum of such a name, which carries
+ * its name on its reference. Only a reference the bodies themselves minted
+ * moves, by its identity: an explicit `$ref` to a component of the same name
+ * (`isComponentModelRef`), a reference an `allOf` merge copied from another
+ * component's field (`isInheritedModelRef`) and a `$ref` to a component
+ * enum, which carries no values, stay as written. A name the operation
+ * takes is no name it gives up, so a reference two holders share moves once.
+ */
+export function yieldBodyNames(yields: BodyNameYields, roots: readonly TypeRef[], models: readonly Model[]): void {
+  if (yields.size === 0) return;
+  const admit = (ref: ModelRef): boolean => !isComponentModelRef(ref) && !isInheritedModelRef(ref);
+  const moveEnums = (ref: TypeRef): void => {
+    walkTypeRef(ref, {
+      enum: (enumRef) => {
+        const renamed = enumRef.values ? yields.get(enumRef.name) : undefined;
+        if (renamed !== undefined) enumRef.name = renamed;
+      },
+    });
+  };
+  for (const root of roots) {
+    renameTypeRefModels(root, yields, admit);
+    moveEnums(root);
+  }
+  for (const model of models) {
+    renameModelRefs(model, yields, admit);
+    for (const ref of collectModelTypeRefs(model)) moveEnums(ref);
+  }
+  for (const model of models) {
+    const renamed = yields.get(model.name);
+    if (renamed !== undefined) model.name = renamed;
+  }
+}
+
+/** Whether `yields` moves one of `models` or an inline enum one of their fields or variants carries. */
+export function yieldsAmong(yields: BodyNameYields, models: readonly Model[]): boolean {
+  if (yields.size === 0) return false;
+  return models.some((model) => {
+    if (yields.has(model.name)) return true;
+    let found = false;
+    for (const ref of collectModelTypeRefs(model)) {
+      walkTypeRef(ref, { enum: (enumRef) => void (enumRef.values && yields.has(enumRef.name) && (found = true)) });
+    }
+    return found;
+  });
+}

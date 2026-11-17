@@ -48,6 +48,7 @@ import {
 import { externalDocsEntry } from './external-docs.js';
 import { schemaExtensionsEntry } from './extensions.js';
 import { materializeInlineSchema, type InlineModelRegistry } from './materialize-inline.js';
+import type { BodyNameYields } from './contested-body-names.js';
 
 /**
  * What settles an array body's or list envelope's item models against the
@@ -58,6 +59,8 @@ import { materializeInlineSchema, type InlineModelRegistry } from './materialize
 export interface ItemSettlement {
   registry: InlineModelRegistry;
   operation: string;
+  /** The names the operation gives up to another operation (`MaterializeInlineOptions.yields`, #683). */
+  yields?: BodyNameYields;
 }
 
 export interface ResponseExtractionResult {
@@ -747,7 +750,10 @@ export function resolveDataPathFromSchema(
  * recorded under the operation; a reference written by sharing another
  * site's model joins that site (`attachSharedRefs`), so a later rename of
  * the shared model — a deprecated copy named like a live one — reaches this
- * array too. Without `settle` — the dry run that reads a component
+ * array too. A name the operation gives up to another operation
+ * (`ItemSettlement.yields`, #683) is left before the comparison, in every
+ * trial, so that operation's model of the name is no clash and the items
+ * never step for it. Without `settle` — the dry run that reads a component
  * response's names, a direct call — the items take `<Op>Item` as written;
  * the dry run that reads an operation's own names settles them against a
  * copy of the registry as seeded, so it reads the name the operation takes
@@ -771,6 +777,7 @@ function typeInlineItems(
       componentSchemas,
       registry: settle.registry,
       operation: settle.operation,
+      ...(settle.yields && { yields: settle.yields }),
       models: inlineModels,
     });
     return { itemType, inlineModels };
