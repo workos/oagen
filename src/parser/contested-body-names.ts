@@ -14,9 +14,9 @@
  * on a tie — so one operation was typed with fields it does not return, and
  * which one followed the order of the paths.
  *
- * Such a name is _contested_, and the contest is settled from the stems
- * alone: an operation gives the name up when another operation that mints it
- * has a stem that contains its own. `CreatePetResponseDraft` contains
+ * Such a name is _contested_, and which operation keeps it is decided by
+ * the stems alone: an operation gives the name up when another operation
+ * that mints it has a stem that contains its own. `CreatePetResponseDraft` contains
  * `CreatePet`, so `createPetResponseDraft` keeps
  * `CreatePetResponseDraftResponse` — the name it mints directly for its own
  * body — and the model nested in `createPet`'s response takes the next free
@@ -30,7 +30,15 @@ import { numberedName } from '../utils/naming.js';
 import { isInheritedModelRef } from './inline-models.js';
 import { isComponentModelRef } from './schemas.js';
 
-/** What one operation's inline request and success bodies mint, read off a rehearsal of them. */
+/**
+ * What one operation's inline request and success bodies mint from its stem,
+ * read off a rehearsal of them: the names that would be other names under
+ * another stem. A name the document gives a model itself — a response named
+ * from its `object` const (`PetOwner`), a variant named from its `title` or
+ * its bare const, and what such a model nests — is no operation's: every
+ * operation that returns it shares it, whatever stems its name happens to
+ * hold, so it is not among these.
+ */
 export interface OperationBodyNames {
   /** The operation's plan key, `${method} ${path}`. */
   key: string;
@@ -40,9 +48,9 @@ export interface OperationBodyNames {
    * (`resolvePathModelBaseNames`).
    */
   stem: string;
-  /** Every model name the bodies mint, nested models and envelope companions included. */
+  /** Every model name the bodies mint from the stem, nested models and envelope companions included. */
   models: string[];
-  /** Every inline enum name the bodies mint — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
+  /** Every inline enum name the bodies mint from the stem — an enum written on a field, an item or the body itself; never a `$ref` to a component enum. */
   enums: string[];
 }
 
@@ -75,12 +83,16 @@ export function stemsInContest(stems: Iterable<string>): Set<string> {
  * operations' stems alone, and return what each operation gives up, by its
  * key.
  *
- * An operation _claims_ a name its bodies mint when the name carries its
- * stem: as a prefix — `CreatePetResponse`, `CreatePetResponseDraftResponse`
- * — or behind the const a union variant is named from
- * (`EmailCreatePetRequest`). A name that does not carry the stem — a variant
- * named from its `title` or its bare const — is not derived from it, and is
- * left to the merge passes as before. Of the operations that claim one name,
+ * An operation _claims_ every name its bodies mint from its stem
+ * (`OperationBodyNames`): the stem followed by what the body is and the
+ * fields on the way down — `CreatePetResponse`,
+ * `CreatePetResponseDraftResponse` — or the stem behind the const a union
+ * variant is named from (`EmailCreatePetRequest`). A name the document
+ * gives a model is no claim, whatever it holds: `pet` and `petOwner` both
+ * returning an `object: pet_owner` resource share one `PetOwner`, as every
+ * operation returning it does, and a response `pet` names `GetPetResponse`
+ * from its `object` const beside `getPet`'s own is left to the merge passes
+ * as before. Of the operations that claim one name,
  * each one whose stem another claimant's stem contains gives the name up:
  * `createPet` (`CreatePet`) gives `CreatePetResponseDraftResponse` up to
  * `createPetResponseDraft` (`CreatePetResponseDraft`), and gives
@@ -94,50 +106,66 @@ export function stemsInContest(stems: Iterable<string>): Set<string> {
  *
  * What an operation gives up takes the name numbered (`numberedName`:
  * `CreatePetResponseDraftResponse2`, `…3`), the first number under which it
- * is no name in play — `taken`, every name decided before the operations
- * (the component models and enums, the models and enums their fields mint,
- * the component responses' bodies), every name the bodies of `bodies` mint,
- * and every name already handed out here — so a field `draft_response2`, a
- * component or an enum of the numbered name moves it on to the next. The
- * names are taken in code-unit order and, when several operations give one
- * name up (`get` and `getResponse` beside `getResponseResponse`), the
- * shorter stem takes the lower number, so the outcome depends on the
- * document's stems and never on the order of its paths.
+ * is no name in play: every name the bodies of `bodies` mint, every name
+ * `taken` gives — the names decided before the operations (the component
+ * models and enums, the models and enums their fields mint, the component
+ * responses' bodies) and every name the operations pass mints with the
+ * given-up names set aside — and every name already handed out here. So a
+ * field `draft_response2`, a component or an enum of the numbered name, a
+ * response of an operation outside the contest named
+ * `CreatePetResponseDraftResponse2` from its `object` const, or a header or
+ * parameter model of that name, moves it on to the next, and none of those
+ * changes. `taken` is read once, and only when a name is given up: the
+ * caller reads the whole pass for it, which a document with no contested
+ * name never needs. The names are taken in code-unit order and, when
+ * several operations give one name up (`get` and `getResponse` beside
+ * `getResponseResponse`), the shorter stem takes the lower number, so the
+ * outcome depends on the document's stems and never on the order of its
+ * paths.
+ *
+ * Without `taken`, the reading is the one that learns those names: what an
+ * operation gives up is set aside under a name no site can mint
+ * (`setAsideName`), so every other site of the pass is named as it is when
+ * the given-up models hold no name of their own yet.
  */
 export function resolveContestedBodyNames(
   bodies: readonly OperationBodyNames[],
-  taken: Iterable<string>,
+  taken?: () => Iterable<string>,
 ): Map<string, BodyNameYields> {
-  /** One stem's claim on a name, and where in the name the stem stands. */
-  interface Claim {
-    stem: string;
-    at: number;
-  }
-  const claims = new Map<string, Claim[]>();
-  const inPlay = new Set(taken);
+  /** The stems that claim each name. */
+  const claims = new Map<string, Set<string>>();
   for (const { stem, models, enums } of bodies) {
-    for (const name of new Set([...models, ...enums])) {
-      inPlay.add(name);
-      const at = stem.length > 0 ? name.indexOf(stem) : -1;
-      if (at < 0) continue;
-      const claimants = claims.get(name) ?? [];
+    // An empty stem names nothing and contains nothing.
+    if (stem.length === 0) continue;
+    for (const name of [...models, ...enums]) {
       // One stem, one claim: two paths that read one Operation Object mint one model.
-      if (!claimants.some((claim) => claim.stem === stem)) claimants.push({ stem, at });
-      claims.set(name, claimants);
+      const claimants = claims.get(name) ?? new Set<string>();
+      claims.set(name, claimants.add(stem));
     }
   }
 
-  const byStem = new Map<string, Map<string, string>>();
+  /** Each contested name, in code-unit order, with the stems that give it up, the shorter stem first. */
+  const contested: Array<{ name: string; yielding: string[] }> = [];
   for (const name of [...claims.keys()].sort()) {
-    const claimants = claims.get(name)!;
+    const claimants = [...claims.get(name)!];
     if (claimants.length < 2) continue;
     const yielding = claimants
-      .filter(({ stem }) => claimants.some((other) => other.stem !== stem && other.stem.includes(stem)))
-      // The shorter stem first; two of one length by where the stem stands, then by code unit.
-      .sort((a, b) => a.stem.length - b.stem.length || a.at - b.at || (a.stem < b.stem ? -1 : 1));
-    for (const { stem } of yielding) {
-      let renamed = numberedName(name, 2);
-      for (let n = 3; inPlay.has(renamed); n++) renamed = numberedName(name, n);
+      .filter((stem) => claimants.some((other) => other !== stem && other.includes(stem)))
+      // The shorter stem first; two of one length by code unit.
+      .sort((a, b) => a.length - b.length || (a < b ? -1 : 1));
+    if (yielding.length > 0) contested.push({ name, yielding });
+  }
+  if (contested.length === 0) return new Map();
+
+  const inPlay = new Set(taken?.());
+  for (const { models, enums } of bodies) {
+    for (const name of [...models, ...enums]) inPlay.add(name);
+  }
+  const byStem = new Map<string, Map<string, string>>();
+  for (const { name, yielding } of contested) {
+    for (const stem of yielding) {
+      let renamed = taken ? numberedName(name, 2) : setAsideName(name, stem);
+      for (let n = 3; taken && inPlay.has(renamed); n++) renamed = numberedName(name, n);
       inPlay.add(renamed);
       const given = byStem.get(stem) ?? new Map<string, string>();
       given.set(name, renamed);
@@ -150,6 +178,18 @@ export function resolveContestedBodyNames(
     if (given) yields.set(key, given);
   }
   return yields;
+}
+
+/**
+ * The name a model or enum an operation gives up is set aside under while
+ * the names in play are read (`resolveContestedBodyNames` without `taken`):
+ * the name and the stem that gives it up around a `#`, which is no
+ * character of a model or enum name — every one is PascalCased from the
+ * document's words — so no site can mint it, no site steps for it, and two
+ * operations that give one name up are set aside apart.
+ */
+export function setAsideName(name: string, stem: string): string {
+  return `${name}#${stem}`;
 }
 
 /**
