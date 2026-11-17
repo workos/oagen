@@ -296,6 +296,27 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
 }
 
 /**
+ * Whether a `oneOf`/`anyOf` of string consts read inline as an enum
+ * (`inlineEnumSpelling`) admits `null`: by a `null` variant an `enum:`
+ * list beside the union does not forbid (`enumListAdmitsNull`), or by OAS
+ * 3.0 `nullable: true` standing for one (`unionFlaggedNullable`), which
+ * admits `null` whatever the list says, as it does on the same schema as a
+ * component (`isNullableEnumSchema`) and beside a `type` (`{ type:
+ * 'string', enum: ['a', 'b'], nullable: true }`). The one answer for the
+ * type builder, which wraps the enum by it (`buildTypeRef`), and for the
+ * pin walk, which says by it whether a discriminator pin written as such
+ * a union admits `null` (`writtenPin`), so a variant's field and the
+ * request-body fold built from its pin never disagree (#677: the walk
+ * counted `null` variants alone, so `kind: { oneOf: [{ const: 'cat' }, {
+ * const: 'lion' }], enum: ['cat'], nullable: true }` was a
+ * `nullable<enum>` field folded into a `kind` that admits no `null`).
+ */
+function constUnionAdmitsNull(schema: SchemaObject): boolean {
+  if (unionFlaggedNullable(schema)) return true;
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema) && enumListAdmitsNull(schema);
+}
+
+/**
  * Whether a component schema is an enum: it declares an `enum:` list, or it
  * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
  * schema (`constUnionEnumMembers`) with no `allOf` that types the schema
@@ -4063,8 +4084,10 @@ interface WrittenPin {
  *     (`inlineEnumSpelling`) pins its one member when the list leaves
  *     exactly one (`{ oneOf: [{ const: 'cat' }, { const: 'lion' }], enum:
  *     ['cat', null] }` is the enum of `cat`), and admits `null` by the
- *     union's rule — a `null` variant the list does not forbid
- *     (`enumListAdmitsNull`) — so a list naming `null` admits nothing
+ *     union's rule (`constUnionAdmitsNull`) — a `null` variant the list
+ *     does not forbid (`enumListAdmitsNull`), or OAS 3.0 `nullable: true`
+ *     standing for one, whatever the list says (#677) — so a list naming
+ *     `null` admits nothing
  *     without that variant (Greptile, #686 review: the list was read as an
  *     enum of its own, and the request-body fold rebuilt a nullable `kind`
  *     from a variant whose own field is the non-null enum). Any other
@@ -4092,8 +4115,7 @@ function writtenPin(schema: SchemaObject): WrittenPin | null {
       const members = spelling?.spelling === 'const-union' ? spelling.members : [];
       const [member] = members;
       if (members.length !== 1 || typeof member?.value !== 'string') return null;
-      const admitsNull = (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema) && enumListAdmitsNull(schema);
-      return { value: member.value, admitsNull };
+      return { value: member.value, admitsNull: constUnionAdmitsNull(schema) };
     }
   }
   if (schema.const !== undefined) {
@@ -6694,7 +6716,9 @@ export function pinnedDeclarationValue(
  * of consts admits `null` only with a `null` variant among them, as the
  * enum the two declare does (`{ oneOf: [{ const: 'email' }, { const:
  * 'sms' }], enum: ['email', null] }` is the non-null enum of `email`;
- * Greptile, #686 review). A `$ref` that names an enum component admits
+ * Greptile, #686 review) — or with OAS 3.0 `nullable: true` beside the
+ * union standing for that variant, which admits `null` whatever the list
+ * says (`constUnionAdmitsNull`; #677). A `$ref` that names an enum component admits
  * `null` exactly when the reference is typed `nullable` — the component's
  * own rule (`enumComponentPin`), which is not always the inline one: `kind:
  * { $ref: EmailKind }` with `EmailKind: { enum: ['email'], nullable: true
@@ -8318,8 +8342,7 @@ function buildTypeRef(
     // (`isNullableUnionSchema`; #677: the flag was read only beside a
     // `type`, which the unwrap above has consumed by now, and dropped here).
     const nonNullVariants = rawVariants.filter((v) => !isNullSchema(v));
-    const flaggedNull = unionFlaggedNullable(schema);
-    const hasNull = nonNullVariants.length < rawVariants.length || flaggedNull;
+    const hasNull = nonNullVariants.length < rawVariants.length || unionFlaggedNullable(schema);
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
     // schemas into a single enum. This turns patterns like
@@ -8352,10 +8375,9 @@ function buildTypeRef(
       );
       // An `enum:` list beside the union that leaves `null` out forbids it,
       // whatever the `type: 'null'` variant says (`enumListAdmitsNull`). The
-      // OAS 3.0 flag admits `null` whatever the list says, as it does on
-      // the same schema as a component (`isNullableEnumSchema`) and beside
-      // a `type` (`{ type: 'string', enum: ['a', 'b'], nullable: true }`).
-      return flaggedNull || (hasNull && enumListAdmitsNull(schema)) ? { kind: 'nullable', inner: enumRef } : enumRef;
+      // OAS 3.0 flag admits `null` whatever the list says — the one answer
+      // the pin walk reads too (`constUnionAdmitsNull`).
+      return constUnionAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
     if (hasNull && nonNullVariants.length === 1) {
