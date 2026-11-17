@@ -7,9 +7,10 @@ import {
   extractSchemas,
   extractInlineModelsFromSchemas,
   clearSchemaNameTransform,
+  rehearse,
   resolveSchemaName,
 } from './schemas.js';
-import { attachSharedRefs, extractOperations } from './operations.js';
+import { attachSharedRefs, extractOperations, type OperationExtractionResult } from './operations.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
 import { collectExistingEnumNames, collectExistingNames, extractWebhooks, type SharedMinting } from './webhooks.js';
 import { extractCallbacks } from './callbacks.js';
@@ -252,6 +253,65 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     components: componentNames,
   });
 
+  const receivedComponents = {
+    schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
+    parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
+    requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
+    responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
+    examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
+    pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
+    callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
+  };
+  /** What a reading of the operations hands the webhooks and the callbacks: the names they step past, and the callbacks the operations declare. */
+  type OperationsReading = Pick<OperationExtractionResult, 'services' | 'inlineModels' | 'declaredCallbacks'>;
+  /**
+   * The webhooks, read beside a reading of the operations: their models are
+   * named against every model and enum decided so far — components, the
+   * operations', and the components' own inline field models.
+   */
+  const readWebhooks = (operations: OperationsReading, mintings: SharedMinting[]) =>
+    extractWebhooks(
+      spec.webhooks,
+      receivedComponents,
+      collectExistingNames([...models, ...operations.inlineModels, ...fieldInlineModels], operations.services, enums),
+      collectExistingEnumNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels],
+        operations.services,
+        enums,
+      ),
+      // Text beside a `$ref` is read by the document's version, as for operations.
+      siblingDocsMode(version),
+      // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
+      spec.paths,
+      mintings,
+    );
+  /** The callbacks the operations and the webhooks declare, read after both and named against every name either holds. */
+  const readCallbacks = (
+    operations: OperationsReading,
+    received: ReturnType<typeof readWebhooks>,
+    mintings: SharedMinting[],
+  ) =>
+    extractCallbacks(
+      [...operations.declaredCallbacks, ...received.declaredCallbacks],
+      receivedComponents,
+      collectExistingNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels, ...received.inlineModels],
+        operations.services,
+        enums,
+        received.webhooks,
+      ),
+      collectExistingEnumNames(
+        [...models, ...operations.inlineModels, ...fieldInlineModels, ...received.inlineModels],
+        operations.services,
+        enums,
+        received.webhooks,
+      ),
+      siblingDocsMode(version),
+      spec.paths,
+      spec.webhooks,
+      mintings,
+    );
+
   const { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks } = extractOperations(
     spec.paths as Record<string, Record<string, unknown>> | undefined,
     options?.operationIdTransform,
@@ -276,6 +336,24 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
     // Or a `$ref` to a `webhooks` entry, as a webhook's may name a `paths` one.
     spec.webhooks,
+    // The webhooks and the callbacks are read after the operations and mint
+    // names too, so a name one operation gives up to another (#683) is
+    // numbered past the ones they mint beside the operations: read here
+    // silently, off the very readings below, into nothing that is kept.
+    {
+      mintedAfter: (operations) =>
+        rehearse(() => {
+          const mintings: SharedMinting[] = [];
+          const received = readWebhooks(operations, mintings);
+          const callbacks = readCallbacks(operations, received, mintings);
+          return collectExistingNames(
+            [...received.inlineModels, ...callbacks.inlineModels],
+            operations.services,
+            [],
+            received.webhooks,
+          );
+        }),
+    },
   );
 
   // Webhooks are read while the schema-name transform is still active, like
@@ -283,35 +361,12 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // Their models are named last, against every model and enum decided so far —
   // components, operations, and the components' own inline field models — so
   // a webhook never takes a name another pass has already minted.
-  const receivedComponents = {
-    schemas: spec.components?.schemas as Record<string, Record<string, unknown>> | undefined,
-    parameters: spec.components?.parameters as Record<string, Record<string, unknown>> | undefined,
-    requestBodies: spec.components?.requestBodies as Record<string, Record<string, unknown>> | undefined,
-    responses: spec.components?.responses as Record<string, Record<string, unknown>> | undefined,
-    examples: spec.components?.examples as Record<string, Record<string, unknown>> | undefined,
-    pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
-    callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
-  };
   // What each group of webhooks minted, for the callbacks below: a callback
   // reaching the operation object a webhook was minted from shares that
   // minting rather than minting a copy beside it (#631).
   const webhookMintings: SharedMinting[] = [];
-  const {
-    webhooks,
-    inlineModels: webhookInlineModels,
-    inlineModelBundles: webhookInlineModelBundles,
-    declaredCallbacks: webhookCallbacks,
-  } = extractWebhooks(
-    spec.webhooks,
-    receivedComponents,
-    collectExistingNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
-    collectExistingEnumNames([...models, ...inlineModels, ...fieldInlineModels], services, enums),
-    // Text beside a `$ref` is read by the document's version, as for operations.
-    siblingDocsMode(version),
-    // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
-    spec.paths,
-    webhookMintings,
-  );
+  const received = readWebhooks({ services, inlineModels, declaredCallbacks }, webhookMintings);
+  const { webhooks, inlineModels: webhookInlineModels, inlineModelBundles: webhookInlineModelBundles } = received;
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
   // The callbacks every operation and webhook declares are read last, into
@@ -323,24 +378,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // same way (`collectWebhookTypeRefs`, `collectOperationTypeRefs`). A
   // callback reading the operation object of one of `webhookMintings` under
   // its stem names nothing: it references the webhook's models (#631).
-  const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = extractCallbacks(
-    [...declaredCallbacks, ...webhookCallbacks],
-    receivedComponents,
-    collectExistingNames(
-      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
-      services,
-      enums,
-      webhooks,
-    ),
-    collectExistingEnumNames(
-      [...models, ...inlineModels, ...fieldInlineModels, ...webhookInlineModels],
-      services,
-      enums,
-      webhooks,
-    ),
-    siblingDocsMode(version),
-    spec.paths,
-    spec.webhooks,
+  const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = readCallbacks(
+    { services, inlineModels, declaredCallbacks },
+    received,
     webhookMintings,
   );
   webhookInlineModels.push(...callbackInlineModels);

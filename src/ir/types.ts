@@ -1478,9 +1478,10 @@ export interface Model {
    * base's or within it (a pinned value or an enum under an enum that
    * lists its values or under their primitive, `integer` under `number`,
    * a non-nullable type under a nullable one, a union when every variant
-   * fits and a type under a union when it fits one variant, an array or
-   * a map by its element, a model under a model it carries every field
-   * of, anything under an untyped schema); its limits at least as tight
+   * fits and a type under a union when it fits one variant, a map by
+   * its values, an array of the same items, a model under a model it
+   * carries every field of, anything under an untyped schema); its
+   * limits at least as tight
    * — its text, flags, default, examples and extensions being its own to
    * override, and whatever the IR cannot tell (a `format` under none,
    * an enum's values under a `pattern` it does not repeat) being no fit.
@@ -1499,7 +1500,13 @@ export interface Model {
    * drops that base. A field carries `inheritedFrom` only while its base
    * stays. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
-   * base like any other model. Present exactly when at least one base is
+   * base like any other model, and one of its variants to an emitter
+   * that writes the union: it stays only while every field a variant
+   * declares that the model carries too is on the model the same way
+   * (the same field, or a declaration of the model's own that fits it),
+   * so `properties: { kind: { type: 'string' } }` over variants that pin
+   * `kind` drops it; a named union with no variant is no base. Present
+   * exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
    * included); never on a model built from an inline `allOf` — a request
    * or response body, a field — nor on a dispatcher's variant models.
