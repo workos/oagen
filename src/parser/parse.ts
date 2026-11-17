@@ -554,9 +554,12 @@ interface SecuritySchemeObject {
  *
  * What is left has no representation and is omitted with an `Unsupported
  * security scheme "<key>" (<what is wrong>) omitted from spec.auth` warning
- * rather than silently: an entry that is no object (`not an object`); a
- * `type` that is not one of the specification's five, compared as written
- * (`type: saml`, `type: OpenIdConnect`, `type: undefined`); and a
+ * rather than silently: an entry that is no object — `null`, a string, a
+ * number, a boolean, an array — named as JSON (`not a Security Scheme
+ * Object: null`, `: "bearer"`, `: 5`, `: true`, `: []`), where reading it
+ * as an object used to fail the parse with a `TypeError`; a `type` that is
+ * not one of the specification's five, compared as written (`type: saml`,
+ * `type: OpenIdConnect`, `type: undefined`); and a
  * definition without the field its type is read by — an `http` scheme with
  * no `scheme` (`type: http, no scheme`) or one that is not an RFC 9110
  * token (`type: http, scheme: "my scheme" is not a token`;
@@ -579,9 +582,12 @@ interface SecuritySchemeObject {
  * target's under 3.1 and is ignored under 3.0 (`siblingDocs`). A ref the map
  * does not answer — a pointer into another section, or a `$ref` that is not
  * a string — is omitted with the same warning an unsupported scheme gets,
- * naming the ref and how the walk ended; one that names no component at
- * all, or a cycle of refs, fails the bundle before parsing, as any dangling
- * ref does.
+ * naming the ref and how the walk ended; one that ends on an entry the map
+ * holds but that is no object (`sharedKey: null`) names what it found
+ * (`$ref #/components/securitySchemes/sharedKey is not a Security Scheme
+ * Object: null`), beside that entry's own warning; one that names no
+ * component at all, or a cycle of refs, fails the bundle before parsing, as
+ * any dangling ref does.
  */
 function extractAuthSchemes(
   securitySchemes: Record<string, SecuritySchemeObject | ReferenceObject> | undefined,
@@ -597,15 +603,23 @@ function extractAuthSchemes(
     // of dropping it silently.
     const omit = (detail: string): void =>
       console.warn(`[oagen] Warning: Unsupported security scheme "${schemeName}" (${detail}) omitted from spec.auth`);
-    // `null`, a string, a number or an array declares no scheme, and is no
-    // Reference Object to follow either.
+    // `null`, a string, a number, a boolean or an array declares no scheme,
+    // and is no Reference Object to follow either: name the value, as JSON,
+    // instead of failing the parse on it.
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-      omit('not an object');
+      omit(`not a Security Scheme Object: ${JSON.stringify(entry)}`);
       continue;
     }
     const followed = followReference<SecuritySchemeObject>(entry, 'securitySchemes', components, siblingDocs);
     if (followed.outcome !== 'resolved') {
-      omit(`$ref ${followed.ref} ${followed.outcome}`);
+      // A chain that ends on an entry the map holds but that is no object
+      // (`found`) is that same malformed entry behind a pointer, not a
+      // missing one, and is reported as such.
+      omit(
+        followed.found !== undefined
+          ? `$ref ${followed.ref} is not a Security Scheme Object: ${JSON.stringify(followed.found.value)}`
+          : `$ref ${followed.ref} ${followed.outcome}`,
+      );
       continue;
     }
     const scheme = followed.value;
