@@ -484,6 +484,16 @@ const sites: Site[] = [
     reading: 'received',
     build: (s) => responses({ '4XX': 'oops', '4xx': body(s) }),
   },
+  ...[null, 7, []].map((skipped): Site => ({
+    label: `the \`4xx\` after a \`4XX\` that is \`${JSON.stringify(skipped)}\``,
+    reading: 'received',
+    build: (s) => responses({ '4XX': skipped, '4xx': body(s) }),
+  })),
+  {
+    label: 'the `2XX` after a `2xx` that is no object',
+    reading: 'received',
+    build: (s) => responses({ '2xx': 'oops', '2XX': body(s) }),
+  },
   {
     label: 'a header of the `4xx` after a `4XX` that is no object',
     reading: 'received',
@@ -745,6 +755,50 @@ const sites: Site[] = [
     build: (s) => parameter({ name: 'note', in: 'query', content: json(s) }),
   },
   {
+    label: 'the first of two `query` parameters, one with no name and one named `""`, which are two',
+    reading: 'sent',
+    build: (s) =>
+      get({
+        parameters: [
+          { in: 'query', schema: s },
+          { name: '', in: 'query', schema: str },
+        ],
+      }),
+  },
+  {
+    label: 'the first of two `query` parameters named `null` and `""`, which are two',
+    reading: 'sent',
+    build: (s) =>
+      get({
+        parameters: [
+          { name: null, in: 'query', schema: s },
+          { name: '', in: 'query', schema: str },
+        ],
+      }),
+  },
+  {
+    label: 'the second of two `query` parameters with no name, which replaces the first',
+    reading: 'sent',
+    build: (s) =>
+      get({
+        parameters: [
+          { in: 'query', schema: str },
+          { in: 'query', schema: s },
+        ],
+      }),
+  },
+  {
+    label: 'the first of two `query` parameters with no name, which the second replaces',
+    reading: 'unread',
+    build: (s) =>
+      get({
+        parameters: [
+          { in: 'query', schema: s },
+          { in: 'query', schema: str },
+        ],
+      }),
+  },
+  {
     label: 'a Path Item parameter beside an operation `parameters` that is no array',
     reading: 'sent',
     build: (s) => get({ parameters: 'oops' }, { parameters: [{ name: 'note', in: 'query', schema: s }] }),
@@ -902,6 +956,102 @@ const sites: Site[] = [
       post({ requestBody: multipart({ encoding: { 'x-part': { headers: { 'x-hdr': { content: json(s) } } } } }) }),
   },
 
+  // --- a map written as an array, which the readers read by its indexes ---------------
+  {
+    label: 'a response `content` written as an array',
+    reading: 'received',
+    build: (s) => get({ responses: { '200': { ...ok, content: [{ schema: s }] } } }),
+  },
+  {
+    label: 'a `404` `content` written as an array',
+    reading: 'received',
+    build: (s) => responses({ '404': { ...ok, content: [{ schema: s }] } }),
+  },
+  {
+    label: 'a request body `content` written as an array',
+    reading: 'sent',
+    build: (s) => post({ requestBody: { content: [{ schema: s }] } }),
+  },
+  {
+    label: "a webhook's request body `content` written as an array",
+    reading: 'received',
+    build: (s) => webhook({ requestBody: { content: [{ schema: s }] } }),
+  },
+  {
+    label: 'a response `headers` written as an array',
+    reading: 'received',
+    build: (s) => get({ responses: { '200': { ...body(str), headers: [{ schema: s }] } } }),
+  },
+  {
+    label: '`paths` written as an array',
+    reading: 'received',
+    build: (s) => ({ paths: [{ get: { operationId: 'getD', responses: { '200': body(s) } } }] }),
+  },
+  {
+    label: '`components/parameters` written as an array, an entry referenced by its index',
+    reading: 'sent',
+    build: (s) =>
+      withComponents(parameter({ $ref: '#/components/parameters/0' }), {
+        parameters: [{ name: 'note', in: 'query', schema: s }],
+      }),
+  },
+  {
+    label: '`components/responses` written as an array, an entry referenced by its index',
+    reading: 'received',
+    build: (s) => withComponents(responses({ '404': { $ref: '#/components/responses/0' } }), { responses: [body(s)] }),
+  },
+  {
+    label: '`components/requestBodies` written as an array, an entry referenced by its index',
+    reading: 'sent',
+    build: (s) =>
+      withComponents(post({ requestBody: { $ref: '#/components/requestBodies/0' } }), {
+        requestBodies: [{ content: json(s) }],
+      }),
+  },
+  {
+    label: '`components/headers` written as an array, an entry referenced by its index',
+    reading: 'received',
+    build: (s) =>
+      withComponents(okWith({ 'X-Note': { $ref: '#/components/headers/0' } }), { headers: [{ schema: s }] }),
+  },
+  {
+    label: '`components/pathItems` written as an array, an entry referenced by its index',
+    reading: 'received',
+    build: (s) => ({
+      paths: { '/d': { $ref: '#/components/pathItems/0' } },
+      components: { pathItems: [{ get: { operationId: 'getD', responses: { '200': body(s) } } }] },
+    }),
+  },
+  {
+    label: '`components/callbacks` written as an array, an entry referenced by its index',
+    reading: 'received',
+    build: (s) =>
+      withComponents(get({ callbacks: { onEvent: { $ref: '#/components/callbacks/0' } } }), {
+        callbacks: [{ '{$request.query.url}': { post: { ...received, requestBody: { content: json(s) } } } }],
+      }),
+  },
+  {
+    label: '`responses` written as an array, which the reader reads nothing from',
+    reading: 'unread',
+    build: (s) => ({ paths: { ...getPaths(), '/e': { get: { operationId: 'getE', responses: [body(s)] } } } }),
+  },
+  {
+    label: '`webhooks` written as an array, which the reader reads nothing from',
+    reading: 'unread',
+    build: (s) => ({ ...get(), webhooks: [{ post: { ...received, requestBody: { content: json(s) } } }] }),
+  },
+  {
+    label: 'a `callbacks` map written as an array, which the reader reads nothing from',
+    reading: 'unread',
+    build: (s) =>
+      get({ callbacks: [{ '{$request.query.url}': { post: { ...received, requestBody: { content: json(s) } } } }] }),
+  },
+  {
+    label: 'a parameter `content` written as an array, none of whose keys is a media type that is read',
+    reading: 'unread',
+    build: (s) => parameter({ name: 'note', in: 'query', content: [{ schema: s }] }),
+  },
+
   // --- the other methods, and keys that are none -------------------------------------
   ...['put', 'post', 'patch', 'delete', 'head', 'options', 'trace'].map((method): Site => ({
     label: `a \`${method}\` operation's \`200\` body`,
@@ -962,6 +1112,17 @@ const sites: Site[] = [
     label: "a webhook's Path Item parameter",
     reading: 'received',
     build: (s) => webhook({}, { parameters: [{ name: 'note', in: 'query', schema: s }] }),
+  },
+  {
+    label: 'a webhook\'s first of two `query` parameters, one with no name and one named `""`',
+    reading: 'received',
+    build: (s) =>
+      webhook({
+        parameters: [
+          { in: 'query', schema: s },
+          { name: '', in: 'query', schema: str },
+        ],
+      }),
   },
   {
     label: "a webhook's `Idempotency-Key` header parameter, which is typed there",
@@ -1796,6 +1957,142 @@ describe('#670 a union at a site the parser ignores contests no title', () => {
       expect(
         marks((s) => ({ paths: {}, components: { parameters: { Note: { name: 'n', in: 'query', schema: s } } } })),
       ).toBe(false);
+    });
+  });
+
+  describe('the documents a review of the walk found, where it and a reader had parted', () => {
+    const minted = (): string[] => vi.mocked(console.warn).mock.calls.map((call) => call.map(String).join(' '));
+    const fieldsOf = (spec: ApiSpec, model: string): string[] | undefined =>
+      spec.models.find(({ name }) => name === model)?.fields.map(({ name }) => name);
+
+    describe.each(['3.1.0', '3.0.3'])('OAS %s', (openapi) => {
+      it('a `Hints` nothing returns, giving `Circle` two shapes, leaves the body of a returned `Card` its name', async () => {
+        // The name reservation reads `Hints` whether or not it is returned. Read with no title contested it
+        // reserved a bare `Circle`, a name the body never mints, and `Card`, which holds a `Circle`, stepped to
+        // `CardResponse2`: editing `Hints` alone was a breaking change to `getPet`.
+        const twoShapes: SchemaObject = {
+          type: 'object',
+          properties: {
+            shape: { oneOf: [shape('Circle', 'radius'), shape('Oval', 'width')] },
+            marker: {
+              type: 'object',
+              properties: { shape: { oneOf: [shape('Circle', 'diameter'), shape('Blob', 'area')] } },
+            },
+          },
+        };
+        const hintsRef = { $ref: '#/components/responses/Hints' };
+        const doc = (hints: SchemaObject, more: Doc = {}): Doc => ({
+          openapi,
+          info: { title: 'repro', version: '1' },
+          paths: {
+            '/pets/{petId}': {
+              get: {
+                operationId: 'getPet',
+                parameters: [petIdParam],
+                responses: { '200': body(str), '404': { $ref: '#/components/responses/Card' }, ...more },
+              },
+            },
+          },
+          components: {
+            responses: {
+              Hints: { description: 'hints', content: json(hints) },
+              Card: {
+                description: 'card',
+                content: json({
+                  type: 'object',
+                  properties: { outline: { oneOf: [shape('Circle', 'radius'), shape('Square', 'side')] } },
+                }),
+              },
+            },
+          },
+        });
+        const { spec: plain } = await parse(doc(str));
+        const { spec: union } = await parse(doc(twoShapes));
+        const { spec: hinted } = await parse(doc(twoShapes, { '103': hintsRef }));
+        const { spec: returned } = await parse(doc(twoShapes, { '500': hintsRef }));
+        expect(names(union)).toEqual(['CardResponse', 'Circle', 'Square']);
+        expect(union.services[0]!.operations[0]!.errors.map(({ statusCode, type }) => [statusCode, type])).toEqual([
+          [404, { kind: 'model', name: 'CardResponse' }],
+        ]);
+        expect(diffSpecs(plain, union).changes).toEqual([]);
+        expect(names(hinted)).toEqual(names(union));
+        expect(diffSpecs(union, hinted).changes).toEqual([]);
+        // Returned, `Hints` mints the names it had reserved, and `Card` keeps its own.
+        expect(names(returned)).toEqual([
+          'CardResponse',
+          'Circle',
+          'Square',
+          'HintResponse',
+          'CircleHintResponseShape',
+          'Oval',
+          'HintResponseMarker',
+          'CircleHintResponseMarkerShape',
+          'Blob',
+        ]);
+        expect(minted()).toEqual([]);
+      });
+
+      it('the `4xx` after `4XX: "oops"` is the range\'s entry, and its two `Circle`s are told apart', async () => {
+        // The reader skips an entry that is no object before it counts as its range's first (#617), so it types
+        // the `4xx`. The walk had counted the skipped `4XX`, left the `4xx` out, and the body was typed with no
+        // title contested: `marker.shape` resolved to the `radius` `Circle`, under a "minted twice" warning.
+        const { spec } = await parse(
+          complete(openapi, responses({ '4XX': 'oops', '4xx': body(contesting(shapes('radius'))) })),
+        );
+        expect(names(spec)).toEqual([
+          'GetDError4Xx',
+          'CircleGetDError4XxShape',
+          'Square',
+          'GetDError4XxMarker',
+          'CircleGetDError4XxMarkerShape',
+        ]);
+        expect(fieldsOf(spec, 'CircleGetDError4XxShape')).toEqual(['kind', 'radius']);
+        expect(fieldsOf(spec, 'CircleGetDError4XxMarkerShape')).toEqual(['kind', 'diameter']);
+        expect(minted().filter((warning) => warning.includes('minted twice'))).toEqual([]);
+        expect(minted().filter((warning) => warning.includes('is not a Response Object'))).toHaveLength(1);
+      });
+
+      it('two parameters without a string name are two, as the readers key them', async () => {
+        // `{ in: 'query' }` and `{ name: '', in: 'query' }` are `query:undefined` and `query:` to the readers
+        // (`parameterKey`). The walk had keyed both `''`, so the second replaced the first and its schema was
+        // typed with no title contested.
+        const { spec } = await parse(
+          complete(
+            openapi,
+            get({
+              parameters: [
+                { in: 'query', schema: contesting(shapes('radius')) },
+                { name: '', in: 'query', schema: str },
+              ],
+            }),
+          ),
+        );
+        expect(names(spec)).toEqual([
+          'DUndefined',
+          'CircleDUndefinedShape',
+          'Square',
+          'DUndefinedMarker',
+          'CircleDUndefinedMarkerShape',
+        ]);
+        expect(fieldsOf(spec, 'CircleDUndefinedMarkerShape')).toEqual(['kind', 'diameter']);
+        expect(minted().filter((warning) => warning.includes('minted twice'))).toEqual([]);
+      });
+
+      it('a `content` map written as an array is read by its indexes, and its two `Circle`s are told apart', async () => {
+        // `content: [{ schema }]` is the media type `0` to the reader (`Object.entries`); the walk asked for an
+        // object that is no array and left it out, on `main` too.
+        const { spec } = await parse(
+          complete(
+            openapi,
+            get({ responses: { '200': { ...ok, content: [{ schema: contesting(shapes('radius')) }] } } }),
+          ),
+        );
+        expect(names(spec)).toEqual(
+          expect.arrayContaining(['CircleGetDResponseShape', 'CircleGetDResponseMarkerShape']),
+        );
+        expect(names(spec)).not.toContain('Circle');
+        expect(minted().filter((warning) => warning.includes('minted twice'))).toEqual([]);
+      });
     });
   });
 

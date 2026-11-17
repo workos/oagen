@@ -1072,8 +1072,9 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * and callback readers do (`readSchemaSites`, which the sent/received walk
  * goes through too), so what is never read contests no title (#670): a
  * `103` response, a response key OpenAPI does not define (`600`) or the
- * later of two range keys that differ in case, a `Content-Type` response
- * header or one a later declaration shadows by case, an `Accept`,
+ * later of two range keys that differ in case once the reader has kept the
+ * first, a `Content-Type` response header or one a later declaration
+ * shadows by case, an `Accept`,
  * `Content-Type` or `Authorization` header parameter, an operation's
  * `Idempotency-Key` header, a parameter in no location the readers type
  * (`in: body`), a webhook's or a callback's `path` parameter and its
@@ -1096,10 +1097,15 @@ export function isContestedTitle(variant: SchemaObject): boolean {
  * it, and nothing written beside the `$ref` is read, so a union under a
  * `content` or `headers` there is under no root and contests nothing,
  * whether the ref resolves or not (#601). Decided from the document's content
- * alone, so declaration order and depth play no part, and once per
- * document, before any union is named (`extractSchemas`), so the union
- * TypeRef and every extractor read the same decision. `undefined` clears
- * the previous document's marks.
+ * alone and once per document, before any union is named
+ * (`extractSchemas`), so the union TypeRef and every extractor read the same
+ * decision. Within a root, declaration order and depth play no part. Which
+ * declaration is a root follows the readers, so it follows the order of two
+ * keys exactly where their reading does: of two range keys that differ in
+ * case the first the reader keeps is read (`4XX` before `4xx`), and of two
+ * header keys that differ in case the later (`x-note` after `X-Note`), so
+ * swapping the two swaps which one's unions are compared. `undefined`
+ * clears the previous document's marks.
  *
  * Each root is read with visited sets of its own, so a schema object two
  * roots share — one a `transformSpec` assigned in both places, a bundled
@@ -1175,8 +1181,10 @@ function schemaRootsOf(
 ): SchemaObject[] {
   const roots = new Set<SchemaObject>();
   readSchemaSites(document, (schema) => roots.add(schema));
+  // Read by its keys whatever it is, as the reservation reads it
+  // (`Object.keys`): an entry of a map written as an array is `0`.
   const responses = components?.['responses'];
-  if (document['paths'] && isRecord(responses)) {
+  if (document['paths'] && typeof responses === 'object' && responses !== null) {
     for (const name of Object.keys(responses)) {
       const body = componentResponseBodySchema(name, responses as Record<string, Record<string, unknown>>);
       if (isSchemaRecord(body)) roots.add(body);

@@ -17,7 +17,12 @@ import {
   schemaRefTokens,
   type DerivedMappingSource,
 } from './schema-refs.js';
-import { pointerTypesAsArray, pointerTypesAsModel, pointerTypesAsUnknown } from './schema-pointers.js';
+import {
+  pointerModelIdentity,
+  pointerTypesAsArray,
+  pointerTypesAsModel,
+  pointerTypesAsUnknown,
+} from './schema-pointers.js';
 import {
   enumShapeKey,
   enumValuesOf,
@@ -5514,46 +5519,73 @@ export function isArrayPointerRef(
 }
 
 /**
- * Whether `schemaToTypeRef` types `schema` as a reference to a model, bare
- * or under a nullable wrapper — decided from the document without typing
- * it, for the reader that must know before any model is built whether a
- * pointer names one (`pointerTypesAsModel`; #682). Read as the type builder
- * reads the schema: every nullable wrapper stripped and sibling
- * `properties` folded in (`unwrapNullableSchema`), then the one keyword
- * that types it (`classifyInlineSchema`) — a `$ref` to a component that
- * builds a model, which every component does but an enum, an array or a
- * primitive component and an alias of one (`isEnumComponentEntry`,
- * `isArrayComponentEntry`, `isPrimitiveComponentEntry`, the test
- * `wrappedVariantReference` makes of a wrapped reference); a `$ref` deeper
- * into a component that settles to a model in turn; an inline object; an
- * `allOf` merged into a model, or read as a member that is one of these
- * (`allOfReadAsMember`). False for everything else: a `$ref` no component
- * answers, a type list naming several types, which is a union of its
- * per-type copies even when one of them is an object, a `oneOf`/`anyOf`,
- * an array, a map, an enum, a `const` and a primitive.
+ * What `modelReferenceIdentity` answers for a schema typed as the model
+ * minted for it where it stands — an inline object, or an `allOf` merged
+ * into one — which is named from the site and so is one model however
+ * many times the same site is read.
  */
-export function typesAsModelReference(
+export const OWN_MODEL = 'own';
+
+/**
+ * Which model `schemaToTypeRef` types `schema` as a reference to, bare or
+ * under a nullable wrapper, or `undefined` when it types it as anything
+ * else — decided from the document without typing it, for the reader that
+ * must know before any model is built whether a pointer names one
+ * (`pointerTypesAsModel`; #682). The answer says no more than which
+ * references are one model: `component:<name>` for a `$ref` to a component
+ * that builds a model, `OWN_MODEL` for the model minted for the schema
+ * where it stands, and what a `$ref` deeper into a component settles to
+ * (`pointerModelIdentity`). Read as the type builder reads the schema:
+ * every nullable wrapper stripped and sibling `properties` folded in
+ * (`unwrapNullableSchema`), then the one keyword that types it
+ * (`classifyInlineSchema`) — a `$ref` to a component, which builds a model
+ * unless it is an enum, an array or a primitive component or an alias of
+ * one (`isEnumComponentEntry`, `isArrayComponentEntry`,
+ * `isPrimitiveComponentEntry`, the test `wrappedVariantReference` makes of
+ * a wrapped reference); a `$ref` deeper into a component that settles to a
+ * model in turn; an inline object; an `allOf` merged into a model, or read
+ * as a member that is one of these (`allOfReadAsMember`). A type list
+ * naming several types is the union of its per-type copies, never one
+ * type twice (`typeListCopies`, `dedupeTypeRefs`), so it is a model
+ * exactly when every copy is typed as the same one: `{ type: ['object',
+ * 'string'], allOf: [{ $ref: Dog }] }` with `Dog` declaring `type:
+ * 'object'` leaves the one copy the `allOf` admits and is `Dog`, and `{
+ * type: ['string', 'integer'], allOf: [{ $ref: Dog }] }`, no entry of
+ * which survives, is read as written and holds `Dog` once (Greptile, #682
+ * review: every such list was refused, so a component dispatching to a
+ * pointer at one was flattened while the union of the same variants was
+ * mapped) — while `{ type: ['object', 'string'], properties }` is `Model |
+ * string`, no model. `undefined` for everything else: a `$ref` no
+ * component answers, a `oneOf`/`anyOf`, an array, a map, an enum, a
+ * `const` and a primitive.
+ */
+export function modelReferenceIdentity(
   schema: SchemaObject | undefined,
   schemas: Record<string, SchemaObject> | undefined,
-): boolean {
-  if (!schema || !schemas) return false;
+): string | undefined {
+  if (!schema || !schemas) return undefined;
   const bare = unwrapNullableSchema(schema);
   if (bare.$ref) {
-    if (componentKeyOf(bare.$ref) === undefined) return pointerTypesAsModel(String(bare.$ref), schemas);
+    const key = componentKeyOf(bare.$ref);
+    if (key === undefined) return pointerModelIdentity(String(bare.$ref), schemas);
     const target = componentSchemaOf(String(bare.$ref), schemas);
-    return (
-      target !== undefined &&
-      !isEnumComponentEntry(target, schemas) &&
-      !isArrayComponentEntry(target, schemas) &&
-      !isPrimitiveComponentEntry(target, schemas)
-    );
+    const modelless =
+      target === undefined ||
+      isEnumComponentEntry(target, schemas) ||
+      isArrayComponentEntry(target, schemas) ||
+      isPrimitiveComponentEntry(target, schemas);
+    return modelless ? undefined : `component:${resolveSchemaName(key)}`;
   }
-  if (namesSeveralTypes(bare)) return false;
+  if (namesSeveralTypes(bare)) {
+    const identities = new Set(typeListCopies(bare).map((copy) => modelReferenceIdentity(copy, schemas)));
+    const [identity] = identities;
+    return identities.size === 1 ? identity : undefined;
+  }
   const kind = classifyInlineSchema(bare);
-  if (kind === 'object') return true;
-  if (kind !== 'allOf') return false;
+  if (kind === 'object') return OWN_MODEL;
+  if (kind !== 'allOf') return undefined;
   const member = allOfReadAsMember(bare);
-  return member === undefined || typesAsModelReference(member, schemas);
+  return member === undefined ? OWN_MODEL : modelReferenceIdentity(member, schemas);
 }
 
 /**
@@ -5692,11 +5724,10 @@ function namedUnionDiscriminator(
  * The `mapping:` a union's `discriminator` keyword writes, when it writes an
  * entry; `undefined` with no keyword, no `mapping:` or an empty one
  * (`mapping: {}`), each of which leaves the mapping to be derived from the
- * variants (`unionConstMapping`). The one test of "the document wrote a
- * mapping" for the sites that decide how an entry written as a pointer is
- * deferred: an explicit one as written (`deferPointerMappingEntries`), a
- * derived one for the pointer variant it stands for
- * (`deferDerivedPointerEntries`).
+ * variants (`unionConstMapping`). What a named union and an inline one
+ * ask before they defer an entry written as a pointer: an explicit one as
+ * written (`deferPointerMappingEntries`), a derived one for the pointer
+ * variant it stands for (`deferDerivedPointerEntries`).
  */
 function writtenMappingOf(schema: SchemaObject): Record<string, string> | undefined {
   const mapping = schema.discriminator?.mapping;
