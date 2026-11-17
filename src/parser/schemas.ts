@@ -7616,24 +7616,45 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
   }
 }
 
+/** What a member of an `allOf` is read as on a primitive copy of a type list (`allOfMemberReadAs`). */
+interface AllOfMemberReading {
+  /** What the member says about an instance of the copy's type alone, in document order; the member itself where it is kept as written. */
+  parts: SchemaObject[];
+  /** Whether the reading left off something the member says about an instance of another type: a keyword of another family, a union no variant of which applies, a `$ref` read through or left off. */
+  shed: boolean;
+}
+
 /**
  * What `member` of an `allOf` says about an instance of the primitive
- * `type` alone, in document order — the parts a primitive copy of a type
- * list keeps of it (`typeListCopy`; #674), read at any depth, since
- * `allOf: [{ allOf: [A, B] }]` says what `allOf: [A, B]` says:
+ * `type` alone — the parts a primitive copy of a type list keeps of it
+ * (`typeListCopy`; #674), read at any depth, since `allOf: [{ allOf: [A,
+ * B] }]` says what `allOf: [A, B]` says:
  *
- *   - An inline member is opened into its own keywords and the readings of
- *     its `allOf` members, its own first, whatever is written beside the
- *     `allOf`: JSON Schema applies `{ minLength: 1, allOf: [A, B] }` as it
- *     applies `allOf: [{ minLength: 1 }, A, B]`. Its own keywords are one
- *     part, read as the copy's own are — those of another type's family
- *     shed (`TYPE_FAMILY_KEYWORDS`), so `{ properties: { name },
- *     minLength: 1 }` is `{ minLength: 1 }` — and kept when what is left
- *     says something about an instance of `type` (`appliesToType`: a type
- *     admitting it, a `const` or `enum`, a keyword of its family, a
- *     `oneOf`/`anyOf` a variant of which does, kept whole as the copy's
- *     own is). A member with no `allOf` and no keyword to shed is kept as
- *     written, the object the document holds.
+ *   - An inline member's own keywords are read as the copy's own are:
+ *     those of another type's family are shed (`TYPE_FAMILY_KEYWORDS`),
+ *     so `{ properties: { name }, minLength: 1 }` is `{ minLength: 1 }`,
+ *     and so is a `oneOf`/`anyOf` no variant of which says anything about
+ *     `type`; one a variant of which does is kept whole, as the copy's own
+ *     is. Its `allOf` members are read in turn.
+ *   - A member that declares no type, in its own keywords or in what its
+ *     members are read as (`declaresType`: no `type`, `const`, `enum`,
+ *     union or `$ref`), only limits or annotates: it is opened into its
+ *     parts — its own keywords when they say something about `type`
+ *     (`appliesToType`), then its members' — whatever is written beside
+ *     its `allOf`, as JSON Schema applies `{ minLength: 1, allOf: [A, B] }`
+ *     as it applies `allOf: [{ minLength: 1 }, A, B]`. Left a wrapper it
+ *     would count as a typing member that types nothing, and the copy
+ *     would be `unknown`.
+ *   - A member that declares a type and sheds nothing is kept as written,
+ *     the object the document holds, so the readers read it as they read
+ *     it anywhere (`readInlineAllOf`): `{ type: 'string', allOf: [{ enum:
+ *     ['a', 'b'] }] }` is that enum (Greptile, #674 review: opened into `{
+ *     type: 'string' }` beside `{ enum }` it was two typing members, which
+ *     the readers read as neither, and the values were lost). One that
+ *     sheds something is opened the same way when it writes nothing beside
+ *     its `allOf`, and otherwise stays the wrapper of its members'
+ *     readings: `{ type: 'string', allOf: [{ $ref: Owner }, { enum: ['a',
+ *     'b'] }] }` is `{ type: 'string', allOf: [{ enum: ['a', 'b'] }] }`.
  *   - A `$ref` member is the reference while its component is a schema of
  *     a type of its own (`namesItsOwnType`): one that declares a type, an
  *     enum component, or a union. It is kept when the component says
@@ -7643,9 +7664,9 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  *     minLength: 1 }`, `Limits: { minLength: 1 }` — is read as its schema
  *     written in the member's place, so the copy keeps `{ minLength: 1 }`
  *     of each and nothing of `Owner`: the reference would type the copy as
- *     the model the component is, or as `unknown`. A union such a
- *     component composes (`holdsUnion`: `Comp: { allOf: [{ $ref: Owner },
- *     { oneOf: [{ properties: { a } }, { minLength: 1 }] }] }`) is left
+ *     the model the component is, or as `unknown`. A `oneOf`/`anyOf` such
+ *     a component composes (`ofComponent`: `Comp: { allOf: [{ $ref: Owner
+ *     }, { oneOf: [{ properties: { a } }, { minLength: 1 }] }] }`) is left
  *     off with the rest: read in the member's place it would name its
  *     inline variants from this site, models only the component builds,
  *     so `Comp` beside `['object', 'string']` is `Comp | string`. A
@@ -7658,19 +7679,25 @@ function appliesToType(schema: SchemaObject, type: string, seen: Set<SchemaObjec
  * A member the walk is already reading — `Loop: { allOf: [{ $ref: Loop },
  * { minLength: 1 }] }` — adds nothing to itself.
  */
-function allOfMemberReadAs(member: SchemaObject, type: string, seen: Set<SchemaObject> = new Set()): SchemaObject[] {
-  if (seen.has(member)) return [];
+function allOfMemberReadAs(
+  member: SchemaObject,
+  type: string,
+  seen: Set<SchemaObject> = new Set(),
+  ofComponent = false,
+): AllOfMemberReading {
+  if (seen.has(member)) return { parts: [], shed: false };
   seen.add(member);
   try {
     if (member.$ref !== undefined) {
       const target = componentSchemaOf(member.$ref);
-      if (target === undefined || namesItsOwnType(target)) return appliesToType(member, type) ? [member] : [];
-      // A union the component composes stays the component's: read in the
-      // member's place it would name its inline variants from this site,
-      // models only the component builds.
-      return allOfMemberReadAs(target, type, seen).filter((part) => !holdsUnion(part));
+      if (target !== undefined && !namesItsOwnType(target)) {
+        return { parts: allOfMemberReadAs(target, type, seen, true).parts, shed: true };
+      }
     }
-    if (namesSeveralTypes(member)) return appliesToType(member, type) ? [member] : [];
+    if (member.$ref !== undefined || namesSeveralTypes(member)) {
+      const applies = appliesToType(member, type);
+      return { parts: applies ? [member] : [], shed: !applies };
+    }
     const { allOf, ...own } = member;
     const family = TYPE_FAMILY_KEYWORDS[type] ?? [];
     let shed = false;
@@ -7681,18 +7708,27 @@ function allOfMemberReadAs(member: SchemaObject, type: string, seen: Set<SchemaO
         shed = true;
       }
     }
-    const parts: SchemaObject[] = [];
-    if (appliesToType(own, type)) parts.push(allOf === undefined && !shed ? member : derivedCopy(own, member));
-    for (const sub of allOf ?? []) parts.push(...allOfMemberReadAs(sub, type, seen));
-    return parts;
+    const variants = [...(own.oneOf ?? []), ...(own.anyOf ?? [])];
+    const writesUnion = own.oneOf !== undefined || own.anyOf !== undefined;
+    if (writesUnion && (ofComponent || !variants.some((variant) => appliesToType(variant, type)))) {
+      delete own.oneOf;
+      delete own.anyOf;
+      delete own.discriminator;
+      shed = true;
+    }
+    const says = appliesToType(own, type);
+    const ownPart = (): SchemaObject => (allOf === undefined && !shed ? member : derivedCopy(own, member));
+    const readings = (allOf ?? []).map((sub) => allOfMemberReadAs(sub, type, seen, ofComponent));
+    const subs = readings.flatMap((reading) => reading.parts);
+    const shedAny = shed || readings.some((reading) => reading.shed);
+    const types = (says && declaresType(own)) || subs.some(declaresType);
+    if (!types) return { parts: says ? [ownPart(), ...subs] : subs, shed: shedAny };
+    if (!shedAny) return { parts: [member], shed: false };
+    if (Object.keys(own).length === 0) return { parts: subs, shed: true };
+    return { parts: [derivedCopy(subs.length > 0 ? { ...own, allOf: subs } : own, member)], shed: true };
   } finally {
     seen.delete(member);
   }
-}
-
-/** Whether a part read from a component for a primitive copy is a union written inline, a `oneOf`/`anyOf` kept whole, which the copy leaves to the component (`allOfMemberReadAs`). */
-function holdsUnion(part: SchemaObject): boolean {
-  return part.$ref === undefined && (part.oneOf ?? part.anyOf) !== undefined;
 }
 
 /**
@@ -7794,7 +7830,7 @@ function typeListCopy(
       // at any depth (`allOfMemberReadAs`): nothing of it reaches the
       // extractor, so nothing can disagree with what it builds. Members
       // all kept as written leave the `allOf` the schema's own.
-      const parts = members.flatMap((member) => allOfMemberReadAs(member, type));
+      const parts = members.flatMap((member) => allOfMemberReadAs(member, type).parts);
       if (parts.length === 0) delete copy.allOf;
       else if (parts.length !== members.length || parts.some((part, index) => part !== members[index])) {
         copy.allOf = parts;
