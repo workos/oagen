@@ -3893,8 +3893,10 @@ function constTypeRef(value: unknown): TypeRef | undefined {
  * either spelling:
  *   { properties: { event: { const: "x" } }, required: ["event"] }
  *   { properties: { event: { type: "string", enum: ["x"] } } }
- * read as the declaration pins it (`pinnedDeclarationValue`): as written,
- * or behind the wrappers the type builder reads the declaration through —
+ * read as the declaration pins it (`pinnedDeclarationValue`): as written
+ * — a `null` listed beside the one string set aside, so `{ enum: ["x",
+ * null] }` pins `x` as well (#678) — or behind the wrappers the type
+ * builder reads the declaration through —
  * `{ allOf: [{ const: "x" }] }`, a nullable wrapper, and, with `schemas`,
  * a `$ref` to a component pinning one value or to an alias of one (#607).
  * Null when it pins none there (`getEffectiveConstPropertyValue` reads
@@ -3917,17 +3919,41 @@ function getConstPropertyValue(
 }
 
 /**
- * The one string a schema pins as written — a string `const`, or an `enum:`
- * of exactly one string; null otherwise. The leaf `pinnedDeclarationValue`
+ * The one string a schema pins as written, its `const` read before its
+ * `enum:` list, the order the type builder reads the two in
+ * (`classifyInlineSchema`): a `const` when it writes one — a string pins,
+ * any other value pins nothing, and an `enum:` beside it is not read —
+ * else an `enum:` list holding exactly one value once every `null` entry
+ * is set aside (`nonNullEnumValues`), that value a string. A `null` entry
+ * marks the declaration nullable and is no value of its own, as the type
+ * builder reads the list — `enum: ['cat', null]` and `enum: [null, 'cat']`
+ * are the `nullable<"cat">` that `{ type: ['string', 'null'], const: 'cat'
+ * }` is — so both pin `cat` (#678: the list was read by its length, so the
+ * `null` entry made it two values, the declaration pinned nothing, and a
+ * union carried `{}` under the keyword and no discriminator without it
+ * while its variant's field was the nullable literal). Null otherwise:
+ * `enum: [null]` holds no value, `enum: ['cat', 'dog', null]` two. Whether
+ * the list names `null` is `pinListsNull`. The leaf `pinnedDeclarationValue`
  * reads once every wrapper is read through; no other site reads a
  * declaration as written.
  */
 function pinnedStringValue(schema: SchemaObject): string | null {
-  if (typeof schema.const === 'string') return schema.const;
-  if (Array.isArray(schema.enum) && schema.enum.length === 1 && typeof schema.enum[0] === 'string') {
-    return schema.enum[0];
-  }
-  return null;
+  if (schema.const !== undefined) return typeof schema.const === 'string' ? schema.const : null;
+  const values = Array.isArray(schema.enum) ? nonNullEnumValues(schema.enum) : [];
+  const [value] = values;
+  return values.length === 1 && typeof value === 'string' ? value : null;
+}
+
+/**
+ * Whether the `enum:` list a schema is pinned by (`pinnedStringValue`)
+ * names `null` beside its value, which is how the type builder reads the
+ * list as nullable with no type list or flag beside it (`{ enum: ['cat',
+ * null] }` is `nullable<"cat">`). False beside a `const`, which types the
+ * schema and leaves the list unread: `{ const: 'cat', enum: ['cat', null]
+ * }` is the plain literal.
+ */
+function pinListsNull(schema: SchemaObject): boolean {
+  return schema.const === undefined && Array.isArray(schema.enum) && schema.enum.includes(null);
 }
 
 function resolveVariantModelName(schema: SchemaObject): string | null {
@@ -6428,7 +6454,8 @@ function getEffectiveProperties(
  * through at every hop (`kind: { allOf: [{ const: 'cat' }] }`; #607), and
  * a chain that repeats pins nothing. Null when the property is undeclared
  * or pins no one string (an enum of several values, a plain `type:
- * string`).
+ * string`); a `null` an `enum:` list names beside its one string is not a
+ * second value (`pinnedStringValue`; #678).
  */
 function getEffectiveConstPropertyValue(
   schema: SchemaObject,
@@ -6452,8 +6479,14 @@ function getEffectiveConstPropertyValue(
  * variant (`unwrapNullableSchema`); an `allOf` read as one member
  * (`allOfReadAsMember`: a lone member, one typing member beside members
  * that only annotate or limit it, or a lone `$ref` member beside such
- * members) to that member — then the `const` or one-value `enum:` written
- * on what it lands on (`pinnedStringValue`). So `kind: { allOf: [{ const:
+ * members) to that member — then the string `const` written on what it
+ * lands on, or the one string its `enum:` list holds, a `null` listed
+ * beside it set aside (`pinnedStringValue`): the list names `null` to
+ * admit it, which the type builder reads as `nullable` around the same
+ * literal, so `kind: { type: ['string', 'null'], enum: ['cat', null] }` —
+ * OAS 3.0: `{ type: 'string', enum: ['cat', null], nullable: true }` —
+ * pins `cat` as `kind: { type: ['string', 'null'], const: 'cat' }` does
+ * (#678). So `kind: { allOf: [{ const:
  * 'cat' }] }`, `kind: { allOf: [{ $ref: HamsterKind }], description: 'The
  * kind of pet.' }` with `HamsterKind: { const: 'hamster' }`, and `kind: {
  * $ref: RabbitKind }` with `RabbitKind: { allOf: [{ $ref: RabbitConst }] }`
@@ -6495,7 +6528,15 @@ export function pinnedDeclarationValue(
  * type: 'null' }] }`, `kind: { type: ['string', 'null'], const: 'email' }`,
  * `kind: { type: 'string', enum: ['email'], nullable: true }` and a `$ref`
  * to a component written so admit `null` as the field built from them is
- * `nullable<literal>`. Read by the request-body fold
+ * `nullable<literal>` — or by the list the walk ends on naming `null`
+ * beside the value it pins (`pinListsNull`), the one spelling that needs
+ * no type list, flag or wrapper: `kind: { enum: ['email', null] }` and
+ * `kind: { type: 'string', enum: ['email', null] }` are `nullable<literal>`
+ * fields too (#678). Only the list on the last hop is read, the one the
+ * type builder reads: a list beside an `allOf`, a `$ref` or a nullable
+ * `oneOf`/`anyOf` wrapper the walk reads through types nothing, and a type
+ * list or `nullable: true` is stripped to a copy that keeps the list
+ * (`unwrapNullableSchema`). Read by the request-body fold
  * (`flattenDiscriminatedUnionBody`), so the discriminator it rebuilds from
  * the pinned values admits `null` exactly when a variant's does (#607
  * review: the fold dropped the admission). False for a chain that repeats.
@@ -6504,7 +6545,10 @@ export function pinnedDeclarationAdmitsNull(
   declaration: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): boolean {
-  return (pinnedDeclarationHops(declaration, schemas) ?? []).some((hop) => hop.$ref === undefined && declaresNull(hop));
+  const hops = pinnedDeclarationHops(declaration, schemas) ?? [];
+  return hops.some(
+    (hop, index) => hop.$ref === undefined && (declaresNull(hop) || (index === hops.length - 1 && pinListsNull(hop))),
+  );
 }
 
 /**

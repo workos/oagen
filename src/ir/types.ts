@@ -1206,11 +1206,15 @@ export interface UnionType {
    * `kind: { $ref: HamsterKind }` pins what `HamsterKind` does) — the
    * declaration read as the type builder reads it, at every hop: a `$ref`
    * to its component, a nullable wrapper to its one variant, an `allOf`
-   * read as one member to that member, then the `const` or one-value
-   * `enum:` written there, so `kind: { allOf: [{ const: 'cat' }] }`,
+   * read as one member to that member, then the string `const` written
+   * there, or the one string its `enum:` list holds beside any `null` it
+   * names, so `kind: { allOf: [{ const: 'cat' }] }`,
    * `kind: { allOf: [{ $ref: HamsterKind }], description }` and a `$ref`
    * to `RabbitKind: { allOf: [{ $ref: RabbitConst }] }` pin as `kind: {
-   * const: … }` does, in OAS 3.0 and 3.1 alike (#607) — a
+   * const: … }` does, in OAS 3.0 and 3.1 alike (#607), and `kind: { type:
+   * ['string', 'null'], enum: ['cat', null] }` pins `cat` as `kind: { type:
+   * ['string', 'null'], const: 'cat' }` does, the field `nullable<"cat">`
+   * in both (#678) — a
    * variant wrapping one model `$ref` through that reference, an inline
    * object variant by the model extracted for it, so `oneOf: [{ $ref: Cat },
    * { $ref: Dog }]` carries `{ cat: "Cat", dog: "Dog" }` on a field as it
