@@ -133,7 +133,7 @@ export function resolvePathItemRef(
  * `/pets/{petId}`. A pointer deeper into an entry names no Path Item, and
  * nor does an `x-` key under `paths`: a specification extension, which
  * `extractOperations` never reads as a path. Shared by `resolvePathItemRef`
- * and `sentOnlyComponentNames`, which follows a path item ahead of the
+ * and `readSchemaSites`, the walk that follows a path item ahead of the
  * readers.
  */
 export function pathItemRefTarget(
