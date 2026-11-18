@@ -19,6 +19,7 @@ import { shapeWithEnumFlags } from './enum-members.js';
 import {
   deprecatedFoldWarning,
   fieldAdmits,
+  foldLiveCopy,
   inheritedModelRefsOf,
   isInheritedModelRef,
   liftedFieldModelsOf,
@@ -27,7 +28,6 @@ import {
   modelShares,
   recordFieldModelRename,
   shapeFingerprint,
-  takeModelDocumentation,
   typeShapeKey,
   type FieldInlineModelGroup,
   type InlineModelBundle,
@@ -923,11 +923,9 @@ function settleRefusedCopies(
     // The model the cluster ends under is its first member's. Deprecated
     // beside a live member, it goes live and is documented as the first
     // live one is, in document order: the copy whose definition a name
-    // with no owner would keep (`preferredDefinition`).
-    if (kept?.deprecated && firstLive) {
-      delete kept.deprecated;
-      takeModelDocumentation(kept, firstLive);
-    }
+    // with no owner would keep (`preferredDefinition`): the fold one
+    // operation's success bodies get (`foldLiveCopy`).
+    if (kept && firstLive) foldLiveCopy(kept, firstLive);
   }
 }
 
