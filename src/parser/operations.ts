@@ -66,7 +66,7 @@ import {
   constraintsEntry,
   deferInlineUnionMappingEntries,
   deprecatedEntry,
-  enumComponentDeclaration,
+  referencedComponentLayer,
   collapsedNullableBranch,
   foldSiblingProperties,
   inlineEnumSpelling,
@@ -4277,12 +4277,19 @@ export function extractParams(
       // Object for the examples it may carry. Every read below goes through
       // `schema`, so a parameter declared either way is typed by one rule.
       const { schema, media, contentType, contentTypes } = parameterTyping(p);
-      // The one component a bare `$ref` names; an enum component on the
-      // schema it declares its members on (`enumComponentDeclaration`), so
-      // `Kind: { allOf: [{ type: 'string', enum }], description, deprecated
-      // }` is read as the plain spelling is.
+      // The one schema a bare `$ref` points at, read as the node built from
+      // it documents itself (`referencedComponentLayer`): an enum component
+      // on the schema it declares its members on, so `Kind: { allOf: [{
+      // type: 'string', enum }], description, deprecated }` is read as the
+      // plain spelling is; any other with its wrapper layer folded in — its
+      // own text, link, flag, default and examples, else those of an `allOf`
+      // member that declares no type and so only annotates it — so `PetId:
+      // { allOf: [{ description, deprecated: true }], oneOf: [...] }` is
+      // read as `{ description, deprecated: true, oneOf: [...] }` is, the
+      // way the model `PetId` reads both (#679: the component's own keys
+      // alone were read, and the member's never reached the parameter).
       const target = resolveComponentSchemaRef(schema, componentSchemas);
-      const refTarget = target && (enumComponentDeclaration(target) ?? target);
+      const refTarget = target && referencedComponentLayer(target);
       // A `$ref` to an array or primitive component, or to an alias of an
       // enum component (#560), bare or under a wrapper the type builder
       // reads through, is read as a field reads one (`componentReference`,
@@ -4292,7 +4299,10 @@ export function extractParams(
       // then the enum an alias resolves to, as a bare `$ref` to that enum
       // reads it — while under a wrapper those are the parameter's own, read
       // from the wrapper and the members beside the `$ref`. Any other `$ref`
-      // falls back to the one component it names, as before. Any other
+      // falls back to the one schema it points at, read as one level
+      // (`refTarget` above): a model's, a named union's or an enum's own
+      // layer, never a component an alias among them names in turn, which
+      // keeps its text on its own node. Any other
       // schema reads the `allOf` members that declare no type and so only
       // annotate or limit it (`annotatingAllOfMembers`; #555: `allOf: [{
       // type: 'string' }, { description }]` lost the text), as a field reads
