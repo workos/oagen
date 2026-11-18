@@ -1469,20 +1469,45 @@ export interface Model {
    * model's chain of bases reaches itself — a base that does, in a cyclic
    * document or once a fold collapsed it onto a kept model of the same
    * shape, is dropped — and a base stays a base only while every field
-   * it ends with is on the model either as the model's own declaration,
-   * which overrides the base's, or as the same field, the base's
+   * it ends with is on the model as the same field, the base's
    * declaration and not another's (every key; the type as its final
    * shape, an inline model built under either model as it ends and an
-   * inline enum by its values), so the model is its own fields plus its
-   * bases' and an emitter writing `extends` or an intersection types
-   * every field as `fields` does: two bases declaring one property
-   * differently (`Tagged.tag: string` beside `Kinded.tag: enum [cat,
-   * dog]`) keep at most the one whose declaration the model carries, the
-   * other's fields the model's own, and a fold that loosens a base, or a
-   * model nested under it, after the model took its fields drops that
-   * base. A field carries `inheritedFrom` only while its base stays. A `$ref` member naming a named union — flattened into
+   * inline enum by its values), or as a declaration of the model's own
+   * that fits it (#681): one that admits no value the base's does not —
+   * the field required wherever the base requires it; its type the
+   * base's or within it (a pinned value or an enum under an enum that
+   * lists its values or under their primitive, `integer` under `number`,
+   * a non-nullable type under a nullable one, a union when every variant
+   * fits and a type under a union when it fits one variant, a map by
+   * its values, an array of the same items, a model under a model it
+   * carries every field of, anything under an untyped schema); its
+   * limits at least as tight
+   * — its text, flags, default, examples and extensions being its own to
+   * override, and whatever the IR cannot tell (a `format` under none,
+   * an enum's values under a `pattern` it does not repeat) being no fit.
+   * So the model is its own
+   * fields plus its bases', `interface Pet extends Animal { … }`
+   * compiles, and that spelling and an intersection type every field as
+   * `fields` does: `Pet: { allOf: [{ $ref: Animal }], properties: {
+   * species: { type: 'string' } } }` over `Animal { name?: string,
+   * species?: enum [cat, dog] }` has no `bases` and `name` its own, where
+   * `species: { const: 'cat' }` keeps `Animal`. Two bases declaring one
+   * property differently (`Tagged.tag: string` beside `Kinded.tag: enum
+   * [cat, dog]`) keep only those whose declaration the model's field is,
+   * or fits — `Tagged` alone, with or without `required: [tag]` on the
+   * model — the others' fields the model's own, and a fold that loosens
+   * a base, or a model nested under it, after the model took its fields
+   * drops that base. A field carries `inheritedFrom` only while its base
+   * stays. A `$ref` member naming a named union — flattened into
    * the fields or dispatched, as the union's own model reads it — is a
-   * base like any other model. Present exactly when at least one base is
+   * base like any other model, and one of its variants to an emitter
+   * that writes the union: it stays only while one variant agrees with
+   * the model on every field the two share (the same field, or a
+   * declaration of the model's own that fits it) and every such field is
+   * agreed by a variant that declares it, so restating one variant's
+   * pinned, required `kind` keeps it and `properties: { kind: { type:
+   * 'string' } }` over variants that pin `kind` drops it; a named union
+   * with no variant is no base. Present exactly when at least one base is
    * named, on a model built from a component schema (a dispatcher
    * included); never on a model built from an inline `allOf` — a request
    * or response body, a field — nor on a dispatcher's variant models.
