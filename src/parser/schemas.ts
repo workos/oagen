@@ -133,10 +133,13 @@ let activeNullableEnumComponentKeys: Set<string> = new Set();
  * field is (#539); and an alias of either — an `allOf` read as its `$ref`
  * member (`PetOwnerAlias: { allOf: [{ $ref: PetOwner }] }`), as the same
  * `allOf` on a field is typed, or a bare `$ref` (`PetOwnerAlias: { $ref:
- * PetOwner }`; #618), at every hop of a chain — while an `allOf` that merges a typing
- * member beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, {
- * properties }] }`) is the object its merged fields describe, bare, as it
- * is on a field (`isNullableModelComponentEntry`). Keyed by the component
+ * PetOwner }`; #618), at every hop of a chain — and an `allOf` that merges
+ * admits `null` exactly when every member that types it does
+ * (`allOfAdmitsNull`; #676): `OwnerTag: { allOf: [{ $ref: Owner }, { $ref:
+ * Tag }] }` over two nullable components is `nullable<OwnerTag>` to a
+ * `$ref`, and `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }` the
+ * bare `Cat`, its inline member an object that admits none, as each is on
+ * a field (`isNullableModelComponentEntry`). Keyed by the component
  * key the `$ref` names, as the array, primitive and alias components are,
  * never by the resolved name the reference is minted with: `Note: { type:
  * ['object', 'null'], properties }` and `note: { type: 'object', properties
@@ -1348,23 +1351,233 @@ export function unwrapCollapsedWrappers(schema: SchemaObject): SchemaObject {
  * Whether `schemaToTypeRef` wraps the schema's own type in `nullable`: an OAS
  * 3.1 type list naming `null` (`type: ['array', 'null']`), an OAS 3.0
  * `nullable: true` beside a `type`, a `oneOf`/`anyOf` that collapses to one
- * non-null variant (`nullableUnionBranch`), or an `allOf` read as a member
- * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`).
- * The one test for the places the response path builds an array TypeRef
- * itself (`nullableIf`) or merges two array declarations
- * (`combineDeclarations`), which find the array through the same wrappers
- * (`arraySchemaOf`).
+ * non-null variant (`nullableUnionBranch`), an `allOf` read as a member
+ * that does (`allOfReadAsMember`: `allOf: [{ type: ['array', 'null'] }]`),
+ * or an `allOf` merged into one model (`readInlineAllOf`: `'merged'`) whose
+ * every member that types it admits `null` (`allOfAdmitsNull`: `allOf: [{
+ * $ref: Owner }, { $ref: Tag }]` over two nullable components; #676: a
+ * merge declared none, whatever its members admitted). A `$ref` the schema
+ * is read as — the schema itself, or the member an `allOf` is read as —
+ * is the component's to answer for and not followed here: the reference
+ * carries the component's own wrapper (`componentTypeRef`).
+ * The one test for the places the response path builds a TypeRef itself —
+ * an array, a merged model (`nullableIf`) — or merges two array
+ * declarations (`combineDeclarations`), which find the array through the
+ * same wrappers (`arraySchemaOf`), and for a component whose model carries
+ * no wrapper of its own (`isNullableModelComponentEntry`).
  */
 export function declaresNull(schema: SchemaObject): boolean {
-  if (
+  if (wrapsOwnType(schema)) return true;
+  const member = allOfReadAsMember(unwrapNullableSchema(schema));
+  return member !== undefined ? declaresNull(member) : mergeDeclaresNull(schema);
+}
+
+/** Whether the schema is itself a nullable wrapper the type builder strips (`unwrapNullableSchema`): a type list naming `null`, OAS 3.0 `nullable: true` beside a `type`, or a `oneOf`/`anyOf` that collapses to one non-null variant (`nullableUnionBranch`). */
+function wrapsOwnType(schema: SchemaObject): boolean {
+  return (
     (Array.isArray(schema.type) && schema.type.includes('null')) ||
     (schema.nullable === true && schema.type !== undefined) ||
     nullableUnionBranch(schema) !== undefined
-  ) {
-    return true;
+  );
+}
+
+/**
+ * Whether `schema` is an `allOf` merged into one model that admits `null`
+ * for its members' sake alone (`allOfAdmitsNull`): it is no nullable
+ * wrapper itself (`wrapsOwnType`), no member is the one it is read as
+ * (`allOfReadAsMember`), and every member that types it admits `null`.
+ * The part of `declaresNull` that #676 added, asked on its own by the one
+ * reader that must tell such a merge from a schema that says `null`
+ * itself (`keptAsWritten`).
+ */
+export function mergeDeclaresNull(schema: SchemaObject): boolean {
+  if (wrapsOwnType(schema)) return false;
+  const bare = unwrapNullableSchema(schema);
+  // No member the `allOf` is read as: one that types the schema is a merge.
+  if (bare.allOf === undefined || allOfReadAsMember(bare) !== undefined) return false;
+  return classifyInlineSchema(bare) === 'allOf' && allOfAdmitsNull(bare);
+}
+
+/**
+ * Whether a schema admits `null`, as the type builder types it — the one
+ * reading every reader settles an `allOf`'s `null` by: the vote of each
+ * member of an `allOf` merged into one model (`allOfAdmitsNull`, for the
+ * type builder, `declaresNull` and a component's model alike) and of each
+ * declaration two `allOf` members give one property
+ * (`conjoinTypedDeclarations`), so the property written by hand as the
+ * `allOf` of both and the one the parser conjoins from two members admit
+ * `null` alike (#676).
+ *
+ * A `$ref` admits what the schema it names admits (`componentSchemaOf`: a
+ * component, or the schema a pointer into one lands on), read by this
+ * same rule, and nothing the keywords beside it say: the type builder
+ * gives a `$ref` precedence over every
+ * sibling, so `{ $ref: Plain, type: ['object', 'null'] }` over a `Plain`
+ * that admits none admits none. Any other schema admits `null` when it
+ * writes it (`writesNull`): a type list naming `null`, OAS 3.0 `nullable:
+ * true` beside a `type`, a schema of nothing but `null` (`isNullSchema`),
+ * a `const` of `null`, an `enum:` list naming it, or a `oneOf`/`anyOf`
+ * with a `null` variant or the flag that stands for one
+ * (`unionFlaggedNullable`), whatever else the union holds — and whatever
+ * the schema composes: `{ type: ['object', 'null'], allOf: [{ $ref: A }]
+ * }` over an `A` that admits none admits `null`, the schema's own word,
+ * as the type builder types it `nullable<A>` and as the same `type`
+ * beside a merge wraps the merge. JSON Schema, applying `A` as well, would
+ * reject `null` there; the parser has always read a nullable `type` beside
+ * an `allOf` as the nullable wrapper around what the `allOf` describes,
+ * and two such wrappers conjoin to the same `type` beside both members
+ * (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }] }`),
+ * which is nullable by that reading. Else it admits
+ * `null` through an `allOf` whose every member that types it does
+ * (`allOfAdmitsNull`), as JSON Schema applies them all — and a `type` of
+ * its own that names no `null` rejects it, whatever the schema composes:
+ * `{ type: 'object', allOf: [{ $ref: Owner }] }` over a nullable `Owner`
+ * admits none. Everything else admits none: an inline object with no
+ * `type` is the object the type builder reads it as, and a schema that
+ * declares no type says nothing.
+ *
+ * A schema met again on the path being read (`path`: the schemas above
+ * it, not every schema read so far) admits none, which ends a component
+ * that names itself, through a hop or outright, while a component two
+ * members name is read for each — `{ allOf: [{ $ref: A }, { $ref: A }] }`
+ * over a nullable `A` admits `null` (the #653 review's round 4: the second
+ * `$ref` met `A` in a shared seen set and read it as a cycle).
+ *
+ * Each schema is read once per document (`nullAdmissions`): what a schema
+ * admits does not depend on the path it was reached by. A schema admits
+ * `null` only when every schema under it was read to the end and admitted
+ * it, so none of them was on the path; and one that does not, because a
+ * schema under it was met again on the path, sits on that loop itself and
+ * admits none from wherever it is read. So a component many members name
+ * is read for the first of them and answered for the rest (#676 review:
+ * each reading forgot its answer, so `A1: { allOf: [{ $ref: A0 }, { $ref:
+ * A0 }] }`, `A2` the same over `A1`, and so on read `A0` twice per level,
+ * a billion times for the thirtieth component).
+ */
+export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  const settled = nullAdmissions.get(schema);
+  if (settled !== undefined) return settled;
+  if (path.has(schema)) return false;
+  path.add(schema);
+  let admits: boolean;
+  try {
+    if (schema.$ref !== undefined) {
+      const target = componentSchemaOf(schema.$ref);
+      admits = target !== undefined && schemaAdmitsNull(target, path);
+    } else {
+      admits = writesNull(schema) || allOfAdmitsNull(schema, path);
+    }
+  } finally {
+    path.delete(schema);
   }
-  const member = allOfReadAsMember(unwrapNullableSchema(schema));
-  return member !== undefined && declaresNull(member);
+  nullAdmissions.set(schema, admits);
+  return admits;
+}
+
+/**
+ * Whether each schema read so far admits `null` (`schemaAdmitsNull`), by
+ * the schema, which the document owns. The answer follows a `$ref` to the
+ * document's components (`componentSchemaOf`), so it is forgotten where
+ * they are set or released (`resetNullAdmissions`), as the folded schemas
+ * are (`resetFoldedSchemas`).
+ */
+let nullAdmissions = new WeakMap<SchemaObject, boolean>();
+
+/** Forget what every schema admits: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+function resetNullAdmissions(): void {
+  nullAdmissions = new WeakMap();
+}
+
+/**
+ * Whether a schema that is no `$ref` writes `null` among what it admits,
+ * in one of the spellings the type builder wraps its type in `nullable`
+ * for (`schemaAdmitsNull`): an OAS 3.1 type list naming `null`; OAS 3.0
+ * `nullable: true` beside a `type`; a schema of nothing but `null`
+ * (`isNullSchema`: `{ type: 'null' }`, `{ const: null }`, `{ enum: [null]
+ * }`); a `const` of `null` or an `enum:` list naming `null` that types the
+ * schema (`classifyInlineSchema`), with or without a `type` beside it; or
+ * a `oneOf`/`anyOf` that types the schema and has a `null` variant
+ * (`isNullSchema`) or OAS 3.0 `nullable: true` standing for one
+ * (`unionFlaggedNullable`) — a nullable wrapper around one variant and a
+ * union of several alike, `{ oneOf: [{ $ref: Cat }, { $ref: Dog }, { type:
+ * 'null' }] }` as a `$ref` to it as a component is nullable
+ * (`isNullableUnionSchema`) — unless the union is read as an enum of
+ * consts whose `enum:` list leaves `null` out (`enumListAdmitsNull`), the
+ * flag apart, as the type builder decides it. A union written beside an
+ * `allOf` that types the schema is one of that `allOf`'s members instead
+ * (`foldSiblingUnions`), and votes there (`allOfAdmitsNull`).
+ */
+function writesNull(schema: SchemaObject): boolean {
+  if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
+  if (schema.nullable === true && schema.type !== undefined) return true;
+  if (isNullSchema(schema)) return true;
+  const kind = classifyInlineSchema(schema);
+  if (kind === 'const') return schema.const === null;
+  if (kind === 'enum') return (schema.enum ?? []).includes(null);
+  if (kind !== 'union') return false;
+  if (unionFlaggedNullable(schema)) return true;
+  if (!(schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema)) return false;
+  return inlineEnumSpelling(schema)?.spelling !== 'const-union' || enumListAdmitsNull(schema);
+}
+
+/**
+ * Whether a schema that writes no `null` of its own (`writesNull`) admits
+ * it through its `allOf` — the one definition of "this `allOf` admits
+ * `null`": the schema writes no `type` (one that names no `null` rejects
+ * it) and every member that types it admits `null` (`schemaAdmitsNull`), at
+ * least one of them, as JSON Schema applies them all. A member that
+ * says nothing of what an instance is (`saysType`: `{ description }`, `{
+ * required }`, `{ minProperties: 1 }`, and a wrapper around nothing but
+ * such members, `{ allOf: [{ description }] }`) only annotates or limits
+ * the schema and has no vote, so the nested spelling votes as the flat one
+ * does. The members are the schema's as written, with what it writes
+ * beside the `allOf` that the readers read as members of it
+ * (`foldBesideAllOf`): its own `properties`, an inline object typed
+ * `object` that admits none, and a typing `oneOf`/`anyOf`, which votes as a
+ * union does. A member that is itself an `allOf` votes through its own
+ * members by this same rule and is not spliced open first
+ * (`unsplicedAllOf`): spliced, `{ type: 'object', allOf: [{ $ref: Owner }]
+ * }` would lose the `type` that rejects `null` (#675 opens it, since no
+ * other reader asks its `type`).
+ *
+ * So `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
+ * components admits `null`, `{ allOf: [{ $ref: Owner }, { type: 'object',
+ * properties: { extra } }] }` does not, and neither does `{ allOf: [{
+ * $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits none. Read
+ * for an `allOf` merged into one model by the type builder
+ * (`buildTypeRef`), by `declaresNull`, and through it for a component
+ * (`isNullableModelComponentEntry`) and the response path (`nullableIf`),
+ * and for any `allOf` by `schemaAdmitsNull`. `path` is `schemaAdmitsNull`'s: the
+ * schemas above the members.
+ */
+function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
+  if (schema.type !== undefined) return false;
+  const voting = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(saysType);
+  return voting.length > 0 && voting.every((member) => schemaAdmitsNull(member, path));
+}
+
+/**
+ * Whether an `allOf` member says what an instance is, and so has a vote on
+ * `null` (`allOfAdmitsNull`): it declares a type by a keyword of its own
+ * (`declaresType`), by a `oneOf`/`anyOf` that types it (`unionTypesSchema`),
+ * or through a member of its own `allOf` that does, at any depth. A member
+ * that is an `allOf` of nothing but annotations and limits — `{ allOf: [{
+ * description }] }`, `{ allOf: [] }`, `{ description, allOf: [{
+ * minProperties: 1 }] }` — or a union of bare limits (`{ anyOf: [{
+ * required: ['a'] }, { maxProperties: 1 }] }`) declares none: every
+ * instance it admits, `null` among them, it admits whatever the type, as
+ * the members it would be spliced open into do (`spliceNestedAllOf`; #675),
+ * which have no vote either. Read on the members as written, where
+ * `declaresType` alone counts any `allOf` or union as a type (#676 review:
+ * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
+ * }` over two nullable components was the bare model for the wrapper's
+ * sake, where the same members written flat were nullable).
+ */
+function saysType(member: SchemaObject): boolean {
+  const { allOf, oneOf, anyOf, ...own } = member;
+  if (declaresType(own)) return true;
+  if ([oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants))) return true;
+  return (allOf ?? []).some(saysType);
 }
 
 /**
@@ -1743,6 +1956,7 @@ export function extractSchemas(
   resetInheritedModelRefs();
   resetCombinedDeclarations();
   resetFoldedSchemas();
+  resetNullAdmissions();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -2063,6 +2277,7 @@ export function clearSchemaNameTransform(): void {
   activeDispatcherVariantPlans = new Map();
   resetCombinedDeclarations();
   resetFoldedSchemas();
+  resetNullAdmissions();
   markContestedTitles(undefined);
 }
 
@@ -2856,8 +3071,10 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * component whose own schema `schemaToTypeRef` wraps when it is written
  * inline (`declaresNull`: an OAS 3.1 `type` list naming `'null'`, OAS 3.0
  * `nullable: true` beside a `type`, a nullable `oneOf`/`anyOf` wrapper —
- * `properties` written beside it or not — or a single-member `allOf`
- * around one of these; #615), or a `null`-only schema in either spelling
+ * `properties` written beside it or not — a single-member `allOf`
+ * around one of these; #615 — or an `allOf` merged into the model whose
+ * every member that types it admits `null`; #676), or a `null`-only schema
+ * in either spelling
  * (`isNullSchema`: `{ type: 'null' }`, `{ type: ['null'] }`), which keeps
  * the fieldless model it always became and admits nothing but `null`; or
  * an alias of either — an `allOf`
@@ -2875,11 +3092,17 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * is `B`, and `A: { $ref: B }` is `A`, as `{ $ref: Cat, type: ['object',
  * 'null'] }` on a field is `Cat` (Greptile, #646: the `type` beside the
  * `$ref` made both `nullable`). An `allOf` that merges — a typing member
- * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
- * }`), a second `$ref`, a `required` that adds to the reference — is read
- * as none of its members: the composed model is the object its merged
- * fields describe, bare, as the same `allOf` on a field is, so a member's
- * nullability never wraps it. OAS 3.0 `nullable: true` beside an `allOf`
+ * beside the `$ref`, a second `$ref`, a `required` that adds to the
+ * reference — is read as none of its members, and admits `null` exactly
+ * when every member that types it does (`declaresNull`, by
+ * `allOfAdmitsNull`), as the same `allOf` on a field does: `OwnerTag: {
+ * allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable components
+ * and `Required: { allOf: [{ $ref: PetOwner }], required: ['name'] }`
+ * admit it, while `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }`,
+ * whose inline member is an object that admits none, and a merge beside a
+ * `$ref` to a component that admits none do not (#676: a merge admitted
+ * none, whatever its members did, so `{ $ref: OwnerTag }` was the bare
+ * `OwnerTag`). OAS 3.0 `nullable: true` beside an `allOf`
  * with no `type` declares nothing, as beside any schema with neither a
  * `type` nor a `oneOf`/`anyOf`; beside a nullable wrapper's union it
  * stands for the `null` variant (`unionFlaggedNullable`), which
@@ -8058,10 +8281,12 @@ export function markComponentModelRef(ref: ModelRef): void {
  * Pet/properties/owner` to it, were `nullable<PetOwner>`). An alias of
  * such a component — an `allOf` read as its `$ref` member, `PetOwnerAlias:
  * { allOf: [{ $ref: PetOwner }] }` — is wrapped as the component is, as the
- * same `allOf` on a field is typed; an `allOf` that merges a typing member
- * beside the `$ref` (`Cat: { allOf: [{ $ref: PetOwner }, { properties }]
- * }`) is the object its fields describe, bare, as it is on a field
- * (`isNullableModelComponentEntry`). This holds at every site typed
+ * same `allOf` on a field is typed; an `allOf` that merges is wrapped
+ * exactly when every member that types it admits `null` — `OwnerTag: {
+ * allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable components
+ * is, `Cat: { allOf: [{ $ref: PetOwner }, { properties }] }` is not — as it
+ * is on a field (`isNullableModelComponentEntry`; #676). This holds at
+ * every site typed
  * through `schemaToTypeRef` — a field, array items, map
  * values, a union variant, a body, a parameter, a header, a webhook or
  * callback payload — and a site that wraps the `$ref` itself (`oneOf: [{
@@ -8736,9 +8961,19 @@ function buildTypeRef(
       // field its inline member redeclares owns in every merge — is that
       // model: the re-entry under this name would build nothing (#566).
       const building = materializingMergedAllOfName(schema);
-      if (building !== undefined) return { kind: 'model', name: building };
-      const baseName = toPascalCase(contextName ?? 'UnknownModel');
-      return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
+      const merged: TypeRef = {
+        kind: 'model',
+        name: building ?? qualifyInlineModelName(toPascalCase(contextName ?? 'UnknownModel'), parentModelName),
+      };
+      // The model carries the merged fields and no wrapper, so the
+      // reference carries the `null` the merge admits: exactly when every
+      // member that types it does (`allOfAdmitsNull`), as the same members
+      // conjoined from two declarations of one property admit it (#676: a
+      // merge was the bare model whatever its members admitted, so `{
+      // allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
+      // components was `PetOwner` where two members declaring `owner` gave
+      // `nullable<PetOwner>`).
+      return allOfAdmitsNull(schema) ? { kind: 'nullable', inner: merged } : merged;
     }
     if (reading === 'reference') {
       const refItem = allOfReferenceMember(schema);
@@ -9229,6 +9464,7 @@ import {
   spliceNestedAllOf,
   splicedAllOfMembers,
   stableStringify,
+  unsplicedAllOf,
 } from './inline-models.js';
 
 export { qualifyInlineModelName, extractInlineModelsFromSchemas } from './inline-models.js';

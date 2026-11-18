@@ -321,6 +321,7 @@ describe('#615', () => {
           // Merges: the composed model is the object its fields describe.
           Cat: { allOf: [refC, { type: 'object', properties: { meow: { type: 'string' } } }] },
           TwoRefs: { allOf: [refC, ref('Pet')] },
+          // A merge whose every typing member admits `null` admits it (#676): `required` types nothing.
           Required: { allOf: [refC], required: ['name'] },
           // A merge's own declaration wraps it; `nullable: true` beside an `allOf` with no `type` declares nothing.
           OwnNullable: ownNullable,
@@ -357,7 +358,7 @@ describe('#615', () => {
         c_alias_nullable_flag: nullable(model('CAliasNullableFlag')),
         cat: model('Cat'),
         two_refs: model('TwoRefs'),
-        required: model('Required'),
+        required: nullable(model('Required')),
         own_nullable: nullable(model('OwnNullable')),
         own_nullable_flag_only: model('OwnNullableFlagOnly'),
         pet_alias: model('PetAlias'),

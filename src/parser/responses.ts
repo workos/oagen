@@ -1235,7 +1235,11 @@ function extractDirectResource(
       const modelName = mergedRefFields ? toPascalCase(contextName) : deriveModelName(rebuilt, contextName, branchOnly);
       inlineModels.push(...extractInlineModel(modelName, rebuilt, componentSchemas));
       return {
-        response: { kind: 'model', name: modelName },
+        // The model carries the merged fields and no wrapper, so the
+        // reference carries the `null` the merge admits, as
+        // `schemaToTypeRef` types the same `allOf` on a field (`nullableIf`;
+        // #676).
+        response: nullableIf(schema, { kind: 'model', name: modelName }),
         inlineModels,
         isPaginated: false,
       };
@@ -1334,8 +1338,9 @@ export function composedWithoutFields(schema: SchemaObject): boolean {
 
 /**
  * Wrap `ref` in `nullable` when `schemaToTypeRef` would wrap the schema's
- * own type (`declaresNull`). For the places the response path builds an
- * array TypeRef itself instead of delegating.
+ * own type (`declaresNull`). For the places the response path builds a
+ * TypeRef itself instead of delegating: an array, and the model an `allOf`
+ * merges into (#676).
  */
 function nullableIf(schema: SchemaObject, ref: TypeRef): TypeRef {
   return declaresNull(schema) ? { kind: 'nullable', inner: ref } : ref;
