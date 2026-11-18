@@ -119,6 +119,7 @@ import {
   isNullSchema,
   referenceTypesAsUnknown,
   schemaToTypeRef,
+  unionFlaggedNullable,
   withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
@@ -815,9 +816,13 @@ class PointerResolver {
           // type whatever it is — a union of its own (`type: ['array',
           // 'string']`), a named union — read before any variants are
           // indexed, which would take the member's own first variant for it.
+          // OAS 3.0 `nullable: true` beside the union stands for that `null`
+          // variant (`unionFlaggedNullable`; #677), so a pointer into `{
+          // oneOf: [{ $ref: Either }], nullable: true }` reads `Either`, as
+          // one into `oneOf: [{ $ref: Either }, { type: 'null' }]` does.
           const members = node[keyword] ?? [];
           const nonNull = members.filter((member) => !isNullSchema(member));
-          if (nonNull.length === 1 && members.length > nonNull.length) {
+          if (nonNull.length === 1 && (members.length > nonNull.length || unionFlaggedNullable(node))) {
             type = bare;
             break;
           }

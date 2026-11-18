@@ -29,6 +29,7 @@ import {
   referenceTypesAsUnknown,
   typesAsUnknown,
   unionAxesOf,
+  unionFlaggedNullable,
   warnOnUncarriedProperties,
   withSchemaConstraints,
   withWrapperDocs,
@@ -984,9 +985,13 @@ function extractWrappedResource(
       const source = collapsedNullableBranch(propSchema) ?? objectVariant;
       inlineModels.push(...extractInlineModel(modelName, source, componentSchemas));
 
-      const hasNullVariant = propSchema.oneOf.some(
-        (v) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')),
-      );
+      // `null` by a `null` variant, or by OAS 3.0 `nullable: true` beside
+      // the `oneOf` standing for one (`unionFlaggedNullable`; #677: the flag
+      // was dropped here, so the resource a 3.1.0 document made nullable
+      // was not in the 3.0.3 one).
+      const hasNullVariant =
+        unionFlaggedNullable(propSchema) ||
+        propSchema.oneOf.some((v) => isNullSchema(v) || (Array.isArray(v.type) && v.type.includes('null')));
 
       const modelRef: TypeRef = { kind: 'model', name: modelName };
       return {

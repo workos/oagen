@@ -296,6 +296,27 @@ function enumListAdmitsNull(schema: SchemaObject): boolean {
 }
 
 /**
+ * Whether a `oneOf`/`anyOf` of string consts read inline as an enum
+ * (`inlineEnumSpelling`) admits `null`: by a `null` variant an `enum:`
+ * list beside the union does not forbid (`enumListAdmitsNull`), or by OAS
+ * 3.0 `nullable: true` standing for one (`unionFlaggedNullable`), which
+ * admits `null` whatever the list says, as it does on the same schema as a
+ * component (`isNullableEnumSchema`) and beside a `type` (`{ type:
+ * 'string', enum: ['a', 'b'], nullable: true }`). The one answer for the
+ * type builder, which wraps the enum by it (`buildTypeRef`), and for the
+ * pin walk, which says by it whether a discriminator pin written as such
+ * a union admits `null` (`writtenPin`), so a variant's field and the
+ * request-body fold built from its pin never disagree (#677: the walk
+ * counted `null` variants alone, so `kind: { oneOf: [{ const: 'cat' }, {
+ * const: 'lion' }], enum: ['cat'], nullable: true }` was a
+ * `nullable<enum>` field folded into a `kind` that admits no `null`).
+ */
+function constUnionAdmitsNull(schema: SchemaObject): boolean {
+  if (unionFlaggedNullable(schema)) return true;
+  return (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema) && enumListAdmitsNull(schema);
+}
+
+/**
  * Whether a component schema is an enum: it declares an `enum:` list, or it
  * is a `oneOf`/`anyOf` whose every non-null variant is a string `const`
  * schema (`constUnionEnumMembers`) with no `allOf` that types the schema
@@ -361,7 +382,8 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * — and the member's own nullability (a `null` member, a type list naming
  * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, while
  * `nullable: true` beside the `allOf` declares nothing, as beside any
- * schema without a `type`. Or — for a component written as a nullable
+ * schema with neither a `type` nor a `oneOf`/`anyOf`
+ * (`unionFlaggedNullable`). Or — for a component written as a nullable
  * `oneOf`/`anyOf` wrapper the type builder collapses (#606: one non-null
  * variant beside `null` variants, `nullableUnionBranch`) — the branch it
  * collapses to read in turn, carrying what the same wrapper hands a field
@@ -417,7 +439,12 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * `null` variant cannot be written there: beside a `oneOf`/`anyOf` the
  * flag is read — every `$ref` to the component is nullable, as it is for
  * a named union (`isNullableUnionSchema`) — unlike beside an `allOf` or
- * any other schema without a `type`, where it declares nothing. Read
+ * any other schema with neither a `type` nor a union, where it declares
+ * nothing. With no `type` beside the union `nullableUnionBranch` reads
+ * this wrapper itself, on a component and inline alike
+ * (`unionFlaggedNullable`; #677), so what this reader still decides alone
+ * is the same wrapper written beside a `type`, kept the nullable enum it
+ * was. Read
  * where a component is read as an enum (`enumComponentDeclaration`; #606
  * review: the 3.1 spelling read as the enum `Color` while this one stayed
  * a `Color {}` model carrying `ColorVariant1`, so `oagen diff` from the
@@ -1071,16 +1098,58 @@ export function unwrapNullableSchema(
 }
 
 /**
+ * Whether OAS 3.0 `nullable: true` stands for a `null` variant of the
+ * schema's `oneOf`/`anyOf`: the flag is written beside a union that types
+ * the schema (`unionTypesSchema`) and no `type` is. An OAS 3.0 document
+ * has no `null` type, so the flag is how it
+ * says what a 3.1 document says with `{ type: 'null' }` among the
+ * variants, and the two are read alike: `{ oneOf: [{ type: 'string' }, {
+ * type: 'integer' }], nullable: true }` as `{ oneOf: [{ type: 'string' },
+ * { type: 'integer' }, { type: 'null' }] }` is, and `{ oneOf: [{ type:
+ * 'string', enum: ['cat', 'dog'] }], nullable: true }` as the nullable
+ * wrapper around its one variant. The one test of every reader that asks
+ * whether a union has a `null` variant beyond the ones written: the type
+ * builder (`buildTypeRef`), the wrapper every reader collapses
+ * (`nullableAxisBranch`), the union folded into an `allOf` as a member
+ * (`besideUnionMembers`), the request body's and the wrapped resource's
+ * own readers (`typePickedRequestBody`, `flattenDiscriminatedUnionBody`,
+ * `extractWrappedResource`), the readers that combine a property's
+ * declarations (`unionOfDeclarations`, `conjoinTypedDeclarations`) and
+ * the pointer walk (`resolveSchemaPointers`) — as a component's union was
+ * already read (`isNullableUnionSchema`, `flaggedNullableUnionBranch`).
+ * #677: inline, the flag was read only beside a `type`, so `{ oneOf:
+ * [...], nullable: true }` on a field, a parameter or a body was a
+ * non-nullable union where a `$ref` to the same schema as a component was
+ * nullable, and `oagen diff` from the 3.0.3 document to the 3.1.0 one
+ * exited 2. Beside a `type` this is false and the flag is read as it was:
+ * with the `type` (`type: 'object', nullable: true` is `type: ['object',
+ * 'null']`, the schema nullable and an inline union the one it is without
+ * the flag), and on an enum component by `flaggedNullableUnionBranch`.
+ * With neither a `type` nor a union beside it — beside an `allOf`, say,
+ * or beside a `oneOf`/`anyOf` of bare limits, which types nothing and
+ * leaves the schema to its own keywords (`{ properties: { a }, anyOf: [{
+ * required: ['a'] }, { maxProperties: 1 }], nullable: true }` is the
+ * object) — the flag declares nothing. The document's version is not
+ * asked, as it is not for the flag beside a `type`.
+ */
+export function unionFlaggedNullable(schema: SchemaObject): boolean {
+  if (schema.nullable !== true || schema.type !== undefined) return false;
+  return [schema.oneOf, schema.anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants));
+}
+
+/**
  * The one variant a nullable `oneOf`/`anyOf` wrapper collapses to: what is
  * left once every `null` variant (`isNullSchema` — `{ type: 'null' }`,
  * `{ const: null }` or `{ enum: [null] }`, however many) is discarded, when
- * at least one was and exactly one variant remains. The single definition of
+ * at least one was — or OAS 3.0 `nullable: true` stands for one
+ * (`unionFlaggedNullable`: `{ oneOf: [{ $ref: Pet }], nullable: true }`) —
+ * and exactly one variant remains. The single definition of
  * a nullable union wrapper on the model side, shared by `unwrapNullableSchema`
  * and `collapsedNullableBranch`. `undefined` otherwise: no union, a union
  * under an `allOf` that types the schema (which `schemaToTypeRef` gives
  * precedence; one that only annotates or limits it is part of the wrapper,
- * `nullableAxisBranch`), no `null`
- * variant, more than one non-null variant, or a union of consts read as an
+ * `nullableAxisBranch`), no `null` variant and no flag in its place, more
+ * than one non-null variant, or a union of consts read as an
  * enum (`inlineEnumSpelling`) — here, one string const beside `null` and an
  * `enum:` list that makes it one. The type builder decides that enum before
  * it collapses a nullable union, so such a union is no wrapper: the enum is
@@ -1116,7 +1185,10 @@ export function nullableUnionBranch(schema: SchemaObject): SchemaObject | undefi
  * (`allOfTypesSchema`; one whose members only annotate or limit it is
  * part of the wrapper, #613), with no `null` variant, with more than one
  * non-null variant, or read as an enum — the enum spelling decided on the
- * axis alone (`axisAlone`) when the schema writes both keywords.
+ * axis alone (`axisAlone`) when the schema writes both keywords. OAS 3.0
+ * `nullable: true` beside the union counts as a `null` variant of each
+ * axis the schema writes (`unionFlaggedNullable`; #677), as the same
+ * `null` variant written on each would.
  */
 export function nullableAxisBranch(schema: SchemaObject, variants: readonly SchemaObject[]): SchemaObject | undefined {
   // An `allOf` that types the schema takes precedence over the union beside
@@ -1132,7 +1204,8 @@ export function nullableAxisBranch(schema: SchemaObject, variants: readonly Sche
   // wrapper's own keys, as it did: the members' are not carried onto it.
   if (schema.allOf && allOfTypesSchema(schema.allOf)) return undefined;
   const nonNull = variants.filter((v) => !isNullSchema(v));
-  if (nonNull.length !== 1 || nonNull.length === variants.length) return undefined;
+  if (nonNull.length !== 1) return undefined;
+  if (nonNull.length === variants.length && !unionFlaggedNullable(schema)) return undefined;
   return inlineEnumSpelling(axisAlone(schema, variants))?.spelling === 'const-union' ? undefined : nonNull[0];
 }
 
@@ -1154,7 +1227,10 @@ function axisAlone(schema: SchemaObject, variants: readonly SchemaObject[]): Sch
  * nullable wrapper, `nullableUnionBranch`), several variants, or a `oneOf`
  * of consts read as an enum (`inlineEnumSpelling`), which is the schema
  * that declares the members and so keeps its own text. Decided on a schema
- * whose nullable wrappers are removed, as `schemaToTypeRef` decides it. The
+ * whose nullable wrappers are removed, as `schemaToTypeRef` decides it —
+ * the OAS 3.0 one among them, `nullable: true` beside a union of one
+ * variant (`unionFlaggedNullable`), which `unwrapNullableSchema` collapses
+ * before this is asked. The
  * one definition for the readers that follow the type builder without
  * typing (`unwrapCollapsedWrappers`).
  */
@@ -2611,7 +2687,14 @@ export function isInlineObjectSchema(schema: SchemaObject | undefined): schema i
   return type === undefined || type === 'object' || (Array.isArray(type) && type.includes('object'));
 }
 
-/** True when a named union admits `null`: a `null` variant (`isNullSchema`), a `type` list with `'null'`, or OAS 3.0 `nullable: true`. */
+/**
+ * True when a named union admits `null`: a `null` variant (`isNullSchema`),
+ * a `type` list with `'null'`, or OAS 3.0 `nullable: true` — the spellings
+ * by which the same union written inline is `nullable<union>`
+ * (`buildTypeRef`: the type list and the flag beside a `type` unwrapped
+ * first, then a `null` variant or the flag standing for one,
+ * `unionFlaggedNullable`).
+ */
 function isNullableUnionSchema(schema: SchemaObject): boolean {
   if (schema.nullable === true) return true;
   if (Array.isArray(schema.type) && schema.type.includes('null')) return true;
@@ -2650,7 +2733,10 @@ function isNullableUnionSchema(schema: SchemaObject): boolean {
  * as none of its members: the composed model is the object its merged
  * fields describe, bare, as the same `allOf` on a field is, so a member's
  * nullability never wraps it. OAS 3.0 `nullable: true` beside an `allOf`
- * with no `type` declares nothing, as beside any schema without one. A
+ * with no `type` declares nothing, as beside any schema with neither a
+ * `type` nor a `oneOf`/`anyOf`; beside a nullable wrapper's union it
+ * stands for the `null` variant (`unionFlaggedNullable`), which
+ * `declaresNull` reads through `nullableUnionBranch`. A
  * chain that returns to an entry it has visited admits nothing through
  * the loop.
  */
@@ -3161,15 +3247,25 @@ function foldSiblingUnions(schema: SchemaObject): SchemaObject {
  * carried on the first. Empty for a schema that writes no typing union.
  * The variant list is the document's own, not a copy, so a decision
  * recorded against it (a dispatcher's variant names, a reported union)
- * reaches every reading.
+ * reaches every reading. OAS 3.0 `nullable: true` standing for a `null`
+ * variant of the union (`unionFlaggedNullable`) goes with every member,
+ * as the `null` variant a 3.1 document writes stays in each list: `{
+ * allOf: [{ $ref: Base }], oneOf: [{ properties: { a } }], nullable: true
+ * }` is `{ allOf: [{ $ref: Base }, { oneOf: [{ properties: { a } }],
+ * nullable: true }] }`, the member a nullable wrapper the readers collapse
+ * to its one variant (`nullableAxisBranch`), as `oneOf: [{ properties: {
+ * a } }, { type: 'null' }]` beside the `allOf` is (#677: the flag stayed
+ * on the schema, where beside an `allOf` it declares nothing, so the
+ * member was a union of one and its variant's fields optional).
  */
 function besideUnionMembers(schema: SchemaObject): SchemaObject[] {
   const members: SchemaObject[] = [];
+  const flag = unionFlaggedNullable(schema) ? { nullable: true } : {};
   for (const keyword of ['oneOf', 'anyOf'] as const) {
     const variants = schema[keyword];
     if (!variants || !unionTypesSchema(variants)) continue;
     const discriminator = members.length === 0 && schema.discriminator ? { discriminator: schema.discriminator } : {};
-    members.push({ [keyword]: variants, ...discriminator });
+    members.push({ [keyword]: variants, ...discriminator, ...flag });
   }
   return members;
 }
@@ -3988,8 +4084,10 @@ interface WrittenPin {
  *     (`inlineEnumSpelling`) pins its one member when the list leaves
  *     exactly one (`{ oneOf: [{ const: 'cat' }, { const: 'lion' }], enum:
  *     ['cat', null] }` is the enum of `cat`), and admits `null` by the
- *     union's rule — a `null` variant the list does not forbid
- *     (`enumListAdmitsNull`) — so a list naming `null` admits nothing
+ *     union's rule (`constUnionAdmitsNull`) — a `null` variant the list
+ *     does not forbid (`enumListAdmitsNull`), or OAS 3.0 `nullable: true`
+ *     standing for one, whatever the list says (#677) — so a list naming
+ *     `null` admits nothing
  *     without that variant (Greptile, #686 review: the list was read as an
  *     enum of its own, and the request-body fold rebuilt a nullable `kind`
  *     from a variant whose own field is the non-null enum). Any other
@@ -4017,8 +4115,7 @@ function writtenPin(schema: SchemaObject): WrittenPin | null {
       const members = spelling?.spelling === 'const-union' ? spelling.members : [];
       const [member] = members;
       if (members.length !== 1 || typeof member?.value !== 'string') return null;
-      const admitsNull = (schema.oneOf ?? schema.anyOf ?? []).some(isNullSchema) && enumListAdmitsNull(schema);
-      return { value: member.value, admitsNull };
+      return { value: member.value, admitsNull: constUnionAdmitsNull(schema) };
     }
   }
   if (schema.const !== undefined) {
@@ -6619,7 +6716,9 @@ export function pinnedDeclarationValue(
  * of consts admits `null` only with a `null` variant among them, as the
  * enum the two declare does (`{ oneOf: [{ const: 'email' }, { const:
  * 'sms' }], enum: ['email', null] }` is the non-null enum of `email`;
- * Greptile, #686 review). A `$ref` that names an enum component admits
+ * Greptile, #686 review) — or with OAS 3.0 `nullable: true` beside the
+ * union standing for that variant, which admits `null` whatever the list
+ * says (`constUnionAdmitsNull`; #677). A `$ref` that names an enum component admits
  * `null` exactly when the reference is typed `nullable` — the component's
  * own rule (`enumComponentPin`), which is not always the inline one: `kind:
  * { $ref: EmailKind }` with `EmailKind: { enum: ['email'], nullable: true
@@ -8233,9 +8332,17 @@ function buildTypeRef(
 
     // Check for nullable pattern: oneOf: [realType, { type: 'null' }]. Every
     // `null` variant is set aside, however many and however spelled
-    // (`isNullSchema`), as `nullableUnionBranch` sets them aside.
+    // (`isNullSchema`), as `nullableUnionBranch` sets them aside. OAS 3.0
+    // `nullable: true` beside the union stands for one, which a 3.0
+    // document cannot write (`unionFlaggedNullable`): `{ oneOf: [{ type:
+    // 'string' }, { type: 'integer' }], nullable: true }` is
+    // `nullable<union<string | integer>>` and a flagged union of one
+    // variant the nullable wrapper around it, so the union written inline
+    // admits `null` by the spellings a `$ref` to it as a component does
+    // (`isNullableUnionSchema`; #677: the flag was read only beside a
+    // `type`, which the unwrap above has consumed by now, and dropped here).
     const nonNullVariants = rawVariants.filter((v) => !isNullSchema(v));
-    const hasNull = nonNullVariants.length < rawVariants.length;
+    const hasNull = nonNullVariants.length < rawVariants.length || unionFlaggedNullable(schema);
 
     // Collapse an oneOf/anyOf whose non-null variants are all string-const
     // schemas into a single enum. This turns patterns like
@@ -8267,8 +8374,10 @@ function buildTypeRef(
         extensionsOf(schema, SCHEMA_CONSUMED_EXTENSIONS),
       );
       // An `enum:` list beside the union that leaves `null` out forbids it,
-      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`).
-      return hasNull && enumListAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
+      // whatever the `type: 'null'` variant says (`enumListAdmitsNull`). The
+      // OAS 3.0 flag admits `null` whatever the list says — the one answer
+      // the pin walk reads too (`constUnionAdmitsNull`).
+      return constUnionAdmitsNull(schema) ? { kind: 'nullable', inner: enumRef } : enumRef;
     }
 
     if (hasNull && nonNullVariants.length === 1) {
