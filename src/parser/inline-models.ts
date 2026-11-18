@@ -50,9 +50,11 @@ import {
   resolveSchemaName,
   sourceDeclaration,
   titleMappedVariantNames,
+  typedDeclaration,
   variantMemberSchemas,
   foldSiblingProperties,
   foldedVariantOrigin,
+  withNullVariant,
 } from './schemas.js';
 import { externalDocsEntry, readExternalDocs } from './external-docs.js';
 import { SCHEMA_CONSUMED_EXTENSIONS, extensionsOf, schemaExtensionsEntry } from './extensions.js';
@@ -4196,6 +4198,29 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * `mergeAllOfMembers`; a component's flattened union types such a property
  * the same way (`declaredComponentProperty`; #398).
  *
+ * Declarations written in several spellings are one shape when the parser
+ * types them identically (`typedDeclaration`; workos/oagen#669): `data: {
+ * $ref: Pets }` beside `data: { type: 'array', items: { $ref: Pet } }` —
+ * or beside a JSON Pointer to such an array, or `{ allOf: [<the array>] }`
+ * — is one `Pet[]`, and `has_more: { $ref: Flag }` beside `has_more: {
+ * type: 'boolean' }` one `boolean`. Compared as written they were two
+ * shapes, the field a union of one type with itself (`Pet[] | Pet[]`),
+ * and a list envelope whose array two variants spelled differently was no
+ * list (`detectListEnvelope`). A shape written several ways is its first
+ * declaration as typed, carrying the keywords and extensions its
+ * declarations agree on, each as a field written that way reads it — a
+ * bare `$ref` to an array or primitive component reads the component's —
+ * so the outcome is the same whichever spelling comes first; a shape
+ * written one way is its first declaration as written, as before. A `null`
+ * only some spellings of a shape admit is the property's: `string` beside
+ * `type: ['string', 'null']`, or beside `oneOf: [{ type: 'string' }, {
+ * type: 'null' }]`, is `nullable<string>` (the first was `nullable<string
+ * | string>`). A declaration typed under a name minted where it stands —
+ * an inline object, an inline enum — and one the type builder reports are
+ * compared as written, the first less the `null` its own `type` or flag
+ * admits, so an inline object beside the same object typed `['object',
+ * 'null']` is one nullable model.
+ *
  * A field reads its flags, documentation and limits from its own schema
  * (`buildFieldFromSchema`, `extractConstraints`), never from a union's
  * variants, so a combined declaration carries every keyword of
@@ -4222,7 +4247,9 @@ function shapeVariant(group: readonly SchemaObject[]): SchemaObject {
  * a union of string consts would otherwise lose when it collapses to an
  * enum — and off the declarations. A declaration that is itself a union
  * keeps the `null` its own variants admit: a `null` variant among them, or
- * OAS 3.0 `nullable: true` standing for one (`admitsNull`; #677).
+ * OAS 3.0 `nullable: true` standing for one (`admitsNull`; #677) — a
+ * nullable wrapper around one variant too, unless another spelling of
+ * that variant is declared beside it (#669).
  */
 export function unionOfDeclarations(declarations: readonly SchemaObject[]): SchemaObject {
   if (declarations.length === 1) return declarations[0]!;
@@ -4237,32 +4264,109 @@ export function unionOfDeclarations(declarations: readonly SchemaObject[]): Sche
   // The keywords the field reads by that agreement make no shape, nor do
   // they inside array items or map values; every declaration of a shape is
   // kept, in order, for the shape's own `deprecated` agreement.
-  const groups = new Map<string, SchemaObject[]>();
-  for (const declaration of declarations) {
-    const key = schemaShapeKey(withoutLiftedKeywords(declaration));
-    const group = groups.get(key);
-    if (group) group.push(declaration);
-    else groups.set(key, [declaration]);
-  }
-  // Each shape is its first declaration, the limits inside its items and
-  // values read by the agreement of every declaration of that shape
-  // (`withAgreedNestedLimits`), whether it is the one shape or one of
-  // several: a limit one array declaration's items write and another's
-  // leave out is no limit of the items whichever array is declared first,
-  // and whether or not an integer is declared beside them (#545 review).
-  const shapes = [...groups.values()].map((group) => withAgreedNestedLimits(shapeVariant(group), group));
-  // One shape: the first declaration, carrying the agreed keywords and
+  const spellings = new Set(declarations.map(declarationShapeKey));
+  // One spelling: the first declaration, carrying the agreed keywords and
   // extensions in place of its own.
-  if (shapes.length === 1) {
-    const first = shapes[0]!;
-    const disputed = new Set(
-      LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
-    );
-    return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
+  if (spellings.size === 1) return settledShape(declarations, agreed, extensions);
+  // Several spellings. Those the parser types identically are one shape
+  // (#669): each declaration is read as the type builder types it
+  // (`typedDeclaration`), the `null` it admits set aside, and grouped by
+  // what is left, in the order first declared. A declaration typed under a
+  // name minted where it stands is compared as written, less the `null`
+  // its own `type` or flag admits.
+  const shapes = new Map<string, DeclaredShape>();
+  for (const declaration of declarations) {
+    const typed = typedDeclaration(declaration);
+    const read = typed ? typed.schema : withoutNull(declaration);
+    const key = typed ? `typed:${typed.shape}` : `written:${declarationShapeKey(read)}`;
+    const shape = shapes.get(key) ?? { written: [], read: [], spellings: new Set(), nullable: false };
+    shapes.set(key, shape);
+    shape.written.push(declaration);
+    shape.read.push(read);
+    shape.spellings.add(declarationShapeKey(declaration));
+    // A `null` the declaration admits by the test this union always made
+    // (`admitsNull`), or through any wrapper the type builder strips.
+    if (admitsNull(declaration) || typed?.nullable) shape.nullable = true;
+    if (!typed && admitsNull(declaration)) shape.admitting ??= declaration;
   }
-  const anyAdmitsNull = shapes.some(admitsNull);
-  const variants = anyAdmitsNull ? [...shapes.map(withoutNull), { type: 'null' }] : shapes;
-  return { ...agreed, ...extensions, oneOf: variants };
+  let anyAdmitsNull = false;
+  const variants = [...shapes.values()].map((shape) => {
+    // A shape written one way is its first declaration as written, the
+    // limits inside its items and values read by the agreement of every
+    // declaration of that shape (`withAgreedNestedLimits`), whether or not
+    // another shape is declared beside it (#545 review): a limit one array
+    // declaration's items write and another's leave out is no limit of the
+    // items whichever array is declared first.
+    if (shape.spellings.size === 1) {
+      const variant = withAgreedNestedLimits(shapeVariant(shape.written), shape.written);
+      anyAdmitsNull ||= admitsNull(variant);
+      return variant;
+    }
+    // A shape written several ways is its first declaration as read,
+    // carrying what its declarations agree on, each as a field written that
+    // way reads it; the `null` any of them admits is the property's.
+    anyAdmitsNull ||= shape.nullable;
+    return settledShape(shape.read);
+  });
+  if (variants.length > 1) {
+    return {
+      ...agreed,
+      ...extensions,
+      oneOf: anyAdmitsNull ? [...variants.map(withoutNull), { type: 'null' }] : variants,
+    };
+  }
+  // One shape after all: that declaration, admitting `null` when a spelling
+  // of it does — on its own `type` where the declarations write it there
+  // and the type builder reads it there (an inline object or enum, so the
+  // model or enum is built as from that spelling alone), else under a
+  // nullable wrapper.
+  const [only] = shapes.values();
+  const [variant] = variants;
+  if (!anyAdmitsNull) return variant!;
+  const own = only!.admitting && withOwnNull(variant!, only!.admitting);
+  return own && declaresNull(own) ? own : withNullVariant(variant!);
+}
+
+/**
+ * The declarations of one shape (`unionOfDeclarations`): as `written`, in
+ * order; each as `read` — as the type builder types it
+ * (`typedDeclaration`), or as written for one typed under a name minted
+ * where it stands, the `null` it admits set aside either way; the distinct
+ * `spellings` among them (`declarationShapeKey` of each as written);
+ * whether any admits `null` (`nullable`); and, for a shape compared as
+ * written, the first declaration that does (`admitting`).
+ */
+interface DeclaredShape {
+  written: SchemaObject[];
+  read: SchemaObject[];
+  spellings: Set<string>;
+  nullable: boolean;
+  admitting?: SchemaObject;
+}
+
+/** The shape `unionOfDeclarations` compares a declaration by: `schemaShapeKey` of it less the keywords a field reads by agreement, at its top level and inside its array items and map values (`withoutLiftedKeywords`). */
+function declarationShapeKey(declaration: SchemaObject): string {
+  return schemaShapeKey(withoutLiftedKeywords(declaration));
+}
+
+/**
+ * The one schema that stands for `declarations`, all of one shape
+ * (`unionOfDeclarations`): the first, `deprecated` where every one is
+ * (`shapeVariant`), the limits inside its items and values read by their
+ * agreement (`withAgreedNestedLimits`), carrying the keywords and
+ * extensions they agree on (`agreed`, `extensions`: by default the
+ * declarations' own agreement) in place of its own.
+ */
+function settledShape(
+  declarations: readonly SchemaObject[],
+  agreed: Record<string, unknown> = agreedDeclarationKeys(declarations, LIFTED_DECLARATION_KEYWORDS),
+  extensions: Extensions | undefined = agreedExtensions(declarations),
+): SchemaObject {
+  const first = withAgreedNestedLimits(shapeVariant(declarations), declarations);
+  const disputed = new Set(
+    LIFTED_DECLARATION_KEYWORDS.filter((key) => Object.hasOwn(first, key) && !Object.hasOwn(agreed, key)),
+  );
+  return withAgreedExtensions(disputed.size > 0 ? omitKeys(first, disputed) : first, extensions);
 }
 
 /**
@@ -4372,6 +4476,13 @@ function withoutNull(schema: SchemaObject): SchemaObject {
     rest.type = types.length === 1 ? types[0] : types;
   }
   return rest;
+}
+
+/** `schema`, which admits no `null` (`withoutNull`), admitting it as `admitting` does (`admitsNull`): by its `type` list, else by OAS 3.0 `nullable: true`. */
+function withOwnNull(schema: SchemaObject, admitting: SchemaObject): SchemaObject {
+  return Array.isArray(admitting.type) && admitting.type.includes('null')
+    ? { ...schema, type: admitting.type }
+    : { ...schema, nullable: true };
 }
 
 /**

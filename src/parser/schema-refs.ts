@@ -67,6 +67,19 @@ export function componentKeyOf(ref: unknown): string | undefined {
 }
 
 /**
+ * The `$ref` that leads to the reference `tokens` (`schemaRefTokens`), in
+ * the one spelling every `$ref` to that place shares: each token
+ * percent-encoded, then its `~` escaped (`~0`), so reading it back gives
+ * the same tokens — `#/components/schemas/Pet%20Owner` for the key `Pet
+ * Owner`, however a document's own `$ref` escapes it. For a reader that
+ * compares two references by the place they name
+ * (`typedDeclaration`; #669), never by their text.
+ */
+export function schemaRefOf(tokens: readonly string[]): string {
+  return SCHEMA_REF_PREFIX + tokens.map((token) => encodeURIComponent(token).split('~').join('~0')).join('/');
+}
+
+/**
  * The schema a `$ref` points at in `schemas`: the component it names by
  * key, or the schema a deeper pointer lands on inside one
  * (`schemaAtPointer`). `undefined` when the `$ref` points outside

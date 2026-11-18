@@ -428,9 +428,10 @@ function endFieldFits(kind: PaginationEndOfIteration['kind'], schema: SchemaObje
  * only variants declare as is such a union when the variants' declarations
  * differ (`unionOfDeclarations`: `has_more: { type: 'boolean', const: true
  * }` in one variant and `{ type: 'boolean', const: false }` in the other,
- * or `{ $ref: Flag }` beside `{ type: 'boolean' }`), so it is tested as the
- * override walk tests the field it lands on one level down, in every
- * variant (`endOfIterationProblem`, `fieldsAtPath`) — PR #643 review
+ * or `{ $ref: Flag }` beside `{ type: 'boolean', const: true }`; `{ $ref:
+ * Flag }` beside `{ type: 'boolean' }` is one `boolean`, #669), so it is
+ * tested as the override walk tests the field it lands on one level down,
+ * in every variant (`endOfIterationProblem`, `fieldsAtPath`) — PR #643 review
  * (MichaelDeBoey): the union was tested as one schema, so such a `has_more`
  * ended no iteration at the top level and an explicit `endOfIteration`
  * naming it was rejected as "not a boolean field", while `meta.has_more`
