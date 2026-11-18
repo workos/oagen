@@ -1064,10 +1064,27 @@ export function collectExistingNames(
 }
 
 /**
- * The enum names among `collectExistingNames`: each enum's name, and every
- * enum a model field or an operation refers to, inline enums included. A
- * webhook model may never take one of these (`mintSchema`): a model and an
- * enum under one name would reach an emitter as one public symbol.
+ * The enum names among `collectExistingNames` that no decided model holds:
+ * each enum's name, and every enum a model field or an operation refers
+ * to, inline enums included. A webhook model may never take one of these
+ * (`mintSchema`): a model and an enum under one name would reach an
+ * emitter as one public symbol. A name a decided model holds as well is
+ * left out: the document declares one, with a model component and an
+ * enum component whose keys resolve to one name (`Size: { type: 'object',
+ * properties }` beside `Sizes: { type: 'string', enum }`, both `Size`;
+ * #668), which the parser keeps both of, since each `$ref` is typed as
+ * the component its key names, and reports (`extractSchemas`: `[oagen]
+ * Warning: Component schemas "Size" (a model) and "Sizes" (an enum) both
+ * resolve to "Size" — keeping both, each $ref typed as the component it
+ * names; a schemaNameTransform can give one a name of its own`), and which
+ * a `schemaNameTransform` returning another name for one of the keys (its
+ * `originalName`) parts. A
+ * webhook model of that name is then settled as one named like a decided
+ * model is — by the stem hash, or by the model merge, which shares the
+ * component's name when the component admits the shape — as the merge
+ * passes settle such a name for an operation's (`settleSharedNames`), so
+ * the webhook's models are what they are when the enum has a name of its
+ * own.
  */
 export function collectExistingEnumNames(
   models: Model[],
@@ -1078,7 +1095,7 @@ export function collectExistingEnumNames(
   return collectExistingNamesByKind(models, services, enums, webhooks).enums;
 }
 
-/** The names a webhook's minting must step around: every decided name, and among them the enums'. */
+/** The names a webhook's minting must step around: every decided name, and among them the enums' that no decided model holds as well (`collectExistingEnumNames`). */
 export interface ReservedNames {
   all: ReadonlySet<string>;
   enums: ReadonlySet<string>;
@@ -1118,6 +1135,10 @@ function collectExistingNamesByKind(
     for (const op of service.operations) for (const ref of collectOperationTypeRefs(op)) collect(ref);
   }
   for (const webhook of webhooks) for (const ref of collectWebhookTypeRefs(webhook)) collect(ref);
+  // A name a decided model holds as well is the document's own clash — a
+  // model component and an enum component whose keys resolve to one name
+  // (#668) — and is settled as the model's (`ReservedNames.enums`).
+  for (const model of models) enumNames.delete(model.name);
   return { all: names, enums: enumNames };
 }
 
@@ -1359,7 +1380,9 @@ export function settleStemOperationIds(entries: WebhookEntry[], kind: ReceivedRe
  * alone leaves the stem plain. One named like a decided enum is renamed
  * under the payload's root instead (`PetAdoptedPayloadCircle`, see
  * `mintSchema`), since a model and an enum under one name would reach an
- * emitter as one symbol; one named like a decided model, or like another
+ * emitter as one symbol; one named like a decided model — a name an enum
+ * component holds as well included, the document's own clash
+ * (`collectExistingEnumNames`) — or like another
  * webhook's variant, is left to the model merge, which shares a component's
  * name when the component admits the shape and renames the variant under
  * the webhook's stem otherwise (`PetAdoptedComp`), as it does for
@@ -2012,7 +2035,23 @@ const MAX_PARAMETER_PROPERTY_ATTEMPTS = 64;
  * emitter as one public symbol. A variant named like a decided MODEL is left
  * to the stem hash and the model merge, as before: the names minted here are
  * not reserved from the extractor, so a stem-embedded clash still hashes the
- * stem and a context-free one still reaches the merge.
+ * stem and a context-free one still reaches the merge. So is one named like
+ * a decided model and a decided enum at once, which `reserved.enums` leaves
+ * out (`collectExistingEnumNames`): the document declares such a name,
+ * with a model component and an enum component whose keys resolve to one
+ * name — `Size: { type: 'object', properties }` beside `Sizes: { type:
+ * 'string', enum }`, both `Size` (#668) — which `extractSchemas` keeps
+ * both of, since each `$ref` is typed as the component its key names, and
+ * reports (`[oagen] Warning: Component schemas "Size" (a model) and
+ * "Sizes" (an enum) both resolve to "Size" — keeping both, each $ref typed
+ * as the component it names; a schemaNameTransform can give one a name of
+ * its own`), and which a `schemaNameTransform` returning another name for
+ * one of the keys (its `originalName`) parts. Settled as the model's, the
+ * webhook's models are what they are when the enum has a name of its own
+ * (they were renamed under the root, `PetOwnedPayloadPetOwnedPayload`
+ * beside a model component `PetOwnedPayload` and an enum component
+ * `pet_owned_payload`, where the same document with the enum under another
+ * key hashes the stem).
  */
 function mintSchema(
   schema: SchemaObject,

@@ -82,24 +82,36 @@ export function documentComponentSchemas(): Record<string, SchemaObject> | undef
 }
 
 /**
- * Module-level set of resolved schema names whose components/schemas entry is
- * an enum (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
+ * Module-level set of the `components/schemas` keys whose entry is an enum
+ * (`isEnumComponentSchema`: an `enum:` list, or a `oneOf`/`anyOf` of
  * string consts). Populated by extractSchemas() so schemaToTypeRef()
  * can classify a `$ref` to a top-level enum schema as `kind: 'enum'` instead of
  * `kind: 'model'`. Without this, every `$ref` was naively returned as a model
- * ref, even when the target was a shared enum like `PaginationOrder`.
+ * ref, even when the target was a shared enum like `PaginationOrder`. Keyed
+ * by the component key the `$ref` names, as the array, primitive, alias and
+ * nullable model components are, never by the name the key resolves to:
+ * `cleanSchemaName` singularizes the leading word, so `Size: { type:
+ * 'object', properties }` and `Sizes: { type: 'string', enum }` both resolve
+ * to `Size`, and only `{ $ref: Sizes }` is the enum — `{ $ref: Size }` is
+ * the model (#668: the set held the resolved name, so both were the enum
+ * and nothing referenced the model `Size`).
  */
-let activeEnumSchemaNames: Set<string> = new Set();
+let activeEnumComponentKeys: Set<string> = new Set();
 
 /**
- * Subset of `activeEnumSchemaNames` whose component schema also admits
+ * Subset of `activeEnumComponentKeys` whose component schema also admits
  * `null` — via an OAS 3.1 `type: [..., 'null']` array, the OAS 3.0
  * `nullable: true` flag, or a literal `null` member in `enum:`. A `$ref` to
  * one of these resolves to `nullable(enum)` so the component's own
  * nullability survives the reference, matching the shape an inline
- * `oneOf: [{ $ref }, { type: 'null' }]` already produces.
+ * `oneOf: [{ $ref }, { type: 'null' }]` already produces. By key too: with
+ * `Size: { type: ['string', 'null'], enum: ['small', 'large', null] }` and
+ * `Sizes: { type: 'string', enum: ['small', 'large'] }`, which resolve to
+ * one enum `Size` (`foldEnumComponents`), `{ $ref: Size }` is
+ * `nullable<Size>` and `{ $ref: Sizes }` the bare `Size` (#668: keyed by
+ * the resolved name, `{ $ref: Sizes }` gained the `null` `Size` admits).
  */
-let activeNullableEnumSchemaNames: Set<string> = new Set();
+let activeNullableEnumComponentKeys: Set<string> = new Set();
 
 /**
  * The `components/schemas` keys of the model components that admit `null`,
@@ -1634,6 +1646,76 @@ export interface ExtractedSchemas {
   enums: Enum[];
 }
 
+/** An enum component as `extractSchemas` reads it: its `components/schemas` key as written, and the `Enum` built from it under the name the key resolves to. */
+interface EnumComponent {
+  key: string;
+  definition: Enum;
+}
+
+/** Component keys as a warning names them: each quoted, in the default string order (UTF-16 code units), never the document's. */
+function quotedKeys(keys: readonly string[]): string {
+  return [...keys]
+    .sort()
+    .map((key) => `"${key}"`)
+    .join(', ');
+}
+
+/**
+ * What two enum components that resolve to one name must agree on to be one
+ * `Enum`: their members, each with its deprecation and in any order
+ * (`enumShapeKey`, the shape two inline enums share a name on), the enum's
+ * own `deprecated` and its `default`. Its text, link and `x-*` keys, and a
+ * member's text, are documentation, not shape, and so is whether the
+ * component admits `null`: that is each reference's (`componentTypeRef`),
+ * never the `Enum`'s.
+ */
+function enumComponentShape(definition: Enum): string {
+  return JSON.stringify([enumShapeKey(definition.values), definition.deprecated === true, definition.default ?? null]);
+}
+
+/**
+ * The one `Enum` each name keeps, in the order the names first appear, with
+ * the keys that resolve to it. Two enum components whose keys resolve to
+ * one name — `Size` and `Sizes`, which `cleanSchemaName` both reads as
+ * `Size`, or `Note` and `note` — are one `Enum`, as two object components
+ * are one model: the definition with more values, and among those of equal
+ * count the one whose key sorts first in the default string order (UTF-16
+ * code units) — never the first in the document, so the reversed document
+ * keeps the same one. Definitions that agree (`enumComponentShape`) fold
+ * silently, the kept one's documentation standing; one that differs from
+ * the kept one is reported before it is dropped, and a `$ref` to its key is
+ * still typed as the enum of that name, with the nullability its own
+ * schema declares (`componentTypeRef`). #668: each key pushed an `Enum` of
+ * its own, so `spec.enums` held two `Size` entries, unreported, and a
+ * reader that indexes the enums by name, as the differ does (`diffEnums`),
+ * kept whichever came last.
+ */
+function foldEnumComponents(components: readonly EnumComponent[]): Array<{ definition: Enum; keys: string[] }> {
+  const byName = new Map<string, EnumComponent[]>();
+  for (const component of components) {
+    const group = byName.get(component.definition.name);
+    if (group) group.push(component);
+    else byName.set(component.definition.name, [component]);
+  }
+  return [...byName.values()].map((group) => {
+    const ordered = [...group].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const kept = ordered.reduce((best, candidate) =>
+      candidate.definition.values.length > best.definition.values.length ? candidate : best,
+    );
+    for (const other of ordered) {
+      if (other === kept || enumComponentShape(other.definition) === enumComponentShape(kept.definition)) continue;
+      const reason =
+        kept.definition.values.length > other.definition.values.length
+          ? 'the one with more values'
+          : 'the first key in string order';
+      console.warn(
+        `[oagen] Warning: Component schemas "${kept.key}" and "${other.key}" both resolve to the enum "${kept.definition.name}" with different values, default or deprecation (${kept.definition.values.length} vs ${other.definition.values.length} values) — keeping "${kept.key}", ${reason}`,
+      );
+    }
+    return { definition: kept.definition, keys: ordered.map(({ key }) => key) };
+  });
+}
+
 export function extractSchemas(
   schemas: Record<string, SchemaObject> | undefined,
   options?: SchemaExtractionOptions,
@@ -1706,13 +1788,14 @@ export function extractSchemas(
   // other inline schema of the document is a root of its own.
   markContestedTitles(options?.document ?? { components: { schemas } });
 
-  // Pre-compute the set of resolved names whose component schema is an enum so
+  // Pre-compute the set of keys whose component schema is an enum so
   // schemaToTypeRef() can classify `$ref` targets correctly. Built in a separate
   // pass because the per-schema loop mutates models/enums and we want this map
   // available before any TypeRef is resolved (operations + nested fields both
-  // call schemaToTypeRef during extraction).
-  activeEnumSchemaNames = new Set();
-  activeNullableEnumSchemaNames = new Set();
+  // call schemaToTypeRef during extraction). By the key a `$ref` names, never
+  // the name it resolves to, which two keys can share (#668).
+  activeEnumComponentKeys = new Set();
+  activeNullableEnumComponentKeys = new Set();
   activeNullableModelComponentKeys = new Set();
   activeNamedUnionMemo = { plans: new WeakMap(), shapes: new WeakMap(), variantEntries: new WeakMap() };
   // The primitive components, by key, before any TypeRef is built: a `$ref`
@@ -1734,15 +1817,14 @@ export function extractSchemas(
       .map(([key]) => key),
   );
   for (const [name, schema] of Object.entries(schemas)) {
-    const resolved = resolveSchemaName(name);
     // An enum component is read on the schema it declares its members on
     // (`enumComponentDeclaration`): through an `allOf` wrapper, the
     // member's own nullability is the enum's, and the wrapper's OAS 3.0
     // `nullable: true` declares nothing.
     const declaration = enumComponentDeclaration(schema);
     if (declaration) {
-      activeEnumSchemaNames.add(resolved);
-      if (isNullableEnumSchema(declaration)) activeNullableEnumSchemaNames.add(resolved);
+      activeEnumComponentKeys.add(name);
+      if (isNullableEnumSchema(declaration)) activeNullableEnumComponentKeys.add(name);
     } else if (
       // A named union's `null` variant, or the `null` an object component
       // declares on itself or on the component it is an alias of (#615),
@@ -1867,12 +1949,19 @@ export function extractSchemas(
     if (other === undefined) componentKeysByName.set(model.name, key);
     keepLarger(model);
   };
+  // Every enum component with its key, folded to one `Enum` per name once
+  // all are read (`foldEnumComponents`), so which definition a name keeps
+  // never depends on the order the document lists the keys in.
+  const enumComponents: EnumComponent[] = [];
+  // Every key whose own model is built under each name, for the report of a
+  // name a model component and an enum component both resolve to.
+  const modelComponentKeys = new Map<string, string[]>();
 
   for (const [name, schema] of Object.entries(schemas)) {
     const pascalName = resolveSchemaName(name);
 
     if (isEnumComponentSchema(schema)) {
-      enums.push(extractEnum(pascalName, schema));
+      enumComponents.push({ key: name, definition: extractEnum(pascalName, schema) });
     } else if (activeArrayComponentPlans.has(name)) {
       // No model of its own: a `$ref` to it is the array (`arrayComponentTypeRef`).
       for (const inlineModel of extractArrayComponentModels(name, schemas)) keepLarger(inlineModel);
@@ -1896,6 +1985,7 @@ export function extractSchemas(
         );
       }
       keepComponent(name, extractModel(pascalName, schema, schemas));
+      modelComponentKeys.set(pascalName, [...(modelComponentKeys.get(pascalName) ?? []), name]);
 
       for (const inlineModel of [
         ...extractDiscriminatedAllOfVariantModels(schema, pascalName, schemas),
@@ -1903,6 +1993,21 @@ export function extractSchemas(
       ]) {
         keepLarger(inlineModel);
       }
+    }
+  }
+
+  // One `Enum` per name (#668: `Size` and `Sizes`, two enum components that
+  // resolve to `Size`, were two `Size` entries). A name a model component
+  // holds as well keeps both, since each `$ref` is typed as the component
+  // its key names — `{ $ref: Size }` the model, `{ $ref: Sizes }` the enum
+  // — and is reported, because the two reach an emitter under one name.
+  for (const { definition, keys } of foldEnumComponents(enumComponents)) {
+    enums.push(definition);
+    const modelKeys = modelComponentKeys.get(definition.name);
+    if (modelKeys !== undefined) {
+      console.warn(
+        `[oagen] Warning: Component schemas ${quotedKeys(modelKeys)} (a model) and ${quotedKeys(keys)} (an enum) both resolve to "${definition.name}" — keeping both, each $ref typed as the component it names; a schemaNameTransform can give one a name of its own`,
+      );
     }
   }
 
@@ -1946,8 +2051,8 @@ export function extractSchemas(
 /** Clear the module-level schemaNameTransform. Called by parseSpec() after all extraction phases. */
 export function clearSchemaNameTransform(): void {
   activeSchemaNameTransform = null;
-  activeEnumSchemaNames = new Set();
-  activeNullableEnumSchemaNames = new Set();
+  activeEnumComponentKeys = new Set();
+  activeNullableEnumComponentKeys = new Set();
   activeNullableModelComponentKeys = new Set();
   activeComponentSchemaKeys = new Set();
   activeComponentSchemas = undefined;
@@ -2000,9 +2105,21 @@ export function collectInlineEnumFromRef(ref: TypeRef, enums: Enum[], seen: Set<
 /**
  * Walk a model's type refs (its fields' types and, for a named union, its
  * variants) and extract inline enum refs as top-level enum definitions,
- * skipping one whose name is in `modelNames`: a model and an enum must never
- * share a name, and the collision-aware model pass
- * (`collectInlineEnumsFromModels`) renames and promotes that one later.
+ * skipping one whose name is in `modelNames`: an inline enum is never
+ * promoted under a model's name, and the collision-aware model pass
+ * (`collectInlineEnumsFromModels`) renames and promotes that one later —
+ * or shares a component enum of its name and members, which the document
+ * declared beside the model. There the IR does declare a model and an
+ * enum under one name: a model component and an
+ * enum component whose keys resolve to one name — `Size: { type: 'object',
+ * properties }` beside `Sizes: { type: 'string', enum }`, both `Size`
+ * (#668) — are both kept, a `Size` in `models` and a `Size` in `enums`,
+ * since each `$ref` is typed as the component its key names, and reported
+ * by `extractSchemas`: `[oagen] Warning: Component schemas "Size" (a
+ * model) and "Sizes" (an enum) both resolve to "Size" — keeping both, each
+ * $ref typed as the component it names; a schemaNameTransform can give one
+ * a name of its own`. A `schemaNameTransform` that returns another name
+ * for one of the keys (its `originalName`) parts the two.
  * This ensures type alias files are generated for inline enums.
  */
 function collectInlineEnums(model: Model, enums: Enum[], modelNames: ReadonlySet<string>): void {
@@ -4356,7 +4473,7 @@ function extractEnum(name: string, schema: SchemaObject): Enum {
   // `description` and `deprecated`. A `null` member or `type: 'null'`
   // variant marks the schema as nullable (OAS 3.1); it is not a value.
   // Nullability is carried on the `$ref` side via
-  // `activeNullableEnumSchemaNames`, so it is dropped here instead of
+  // `activeNullableEnumComponentKeys`, so it is dropped here instead of
   // emitting a bogus `NULL = "null"` member.
   const values: EnumValue[] = (enumMembersOf(declaration) ?? []).map(toEnumValue);
 
@@ -5160,6 +5277,27 @@ function isEnumComponentEntry(schema: SchemaObject, schemas: Record<string, Sche
 function isEnumComponentAlias(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
   const entries = componentEntries(schema, schemas, isEnumComponentSchema);
   return entries !== undefined && entries.length > 1;
+}
+
+/**
+ * Whether a `components/schemas` entry becomes a model of its own: every
+ * entry but an enum component (`isEnumComponentSchema`), an array
+ * component (`isArrayComponentEntry`), a primitive component
+ * (`isPrimitiveComponentEntry`) and an alias of an enum component
+ * (`isEnumComponentAlias`) — the four kinds `extractSchemas` builds no
+ * model for, by the tests it decides them with. For a reader that asks of
+ * a key what its model is asked, when another key resolves to the same
+ * name: `Sizes: { type: 'string', enum }` beside `Size: { type: 'object',
+ * properties }` holds no model named `Size`, so nothing said of the key
+ * `Sizes` is said of that model (`sentOnlyComponentNames`; #668).
+ */
+export function buildsComponentModel(schema: SchemaObject, schemas: Record<string, SchemaObject>): boolean {
+  return (
+    !isEnumComponentSchema(schema) &&
+    !isArrayComponentEntry(schema, schemas) &&
+    !isPrimitiveComponentEntry(schema, schemas) &&
+    !isEnumComponentAlias(schema, schemas)
+  );
 }
 
 /**
@@ -7884,10 +8022,26 @@ export function markComponentModelRef(ref: ModelRef): void {
  * a top-level component schema needs to preserve whether the target is a
  * model or an enum, because emitters route imports differently for the two
  * kinds (e.g. com.example.models.X vs com.example.types.X). The set of enum
- * names is precomputed by extractSchemas() in a first pass so it's
+ * keys is precomputed by extractSchemas() in a first pass so it's
  * available even when called recursively for nested $refs. Read by
  * `schemaToTypeRef` for the `$ref` itself and by `resolveSchemaPointers`
  * for the component a pointer enters (#539).
+ *
+ * What the component is, and whether it admits `null`, is read by `key`
+ * for every kind — an array, a primitive, an alias of an enum, an enum, a
+ * model — and never by the name the key resolves to, which two keys can
+ * share (`cleanSchemaName` singularizes the leading word, so `Size` and
+ * `Sizes` are both `Size`; `Note` and `note` are both `Note`). Only the
+ * reference's `name` is the resolved one. #668: an enum and its nullability
+ * were read by that name, so with `Size: { type: ['string', 'null'], enum:
+ * ['small', 'large', null] }` beside `Sizes: { type: 'string', enum:
+ * ['small', 'large'] }` a `$ref` to `Sizes` was `nullable<Size>`, and with
+ * `Size: { type: 'object', properties }` a `$ref` to `Size` was the enum
+ * `Sizes` declares and nothing referenced the model. A `$ref` to `Sizes` is
+ * now the bare enum `Size`, and a `$ref` to the object `Size` the model
+ * `Size`. Two enum components of one name are one `Enum`
+ * (`foldEnumComponents`); a model and an enum of one name are both kept,
+ * and reported (`extractSchemas`).
  *
  * Every kind of component carries its own nullability through the
  * reference, so the two spellings of one schema — written inline, or
@@ -7897,7 +8051,7 @@ export function markComponentModelRef(ref: ModelRef): void {
  * OAS 3.1 `type` list naming `'null'`, OAS 3.0 `nullable: true`, a nullable
  * `oneOf`/`anyOf` wrapper, a single-member `allOf` around one of these —
  * is wrapped in `nullable` here, since the enum or model built for it
- * carries no wrapper (`activeNullableEnumSchemaNames`,
+ * carries no wrapper (`activeNullableEnumComponentKeys`,
  * `activeNullableModelComponentKeys`; #615: `PetOwner: { type: ['object',
  * 'null'], properties }` named by a bare `$ref` was `PetOwner`, while
  * `Pet.owner` written inline, and the JSON Pointer `#/components/schemas/
@@ -7944,12 +8098,18 @@ export function componentTypeRef(key: string): TypeRef {
   const alias = activeEnumAliasKeys.has(key) ? component : undefined;
   if (alias) return schemaToTypeRef(alias);
   const resolved = resolveSchemaName(key);
-  if (activeEnumSchemaNames.has(resolved)) {
+  // An enum component, by the key the `$ref` names as every kind above is,
+  // never by the name the key resolves to: `Sizes: { type: 'string', enum }`
+  // beside `Size: { type: 'object', properties }` resolve to one name, and
+  // only `{ $ref: Sizes }` is the enum (#668).
+  if (activeEnumComponentKeys.has(key)) {
     const enumRef: TypeRef = { kind: 'enum', name: resolved };
     // Carry the component's own nullability through the reference so
     // `field: { $ref: NullableEnum }` has the same shape as the inline
-    // `oneOf: [{ $ref }, { type: 'null' }]` form.
-    return activeNullableEnumSchemaNames.has(resolved) ? { kind: 'nullable', inner: enumRef } : enumRef;
+    // `oneOf: [{ $ref }, { type: 'null' }]` form — the key's own, so a
+    // reference to another enum component of the same resolved name never
+    // gains a `null` its schema does not admit.
+    return activeNullableEnumComponentKeys.has(key) ? { kind: 'nullable', inner: enumRef } : enumRef;
   }
   // Likewise a model component that admits `null` — a named union with a
   // `null` variant, or an object component that declares it (#615): neither

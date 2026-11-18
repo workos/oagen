@@ -410,10 +410,21 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // a `createPet` body beside a `request` query enum of its service named
   // `CreatePetRequest`, as a `request` parameter object beside that enum
   // steps in the shape registry (`reserveEnumNames`) — the model steps
-  // wherever an enum of its name exists, so the IR never declares a model
+  // wherever an enum of its name exists, so no pass here declares a model
   // and an enum under one name. An enum the collectors lift after a model
   // of its name that no pass could rename (a component model) steps itself
-  // (`collectDistinctEnums`). Every site is here: the operations', the
+  // (`collectDistinctEnums`). The IR does declare both under one name
+  // where the document does: a model component and an enum component whose
+  // keys resolve to one name — `Size: { type: 'object', properties }`
+  // beside `Sizes: { type: 'string', enum }`, both `Size` (#668) — are both
+  // kept, each `$ref` typed as the component its key names, and reported
+  // by `extractSchemas` (`[oagen] Warning: Component schemas "Size" (a
+  // model) and "Sizes" (an enum) both resolve to "Size" — keeping both,
+  // each $ref typed as the component it names; a schemaNameTransform can
+  // give one a name of its own`); a `schemaNameTransform` that returns
+  // another name for one of the keys (its `originalName`) parts the two.
+  // An inline model of that name is settled against the model component
+  // (`settleSharedNames`). Every site is here: the operations', the
   // webhooks', and the component fields' — read again, with the references
   // the operations' and webhooks' `allOf` merges have copied from component
   // fields since the fields were settled.

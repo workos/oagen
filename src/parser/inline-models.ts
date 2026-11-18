@@ -14,6 +14,7 @@ import { toPascalCase, stripListItemMarkers, singularizeTrailingWord } from '../
 import type { SchemaObject } from './schemas.js';
 import {
   buildFieldFromSchema,
+  buildsComponentModel,
   classifyInlineSchema,
   componentPropertyLedger,
   admits,
@@ -1231,7 +1232,16 @@ function schemaRootsOf(
  * one that names `Pet` leaves `Pet` as only sent as it was, and is itself
  * not among the result, since the document does not say which way it goes.
  * Two keys that resolve to one name (`Note` and `note`) count as one
- * component only sent when both are.
+ * component only sent when both are — two keys whose own model takes the
+ * name. Under a name a model holds, a key that builds no model
+ * (`buildsComponentModel`: an enum, an array or primitive component, an
+ * alias of an enum) has no field of its own to send and says nothing of
+ * the model: `Sizes: { type: 'string', enum }` beside `Size: { type:
+ * 'object', properties }` leaves `Size` only sent when the object is,
+ * whatever reads the enum (#668: a response typed by the enum, or nothing
+ * reaching it, lost the object its sent-only standing, and its field
+ * object was typed as a looser component of its name). A name no model
+ * holds is read from every key that resolves to it, as it always was.
  *
  * A component field's object is what the SDK sends when its component is
  * (`fieldInlineModelBundles`, `InlineModelBundle.sent`), so it shares a
@@ -1272,10 +1282,26 @@ export function sentOnlyComponentNames(document: unknown): Set<string> {
   };
   readSchemaSites(document, schema);
 
+  // The names a model component holds: under one, only the keys whose own
+  // model takes the name speak for it (#668). A name no model holds is read
+  // from every key that resolves to it, as before.
+  // An entry that is no object is read as the model it always was, and is
+  // no alias target: this walk reads the document as written.
+  const declared = Object.fromEntries(Object.entries(schemas).filter(([, entry]) => isRecord(entry))) as Record<
+    string,
+    SchemaObject
+  >;
+  const modelKeys = new Set(
+    Object.keys(schemas).filter(
+      (key) => !Object.hasOwn(declared, key) || buildsComponentModel(declared[key]!, declared),
+    ),
+  );
+  const modelNames = new Set([...modelKeys].map((key) => resolveSchemaName(key)));
   const onlySent = new Map<string, boolean>();
   for (const key of Object.keys(schemas)) {
     const directions = reached.get(key);
     const name = resolveSchemaName(key);
+    if (modelNames.has(name) && !modelKeys.has(key)) continue;
     onlySent.set(name, (onlySent.get(name) ?? true) && directions?.size === 1 && directions.has('sent'));
   }
   return new Set([...onlySent].filter(([, only]) => only).map(([name]) => name));
