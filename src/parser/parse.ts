@@ -11,7 +11,7 @@ import {
 } from './schemas.js';
 import { attachSharedRefs, extractOperations } from './operations.js';
 import { sentOnlyComponentNames, type FieldInlineModelGroup } from './inline-models.js';
-import { collectExistingEnumNames, collectExistingNames, extractWebhooks } from './webhooks.js';
+import { collectExistingEnumNames, collectExistingNames, extractWebhooks, type SharedMinting } from './webhooks.js';
 import { extractCallbacks } from './callbacks.js';
 import { followReference, siblingDocsMode, type ReferenceObject, type SiblingDocs } from './reference-objects.js';
 import {
@@ -292,6 +292,10 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     pathItems: spec.components?.pathItems as Record<string, Record<string, unknown>> | undefined,
     callbacks: spec.components?.callbacks as Record<string, Record<string, unknown>> | undefined,
   };
+  // What each group of webhooks minted, for the callbacks below: a callback
+  // reaching the operation object a webhook was minted from shares that
+  // minting rather than minting a copy beside it (#631).
+  const webhookMintings: SharedMinting[] = [];
   const {
     webhooks,
     inlineModels: webhookInlineModels,
@@ -306,6 +310,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     siblingDocsMode(version),
     // A webhook entry may be a `$ref` to a `paths` entry, as to another webhook.
     spec.paths,
+    webhookMintings,
   );
   warnOnLegacyWebhooks(spec['x-webhooks']);
 
@@ -315,7 +320,9 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
   // far — components, operations, webhooks, the components' field models —
   // and join the webhooks' from here on, since a callback's payload is
   // received exactly as a webhook's is and every later pass reaches it the
-  // same way (`collectWebhookTypeRefs`, `collectOperationTypeRefs`).
+  // same way (`collectWebhookTypeRefs`, `collectOperationTypeRefs`). A
+  // callback reading the operation object of one of `webhookMintings` under
+  // its stem names nothing: it references the webhook's models (#631).
   const { inlineModels: callbackInlineModels, inlineModelBundles: callbackInlineModelBundles } = extractCallbacks(
     [...declaredCallbacks, ...webhookCallbacks],
     receivedComponents,
@@ -334,6 +341,7 @@ export async function parseSpec(specPath: string, options?: ParseOptions): Promi
     siblingDocsMode(version),
     spec.paths,
     spec.webhooks,
+    webhookMintings,
   );
   webhookInlineModels.push(...callbackInlineModels);
   webhookInlineModelBundles.push(...callbackInlineModelBundles);
