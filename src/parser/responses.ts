@@ -16,6 +16,7 @@ import {
   declaresNull,
   schemaToTypeRef,
   buildFieldFromSchema,
+  besideUnionsCompose,
   classifyInlineSchema,
   constraintsEntry,
   deprecatedEntry,
@@ -31,6 +32,7 @@ import {
   unionAxesOf,
   unionFlaggedNullable,
   warnOnUncarriedProperties,
+  warnOnUnreadUnion,
   withSchemaConstraints,
   withWrapperDocs,
 } from './schemas.js';
@@ -343,6 +345,7 @@ function classifyBody(
   // under the body's name, since the fold leaves `schemaToTypeRef` nothing
   // to report.
   warnOnUncarriedProperties(schema, contextName, undefined);
+  warnOnUnreadUnion(schema, contextName);
   schema = foldSiblingProperties(schema);
 
   // 2. Check for list envelope (structural detection: array prop + non-array companion)
@@ -947,6 +950,10 @@ function isSingleResourceWrapper(schema: SchemaObject): boolean {
   // the property; the object still unwraps.
   const variants = (propSchema.oneOf ?? propSchema.anyOf)?.filter((v) => !isNullSchema(v)) ?? [];
   if (variants.length > 1 && variants.some((variant) => variantAddsShape(variant, propSchema))) return false;
+  // A typing `oneOf` beside a typing `anyOf` composes (`besideUnionsCompose`;
+  // #680): the property is one of the first and any of the second, the
+  // body's own field, never the `oneOf`'s one object with the `anyOf` dropped.
+  if (besideUnionsCompose(propSchema)) return false;
 
   // Direct object with a discriminant const field
   if (propSchema.type === 'object' && hasDiscriminantConstField(propSchema) !== null) return true;

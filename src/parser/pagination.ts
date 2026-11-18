@@ -13,6 +13,7 @@ import type { PaginationHint } from '../ir/operation-hints.js';
 import type { SchemaObject } from './schemas.js';
 import { componentKeyOf, isPendingSchemaRef } from './schema-refs.js';
 import {
+  allOfComposesComponent,
   allOfReadAsMember,
   classifyInlineSchema,
   componentUnionDispatches,
@@ -23,6 +24,7 @@ import {
   resolveComponentSchemaRef,
   resolveSchemaName,
   unionAxesOf,
+  axisDiscriminatorOf,
   unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
@@ -758,8 +760,10 @@ function unionFields(
  * `has_more` every dispatched variant declares, and the iterator read a
  * field `Meta { base, trace_id }` lacks). One exception, the component
  * reader's own (`readComponentAllOfMember`): a component's direct `$ref`
- * member to a plain object that carries the union — no `allOf` of its own
- * nor on the way to it — dispatches the component itself (`Dog: { allOf:
+ * member to a plain object that carries the union — no `allOf` that
+ * composes it nor one on the way to it (`allOfComposesComponent`: one
+ * that only annotates the union beside it is part of the wrapper) —
+ * dispatches the component itself (`Dog: { allOf:
  * [{ $ref: Pet }] }` with `Pet: { properties: { id }, oneOf: [cat, dog] }`
  * dispatches to `DogCat` and `DogDog`), whose variant models carry the
  * field; an inline merge of the same member carries the base fields only.
@@ -972,15 +976,24 @@ export function collectObjectProperties(
   // for the member, counting from the `from`th it recorded; `direct` when
   // the member is one of the node's own and every component on the way to
   // the schema it lands on is a plain object or an alias — none composed
-  // with `allOf`, which the component reader reads as a nested component
-  // whose own dispatcher stays its own. `null` for an inline member.
+  // by its `allOf` (`allOfComposesComponent`, the component reader's own
+  // test), which that reader reads as a nested component whose own
+  // dispatcher stays its own. An `allOf` that only annotates the unions
+  // written beside it composes nothing, and the member is read as those
+  // unions (#613, #680 review: any `allOf` made the member indirect here,
+  // so a stop field every dispatched variant declares resolved with the
+  // description beside the unions and not with it in an `allOf` member,
+  // where the model dispatches alike). `null` for an inline member.
   const memberOrigin = (from: number, depth: number): CollectedUnion['origin'] => {
     const refs = [...seenRefs].slice(from);
     const key = componentKeyOf(refs[0]);
     if (key === undefined) return null;
     const direct =
       depth === 1 &&
-      refs.every((ref) => resolveComponentSchemaRef({ $ref: ref }, componentSchemas)?.allOf === undefined);
+      refs.every((ref) => {
+        const component = resolveComponentSchemaRef({ $ref: ref }, componentSchemas);
+        return component === undefined || !allOfComposesComponent(component);
+      });
     return { name: resolveSchemaName(key), direct };
   };
 
@@ -1036,11 +1049,17 @@ export function collectObjectProperties(
       for (const variants of unionAxesOf(bare)) {
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
+        // A member writing both keywords hands its own `discriminator` to
+        // the first of them that types it (`axisDiscriminatorOf`).
+        const axisDiscriminator =
+          axisDiscriminatorOf(bare, variants) ??
+          (bare === carrier ? undefined : carrier.discriminator) ??
+          wrapperDiscriminator;
         if (branch) {
-          visit(branch, depth, origin, discriminator);
+          visit(branch, depth, origin, axisDiscriminator);
           continue;
         }
-        const union: CollectedUnion = { schema: bare, keyword, variants, origin, discriminator };
+        const union: CollectedUnion = { schema: bare, keyword, variants, origin, discriminator: axisDiscriminator };
         unions.push(union);
         // What the variants declare, when the model flattens the union into
         // the node's model (`unionCounts`): branch-only fields of that model,

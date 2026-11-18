@@ -84,6 +84,7 @@ import {
   unwrapNullableField,
   unwrapNullableSchema,
   warnOnUncarriedProperties,
+  warnOnUnreadUnion,
   withSchemaConstraints,
   withWrapperDocs,
 } from './schemas.js';
@@ -5052,6 +5053,7 @@ function typePickedRequestBody(
   // the properties are reported on the body as written, under the body's
   // name, since the fold leaves `schemaToTypeRef` nothing to report.
   warnOnUncarriedProperties(schema, contextName, undefined);
+  warnOnUnreadUnion(schema, contextName);
   schema = foldSiblingProperties(schema);
 
   // A discriminated-union request body (`oneOf` + an explicit `discriminator`)

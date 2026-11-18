@@ -20,6 +20,8 @@ import {
   admits,
   componentSchemaOf,
   componentUnionDispatches,
+  composesOwnChain,
+  axisDiscriminatorOf,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
@@ -3979,7 +3981,9 @@ export function mergeAllOfMembers(
       // members, nullable ones included, and types their fields under its
       // own name (`DogMeta`); so does one inside a bare alias's (`Hop: {
       // $ref: Base }`), whose model is built as `allOf: [{ $ref: Base }]`'s
-      // is and types the field `HopMeta` (#618). Any other component met on
+      // is and types the field `HopMeta` (#618), and one inside a component
+      // composed of the `oneOf` and the `anyOf` it writes together
+      // (`composesOwnChain`; #680). Any other component met on
       // the way declares nothing of its own that this reference adds to —
       // a nullable alias (`Alias: { oneOf: [{ $ref: Base }, { type: 'null'
       // }] }`), a chain of them — and builds no model for the fields, so
@@ -3989,7 +3993,7 @@ export function mergeAllOfMembers(
       // a component (#539) names a schema and no model of its own, so it
       // declares as a member written inline does: under the origin at hand.
       const owner =
-        origin?.schema.allOf || origin?.schema.$ref !== undefined || key === undefined
+        (origin && composesOwnChain(origin.schema)) || key === undefined
           ? origin
           : { name: resolveSchemaName(key), schema: target };
       // Nothing written beside the `$ref` is read — not a bare alias's
@@ -4031,10 +4035,10 @@ export function mergeAllOfMembers(
     for (const variants of unionAxesOf(s)) {
       const branch = nullableAxisBranch(s, variants);
       if (branch) {
-        visit(branch, origin, s.discriminator ?? wrapperDiscriminator);
+        visit(branch, origin, axisDiscriminatorOf(s, variants) ?? wrapperDiscriminator);
         continue;
       }
-      const explicit = s.discriminator ?? wrapperDiscriminator;
+      const explicit = axisDiscriminatorOf(s, variants) ?? wrapperDiscriminator;
       if (origin !== null && componentUnionDispatches(variants, origin.name, componentSchemas, explicit)) continue;
       for (const variant of variants) declareVariant(declared, variant, componentSchemas);
     }
