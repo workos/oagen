@@ -95,11 +95,13 @@
  * (`componentAccepts`) — one that is live (a deprecated component takes no
  * body, as it takes no inline copy anywhere else, #441, #629), that
  * declares every field the member has, required or optional as the member
- * has it and deprecated only where the member's is (a live field takes a
- * deprecated one, with a warning, as the live model takes a deprecated
- * body), of its type and domain name, no stricter in its limits at any
- * level of a field's type (an array's items, a map's values, a union's
- * variants; #611), and admitting every value the member pins:
+ * has it, and deprecates none of them, whichever flag the member gives the
+ * field (#671: the component's flags decide alone, so a body's own flip
+ * never moves it on or off the component; a live field takes a deprecated
+ * one, with a warning, as the live model takes a deprecated body), of its
+ * type and domain name, no stricter in its limits at any level of a field's
+ * type (an array's items, a map's values, a union's variants; #611), and
+ * admitting every value the member pins:
  * those members fold onto it, and a member it cannot stand for is left as
  * it is, with a warning that prints that member's shape, so a body that
  * gains a field the component lacks moves alone. A name anything else holds
@@ -395,9 +397,14 @@ function fold(
     const list = left.map((member) => `"${member.name}"`).join(', ');
     return left.length === 1 ? `model ${list} as it is` : `models ${list} as they are`;
   };
-  const leave = (name: string, holder: string, left: readonly Model[]): void => {
+  const leave = (
+    name: string,
+    holder: string,
+    left: readonly Model[],
+    remedy = 'give the two the same shape, or rename one',
+  ): void => {
     console.warn(
-      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; give the two the same shape, or rename one`,
+      `[oagen] Warning: The shared error body ${shapeOf(left[0])} would be named "${name}", which ${holder} already holds — keeping ${leaving(left)}; ${remedy}`,
     );
   };
   // An inline enum whose name is taken leaves its bodies the same way (#612).
@@ -415,13 +422,16 @@ function fold(
     }
     // A component schema of this shape is the shared body of every member
     // it can stand for; a member it cannot — one with a field, a domain
-    // name, a limit or a pinned value the component does not admit, a live
-    // field the component deprecates, or any member when the component is
+    // name, a limit or a pinned value the component does not admit, one
+    // that carries a field the component deprecates, whichever flag the
+    // member gives it (#671), or any member when the component is
     // deprecated — is left as it is, alone, with its own shape in the
-    // warning, and the fold runs again with the rest (#506, #629).
+    // warning, and the fold runs again with the rest (#506, #629). A
+    // model of another shape takes none of the members.
     const component = byName.get(name);
-    if (component && !errorOnly.has(name) && keys.of(name) === key) {
-      const left = members.filter((member) => !componentAccepts(component, member, keys));
+    if (component && !errorOnly.has(name)) {
+      const sameKey = keys.of(name) === key;
+      const left = sameKey ? members.filter((member) => !componentAccepts(component, member, keys)) : members;
       if (left.length === 0) {
         // A deprecated body a live component takes, and a deprecated field
         // a live field of the component takes, are announced, as a
@@ -440,7 +450,27 @@ function fold(
         absorbed.add(key);
         return;
       }
-      leave(name, holder, left);
+      // The members left are told everything that keeps them off the
+      // model, each with its remedy (`remediesFor`), so that following a
+      // warning to the end takes its bodies: a member a deprecated field
+      // keeps off may print the model's very shape, and one that differs
+      // in shape may carry such a field too (#671). The members the same
+      // kinds of reason keep off share one warning, which names every
+      // field and limit among them.
+      const told = new Map<string, { left: Model[]; why: Refusal }>();
+      for (const member of left) {
+        const why = refusalOf(component, member, keys, sameKey);
+        const kinds = [why.shape, why.limits.length > 0, why.deprecated, why.deprecates.length > 0].join();
+        const alike = told.get(kinds);
+        if (alike === undefined) {
+          told.set(kinds, { left: [member], why });
+          continue;
+        }
+        alike.left.push(member);
+        alike.why.limits = [...new Set([...alike.why.limits, ...why.limits])].sort();
+        alike.why.deprecates = [...new Set([...alike.why.deprecates, ...why.deprecates])].sort();
+      }
+      for (const { left: alike, why } of told.values()) leave(name, holder, alike, remediesFor(name, why));
       return;
     }
     leave(name, holder, members);
@@ -835,41 +865,130 @@ const OAUTH_ERROR_FIELDS = ['error', 'error_description'];
 const ERROR_CODE_FIELDS = ['code', 'error'];
 
 /**
- * Whether `component`, whose key is the group's, can stand for `member`: it
- * is live — a deprecated component takes no body, live or deprecated, as it
- * takes no inline copy anywhere else (`ownerFlagAdmits`, #441, #629), so no
- * live site resolves to a deprecated model; it declares every field the
- * member has, required or optional as the member has it, and deprecated
- * only where the member's field is — a component whose field is deprecated
- * would give a live member's readers a notice its schema never wrote, while
- * one whose field is live takes a member's deprecated field as the live
- * model takes a deprecated body (`flagAdmits`), announced by `claim` since
- * the field is the flag's only carrier — of the member's type and domain
- * name, so no body loses a field or a hint by folding onto it; it is no
- * stricter than the member — every limit it writes, on itself, a field or any level
- * of the field's type (`typeNoStricter`: the type's own, an array's items,
- * a map's values, a union's variants; #611), the member writes the same, so
- * no body is narrowed by folding onto it (the key leaves limits out, as the
- * shared model merges them); and it admits every value the member pins — a
- * string field the member pins is, on the component, a plain string, or,
- * when the member does not leave it free, a literal or inline enum holding
- * every pinned value. The key reads every string as one, so this is what
- * tells a component the body can reference from one that would narrow its
- * codes.
+ * Whether `component`, whose key is the group's, can stand for `member`.
+ * Its `deprecated` flags decide on their own, whatever the member's are,
+ * so a flag a body flips never moves the body on or off a component
+ * (#671). It is live: a deprecated component takes no body, live or
+ * deprecated, as it takes no inline copy anywhere else (`ownerFlagAdmits`,
+ * #441, #629), so no live site resolves to a deprecated model. And it
+ * deprecates no field the member carries (`deprecatedCarried`), live or
+ * deprecated there: a component `ErrorBody` whose `message` is deprecated
+ * would give a `{ message }` body whose `message` is live a notice its
+ * schema never wrote (#629), and taking the one whose `message` is
+ * deprecated, as it did until #671, made that body's own flag choose
+ * between `ErrorBody` and `GetNoteError404` — a breaking retype for an edit
+ * that is additive on the body's own model. A field the component
+ * deprecates and the member does not carry is nothing to the member; a
+ * live field of the component takes the member's deprecated one as the
+ * live model takes a deprecated body (`flagAdmits`), announced by `claim`
+ * since the field is the flag's only carrier. The rest of the component
+ * has to fit the member too: its shape (`shapeFits`) and its limits
+ * (`limitedPlaces`). Each of the four is a reason `refusalOf` gives, which
+ * the warning that leaves a member tells with its remedy.
  */
 function componentAccepts(component: Model, member: Model, keys: ModelKeys): boolean {
-  if (component.deprecated) return false;
-  if (!noStricter(component.constraints, member.constraints)) return false;
+  const why = refusalOf(component, member, keys, true);
+  return !why.shape && why.limits.length === 0 && !why.deprecated && why.deprecates.length === 0;
+}
+
+/**
+ * Why the model that holds a shared name takes no body of a group: every
+ * reason at once, since each alone keeps the body off (`componentAccepts`)
+ * and a warning that told one of them would send its reader to the next.
+ */
+interface Refusal {
+  /** The two differ in shape: their keys do, or the holder does not fit the body's fields (`shapeFits`). */
+  shape: boolean;
+  /** Where the holder writes a limit the body does not write the same (`limitedPlaces`), sorted. */
+  limits: string[];
+  /** The holder is deprecated. */
+  deprecated: boolean;
+  /** The fields the body carries that the holder deprecates (`deprecatedCarried`), sorted. */
+  deprecates: string[];
+}
+
+/** Every reason `holder`, which holds the shared name of `member`'s group, does not take `member`; none when it does. `sameKey` says whether the holder's key is the group's. */
+function refusalOf(holder: Model, member: Model, keys: ModelKeys, sameKey: boolean): Refusal {
+  return {
+    shape: !sameKey || !shapeFits(holder, member, keys),
+    limits: limitedPlaces(holder, member, keys),
+    deprecated: holder.deprecated === true,
+    deprecates: deprecatedCarried(holder, member),
+  };
+}
+
+/**
+ * How the warning that leaves a body off the model `name` ends: the rule
+ * behind each flag that keeps it off, then one remedy per reason, then
+ * `or rename one` — so that following every remedy takes the body, and
+ * renaming one frees the name. A difference in shape or limits needs no
+ * rule: `give the two the same shape`, `the same limits on "message"`
+ * (`of their own` for the models' own limits). A deprecated holder, and
+ * each field it deprecates that the body carries, is told as the rule it
+ * is, since the two may print one shape (#671): `"ErrorBody" deprecates
+ * "message", and takes no inline body carrying a field it deprecates,
+ * whether the body deprecates the field or not; make "message" live on
+ * "ErrorBody", or rename one`. A body that also has a `hint` the holder
+ * lacks reads `…; give the two the same shape, and make "message" live on
+ * "ErrorBody", or rename one`.
+ */
+function remediesFor(name: string, why: Refusal): string {
+  const quoted = (names: readonly string[]): string => names.map((each) => `"${each}"`).join(', ');
+  const rules: string[] = [];
+  const steps: string[] = [];
+  const alike: string[] = [];
+  if (why.shape) alike.push('the same shape');
+  if (why.limits.length > 0) {
+    const fields = why.limits.filter((place) => place !== OWN_LIMITS);
+    const places = [
+      ...(fields.length < why.limits.length ? ['of their own'] : []),
+      ...(fields.length > 0 ? [`on ${quoted(fields)}`] : []),
+    ];
+    alike.push(`the same limits ${places.join(' and ')}`);
+  }
+  if (alike.length > 0) steps.push(`give the two ${alike.join(' and ')}`);
+  if (why.deprecated) {
+    rules.push(`"${name}" is deprecated, and takes no inline body, deprecated or live`);
+    steps.push(`make "${name}" live`);
+  }
+  if (why.deprecates.length > 0) {
+    const fields = quoted(why.deprecates);
+    rules.push(
+      `"${name}" deprecates ${fields}, and takes no inline body carrying a field it deprecates, whether the body deprecates the field or not`,
+    );
+    steps.push(`make ${fields} live on "${name}"`);
+  }
+  const remedy = steps.length > 1 ? `${steps.slice(0, -1).join(', ')}, and ${steps[steps.length - 1]}` : steps[0];
+  return `${[...rules, remedy].join('; ')}, or rename one`;
+}
+
+/** The names of the fields `member` carries that `component` deprecates, whatever flag the member gives them, sorted. */
+function deprecatedCarried(component: Model, member: Model): string[] {
+  return member.fields
+    .filter((field) => component.fields.some((own) => own.name === field.name && own.deprecated === true))
+    .map((field) => field.name)
+    .sort();
+}
+
+/**
+ * Whether `component` fits `member` in shape, its `deprecated` flags and
+ * its limits aside (`componentAccepts` reads those): it declares every
+ * field the member has, required or optional as the member has it, of the
+ * member's type and domain name, so no body loses a field or a hint by
+ * folding onto it; and it admits every value the member pins — a string
+ * field the member pins is, on the component, a plain string, or, when the
+ * member does not leave it free, a literal or inline enum holding every
+ * pinned value. The key reads every string as one, so this is what tells a
+ * component the body can reference from one that would narrow its codes.
+ */
+function shapeFits(component: Model, member: Model, keys: ModelKeys): boolean {
   for (const field of member.fields) {
     const own = component.fields.find((f) => f.name === field.name);
     if (
       !own ||
       own.required !== field.required ||
-      (own.deprecated === true && !field.deprecated) ||
       own.domainName !== field.domainName ||
-      keys.type(own.type, true) !== keys.type(field.type, true) ||
-      !noStricter(own.constraints, field.constraints) ||
-      !typeNoStricter(own.type, field.type, keys)
+      keys.type(own.type, true) !== keys.type(field.type, true)
     ) {
       return false;
     }
@@ -892,6 +1011,33 @@ function componentAccepts(component: Model, member: Model, keys: ModelKeys): boo
     return false;
   }
   return true;
+}
+
+/** How `limitedPlaces` names the models' own limits, beside the names of fields. */
+const OWN_LIMITS = '';
+
+/**
+ * Where `component` is stricter than `member`, sorted: a limit it writes
+ * that the member does not write the same, on the model itself
+ * (`OWN_LIMITS`) or, by the field's name, on a field or any level of the
+ * field's type (`typeNoStricter`: the type's own, an array's items, a
+ * map's values, a union's variants; #611). A component takes a member only
+ * when there is no such place, so no body is narrowed by folding onto it
+ * (the key leaves limits out, as the shared model merges them). A field
+ * the component lacks, or types another way, is a difference of shape
+ * (`shapeFits`) and has no limits to compare.
+ */
+function limitedPlaces(component: Model, member: Model, keys: ModelKeys): string[] {
+  const places: string[] = [];
+  if (!noStricter(component.constraints, member.constraints)) places.push(OWN_LIMITS);
+  for (const field of member.fields) {
+    const own = component.fields.find((f) => f.name === field.name);
+    if (!own || keys.type(own.type, true) !== keys.type(field.type, true)) continue;
+    if (!noStricter(own.constraints, field.constraints) || !typeNoStricter(own.type, field.type, keys)) {
+      places.push(field.name);
+    }
+  }
+  return places.sort();
 }
 
 /** Whether every limit `component` writes, `member` writes the same: the component admits at least what the member does. */
