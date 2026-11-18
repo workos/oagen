@@ -35,6 +35,9 @@
  * and `allOf/<n>` to the member's own type: a `$ref` member's reference,
  * or, for the one member the `allOf` is read as (its one typing member
  * beside members that only annotate it; #555), the `allOf`'s own type —
+ * the member the readers pick among the members as they read them
+ * (`writtenTypingMember`; #675), at every `allOf` the pointer goes through
+ * on its way to the member it ends at (`memberNotReadAs`) —
  * and writes the type it reaches into the pending reference in place
  * (`replaceTypeRef`), so every holder keeps the object it holds. A pointer
  * that leads nowhere is reported once, at the site, and the site typed
@@ -129,7 +132,7 @@ import {
   withTypeConstraints,
   type SchemaObject,
 } from './schemas.js';
-import { allOfTypingMember, cloneTypeRef, mapValueSchema, readInlineAllOf, replaceTypeRef } from './inline-models.js';
+import { cloneTypeRef, mapValueSchema, readInlineAllOf, replaceTypeRef, writtenTypingMember } from './inline-models.js';
 import {
   collectObjectProperties,
   isDeferredDataPathItemType,
@@ -520,6 +523,9 @@ export interface PointerStep {
  * the merged model, or only annotates the member the `allOf` is read as,
  * and has no type of its own — while an `allOf` step on the way through
  * (`allOf/1/properties/nickname`) reads on to the merged model's field.
+ * A pointer that goes through several `allOf`s to the member it ends at
+ * (`value/allOf/1/allOf/0`) ends at a type only when each of them is read
+ * as the member it goes through (`memberNotReadAs`; #675 review).
  */
 export function pointerSteps(
   component: SchemaObject,
@@ -558,8 +564,13 @@ export function pointerSteps(
           return { problem: `"${keyword}/${name}" is the null variant, which the IR carries as nullability` };
         break;
       case 'allOf':
-        if (!next.$ref && index === path.length - 1 && !allOfReadAsMember(node, next, schemas))
-          return { problem: `"${keyword}/${name}" is an inline allOf member, which has no type of its own` };
+        if (!next.$ref && index === path.length - 1) {
+          const untyped = memberNotReadAs([...steps, { keyword, name, node, next }], schemas);
+          if (untyped)
+            return {
+              problem: `"${untyped.keyword}/${untyped.name}" is an inline allOf member, which has no type of its own`,
+            };
+        }
         break;
       default:
         return { problem: `the parser types nothing under "${keyword}"` };
@@ -570,15 +581,51 @@ export function pointerSteps(
   return steps;
 }
 
-/** Whether `schema`'s `allOf` is read as its inline `member` — the one typing member beside members that only annotate it — so the member's type is the `allOf`'s own. */
+/**
+ * Whether `schema`'s `allOf` is read as its inline `member` — the one
+ * typing member beside members that only annotate it — so the member's
+ * type is the `allOf`'s own. The member is the one the readers pick
+ * (`writtenTypingMember`), among the members as they read them, a bare
+ * `allOf` that only annotates or limits spliced open (#675): in `value: {
+ * allOf: [{ allOf: [{ minLength: 1 }] }, { allOf: [{ type: 'string' }] }]
+ * }` it is `allOf/1`, the wrapper around the type, though both members
+ * declare a type as written (Greptile, #675 review: picked among the
+ * members as written, it was `allOf/0`, so a pointer to the limit was the
+ * `string` and one to the wrapper around the type `unknown`). The
+ * pointer's index stays the document's: a member that types the `allOf`
+ * is one of its own members as written, never a part spliced out of one.
+ */
 function allOfReadAsMember(
   schema: SchemaObject,
   member: SchemaObject,
   schemas: Record<string, SchemaObject> | undefined,
 ): boolean {
-  const members = schema.allOf ?? [];
-  if (readInlineAllOf(members, schema, schemas) !== 'unwrapped') return false;
-  return (allOfTypingMember(members) ?? members[0]) === member;
+  if (readInlineAllOf(schema.allOf ?? [], schema, schemas) !== 'unwrapped') return false;
+  return writtenTypingMember(schema) === member;
+}
+
+/**
+ * The step at which a pointer that ends at an inline `allOf` member stops
+ * naming a type, or `undefined` when it ends at the member the `allOf` is
+ * read as: the first step, of the run of `allOf` steps `steps` ends with,
+ * to an inline member its `allOf` is not read as (`allOfReadAsMember`).
+ * The type at the end of the run is the type of the schema the run starts
+ * at only when every `allOf` on the way is read as the member the pointer
+ * goes through — `value/allOf/1/allOf/0` in the `allOf` above is the
+ * `string`, `value` read as its second member and that member as its one
+ * — so a pointer through a member that only limits or annotates, or that
+ * declares into a merged model, ends at no type however the innermost
+ * `allOf` is read: `value/allOf/0/allOf/0`, the `{ minLength: 1 }` its
+ * wrapper is read as, is a limit alone (#675 review: the last step alone
+ * was asked, and the pointer was the `string`).
+ */
+function memberNotReadAs(
+  steps: readonly PointerStep[],
+  schemas: Record<string, SchemaObject> | undefined,
+): PointerStep | undefined {
+  let first = steps.length - 1;
+  while (first > 0 && steps[first - 1]!.keyword === 'allOf' && !steps[first - 1]!.next.$ref) first--;
+  return steps.slice(first).find((step) => !allOfReadAsMember(step.node, step.next, schemas));
 }
 
 /**

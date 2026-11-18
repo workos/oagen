@@ -1282,7 +1282,8 @@ export function arraySchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * members that only annotate or limit it (`'unwrapped'`; #555), read as
  * the schema itself with the wrapper's limits, flag and documentation
  * (`unwrappedAllOfMember`), or the first `$ref` member of a plain reference
- * (`'reference'`). `undefined` for any other schema: no `allOf` that types
+ * (`'reference'`; `allOfReferenceMember`, which finds it inside a bare
+ * `allOf` spliced open, #675). `undefined` for any other schema: no `allOf` that types
  * it (`classifyInlineSchema`), or one merged into a model. Read on a schema
  * whose nullable wrappers are removed and sibling `properties` folded in
  * (`unwrapNullableSchema`), as `schemaToTypeRef` reads it.
@@ -1291,7 +1292,7 @@ export function allOfReadAsMember(schema: SchemaObject): SchemaObject | undefine
   if (!schema.allOf || classifyInlineSchema(schema) !== 'allOf') return undefined;
   const reading = readInlineAllOf(schema.allOf, schema);
   if (reading === 'unwrapped') return unwrappedAllOfMember(schema);
-  return reading === 'reference' ? schema.allOf.find((member) => member.$ref !== undefined) : undefined;
+  return reading === 'reference' ? allOfReferenceMember(schema) : undefined;
 }
 
 /**
@@ -3098,11 +3099,19 @@ const TYPING_KEYWORDS: readonly string[] = [
  * union written beside an inline schema's `allOf`, and
  * `composesComponentModel` for one beside a component's (#613), so a union
  * beside an `allOf` that only annotates — `{ allOf: [{ description }],
- * oneOf: [...] }` — is the union inline and as a component alike.
+ * oneOf: [...] }` — is the union inline and as a component alike. The
+ * members are read as every reader reads them, the bare `allOf`s among
+ * them spliced open (`splicedAllOfMembers`; #675), so `allOf: [{ allOf: [{
+ * $ref: Owner }] }, { allOf: [{ $ref: Tag }] }]` types the schema as
+ * `allOf: [{ $ref: Owner }, { $ref: Tag }]` does, and so do several
+ * typing members one of which composes an object through an `allOf` of
+ * its own that no splice opens (`composesObjectMember`: the merge
+ * `readInlineAllOf` reads them as).
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
+  members = splicedAllOfMembers(members).members;
   if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
-  return allOfTypingMember(members) !== undefined;
+  return allOfTypingMember(members) !== undefined || members.some((member) => composesObjectMember(member));
 }
 
 /**
@@ -3175,7 +3184,14 @@ export function unionTypesSchema(variants: readonly SchemaObject[]): boolean {
  * a decision recorded against it (a contested title, `isContestedTitle`)
  * reaches the copy. A component schema's own `properties` beside its
  * `allOf` are read the same way, as its first member, by
- * `componentAllOfMembers`.
+ * `componentAllOfMembers`. Last, the members of the `allOf` the schema
+ * now carries — its own, the properties and the union folded in — are
+ * read as every reader reads them, a bare `allOf` among them spliced open
+ * into its own members (`spliceNestedAllOf`; #675), so `{ properties: {
+ * id }, allOf: [{ allOf: [{ $ref: Owner }] }, { $ref: Tag }] }` folds to
+ * the `allOf` of `{ properties: { id } }`, `{ $ref: Owner }` and `{ $ref:
+ * Tag }`, as `{ properties: { id }, allOf: [{ $ref: Owner }, { $ref: Tag
+ * }] }` does.
  */
 export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
   let folded = foldedSchemas.get(schema);
@@ -3203,13 +3219,22 @@ export function foldSiblingProperties(schema: SchemaObject): SchemaObject {
  */
 let foldedSchemas = new WeakMap<SchemaObject, SchemaObject>();
 
-/** Forget every folded schema: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+/** Forget every folded schema, and every spliced one (`resetSplicedSchemas`): a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
 function resetFoldedSchemas(): void {
   foldedSchemas = new WeakMap();
+  resetSplicedSchemas();
 }
 
 /** What `foldSiblingProperties` returns for a schema not folded yet (see there). */
 function foldAfresh(schema: SchemaObject): SchemaObject {
+  // Last, the bare `allOf`s among the members are spliced open
+  // (`spliceNestedAllOf`; #675): the members as written, with the union
+  // and the properties written beside the `allOf`, which are members too.
+  return spliceNestedAllOf(foldBesideAllOf(schema));
+}
+
+/** `schema` with the union (`foldSiblingUnions`) and the properties it writes beside a composition folded into it; see `foldSiblingProperties`. */
+function foldBesideAllOf(schema: SchemaObject): SchemaObject {
   const folded = foldSiblingUnions(schema);
   if (!hasFoldableProperties(folded)) return folded;
   const kind = classifyInlineSchema(folded);
@@ -5179,7 +5204,7 @@ function componentEntries(
   if (bare.$ref) return aliasOf(bare.$ref);
   if (classifyInlineSchema(bare) !== 'allOf' || !bare.allOf) return undefined;
   const reading = readInlineAllOf(bare.allOf, bare, schemas);
-  if (reading === 'reference') return aliasOf(bare.allOf.find((member) => member.$ref)?.$ref);
+  if (reading === 'reference') return aliasOf(allOfReferenceMember(bare)?.$ref);
   if (reading !== 'unwrapped') return undefined;
   const entries = componentEntries(unwrappedAllOfMember(bare), schemas, declares, seen);
   return entries && [schema, ...entries.slice(1)];
@@ -5692,10 +5717,11 @@ export function referenceTypesAsUnknown(schema: SchemaObject): boolean {
   if (classifyInlineSchema(folded) !== 'allOf' || !folded.allOf) return false;
   const reading = readInlineAllOf(folded.allOf, folded);
   if (reading === 'reference') {
-    const member = folded.allOf.find((candidate) => candidate.$ref);
+    const member = allOfReferenceMember(folded);
     return member !== undefined && referenceTypesAsUnknown(member);
   }
-  return reading === 'unwrapped' && referenceTypesAsUnknown(allOfTypingMember(folded.allOf) ?? folded.allOf[0]);
+  const member = reading === 'unwrapped' ? writtenTypingMember(folded) : undefined;
+  return member !== undefined && referenceTypesAsUnknown(member);
 }
 
 /**
@@ -8555,7 +8581,7 @@ function buildTypeRef(
       return { kind: 'model', name: qualifyInlineModelName(baseName, parentModelName) };
     }
     if (reading === 'reference') {
-      const refItem = schema.allOf.find((s: SchemaObject) => s.$ref);
+      const refItem = allOfReferenceMember(schema);
       // `'reference'` is only read with a `$ref` member among the members an
       // `allOfTypesSchema` admits, so one is found here.
       if (refItem) return schemaToTypeRef(refItem, contextName, parentModelName);
@@ -8999,12 +9025,14 @@ export function typesAsUnknown(schema: SchemaObject): boolean {
 }
 
 import {
+  allOfReferenceMember,
   allOfTypingMember,
   allOfWrapperLayer,
   annotatedTypingMember,
   annotatingAllOfMembers,
   buildInlineModel,
   collectProperties,
+  composesObjectMember,
   declarationKeywords,
   declareProperty,
   declareVariant,
@@ -9021,6 +9049,7 @@ import {
   readInlineAllOf,
   unionOfDeclarations,
   unwrappedAllOfMember,
+  writtenTypingMember,
   agreedExtensions,
   withAgreedExtensions,
   type MintedInlineName,
@@ -9035,7 +9064,10 @@ import {
   reservedInlineNames,
   resetCombinedDeclarations,
   resetInheritedModelRefs,
+  resetSplicedSchemas,
   schemaShapeKey,
+  spliceNestedAllOf,
+  splicedAllOfMembers,
   stableStringify,
 } from './inline-models.js';
 
