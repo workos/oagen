@@ -88,7 +88,11 @@
  * and a discriminator mapping entry written as a pointer is written as the
  * model the schema it points at is built as — a pointer variant's, settled
  * by the walk, or, for a target outside the variants, one settled here at
- * the mapping site (`settleDeferredMappingEntries`).
+ * the mapping site (`settleDeferredMappingEntries`) — as is the entry a
+ * union with no `mapping:` derives for a variant written as a pointer,
+ * from the const the pointed schema pins (#682): such a variant is named
+ * by the model it settles to, and a union whose pointer variant settles
+ * to no model derives nothing (`withdrawDerivedMapping`).
  */
 import type {
   Callback,
@@ -117,6 +121,8 @@ import {
   isArrayComponentRef,
   isArrayPointerRef,
   isNullSchema,
+  modelReferenceIdentity,
+  OWN_MODEL,
   referenceTypesAsUnknown,
   schemaToTypeRef,
   unionFlaggedNullable,
@@ -131,6 +137,7 @@ import {
   settleDeferredDataPathItemType,
 } from './pagination.js';
 import {
+  derivedMappingSource,
   isPendingSchemaRef,
   isPendingVariant,
   pendingSiteLimitsOf,
@@ -138,6 +145,7 @@ import {
   schemaRefTokens,
   settleDeferredMappingEntries,
   settlePendingSchemaRef,
+  type DerivedMappingSource,
 } from './schema-refs.js';
 
 /** Where pending references are held: every model built so far — the components', their fields', the operations', the webhooks' — and the operations and webhooks themselves. */
@@ -196,15 +204,21 @@ function underNullableWrappers(type: TypeRef): TypeRef {
  * held inside a multi-type variant's union, or a variant the union holds
  * that several keys name at once (`mappingEntriesByVariant` hands the j-th
  * entry naming a model to the j-th variant naming it, so a third key on
- * two such variants would be left behind).
+ * two such variants would be left behind). The entry a mapping derived
+ * for a pointer variant (`Pet: { oneOf: [{ $ref: Cat }, { $ref:
+ * Shelter/properties/dog }], discriminator: { propertyName: kind } }`, or
+ * the same with no keyword; #682) is settled and handed over the same way,
+ * to `ShelterDog`; where the variant settled to no model the mapping is
+ * withdrawn instead (`withdrawDerivedMapping`) and the union's settled
+ * variants are returned bare.
  */
 export function resolveSchemaPointers(
   sites: SchemaPointerSites,
   schemas: Record<string, SchemaObject> | undefined,
 ): TypeRef[] {
   const resolver = new PointerResolver(sites.models, schemas);
-  /** Every discriminated union met — the named union models' and the dispatchers' as views — with the site it was met at; their mapping entries are settled once the walk is done. */
-  const unions: Array<{ union: UnionType; context: string }> = [];
+  /** Every discriminated union met — the named union models' and the dispatchers' as views, each with the model it is a view onto — with the site it was met at; their mapping entries are settled once the walk is done. */
+  const unions: DiscriminatedUnionSite[] = [];
   const visit = (ref: TypeRef, context: string): void => {
     walkTypeRef(ref, {
       model: (reference) => {
@@ -233,6 +247,7 @@ export function resolveSchemaPointers(
           discriminator: model.discriminator,
         },
         context: model.name,
+        model,
       });
     }
   }
@@ -260,10 +275,28 @@ export function resolveSchemaPointers(
   // again as a bare reference.
   const bare = new Set(resolver.settled);
   const roots: TypeRef[] = [];
-  for (const { union, context } of unions) {
+  for (const site of unions) {
+    const { union, context } = site;
+    // A mapping derived from the variants' consts names models alone: with
+    // a pointer variant that settled to none it is withdrawn, and the
+    // union's variants stay the bare references they were settled as
+    // (#682). A derived entry's own reference stands for a pointer some
+    // variant of the union wraps, which the walk has settled and, where it
+    // names no type, reported at the union's own site — so it is settled
+    // here without a second report, under a mapping the document never wrote.
+    const derived = derivedMappingSource(union.discriminator?.mapping);
     const references = settleDeferredMappingEntries(union.discriminator?.mapping, (target, value) =>
-      resolver.settle(target, `${context}.discriminator.mapping.${value}`, new Set(), 'leaving the entry as written'),
+      resolver.settle(
+        target,
+        `${context}.discriminator.mapping.${value}`,
+        new Set(),
+        derived === undefined ? 'leaving the entry as written' : null,
+      ),
     );
+    if (derived !== undefined && references.some((reference) => variantModelRef(reference) === undefined)) {
+      withdrawDerivedMapping(site, derived);
+      continue;
+    }
     const own = union.variants
       .map(variantModelRef)
       .filter((ref): ref is ModelRef => ref !== undefined && bare.has(ref));
@@ -279,6 +312,34 @@ export function resolveSchemaPointers(
     roots.push(followed.length === 0 ? union : { ...union, variants: [...followed, ...union.variants] });
   }
   return [...roots, ...resolver.settled.filter((ref) => bare.has(ref))];
+}
+
+/** A discriminated union met by the walk, at `context`: an inline union as the IR holds it, or a view onto `model`'s `variants` and `discriminator` — a named union's, or an allOf+oneOf dispatcher's mapping alone. */
+interface DiscriminatedUnionSite {
+  union: UnionType;
+  context: string;
+  model?: Model;
+}
+
+/**
+ * Withdraw the mapping a union derived from its variants' consts, one of
+ * which is a pointer variant that settled to no model (#682): a schema
+ * typed as anything else where it stands (a union of several types), or a
+ * pointer the settle typed `unknown` and reported. Such a variant is
+ * unnamed, and a derived mapping names every variant or none, so the union
+ * reads as it does beside any other unnamed variant: `{}` under the
+ * `discriminator` keyword — emptied in place, so every holder of the
+ * mapping reads the same — and no discriminator at all where the keyword
+ * is absent, on the union itself or on the model it is a view onto.
+ */
+function withdrawDerivedMapping(site: DiscriminatedUnionSite, source: DerivedMappingSource): void {
+  const mapping = site.union.discriminator?.mapping;
+  if (mapping === undefined) return;
+  if (source === 'implicit') {
+    delete (site.model ?? site.union).discriminator;
+    return;
+  }
+  for (const value of Object.keys(mapping)) delete mapping[value];
 }
 
 /** The map a model carries its `additionalProperties` values in: the last field named `additionalProperties` that is a map (`extractModel` pushes it after the named properties). */
@@ -297,11 +358,7 @@ function variantModelRef(variant: TypeRef): ModelRef | undefined {
 }
 
 /** Collect every discriminated union under `ref`, met at `context`, into `out`, the nested ones first. */
-function collectDiscriminatedUnions(
-  ref: TypeRef,
-  context: string,
-  out: Array<{ union: UnionType; context: string }>,
-): void {
+function collectDiscriminatedUnions(ref: TypeRef, context: string, out: DiscriminatedUnionSite[]): void {
   switch (ref.kind) {
     case 'union':
       for (const variant of ref.variants) collectDiscriminatedUnions(variant, context, out);
@@ -641,6 +698,82 @@ export function pointerTypesAsArray(ref: string, schemas: Record<string, SchemaO
   }
 }
 
+/** The pointers being read for the model they settle to (`pointerModelIdentity`), so a chain that reaches itself ends, and so does a reading that comes back to the pointer through the union that holds it. */
+const pointersBeingNamed = new Set<string>();
+
+/**
+ * Whether a site written as `ref`, a schema `$ref` that names no component,
+ * settles to a model, bare or under a nullable wrapper (#682) — decided
+ * from the document before any model is built, for the two readers that
+ * ask whether a union's pointer variant names a model before the union is
+ * built (`namesModelAhead`: an allOf+oneOf component dispatches to its
+ * variants only when each names one, and a title-mapped `oneOf` names its
+ * inline variants by their titles only then). True exactly when the
+ * pointer lands on a schema (`pointerLanding`) typed as a reference to a
+ * model where it stands, read as a property written there is read
+ * (`modelReferenceIdentity`): an inline object, an `allOf` merged into a
+ * model, a `$ref` to a component that builds one, a type list whose
+ * per-type copies are all typed as one model, or another such pointer in
+ * turn, under any nullable wrapper or `allOf` read as its member. False
+ * when the pointer leads nowhere or to a schema the parser builds no type
+ * for at that place — the settle reports it and types the site `unknown`,
+ * no model — when it lands on anything typed otherwise (a string, an
+ * array, a union, a type list read as a union of its types), and for a
+ * chain of pointers that reaches itself. What the document alone cannot
+ * refuse is left to the settle, as `pointerTypesAsArray` leaves it: a
+ * `properties` step through a component typed as a primitive or an enum
+ * reads on to the object here, and the settle reports the site and types
+ * it `unknown`.
+ */
+export function pointerTypesAsModel(ref: string, schemas: Record<string, SchemaObject> | undefined): boolean {
+  return pointerModelIdentity(ref, schemas) !== undefined;
+}
+
+/**
+ * Which model a site written as `ref` settles to, as `pointerTypesAsModel`
+ * asks whether it settles to one: what the schema the pointer lands on is
+ * typed as a reference to (`modelReferenceIdentity`) — a component's model
+ * by its name, wherever the `$ref` to it stands, and the model minted for
+ * the pointed schema where it stands by the pointer itself, the one way
+ * that site is spelled here — or `undefined` when it settles to no model.
+ * It tells the per-type copies of a type list apart: copies that are one
+ * model are one variant, and the list is that model.
+ *
+ * The pointer is recorded as being read (`pointersBeingNamed`) before
+ * anything is read for it, the landing included, since either reading can
+ * ask this very question again: the landing of a `properties` step is the
+ * field its component's `allOf` merges (`pointerLanding`), and a component
+ * that extends the union's own — `Holder: { allOf: [{ $ref: Pet }],
+ * properties: { dog } }` beside `Pet: { allOf: [{ $ref: Base }, { oneOf: [{
+ * $ref: Cat }, { $ref: '#/components/schemas/Holder/properties/dog' }] }]
+ * }` — merges `Pet`'s fields by whether `Pet` dispatches that union, which
+ * is decided by whether this pointer names a model (Greptile, #682 review:
+ * the pointer was recorded only once its landing was read, so the question
+ * was asked again without end and the parse overflowed the stack). A
+ * reading that comes back to a pointer still being read is answered that
+ * the pointer names no model, for that reading alone: the union asked
+ * about is read as holding an unnamed variant while the landing is looked
+ * up — flattened, there — and the pointer is then decided by the schema it
+ * lands on, `Holder`'s own `dog` here, a model. Nothing is kept of a
+ * reading made on the way, so the answer is the document's alone, the same
+ * whichever component is read first.
+ */
+export function pointerModelIdentity(
+  ref: string,
+  schemas: Record<string, SchemaObject> | undefined,
+): string | undefined {
+  if (pointersBeingNamed.has(ref)) return undefined;
+  pointersBeingNamed.add(ref);
+  try {
+    const landed = pointerLanding(ref, schemas);
+    if (!landed) return undefined;
+    const identity = modelReferenceIdentity(landed, schemas);
+    return identity === OWN_MODEL ? `pointer:${ref}` : identity;
+  } finally {
+    pointersBeingNamed.delete(ref);
+  }
+}
+
 /** The walk one document's pending references are settled by; `settled` collects them. */
 class PointerResolver {
   readonly settled: TypeRef[] = [];
@@ -667,14 +800,23 @@ class PointerResolver {
    * a warning says becomes of the site when the pointer names no type:
    * typed `unknown`, which the reference is settled to, unless the site
    * reads the reference for a name alone — a mapping entry, left as
-   * written.
+   * written. `null` says nothing at all, for a reference that stands for
+   * a pointer another site holds and reports: the entry a mapping derived
+   * for a pointer variant, whose union reports the variant (#682).
    */
-  settle(pending: ModelRef, context: string, stack: Set<string>, outcome = 'typing the site as unknown'): void {
+  settle(
+    pending: ModelRef,
+    context: string,
+    stack: Set<string>,
+    outcome: string | null = 'typing the site as unknown',
+  ): void {
     if (!isPendingSchemaRef(pending)) return;
     const ref = pending.name;
     let type: TypeRef | undefined;
     if (stack.has(ref)) {
-      console.warn(`[oagen] Warning: Circular schema $ref chain starting at "${ref}" in ${context} — ${outcome}`);
+      if (outcome !== null) {
+        console.warn(`[oagen] Warning: Circular schema $ref chain starting at "${ref}" in ${context} — ${outcome}`);
+      }
     } else {
       stack.add(ref);
       type = this.resolve(ref, context, stack, outcome);
@@ -729,12 +871,17 @@ class PointerResolver {
     else delete site.constraints;
   }
 
-  /** The type `ref` names, or `undefined` after one warning saying why it names none and what becomes of the site (`outcome`, as `settle` takes it). */
-  private resolve(ref: string, context: string, stack: Set<string>, outcome: string): TypeRef | undefined {
+  /** The type `ref` names, or `undefined` after one warning saying why it names none and what becomes of the site (`outcome`, as `settle` takes it: `null` for no warning, here and for every reference settled on the way). */
+  private resolve(ref: string, context: string, stack: Set<string>, outcome: string | null): TypeRef | undefined {
     const fail = (reason: string): undefined => {
-      console.warn(`[oagen] Warning: Unresolved schema $ref "${ref}" in ${context}: ${reason} — ${outcome}`);
+      if (outcome !== null) {
+        console.warn(`[oagen] Warning: Unresolved schema $ref "${ref}" in ${context}: ${reason} — ${outcome}`);
+      }
       return undefined;
     };
+    // A reference met on the way is typed `unknown` when it names no type,
+    // and says so — unless this walk says nothing.
+    const onTheWay = outcome === null ? null : undefined;
     const tokens = schemaRefTokens(ref);
     if (!tokens) return fail('only a $ref into components/schemas is followed');
     const [key, ...path] = tokens;
@@ -746,7 +893,7 @@ class PointerResolver {
     // The reference being settled: a type reached on the way that is itself
     // pending is settled first, in place, so the walk reads what it names.
     const settled = (type: TypeRef): TypeRef => {
-      if (type.kind === 'model') this.settle(type, context, stack);
+      if (type.kind === 'model') this.settle(type, context, stack, onTheWay);
       return type;
     };
     /** `type` under any nullable wrapper, each level settled. */
@@ -857,7 +1004,7 @@ class PointerResolver {
     }
     // Whatever the type reached holds that is still pending is settled
     // before the copy is made, so the site never carries a pending copy.
-    walkTypeRef(settled(type), { model: (reference) => this.settle(reference, context, stack) });
+    walkTypeRef(settled(type), { model: (reference) => this.settle(reference, context, stack, onTheWay) });
     return type;
   }
 }
