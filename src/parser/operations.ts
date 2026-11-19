@@ -166,6 +166,7 @@ import { extractSecurityRequirements, type RawSecurityRequirements } from './sec
 import { extractServerList } from './servers.js';
 import { resolveEnvelopeCompanionNames, companionBundles, type EnvelopeCompanion } from './envelope-companion-names.js';
 import {
+  namesHeldAcrossStems,
   resolveContestedBodyNames,
   stemsInContest,
   yieldBodyNames,
@@ -1116,43 +1117,68 @@ export function extractOperations(
   // `draft_response` and the response of `createPetResponseDraft`, both
   // `CreatePetResponseDraftResponse` — is settled here, before any operation
   // is built: what each operation gives up, and the name it takes instead
-  // (see resolveBodyNameYields). The names are read off each operation built
-  // on its own (`bodyNamesOf`), silently and into nothing that is kept: the
-  // operation reports its problems once, when the loop below builds it, and
-  // one that cannot be built says so there.
+  // (see resolveBodyNameYields); and so is a name one operation mints and
+  // the document gives a model of another — `getPet`'s response and an
+  // `object: get_pet_response` body `listDogs` returns, both
+  // `GetPetResponse` (#712). The names are read off each operation built
+  // on its own (`heldBodyNames`, `bodyNamesOf`), silently and into nothing
+  // that is kept: the operation reports its problems once, when the loop
+  // below builds it, and one that cannot be built says so there.
   const componentResponseNames = new Set(
     [...componentResponseNaming.values()].flatMap((naming) => [naming.name, ...naming.minted]),
   );
-  const readBodies = (included: (key: string) => boolean): OperationBodyNames[] =>
+  const readBodies = (included: (key: string) => boolean, contested: (key: string) => boolean): OperationBodyNames[] =>
     rehearse(() => {
-      const bodies: OperationBodyNames[] = [];
+      // The names decided before the operations: the registry as it is seeded.
+      const declaredNames = new Set(registry.keys());
+      type Built = ReturnType<typeof buildAt>;
+      const readings: Array<{ key: string; built: Built; standIn: () => Built; held: string[] }> = [];
       for (const [path, pathItem] of Object.entries(resolvedPaths)) {
         for (const method of HTTP_METHODS) {
           const op = pathItem[method];
           const key = `${method} ${path}`;
           if (!op || !included(key)) continue;
-          try {
-            // Built as it is, and once more under a stand-in for its stem: a
-            // name both readings mint is one the document gives the model,
-            // not one minted from the stem (`bodyNamesOf`).
-            const build = (namedFrom?: string) =>
-              buildAt(
-                path,
-                pathItem,
-                method,
-                op,
-                undefined,
-                { deferred: [], registry: new Map(registry) },
-                undefined,
-                namedFrom,
-              );
-            const built = build();
-            bodies.push(
-              bodyNamesOf(key, built, build(standInOperationId(built.modelQualifier)), componentResponseNames),
+          const build = (namedFrom?: string) =>
+            buildAt(
+              path,
+              pathItem,
+              method,
+              op,
+              undefined,
+              { deferred: [], registry: new Map(registry) },
+              undefined,
+              namedFrom,
             );
+          try {
+            const built = build();
+            const { models, enums } = heldBodyNames(built, componentResponseNames);
+            readings.push({
+              key,
+              built,
+              standIn: () => build(standInOperationId(built.modelQualifier)),
+              held: [...models, ...enums],
+            });
           } catch {
             // Left out: the loop below fails on it with the operation's own error.
           }
+        }
+      }
+      // Built once more under a stand-in for its stem, to tell the names it
+      // mints from its stem from the ones the document gives (`bodyNamesOf`),
+      // where the two can be told apart to any effect: an operation whose
+      // stem contains another's or is contained in one (`contested`), and
+      // one that holds a name an operation of another stem holds too
+      // (`namesHeldAcrossStems`).
+      const shared = namesHeldAcrossStems(
+        readings.map(({ built, held }) => ({ stem: built.modelQualifier, names: held })),
+      );
+      const bodies: OperationBodyNames[] = [];
+      for (const { key, built, standIn, held } of readings) {
+        if (!contested(key) && !held.some((name) => shared.has(name))) continue;
+        try {
+          bodies.push(bodyNamesOf(key, built, standIn(), componentResponseNames, declaredNames));
+        } catch {
+          // Left out, as above.
         }
       }
       return bodies;
@@ -7563,31 +7589,69 @@ function ownBodyTypeRefs(
  * hold: `pet` and `petOwner` returning one `object: pet_owner` resource
  * hold one `PetOwner` (Michael, #683 review; the stem was looked for in the
  * name, which found `Pet` in it and split the resource in two).
+ *
+ * Those names are read apart (`documentNames`), since one of them can be
+ * the name another operation mints from its stem — `GetPetResponse` from
+ * `object: get_pet_response` on `listDogs`, beside `getPet`'s own (#712) —
+ * and with them the reading itself (`definitions`: the types the bodies are
+ * read through and their models, those under a component response's names
+ * included, which no name here reaches), so what the two operations hold
+ * under the name can be compared (`resolveContestedBodyNames`). A name
+ * decided before the operations (`declaredNames`: the registry as it is
+ * seeded — a component schema's, a model or enum a component's field mints)
+ * is left out of them: it is its owner's whatever an operation's stem
+ * spells, and every copy is settled against the owner by the merge passes,
+ * so `getPet`'s body beside a component `GetPetResponse` is folded onto it
+ * or renamed `GetPetResponse2` and a `listDogs` body of that name
+ * `ListDogsGetPetResponse`, as before.
  */
 function bodyNamesOf(
   key: string,
   built: ReturnType<typeof buildOperation>,
   standIn: ReturnType<typeof buildOperation>,
   componentResponseNames: ReadonlySet<string>,
+  declaredNames: ReadonlySet<string> = new Set(),
 ): OperationBodyNames {
-  const namesOf = (reading: ReturnType<typeof buildOperation>): { models: string[]; enums: string[] } => {
-    const companions = reading.envelopeCompanions ?? [];
-    const models = [...reading.inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
-      (model) => !componentResponseNames.has(model.name),
-    );
-    return {
-      models: models.map((model) => model.name),
-      enums: inlineEnumNames(ownBodyTypeRefs(reading.operation, reading.componentBodies, companions), models),
-    };
-  };
-  const own = namesOf(built);
-  const other = namesOf(standIn);
+  const own = heldBodyNames(built, componentResponseNames);
+  const other = heldBodyNames(standIn, componentResponseNames);
   const given = new Set([...other.models, ...other.enums]);
+  const documents = (name: string): boolean => given.has(name) && !declaredNames.has(name);
+  const companions = built.envelopeCompanions ?? [];
   return {
     key,
     stem: built.modelQualifier,
     models: own.models.filter((name) => !given.has(name)),
     enums: own.enums.filter((name) => !given.has(name)),
+    documentNames: { models: own.models.filter(documents), enums: own.enums.filter(documents) },
+    definitions: {
+      roots: ownBodyTypeRefs(built.operation, built.componentBodies, companions),
+      models: [...built.inlineModels, ...companions.flatMap((companion) => companion.models)],
+    },
+  };
+}
+
+/**
+ * Every model and inline enum name an operation's inline request and
+ * success bodies hold in one reading of it (`buildOperation`): the request
+ * body's models, the success bodies' and the envelope companions', less
+ * every model a component response's body is shared under or mints
+ * (`componentResponseNames`), which is no operation's own, and the inline
+ * enums those models and the bodies' own types carry (`ownBodyTypeRefs`).
+ * The names an operation is first read for, on its own
+ * (`namesHeldAcrossStems`), and the ones its two readings are told apart by
+ * (`bodyNamesOf`).
+ */
+function heldBodyNames(
+  reading: ReturnType<typeof buildOperation>,
+  componentResponseNames: ReadonlySet<string>,
+): { models: string[]; enums: string[] } {
+  const companions = reading.envelopeCompanions ?? [];
+  const models = [...reading.inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
+    (model) => !componentResponseNames.has(model.name),
+  );
+  return {
+    models: models.map((model) => model.name),
+    enums: inlineEnumNames(ownBodyTypeRefs(reading.operation, reading.componentBodies, companions), models),
   };
 }
 
@@ -7625,8 +7689,8 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * another operation's, by operation key (`${method} ${path}`), each name
  * with the one the operation's model or inline enum takes instead (#683).
  *
- * Every name the bodies mint carries the stem the operation's models are
- * named from — its `operationId`'s (`operationIdModelBase`) or its
+ * Every name the bodies mint is built on the stem the operation's models
+ * are named from — its `operationId`'s (`operationIdModelBase`) or its
  * path-derived prefix — but the names are concatenations, so two operations
  * can mint one: `createPet` returning a `draft_response` object names it
  * `CreatePetResponseDraftResponse`, the response of
@@ -7646,31 +7710,47 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * or enum, nested deeper in its body, takes the next free numbered name
  * (`CreatePetResponseDraftResponse2`), whatever the two shapes are. The
  * names are read off a rehearsal of the operations themselves (`read`: each
- * operation `included` names, built on its own, and what it mints from its
- * stem alone, see `bodyNamesOf`), of the
- * operations a name can be contested between alone: those whose stem
- * contains another operation's or is contained in one (`stemsInContest`),
- * the stem being the `operationId`'s the reuse and contest passes left the
- * operation (`modelOperationIds`) or, without one, its path-derived prefix,
- * which is settled by now (`pathModelBaseNames`). A document in which no
- * stem contains another rehearses nothing. The number is chosen against
- * every name in play (`taken`, read only once a name is given up, which
- * most documents never see): `updateAnimal` returning an object named
- * `CreatePetResponseDraftResponse2` from its `object` const keeps that name
- * and its fields (Greptile), a `Response2` header model of an operation in
- * a service `CreatePetResponseDraft` keeps it too, and the nested model is
- * `…3` beside either. Without `taken`, what is given up is set aside under
- * names no site can mint, for the reading that learns the names in play
- * (`resolveContestedBodyNames`). A path that shares another's Operation
- * Object (`sharedWith`) takes no part: it reads the one body and gives up
- * what that path does.
+ * operation built on its own, and what it mints from its stem alone, see
+ * `bodyNamesOf`), the stem being the `operationId`'s the reuse and contest
+ * passes left the operation (`modelOperationIds`) or, without one, its
+ * path-derived prefix, which is settled by now (`pathModelBaseNames`).
+ *
+ * A name an operation keeps is its own against the document's names too
+ * (#712): `listDogs` returning an object that pins
+ * `object: get_pet_response` names it `GetPetResponse` beside `getPet`'s
+ * own response, under stems neither of which contains the other, and that
+ * model leaves the name for `GetPetResponse2` unless it is `getPet`'s very
+ * model (`resolveContestedBodyNames`). So every operation `included` names
+ * is read once, built on its own, for the names its bodies hold, and those
+ * that `contested` names — an operation whose stem contains another's or is
+ * contained in one (`stemsInContest`) — or that hold a name an operation of
+ * another stem holds too (`namesHeldAcrossStems`), once more under a
+ * stand-in for the stem, which tells the names an operation mints from the
+ * ones the document gives. The name itself says nothing of who minted it:
+ * the `owner` of `getList`'s array items is `GetOwner`, the `ListItem`
+ * cleaned out of it (`cleanSchemaName`), and is still `getList`'s own
+ * beside a `listDogs` body pinning `object: get_owner` (Greptile, #724).
+ * A document in which no stem contains another and no two operations of
+ * two stems hold one name reads each operation that one more time, and
+ * nothing else.
+ *
+ * The number is chosen against every name in play (`taken`, read only once
+ * a name is given up, which most documents never see): `updateAnimal`
+ * returning an object named `CreatePetResponseDraftResponse2` from its
+ * `object` const keeps that name and its fields (Greptile), a `Response2`
+ * header model of an operation in a service `CreatePetResponseDraft` keeps
+ * it too, and the nested model is `…3` beside either. Without `taken`,
+ * what is given up is set aside under names no site can mint, for the
+ * reading that learns the names in play (`resolveContestedBodyNames`). A
+ * path that shares another's Operation Object (`sharedWith`) takes no part:
+ * it reads the one body and gives up what that path does.
  */
 function resolveBodyNameYields(
   paths: Record<string, PathItem>,
   modelOperationIds: ReadonlyMap<string, string | null>,
   sharedWith: ReadonlyMap<string, string>,
   pathModelBaseNames: ReadonlyMap<string, string>,
-  read: (included: (key: string) => boolean) => readonly OperationBodyNames[],
+  read: (included: (key: string) => boolean, contested: (key: string) => boolean) => readonly OperationBodyNames[],
   taken?: () => Iterable<string>,
 ): Map<string, BodyNameYields> {
   /** The stem each operation's models are named from, by key. */
@@ -7690,9 +7770,11 @@ function resolveBodyNameYields(
     }
   }
   const contested = stemsInContest(stemOf.values());
-  if (contested.size === 0) return new Map();
   return resolveContestedBodyNames(
-    read((key) => contested.has(stemOf.get(key) ?? '')),
+    read(
+      (key) => stemOf.has(key),
+      (key) => contested.has(stemOf.get(key) ?? ''),
+    ),
     taken,
   );
 }

@@ -1597,11 +1597,20 @@ export interface Model {
    * property shared by every variant, a `$ref` variant's read from its
    * component as `UnionType.discriminator` reads it) or over allOf+oneOf variants (where
    * `variants` is absent and the mapping alone names them: the union a
-   * composed component carries, as an `allOf` member, beside the `allOf`
+   * composed component carries, as an `allOf` member — a direct one, or one
+   * of an inline `allOf` among the members, at any depth, which is part of
+   * the `allOf` it sits in: `Pet: { allOf: [{ $ref: Animal }, { allOf: [{
+   * oneOf: [...] }] }] }` dispatches as `Pet: { allOf: [{ $ref: Animal }, {
+   * oneOf: [...] }] }` does (#714) — beside the `allOf`
    * or beside the component's own `properties`, whose every variant pins
    * one property to a distinct const — a `$ref` variant's read from its
    * component — or that the document declares a `discriminator:` for, on
-   * the union or on the component itself). Emitters should generate a
+   * the union, on an inline `allOf` around it or on the component itself;
+   * a component that composes several unions dispatches by one, the union
+   * whose variants the keyword's `mapping` names, and carries every other
+   * union's variants' properties as optional fields, #718). A component
+   * composed with `allOf` that a `$ref` member names keeps the union for
+   * its own model. Emitters should generate a
    * dispatcher (factory) instead of a regular dataclass. The `property`
    * field is the discriminator key (e.g. "event"), and `mapping` maps each
    * discriminator value to the concrete variant model name (an IR model
