@@ -32,6 +32,7 @@ import {
   extractConstraints,
   isComponentModelRef,
   markComponentModelRef,
+  nullVote,
   schemaAdmitsNull,
   arraySchemaOf,
   declaresNull,
@@ -3182,15 +3183,22 @@ function conjoinTypedDeclarations(first: SchemaObject, second: SchemaObject): Sc
  * is a merge admitting `null` for its members' sake alone
  * (`mergeDeclaresNull`: `{ allOf: [{ $ref: A }, { $ref: B }] }` over two
  * nullable components) beside a `second` that rejects `null`
- * (`schemaAdmitsNull`) is kept typed `object`, its members and keywords
+ * (`nullVote`) is kept typed `object`, its members and keywords
  * as written — the bare model it was, and the model the same two
  * declarations written by hand as one `allOf` are, where that reading
  * rejects `null` for the second's sake. A `nullable: true` it writes with
  * no `type`, which declared nothing, is left off: beside the `type` it
- * would. Any other `first` is itself.
+ * would. Any other `first` is itself, and so is one beside a `second` that
+ * admits `null` or says nothing of what an instance is (`'abstains'`: a
+ * `$ref` to a component of nothing but annotations and limits, a wrapper
+ * around nothing but such members), which has no vote in the `allOf` of
+ * both either (#715: any `second` that did not admit `null` took the
+ * `null` away, so `{ allOf: [{ $ref: A }, { $ref: B }] }` beside `{ $ref:
+ * Described }` was the bare model, where beside `{ description }` it
+ * stayed nullable).
  */
 function keptAsWritten(first: SchemaObject, second: SchemaObject): SchemaObject {
-  if (!mergeDeclaresNull(first) || schemaAdmitsNull(second)) return first;
+  if (!mergeDeclaresNull(first) || nullVote(second) !== 'rejects') return first;
   const { nullable: _flag, ...rest } = first;
   return { ...rest, type: 'object' };
 }
