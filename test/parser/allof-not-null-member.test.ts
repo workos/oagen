@@ -733,6 +733,102 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
         expect(await members({ allOf: [kind, notNull] }, {}, 'PetOwner'), label).toBe('PetOwner cat: Cat, dog: Dog');
       }
     });
+
+    it('takes the `null` away from a JSON Pointer the `allOf` is read as, once the pointer is settled', async () => {
+      // Greptile, #726: a pointer has no type when the `allOf` is typed, so the veto was read too early and the
+      // type the pointer settled to kept its `null`.
+      const Holder = {
+        type: 'object',
+        properties: {
+          name: nullable(openapi, 'string'),
+          names: nullable(openapi, 'array', { items: string }),
+          held: nullableObject(openapi, 'held'),
+          owner: Owner,
+          kind: nullable(openapi, 'string', { enum: ['cat', 'dog', null] }),
+          wrapped: { oneOf: [Plain, { type: 'null' }] },
+          plain: string,
+        },
+      };
+      const at = (field: string) => ({ $ref: `#/components/schemas/Holder/properties/${field}` });
+      const lines: string[] = [];
+      for (const field of Object.keys(Holder.properties)) {
+        const read = async (owner: unknown) =>
+          show(fieldType(await parse(ownerDoc(openapi, owner, { Holder })), 'Pet', 'owner'));
+        const alone = await read(at(field));
+        const vetoed = await read({ allOf: [at(field), notNull] });
+        // First among the members, beside the `allOf`, and around a wrapper: the same type.
+        expect(await read({ allOf: [notNull, at(field)] }), field).toBe(vetoed);
+        expect(await read({ allOf: [at(field)], not: { type: 'null' } }), field).toBe(vetoed);
+        expect(await read({ allOf: [{ allOf: [at(field)] }, notNull] }), field).toBe(vetoed);
+        // Without the `not` the `allOf` is what the pointer alone is.
+        expect(await read({ allOf: [at(field)] }), field).toBe(alone);
+        lines.push(`${field}: ${alone} -> ${vetoed}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "name: nullable<string> -> string
+        names: nullable<string[]> -> string[]
+        held: nullable<HolderHeld> -> HolderHeld
+        owner: nullable<Owner> -> Owner
+        kind: nullable<HolderKind> -> HolderKind
+        wrapped: nullable<Plain> -> Plain
+        plain: string -> string"
+      `);
+      // At the other sites a schema is typed at, and through a pointer to the field that writes the `allOf`.
+      const schema = { allOf: [at('name'), notNull] };
+      const spec = await parse(
+        document(
+          openapi,
+          {
+            Holder,
+            Pet: {
+              type: 'object',
+              properties: {
+                field: schema,
+                items: { type: 'array', items: schema },
+                values: { type: 'object', additionalProperties: schema },
+                pointer: { $ref: '#/components/schemas/Pet/properties/field' },
+                wrapped_again: { oneOf: [schema, { type: 'null' }] },
+                own_type: { ...nullable(openapi, 'string'), allOf: [at('name'), notNull] },
+                merged: { allOf: [at('held'), Tag, notNull] },
+              },
+            },
+          },
+          {
+            '/names': {
+              post: {
+                operationId: 'postName',
+                parameters: [{ name: 'q', in: 'query', schema }],
+                requestBody: json(schema),
+                responses: { '200': { description: 'ok', headers: { 'X-Name': { schema } }, ...json(schema) } },
+              },
+            },
+          },
+        ),
+      );
+      const op = operation(spec, 'postName');
+      expect([
+        ...script(spec).split(', '),
+        `query parameter: ${show(op.queryParams[0]?.type)}`,
+        `request body: ${show(op.requestBody)}`,
+        `response body: ${show(op.response)}`,
+        `response header: ${show(op.responseHeaders?.[0]?.type)}`,
+      ]).toMatchInlineSnapshot(`
+        [
+          "field: string",
+          "items: string[]",
+          "values: map<string>",
+          "pointer: string",
+          "wrapped_again: nullable<string>",
+          "own_type: nullable<string>",
+          "merged: PetMerged",
+          "query parameter: string",
+          "request body: string",
+          "response body: string",
+          "response header: string",
+        ]
+      `);
+      expect(warnings()).toEqual([]);
+    });
   });
 });
 

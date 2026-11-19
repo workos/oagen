@@ -239,6 +239,32 @@ export function pendingSiteLimitsOf(ref: ModelRef): Constraints | undefined {
 }
 
 /**
+ * The pending references whose site vetoes `null`: each is the member an
+ * `allOf` that vetoes `null` is read as (`withoutVetoedNull`; #716), so
+ * the type it is settled to admits none, whatever the schema the pointer
+ * lands on admits — `{ allOf: [{ $ref: '#/components/schemas/Holder/
+ * properties/name' }, { not: { type: 'null' } }] }` over a nullable `name`
+ * is the bare `string`, as the same `allOf` around a `$ref` to a nullable
+ * component is the bare component. The type builder cannot take the
+ * `nullable` wrapper off a reference that has no type yet, so the veto is
+ * kept here until the reference is settled (`resolveSchemaPointers`), as
+ * the site's limits are (`pendingSiteLimits`). A copy of a pending
+ * reference keeps it (`cloneTypeRef`).
+ */
+const pendingNullVetoes = new WeakSet<ModelRef>();
+
+/** Record whether the site of the pending `ref` vetoes `null` (`pendingNullVetoes`). */
+export function recordPendingNullVeto(ref: ModelRef, vetoed: boolean): void {
+  if (vetoed) pendingNullVetoes.add(ref);
+  else pendingNullVetoes.delete(ref);
+}
+
+/** Whether the site of the pending `ref` vetoes `null` (`pendingNullVetoes`). */
+export function pendingNullVetoed(ref: ModelRef): boolean {
+  return pendingNullVetoes.has(ref);
+}
+
+/**
  * The entries of a discriminator `mapping` whose target is a pointer
  * deeper into a component (`#/components/schemas/Zoo/properties/dog`;
  * #539 review, #619), each to be written as the model the schema it
