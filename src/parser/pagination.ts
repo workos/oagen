@@ -25,10 +25,11 @@ import {
   resolveSchemaName,
   unionAxesOf,
   axisDiscriminatorOf,
-  isDecidedDiscriminator,
+  handedOn,
+  undecided,
   unionTypesSchema,
   unwrapNullableSchema,
-  wrapperDiscriminatorOf,
+  wrapperDiscriminatorWithin,
 } from './schemas.js';
 import { toSnakeCase } from '../utils/naming.js';
 import {
@@ -769,6 +770,12 @@ function unionFields(
  * [{ $ref: Pet }] }` with `Pet: { properties: { id }, oneOf: [cat, dog] }`
  * dispatches to `DogCat` and `DogDog`), whose variant models carry the
  * field; an inline merge of the same member carries the base fields only.
+ * A member of an inline `allOf` wrapper among the component's members is
+ * as direct as one written beside the wrapper, since the component reader
+ * reads the wrapper as part of the `allOf` it sits in
+ * (`composedInlineMember`; #714): `Dog: { allOf: [{ additionalProperties:
+ * false, allOf: [{ $ref: Pet }, { trace_id }] }] }` dispatches to `DogCat`
+ * and `DogDog` too.
  */
 function unionCounts(union: CollectedUnion, named: boolean, componentSchemas?: Record<string, SchemaObject>): boolean {
   if (union.origin === null) return true;
@@ -813,20 +820,32 @@ function isNumeric(schema: SchemaObject): boolean {
  * component. Shared by the stop-field check and the document walk an
  * explicit `dataPath` makes (`resolveDataPathArray`), so a stop field
  * and a data array behind the same wrappers are read the same way.
+ * `through` is told each schema read through on the way, in order — a
+ * `$ref` that is followed, a nullable union wrapper collapsed onto its one
+ * variant, an `allOf` read as its one member — for the one walk that
+ * hands what such a wrapper writes on to the schema under it
+ * (`collectObjectProperties`, the `discriminator` written for a union
+ * among an `allOf`'s members).
  */
 export function resolveBareSchema(
   schema: SchemaObject,
   componentSchemas?: Record<string, SchemaObject>,
   seen: Set<string> = new Set(),
+  through?: (wrapper: SchemaObject) => void,
 ): SchemaObject {
   if (schema.$ref) {
     if (seen.has(schema.$ref)) return schema;
     seen.add(schema.$ref);
     const resolved = resolveComponentSchemaRef(schema, componentSchemas);
-    return resolved ? resolveBareSchema(resolved, componentSchemas, seen) : schema;
+    if (!resolved) return schema;
+    through?.(schema);
+    return resolveBareSchema(resolved, componentSchemas, seen, through);
   }
-  const bare = unwrapNullableSchema(schema);
-  if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen);
+  const bare = unwrapNullableSchema(schema, (branch, wrapper) => {
+    through?.(wrapper);
+    return branch;
+  });
+  if (bare.$ref) return resolveBareSchema(bare, componentSchemas, seen, through);
   const reading =
     bare.allOf && classifyInlineSchema(bare) === 'allOf'
       ? readInlineAllOf(bare.allOf, bare, componentSchemas)
@@ -841,7 +860,9 @@ export function resolveBareSchema(
       : reading === 'reference'
         ? allOfReferenceMember(bare)
         : undefined;
-  return lone ? resolveBareSchema(lone, componentSchemas, seen) : bare;
+  if (!lone) return bare;
+  through?.(bare);
+  return resolveBareSchema(lone, componentSchemas, seen, through);
 }
 
 /**
@@ -976,7 +997,10 @@ export function collectObjectProperties(
   // The component a member's `$ref` names, as the model reads the member
   // (`CollectedUnion.origin`): the first reference the resolver followed
   // for the member, counting from the `from`th it recorded; `direct` when
-  // the member is one of the node's own and every component on the way to
+  // the member is one of the node's own — written among its `allOf`
+  // members, or among those of an inline `allOf` wrapper that is one of
+  // them, at any depth (`depth` stays 1 through such a wrapper; #714) — and
+  // every component on the way to
   // the schema it lands on is a plain object or an alias — none composed
   // by its `allOf` (`allOfComposesComponent`, the component reader's own
   // test), which that reader reads as a nested component whose own
@@ -1013,22 +1037,59 @@ export function collectObjectProperties(
     // per keyword below rather than collapsed by the resolver onto a
     // nullable axis's one variant with the other axis lost.
     let carrier = s;
+    // What the schema the walk reads is handed, as part of the `allOf` it
+    // sits in, for a union among its own members (`readThrough`): what `s`
+    // is handed, through each wrapper read on the way — an `allOf` read as
+    // its one member hands on as any wrapper does
+    // (`wrapperDiscriminatorWithin`), a nullable wrapper its own keyword,
+    // under the decision handed to it if any (`handedOn`) — until a `$ref`
+    // names a component (`viaComponent`), which is handed nothing.
+    let passedOn = wrapperDiscriminator;
+    let viaComponent = false;
+    const readThrough = (wrapper: SchemaObject): void => {
+      if (wrapper.$ref !== undefined) {
+        // What is written around a reference says nothing of the members of
+        // the component it names; a pointer into one names a schema and no
+        // model, and is read as that schema written in its place is.
+        if (componentKeyOf(wrapper.$ref) === undefined) return;
+        passedOn = undefined;
+        viaComponent = true;
+      } else if (allOfComposesComponent(wrapper)) {
+        passedOn = wrapperDiscriminatorWithin(wrapper, passedOn, componentSchemas);
+      } else passedOn = handedOn(passedOn, (was) => wrapper.discriminator ?? was);
+    };
     while (depth > 0 && carrier.$ref) {
       if (seenRefs.has(carrier.$ref)) return;
       seenRefs.add(carrier.$ref);
       const target = resolveComponentSchemaRef(carrier, componentSchemas);
       if (!target) return;
+      readThrough(carrier);
       carrier = target;
     }
     const bare =
-      depth > 0 && carrier.oneOf && carrier.anyOf ? carrier : resolveBareSchema(carrier, componentSchemas, seenRefs);
+      depth > 0 && carrier.oneOf && carrier.anyOf
+        ? carrier
+        : resolveBareSchema(carrier, componentSchemas, seenRefs, readThrough);
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
     // The node's own unions are its model's, whatever it resolves through;
     // a member's are read as the component its `$ref` names reads them.
     named ??= seenRefs.size > followed;
-    const origin = depth === 0 ? null : (inherited ?? memberOrigin(followed, depth));
+    const landed = depth === 0 ? null : memberOrigin(followed, depth);
+    const origin = inherited ?? landed;
+    // A member reached without naming a component — written inline, or a
+    // pointer into one — that carries an `allOf` of its own is part of the
+    // `allOf` it sits in, as the component reader reads it
+    // (`composedInlineMember`; #714): its members are members of the same
+    // `allOf`, the node's own direct members where it is one. So a `$ref`
+    // member inside `{ additionalProperties: false, allOf: [{ $ref: PetMeta
+    // }, { trace_id }] }` is as direct as one written beside it, and a stop
+    // field every variant declares resolves exactly where the node's model
+    // dispatches to those variants, in both spellings (the wrapper deepened
+    // the walk, so the member was indirect where the model, reading through
+    // the wrapper, dispatches).
+    const inline = depth > 0 && landed === null;
     // The `discriminator` declared for a union here: the schema's own, else
     // the member's own written on a nullable wrapper the resolver collapsed
     // (`carrier`), else the one handed down from above — as the readers read
@@ -1052,15 +1113,25 @@ export function collectObjectProperties(
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
         // The keyword the union is read with, as the model reads it
-        // (`axisDiscriminatorOf`): the one the composition decided the union
-        // of, else the member's own — a member writing both keywords hands
-        // it to the one it goes with — else the one written on a nullable
-        // wrapper the resolver collapsed, else the one handed down.
+        // (`axisDiscriminatorOf`): the composition's decision, else the
+        // member's own — a member writing both keywords hands it to the
+        // one it goes with — else the one written on a nullable wrapper the
+        // resolver collapsed (`handedOn`), else the one handed down.
         const handed =
-          bare === carrier || isDecidedDiscriminator(wrapperDiscriminator)
+          bare === carrier
             ? wrapperDiscriminator
-            : (carrier.discriminator ?? wrapperDiscriminator);
-        const axisDiscriminator = axisDiscriminatorOf(bare, variants, handed, componentSchemas);
+            : handedOn(wrapperDiscriminator, (was) => carrier.discriminator ?? was);
+        // A component its own `allOf` composes is read by its own
+        // composition's decision, never by one made around the reference
+        // that names it (`undecided`); a wrapper written inline is part of
+        // the composition that decided (`composedInlineMember`; #714).
+        const component = viaComponent && allOfComposesComponent(bare);
+        const axisDiscriminator = axisDiscriminatorOf(
+          bare,
+          variants,
+          component ? undecided(handed) : handed,
+          componentSchemas,
+        );
         if (branch) {
           visit(branch, depth, origin, axisDiscriminator);
           continue;
@@ -1081,7 +1152,17 @@ export function collectObjectProperties(
         }
       }
     }
-    for (const sub of bare.allOf ?? []) visit(sub, depth + 1, origin, wrapperDiscriminatorOf(bare, componentSchemas));
+    // What the members are handed for a union among them: what the schema
+    // hands them as part of the `allOf` it sits in — the decision handed on
+    // to it, else its own keyword, else the one handed on as written, from
+    // the `allOf` an inline wrapper sits in or from a wrapper the resolver
+    // read through to reach the schema (`passedOn`) — as the component
+    // reader and the merge hand it on (`wrapperDiscriminatorWithin`; #714:
+    // only the schema's own was read, so a union a component dispatches by
+    // a `mapping` written around a wrapper counted as flattened, and a stop
+    // field its variants declare resolved to a field the model has none of).
+    const forMembers = wrapperDiscriminatorWithin(bare, passedOn, componentSchemas);
+    for (const sub of bare.allOf ?? []) visit(sub, inline ? depth : depth + 1, origin, forMembers);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;
       note(key);

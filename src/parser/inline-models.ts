@@ -20,14 +20,15 @@ import {
   admits,
   componentSchemaOf,
   componentUnionDispatches,
+  allOfComposesComponent,
   composesOwnChain,
   axisDiscriminatorOf,
-  isDecidedDiscriminator,
+  handedOn,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
   unionAxesOf,
-  wrapperDiscriminatorOf,
+  wrapperDiscriminatorWithin,
   constraintsEntry,
   deprecatedEntry,
   extractConstraints,
@@ -3650,7 +3651,10 @@ function splicesOpen(schema: SchemaObject): boolean {
  * beside the `allOf` have joined its members, and read by the readers
  * that are handed a schema as written (`annotatingAllOfMembers`,
  * `annotatedTypingMember`, `allOfReferenceMember`), a component's among
- * them.
+ * them — and by the reader of a composed component's own members
+ * (`componentAllOfMembers`, with the `required` the spliced members write,
+ * `ownRequired`; workos/oagen#714), so a union inside a bare `allOf` among
+ * them is a direct member's, dispatched or flattened as one.
  */
 export function spliceNestedAllOf(schema: SchemaObject): SchemaObject {
   if (schema.$ref !== undefined || schema.allOf === undefined) return schema;
@@ -4154,17 +4158,24 @@ export function mergeAllOfMembers(
           : { name: resolveSchemaName(key), schema: target };
       // Nothing written beside the `$ref` is read — not a bare alias's
       // `required`, `properties`, `allOf` or union (#618 review, #622) —
-      // as the component reader reads none (`componentAllOfMembers`). A
-      // keyword the composition around the `$ref` decided the union of
+      // as the component reader reads none (`componentAllOfMembers`), and
+      // no keyword is handed on past the `$ref`, as none was. A decision
+      // the composition around the `$ref` made of its keyword
       // (`wrapperDiscriminatorOf`) goes on with a reference that stays
-      // inside the same component's chain, as the component reader hands
-      // it to a `$ref` member's unions: the union it goes with is left to
-      // the component and every other is flattened into the merge, as
-      // both are in the component's own model (#718).
+      // inside the same component's chain (`handedOn`), as the component
+      // reader hands it to a `$ref` member's unions: the union the keyword
+      // goes with is left to the component and every other is flattened
+      // into the merge, as both are in the component's own model (#718). A
+      // component its own `allOf` composes is read by its own composition's
+      // decision, never by one made around the reference, as the component
+      // reader reads it (`composedInlineMember`: only a wrapper written
+      // inline, or a pointer to one, is part of the `allOf` it sits in;
+      // #714), so it is handed none.
+      const component = key !== undefined && allOfComposesComponent(target);
       visit(
         target,
         owner,
-        owner === origin && isDecidedDiscriminator(wrapperDiscriminator) ? wrapperDiscriminator : undefined,
+        owner === origin && !component ? handedOn(wrapperDiscriminator, () => undefined) : undefined,
       );
       return;
     }
@@ -4172,7 +4183,16 @@ export function mergeAllOfMembers(
       if (value) declareProperty(declared, key, value, origin, false);
     }
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
-    for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s, componentSchemas));
+    // A member that is itself an `allOf` is part of the `allOf` it sits in,
+    // so what that `allOf` hands its members for a union among them goes on
+    // to the member's own, as the component reader hands it on
+    // (`wrapperDiscriminatorWithin`, `readComponentAllOf`; #714: it stopped
+    // at the member, so `Pet: { allOf: [{ $ref: Base }, { allOf: [{ oneOf:
+    // [...] }] }], discriminator: { mapping } }` named in a merge had the
+    // fields of the variants `Pet` dispatches flattened in). A component
+    // composed with `allOf` that a `$ref` names is visited with none.
+    const forMembers = wrapperDiscriminatorWithin(s, wrapperDiscriminator, componentSchemas);
+    for (const sub of s.allOf ?? []) visit(sub, origin, forMembers);
     // A nullable union wrapper — one non-null variant beside `null`, decided
     // per keyword by `nullableAxisBranch`, `nullableUnionBranch`'s
     // definition, the one `unwrapNullableSchema` collapses by, which
