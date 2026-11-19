@@ -172,6 +172,8 @@ import {
   yieldBodyNames,
   type BodyNameYields,
   type OperationBodyNames,
+  type OwnBodyDefinition,
+  type OwnBodyNames,
 } from './contested-body-names.js';
 import { externalDocsEntry, readExternalDocs, type RawExternalDocs } from './external-docs.js';
 import { resolvePathItemRef } from './path-item-refs.js';
@@ -818,6 +820,24 @@ export interface OperationExtractionResult {
   declaredCallbacks: DeclaredCallbacks[];
 }
 
+/** What each reading of the operations answers about the names its operations mint (`ownBodyNamesOf`), kept beside the result rather than on it: a reading is data, compared and copied as such. */
+const ownBodyNamesByReading = new WeakMap<OperationExtractionResult, OwnBodyNames>();
+
+/**
+ * The operations' own definitions of a name, as `operations` — a reading
+ * `extractOperations` returned — holds them: what each operation that mints
+ * the name from its stem, and keeps it, holds under it (`OwnBodyNames`,
+ * #712). For the webhooks and the callbacks, read after the operations: a
+ * model of theirs the document names like an operation's own leaves the
+ * name unless it is that operation's very model (`buildReceivedRequests`).
+ * Answered from the rehearsal the pass read its bodies in, once more under
+ * a stand-in only for an operation that holds the name asked for; absent
+ * for a reading of a document without `paths`.
+ */
+export function ownBodyNamesOf(operations: OperationExtractionResult): OwnBodyNames | undefined {
+  return ownBodyNamesByReading.get(operations);
+}
+
 /**
  * What `extractOperations` is told about the names two operations' bodies
  * both mint (`resolveBodyNameYields`, #683).
@@ -1065,6 +1085,8 @@ export function extractOperations(
     yields?: BodyNameYields,
     /** An `operationId` to name the models from in place of the operation's own naming: the rehearsal's stand-in (`readBodies`). */
     namedFrom?: string,
+    /** What each component response's body gives up, by the name it is shared under (`ResponseTypingContext.componentYields`). */
+    componentYields?: ReadonlyMap<string, BodyNameYields>,
   ) => {
     // The first tag with a name (`serviceTag`), read from the list
     // `Operation.tags` carries, so the service is named from one of its
@@ -1109,6 +1131,7 @@ export function extractOperations(
       namedFrom ?? modelOperationIds.get(key),
       yields,
       sink.kept,
+      componentYields,
     );
     return { tag, serviceName, ...built };
   };
@@ -1120,19 +1143,38 @@ export function extractOperations(
   // (see resolveBodyNameYields); and so is a name one operation mints and
   // the document gives a model of another — `getPet`'s response and an
   // `object: get_pet_response` body `listDogs` returns, both
-  // `GetPetResponse` (#712). The names are read off each operation built
-  // on its own (`heldBodyNames`, `bodyNamesOf`), silently and into nothing
-  // that is kept: the operation reports its problems once, when the loop
-  // below builds it, and one that cannot be built says so there.
+  // `GetPetResponse` (#712), whether `listDogs` writes that body inline or
+  // mounts it from `components/responses`. The names are read off each
+  // operation built on its own (`heldBodyNames`, `bodyNamesOf`) and each
+  // mounted component response's body read on its own
+  // (`componentBodyNames`), silently and into nothing that is kept: the
+  // operation reports its problems once, when the loop below builds it, and
+  // one that cannot be built says so there.
   const componentResponseNames = new Set(
     [...componentResponseNaming.values()].flatMap((naming) => [naming.name, ...naming.minted]),
   );
+  type Built = ReturnType<typeof buildAt>;
+  /**
+   * Every operation as the rehearsal read it on its own, kept for the
+   * passes read after the operations (`ownBodyNames`): the names its bodies
+   * hold, the stand-in reading to tell the minted ones by, and what it
+   * mints from its stem once that reading was made (`minted`).
+   */
+  const rehearsed: Array<{
+    key: string;
+    built: Built;
+    standIn: () => Built;
+    held: string[];
+    minted?: ReadonlySet<string>;
+  }> = [];
+  // The names decided before the operations: the registry as it is seeded,
+  // which every rehearsal reads a copy of, whenever it is made.
+  const seededRegistry: ModelShapeRegistry = new Map(registry);
+  const declaredNames: ReadonlySet<string> = new Set(seededRegistry.keys());
   const readBodies = (included: (key: string) => boolean, contested: (key: string) => boolean): OperationBodyNames[] =>
     rehearse(() => {
-      // The names decided before the operations: the registry as it is seeded.
-      const declaredNames = new Set(registry.keys());
-      type Built = ReturnType<typeof buildAt>;
-      const readings: Array<{ key: string; built: Built; standIn: () => Built; held: string[] }> = [];
+      const readings = rehearsed;
+      readings.length = 0;
       for (const [path, pathItem] of Object.entries(resolvedPaths)) {
         for (const method of HTTP_METHODS) {
           const op = pathItem[method];
@@ -1145,13 +1187,13 @@ export function extractOperations(
               method,
               op,
               undefined,
-              { deferred: [], registry: new Map(registry) },
+              { deferred: [], registry: new Map(seededRegistry) },
               undefined,
               namedFrom,
             );
           try {
             const built = build();
-            const { models, enums } = heldBodyNames(built, componentResponseNames);
+            const { models, enums } = heldBodyNames(built);
             readings.push({
               key,
               built,
@@ -1163,23 +1205,45 @@ export function extractOperations(
           }
         }
       }
+      // The body of each `components/responses` entry an operation mounts as
+      // a 2xx, read on its own under the name it is shared under: a holder
+      // of the names the document gives it, as an operation's own body is,
+      // and of nothing an operation mints (`componentBodyNames`).
+      const mountedNames = new Set(readings.flatMap(({ built }) => built.mounted.names));
+      const mountedBodies = [...componentResponseNaming].flatMap(([componentName, { name }]) => {
+        const schema = mountedNames.has(name)
+          ? componentResponseBodySchema(componentName, componentResponses ?? {})
+          : undefined;
+        if (!schema) return [];
+        const body = readComponentBody(schema, name, componentSchemas);
+        return [{ key: componentBodyKey(componentName), name, schema, body, held: componentBodyHeldNames(body) }];
+      });
       // Built once more under a stand-in for its stem, to tell the names it
       // mints from its stem from the ones the document gives (`bodyNamesOf`),
       // where the two can be told apart to any effect: an operation whose
       // stem contains another's or is contained in one (`contested`), and
-      // one that holds a name an operation of another stem holds too
-      // (`namesHeldAcrossStems`).
-      const shared = namesHeldAcrossStems(
-        readings.map(({ built, held }) => ({ stem: built.modelQualifier, names: held })),
-      );
+      // an operation or a component's body that holds a name another one
+      // holds too (`namesHeldAcrossStems`).
+      const shared = namesHeldAcrossStems([
+        ...readings.map(({ built, held }) => ({ stem: built.modelQualifier, names: held })),
+        ...mountedBodies.map(({ key, held }) => ({ stem: key, names: held })),
+      ]);
       const bodies: OperationBodyNames[] = [];
-      for (const { key, built, standIn, held } of readings) {
+      for (const reading of readings) {
+        const { key, built, standIn, held } = reading;
         if (!contested(key) && !held.some((name) => shared.has(name))) continue;
         try {
-          bodies.push(bodyNamesOf(key, built, standIn(), componentResponseNames, declaredNames));
+          const names = bodyNamesOf(key, built, standIn(), declaredNames);
+          reading.minted = new Set([...names.models, ...names.enums]);
+          bodies.push(names);
         } catch {
           // Left out, as above.
         }
+      }
+      for (const { key, name, schema, body, held } of mountedBodies) {
+        if (!held.some((heldName) => shared.has(heldName))) continue;
+        const standIn = readComponentBody(schema, standInComponentBodyName(name), componentSchemas);
+        bodies.push(componentBodyNames(key, body, standIn, declaredNames));
       }
       return bodies;
     });
@@ -1230,7 +1294,16 @@ export function extractOperations(
     readBodies,
     bodyNames?.setAside ? undefined : namesInPlay,
   );
+  // What each component response's body gives up, by the name it is shared
+  // under: one answer for the component, applied wherever it is mounted.
+  const componentYields = new Map<string, BodyNameYields>();
+  for (const [componentName, { name }] of componentResponseNaming) {
+    const given = bodyNameYields.get(componentBodyKey(componentName));
+    if (given) componentYields.set(name, given);
+  }
 
+  /** Each operation's own models and the types its own bodies are read through, by key, as the loop below builds them (`ownBodyNames`). */
+  const ownBodies = new Map<string, { models: Model[]; refs: TypeRef[] }>();
   for (const [path, pathItem] of Object.entries(resolvedPaths)) {
     // Read once per Path Item so a problem in its `servers` is reported once,
     // not once per operation. The operations that inherit it share the array,
@@ -1258,6 +1331,7 @@ export function extractOperations(
         operationQualifier,
         modelQualifier,
         componentBodies: opComponentBodies,
+        mounted: opMounted,
         declaredCallbacks: opCallbacks,
       } = buildAt(
         path,
@@ -1268,7 +1342,13 @@ export function extractOperations(
         { deferred, registry, kept: keptModelsOf(op) },
         // A path that shares another's Operation Object gives up what that path does.
         bodyNameYields.get(sharedWith.get(key) ?? key),
+        undefined,
+        componentYields,
       );
+      ownBodies.set(key, {
+        models: ownBodyModels(opModels, opCompanions ?? [], opMounted),
+        refs: ownBodyTypeRefs(operation, opComponentBodies, opCompanions ?? []),
+      });
       inlineModels.push(...opModels);
       componentBodies.push(...opComponentBodies);
       if (opCallbacks) declaredCallbacks.push(opCallbacks);
@@ -1359,7 +1439,7 @@ export function extractOperations(
   // — as it steps past every other enum in play, so a model never keeps an
   // enum's name.
   for (const item of namingOrder) reserveEnumNames(registry, deferredEnumNames(item), registryOwner(item));
-  const deferredTypes = resolveDeferredInlineTypes(deferred, registry, namingOrder);
+  const deferredTypes = resolveDeferredInlineTypes(deferred, registry, namingOrder, componentYields);
   inlineModels.push(...deferredTypes.models);
   // The root every component-shared site wrote, by identity (every target of
   // a site carries the one TypeRef its resolution produced), and each
@@ -1401,7 +1481,46 @@ export function extractOperations(
     };
   });
 
-  return { services, inlineModels, inlineModelBundles, componentSites, declaredCallbacks };
+  // What the passes read after the operations ask of a name they would
+  // take (`ownBodyNamesOf`): the operations that
+  // mint it from their stem — told by the stand-in reading, made now for an
+  // operation the contest above had no reason to read twice — less the one
+  // that gave it up to another, each with what its own bodies hold under
+  // the name in the IR as it stands.
+  const ownBodyNames: OwnBodyNames = (name) =>
+    rehearse(() => {
+      const definitions: OwnBodyDefinition[] = [];
+      for (const reading of rehearsed) {
+        if (!reading.held.includes(name)) continue;
+        if (reading.minted === undefined) {
+          try {
+            const names = bodyNamesOf(reading.key, reading.built, reading.standIn(), declaredNames);
+            reading.minted = new Set([...names.models, ...names.enums]);
+          } catch {
+            reading.minted = new Set();
+          }
+        }
+        const own = ownBodies.get(reading.key);
+        if (!own || !reading.minted.has(name) || bodyNameYields.get(reading.key)?.has(name)) continue;
+        const models = own.models.filter((model) => model.name === name);
+        const enums = new Set<EnumRef>();
+        for (const ref of [...own.refs, ...own.models.flatMap(collectModelTypeRefs)]) {
+          walkTypeRef(ref, { enum: (enumRef) => void (enumRef.values && enumRef.name === name && enums.add(enumRef)) });
+        }
+        if (models.length > 0 || enums.size > 0) definitions.push({ models, enums: [...enums] });
+      }
+      return definitions;
+    });
+
+  const reading: OperationExtractionResult = {
+    services,
+    inlineModels,
+    inlineModelBundles,
+    componentSites,
+    declaredCallbacks,
+  };
+  ownBodyNamesByReading.set(reading, ownBodyNames);
+  return reading;
 }
 
 /** What `planOperations` settles for one operation. */
@@ -3625,11 +3744,15 @@ function buildOperation(
   bodyNameYields?: BodyNameYields,
   /** The definitions the Operation Object keeps for its success bodies' copies, shared by every path that reads it (`ResponseTypingContext.kept`, #672). */
   kept?: KeptSuccessModels,
+  /** What each component response's body gives up, wherever it is mounted (`ResponseTypingContext.componentYields`, #712). */
+  componentYields?: ReadonlyMap<string, BodyNameYields>,
 ): {
   operation: Operation;
   inlineModels: Model[];
   inlineModelBundles: InlineModelBundle[];
   envelopeCompanions?: EnvelopeCompanion[];
+  /** What the 2xx bodies the operation mounts from `components/responses` contribute (`MountedComponentBodies`). */
+  mounted: MountedComponentBodies;
   /** What the shape registry records as the owner of this operation's models (see `headerOperationQualifier`). */
   operationQualifier: string;
   /** What a merge pass prefixes to one of this operation's models it must rename (`InlineModelBundle.qualifier`). */
@@ -3737,6 +3860,7 @@ function buildOperation(
     componentResponseModelNames,
     registry,
     ...(bodyNameYields && { yields: bodyNameYields }),
+    ...(componentYields && { componentYields }),
     ...(kept && { kept }),
   };
   // One location's parameters, typed by `extractParams`. A parameter whose
@@ -3871,6 +3995,7 @@ function buildOperation(
     envelopeCompanions,
     unpagedEnvelope,
     componentBodies,
+    mounted,
   } = extractResponses(op.responses, namingOp, pathModelBaseName, opLabel, componentSchemas, typing, {
     disabled: iteratorSource === undefined,
     dataPath: paginationDisabled ? undefined : paginationOverride?.hint.dataPath,
@@ -4068,10 +4193,14 @@ function buildOperation(
   // (`ItemSettlement.yields`).
   if (bodyNameYields) {
     const companions = envelopeCompanions ?? [];
-    yieldBodyNames(bodyNameYields, ownBodyTypeRefs(operation, componentBodies, companions), [
-      ...inlineModels,
-      ...companions.flatMap((companion) => companion.models),
-    ]);
+    // The operation's own models only: a mounted component's body gives up
+    // what the component does (`ResponseTypingContext.componentYields`), in
+    // every operation alike, and nothing this operation gives up.
+    yieldBodyNames(
+      bodyNameYields,
+      ownBodyTypeRefs(operation, componentBodies, companions),
+      ownBodyModels(inlineModels, companions, mounted),
+    );
   }
   const inlineModelBundles: InlineModelBundle[] = [];
   // The response site is recorded even when it minted nothing: its array
@@ -4090,6 +4219,7 @@ function buildOperation(
     operationQualifier,
     modelQualifier,
     componentBodies,
+    mounted,
     // The callbacks are read after every webhook is named, under this
     // operation's label and the stem its own models are named from.
     ...(op.callbacks !== undefined
@@ -5800,6 +5930,21 @@ interface ResponseTypingContext {
    */
   yields?: BodyNameYields;
   /**
+   * The names the body of each `components/responses` entry gives up, by
+   * the model name the body is shared under (`sharedResponseModelName`),
+   * each with the name its model or inline enum takes instead (#712): a
+   * name the document gives a model of the body — `GetPetResponse` from
+   * `object: get_pet_response` — that an operation mints from its stem for
+   * another shape. The component's own, never the mounting operation's: it
+   * is applied wherever the body is typed — as an operation's 2xx
+   * (`extractResponses`), its array items as they settle
+   * (`ItemSettlement.yields`), and a `default`, range, 3xx or error site
+   * (`DeferredInlineType.componentSite`) — so every operation that mounts
+   * the component reads one model, whichever is read first, and what the
+   * operation itself gives up (`yields`) never reaches it.
+   */
+  componentYields?: ReadonlyMap<string, BodyNameYields>;
+  /**
    * The definitions the Operation Object keeps for the copies its success
    * bodies declare (`KeptSuccessModels`, #672): what a later body's items,
    * or a later entry's secondary media-type body, share when they repeat
@@ -5920,6 +6065,8 @@ function resolveDeferredInlineTypes(
   deferred: readonly DeferredInlineType[],
   registry: ModelShapeRegistry,
   namingOrder: readonly DeferredInlineType[],
+  /** What each component response's body gives up, by the name it is shared under (`ResponseTypingContext.componentYields`): a site the component declares leaves those names as it is typed. */
+  componentYields: ReadonlyMap<string, BodyNameYields> = new Map(),
 ): { models: Model[]; bundles: InlineModelBundle[] } {
   const bundleOf = new Map<DeferredInlineType, InlineModelBundle>();
   const siblingsByBareName = new Map<string, SiblingSites>();
@@ -5944,7 +6091,8 @@ function resolveDeferredInlineTypes(
         : `${item.kind}\u0000${item.parentName ?? ''}\u0000${item.name}`;
     const siblings = sitesOf(item.later ? `later\u0000${bareName}` : bareName);
     const models: Model[] = [];
-    const type = materializeDeferredType(item, registry, models, siblings);
+    const given = item.componentSite === undefined ? undefined : componentYields.get(item.componentSite);
+    const type = materializeDeferredType(item, registry, models, siblings, given);
     // An enum this site typed — a body that is itself an enum, one nested in
     // a model it minted — owns its name from here on, as the site's models do.
     reserveEnumNames(
@@ -6145,6 +6293,8 @@ function materializeDeferredType(
   registry: ModelShapeRegistry,
   models: Model[],
   siblings: SiblingSites,
+  /** The names a component response's site gives up with its component (`ResponseTypingContext.componentYields`); none for an operation's own site, which steps past every body's name instead. */
+  yields?: BodyNameYields,
 ): TypeRef {
   return materializeInlineSchema(item.schema, {
     stem: deferredNamingStem(item),
@@ -6156,6 +6306,7 @@ function materializeDeferredType(
     operation: registryOwner(item),
     sent: isSentSite(item),
     ...(item.kept && { kept: item.kept }),
+    ...(yields && { yields }),
     models,
   });
 }
@@ -7528,11 +7679,14 @@ function itemSettlement(
   registry: ModelShapeRegistry,
   ctx: ResponseTypingContext,
   kept: Map<string, KeptDefinition> | undefined,
+  /** The name a component response's body is shared under, for such a body: it gives up what the component does, never what the operation does (`ResponseTypingContext.componentYields`). */
+  component?: string,
 ): ItemSettlement {
+  const yields = component === undefined ? ctx.yields : ctx.componentYields?.get(component);
   return {
     registry,
     operation: ctx.operationQualifier,
-    ...(ctx.yields && { yields: ctx.yields }),
+    ...(yields && { yields }),
     ...(kept && { kept }),
   };
 }
@@ -7574,9 +7728,10 @@ function ownBodyTypeRefs(
  * to (`CreatePetResponse201`, or `CreatePetResponse2` past a component
  * `CreatePetResponse201`), an explicit `dataPath`'s items. The models are
  * the request body's, the success bodies' and the envelope companions',
- * less every model a component response's body is shared under or mints
- * (`componentResponseNames`), which is no operation's own; the enums are the
- * inline enums those models and the bodies' own types carry
+ * less every model the body of a mounted component response minted
+ * (`heldBodyModels`: told apart by identity, never by name), which is the
+ * component's wherever it is mounted and no operation's own; the enums are
+ * the inline enums those models and the bodies' own types carry
  * (`ownBodyTypeRefs`).
  *
  * Minted from the stem means the name would be another under another stem,
@@ -7593,10 +7748,10 @@ function ownBodyTypeRefs(
  * Those names are read apart (`documentNames`), since one of them can be
  * the name another operation mints from its stem — `GetPetResponse` from
  * `object: get_pet_response` on `listDogs`, beside `getPet`'s own (#712) —
- * and with them the reading itself (`definitions`: the types the bodies are
- * read through and their models, those under a component response's names
- * included, which no name here reaches), so what the two operations hold
- * under the name can be compared (`resolveContestedBodyNames`). A name
+ * and with them the reading itself (`definitions`: the types the
+ * operation's own bodies are read through and their models), so what the
+ * two operations hold under the name can be compared
+ * (`resolveContestedBodyNames`). A name
  * decided before the operations (`declaredNames`: the registry as it is
  * seeded — a component schema's, a model or enum a component's field mints)
  * is left out of them: it is its owner's whatever an operation's stem
@@ -7609,11 +7764,10 @@ function bodyNamesOf(
   key: string,
   built: ReturnType<typeof buildOperation>,
   standIn: ReturnType<typeof buildOperation>,
-  componentResponseNames: ReadonlySet<string>,
   declaredNames: ReadonlySet<string> = new Set(),
 ): OperationBodyNames {
-  const own = heldBodyNames(built, componentResponseNames);
-  const other = heldBodyNames(standIn, componentResponseNames);
+  const own = heldBodyNames(built);
+  const other = heldBodyNames(standIn);
   const given = new Set([...other.models, ...other.enums]);
   const documents = (name: string): boolean => given.has(name) && !declaredNames.has(name);
   const companions = built.envelopeCompanions ?? [];
@@ -7625,33 +7779,119 @@ function bodyNamesOf(
     documentNames: { models: own.models.filter(documents), enums: own.enums.filter(documents) },
     definitions: {
       roots: ownBodyTypeRefs(built.operation, built.componentBodies, companions),
-      models: [...built.inlineModels, ...companions.flatMap((companion) => companion.models)],
+      models: heldBodyModels(built),
     },
   };
 }
 
 /**
- * Every model and inline enum name an operation's inline request and
- * success bodies hold in one reading of it (`buildOperation`): the request
- * body's models, the success bodies' and the envelope companions', less
- * every model a component response's body is shared under or mints
- * (`componentResponseNames`), which is no operation's own, and the inline
- * enums those models and the bodies' own types carry (`ownBodyTypeRefs`).
- * The names an operation is first read for, on its own
- * (`namesHeldAcrossStems`), and the ones its two readings are told apart by
- * (`bodyNamesOf`).
+ * The models an operation's inline request and success bodies hold in one
+ * reading of it (`buildOperation`): the request body's, the success bodies'
+ * and the envelope companions' — the operation's own (`ownBodyModels`),
+ * never one a mounted component's body minted, which is the component's
+ * wherever it is mounted and is read with it (`componentBodyNames`) — and
+ * each model of its own that such a body's model stands in for in the
+ * reading (`MountedComponentBodies.shadowed`).
  */
-function heldBodyNames(
-  reading: ReturnType<typeof buildOperation>,
-  componentResponseNames: ReadonlySet<string>,
-): { models: string[]; enums: string[] } {
-  const companions = reading.envelopeCompanions ?? [];
-  const models = [...reading.inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
-    (model) => !componentResponseNames.has(model.name),
-  );
+function heldBodyModels(reading: ReturnType<typeof buildOperation>): Model[] {
+  return [
+    ...ownBodyModels(reading.inlineModels, reading.envelopeCompanions ?? [], reading.mounted),
+    ...reading.mounted.shadowed,
+  ];
+}
+
+/**
+ * Every model and inline enum name an operation's inline request and
+ * success bodies hold in one reading of it: its own models
+ * (`heldBodyModels`) and the inline enums those models and the bodies' own
+ * types carry (`ownBodyTypeRefs`). The names an operation is first read
+ * for, on its own (`namesHeldAcrossStems`), and the ones its two readings
+ * are told apart by (`bodyNamesOf`).
+ */
+function heldBodyNames(reading: ReturnType<typeof buildOperation>): { models: string[]; enums: string[] } {
+  const models = heldBodyModels(reading);
   return {
     models: models.map((model) => model.name),
-    enums: inlineEnumNames(ownBodyTypeRefs(reading.operation, reading.componentBodies, companions), models),
+    enums: inlineEnumNames(
+      ownBodyTypeRefs(reading.operation, reading.componentBodies, reading.envelopeCompanions ?? []),
+      models,
+    ),
+  };
+}
+
+/** The key the body of a `components/responses` entry is read under among the operations' (`OperationBodyNames.key`), which no operation's `${method} ${path}` is. */
+function componentBodyKey(componentName: string): string {
+  return `components/responses/${componentName}`;
+}
+
+/**
+ * The body of a `components/responses` entry read on its own under
+ * `contextName`, under every reading an operation can give it
+ * (`BODY_READINGS`, as `bodyModelNames` reads its names): the types it is
+ * read through and every model it mints, the envelope companions' included.
+ * Read once under the name the body is shared under and once under a
+ * stand-in for it (`standInComponentBodyName`), as an operation is read
+ * under a stand-in for its stem.
+ */
+function readComponentBody(
+  schema: SchemaObject,
+  contextName: string,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): { roots: TypeRef[]; models: Model[] } {
+  const roots: TypeRef[] = [];
+  const models: Model[] = [];
+  for (const reading of BODY_READINGS) {
+    const body = classifyAndExtractResponse(schema, contextName, componentSchemas, reading);
+    roots.push(...responseBodyRefs(body));
+    models.push(...responseBodyModels(body));
+  }
+  return { roots, models };
+}
+
+/** Every model and inline enum name a component response's body holds (`readComponentBody`). */
+function componentBodyHeldNames(body: { roots: TypeRef[]; models: Model[] }): string[] {
+  return [...body.models.map((model) => model.name), ...inlineEnumNames(body.roots, body.models)];
+}
+
+/** A name to read a component response's body under in place of the one it is shared under (`readComponentBody`): any other. */
+function standInComponentBodyName(name: string): string {
+  const standIn = componentResponseModelName('bodyNamesStandIn');
+  return standIn === name ? componentResponseModelName('bodyNamesStandInOther') : standIn;
+}
+
+/**
+ * The body of a `components/responses` entry as a holder of the names the
+ * document gives (#712; Michael, #724): `DogList`, whose body pins
+ * `object: get_pet_response`, holds `GetPetResponse` as `listDogs` would
+ * with the same body written inline, and leaves it to `getPet` the same way
+ * (`resolveContestedBodyNames`). `body` is the body under the name it is
+ * shared under and `standIn` the same body under another: a name both
+ * readings hold is the document's, less the names decided before the
+ * operations (`declaredNames`), as for an operation (`bodyNamesOf`). The
+ * body mints nothing an operation's stem can contest — the names it takes
+ * from the component were stepped past every operation's before any was
+ * read (`resolveComponentResponseModelNames`) — so it claims none, and its
+ * key stands for its stem: one holder, whatever number of operations mount
+ * it, so what it gives up it gives up once.
+ */
+function componentBodyNames(
+  key: string,
+  body: { roots: TypeRef[]; models: Model[] },
+  standIn: { roots: TypeRef[]; models: Model[] },
+  declaredNames: ReadonlySet<string>,
+): OperationBodyNames {
+  const given = new Set(componentBodyHeldNames(standIn));
+  const documents = (name: string): boolean => given.has(name) && !declaredNames.has(name);
+  return {
+    key,
+    stem: key,
+    models: [],
+    enums: [],
+    documentNames: {
+      models: body.models.map((model) => model.name).filter(documents),
+      enums: inlineEnumNames(body.roots, body.models).filter(documents),
+    },
+    definitions: body,
   };
 }
 
@@ -7687,7 +7927,9 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
 /**
  * What every operation's inline request and success bodies give up to
  * another operation's, by operation key (`${method} ${path}`), each name
- * with the one the operation's model or inline enum takes instead (#683).
+ * with the one the operation's model or inline enum takes instead (#683);
+ * and what the body of a mounted `components/responses` entry gives up, by
+ * its own key (`componentBodyKey`, #712).
  *
  * Every name the bodies mint is built on the stem the operation's models
  * are named from — its `operationId`'s (`operationIdModelBase`) or its
@@ -7730,9 +7972,14 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * the `owner` of `getList`'s array items is `GetOwner`, the `ListItem`
  * cleaned out of it (`cleanSchemaName`), and is still `getList`'s own
  * beside a `listDogs` body pinning `object: get_owner` (Greptile, #724).
- * A document in which no stem contains another and no two operations of
- * two stems hold one name reads each operation that one more time, and
- * nothing else.
+ * The body of a `components/responses` entry an operation mounts as a 2xx
+ * holds the document's names as an operation's own body does, so it is
+ * read with them, on its own and once (`componentBodyNames`; Michael,
+ * #724), and gives up what it gives up under its own key: the component's
+ * answer, which every operation that mounts it reads
+ * (`ResponseTypingContext.componentYields`). A document in which no stem
+ * contains another and no two of those holders hold one name reads each
+ * operation that one more time, and nothing else.
  *
  * The number is chosen against every name in play (`taken`, read only once
  * a name is given up, which most documents never see): `updateAnimal`
@@ -8575,9 +8822,12 @@ function extractResponses(
   unpagedEnvelope?: boolean;
   /** Each 2xx entry's `type` a `components/responses` entry declares, by identity (`OperationExtractionResult.componentSites`). */
   componentBodies: TypeRef[];
+  /** What those bodies contribute to the reading, told from the operation's own by identity (`MountedComponentBodies`). */
+  mounted: MountedComponentBodies;
 } {
   const errors: ErrorResponse[] = [];
   const componentBodyTypes: TypeRef[] = [];
+  const mounted: MountedComponentBodies = { names: [], models: [], shadowed: [] };
   let response: TypeRef = undescribedBodyType();
   let responseHeaders: ResponseHeader[] | undefined;
   let responseContentTypes: string[] | undefined;
@@ -8612,8 +8862,9 @@ function extractResponses(
   const bodySchemas = new Map<number, SchemaObject>();
   // The context each 2xx body's models were named under — `<Op>Response`,
   // or the component's shared name — the stem a later status code's body
-  // steps from (`stepSecondaryBody`), and whether it is a component's.
-  const bodyContexts = new Map<number, { context: string; component: boolean }>();
+  // steps from (`stepSecondaryBody`), and, for a component's, the name its
+  // body is shared under.
+  const bodyContexts = new Map<number, { context: string; component: string | undefined }>();
   // The item models this operation's success bodies settle against the
   // registry, by name (`ItemSettlement.kept`): the items of a later body
   // that repeat an earlier body's but for the model's own `deprecated`
@@ -8694,7 +8945,15 @@ function extractResponses(
   // so `response` is `unknown` here as it is for one that declares only
   // `default`, ranges or errors.
   if (!responses)
-    return { response, errors, inlineModels, isPaginated, overrideProblem, componentBodies: componentBodyTypes };
+    return {
+      response,
+      errors,
+      inlineModels,
+      isPaginated,
+      overrideProblem,
+      componentBodies: componentBodyTypes,
+      mounted,
+    };
 
   for (const [statusCode, rawResponse] of entries) {
     // The whole key decides what it names (`classifyResponseKey`): `default`
@@ -8791,13 +9050,28 @@ function extractResponses(
           paginationDisabled,
           dataPathOverride,
           ...(ctx.registry && {
-            settle: itemSettlement(ctx.registry, ctx, componentModelName === undefined ? settledItems : undefined),
+            settle: itemSettlement(
+              ctx.registry,
+              ctx,
+              componentModelName === undefined ? settledItems : undefined,
+              componentModelName,
+            ),
           }),
         });
+        // A component's body leaves the names the component gives up here
+        // (`ResponseTypingContext.componentYields`, #712), as it is read and
+        // before it meets any other body of the operation or any model of
+        // the registry: every operation that mounts the component then holds
+        // the one model, whichever is read first.
+        if (componentModelName !== undefined) {
+          if (!mounted.names.includes(componentModelName)) mounted.names.push(componentModelName);
+          const given = ctx.componentYields?.get(componentModelName);
+          if (given) yieldBodyNames(given, responseBodyRefs(result), responseBodyModels(result));
+        }
         extractedType = result.response;
         bodyResults.set(code, result);
         bodySchemas.set(code, bodySchema);
-        bodyContexts.set(code, { context: contextName, component: componentModelName !== undefined });
+        bodyContexts.set(code, { context: contextName, component: componentModelName });
       }
       // A 2xx after the primary names its secondary bodies for its status
       // code, as `stepSecondaryBody` names its primary body (#538); the
@@ -8926,6 +9200,11 @@ function extractResponses(
     envelopeCompanions = primaryBody.envelopeCompanions;
     unpagedEnvelope = primaryBody.unpagedEnvelope;
   }
+  // The primary's companions are the component's when its body is.
+  const primaryComponent = primaryStatus === undefined ? undefined : bodyContexts.get(primaryStatus)?.component;
+  if (primaryComponent !== undefined) {
+    mounted.models.push(...(envelopeCompanions ?? []).flatMap((companion) => companion.models));
+  }
 
   // Keep the models of every 2xx body: `successResponses` references each of
   // them, so keeping only one body's would leave the others dangling. Every
@@ -8969,23 +9248,51 @@ function extractResponses(
   const settledStems = new Map<string, string>();
   const componentBodies = new Set(ctx.componentResponseModelNames?.values());
   for (const [status, result] of bodiesByPrimacy) {
+    const { context, component } = bodyContexts.get(status)!;
     if (status !== primaryStatus) {
       // A body that shared the items an earlier later body's step has moved
       // since follows them before it is named for itself.
       followMovedItems(result, settledItems);
-      const { context, component } = bodyContexts.get(status)!;
-      const key = component ? undefined : bodyShapeKey(bodySchemas.get(status)!, context, componentSchemas);
+      const key =
+        component !== undefined ? undefined : bodyShapeKey(bodySchemas.get(status)!, context, componentSchemas);
       const ownBody = key === undefined ? undefined : { stems: settledStems, key, componentBodies };
-      stepSecondaryBody(result, context, status, keptByName, ctx.registry, ownBody, ctx.yields);
+      // A component's body has left what the component gives up already;
+      // what the operation gives up is none of its names.
+      stepSecondaryBody(
+        result,
+        context,
+        status,
+        keptByName,
+        ctx.registry,
+        ownBody,
+        component === undefined ? ctx.yields : undefined,
+      );
+    }
+    // The operation's own body leaves what the operation gives up before
+    // it meets the other bodies by name, as a component's has left what the
+    // component gives up: the two answer for one name apart (#712), so a
+    // model of this body that leaves `GetPetResponseOwner` is never folded
+    // onto, or dropped beside, a mounted body's that keeps it. Every name
+    // moved here is moved once; the rest — the request body's — follow
+    // when the operation is built (`buildOperation`).
+    if (component === undefined && ctx.yields) {
+      yieldBodyNames(ctx.yields, responseBodyRefs(result), responseBodyModels(result));
     }
     const reached =
       status === primaryStatus ? undefined : reachedModels(result.response, result.inlineModels, keptByName);
     for (const model of result.inlineModels) {
       if (reached && !reached.has(model)) continue;
       const kept = keptByName.get(model.name);
+      // A model of the operation's own body that a mounted component's
+      // model of its name stands in for is still the operation's to answer
+      // for (`MountedComponentBodies.shadowed`).
+      if (kept && component === undefined && bodyContexts.get(kept.status)?.component !== undefined) {
+        mounted.shadowed.push(model);
+      }
       if (!kept) {
         keptByName.set(model.name, { model, status });
         inlineModels.push(model);
+        if (component !== undefined) mounted.models.push(model);
       } else if (shapeFingerprint(kept.model) !== shapeFingerprint(model)) {
         console.warn(
           `[oagen] Warning: Inline model "${model.name}" from the ${status} response has different fields than the ${kept.status} response's — using the ${kept.status} response's`,
@@ -9036,7 +9343,7 @@ function extractResponses(
       pagination.componentModels ?? [],
       componentSchemas,
       ctx.registry &&
-        itemSettlement(ctx.registry, ctx, bodyContexts.get(primaryStatus)?.component ? undefined : settledItems),
+        itemSettlement(ctx.registry, ctx, primaryComponent !== undefined ? undefined : settledItems, primaryComponent),
     );
     if (resolved) {
       overrideItemType = resolved.itemType;
@@ -9044,6 +9351,7 @@ function extractResponses(
         if (keptByName.has(model.name)) continue;
         keptByName.set(model.name, { model, status: primaryStatus });
         inlineModels.push(model);
+        if (primaryComponent !== undefined) mounted.models.push(model);
       }
     }
   }
@@ -9073,7 +9381,63 @@ function extractResponses(
     envelopeCompanions,
     unpagedEnvelope,
     componentBodies: componentBodyTypes,
+    mounted,
   };
+}
+
+/**
+ * What the 2xx bodies an operation mounts from `components/responses`
+ * contribute to its reading (`extractResponses`), told from the operation's
+ * own by identity, never by name (#712): a name such a body takes from the
+ * document — `GetPetResponse` from `object: get_pet_response` — can be the
+ * very name the operation, or another one, mints from its stem, and a list
+ * of the components' names took both for the component's (Michael, #724:
+ * `getPet`'s own response lost its claim to the name, and its fields in the
+ * merge, as soon as a component's body pinned that const).
+ */
+interface MountedComponentBodies {
+  /** The model name each mounted component's body is shared under (`sharedResponseModelName`), once each. */
+  names: string[];
+  /** Every model of the reading a mounted body minted: the body's own, its array items, and the envelope companions when the primary response is a component's. */
+  models: Model[];
+  /**
+   * Each model of the operation's own bodies a mounted body's model of its
+   * name stands in for in the reading — folded onto it, or dropped beside
+   * it with a warning — and so not among the reading's models, though the
+   * operation still holds the name for it.
+   */
+  shadowed: Model[];
+}
+
+/** The type references a response body is read through: its type, its item type, and the list envelope's fields and companions. */
+function responseBodyRefs(body: ResponseExtractionResult): TypeRef[] {
+  return [
+    body.response,
+    ...(body.itemType ? [body.itemType] : []),
+    ...(body.envelopeFields ?? []).map((field) => field.type),
+    ...(body.envelopeCompanions ?? []).map((companion) => companion.field.type),
+  ];
+}
+
+/** Every model a response body mints, its envelope companions' included. */
+function responseBodyModels(body: ResponseExtractionResult): Model[] {
+  return [...body.inlineModels, ...(body.envelopeCompanions ?? []).flatMap((companion) => companion.models)];
+}
+
+/**
+ * The models of a reading that are the operation's own: its request body's,
+ * its success bodies' and its envelope companions', less every one a
+ * mounted component's body minted (`MountedComponentBodies.models`).
+ */
+function ownBodyModels(
+  inlineModels: readonly Model[],
+  companions: readonly EnvelopeCompanion[],
+  mounted: MountedComponentBodies,
+): Model[] {
+  const components = new Set(mounted.models);
+  return [...inlineModels, ...companions.flatMap((companion) => companion.models)].filter(
+    (model) => !components.has(model),
+  );
 }
 
 /**

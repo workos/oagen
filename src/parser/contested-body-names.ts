@@ -31,9 +31,14 @@
  * what the document names so keeps it only while it is that very model —
  * the same kind, a model or an inline enum, of the same shape. Otherwise it
  * takes the next free numbered name (`GetPetResponse2`), one name for every
- * operation that returns it, with a note (`resolveDocumentNames`).
+ * operation that returns it, with a note (`resolveDocumentNames`). The body
+ * of a `components/responses` entry holds the document's names as an
+ * operation's own body does, and leaves them the same way, once for the
+ * component: `listDogs` returning that object through `DogList` reads
+ * `GetPetResponse2` too, and so does every other operation that mounts
+ * `DogList`.
  */
-import type { Model, ModelRef, TypeRef } from '../ir/types.js';
+import type { EnumRef, Model, ModelRef, TypeRef } from '../ir/types.js';
 import { collectModelTypeRefs, renameModelRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { numberedName } from '../utils/naming.js';
 import { shapeWithEnumFlags } from './enum-members.js';
@@ -48,14 +53,21 @@ import { isComponentModelRef } from './schemas.js';
  * its bare const, and what such a model nests — is no operation's: every
  * operation that returns it shares it, whatever stems its name happens to
  * hold, so it is not among these. It is among `documentNames`, read apart.
+ *
+ * The body of a `components/responses` entry an operation mounts is read
+ * as one of these too, on its own: it mints nothing from a stem (the names
+ * it takes from its component were stepped past every operation's before
+ * any was read) and holds the names the document gives it, for every
+ * operation that mounts it at once.
  */
 export interface OperationBodyNames {
-  /** The operation's plan key, `${method} ${path}`. */
+  /** The operation's plan key, `${method} ${path}`; `components/responses/<name>` for a component response's body. */
   key: string;
   /**
    * The stem the operation's models are named from: its `operationId`'s
    * (`operationIdModelBase`), or its path-derived prefix
-   * (`resolvePathModelBaseNames`).
+   * (`resolvePathModelBaseNames`). A component response's body has none and
+   * carries its key, which no stem is: one holder, told from every other.
    */
   stem: string;
   /** Every model name the bodies mint from the stem, nested models and envelope companions included. */
@@ -84,6 +96,30 @@ export interface OperationBodyNames {
 
 /** The names one operation gives up, each with the name its model or inline enum takes instead. */
 export type BodyNameYields = ReadonlyMap<string, string>;
+
+/**
+ * What one operation's own inline request and success bodies hold, in the
+ * IR as the operations pass leaves it, under a name the operation mints
+ * from its stem and keeps: the models of that name and the inline enum
+ * references of it.
+ */
+export interface OwnBodyDefinition {
+  models: Model[];
+  enums: EnumRef[];
+}
+
+/**
+ * The operations' own definitions of `name` (`OwnBodyDefinition`), one per
+ * operation that mints the name from its stem and gives it up to no other;
+ * none when no operation does — the name is free, a component's, or one the
+ * document gives. What the passes that read the document after the
+ * operations ask before one of their models takes a name the operations
+ * hold (`buildReceivedRequests`): a webhook's or a callback's payload
+ * variant titled `GetPetResponse` beside `getPet`'s own response leaves the
+ * name to `getPet` unless it is that very model, as an operation's inline
+ * body does (#712).
+ */
+export type OwnBodyNames = (name: string) => OwnBodyDefinition[];
 
 /**
  * The stems among `stems` that contain another one or that another one
@@ -246,7 +282,7 @@ export function resolveContestedBodyNames(
     const renamed = freeName(name, setAsideName(name, ''));
     for (const stem of moved.stems) giveUp(stem, name, renamed);
     if (taken) {
-      const shared = moved.stems.size > 1 ? ` (shared by ${moved.stems.size} operations)` : '';
+      const shared = moved.stems.size > 1 ? ` (shared by ${moved.stems.size} sites)` : '';
       console.warn(
         `[oagen] Renamed inline ${moved.kind} "${name}" → "${renamed}": its shape differs from operation ${moved.keeper}'s own "${name}"${shared}`,
       );
@@ -262,9 +298,9 @@ export function resolveContestedBodyNames(
 
 /** A name the document gives that leaves it to the operation minting it from its stem (`resolveDocumentNames`). */
 interface DocumentNameMove {
-  /** The stems of the operations that hold what leaves the name. */
+  /** The sites that hold what leaves the name, each by its stem: an operation's own bodies, or a component response's body. */
   stems: Set<string>;
-  /** What leaves it: a model when any of those operations holds one, else an inline enum. */
+  /** What leaves it: a model when any of those sites holds one, else an inline enum. */
   kind: 'model' | 'enum';
   /** The operation that keeps the name, as a note names it: `GET /pets/{petId}`. */
   keeper: string;
@@ -272,7 +308,8 @@ interface DocumentNameMove {
 
 /**
  * The names the document gives that an operation's stem mints as well, each
- * with the operations whose model or inline enum leaves it (#712).
+ * with the sites — an operation's own bodies, a component response's body —
+ * whose model or inline enum leaves it (#712).
  *
  * `listDogs` returning an object that pins `object: get_pet_response` names
  * it `GetPetResponse`, as it would under any stem
@@ -292,13 +329,22 @@ interface DocumentNameMove {
  * minting operation's model and whose request body holds another under the
  * same title gives the name up for both, since its bodies are named as one
  * and the two are then the document's to settle between themselves. An
- * `owner` pinned
- * `object: get_pet_response_owner` that `getPet` nests and `listDogs`
- * returns is therefore still one `GetPetResponseOwner`, as before. Any
- * other definition leaves the name, in every operation that holds it, for
- * one name: the document names one thing, so the operations that return it
- * keep sharing it, settled among themselves as two bodies pinning one const
- * always were.
+ * `owner` pinned `object: get_pet_response_owner` that `getPet` nests and
+ * `listDogs` returns is therefore still one `GetPetResponseOwner`, as
+ * before. Any other definition leaves the name, in every site that holds
+ * it, for one name: the document names one thing, so the operations that
+ * return it keep sharing it, settled among themselves as two bodies pinning
+ * one const always were.
+ *
+ * The body of a `components/responses` entry is such a site, read on its
+ * own and once (Michael, #724): the name its body takes from a `const` or
+ * a `title` is the document's, as it is in an operation's inline body, so
+ * `DogList` pinning `object: get_pet_response` leaves `GetPetResponse` to
+ * `getPet` exactly as `listDogs` returning that body inline does, and
+ * every operation that mounts `DogList` reads the one `GetPetResponse2`.
+ * What it gives up is the component's answer, never a mounting operation's,
+ * and what a mounting operation gives up for its own bodies is none of the
+ * component's.
  *
  * A definition is compared as it ends. What each operation gives up to
  * another stem has left its name first, and a name is decided after every
