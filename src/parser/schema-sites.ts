@@ -21,15 +21,16 @@
  * Every skip is asked of the reader's own rule where the reader names one
  * (`HTTP_METHODS`, `isIgnoredHeaderParameter`, `isIdempotencyKeyHeader`,
  * `isIgnoredResponseHeader`, `classifyResponseKey`, `isResponseEntry`,
- * `resolveResponseRef`, `responseBodyReading`, `parameterTyping`,
- * `parameterKey`, `pathItemRefTarget`), and mirrors the reader's branch
+ * `resolveResponseRef`, `responseBodyReading`, `mediaTypesOf`,
+ * `parameterTyping`, `parameterKey`, `pathItemRefTarget`), and mirrors the
+ * reader's branch
  * where it does not. `test/parser/schema-sites.test.ts` holds one document
  * per site and checks that the reader, this walk and both passes give it
  * one answer, so a site among them that a reader gains or drops fails there
  * until the walk follows.
  */
 import { foldHeaderName, parameterKey, type ParameterLocation } from '../ir/parameter-key.js';
-import { responseBodyReading } from './body-media-types.js';
+import { mediaTypesOf, responseBodyReading } from './body-media-types.js';
 import {
   HTTP_METHODS,
   isIdempotencyKeyHeader,
@@ -141,11 +142,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * only a site that is stepped over references (`103: { $ref:
  * '#/components/responses/Hints' }`), is no site of this walk.
  *
- * **Not followed: a map written as an array.** A map is read here as an
- * object that is no array. The readers that iterate `paths`, a `content` or
- * `headers` map or a `components` section without asking what it is read
- * one written as an array by its indexes (`content: [{ schema }]` types a
- * media type `0`); this walk leaves such a map out, as both walks it
+ * **A `content` that is no map.** A `content` is read through the readers'
+ * own check (`mediaTypesOf`): one that is no object — an array, a string —
+ * declares no media type, to the readers and to this walk alike, so
+ * `content: [{ schema }]` is a site of neither (#710: the readers typed a
+ * media type `0` from it, which this walk left out).
+ *
+ * **Not followed: any other map written as an array.** Every other map is
+ * read here as an object that is no array. The readers that iterate
+ * `paths`, a `headers` map or a `components` section without asking what it
+ * is read one written as an array by its indexes (`headers: [{ schema }]`
+ * types a header `0`); this walk leaves such a map out, as both walks it
  * replaces did.
  */
 export function readSchemaSites(
@@ -179,11 +186,13 @@ export function readSchemaSites(
    * type that declares a schema is typed through it, as the primary pick
    * (`selectRequestBodyContent`) or a secondary entry
    * (`typeSecondaryRequestContent`, `mintPayload`: `requestBodyContents`).
-   * `encoding` is not read.
+   * `encoding` is not read. A `content` that is no object is no map and
+   * declares no media type, as to those readers (`mediaTypesOf`, #710).
    */
   const requestContent = (value: unknown, direction: SiteDirection): void => {
-    if (!isRecord(value)) return;
-    for (const mediaType of Object.values(value)) if (isRecord(mediaType)) schema(mediaType['schema'], direction);
+    for (const mediaType of Object.values(mediaTypesOf(value) ?? {})) {
+      if (isRecord(mediaType)) schema(mediaType['schema'], direction);
+    }
   };
   /**
    * A response's `content` map, read as `extractResponseContents` reads it:
@@ -191,11 +200,11 @@ export function readSchemaSites(
    * reading its schema (`responseBodyReading`) is no site, as the primary
    * pick (`primaryBodySchema`) and a secondary entry (`typeSecondaryContent`)
    * alike leave its schema unread; every other media type types its body
-   * through its schema (#610).
+   * through its schema (#610). A `content` that is no object is no map and
+   * declares no media type, as to the reader (`mediaTypesOf`, #710).
    */
   const responseContent = (value: unknown): void => {
-    if (!isRecord(value)) return;
-    for (const [contentType, mediaType] of Object.entries(value)) {
+    for (const [contentType, mediaType] of Object.entries(mediaTypesOf(value) ?? {})) {
       if (!isRecord(mediaType) || responseBodyReading(contentType) !== 'schema') continue;
       schema(mediaType['schema'], 'received');
     }
@@ -204,15 +213,12 @@ export function readSchemaSites(
    * A Parameter or Header Object, read by the one schema that types it
    * (`parameterTyping`): its `schema`, else the schema of the `content`
    * entry `selectParameterContent` picks. One typed as a string — a
-   * `content` map none of whose media types is read, or no schema at all —
-   * is no site, and a `content` map beside a `schema` is not consulted.
+   * `content` map none of whose media types is read, a `content` that is
+   * no map (`mediaTypesOf`, #710), or no schema at all — is no site, and a
+   * `content` map beside a `schema` is not consulted.
    */
   const typed = (declaration: Record<string, unknown>, direction: SiteDirection): void => {
-    const { schema: own, content: map } = declaration;
-    schema(
-      parameterTyping({ schema: own, content: isRecord(map) ? map : undefined } as SchemaOrContent).schema,
-      direction,
-    );
+    schema(parameterTyping(declaration as SchemaOrContent).schema, direction);
   };
   /**
    * The parameters `operation` types, resolved as `buildOperation` and
