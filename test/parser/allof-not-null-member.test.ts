@@ -13,8 +13,11 @@ import {
   nullVote,
   pinnedDeclarationAdmitsNull,
   schemaAdmitsNull,
+  schemaToTypeRef,
   type SchemaObject,
 } from '../../src/parser/schemas.js';
+import { cloneTypeRef } from '../../src/parser/inline-models.js';
+import { settleDeferredMappingEntries } from '../../src/parser/schema-refs.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -136,7 +139,7 @@ const show = (type: TypeRef | undefined, named: (name: string) => string = (name
     case 'nullable':
       return `nullable<${show(type.inner, named)}>`;
     case 'array':
-      return `${show(type.items, named)}[]`;
+      return type.items.kind === 'union' ? `(${show(type.items, named)})[]` : `${show(type.items, named)}[]`;
     case 'map':
       return `map<${show(type.valueType, named)}>`;
     case 'union':
@@ -401,6 +404,35 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
       expect(
         lines.split('\n').filter((line) => !line.endsWith(': nullable<PetOwner> { name, label } and nullable<Owner>')),
       ).toEqual([]);
+    });
+
+    it('holds beside a member that is no Schema Object, which has no vote and writes no `not`', async () => {
+      // A JSON Schema boolean, or anything else a document writes where a schema goes, abstains (#715), so the
+      // `allOf` is what its other members make it: nullable without the `not`, bare with it.
+      const lines: string[] = [];
+      for (const member of [true, false, 5, 'x', [notNull]] as unknown[]) {
+        const word = JSON.stringify(member);
+        const merged = await ownerOf(openapi, { allOf: [Owner, Tag, member, notNull] });
+        const one = await ownerOf(openapi, { allOf: [Owner, member, notNull] });
+        const wrapped = await ownerOf(openapi, { allOf: [Owner, { allOf: [member], not: { type: 'null' } }] });
+        expect(await ownerOf(openapi, { allOf: [Owner, Tag, member] }), word).toBe(
+          'nullable<PetOwner> { name, label }',
+        );
+        expect(await ownerOf(openapi, { allOf: [Owner, member] }), word).toBe('nullable<Owner>');
+        // Under the `not`, a member that is no Schema Object says nothing either: the subschema admits `null`.
+        expect(
+          await ownerOf(openapi, { allOf: [Owner, Tag, { not: { allOf: [member, { type: 'null' }] } }] }),
+          word,
+        ).toBe('PetOwner { name, label }');
+        lines.push(`${word}: ${merged}, ${one}, ${wrapped}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "true: PetOwner { name, label }, Owner, Owner
+        false: PetOwner { name, label }, Owner, Owner
+        5: PetOwner { name, label }, Owner, Owner
+        "x": PetOwner { name, label }, Owner, Owner
+        [{"not":{"type":"null"}}]: PetOwner { name, label }, Owner, Owner"
+      `);
     });
 
     it('casts the same vote however the member is written: inline, a `$ref`, an alias, a wrapper', async () => {
@@ -732,6 +764,190 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
         );
         expect(await members({ allOf: [kind, notNull] }, {}, 'PetOwner'), label).toBe('PetOwner cat: Cat, dog: Dog');
       }
+    });
+
+    it('takes the `null` away from a JSON Pointer the `allOf` is read as, once the pointer is settled', async () => {
+      // Greptile, #726: a pointer has no type when the `allOf` is typed, so the veto was read too early and the
+      // type the pointer settled to kept its `null`.
+      const Holder = {
+        type: 'object',
+        properties: {
+          name: nullable(openapi, 'string'),
+          names: nullable(openapi, 'array', { items: string }),
+          held: nullableObject(openapi, 'held'),
+          owner: Owner,
+          kind: nullable(openapi, 'string', { enum: ['cat', 'dog', null] }),
+          wrapped: { oneOf: [Plain, { type: 'null' }] },
+          plain: string,
+        },
+      };
+      const at = (field: string) => ({ $ref: `#/components/schemas/Holder/properties/${field}` });
+      const lines: string[] = [];
+      for (const field of Object.keys(Holder.properties)) {
+        const read = async (owner: unknown) =>
+          show(fieldType(await parse(ownerDoc(openapi, owner, { Holder })), 'Pet', 'owner'));
+        const alone = await read(at(field));
+        const vetoed = await read({ allOf: [at(field), notNull] });
+        // First among the members, beside the `allOf`, and around a wrapper: the same type.
+        expect(await read({ allOf: [notNull, at(field)] }), field).toBe(vetoed);
+        expect(await read({ allOf: [at(field)], not: { type: 'null' } }), field).toBe(vetoed);
+        expect(await read({ allOf: [{ allOf: [at(field)] }, notNull] }), field).toBe(vetoed);
+        // Without the `not` the `allOf` is what the pointer alone is.
+        expect(await read({ allOf: [at(field)] }), field).toBe(alone);
+        lines.push(`${field}: ${alone} -> ${vetoed}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "name: nullable<string> -> string
+        names: nullable<string[]> -> string[]
+        held: nullable<HolderHeld> -> HolderHeld
+        owner: nullable<Owner> -> Owner
+        kind: nullable<HolderKind> -> HolderKind
+        wrapped: nullable<Plain> -> Plain
+        plain: string -> string"
+      `);
+      // At the other sites a schema is typed at, and through a pointer to the field that writes the `allOf`.
+      const schema = { allOf: [at('name'), notNull] };
+      const spec = await parse(
+        document(
+          openapi,
+          {
+            Holder,
+            Pet: {
+              type: 'object',
+              properties: {
+                field: schema,
+                items: { type: 'array', items: schema },
+                values: { type: 'object', additionalProperties: schema },
+                pointer: { $ref: '#/components/schemas/Pet/properties/field' },
+                wrapped_again: { oneOf: [schema, { type: 'null' }] },
+                own_type: { ...nullable(openapi, 'string'), allOf: [at('name'), notNull] },
+                merged: { allOf: [at('held'), Tag, notNull] },
+              },
+            },
+          },
+          {
+            '/names': {
+              post: {
+                operationId: 'postName',
+                parameters: [{ name: 'q', in: 'query', schema }],
+                requestBody: json(schema),
+                responses: { '200': { description: 'ok', headers: { 'X-Name': { schema } }, ...json(schema) } },
+              },
+            },
+          },
+        ),
+      );
+      const op = operation(spec, 'postName');
+      expect([
+        ...script(spec).split(', '),
+        `query parameter: ${show(op.queryParams[0]?.type)}`,
+        `request body: ${show(op.requestBody)}`,
+        `response body: ${show(op.response)}`,
+        `response header: ${show(op.responseHeaders?.[0]?.type)}`,
+      ]).toMatchInlineSnapshot(`
+        [
+          "field: string",
+          "items: string[]",
+          "values: map<string>",
+          "pointer: string",
+          "wrapped_again: nullable<string>",
+          "own_type: nullable<string>",
+          "merged: PetMerged",
+          "query parameter: string",
+          "request body: string",
+          "response body: string",
+          "response header: string",
+        ]
+      `);
+      expect(warnings()).toEqual([]);
+    });
+
+    it('takes the `null` a variant admits away from a union the `allOf` is read as, and leaves what a type nests', async () => {
+      // Greptile, #726: the `nullable` wrapper was taken off the type alone, so a union kept the `null` one of its
+      // variants admits. The `not` is written beside the `allOf` here: beside it as a member, a union of objects
+      // is one of the objects the `allOf` merges.
+      const text = nullable(openapi, 'string');
+      const integer = { type: 'integer' };
+      const schemas = {
+        Holder: { type: 'object', properties: { name: text, either: { oneOf: [Owner, integer] } } },
+        Shapes: { oneOf: [Plain, Tag] },
+      };
+      const name = { $ref: '#/components/schemas/Holder/properties/name' };
+      const unions: ReadonlyArray<readonly [string, unknown]> = [
+        ['a nullable primitive variant', { anyOf: [text, integer] }],
+        ['two `$ref`s to nullable components', { oneOf: [Owner, Tag] }],
+        ['a `null` variant and a nullable one', { oneOf: [Plain, Tag, { type: 'null' }] }],
+        ['a nullable inline object variant', { oneOf: [nullableObject(openapi, 'extra'), integer] }],
+        ['a union nested in a variant', { oneOf: [Plain, { anyOf: [Owner, integer] }] }],
+        ['a variant that is a pointer to a nullable field', { oneOf: [name, integer] }],
+        ['no variant that admits `null`', { oneOf: [Plain, integer] }],
+        // What a variant nests is not the value itself: the items and the values keep their own `null`.
+        ['an array of nullable items', { oneOf: [{ type: 'array', items: text }, integer] }],
+        ['a map of nullable values', { oneOf: [{ type: 'object', additionalProperties: text }, integer] }],
+        // Two variants alike once the `null` is gone stay two, as two written alike are.
+        ['a nullable string beside a string', { anyOf: [text, string] }],
+      ];
+      const lines: string[] = [];
+      for (const [label, union] of unions) {
+        const read = async (owner: unknown) =>
+          show(fieldType(await parse(ownerDoc(openapi, owner, schemas)), 'Pet', 'owner'));
+        lines.push(`${label}: ${await read(union)} -> ${await read({ allOf: [union], not: { type: 'null' } })}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "a nullable primitive variant: nullable<string> | integer -> string | integer
+        two \`$ref\`s to nullable components: nullable<Owner> | nullable<Tag> -> Owner | Tag
+        a \`null\` variant and a nullable one: nullable<Plain | nullable<Tag>> -> Plain | Tag
+        a nullable inline object variant: nullable<PetOwner> | integer -> PetOwner | integer
+        a union nested in a variant: Plain | nullable<Owner> | integer -> Plain | Owner | integer
+        a variant that is a pointer to a nullable field: nullable<string> | integer -> string | integer
+        no variant that admits \`null\`: Plain | integer -> Plain | integer
+        an array of nullable items: nullable<string>[] | integer -> nullable<string>[] | integer
+        a map of nullable values: map<nullable<string>> | integer -> map<nullable<string>> | integer
+        a nullable string beside a string: nullable<string> | string -> string | string"
+      `);
+      // The member beside a union of primitives, a pointer that lands on such a union, and a parameter.
+      const spec = await parse(
+        document(
+          openapi,
+          {
+            ...schemas,
+            Pet: {
+              type: 'object',
+              properties: {
+                member: { allOf: [{ anyOf: [text, integer] }, notNull] },
+                landed: { allOf: [{ $ref: '#/components/schemas/Holder/properties/either' }, notNull] },
+                items: { type: 'array', items: { allOf: [{ anyOf: [text, integer] }, notNull] } },
+                wrapped_again: { oneOf: [{ allOf: [{ anyOf: [text, integer] }, notNull] }, { type: 'null' }] },
+                // A union component is a model of its own: the reference admits no `null`, its variants are its own.
+                component: { allOf: [ref('Shapes'), notNull] },
+              },
+            },
+          },
+          {
+            '/unions': {
+              get: {
+                operationId: 'getUnion',
+                parameters: [{ name: 'q', in: 'query', schema: { allOf: [{ anyOf: [text, integer] }, notNull] } }],
+                responses: { '200': { description: 'ok', ...json(Plain) } },
+              },
+            },
+          },
+        ),
+      );
+      expect([
+        ...script(spec).split(', '),
+        `query parameter: ${show(operation(spec, 'getUnion').queryParams[0]?.type)}`,
+      ]).toMatchInlineSnapshot(`
+        [
+          "member: string | integer",
+          "landed: Owner | integer",
+          "items: (string | integer)[]",
+          "wrapped_again: nullable<string | integer>",
+          "component: Shape",
+          "query parameter: string | integer",
+        ]
+      `);
+      expect(warnings()).toEqual([]);
     });
   });
 });
@@ -1278,6 +1494,71 @@ describe('#716 `nullVote` and the readers beside it', () => {
     expect(script(spec)).toBe(
       `under_the_not: PetUnderTheNot, beside_the_not: Level${depth}, in_a_wrapper: nullable<PetInAWrapper>`,
     );
+  });
+
+  it("keeps a deferred discriminator mapping entry with the variant that takes its wrapper's place", async () => {
+    // Greptile, #726: a variant written `oneOf: [<pointer>, { type: 'null' }]` that the mapping names has its
+    // entry deferred against the nullable wrapper. The veto takes the wrapper off the variant, and the entry kept
+    // following the wrapper the union no longer held, so a copy made before the pointers settle carried it as a
+    // target outside the variants.
+    const dog = { $ref: '#/components/schemas/Zoo/properties/dog' };
+    const variant = (kind: string, extra: string): SchemaObject => ({
+      type: 'object',
+      required: ['kind'],
+      properties: { kind: { type: 'string', enum: [kind] }, [extra]: string },
+    });
+    const schemas: Record<string, SchemaObject> = {
+      Cat: variant('cat', 'meow'),
+      Zoo: { type: 'object', properties: { dog: variant('dog', 'bark') } },
+    };
+    const union: SchemaObject = {
+      oneOf: [at('Cat'), { oneOf: [dog, { type: 'null' }] }],
+      discriminator: { propertyName: 'kind', mapping: { cat: '#/components/schemas/Cat', dog: dog.$ref } },
+    };
+    const vetoed: SchemaObject = { allOf: [union], not: { type: 'null' } };
+    within(schemas, () => {
+      for (const [schema, kinds] of [
+        [union, ['model', 'nullable']],
+        [vetoed, ['model', 'model']],
+      ] as const) {
+        const copy = cloneTypeRef(schemaToTypeRef(schema, 'owner', 'Pet'));
+        if (copy.kind !== 'union' || !copy.discriminator) throw new Error('a discriminated union is built');
+        expect(copy.variants.map((member) => member.kind)).toEqual(kinds);
+        // The copy's one deferred entry follows the copy's own second variant, with or without the wrapper.
+        const followed = settleDeferredMappingEntries(copy.discriminator.mapping, () => {});
+        expect(followed.map((reference) => copy.variants.indexOf(reference))).toEqual([1]);
+      }
+    });
+    // End to end the entry is written as the model the pointer settles to, in the union and in every copy of it: a
+    // pointer to the field, and a second webhook sharing the path item.
+    const event = { post: { requestBody: json(vetoed), responses: { '200': { description: 'ok' } } } };
+    const spec = await parse({
+      ...document('3.1.0', {
+        ...schemas,
+        Pet: { type: 'object', properties: { a: vetoed, b: { $ref: '#/components/schemas/Pet/properties/a' } } },
+      }),
+      webhooks: {
+        petSaved: { $ref: '#/components/pathItems/PetEvent' },
+        petSavedAgain: { $ref: '#/components/pathItems/PetEvent' },
+      },
+      components: {
+        schemas: {
+          ...schemas,
+          Pet: { type: 'object', properties: { a: vetoed, b: { $ref: '#/components/schemas/Pet/properties/a' } } },
+        },
+        pathItems: { PetEvent: event },
+      },
+    });
+    const unions = [
+      fieldType(spec, 'Pet', 'a'),
+      fieldType(spec, 'Pet', 'b'),
+      ...(spec.webhooks ?? []).map((webhook) => webhook.requestBody),
+    ];
+    expect(unions).toHaveLength(4);
+    for (const type of unions) {
+      expect(show(type)).toBe('Cat | ZooDog');
+      expect(type?.kind === 'union' ? type.discriminator?.mapping : undefined).toEqual({ cat: 'Cat', dog: 'ZooDog' });
+    }
   });
 
   it('counts no `null` among the values a declaration pins under an `allOf` that vetoes it', async () => {

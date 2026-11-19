@@ -16,6 +16,7 @@ import {
   schemaRefOf,
   schemaRefTarget,
   schemaRefTokens,
+  withoutNull,
   type DerivedMappingSource,
 } from './schema-refs.js';
 import {
@@ -756,15 +757,20 @@ function asNullable(ref: TypeRef): TypeRef {
 /**
  * `ref`, the type of the member `schema`'s `allOf` is read as
  * (`allOfReadAsMember`), as the `allOf` admits it: without its `nullable`
- * wrapper when the `allOf` vetoes `null` (`allOfVetoesNull`; #716). A
+ * wrapper, and those of a union's variants (`withoutNull`), when the
+ * `allOf` vetoes `null` (`allOfVetoesNull`; #716). A
  * schema that wraps its own type in `nullable` (`wrapsOwnType`: a type
  * list naming `null` beside the `allOf`) says so itself, before its
- * `allOf` is read, and keeps the member's type as built. Exported for the
- * response path, which types a body's unwrapped member itself
+ * `allOf` is read, and keeps the member's type as built. A member that is
+ * a JSON Pointer `$ref` has no type yet: the reference stays, marked so
+ * that the type it is settled to admits no `null` either (`withoutNull`;
+ * Greptile, #726: a pointer to a nullable schema passed through as it
+ * was, and settled to `nullable<…>`). Exported for
+ * the response path, which types a body's unwrapped member itself
  * (`extractDirectResource`).
  */
 export function withoutVetoedNull(schema: SchemaObject, ref: TypeRef): TypeRef {
-  return ref.kind === 'nullable' && !wrapsOwnType(schema) && allOfVetoesNull(schema) ? ref.inner : ref;
+  return wrapsOwnType(schema) || !allOfVetoesNull(schema) ? ref : withoutNull(ref);
 }
 
 /**
@@ -1598,6 +1604,19 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * nullable). A `$ref` no schema answers is the reference the type builder
  * types it as, a model that admits none, and rejects `null`.
  *
+ * A member that is no Schema Object abstains (`isSchemaObject`): a JSON
+ * Schema boolean — `true`, which admits every instance as `{}` does, and
+ * `false`, which the readers of an `allOf` read as they read `true`, a
+ * member that gives the merged model no field and no limit, the parser
+ * having no type for a schema that admits nothing — and anything else a
+ * document writes where a schema goes (`null`, a number, a string, a
+ * list). So does a `$ref` to a component that is one (`Anything: true`).
+ * It is answered before anything is asked of it or remembered for it: it
+ * has no keyword to read, and only an object can key the memo (#715
+ * review: every member reached the memo, so `{ allOf: [{ $ref: Owner }, {
+ * $ref: Tag }, true] }` failed the parse where the readers before, which
+ * asked who votes first, read it as nullable).
+ *
  * Any other schema admits `null` when it writes it (`writesNull`): a type
  * list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a schema
  * of nothing but `null` (`isNullSchema`), a `const` of `null`, an `enum:`
@@ -1651,6 +1670,7 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * component).
  */
 export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set()): NullVote {
+  if (!isSchemaObject(schema)) return 'abstains';
   const settled = nullVotes.get(schema);
   if (settled !== undefined) return settled;
   if (path.has(schema)) return 'rejects';
@@ -1668,6 +1688,19 @@ export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set
   }
   nullVotes.set(schema, vote);
   return vote;
+}
+
+/**
+ * Whether a value written where a schema goes is a Schema Object: a plain
+ * object, the only value with keywords for a reader to ask and the only
+ * one a memo can be keyed by. A JSON Schema boolean (`true`, `false`; OAS
+ * 3.1) is none, and neither is anything else a document may hold there
+ * (`null`, a number, a string, a list). `nullVote` asks it of every schema
+ * it is handed, since the members of an `allOf` and the component a `$ref`
+ * names are whatever the document wrote.
+ */
+function isSchemaObject(value: unknown): value is SchemaObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -1801,10 +1834,10 @@ function vetoesNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): 
   return schemaAdmitsNull(not, path);
 }
 
-/** The Schema Object a schema's `not` holds; `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
+/** The Schema Object a schema's `not` holds (`isSchemaObject`); `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
 function notSchemaOf(schema: SchemaObject): SchemaObject | undefined {
   const { not } = schema;
-  return typeof not === 'object' && not !== null && !Array.isArray(not) ? (not as SchemaObject) : undefined;
+  return isSchemaObject(not) ? not : undefined;
 }
 
 /**
@@ -1823,6 +1856,8 @@ function notSchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * `not` are read alike in either order.
  */
 function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaObject> = new Set()): boolean {
+  // A member, or a component a `$ref` names, that is no Schema Object leads nowhere, as it has no vote.
+  if (!isSchemaObject(schema)) return false;
   if (sourceDeclaration(schema) === host) return true;
   if (seen.has(schema)) return false;
   seen.add(schema);
@@ -1882,7 +1917,8 @@ export function allOfVetoesNull(schema: SchemaObject): boolean {
  * for the first alone (`allOfVetoesNull`).
  */
 function conjoinsVeto(schema: SchemaObject, seen: Set<SchemaObject>): boolean {
-  if (seen.has(schema)) return false;
+  // A member, or a component a `$ref` names, that is no Schema Object writes no `not`, as it has no vote.
+  if (!isSchemaObject(schema) || seen.has(schema)) return false;
   seen.add(schema);
   if (schema.$ref !== undefined) {
     const target = componentSchemaOf(schema.$ref);
@@ -7703,16 +7739,13 @@ export function isDecidedDiscriminator(keyword: DiscriminatorKeyword | undefined
 }
 
 /**
- * The keyword handed on past a schema on the way to a union — a `$ref`
- * followed, a nullable wrapper collapsed — given what was handed on there
- * before any decision (`was`, of the keyword handed in): the same, under
- * the decision when `handed` carries one (`DecidedDiscriminator`), so the
- * union under it is still told which union the keyword goes with, and
- * still read as it was where that decision is none. For the readers that
- * walk to a union on their own: the inline merge past a `$ref` that stays
- * in one component's chain, where nothing was handed on, and the
- * pagination walk past a nullable wrapper its resolver collapsed, whose
- * own keyword went with its one variant.
+ * The keyword handed on past a schema on the way to a union, given what
+ * was handed on there before any decision (`was`, of the keyword handed
+ * in): the same, under the decision when `handed` carries one
+ * (`DecidedDiscriminator`), so the union under it is still told which
+ * union the keyword goes with, and still read as it was where that
+ * decision is none. How an `allOf` wrapper hands on what it is handed
+ * (`wrapperDiscriminatorWithin`), for every reader that reads through one.
  */
 export function handedOn(
   handed: DiscriminatorKeyword | undefined,
@@ -7932,10 +7965,9 @@ function discriminatedUnion(
  * else its own composition's. A decision is handed in only to a wrapper
  * written inline, which is part of the composition that made it
  * (`composedInlineMember`; #714) — a reader that reaches a component its
- * `allOf` composes through a `$ref` hands it nothing, since such a
- * component is read by its own composition's keyword, never by one written
- * or decided around the reference, as the component reader reads it
- * (`mergeAllOfMembers`, `collectObjectProperties`).
+ * `allOf` composes through a `$ref` hands it nothing (`handedPastRef`),
+ * since such a component is read by its own composition's keyword, never
+ * by one written or decided around the reference.
  */
 export function axisDiscriminatorOf(
   schema: SchemaObject,
@@ -8274,14 +8306,21 @@ function readComponentAllOfMember(
   // member with no `allOf` is read below whatever else it writes, as it
   // was: a dispatcher it carries beside its own properties is the model's
   // (#429).
+  // What the schema the member lands on is handed for a union under it:
+  // what the member was, unless a `$ref` names a component its own `allOf`
+  // composes (`handedPastRef`).
+  const handed = handedPastRef(options.wrapperDiscriminator, resolved, landing.key !== undefined);
   if (allOfComposesComponent(resolved)) {
     // An inline wrapper has no model of its own: the dispatcher among its
     // members is this model's, found by what the `allOf` it sits in hands
     // on to them (`wrapperDiscriminatorWithin`), and the axes not to read
     // are not read inside it (`composedInlineMember`; #714). A component's
-    // is its own model's.
+    // is its own model's, and it is handed nothing.
     const inline = composedInlineMember(landing) !== undefined;
-    const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, inline ? options : {});
+    const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, {
+      skipAxes: inline ? options.skipAxes : undefined,
+      wrapperDiscriminator: handed,
+    });
     return inline ? found : undefined;
   }
   // The member's own `properties` and `required` always apply, whether or
@@ -8315,7 +8354,7 @@ function readComponentAllOfMember(
     const branch = branches[index];
     // The keyword this union is read with: the one the composition decided
     // the union of, else the member's own, else the one handed down.
-    const explicit = axisDiscriminatorOf(resolved, variants, options.wrapperDiscriminator, schemas);
+    const explicit = axisDiscriminatorOf(resolved, variants, handed, schemas);
     if (branch) {
       // The member's own `discriminator`, written on the wrapper, goes with
       // the variant (#398 review round 6: the recursion passed the options
@@ -8466,11 +8505,19 @@ function ownRequired(schema: SchemaObject): readonly string[] {
  * and `Dog` and carried neither union's properties). A union alone with
  * the keyword written on a nullable wrapper beside it is handed it too.
  * Decided once per schema and document (`composedDiscriminators`).
+ *
+ * A member that is no Schema Object (`isSchemaObject`: a JSON Schema
+ * boolean among the members of an `allOf`, #715) writes no keyword and
+ * hands none on. It is answered before anything is remembered for it, as
+ * `nullVote` answers it: every reader that reads through a wrapper asks
+ * this of each member it visits (`wrapperDiscriminatorWithin`), and only an
+ * object can key the memo.
  */
 export function wrapperDiscriminatorOf(
   schema: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): DiscriminatorKeyword | undefined {
+  if (!isSchemaObject(schema)) return undefined;
   // A `discriminator` beside a `$ref` is not read, as nothing but
   // annotations is beside any `$ref` (#618 review): a bare `$ref` alias
   // dispatches as the component it names does.
@@ -8499,6 +8546,41 @@ function writtenWrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeywo
   // Nothing but annotations is read beside a `$ref` (#618 review).
   if (schema.$ref !== undefined) return undefined;
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
+}
+
+/**
+ * What the schema a reference lands on is handed of `handed` — what the
+ * `allOf` the reference sits in hands its members for a union among them
+ * (`wrapperDiscriminatorOf`), or a wrapper around the reference writes for
+ * it. Nothing, for a component its own `allOf` composes
+ * (`allOfComposesComponent`; `named`: the chain to it names a component,
+ * `MemberLanding.key`): it has a model of its own, which reads its unions
+ * by its own composition's keyword whatever is written around a reference
+ * to it, so `Paging: { allOf: [{ oneOf: [...] }] }` flattens or dispatches
+ * its union alike under `{ discriminator, allOf: [{ $ref: Paging }] }` and
+ * with no keyword at all. And `handed` itself for anything else, which the
+ * reading model reads as its own: a component that writes the union itself
+ * (`Paging: { oneOf: [...] }`, dispatched by the keyword; #429), a nullable
+ * alias, a bare alias on the way to either, and a schema a pointer names,
+ * which is no component (`composedInlineMember`).
+ *
+ * The one decision of where a keyword stops at a `$ref`, asked by every
+ * reader that follows one: the member reader and the variant builder
+ * (`readComponentAllOfMember`, `memberUnions`), the inline merge
+ * (`mergeAllOfMembers`, for what it hands on past a reference at all) and
+ * the pagination walk (`collectObjectProperties`), so the walk counts a
+ * union as dispatched exactly where the model dispatches it (MichaelDeBoey
+ * on #725: the walk decided it on its own, by what it had reached rather
+ * than by the component it had entered, so a keyword written around a
+ * `$ref` to `Paging: { allOf: [{ oneOf }] }` was carried across, and
+ * `meta.has_more`, which the model carries, was reported).
+ */
+export function handedPastRef(
+  handed: DiscriminatorKeyword | undefined,
+  landing: SchemaObject,
+  named: boolean,
+): DiscriminatorKeyword | undefined {
+  return named && allOfComposesComponent(landing) ? undefined : handed;
 }
 
 /**
@@ -9251,7 +9333,9 @@ function followMemberRefChain(
  * a variant model is built exactly when the model dispatches to it; the
  * limits every variant carries are read around the axes the same way
  * (`limitsOutsideAxes`), and the pagination walk counts a wrapper's
- * members as the node's own (`collectObjectProperties`).
+ * members as the node's own (`collectObjectProperties`). What such a
+ * wrapper is handed, and what a component in its place is not, is one
+ * decision too (`handedPastRef`).
  */
 function composedInlineMember(landing: MemberLanding): SchemaObject | undefined {
   if (!landing.read || landing.key !== undefined) return undefined;
@@ -9331,6 +9415,8 @@ function memberUnions(
   // is written alone (#613), and two unions are the two axes (#680). A
   // component's axes are its own model's; an inline wrapper's members are
   // this model's, and their unions with them (`composedInlineMember`).
+  // What the carrier is handed, by the member reader's rule (`handedPastRef`).
+  wrapper = handedPastRef(wrapper, carrier, landing.key !== undefined);
   if (allOfComposesComponent(carrier)) {
     if (composedInlineMember(landing) === undefined || seen.has(carrier)) return [];
     seen.add(carrier);
