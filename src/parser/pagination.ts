@@ -26,7 +26,6 @@ import {
   unionAxesOf,
   axisDiscriminatorOf,
   handedOn,
-  undecided,
   unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorWithin,
@@ -1037,33 +1036,33 @@ export function collectObjectProperties(
     // per keyword below rather than collapsed by the resolver onto a
     // nullable axis's one variant with the other axis lost.
     let carrier = s;
-    // What the schema the walk reads is handed, as part of the `allOf` it
-    // sits in, for a union among its own members (`readThrough`): what `s`
-    // is handed, through each wrapper read on the way — an `allOf` read as
-    // its one member hands on as any wrapper does
+    // What the schema the walk reads is handed for a union under it
+    // (`handedIn`), as the component reader hands it on to the same schema:
+    // what `s` is handed, through everything read on the way to it
+    // (`readThrough`). A wrapper hands on as it does to the reader — an
+    // `allOf` read as its one member as any `allOf` wrapper
     // (`wrapperDiscriminatorWithin`), a nullable wrapper its own keyword,
-    // under the decision handed to it if any (`handedOn`) — until a `$ref`
-    // names a component (`viaComponent`), which is handed nothing.
-    let passedOn = wrapperDiscriminator;
-    let viaComponent = false;
-    // The keyword the innermost wrapper read through writes for the schema
-    // under it (`writtenNearest`): the one the union the walk ends on was
-    // read with before any decision, nearer than `s`'s own.
-    let writtenNearest: SchemaObject['discriminator'];
+    // under the decision handed to it if any (`handedOn`) — the nearest to
+    // the union last, so its keyword is the one the union is read with. A
+    // `$ref` hands on what it was handed, to a pointer's schema and to a
+    // component alike, except to a component its own `allOf` composes
+    // (`entering`): that one is read by its own composition's keyword and
+    // is handed nothing, as the reader hands it nothing (`composedInlineMember`).
+    let handedIn = wrapperDiscriminator;
+    let entering = false;
+    const enter = (schema: SchemaObject): void => {
+      if (entering && allOfComposesComponent(schema)) handedIn = undefined;
+      entering = false;
+    };
     const readThrough = (wrapper: SchemaObject): void => {
       if (wrapper.$ref !== undefined) {
-        // What is written around a reference says nothing of the members of
-        // the component it names; a pointer into one names a schema and no
-        // model, and is read as that schema written in its place is.
-        if (componentKeyOf(wrapper.$ref) === undefined) return;
-        passedOn = undefined;
-        viaComponent = true;
+        entering = componentKeyOf(wrapper.$ref) !== undefined;
         return;
       }
-      writtenNearest = wrapper.discriminator ?? writtenNearest;
-      passedOn = allOfComposesComponent(wrapper)
-        ? wrapperDiscriminatorWithin(wrapper, passedOn, componentSchemas)
-        : handedOn(passedOn, (was) => wrapper.discriminator ?? was);
+      enter(wrapper);
+      handedIn = allOfComposesComponent(wrapper)
+        ? wrapperDiscriminatorWithin(wrapper, handedIn, componentSchemas)
+        : handedOn(handedIn, (was) => wrapper.discriminator ?? was);
     };
     while (depth > 0 && carrier.$ref) {
       if (seenRefs.has(carrier.$ref)) return;
@@ -1077,6 +1076,7 @@ export function collectObjectProperties(
       depth > 0 && carrier.oneOf && carrier.anyOf
         ? carrier
         : resolveBareSchema(carrier, componentSchemas, seenRefs, readThrough);
+    enter(bare);
     // A reference the walk has followed already, or one nothing resolves:
     // the walk ends on it, as the resolver did.
     if (bare.$ref) return;
@@ -1122,30 +1122,20 @@ export function collectObjectProperties(
         // The keyword the union is read with, as the model reads it
         // (`axisDiscriminatorOf`): the composition's decision, else the
         // member's own — a member writing both keywords hands it to the
-        // one it goes with — else the one written on a wrapper the resolver
-        // read through to reach the union, the nearest to it first
-        // (`handedOn`, `writtenNearest`: a nullable wrapper collapsed onto
-        // its one variant, an `allOf` read as its one member), else the
-        // one handed down. Greptile on #725: only the first wrapper's was
-        // read, so `{ additionalProperties: false, allOf: [{ discriminator:
-        // { mapping }, allOf: [{ oneOf: [...] }] }] }` among a component's
-        // members left the union under it with no keyword, counted as
-        // flattened where the component dispatches it by that `mapping`.
-        const handed =
-          bare === carrier
-            ? wrapperDiscriminator
-            : handedOn(wrapperDiscriminator, (was) => writtenNearest ?? carrier.discriminator ?? was);
-        // A component its own `allOf` composes is read by its own
-        // composition's decision, never by one made around the reference
-        // that names it (`undecided`); a wrapper written inline is part of
-        // the composition that decided (`composedInlineMember`; #714).
-        const component = viaComponent && allOfComposesComponent(bare);
-        const axisDiscriminator = axisDiscriminatorOf(
-          bare,
-          variants,
-          component ? undecided(handed) : handed,
-          componentSchemas,
-        );
+        // one it goes with — else what the schema is handed (`handedIn`):
+        // the keyword of the nearest wrapper the resolver read through to
+        // reach the union (a nullable wrapper collapsed onto its one
+        // variant, an `allOf` read as its one member), else the one handed
+        // down. Greptile on #725: only the first wrapper's was read, so `{
+        // additionalProperties: false, allOf: [{ discriminator: { mapping },
+        // allOf: [{ oneOf: [...] }] }] }` among a component's members left
+        // the union under it with no keyword, counted as flattened where the
+        // component dispatches it by that `mapping`; and a keyword crossed a
+        // `$ref` into a component its own `allOf` composes, which reads its
+        // unions by its own keyword alone, so a union that component
+        // flattens counted as dispatched and a stop field its variants
+        // declare, which the model has, resolved to none.
+        const axisDiscriminator = axisDiscriminatorOf(bare, variants, handedIn, componentSchemas);
         if (branch) {
           visit(branch, depth, origin, axisDiscriminator);
           continue;
@@ -1170,12 +1160,12 @@ export function collectObjectProperties(
     // hands them as part of the `allOf` it sits in — the decision handed on
     // to it, else its own keyword, else the one handed on as written, from
     // the `allOf` an inline wrapper sits in or from a wrapper the resolver
-    // read through to reach the schema (`passedOn`) — as the component
+    // read through to reach the schema (`handedIn`) — as the component
     // reader and the merge hand it on (`wrapperDiscriminatorWithin`; #714:
     // only the schema's own was read, so a union a component dispatches by
     // a `mapping` written around a wrapper counted as flattened, and a stop
     // field its variants declare resolved to a field the model has none of).
-    const forMembers = wrapperDiscriminatorWithin(bare, passedOn, componentSchemas);
+    const forMembers = wrapperDiscriminatorWithin(bare, handedIn, componentSchemas);
     for (const sub of bare.allOf ?? []) visit(sub, inline ? depth : depth + 1, origin, forMembers);
     for (const [key, prop] of Object.entries(bare.properties ?? {})) {
       if (!prop) continue;

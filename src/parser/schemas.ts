@@ -7910,9 +7910,9 @@ function discriminatedUnion(
  * else its own composition's. A decision is handed in only to a wrapper
  * written inline, which is part of the composition that made it
  * (`composedInlineMember`; #714) — a reader that reaches a component its
- * `allOf` composes through a `$ref` hands it the keyword as it was before
- * the decision (`undecided`), since such a component is read by its own
- * composition's decision, never by one made around the reference
+ * `allOf` composes through a `$ref` hands it nothing, since such a
+ * component is read by its own composition's keyword, never by one written
+ * or decided around the reference, as the component reader reads it
  * (`mergeAllOfMembers`, `collectObjectProperties`).
  */
 export function axisDiscriminatorOf(
@@ -8513,21 +8513,6 @@ export function wrapperDiscriminatorWithin(
 ): DiscriminatorKeyword | undefined {
   if (isDecidedDiscriminator(handed)) return handedOn(handed, (was) => writtenWrapperDiscriminatorOf(schema) ?? was);
   return handedOn(wrapperDiscriminatorOf(schema, schemas), (was) => was ?? handed);
-}
-
-/**
- * `handed` as it was before any decision: the keyword a union under it was
- * read with before a composition decided which union its keyword goes with
- * (`DecidedDiscriminator.otherwise`), or `handed` itself where it carries
- * no decision. What a reader hands a component its own `allOf` composes
- * when it reaches it through a `$ref`: such a component is read by its own
- * composition's decision, never by one made around the reference
- * (`axisDiscriminatorOf`), where a wrapper written inline is part of the
- * composition that decided (`composedInlineMember`; #714).
- */
-export function undecided(handed: DiscriminatorKeyword | undefined): DiscriminatorKeyword | undefined {
-  const decision = decisionOf(handed);
-  return decision ? decision.otherwise : handed;
 }
 
 /** What `wrapperDiscriminatorOf` answers for a schema not asked yet (see there). */
