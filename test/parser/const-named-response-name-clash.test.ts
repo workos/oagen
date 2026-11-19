@@ -442,6 +442,44 @@ describe('#712', () => {
         `);
       });
 
+      it('settles a name the cleaning took the stem’s words out of: nothing is read off the name', async () => {
+        // Greptile, #724: `ListItem` is a marker `cleanSchemaName` drops wherever it appears,
+        // so the `owner` of `getList`'s array items is `GetOwner` — minted from the stem
+        // `GetList`, which the name does not carry. The operations to read under a stand-in
+        // were chosen by a stem found in the name, so this pair was left to the merge.
+        expect(
+          await settled(openapi, {
+            '/lists': { get: returning('getList', { type: 'array', items: obj({ owner: obj({ name: str }) }) }) },
+            ...listDogs(named('get_owner', { breed: str, age: int })),
+          }),
+        ).toMatchInlineSnapshot(`
+          [
+            "GET /dogs (listDogs): none → GetOwner2",
+            "GET /lists (getList): none → GetListItem[]",
+            "GetListItem { owner?: GetOwner }",
+            "GetOwner { name?: string }",
+            "GetOwner2 { object?: "get_owner", breed?: string, age?: integer }",
+            "! [oagen] Renamed inline model "GetOwner" → "GetOwner2": its shape differs from operation GET /lists's own "GetOwner"",
+          ]
+        `);
+        // The other markers the cleaning drops: `ByExternalId`, `ByResourceId`, `ForResource`.
+        for (const [operationId, marker] of [
+          ['getPetByExternalId', 'by_external_id'],
+          ['getPetByResourceId', 'by_resource_id'],
+          ['getPetForResource', 'for_resource'],
+        ] as const) {
+          const lines = await settled(openapi, {
+            '/pets': { get: returning(operationId, obj({ id: str, owner: obj({ name: str }) })) },
+            ...listDogs(named('get_pet_response_owner', { breed: str, age: int })),
+          });
+          expect([marker, ...lines.filter((line) => line.startsWith('GetPetResponseOwner'))]).toEqual([
+            marker,
+            'GetPetResponseOwner { name?: string }',
+            'GetPetResponseOwner2 { object?: "get_pet_response_owner", breed?: string, age?: integer }',
+          ]);
+        }
+      });
+
       it('settles every way the document names a body: a wrapped resource, an `allOf` merge, a later status code', async () => {
         const expected = [
           'GetPetResponse { name?: string }',
@@ -1405,22 +1443,23 @@ describe('#712', () => {
   });
 
   describe('namesHeldAcrossStems', () => {
-    it('keeps the names more than one stem holds of which one of those stems is a part', () => {
+    it('keeps the names more than one stem holds, whatever the names spell', () => {
       expect([
         ...namesHeldAcrossStems([
           { stem: 'GetPet', names: ['GetPetResponse', 'Pet', 'GetPetResponseOwner'] },
           { stem: 'ListDogs', names: ['GetPetResponse', 'Pet', 'ListDogsResponse'] },
-          { stem: 'ListCats', names: ['Pet', 'ListDogsResponse'] },
+          { stem: 'ListCats', names: ['ListCatsResponse'] },
+          // `GetOwner` carries neither stem: `getList` mints it for its items' `owner`.
+          { stem: 'GetList', names: ['GetListItem', 'GetOwner'] },
+          { stem: 'ListBirds', names: ['GetOwner'] },
         ]),
-      ]).toEqual(['GetPetResponse', 'ListDogsResponse']);
-      // One stem, however many operations are named from it, shares nothing with itself;
-      // an empty stem is part of no name.
+      ]).toEqual(['GetPetResponse', 'Pet', 'GetOwner']);
+      // One stem, however many operations are named from it, shares nothing with itself.
       expect([
         ...namesHeldAcrossStems([
           { stem: 'GetPet', names: ['GetPetResponse'] },
           { stem: 'GetPet', names: ['GetPetResponse'] },
-          { stem: '', names: ['Response'] },
-          { stem: 'ListDogs', names: ['Response'] },
+          { stem: 'ListDogs', names: ['ListDogsResponse'] },
         ]),
       ]).toEqual([]);
     });

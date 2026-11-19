@@ -110,13 +110,18 @@ export function stemsInContest(stems: Iterable<string>): Set<string> {
 }
 
 /**
- * The names operations of more than one stem hold of which one of those
- * stems is a part: `GetPetResponse` beside `getPet` and `listDogs`, never a
- * `Pet` both return. Only such a name can be one operation's own and
- * another's by the document — a name minted from a stem carries the stem —
- * so only its holders are read once more to tell the two apart
- * (`OperationBodyNames.documentNames`). An empty stem names nothing, and is
- * part of no name.
+ * The names operations of more than one stem hold: `GetPetResponse` beside
+ * `getPet` and `listDogs`, and a `Pet` both return. Only such a name can be
+ * one operation's own and another's by the document, so only its holders
+ * are read once more to tell the two apart
+ * (`OperationBodyNames.documentNames`). Nothing is read off the name: a
+ * name minted from a stem need not carry it — the cleaning every name goes
+ * through drops a marker wherever it appears (`stripListItemMarkers`), so
+ * the `owner` of `getList`'s array items is `GetOwner`, not
+ * `GetListItemOwner` — and a test that looked for a holder's stem in the
+ * name left `GetOwner` beside a `listDogs` body pinning
+ * `object: get_owner` to the merge (Greptile, #724). One stem holds a name
+ * once, however many operations are named from it.
  */
 export function namesHeldAcrossStems(holders: Iterable<{ stem: string; names: Iterable<string> }>): Set<string> {
   const stemsOf = new Map<string, Set<string>>();
@@ -124,9 +129,7 @@ export function namesHeldAcrossStems(holders: Iterable<{ stem: string; names: It
     for (const name of names) stemsOf.set(name, (stemsOf.get(name) ?? new Set<string>()).add(stem));
   }
   const shared = new Set<string>();
-  for (const [name, stems] of stemsOf) {
-    if (stems.size > 1 && [...stems].some((stem) => stem.length > 0 && name.includes(stem))) shared.add(name);
-  }
+  for (const [name, stems] of stemsOf) if (stems.size > 1) shared.add(name);
   return shared;
 }
 
