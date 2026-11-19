@@ -1834,10 +1834,10 @@ function vetoesNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): 
   return schemaAdmitsNull(not, path);
 }
 
-/** The Schema Object a schema's `not` holds; `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
+/** The Schema Object a schema's `not` holds (`isSchemaObject`); `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
 function notSchemaOf(schema: SchemaObject): SchemaObject | undefined {
   const { not } = schema;
-  return typeof not === 'object' && not !== null && !Array.isArray(not) ? (not as SchemaObject) : undefined;
+  return isSchemaObject(not) ? not : undefined;
 }
 
 /**
@@ -1856,6 +1856,8 @@ function notSchemaOf(schema: SchemaObject): SchemaObject | undefined {
  * `not` are read alike in either order.
  */
 function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaObject> = new Set()): boolean {
+  // A member, or a component a `$ref` names, that is no Schema Object leads nowhere, as it has no vote.
+  if (!isSchemaObject(schema)) return false;
   if (sourceDeclaration(schema) === host) return true;
   if (seen.has(schema)) return false;
   seen.add(schema);
@@ -1915,7 +1917,8 @@ export function allOfVetoesNull(schema: SchemaObject): boolean {
  * for the first alone (`allOfVetoesNull`).
  */
 function conjoinsVeto(schema: SchemaObject, seen: Set<SchemaObject>): boolean {
-  if (seen.has(schema)) return false;
+  // A member, or a component a `$ref` names, that is no Schema Object writes no `not`, as it has no vote.
+  if (!isSchemaObject(schema) || seen.has(schema)) return false;
   seen.add(schema);
   if (schema.$ref !== undefined) {
     const target = componentSchemaOf(schema.$ref);

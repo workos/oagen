@@ -406,6 +406,35 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
       ).toEqual([]);
     });
 
+    it('holds beside a member that is no Schema Object, which has no vote and writes no `not`', async () => {
+      // A JSON Schema boolean, or anything else a document writes where a schema goes, abstains (#715), so the
+      // `allOf` is what its other members make it: nullable without the `not`, bare with it.
+      const lines: string[] = [];
+      for (const member of [true, false, 5, 'x', [notNull]] as unknown[]) {
+        const word = JSON.stringify(member);
+        const merged = await ownerOf(openapi, { allOf: [Owner, Tag, member, notNull] });
+        const one = await ownerOf(openapi, { allOf: [Owner, member, notNull] });
+        const wrapped = await ownerOf(openapi, { allOf: [Owner, { allOf: [member], not: { type: 'null' } }] });
+        expect(await ownerOf(openapi, { allOf: [Owner, Tag, member] }), word).toBe(
+          'nullable<PetOwner> { name, label }',
+        );
+        expect(await ownerOf(openapi, { allOf: [Owner, member] }), word).toBe('nullable<Owner>');
+        // Under the `not`, a member that is no Schema Object says nothing either: the subschema admits `null`.
+        expect(
+          await ownerOf(openapi, { allOf: [Owner, Tag, { not: { allOf: [member, { type: 'null' }] } }] }),
+          word,
+        ).toBe('PetOwner { name, label }');
+        lines.push(`${word}: ${merged}, ${one}, ${wrapped}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "true: PetOwner { name, label }, Owner, Owner
+        false: PetOwner { name, label }, Owner, Owner
+        5: PetOwner { name, label }, Owner, Owner
+        "x": PetOwner { name, label }, Owner, Owner
+        [{"not":{"type":"null"}}]: PetOwner { name, label }, Owner, Owner"
+      `);
+    });
+
     it('casts the same vote however the member is written: inline, a `$ref`, an alias, a wrapper', async () => {
       const schemas = {
         NotNull: notNull,
