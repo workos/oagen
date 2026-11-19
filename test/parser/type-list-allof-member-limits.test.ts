@@ -182,6 +182,22 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
       },
     );
 
+    it('types the four as fields of one model alike, each written where it is typed', async () => {
+      // The example `docs/architecture/ir-types.md` gives under "A type list's limits".
+      const Note = { type: 'object', properties: { beside: beside(), two: two(), one: one(), nested: nested() } };
+      const spec = await parseJson(document('3.1.0', undefined, { Note }));
+      const { fields } = spec.models.find(({ name }) => name === 'Note')!;
+      expect(fields.map(({ name, type, constraints }) => `${name}: ${show(type)} / ${JSON.stringify(constraints)}`))
+        .toMatchInlineSnapshot(`
+          [
+            "beside: (array<string> | string) {"minItems":2} / {"minItems":2}",
+            "two: (array<string> | string) {"minItems":2} / {"minItems":2}",
+            "one: (array<string> | string) {"minItems":2} / {"minItems":2}",
+            "nested: (array<string> | string) {"minItems":2} / {"minItems":2}",
+          ]
+        `);
+    });
+
     it('`oagen diff` between any two of the four exits 0, in either direction', async () => {
       const written: Record<string, string> = {};
       for (const [file, schema] of Object.entries(ISSUE)) written[file] = await writeJson(document('3.1.0', schema()));
@@ -869,7 +885,7 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
 
   describe('a component that is the type list', () => {
     it.each(['3.0.3', '3.1.0'])(
-      'is typed where a `$ref` names it as the list written in place is, under OAS %s',
+      'written through an `allOf` is typed where a `$ref` names it as the list written in place is, under OAS %s',
       async (openapi) => {
         // The limit in two members types the component in place; in one member,
         // or nested, the array variant carried it too.
@@ -891,6 +907,83 @@ describe('#711 a type list’s variants carry none of the limits an `allOf` memb
           }
         }
         expect(warn).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('a component that is the type list, with `items` beside the list', () => {
+    // Not this issue, and as it was: what a component is read as is decided
+    // from its own schema. A type list naming `array` with `items` beside it
+    // is neither an array component nor a primitive one, so it is the
+    // fieldless model it always became, where the same list written through
+    // an `allOf` is an array component, typed in place (MichaelDeBoey, #721
+    // review: the docs showed the four spellings as named schemas and said
+    // `oagen diff` between any two reports nothing, which holds where the
+    // list is written, not for a component).
+    it.each(['3.0.3', '3.1.0'])(
+      'is the fieldless model `Tags`, so `oagen diff` to the other three spellings reports the model removed, under OAS %s',
+      async (openapi) => {
+        const parsed: Record<string, ApiSpec> = {};
+        for (const [file, schema] of Object.entries(ISSUE)) {
+          parsed[file] = await parseJson(document(openapi, ref('Tags'), { Tags: schema() }));
+        }
+
+        // `Tags` written as `beside`: a model of no fields and no variants,
+        // the list's limits its own; the field a reference to it.
+        expect(parsed['beside.json']!.models).toEqual([
+          { name: 'Note', fields: [{ name: 'tags', type: { kind: 'model', name: 'Tags' }, required: false }] },
+          { name: 'Tags', fields: [], constraints: { minItems: 2 } },
+        ]);
+        // Written as `two`, `one` or `nested`: no `Tags` model, the field typed in place.
+        for (const file of ['two.json', 'one.json', 'nested.json']) {
+          expect(parsed[file]!.models, file).toEqual([
+            {
+              name: 'Note',
+              fields: [
+                {
+                  name: 'tags',
+                  type: {
+                    kind: 'union',
+                    variants: [
+                      { kind: 'array', items: { kind: 'primitive', type: 'string' } },
+                      { kind: 'primitive', type: 'string' },
+                    ],
+                    constraints: { minItems: 2 },
+                  },
+                  required: false,
+                  constraints: { minItems: 2 },
+                },
+              ],
+            },
+          ]);
+        }
+
+        const changes = (from: string, to: string) =>
+          diffSpecs(parsed[from]!, parsed[to]!).changes.map((change) =>
+            'name' in change ? `${change.kind} ${change.name}` : change.kind,
+          );
+        const lines: string[] = [];
+        for (const from of Object.keys(parsed)) {
+          for (const to of Object.keys(parsed)) {
+            if (from !== to) lines.push(`${from} -> ${to}: ${changes(from, to).join(', ') || 'nothing'}`);
+          }
+        }
+        expect(lines.join('\n')).toBe(
+          [
+            'beside.json -> two.json: model-removed Tags, model-modified Note',
+            'beside.json -> one.json: model-removed Tags, model-modified Note',
+            'beside.json -> nested.json: model-removed Tags, model-modified Note',
+            'two.json -> beside.json: model-added Tags, model-modified Note',
+            'two.json -> one.json: nothing',
+            'two.json -> nested.json: nothing',
+            'one.json -> beside.json: model-added Tags, model-modified Note',
+            'one.json -> two.json: nothing',
+            'one.json -> nested.json: nothing',
+            'nested.json -> beside.json: model-added Tags, model-modified Note',
+            'nested.json -> two.json: nothing',
+            'nested.json -> one.json: nothing',
+          ].join('\n'),
+        );
       },
     );
   });
