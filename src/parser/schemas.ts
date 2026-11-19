@@ -8253,11 +8253,19 @@ function ownRequired(schema: SchemaObject): readonly string[] {
  * and `Dog` and carried neither union's properties). A union alone with
  * the keyword written on a nullable wrapper beside it is handed it too.
  * Decided once per schema and document (`composedDiscriminators`).
+ *
+ * A member that is no Schema Object (`isSchemaObject`: a JSON Schema
+ * boolean among the members of an `allOf`, #715) writes no keyword and
+ * hands none on. It is answered before anything is remembered for it, as
+ * `nullVote` answers it: every reader that reads through a wrapper asks
+ * this of each member it visits (`wrapperDiscriminatorWithin`), and only an
+ * object can key the memo.
  */
 export function wrapperDiscriminatorOf(
   schema: SchemaObject,
   schemas?: Record<string, SchemaObject>,
 ): DiscriminatorKeyword | undefined {
+  if (!isSchemaObject(schema)) return undefined;
   // A `discriminator` beside a `$ref` is not read, as nothing but
   // annotations is beside any `$ref` (#618 review): a bare `$ref` alias
   // dispatches as the component it names does.

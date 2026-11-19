@@ -1344,6 +1344,40 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
   // the model has. A keyword written around a `$ref` stops at a component its own `allOf`
   // composes and goes on into anything else, for the model, for a merge that names it and for
   // the walk alike, since all three ask one helper (`handedPastRef`).
+  it.each(['3.0.3', '3.1.0'])(
+    'reads a member that is no Schema Object inside a wrapper as `{}` in its place, at every site that names `Pet` (#715; OAS %s)',
+    async (openapi) => {
+      // Every reader that reads through a wrapper asks each member what it hands on
+      // (`wrapperDiscriminatorWithin`), a JSON Schema boolean among them: the inline merge asked it of
+      // `true` and failed the parse on the memo, which only an object can key.
+      const spellings = (odd: unknown): Record<string, unknown> => ({
+        'first in the wrapper': W(Animal, W(odd, dunion)),
+        'last in the wrapper': W(Animal, W(dunion, odd)),
+        'beside the wrapper': W(Animal, odd, W(dunion)),
+        'in a wrapper of its own': W(Animal, W(odd), W(dunion)),
+        'in a closed wrapper': W(Animal, beside({ additionalProperties: false }, odd, dunion)),
+        'under a keyword beside the outer `allOf`': beside({ discriminator: D }, Animal, W(odd, union)),
+        'under a keyword on the wrapper': W(Animal, beside({ discriminator: D }, odd, union)),
+        'two wrappers deep': W(Animal, W(W(odd, dunion))),
+      });
+      const read = async (pet: unknown) => {
+        const { models, services } = await parseJson(document(openapi, pet, { sites: true }));
+        return { models, services };
+      };
+      const empty = spellings({});
+      for (const odd of [true, false]) {
+        for (const [label, pet] of Object.entries(spellings(odd))) {
+          const spec = await read(pet);
+          expect(spec, `${odd} ${label}`).toEqual(await read(empty[label]));
+          expect(showModel(spec.models.find(({ name }) => name === 'Pet')!), `${odd} ${label}`).toBe(
+            'Pet extends Animal { id!: string } by kind to cat: Cat, dog: Dog',
+          );
+        }
+      }
+      expect(warnings()).toEqual([]);
+    },
+  );
+
   describe('an override behind a `$ref` under a keyword resolves exactly where the model carries the field', () => {
     const closed = { additionalProperties: false };
     const x = { properties: { x: string } };
