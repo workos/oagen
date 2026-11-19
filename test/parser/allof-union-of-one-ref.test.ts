@@ -464,6 +464,24 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
       ],
       ['wrapped once more', () => ({ allOf: [{ allOf: [one('Pet')] }, ref('Owner')] }), nameOwner],
       ['both wrapped once more', () => ({ allOf: [{ allOf: [one('Pet')] }, { allOf: [one('Owner')] }] }), nameOwner],
+      ['wrapped twice', () => ({ allOf: [{ allOf: [{ allOf: [one('Pet')] }] }, ref('Owner')] }), nameOwner],
+      [
+        'typed `object` beside its union',
+        () => ({
+          allOf: [
+            { type: 'object', ...one('Pet') },
+            { type: 'object', ...one('Owner') },
+          ],
+        }),
+        nameOwner,
+      ],
+      [
+        'after a member that only annotates',
+        () => ({ allOf: [{ description: 'Both.' }, one('Pet'), ref('Owner')] }),
+        nameOwner,
+      ],
+      ['the same component twice', () => ({ allOf: [one('Pet'), one('Pet')] }), ['name?: string']],
+      ['beside a `$ref` to the same component', () => ({ allOf: [one('Pet'), ref('Pet')] }), ['name?: string']],
       [
         'wrapped in an `allOf` that says more',
         () => ({ allOf: [{ additionalProperties: false, allOf: [one('Pet')] }, ref('Owner')] }),
@@ -667,6 +685,93 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
   });
 
   describe('beside what', () => {
+    it('written beside the `allOf` instead of in it, the union of one is one more member (#398)', async () => {
+      // A union beside an `allOf` that types the schema is its last member (`foldSiblingUnions`), so the
+      // weighing is the same one: the base read each of these inline as the reference to `Base`.
+      const idName = ['id: string', 'name?: string'];
+      await expectTwins({ allOf: [ref('Base')], oneOf: [ref('Pet')] }, idName, 'a oneOf of one');
+      await expectTwins({ allOf: [ref('Base')], anyOf: [ref('Pet')] }, idName, 'an anyOf of one');
+      await expectTwins({ allOf: [ref('Base')], oneOf: [ref('Pet'), nullVariant] }, idName, 'a nullable wrapper');
+      await expectTwins({ allOf: [ref('Base')], oneOf: [ref('Pet')], nullable: true }, idName, 'the OAS 3.0 flag');
+      await expectTwins(
+        { allOf: [ref('Base')], oneOf: [ref('Pet')], anyOf: [ref('Owner')] },
+        [...idName, 'ownerId?: string'],
+        'both keywords',
+      );
+    });
+
+    it('what is written beside an `allOf` of such members is read as beside two `$ref` members', async () => {
+      await expectTwins(
+        { properties: { id: str }, allOf: [one('Pet'), one('Owner')] },
+        ['id?: string', ...nameOwner],
+        '`properties`',
+      );
+      // The base read the field as a map of `unknown`, by its `type`.
+      await expectTwins({ type: 'object', allOf: [one('Pet'), one('Owner')] }, nameOwner, '`type: object`');
+      await expectTwins({ type: ['object', 'string'], allOf: [one('Pet'), one('Owner')] }, nameOwner, 'a type list');
+      const nullable = openapi === '3.0.3' ? { type: 'object', nullable: true } : { type: ['object', 'null'] };
+      const { reading } = await expectTwins({ ...nullable, allOf: [one('Pet'), one('Owner')] }, nameOwner, 'nullable');
+      expect(reading.field).toBe('nullable<HolderField>');
+      // A nullable wrapper beside the `allOf` is one more member: its variant applies, and the unions of
+      // one admit no `null` (the base read the `oneOf` alone: `nullable<Base>`, the `allOf` unread).
+      await expectTwins(
+        { allOf: [one('Pet'), one('Owner')], oneOf: [ref('Base'), nullVariant] },
+        [...nameOwner, 'id: string'],
+        'a nullable wrapper beside',
+      );
+      await expectTwins(
+        { description: 'Both.', deprecated: true, allOf: [one('Pet'), one('Owner')] },
+        nameOwner,
+        'text',
+      );
+      // A primitive `type` too: the `allOf` types the schema, as two `$ref` members do (the base read the
+      // `string` its `type` says, the `allOf` unread).
+      const typed = (members: unknown[]) => twins({ type: 'string', allOf: members });
+      const unions = await read(typed([one('Pet'), one('Owner')]));
+      const refs = await read(typed([ref('Pet'), ref('Owner')]));
+      expect(twinReading(unions.spec)).toMatchObject({ component: nameOwner, inline: nameOwner, field: 'HolderField' });
+      expect(modelNames(unions.spec)).toEqual(modelNames(refs.spec));
+    });
+
+    it('a union written beside an `allOf` of such members is one more member, not the schema’s one union', async () => {
+      const Cat = object({ kind: pinned('cat'), meow: str }, ['kind']);
+      const Dog = object({ kind: pinned('dog'), bark: str }, ['kind']);
+      const schema = { allOf: [one('Pet'), one('Owner')], oneOf: [ref('Cat'), ref('Dog')] };
+      const { spec, warnings } = await read(twins(schema, { Cat, Dog }));
+      // The base read both twins as the union of `Cat` and `Dog`, the `allOf` unread.
+      expect(describeModel(model(spec, 'Comp'))).toBe(
+        'Comp { name?: string, ownerId?: string } by kind {"cat":"Cat","dog":"Dog"}',
+      );
+      // An inline `allOf` never dispatches: the union is flattened beside the two.
+      expect(fieldsOf(model(spec, 'HolderField')).map((field) => field.split(':')[0])).toEqual([
+        'name?',
+        'ownerId?',
+        'kind?',
+        'meow?',
+        'bark?',
+      ]);
+      expect(warnings).toEqual([]);
+      // As with two `$ref` members in the `allOf`'s place.
+      const plain = await read(
+        twins({ allOf: [ref('Pet'), ref('Owner')], oneOf: [ref('Cat'), ref('Dog')] }, { Cat, Dog }),
+      );
+      expect(model(plain.spec, 'Comp').discriminator).toEqual(model(spec, 'Comp').discriminator);
+      expect(fieldsOf(model(plain.spec, 'HolderField'))).toEqual(fieldsOf(model(spec, 'HolderField')));
+    });
+
+    it('a variant of a named union: the variant model is built', async () => {
+      const { spec, warnings } = await read(
+        doc({
+          Shape: { oneOf: [{ allOf: [one('Pet'), one('Owner')] }, ref('Toy')] },
+          Holder: object({ shape: ref('Shape') }),
+        }),
+      );
+      // The base read the variant as `unknown`, with a warning.
+      expect(model(spec, 'Shape').variants?.map(show)).toEqual(['ShapeVariant1', 'Toy']);
+      expect(fieldsOf(model(spec, 'ShapeVariant1'))).toEqual(nameOwner);
+      expect(warnings).toEqual([]);
+    });
+
     it('an inline object, an object that declares nothing, a primitive: the merge the component is', async () => {
       await expectTwins({ allOf: [one('Pet'), object({ extra: str })] }, ['name?: string', 'extra?: string'], 'object');
       await expectTwins({ allOf: [one('Pet'), { type: 'object' }] }, ['name?: string'], '`type: object`');
