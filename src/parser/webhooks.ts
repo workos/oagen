@@ -58,6 +58,7 @@ import {
   type PathItem,
   type RequestBodyObject,
 } from './operations.js';
+import type { OwnBodyNames } from './contested-body-names.js';
 import { enumValueShapeKey, enumValuesOf } from './enum-members.js';
 import { externalDocsEntry } from './external-docs.js';
 import { resolvePathItemRef } from './path-item-refs.js';
@@ -342,6 +343,10 @@ export function extractWebhooks(
   // Filled with what each group of webhooks minted, in document order, for
   // `extractCallbacks` to share (#631).
   mintings?: SharedMinting[],
+  // What the operations hold under a name one of them mints from its stem
+  // (`OperationExtractionResult.ownBodyNames`): a payload or parameter model
+  // of that name and another shape leaves it (`buildReceivedRequests`, #712).
+  ownBodyNames?: OwnBodyNames,
 ): WebhookExtractionResult {
   if (webhooks === undefined) return { webhooks: [], inlineModels: [], inlineModelBundles: [], declaredCallbacks: [] };
   if (!isRecord(webhooks)) {
@@ -351,7 +356,7 @@ export function extractWebhooks(
 
   const entries = collectWebhookEntries(webhooks, components, siblingDocs, paths);
   const reserved: ReservedNames = { all: new Set(reservedNames), enums: new Set(reservedEnumNames) };
-  const batch = buildReceivedRequests(entries, components, reserved, siblingDocs);
+  const batch = buildReceivedRequests(entries, components, reserved, siblingDocs, [], ownBodyNames);
   const { built, inlineModels, inlineModelBundles } = batch;
   mintings?.push(...batch.mintings);
   // Each webhook's `callbacks`, read after every webhook is named, under
@@ -450,6 +455,17 @@ export interface BuiltReceivedRequests {
  * model or inline enum of such a name and another shape is renamed under
  * its stem, never left to merge into the earlier one or to be numbered
  * after it (#634).
+ *
+ * `ownBodyNames` is what the operations hold under a name one of them
+ * mints from its stem and keeps (`ownBodyNamesOf`, #712): such a name is
+ * the operation's against either batch, as an earlier batch's is against
+ * this one. A payload variant titled `GetPetResponse` beside `getPet`'s
+ * own response is `getPet`'s very model and shares it, or is renamed
+ * under its group's stem (`DogCreatedGetPetResponse`,
+ * `CreateDogOnDogGetPetResponse`) with the enums it carries, where it used
+ * to reach the merge and replace the operation's response under a `more
+ * than one definition` warning. A name the document gives in an
+ * operation's body is no operation's and holds nothing.
  */
 export function buildReceivedRequests(
   entries: WebhookEntry[],
@@ -457,6 +473,7 @@ export function buildReceivedRequests(
   reserved: ReservedNames,
   siblingDocs: SiblingDocs,
   earlier: readonly SharedMinting[] = [],
+  ownBodyNames?: OwnBodyNames,
 ): BuiltReceivedRequests {
   // The entries an earlier batch already minted for, each with the minting
   // it shares; every other entry is grouped, named and minted here.
@@ -544,7 +561,11 @@ export function buildReceivedRequests(
   }
   // The groups in minting order: by wave, then as the document declares them.
   const order = waves.flatMap((wave) => groups.filter((group) => waveOf.get(group) === wave));
-  if (entries[0]?.kind === 'callback') {
+  // A callback batch is held to the stricter rule among its own groups
+  // (`separateMintedNames`); either batch leaves a name an earlier batch or
+  // an operation holds for another shape (`heldNames`).
+  const mutual = entries[0]?.kind === 'callback';
+  if (mutual || ownBodyNames !== undefined) {
     separateMintedNames(
       order,
       stems,
@@ -555,7 +576,8 @@ export function buildReceivedRequests(
       identities,
       components,
       siblingDocs,
-      heldShapes(earlier),
+      heldNames(heldShapes(earlier), ownBodyNames),
+      mutual,
     );
   }
   const inlineModels = order.flatMap((group) => mintedByGroup.get(group)!.inlineModels);
@@ -652,8 +674,41 @@ function sharedMintingOf(entry: WebhookEntry, earlier: readonly SharedMinting[])
   });
 }
 
-/** The names an earlier batch holds — its models' and its inline enums' — each with every shape (`mintedShape`) it holds the name for. */
-type HeldShapes = ReadonlyMap<string, ReadonlySet<string>>;
+/**
+ * The names held before a batch is named, each with every shape
+ * (`mintedShape`) it is held for: an earlier batch's — its models' and its
+ * inline enums' (`heldShapes`) — and the names the operations mint from
+ * their stems (`heldNames`).
+ */
+interface HeldShapes {
+  get(name: string): ReadonlySet<string> | undefined;
+}
+
+/**
+ * `earlier` and what the operations hold under a name one of them mints
+ * from its stem and keeps (`OwnBodyNames`, #712), asked name by name and
+ * once each. Such a name is the operation's alone, as a webhook's model is
+ * the webhook's against a callback (#631, #634): `getPet`'s own
+ * `GetPetResponse` beside a payload variant titled `GetPetResponse` with
+ * other fields keeps its name and its fields, where the two used to reach
+ * the merge and the payload's larger variant replaced `getPet`'s response.
+ * A name both an earlier batch and an operation hold is held for the shapes
+ * of both.
+ */
+function heldNames(earlier: ReadonlyMap<string, ReadonlySet<string>>, ownBodyNames?: OwnBodyNames): HeldShapes {
+  if (ownBodyNames === undefined) return earlier;
+  const asked = new Map<string, ReadonlySet<string> | undefined>();
+  return {
+    get: (name) => {
+      if (!asked.has(name)) {
+        const own = ownBodyNames(name).map(({ models, enums }) => heldShape(models[0], enums));
+        const shapes = [...(earlier.get(name) ?? []), ...own];
+        asked.set(name, shapes.length > 0 ? new Set(shapes) : undefined);
+      }
+      return asked.get(name);
+    },
+  };
+}
 
 /**
  * The shapes the mintings of an earlier batch hold each of their names for
@@ -664,7 +719,7 @@ type HeldShapes = ReadonlyMap<string, ReadonlySet<string>>;
  * title-mapped variants, which the `webhooks` map leaves to the model
  * merge.
  */
-function heldShapes(earlier: readonly SharedMinting[]): HeldShapes {
+function heldShapes(earlier: readonly SharedMinting[]): ReadonlyMap<string, ReadonlySet<string>> {
   const held = new Map<string, Set<string>>();
   for (const { minted } of earlier) {
     for (const name of minted.names) {
@@ -676,11 +731,13 @@ function heldShapes(earlier: readonly SharedMinting[]): HeldShapes {
 
 /**
  * The contested names of one round of `separateMintedNames`, each with the
- * groups it moves. A name no earlier batch holds is contested when two of
- * the groups minting it disagree on its shape, and moves every one of
+ * groups it moves. A name nothing read before the batch holds is contested
+ * when two of the groups minting it disagree on its shape — in a callback
+ * batch (`mutual`); never in the `webhooks` map — and moves every one of
  * them. A name an earlier batch holds (`held`: a `webhooks` entry's own
  * model, which a callback sharing the webhook's minting references too;
- * #631) is not the groups' to take: that model was named before any
+ * #631), or one an operation mints from its stem and keeps (`heldNames`,
+ * #712), is not the groups' to take: that model was named before any
  * callback was read and never moves, as a callback never renames a
  * webhook's model. So a group minting a model of the name with the one
  * shape held shares it, as the merge always let it, and stays whatever the
@@ -707,13 +764,15 @@ function contestedNames(
   minters: ReadonlyMap<string, WebhookGroup[]>,
   mintedByGroup: ReadonlyMap<WebhookGroup, MintedWebhook>,
   held: HeldShapes,
+  /** Whether a name nothing holds is contested between the groups themselves: a callback batch's rule, never the `webhooks` map's. */
+  mutual: boolean,
 ): Array<[string, WebhookGroup[]]> {
   const contested: Array<[string, WebhookGroup[]]> = [];
   for (const [name, groups] of minters) {
     const shapeOf = (group: WebhookGroup): string => mintedShape(mintedByGroup.get(group)!, name);
     const shapes = held.get(name);
     if (shapes === undefined) {
-      if (new Set(groups.map(shapeOf)).size > 1) contested.push([name, groups]);
+      if (mutual && new Set(groups.map(shapeOf)).size > 1) contested.push([name, groups]);
       continue;
     }
     const shares = (group: WebhookGroup): boolean => shapes.size === 1 && shapes.has(shapeOf(group));
@@ -792,13 +851,15 @@ function contestedNames(
  * `size` enums two enums. The check runs again until no name is
  * contested.
  *
- * The `webhooks` map is not held to this: the one name the resolution
- * leaves two webhooks sharing is a title-mapped variant, which the model
- * merge shares when the shapes agree and otherwise keeps one definition
- * of with a warning (`keepLargestByName`), as it always has, and a
- * document without callbacks names its webhooks as before. A callback
- * batch — nested, shared across depths, its stems built on its owners' —
- * is held to the stricter rule (#382).
+ * The `webhooks` map is not held to this among its own groups
+ * (`mutual`): the one name the resolution leaves two webhooks sharing is a
+ * title-mapped variant, which the model merge shares when the shapes agree
+ * and otherwise keeps one definition of with a warning
+ * (`keepLargestByName`), as it always has, and a document without
+ * callbacks names its webhooks as before. A callback batch — nested,
+ * shared across depths, its stems built on its owners' — is held to the
+ * stricter rule (#382). Either batch leaves a name something read before
+ * it holds (`held`).
  *
  * What the `webhooks` map minted holds its name against the callbacks
  * (`held`), a model (#631) and an inline enum (#634) alike: it never
@@ -807,6 +868,10 @@ function contestedNames(
  * callback's variant titled `Shape` beside a webhook's `Shape` of other
  * fields is `<Stem>Shape` and its `size` enum `<Stem>ShapeSize`, the enum
  * following its model wherever the webhook's `size` has other members.
+ * What an operation mints from its stem and keeps is held the same way,
+ * against the `webhooks` map and the callbacks alike (`heldNames`, #712):
+ * a webhook's variant titled `GetPetResponse` beside `getPet`'s own
+ * response of other fields is `<Stem>GetPetResponse`.
  */
 function separateMintedNames(
   order: WebhookGroup[],
@@ -819,8 +884,10 @@ function separateMintedNames(
   identities: Map<WebhookGroup, HashIdentity>,
   components: WebhookComponents,
   siblingDocs: SiblingDocs,
-  /** The names an earlier batch holds, each with the shapes it holds the name for (`heldShapes`). */
+  /** The names an earlier batch or an operation holds, each with the shapes it is held for (`heldNames`). */
   held: HeldShapes,
+  /** Whether the groups are held to the rule among themselves (`contestedNames`): a callback batch; the `webhooks` map leaves only a held name. */
+  mutual: boolean,
 ): void {
   for (;;) {
     // Every name the groups mint, with the groups, in minting order.
@@ -834,7 +901,7 @@ function separateMintedNames(
     // the order the groups were declared in. Each comes with the groups it
     // moves: every group minting it, unless an earlier batch holds the name
     // (`contestedNames`).
-    const contested = contestedNames(minters, mintedByGroup, held);
+    const contested = contestedNames(minters, mintedByGroup, held, mutual);
     if (contested.length === 0) return;
     // Of a contested name's minters the hash moves, those hashed already
     // that hash one string as another minter of the name — a key and an
@@ -993,10 +1060,15 @@ interface MintedMoves {
  * model and an inline enum under the name is read on both.
  */
 function mintedShape(minted: MintedWebhook, name: string): string {
-  const model = minted.inlineModels.find((m) => m.name === name);
-  const enums = new Set(
-    mintedEnumRefs(minted, name).map((ref) => JSON.stringify(enumValuesOf(ref).map(enumValueShapeKey))),
+  return heldShape(
+    minted.inlineModels.find((m) => m.name === name),
+    mintedEnumRefs(minted, name),
   );
+}
+
+/** A model and the inline enum references of one name, read as `mintedShape` reads a minting's: what a name is held for, whoever holds it. */
+function heldShape(model: Model | undefined, enumRefs: readonly EnumRef[]): string {
+  const enums = new Set(enumRefs.map((ref) => JSON.stringify(enumValuesOf(ref).map(enumValueShapeKey))));
   return JSON.stringify([model !== undefined ? shapeFingerprint(model) : null, [...enums].sort()]);
 }
 
