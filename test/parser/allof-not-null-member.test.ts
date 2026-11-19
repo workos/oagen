@@ -1233,6 +1233,121 @@ describe('#716 several declarations of one property', () => {
   });
 });
 
+describe('#716 a `not` the parser cannot read vetoes nothing, and never fails the parse', () => {
+  // No reader looked under a `not` before, so a document could write anything there and parse. Each value below
+  // is written at every place the reading of a `not` now reaches: as the `not` itself, as a member of the
+  // `allOf`/`oneOf`/`anyOf` under it at one and two levels, under a `not` nested in it, under `items` and
+  // `properties`, in place of a list a keyword holds, and behind a `$ref`.
+  const nullSchema = { type: 'null' };
+  const values: ReadonlyArray<readonly [string, unknown]> = [
+    ['true', true],
+    ['false', false],
+    ['null', null],
+    ['5', 5],
+    ["'x'", 'x'],
+    ['a list', [nullSchema]],
+    ['{}', {}],
+  ];
+  /** The subschemas of a `not` that hold `v`, each labeled. */
+  const subschemas = (v: unknown): Array<readonly [string, unknown]> => [
+    ['V', v],
+    ['{ allOf: [V] }', { allOf: [v] }],
+    ['{ allOf: [V, null] }', { allOf: [v, nullSchema] }],
+    ['{ allOf: [null, V] }', { allOf: [nullSchema, v] }],
+    ['{ oneOf: [V] }', { oneOf: [v] }],
+    ['{ oneOf: [V, null] }', { oneOf: [v, nullSchema] }],
+    ['{ anyOf: [null, V] }', { anyOf: [nullSchema, v] }],
+    ['{ allOf: [{ allOf: [V, null] }] }', { allOf: [{ allOf: [v, nullSchema] }] }],
+    ['{ allOf: [{ oneOf: [V, null] }] }', { allOf: [{ oneOf: [v, nullSchema] }] }],
+    ['{ oneOf: [{ anyOf: [V, null] }, string] }', { oneOf: [{ anyOf: [v, nullSchema] }, string] }],
+    ['{ anyOf: [{ allOf: [V] }, null] }', { anyOf: [{ allOf: [v] }, nullSchema] }],
+    ['{ not: V }', { not: v }],
+    ['{ not: { allOf: [V] } }', { not: { allOf: [v] } }],
+    ['{ type: null, not: V }', { type: 'null', not: v }],
+    ['{ allOf: [null, { not: V }] }', { allOf: [nullSchema, { not: v }] }],
+    ['{ items: V }', { items: v }],
+    ['{ type: array, items: V }', { type: 'array', items: v }],
+    ['{ properties: { a: V } }', { properties: { a: v } }],
+    ['{ properties: V }', { properties: v }],
+    ['{ additionalProperties: V }', { additionalProperties: v }],
+    ['{ allOf: V }', { allOf: v }],
+    ['{ oneOf: V }', { oneOf: v }],
+    ['{ anyOf: V }', { anyOf: v }],
+    ['{ enum: V }', { enum: v }],
+    ['{ type: V }', { type: v }],
+    ['{ type: [V, null] }', { type: [v, 'null'] }],
+    ['{ const: V }', { const: v }],
+    ['{ nullable: V, type: string }', { nullable: v, type: 'string' }],
+    ['{ required: V, type: null }', { required: v, type: 'null' }],
+    // A component that holds the value: one written `null` there fails the parse before any `not` is read, as it
+    // did, and so does a component written as the value itself.
+    ...(v === null ? [] : [['{ $ref: Holds }', ref('Holds')] as const]),
+  ];
+
+  it('parses each, and reads a veto exactly where the subschema can be read and admits `null`', async () => {
+    const labels = subschemas(true).map(([label]) => label);
+    const vetoing = new Map<string, string[]>(labels.map((label) => [label, []]));
+    for (const [word, v] of values) {
+      const rows = subschemas(v);
+      // One field per subschema and per place the `not` is written: a member of a merge, and beside an `allOf`
+      // read as a reference. Without the `not` the two are `nullable<PetF…>` and `nullable<Owner>`.
+      const properties: Record<string, unknown> = {};
+      rows.forEach(([, sub], index) => {
+        properties[`f${index}_member`] = { allOf: [Owner, Tag, { not: sub }] };
+        properties[`f${index}_beside`] = { allOf: [Owner], not: sub };
+      });
+      const holds = v === null ? {} : { Holds: { allOf: [v, nullSchema] } };
+      // It parses, whatever is written there.
+      const spec = await parse(document('3.1.0', { ...holds, Pet: { type: 'object', properties } }));
+      rows.forEach(([label], index) => {
+        const shapes = ['member', 'beside'].map((site) =>
+          show(fieldType(spec, 'Pet', `f${index}_${site}`), () => 'named'),
+        );
+        // Every field is the type it is without the `not`, or that type without its `null`: nothing else.
+        for (const shape of shapes) expect(['nullable<named>', 'named'], `${word}: ${label}`).toContain(shape);
+        // And the two places the `not` is written agree.
+        expect(shapes[1], `${word}: ${label}`).toBe(shapes[0]);
+        if (shapes[0] === 'named') vetoing.get(label)!.push(word);
+      });
+    }
+    // For each subschema, the values of `V` with which the `not` vetoes `null`; with every other it vetoes
+    // nothing, and the field is what it is without the `not`. `null` in a label is `{ type: 'null' }`.
+    const table = labels.map((label) => `not: ${label} — ${vetoing.get(label)!.join(', ') || 'none'}`);
+    expect(table.join('\n')).toMatchInlineSnapshot(`
+      "not: V — none
+      not: { allOf: [V] } — none
+      not: { allOf: [V, null] } — true, false, 5, 'x', a list, {}
+      not: { allOf: [null, V] } — true, false, 5, 'x', a list, {}
+      not: { oneOf: [V] } — none
+      not: { oneOf: [V, null] } — true, false, 5, 'x', a list, {}
+      not: { anyOf: [null, V] } — true, false, 5, 'x', a list, {}
+      not: { allOf: [{ allOf: [V, null] }] } — true, false, 5, 'x', a list, {}
+      not: { allOf: [{ oneOf: [V, null] }] } — true, false, 5, 'x', a list, {}
+      not: { oneOf: [{ anyOf: [V, null] }, string] } — none
+      not: { anyOf: [{ allOf: [V] }, null] } — true, false, null, 5, 'x', a list, {}
+      not: { not: V } — none
+      not: { not: { allOf: [V] } } — none
+      not: { type: null, not: V } — true, false, null, 5, 'x', a list, {}
+      not: { allOf: [null, { not: V }] } — true, false, null, 5, 'x', a list, {}
+      not: { items: V } — none
+      not: { type: array, items: V } — none
+      not: { properties: { a: V } } — none
+      not: { properties: V } — none
+      not: { additionalProperties: V } — none
+      not: { allOf: V } — a list
+      not: { oneOf: V } — a list
+      not: { anyOf: V } — a list
+      not: { enum: V } — none
+      not: { type: V } — none
+      not: { type: [V, null] } — true, false, null, 5, 'x', a list, {}
+      not: { const: V } — null
+      not: { nullable: V, type: string } — true
+      not: { required: V, type: null } — true, false, null, 5, 'x', a list, {}
+      not: { $ref: Holds } — true, false, 5, 'x', a list, {}"
+    `);
+  });
+});
+
 describe('#716 what is left as it was', () => {
   it.each(VERSIONS)('reads no `not` outside an `allOf` (%s)', async (openapi) => {
     expect(

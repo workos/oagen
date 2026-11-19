@@ -1826,12 +1826,29 @@ function allOfNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote 
  * schema stays typed by its other keywords, `null` included. A `not` that
  * holds no Schema Object is not read (`notSchemaOf`), and neither is one
  * whose subschema leads back to the schema that writes it (`leadsBackTo`).
- * `path` is `nullVote`'s.
+ *
+ * Reading a `not` never fails a parse. No reader looked under one before
+ * (#716), so a document may write anything there and parse: a `null`
+ * where a schema goes (`{ not: { allOf: [null, { type: 'null' }] } }`,
+ * `{ not: { items: null } }`), or a keyword that holds no list (`{ not: {
+ * oneOf: 5 } }`, `{ not: { enum: {} } }`). The subschema is read by the
+ * readers every schema is read by, and where they cannot read it — they
+ * fail on those — the `not` vetoes nothing and the schema is typed as it
+ * was before a `not` was read. So what they can read under a `not` is
+ * read as it is anywhere: a member that is no Schema Object but which
+ * they read as one with no vote (`true`, a number, a string, a list;
+ * `isSchemaObject`) leaves the veto to the others (`{ not: { allOf: [true,
+ * { type: 'null' }] } }` vetoes). `path` is `nullVote`'s.
  */
 function vetoesNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
   const not = notSchemaOf(schema);
-  if (not === undefined || leadsBackTo(not, sourceDeclaration(schema))) return false;
-  return schemaAdmitsNull(not, path);
+  if (not === undefined) return false;
+  try {
+    return !leadsBackTo(not, sourceDeclaration(schema)) && schemaAdmitsNull(not, path);
+  } catch {
+    // Unreadable, and unread until #716: no veto, and the parse goes on.
+    return false;
+  }
 }
 
 /** The Schema Object a schema's `not` holds (`isSchemaObject`); `undefined` when it writes none, or holds anything else — a boolean schema (`not: true`), a list — which is not read. */
