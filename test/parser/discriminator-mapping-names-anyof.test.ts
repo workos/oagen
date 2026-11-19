@@ -505,18 +505,101 @@ describe.each(['3.1.0', '3.0.3'])('#718 a discriminator mapping naming the anyOf
         expect(reading).toBe('{ name?: string, toy?: string } by kind { lion: A, wolf: B }');
       });
 
-      it('a property no union pins dispatches nothing, as on one union: both are flattened', async () => {
-        const { reading } = await pick(
-          { oneOf: petToy, anyOf: [ref('A'), ref('B')], discriminator: keyword() },
-          { A: object({ type: pinned('a'), roar: str }), B: object({ type: pinned('b'), howl: str }) },
+      describe('a keyword that dispatches no union decides nothing: each union is read as it was', () => {
+        // Greptile on #723: the decision stood whether or not the keyword dispatched the union it went with,
+        // and the no-`mapping` score counted pinned values without comparing them.
+        const tagged = (kind: string, extra: string) => object({ kind: pinned(kind), [extra]: str }, ['kind']);
+        const repeated = [tagged('cat', 'a'), tagged('cat', 'b'), tagged('dog', 'c')];
+        const everySpelling = (oneOf: unknown[], anyOf: unknown[]): Array<[string, Doc]> => [
+          ['beside the two unions', { oneOf, anyOf, discriminator: keyword() }],
+          ['beside the `allOf` of the two', { allOf: [{ oneOf }, { anyOf }], discriminator: keyword() }],
+          ['on the oneOf member', { allOf: [{ oneOf, discriminator: keyword() }, { anyOf }] }],
+          ['on the anyOf member', { allOf: [{ oneOf }, { anyOf, discriminator: keyword() }] }],
+        ];
+
+        it.each(everySpelling(repeated, catDog))(
+          'a oneOf whose variants repeat a tag is no dispatcher, and the anyOf dispatches by the keyword, %s',
+          async (_label, Pick) => {
+            const { reading, warnings } = await pick(Pick);
+            // `cat`, `cat` and `dog`: no keyword dispatches the `oneOf`, so it never outscores the `anyOf`.
+            expect(reading).toBe(
+              '{ kind?: PickKind, a?: string, b?: string, c?: string } by kind { cat: Cat, dog: Dog }',
+            );
+            expect(warnings).toEqual([]);
+          },
         );
-        expect(reading).toBe('{ name?: string, toy?: string, type?: PickType, roar?: string, howl?: string }');
-        // The one union alone under the same keyword is flattened too: the document names the property.
-        const alone = await pick(
-          { allOf: [ref('Base'), { anyOf: [ref('A'), ref('B')], discriminator: keyword() }] },
-          { A: object({ type: pinned('a'), roar: str }), B: object({ type: pinned('b'), howl: str }) },
-        );
-        expect(alone.reading).toBe('{ id: string, type?: PickType, roar?: string, howl?: string }');
+
+        it('the same with the repeating variants as components, for a model naming the component and a merge of it', async () => {
+          const { spec } = await read(
+            doc({
+              A: tagged('cat', 'a'),
+              B: tagged('cat', 'b'),
+              D: tagged('dog', 'c'),
+              Pick: { oneOf: [ref('A'), ref('B'), ref('D')], anyOf: catDog, discriminator: keyword() },
+              Combo: { allOf: [ref('Base'), ref('Pick')] },
+              Holder: object({ merged: { allOf: [ref('Base'), ref('Pick')] } }),
+            }),
+          );
+          expect(reads(spec, 'Pick')).toBe(
+            '{ kind?: PickKind, a?: string, b?: string, c?: string } by kind { cat: Cat, dog: Dog }',
+          );
+          expect(model(spec, 'Combo').discriminator).toEqual(dispatched);
+          expect(fieldsOf(model(spec, 'HolderMerged')).map((field) => field.split('?')[0])).toEqual([
+            'id: string',
+            'kind',
+            'a',
+            'b',
+            'c',
+          ]);
+        });
+
+        it('a repeated tag beside an anyOf that pins another property first: the anyOf dispatches by the keyword’s property', async () => {
+          const { reading } = await pick(
+            { oneOf: repeated, anyOf: [ref('A'), ref('B')], discriminator: keyword() },
+            {
+              A: object({ type: pinned('a'), kind: pinned('lion'), roar: str }, ['kind']),
+              B: object({ type: pinned('b'), kind: pinned('wolf'), howl: str }, ['kind']),
+            },
+          );
+          // The base dispatched the `anyOf` by `type`, the first property its variants pin.
+          expect(reading).toBe('{ kind?: PickKind, a?: string, b?: string, c?: string } by kind { lion: A, wolf: B }');
+        });
+
+        it('a tag that names no model keeps the first union from dispatching: the anyOf dispatches by its pinned consts, as it did', async () => {
+          // `-` spells no variant name (#430), which the score does not read: the keyword stays with the
+          // `oneOf`, dispatches nothing, and decides nothing.
+          const { reading } = await pick({
+            oneOf: [tagged('-', 'a'), tagged('dog', 'c')],
+            anyOf: catDog,
+            discriminator: keyword(),
+          });
+          expect(reading).toBe('{ kind?: PickKind, a?: string, c?: string } by kind { cat: Cat, dog: Dog }');
+        });
+
+        it('a property no union pins: every union is read with the keyword it is written with, in each spelling as before', async () => {
+          const typed = {
+            A: object({ type: pinned('a'), roar: str }),
+            B: object({ type: pinned('b'), howl: str }),
+          };
+          const [beside, wrapper, onOneOf, onAnyOf] = everySpelling(petToy, [ref('A'), ref('B')]);
+          // Read with no keyword of its own, the `anyOf` dispatches by the property its variants pin.
+          for (const [label, Pick] of [beside!, onOneOf!]) {
+            expect((await pick(Pick, typed)).reading, label).toBe(
+              '{ name?: string, toy?: string } by type { a: A, b: B }',
+            );
+          }
+          // Read with the keyword, it dispatches nothing: the document names `kind`, as on one union alone.
+          for (const [label, Pick] of [wrapper!, onAnyOf!]) {
+            expect((await pick(Pick, typed)).reading, label).toBe(
+              '{ name?: string, toy?: string, type?: PickType, roar?: string, howl?: string }',
+            );
+          }
+          const alone = await pick(
+            { allOf: [ref('Base'), { anyOf: [ref('A'), ref('B')], discriminator: keyword() }] },
+            typed,
+          );
+          expect(alone.reading).toBe('{ id: string, type?: PickType, roar?: string, howl?: string }');
+        });
       });
     });
 
@@ -814,16 +897,29 @@ describe.each(['3.1.0', '3.0.3'])('#718 a discriminator mapping naming the anyOf
   describe('the one decision', () => {
     const schemas = components as Record<string, SchemaObject>;
 
-    it('`axisDiscriminatorOf` answers the keyword for the union it goes with, and the decision for the other', () => {
+    it('`axisDiscriminatorOf` answers the decision for each union of a schema that writes two, and the keyword as written for one that stays with it', () => {
       const discriminator = { propertyName: 'kind', mapping: toCatDog };
       const both: SchemaObject = { oneOf: petToy, anyOf: catDog, discriminator };
-      expect(axisDiscriminatorOf(both, both.anyOf!, undefined, schemas)).toBe(discriminator);
-      const other = axisDiscriminatorOf(both, both.oneOf!, undefined, schemas);
-      expect(other).toEqual(discriminator);
-      expect(isDecidedDiscriminator(other)).toBe(true);
+      // Each of the two unions is answered the decision that the keyword goes with the `anyOf`.
+      for (const variants of [both.oneOf!, both.anyOf!]) {
+        const answer = axisDiscriminatorOf(both, variants, undefined, schemas);
+        expect(answer).toEqual(discriminator);
+        expect(answer).not.toBe(discriminator);
+        expect(isDecidedDiscriminator(answer)).toBe(true);
+        // Asked again, the same answer.
+        expect(axisDiscriminatorOf(both, variants, undefined, schemas)).toBe(answer);
+      }
+      // The union a keyword stays with, read with it before, is answered the keyword as written.
+      const stays: SchemaObject = { oneOf: catDog, anyOf: petToy, discriminator };
+      expect(axisDiscriminatorOf(stays, stays.oneOf!, undefined, schemas)).toBe(discriminator);
+      expect(isDecidedDiscriminator(axisDiscriminatorOf(stays, stays.anyOf!, undefined, schemas))).toBe(true);
       // A decision handed down is the answer for every union under it, whatever the schema writes itself.
+      const other = axisDiscriminatorOf(both, both.oneOf!, undefined, schemas);
       const lone: SchemaObject = { oneOf: lionWolf, discriminator: { propertyName: 'type' } };
-      expect(axisDiscriminatorOf(lone, lone.oneOf!, other, schemas)).toBe(other);
+      const under = axisDiscriminatorOf(lone, lone.oneOf!, other, schemas);
+      expect(under).toEqual(discriminator);
+      expect(isDecidedDiscriminator(under)).toBe(true);
+      // A keyword handed down as written yields to the schema's own, and is the answer where it writes none.
       expect(axisDiscriminatorOf(lone, lone.oneOf!, discriminator, schemas)).toBe(lone.discriminator);
       expect(axisDiscriminatorOf({ oneOf: lionWolf }, [], discriminator, schemas)).toBe(discriminator);
     });

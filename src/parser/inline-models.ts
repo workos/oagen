@@ -22,7 +22,7 @@ import {
   componentUnionDispatches,
   composesOwnChain,
   axisDiscriminatorOf,
-  isDecidedDiscriminator,
+  handedOn,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
@@ -4014,18 +4014,15 @@ export function mergeAllOfMembers(
           : { name: resolveSchemaName(key), schema: target };
       // Nothing written beside the `$ref` is read — not a bare alias's
       // `required`, `properties`, `allOf` or union (#618 review, #622) —
-      // as the component reader reads none (`componentAllOfMembers`). A
-      // keyword the composition around the `$ref` decided the union of
+      // as the component reader reads none (`componentAllOfMembers`), and
+      // no keyword is handed on past the `$ref`, as none was. A decision
+      // the composition around the `$ref` made of its keyword
       // (`wrapperDiscriminatorOf`) goes on with a reference that stays
-      // inside the same component's chain, as the component reader hands
-      // it to a `$ref` member's unions: the union it goes with is left to
-      // the component and every other is flattened into the merge, as
-      // both are in the component's own model (#718).
-      visit(
-        target,
-        owner,
-        owner === origin && isDecidedDiscriminator(wrapperDiscriminator) ? wrapperDiscriminator : undefined,
-      );
+      // inside the same component's chain (`handedOn`), as the component
+      // reader hands it to a `$ref` member's unions: the union the keyword
+      // goes with is left to the component and every other is flattened
+      // into the merge, as both are in the component's own model (#718).
+      visit(target, owner, owner === origin ? handedOn(wrapperDiscriminator, () => undefined) : undefined);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {

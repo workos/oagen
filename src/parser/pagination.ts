@@ -25,7 +25,7 @@ import {
   resolveSchemaName,
   unionAxesOf,
   axisDiscriminatorOf,
-  isDecidedDiscriminator,
+  handedOn,
   unionTypesSchema,
   unwrapNullableSchema,
   wrapperDiscriminatorOf,
@@ -1052,14 +1052,14 @@ export function collectObjectProperties(
         const keyword = variants === bare.oneOf ? 'oneOf' : 'anyOf';
         const branch = bare.oneOf && bare.anyOf ? nullableAxisBranch(bare, variants) : undefined;
         // The keyword the union is read with, as the model reads it
-        // (`axisDiscriminatorOf`): the one the composition decided the union
-        // of, else the member's own — a member writing both keywords hands
-        // it to the one it goes with — else the one written on a nullable
-        // wrapper the resolver collapsed, else the one handed down.
+        // (`axisDiscriminatorOf`): the composition's decision, else the
+        // member's own — a member writing both keywords hands it to the
+        // one it goes with — else the one written on a nullable wrapper the
+        // resolver collapsed (`handedOn`), else the one handed down.
         const handed =
-          bare === carrier || isDecidedDiscriminator(wrapperDiscriminator)
+          bare === carrier
             ? wrapperDiscriminator
-            : (carrier.discriminator ?? wrapperDiscriminator);
+            : handedOn(wrapperDiscriminator, (was) => carrier.discriminator ?? was);
         const axisDiscriminator = axisDiscriminatorOf(bare, variants, handed, componentSchemas);
         if (branch) {
           visit(branch, depth, origin, axisDiscriminator);
