@@ -639,6 +639,15 @@ describe('#715 at every site', () => {
     const lines = (await sites(openapi, { allOf: [Owner, Plain, Described] })).split('\n');
     expect(lines.filter((line) => line.includes('nullable'))).toEqual([]);
   });
+
+  it.each(VERSIONS)('parses a boolean member at every site, typed as `{}` in its place is (%s)', async (openapi) => {
+    // #715 review: the vote was asked of the boolean at each of these sites, and each failed the parse.
+    const empty = await sites(openapi, { allOf: [Owner, Tag, {}] });
+    expect(empty.split('\n').filter((line) => !line.includes('nullable<model>'))).toEqual([]);
+    expect(await sites(openapi, { allOf: [Owner, Tag, true] })).toBe(empty);
+    expect(await sites(openapi, { allOf: [Owner, Tag, false] })).toBe(empty);
+    expect(await sites(openapi, { allOf: [Owner, Tag, { allOf: [true] }] })).toBe(empty);
+  });
 });
 
 describe('#715 `nullVote`', () => {
@@ -850,6 +859,177 @@ describe('#715 `nullVote`', () => {
       document('3.1.0', { ...levels, Pet: { type: 'object', properties: { top: ref(`Level${depth}`) } } }),
     );
     expect(script(spec)).toBe(`top: nullable<Level${depth}>`);
+  });
+});
+
+describe('#715 review: a member that is no Schema Object has no vote', () => {
+  /** `value` where a schema goes, as a document may write it. */
+  const written = (value: unknown): SchemaObject => value as SchemaObject;
+
+  describe.each(VERSIONS)('OpenAPI %s', (openapi) => {
+    it('parses a boolean schema among the members, which has no vote, as `{}` has none', async () => {
+      // MichaelDeBoey's three cases: `true`, `false` and `{ allOf: [true] }` as the third member each failed the
+      // parse (`TypeError: Invalid value used as weak map key`); before, each was `nullable<PetOwner>`.
+      const cases: ReadonlyArray<readonly [string, unknown]> = [
+        ['`true`', true],
+        ['`false`', false],
+        ['a wrapper around `true`', { allOf: [true] }],
+      ];
+      const empty = await ownerOf(openapi, { allOf: [Owner, Tag, {}] });
+      expect(empty).toBe('nullable<PetOwner> { name, label }');
+      for (const [label, member] of cases) {
+        expect(await ownerOf(openapi, { allOf: [Owner, Tag, member] }), label).toBe(empty);
+        await expectNoDiff(
+          ownerDoc(openapi, { allOf: [Owner, Tag, member] }),
+          ownerDoc(openapi, { allOf: [Owner, Tag, {}] }),
+          label,
+        );
+      }
+    });
+
+    it('gives a boolean no vote wherever it stands, under any wrapper, and leaves the other members theirs', async () => {
+      expect(
+        await table(openapi, [
+          ['a wrapper around `false`', { allOf: [Owner, Tag, { allOf: [false] }] }],
+          ['`true` two wrappers down', { allOf: [Owner, Tag, { allOf: [{ allOf: [true] }] }] }],
+          ['a documented wrapper around `true`', { allOf: [Owner, Tag, { description: 'Any.', allOf: [true] }] }],
+          ['`true` first', { allOf: [true, Owner, Tag] }],
+          ['`true` and `false`, between the others', { allOf: [Owner, true, Tag, false] }],
+          ['`true` beside the annotating `$ref`', { allOf: [Owner, Tag, Described, true] }],
+          ['`true` beside a nullable inline object', { allOf: [nullableObject(openapi, 'extra'), Tag, true] }],
+          // A member that rejects `null` still does, and so does a wrapper that says what an instance is.
+          ['`true` beside a `$ref` that admits no `null`', { allOf: [Owner, Plain, true] }],
+          ['`false` beside a `$ref` that admits no `null`', { allOf: [Owner, Plain, false] }],
+          ['a wrapper typed `object` around `true`', { allOf: [Owner, Tag, { type: 'object', allOf: [true] }] }],
+          ['`type: object` beside the `allOf`', { type: 'object', allOf: [Owner, Tag, true] }],
+          // One typing member beside a boolean is read as that member, as beside `{}`.
+          ['one nullable `$ref` and `true`', { allOf: [Owner, true] }],
+          ['one nullable `$ref` and `{}`', { allOf: [Owner, {}] }],
+        ]),
+      ).toMatchInlineSnapshot(`
+        "a wrapper around \`false\`: nullable<PetOwner> { name, label }
+        \`true\` two wrappers down: nullable<PetOwner> { name, label }
+        a documented wrapper around \`true\`: nullable<PetOwner> { name, label }
+        \`true\` first: nullable<PetOwner> { name, label }
+        \`true\` and \`false\`, between the others: nullable<PetOwner> { name, label }
+        \`true\` beside the annotating \`$ref\`: nullable<PetOwner> { name, label }
+        \`true\` beside a nullable inline object: nullable<PetOwner> { extra, label }
+        \`true\` beside a \`$ref\` that admits no \`null\`: PetOwner { name, id }
+        \`false\` beside a \`$ref\` that admits no \`null\`: PetOwner { name, id }
+        a wrapper typed \`object\` around \`true\`: PetOwner { name, label }
+        \`type: object\` beside the \`allOf\`: PetOwner { name, label }
+        one nullable \`$ref\` and \`true\`: nullable<Owner>
+        one nullable \`$ref\` and \`{}\`: nullable<Owner>"
+      `);
+    });
+
+    it('wraps a `$ref` to a component whose `allOf` holds a boolean', async () => {
+      const spec = await parse(
+        document(openapi, {
+          WithTrue: { allOf: [Owner, Tag, true] },
+          WithFalse: { allOf: [Owner, Tag, false] },
+          Wrapped: { allOf: [Owner, Tag, { allOf: [true] }] },
+          Rejecting: { allOf: [Owner, Plain, true] },
+          Pet: {
+            type: 'object',
+            properties: {
+              with_true: ref('WithTrue'),
+              with_false: ref('WithFalse'),
+              wrapped: ref('Wrapped'),
+              rejecting: ref('Rejecting'),
+              through: { allOf: [ref('WithTrue'), Tag] },
+            },
+          },
+        }),
+      );
+      expect(script(spec)).toBe(
+        'with_true: nullable<WithTrue>, with_false: nullable<WithFalse>, wrapped: nullable<Wrapped>, ' +
+          'rejecting: Rejecting, through: nullable<PetThrough>',
+      );
+      expect(fieldNames(spec, 'WithTrue')).toEqual(['name', 'label']);
+    });
+
+    it('reads a boolean under the keywords the vote reads as it did', async () => {
+      expect(
+        await table(openapi, [
+          // `items` that say nothing of an item give the member no vote; a map or a closed object rejects `null`.
+          ['`items: true`', { allOf: [Owner, Tag, { items: true }] }],
+          ['`items: false`', { allOf: [Owner, Tag, { items: false }] }],
+          ['`additionalProperties: true`', { allOf: [Owner, Tag, { additionalProperties: true }] }],
+          ['`additionalProperties: false`', { allOf: [Owner, Tag, { additionalProperties: false }] }],
+          ['a union of booleans', { allOf: [Owner, Tag, { anyOf: [true, false] }] }],
+          ['`not: true`', { allOf: [Owner, Tag, { not: true }] }],
+          ['a union with a boolean variant beside the `allOf`', { allOf: [Owner, Tag], anyOf: [true, string] }],
+        ]),
+      ).toMatchInlineSnapshot(`
+        "\`items: true\`: nullable<PetOwner> { name, label }
+        \`items: false\`: nullable<PetOwner> { name, label }
+        \`additionalProperties: true\`: PetOwner { name, label }
+        \`additionalProperties: false\`: PetOwner { name, label }
+        a union of booleans: nullable<PetOwner> { name, label }
+        \`not: true\`: nullable<PetOwner> { name, label }
+        a union with a boolean variant beside the \`allOf\`: PetOwner { name, label }"
+      `);
+    });
+
+    it('does not fail on a member that is nothing a schema may be', async () => {
+      // Malformed, and read as before: a member with no keyword says nothing, so it has no vote.
+      expect(
+        await table(openapi, [
+          ['a number', { allOf: [Owner, Tag, 1] }],
+          ['a string', { allOf: [Owner, Tag, 'text'] }],
+          ['an empty list', { allOf: [Owner, Tag, []] }],
+          ['a list of schemas', { allOf: [Owner, Tag, [string]] }],
+          ['a wrapper around a number', { allOf: [Owner, Tag, { allOf: [1] }] }],
+        ]),
+      ).toMatchInlineSnapshot(`
+        "a number: nullable<PetOwner> { name, label }
+        a string: nullable<PetOwner> { name, label }
+        an empty list: nullable<PetOwner> { name, label }
+        a list of schemas: nullable<PetOwner> { name, label }
+        a wrapper around a number: nullable<PetOwner> { name, label }"
+      `);
+    });
+
+    it('keeps the `null` of a merge beside a declaration that wraps a boolean, as the `allOf` of both by hand does', async () => {
+      const merge = { allOf: [Owner, Tag] };
+      for (const second of [{ allOf: [true] }, { allOf: [false] }, { allOf: [{ allOf: [true] }] }]) {
+        const members = membersDoc(openapi, [merge, second]);
+        const hand = ownerDoc(openapi, { allOf: [merge, second] });
+        expect(show(fieldType(await parse(members), 'Pet', 'owner')), JSON.stringify(second)).toBe(
+          'nullable<PetOwner>',
+        );
+        expect(show(fieldType(await parse(hand), 'Pet', 'owner')), JSON.stringify(second)).toBe('nullable<PetOwner>');
+        await expectNoDiff(members, hand, JSON.stringify(second));
+      }
+    });
+  });
+
+  it('abstains for every value that is no Schema Object, before anything is asked of it or remembered for it', () => {
+    const nullableInline: SchemaObject = { type: ['object', 'null'], properties: { a: string } };
+    const plainInline: SchemaObject = { type: 'object', properties: { id: string } };
+    const values: unknown[] = [true, false, null, undefined, 0, 1, '', 'text', [], [nullableInline]];
+    for (const value of values) {
+      const label = JSON.stringify(value) ?? 'undefined';
+      expect(nullVote(written(value)), label).toBe('abstains');
+      // Asked twice: nothing was remembered under a key no memo can hold.
+      expect(nullVote(written(value)), label).toBe('abstains');
+      expect(schemaAdmitsNull(written(value)), label).toBe(false);
+    }
+    // As a member it changes nothing, at any depth: the others settle the `allOf`. (`null` is left out: the
+    // readers that classify an `allOf` fail on a `null` member before any vote is asked, here and on the base.)
+    for (const value of values.filter((value) => value !== null && value !== undefined)) {
+      const label = JSON.stringify(value);
+      expect(nullVote({ allOf: [nullableInline, written(value)] }), label).toBe('admits');
+      expect(nullVote({ allOf: [written(value), plainInline] }), label).toBe('rejects');
+      expect(nullVote({ allOf: [written(value)] }), label).toBe('abstains');
+      expect(nullVote({ allOf: [{ allOf: [{ allOf: [written(value)] }] }, nullableInline] }), label).toBe('admits');
+      expect(declaresNull({ allOf: [nullableInline, { ...nullableInline }, written(value)] }), label).toBe(true);
+    }
+    // `true` votes as `{}` does, and `false` as `true`: the readers of an `allOf` read either as no member at all.
+    expect(nullVote(written(true))).toBe(nullVote({}));
+    expect(nullVote(written(false))).toBe(nullVote(written(true)));
+    expect(nullVote({ allOf: [written(true), written(false)] })).toBe('abstains');
   });
 });
 
