@@ -78,6 +78,7 @@
 import type { Callback, Model, Operation, Webhook } from '../ir/types.js';
 import { callbackContext } from '../ir/types.js';
 import type { InlineModelBundle } from './inline-models.js';
+import type { OwnBodyNames } from './contested-body-names.js';
 import type { DeclaredCallbacks, PathItem } from './operations.js';
 import { resolveComponentRef, resolvePathItemRef } from './path-item-refs.js';
 import type { SiblingDocs } from './reference-objects.js';
@@ -184,6 +185,8 @@ export function extractCallbacks(
   paths?: unknown,
   webhooks?: unknown,
   webhookMintings: readonly SharedMinting[] = [],
+  /** What the operations hold under a name one of them mints from its stem (`OperationExtractionResult.ownBodyNames`), which a callback's model of another shape leaves as it leaves a webhook's (#712). */
+  ownBodyNames?: OwnBodyNames,
 ): CallbackExtractionResult {
   const pending: PendingCallback[] = [];
   for (const { owner, callbacks, label, stem, identity } of declared) {
@@ -246,6 +249,7 @@ export function extractCallbacks(
     { all: new Set(reservedNames), enums: new Set(reservedEnumNames) },
     siblingDocs,
     webhookMintings,
+    ownBodyNames,
   );
   inlineModels.push(...batch.inlineModels);
   inlineModelBundles.push(...batch.inlineModelBundles);

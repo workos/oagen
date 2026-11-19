@@ -25,8 +25,9 @@ import {
   resolveSchemaName,
   unionAxesOf,
   axisDiscriminatorOf,
-  handedOn,
+  handedPastRef,
   unionTypesSchema,
+  unionVariantsOf,
   unwrapNullableSchema,
   wrapperDiscriminatorWithin,
 } from './schemas.js';
@@ -1041,28 +1042,32 @@ export function collectObjectProperties(
     // what `s` is handed, through everything read on the way to it
     // (`readThrough`). A wrapper hands on as it does to the reader — an
     // `allOf` read as its one member as any `allOf` wrapper
-    // (`wrapperDiscriminatorWithin`), a nullable wrapper its own keyword,
-    // under the decision handed to it if any (`handedOn`) — the nearest to
+    // (`wrapperDiscriminatorWithin`), a nullable wrapper as the keyword its
+    // one variant is read with (`axisDiscriminatorOf`) — the nearest to
     // the union last, so its keyword is the one the union is read with. A
-    // `$ref` hands on what it was handed, to a pointer's schema and to a
-    // component alike, except to a component its own `allOf` composes
-    // (`entering`): that one is read by its own composition's keyword and
-    // is handed nothing, as the reader hands it nothing (`composedInlineMember`).
+    // chain of `$ref`s hands the schema it lands on what the reader hands it
+    // there (`handedPastRef`, asked with whether the chain named a
+    // component, `viaComponent`, as the reader asks it of a member's landing):
+    // nothing for a component its own `allOf` composes, which is read by
+    // its own composition's keyword, and what the chain was handed for
+    // anything else. None of this is decided here: every step asks the
+    // helper the reader asks at the same step, so the walk counts a union
+    // as dispatched exactly where the model dispatches it.
     let handedIn = wrapperDiscriminator;
-    let entering = false;
-    const enter = (schema: SchemaObject): void => {
-      if (entering && allOfComposesComponent(schema)) handedIn = undefined;
-      entering = false;
+    let viaComponent = false;
+    const enter = (landing: SchemaObject): void => {
+      handedIn = handedPastRef(handedIn, landing, viaComponent);
+      viaComponent = false;
     };
     const readThrough = (wrapper: SchemaObject): void => {
       if (wrapper.$ref !== undefined) {
-        entering = componentKeyOf(wrapper.$ref) !== undefined;
+        viaComponent ||= componentKeyOf(wrapper.$ref) !== undefined;
         return;
       }
       enter(wrapper);
       handedIn = allOfComposesComponent(wrapper)
         ? wrapperDiscriminatorWithin(wrapper, handedIn, componentSchemas)
-        : handedOn(handedIn, (was) => wrapper.discriminator ?? was);
+        : axisDiscriminatorOf(wrapper, unionVariantsOf(wrapper) ?? [], handedIn, componentSchemas);
     };
     while (depth > 0 && carrier.$ref) {
       if (seenRefs.has(carrier.$ref)) return;
