@@ -3509,7 +3509,10 @@ function splicesOpen(schema: SchemaObject): boolean {
  * beside the `allOf` have joined its members, and read by the readers
  * that are handed a schema as written (`annotatingAllOfMembers`,
  * `annotatedTypingMember`, `allOfReferenceMember`), a component's among
- * them.
+ * them — and by the reader of a composed component's own members
+ * (`componentAllOfMembers`, with the `required` the spliced members write,
+ * `ownRequired`; workos/oagen#714), so a union inside a bare `allOf` among
+ * them is a direct member's, dispatched or flattened as one.
  */
 export function spliceNestedAllOf(schema: SchemaObject): SchemaObject {
   if (schema.$ref !== undefined || schema.allOf === undefined) return schema;
@@ -4008,7 +4011,16 @@ export function mergeAllOfMembers(
       if (value) declareProperty(declared, key, value, origin, false);
     }
     if (s.required) for (const r of s.required) if (!required.includes(r)) required.push(r);
-    for (const sub of s.allOf ?? []) visit(sub, origin, wrapperDiscriminatorOf(s));
+    // A member that is itself an `allOf` is part of the `allOf` it sits in,
+    // so the `discriminator` written for a union among that `allOf`'s
+    // members goes on to the member's own where it writes none for them, as
+    // the component reader hands it on (`readComponentAllOf`; #714: it
+    // stopped at the member, so `Pet: { allOf: [{ $ref: Base }, { allOf: [{
+    // oneOf: [...] }] }], discriminator: { mapping } }` named in a merge had
+    // the fields of the variants `Pet` dispatches flattened in). A component
+    // a `$ref` names is visited with none.
+    const forMembers = wrapperDiscriminatorOf(s) ?? wrapperDiscriminator;
+    for (const sub of s.allOf ?? []) visit(sub, origin, forMembers);
     // A nullable union wrapper — one non-null variant beside `null`, decided
     // per keyword by `nullableAxisBranch`, `nullableUnionBranch`'s
     // definition, the one `unwrapNullableSchema` collapses by, which

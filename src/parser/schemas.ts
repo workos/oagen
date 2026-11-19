@@ -3852,8 +3852,11 @@ function composesComponentModel(schema: SchemaObject): boolean {
  * (`besideUnionsCompose`; #680). The test the member readers make of a
  * member, or of the component a `$ref` member names
  * (`readComponentAllOfMember`, `memberUnions`): one whose `allOf`
- * composes it is read as a component is, its own dispatcher its own
- * model's; any other is read as the unions and properties it writes, which
+ * composes it is read as a component is, through its own members — the
+ * dispatcher found among them its own model's when a `$ref` names it as a
+ * component, and the reading model's when it is an inline wrapper, which
+ * has no model of its own (`composedInlineMember`; #714); any other is
+ * read as the unions and properties it writes, which
  * are then the reading model's to dispatch or flatten (#429) — so a member
  * that writes both unions is read alike with the description beside them
  * and with it in an `allOf` member (#680: the second spelling was read as
@@ -3933,11 +3936,29 @@ function hasFoldableProperties(schema: SchemaObject): boolean {
  * by `extractAllOfModel`, at every level of a `$ref` chain, and by
  * `extractDiscriminatedAllOfVariantModels`, whose dispatcher base carries
  * them into every variant. Empty for a component that composes nothing.
+ *
+ * The members of the `allOf` are the ones every reader of an `allOf` reads
+ * (`spliceNestedAllOf`; #675), a member that is itself a bare `allOf`
+ * spliced open into its own members, at any depth: `Pet: { allOf: [{ $ref:
+ * Animal }, { allOf: [{ oneOf: [{ $ref: Cat }, { $ref: Dog }] }] }] }` is
+ * read from the members `{ $ref: Animal }` and `{ oneOf: [...] }`, as `Pet:
+ * { allOf: [{ $ref: Animal }, { oneOf: [...] }] }` is, so the union is a
+ * direct member's in both spellings — dispatched or flattened by this
+ * model, its variant models built, a `discriminator` written beside the
+ * component's `allOf` handed to it (workos/oagen#714: the wrapper was a
+ * member of its own, read as a composed component whose dispatcher no
+ * model carried, so `Pet` was `{ id }` with neither the `discriminator`
+ * nor the variants' fields). What a spliced wrapper writes beside its
+ * `allOf` takes its place as a member that declares no type, and the
+ * `required` it writes is the component's (`ownRequired`). A wrapper the
+ * splice leaves closed — a lone member, or one that says more than its
+ * members do — stays a member, read through its own members in turn
+ * (`composedInlineMember`).
  */
 function componentAllOfMembers(schema: SchemaObject): readonly SchemaObject[] {
   if (!composesComponentModel(schema)) return [];
   if (schema.$ref !== undefined) return [{ $ref: schema.$ref }];
-  const members = [...(schema.allOf ?? []), ...besideUnionMembers(schema)];
+  const members = [...(spliceNestedAllOf(schema).allOf ?? []), ...besideUnionMembers(schema)];
   if (!hasFoldableProperties(schema)) return members;
   const { properties, required } = schema;
   return [{ type: 'object', properties, ...(required && required.length > 0 && { required }) }, ...members];
@@ -7256,10 +7277,13 @@ interface ComponentOrigin {
 }
 
 /**
- * How a member is read: the one variant axis not to read (the dispatcher
- * base reads its axis for its own properties only), the `discriminator`
+ * How a member is read: the variant axes not to read (the dispatcher base
+ * reads each of its axes for its own properties only, wherever among the
+ * model's own members the axis sits — a direct member's, or one inside an
+ * inline `allOf` wrapper, `composedInlineMember`), the `discriminator`
  * written for a union among the members outside the member that carries it
- * — on the `allOf` wrapper, or on a nullable wrapper around the union —
+ * — on the `allOf` wrapper, on one that wrapper is nested in, or on a
+ * nullable wrapper around the union —
  * and the component whose own chain the member is read inside (`origin`:
  * a `$ref` member's component, handed down to that component's members
  * and nullable branches), under which its declarations are recorded
@@ -7268,7 +7292,7 @@ interface ComponentOrigin {
  * model's own.
  */
 interface MemberReadingOptions {
-  skipAxis?: readonly SchemaObject[];
+  skipAxes?: ReadonlySet<readonly SchemaObject[]>;
   wrapperDiscriminator?: DiscriminatorKeyword;
   origin?: ComponentOrigin;
 }
@@ -7397,10 +7421,23 @@ function inheritedRef(name: string): ModelRef {
  * met again on the chain declares nothing more. An `allOf` member — a
  * component composed with `allOf`, or an inline wrapper — is read by
  * `readComponentAllOf`, so a declaration it makes under a `oneOf`/`anyOf`
- * variant stays branch-only however deep it sits; its own discriminator,
- * if any, is its own model's and is not returned (the model reading it
+ * variant stays branch-only however deep it sits. The discriminator a
+ * component the member names finds among its own members is that
+ * component's own model's and is not returned (the model reading it
  * carries the base fields only, as the inline merge of a reference to it
- * does). Every member contributes its own `properties` as always-applying
+ * does: `Pet: { allOf: [{ $ref: Animal }, { $ref: Wrapped }] }` over
+ * `Wrapped: { allOf: [{ oneOf: [...] }] }` has `Wrapped` for a base, and
+ * `Wrapped` dispatches). An inline wrapper has no model of its own, so
+ * the one found among its members is the reading model's and is returned
+ * (`composedInlineMember`; workos/oagen#714: it was dropped for both, so a
+ * dispatcher under a wrapper the splice leaves closed — `Pet: { allOf: [{
+ * allOf: [{ oneOf: [...] }] }] }`, a lone member; `{ properties: { extra
+ * }, allOf: [{ oneOf: [...] }] }`, which says more than its members do —
+ * was no model's, where `{ oneOf: [...] }` written as the member
+ * dispatches); the `discriminator` written for a union among the members
+ * of the `allOf` it sits in goes with it to its own members, where it
+ * writes none for them, and so do the axes not to read.
+ * Every member contributes its own `properties` as always-applying
  * and its own `required` — beside a `oneOf`/`anyOf` too, an inline
  * member's or those of the component a `$ref` member names (`Pet: {
  * properties: { id }, oneOf: [...] }`, whose union is then this model's to
@@ -7437,7 +7474,7 @@ function inheritedRef(name: string): ModelRef {
  * variant with, so the two read a variant alike; #398: a `$ref` variant and
  * a nested union's variants declared nothing here) — and a variant's
  * `required` is not read, since its properties are present only on that
- * branch. With `skipAxis` the dispatcher base reads the variant axis for
+ * branch. With `skipAxes` the dispatcher base reads each variant axis for
  * its own properties only, while a nullable wrapper, never a variant axis,
  * and any other union the member carries are still read. Shared by
  * `extractAllOfModel` and the dispatcher base of
@@ -7482,8 +7519,14 @@ function readComponentAllOfMember(
   // was: a dispatcher it carries beside its own properties is the model's
   // (#429).
   if (allOfComposesComponent(resolved)) {
-    readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined);
-    return undefined;
+    // An inline wrapper has no model of its own: the dispatcher among its
+    // members is this model's, found by the `discriminator` written for
+    // them on the `allOf` it sits in where it writes none itself, and the
+    // axes not to read are not read inside it (`composedInlineMember`;
+    // #714). A component's is its own model's.
+    const inline = composedInlineMember(landing) !== undefined;
+    const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, inline ? options : {});
+    return inline ? found : undefined;
   }
   // The member's own `properties` and `required` always apply, whether or
   // not a `oneOf`/`anyOf` sits beside them (workos/oagen#359 review: a
@@ -7505,7 +7548,7 @@ function readComponentAllOfMember(
   // so a member writing a nullable `oneOf` beside an `anyOf` has the `anyOf`
   // read too; the wrapper is recorded so a component that wraps a reference
   // to itself ends here.
-  const axes = unionAxesOf(resolved).filter((variants) => variants !== options.skipAxis);
+  const axes = unionAxesOf(resolved).filter((variants) => !options.skipAxes?.has(variants));
   const branches = axes.map((variants) => nullableAxisBranch(resolved, variants));
   if (branches.some((branch) => branch !== undefined)) {
     if (seen.has(resolved)) return undefined;
@@ -7572,7 +7615,15 @@ function readComponentAllOfMember(
  * naming one component, terminate. A component written as a bare `$ref`
  * composes its reference alone (`componentAllOfMembers`): a `required` or
  * a `discriminator` beside the `$ref` is not read, as nothing but
- * annotations is beside any `$ref` (#618 review).
+ * annotations is beside any `$ref` (#618 review). `enclosing` is how the
+ * member the schema was reached as is read, when that member is an inline
+ * `allOf` wrapper among a model's own members (`composedInlineMember`;
+ * #714): the wrapper is part of the `allOf` it sits in, so the
+ * `discriminator` written for a union among that `allOf`'s members is
+ * handed on to the wrapper's own members where the wrapper writes none for
+ * them, and the axes the dispatcher base does not read are not read under
+ * it either. A component a `$ref` names is read with none: what is written
+ * around the reference says nothing of the component's own members.
  */
 function readComponentAllOf(
   name: string,
@@ -7580,15 +7631,18 @@ function readComponentAllOf(
   schemas: Record<string, SchemaObject> | undefined,
   reading: ComponentReading = newComponentReading(),
   origin?: ComponentOrigin,
+  enclosing: Pick<MemberReadingOptions, 'skipAxes' | 'wrapperDiscriminator'> = {},
 ): AllOfDiscriminator | undefined {
   if (reading.seen.has(schema)) return undefined;
   reading.seen.add(schema);
   reading.root ??= schema;
   let discriminator: AllOfDiscriminator | undefined;
-  const wrapperDiscriminator = wrapperDiscriminatorOf(schema);
+  const wrapperDiscriminator = wrapperDiscriminatorOf(schema) ?? enclosing.wrapperDiscriminator;
+  const { skipAxes } = enclosing;
   for (const member of componentAllOfMembers(schema)) {
     discriminator =
-      readComponentAllOfMember(name, member, schemas, reading, { wrapperDiscriminator, origin }) ?? discriminator;
+      readComponentAllOfMember(name, member, schemas, reading, { skipAxes, wrapperDiscriminator, origin }) ??
+      discriminator;
   }
   // The component's own `required`: carried by its own member when it
   // declares properties, and read here when it only names inherited ones
@@ -7607,9 +7661,15 @@ function readComponentAllOf(
  * required: [name] }` is `Cat`'s `name` as optional as `Cat` declares it,
  * at `B`, at every hop of a chain naming `B` and in a merge naming it,
  * where `B: { allOf: [{ $ref: Cat }], required: [name] }` requires it).
+ * The list of a bare `allOf` among its members is its own too, once that
+ * member is spliced open into the members the readers read
+ * (`componentAllOfMembers`, `spliceNestedAllOf`): `Pup: { allOf: [{ $ref:
+ * Dog }, { allOf: [{ $ref: Tag }], required: [breed] }] }` requires
+ * `breed` as `Pup: { allOf: [{ $ref: Dog }, { $ref: Tag }], required:
+ * [breed] }` does.
  */
 function ownRequired(schema: SchemaObject): readonly string[] {
-  return schema.$ref === undefined ? (schema.required ?? []) : [];
+  return schema.$ref === undefined ? (spliceNestedAllOf(schema).required ?? []) : [];
 }
 
 /**
@@ -8258,8 +8318,42 @@ function followMemberRefChain(
   return { resolved, key, named, read: true };
 }
 
-/** One union a component's `allOf` member carries: the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it. */
+/**
+ * The schema a member of a component's `allOf` is read through as an
+ * inline `allOf` wrapper: the schema the member's chain lands on
+ * (`followMemberRefChain`) when its `allOf` composes it
+ * (`allOfComposesComponent`) and no component is named on the way — the
+ * member is written inline, or is a pointer into a component, which names
+ * a schema and no model of its own (#539). `undefined` for any other
+ * member: a plain one, read as the properties and unions it writes; a
+ * landing not to be read; and a component composed with `allOf` that a
+ * `$ref` names, which has a model of its own.
+ *
+ * Such a wrapper is one the splice leaves closed
+ * (`componentAllOfMembers`, `spliceNestedAllOf`): a lone member (`Pet: {
+ * allOf: [{ allOf: [{ oneOf: [...] }] }] }`), or one that says more than
+ * its members do — `properties`, a `discriminator`, a union or
+ * `additionalProperties` beside its `allOf`, a `type` naming `null`. It
+ * is read as a component is, through its own members (`readComponentAllOf`,
+ * each read the same way, so to any depth), but it is no component: what
+ * its members declare is the reading model's own, the fields as they
+ * always were and the dispatcher too (workos/oagen#714). The one test of
+ * the readers that must agree on it — the member reader, which returns
+ * the dispatcher found under the wrapper (`readComponentAllOfMember`), and
+ * the variant builder, which finds its axes under it (`memberUnions`) — so
+ * a variant model is built exactly when the model dispatches to it; the
+ * limits every variant carries are read around the axes the same way
+ * (`limitsOutsideAxes`), and the pagination walk counts a wrapper's
+ * members as the node's own (`collectObjectProperties`).
+ */
+function composedInlineMember(landing: MemberLanding): SchemaObject | undefined {
+  if (!landing.read || landing.key !== undefined) return undefined;
+  return allOfComposesComponent(landing.resolved) ? landing.resolved : undefined;
+}
+
+/** One union a component's `allOf` member carries: the member the member reader reads it on (`member`: the one handed in, or, under an inline `allOf` wrapper, the wrapper's own member that carries it), the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it, else the one written on the `allOf` an inline wrapper around it writes. */
 interface MemberUnion {
+  member: SchemaObject;
   carrier: SchemaObject;
   variants: SchemaObject[];
   discriminator?: DiscriminatorKeyword;
@@ -8278,12 +8372,19 @@ interface MemberUnion {
  * on the wrapper was forgotten, and the builder flattened what the reader
  * dispatched; the carrier's own going to the first typing union alone
  * when it writes two, `axisDiscriminatorOf`). None for a member that
- * carries none, or a member whose `allOf` composes it
- * (`allOfComposesComponent`: read as a component composed with `allOf`,
- * never as a variant axis — a union beside an `allOf` that only annotates
- * or limits the member is an axis, as the member reader reads it, #613,
- * and so is each of a `oneOf` and an `anyOf` written together beside one,
- * #680).
+ * carries none, or a member that names a component whose `allOf` composes
+ * it (`allOfComposesComponent`: read as a component composed with `allOf`,
+ * whose axes are its own model's, never this one's — a union beside an
+ * `allOf` that only annotates or limits the member is an axis, as the
+ * member reader reads it, #613, and so is each of a `oneOf` and an `anyOf`
+ * written together beside one, #680). An inline `allOf` wrapper
+ * (`composedInlineMember`) carries the unions its own members carry, each
+ * read the same way and listed under the wrapper's member that carries it
+ * (`MemberUnion.member`), with the `discriminator` the wrapper writes for
+ * them, else the one handed down to it (workos/oagen#714: none was found
+ * under a wrapper, so `Pet: { allOf: [{ allOf: [{ oneOf: [cat, dog] }] }]
+ * }` built neither `PetCat` nor `PetDog`); a wrapper met again on the walk
+ * carries nothing more.
  * The one way the variant builder
  * (`extractDiscriminatedAllOfVariantModels`) finds a variant axis, so a
  * union the member reader detects as a dispatcher is the union whose
@@ -8302,13 +8403,23 @@ function memberUnions(
   schemas: Record<string, SchemaObject> | undefined,
   seen = new Set<SchemaObject>(),
   wrapper?: DiscriminatorKeyword,
+  reader: SchemaObject = member,
 ): MemberUnion[] {
-  const carrier = followMemberRefs(member, schemas, seen);
+  const landing = followMemberRefChain(member, schemas, seen);
+  if (!landing.read) return [];
+  const carrier = landing.resolved;
   // A carrier whose `allOf` composes it is read as a component
   // (`readComponentAllOfMember`, by the same predicate), never as a variant
   // axis; a union beside an `allOf` that only annotates it is the axis it
-  // is written alone (#613), and two unions are the two axes (#680).
-  if (!carrier || allOfComposesComponent(carrier)) return [];
+  // is written alone (#613), and two unions are the two axes (#680). A
+  // component's axes are its own model's; an inline wrapper's members are
+  // this model's, and their unions with them (`composedInlineMember`).
+  if (allOfComposesComponent(carrier)) {
+    if (composedInlineMember(landing) === undefined || seen.has(carrier)) return [];
+    seen.add(carrier);
+    const discriminator = wrapperDiscriminatorOf(carrier) ?? wrapper;
+    return componentAllOfMembers(carrier).flatMap((inner) => memberUnions(inner, schemas, seen, discriminator));
+  }
   const axes = unionAxesOf(carrier);
   const branches = axes.map((variants) => nullableAxisBranch(carrier, variants));
   // The wrapper is recorded as read, as the member reader records it, so a
@@ -8321,8 +8432,8 @@ function memberUnions(
   for (const [index, variants] of axes.entries()) {
     const branch = branches[index];
     const discriminator = axisDiscriminatorOf(carrier, variants) ?? wrapper;
-    if (branch) unions.push(...memberUnions(branch, schemas, seen, discriminator));
-    else unions.push({ carrier, variants, discriminator });
+    if (branch) unions.push(...memberUnions(branch, schemas, seen, discriminator, reader));
+    else unions.push({ member: reader, carrier, variants, discriminator });
   }
   return unions;
 }
@@ -8354,6 +8465,47 @@ function extractDiscriminatedAllOfVariantModels(
     }
   }
   return models;
+}
+
+/**
+ * The limits a member of a discriminated component's `allOf` puts on every
+ * variant (`discriminatedVariantSchemas`): everything it writes except the
+ * branches of an axis (`axes`, the variant lists the component dispatches).
+ * A member with no axis under it (`memberUnions`) binds every variant by
+ * all it writes, read through its `allOf` members (`extractConstraints`).
+ * The member that carries an axis binds them by the keywords of its own
+ * level, an `allOf` member that only annotates or limits it included
+ * (`annotatingAllOfMembers`; #613 review: `{ allOf: [{ maxProperties: 3
+ * }], oneOf: [cat, dog] }` as a member built `HolderCat` and `HolderDog`
+ * without the limit, where `{ maxProperties: 3, oneOf: [...] }` carried it
+ * onto both). And an `allOf` wrapper written as the member, with an axis
+ * under it (`composedInlineMember`; #714), by its own keywords and by each
+ * of its own members', read the same way, so `{ maxProperties: 5,
+ * properties: { extra }, allOf: [{ maxProperties: 3, oneOf: [cat, dog] }]
+ * }` limits both variants to 3 as the wrapper's parts written as members
+ * do. A `$ref` member contributes the keywords written beside the
+ * reference only, as everywhere: the schema it names keeps its own
+ * limits, a wrapper a pointer lands on included. `walking` ends a wrapper
+ * that holds itself.
+ */
+function limitsOutsideAxes(
+  member: SchemaObject,
+  axes: ReadonlySet<readonly SchemaObject[]>,
+  schemas: Record<string, SchemaObject> | undefined,
+  walking = new Set<SchemaObject>(),
+): Constraints | undefined {
+  if (!memberUnions(member, schemas).some(({ variants }) => axes.has(variants))) return extractConstraints(member);
+  if (member.$ref === undefined && allOfComposesComponent(member) && !walking.has(member)) {
+    walking.add(member);
+    return componentAllOfMembers(member).reduce(
+      (limits, inner) => combineConstraints(limits, limitsOutsideAxes(inner, axes, schemas, walking)),
+      ownConstraints(member),
+    );
+  }
+  return [member, ...annotatingAllOfMembers(member)].reduce<Constraints | undefined>(
+    (limits, level) => combineConstraints(limits, ownConstraints(level)),
+    undefined,
+  );
 }
 
 /** A discriminated component's variant axis: its union's variants, and each object variant with the schema its model is built from. */
@@ -8400,51 +8552,44 @@ function discriminatedVariantSchemas(
   // reading `extractAllOfModel` makes of it
   // (`detectAllOfVariantDiscriminator`) — so a variant model exists exactly
   // when the component's model dispatches to it; the first such union of a
-  // member, as the member reader keeps the first. A union that is not an
+  // member, as the member reader keeps the first — of each member the
+  // reader reads one on, so under an inline `allOf` wrapper each of the
+  // wrapper's own members has its own (`MemberUnion.member`; #714), as each
+  // direct member does. A union that is not an
   // axis is flattened into the model and builds no variant model here
   // (workos/oagen#359 review: it did, and a model nested under such a
   // variant took the name of the flattened field's own model).
-  const axisVariants = new Map<SchemaObject, SchemaObject[]>();
-  for (const m of members) {
-    for (const { variants, discriminator } of memberUnions(m, schemas)) {
+  const axes: SchemaObject[][] = [];
+  // Each member once, a schema object the `allOf` lists twice included.
+  for (const m of new Set(members)) {
+    const dispatching = new Set<SchemaObject>();
+    for (const { member, variants, discriminator } of memberUnions(m, schemas)) {
+      if (dispatching.has(member)) continue;
       const explicit = discriminator ?? wrapperDiscriminator;
       if (detectAllOfVariantDiscriminator(variants, fallbackName, schemas, explicit) === null) continue;
-      axisVariants.set(m, variants);
-      break;
+      dispatching.add(member);
+      axes.push(variants);
     }
   }
-  if (axisVariants.size === 0) return axesFound;
+  if (axes.length === 0) return axesFound;
+  const skipAxes: ReadonlySet<readonly SchemaObject[]> = new Set(axes);
   const reading = newComponentReading();
   reading.seen.add(schema);
   reading.root = schema;
   // Shared limits every variant instance must satisfy under allOf semantics:
   // the outer wrapper's own keywords, each base member's (through its allOf
   // wrappers), and any written beside the `oneOf` itself — everything except
-  // the branches. They ride along with the base properties and are conjoined
-  // with each variant's own below, so on a shared keyword the stricter bound
-  // wins.
+  // the branches (`limitsOutsideAxes`). They ride along with the base
+  // properties and are conjoined with each variant's own below, so on a
+  // shared keyword the stricter bound wins.
   let baseConstraints = ownConstraints(schema);
   for (const subSchema of members) {
-    const skipAxis = axisVariants.get(subSchema);
-    if (skipAxis) {
-      // The axis: its branches are handled below, its own keywords bind all
-      // of them — the keywords of its own level, an `allOf` member that only
-      // annotates or limits it included (`annotatingAllOfMembers`; #613
-      // review: `{ allOf: [{ maxProperties: 3 }], oneOf: [cat, dog] }` as a
-      // member built `HolderCat` and `HolderDog` without the limit, where
-      // `{ maxProperties: 3, oneOf: [...] }` carried it onto both) — and its
-      // own `properties` and `required` are base fields every variant
-      // carries (read without its variants).
-      readComponentAllOfMember(fallbackName, subSchema, schemas, reading, { skipAxis, wrapperDiscriminator });
-      for (const level of [subSchema, ...annotatingAllOfMembers(subSchema)]) {
-        baseConstraints = combineConstraints(baseConstraints, ownConstraints(level));
-      }
-      continue;
-    }
-    // Any other member, a union that is not an axis included: read as the
-    // model reads it, its variants' properties as branch-only fallbacks.
-    readComponentAllOfMember(fallbackName, subSchema, schemas, reading, { wrapperDiscriminator });
-    baseConstraints = combineConstraints(baseConstraints, extractConstraints(subSchema));
+    // Every member is read as the model reads it, without the axes: a
+    // member that carries one for its own `properties` and `required`,
+    // base fields every variant carries; any other, a union that is not an
+    // axis included, with its variants' properties as branch-only fallbacks.
+    readComponentAllOfMember(fallbackName, subSchema, schemas, reading, { skipAxes, wrapperDiscriminator });
+    baseConstraints = combineConstraints(baseConstraints, limitsOutsideAxes(subSchema, skipAxes, schemas));
   }
   // The component's own `required` naming an inherited property only, as
   // `readComponentAllOf` reads it for the dispatcher model.
@@ -8454,7 +8599,7 @@ function discriminatedVariantSchemas(
     [...reading.ledger.values()].map((entry) => [entry.name, declaredComponentProperty(entry)]),
   );
 
-  for (const variants of axisVariants.values()) {
+  for (const variants of axes) {
     const rebuilt: DiscriminatedAxis['rebuilt'] = [];
     for (const variant of variants) {
       // Flatten any allOf wrapper on the variant (e.g. `ConnectApplication`'s
