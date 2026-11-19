@@ -1264,4 +1264,80 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
       }
     },
   );
+  it.each(['3.0.3', '3.1.0'])(
+    'stops a keyword at a `$ref` to a component its own `allOf` composes and hands it on to one that writes the union itself (MichaelDeBoey), under OAS %s',
+    async (openapi) => {
+      // Review of #725: `Paging: { allOf: [{ oneOf }] }` flattens its union whatever is written
+      // around the `$ref`, so `Via` carries `has_more` and the path resolves, in each spelling; a
+      // plain `Paging: { oneOf }` takes the keyword in the model, which then dispatches, and the
+      // path is reported, in each spelling.
+      const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+      const byMapping = {
+        propertyName: 'kind',
+        mapping: { cursor: '#/components/schemas/Cursor', page: '#/components/schemas/Page' },
+      };
+      const pages = { oneOf: [ref('Cursor'), ref('Page')] };
+      const Base = ref('Base');
+      const Paging = ref('Paging');
+      const x = { properties: { x: string } };
+      const listPets = (paging: unknown, dispatcher: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: string }],
+              responses: { '200': ok(object({ data: { type: 'array', items: string }, meta: ref('Via') })) },
+              'x-pagination': { endOfIteration },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            Base: object({ base: string }),
+            Cursor: object({ kind: string, has_more: boolean, next_after: string }),
+            Page: object({ kind: string, has_more: boolean, next_page: integer }),
+            Paging: paging,
+            MetaDispatcher: dispatcher,
+            Via: W(ref('MetaDispatcher'), object({ trace_id: string })),
+          },
+        },
+      });
+      const spellings: Array<readonly [label: string, dispatcher: unknown]> = [
+        [
+          'the keyword wrapper in a closed wrapper',
+          W(Base, beside({ additionalProperties: false }, beside({ discriminator: byMapping }, Paging)), x),
+        ],
+        ['the keyword wrapper as the member', W(Base, beside({ discriminator: byMapping }, Paging), x)],
+        ['the keyword beside `MetaDispatcher`’s `allOf`', { discriminator: byMapping, ...W(Base, Paging, x) }],
+      ];
+      const lines: string[] = [];
+      for (const [pagingLabel, paging] of [
+        ['Paging: { allOf: [{ oneOf }] }', W(pages)],
+        ['Paging: { oneOf }', pages],
+      ] as const) {
+        for (const [label, dispatcher] of spellings) {
+          warn.mockClear();
+          const spec = await parseJson(listPets(paging, dispatcher));
+          const kept = spec.services.flatMap(({ operations }) => operations)[0]!.pagination?.endOfIteration;
+          const models = ['MetaDispatcher', 'Via'].map((name) => showModel(modelOf(spec, name)));
+          lines.push(`${pagingLabel}, ${label}: ${kept ? 'kept' : 'reported'} ; ${models.join(' ; ')}`);
+          // The path resolves exactly where the model it goes through carries the field.
+          expect(kept !== undefined, label).toBe(modelOf(spec, 'Via').fields.some(({ name }) => name === 'has_more'));
+          expect(warnings(), label).toEqual(
+            kept ? [] : [expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field')],
+          );
+        }
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "Paging: { allOf: [{ oneOf }] }, the keyword wrapper in a closed wrapper: kept ; MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string } ; Via extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword wrapper as the member: kept ; MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string } ; Via extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword beside \`MetaDispatcher\`’s \`allOf\`: kept ; MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string } ; Via extends MetaDispatcher { base?: string, kind?: string, has_more?: boolean, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword wrapper in a closed wrapper: reported ; MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Via extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword wrapper as the member: reported ; MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Via extends MetaDispatcher { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword beside \`MetaDispatcher\`’s \`allOf\`: reported ; MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Via extends MetaDispatcher { base?: string, x?: string, trace_id?: string }"
+      `);
+    },
+  );
 });
