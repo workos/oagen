@@ -22,6 +22,7 @@ import {
 import { foldParameterName, parameterKey } from '../ir/parameter-key.js';
 import { numberedName, numberedProperty, toPascalCase } from '../utils/naming.js';
 import { mediaTypeNameFragment, mediaTypeNamingOrder } from '../utils/media-type.js';
+import { mediaTypesOf } from './body-media-types.js';
 import type { SchemaObject } from './schemas.js';
 import { isComponentModelRef, schemaToTypeRef } from './schemas.js';
 import {
@@ -1211,7 +1212,10 @@ export interface PathItemEntrySite extends Pick<
  * — is warned about once, naming the entry and this label, and skipped, as
  * on an operation (`resolveParameterRef`, `resolveRequestBodyRef`; #664);
  * a ref that leads to no entry at all still fails the parse. A parameter `content` map or a request body
- * none of whose media types is read is reported here, once per entry: the
+ * none of whose media types is read is reported here, once per entry, and
+ * so is a `content` of either that is no map at all (`mediaTypesOf`: `content
+ * of the request body of webhooks.petAdopted.post is not a map of media
+ * types ("json"); reading no media type from it.`; #710): the
  * mint runs twice for each (`resolveWebhookModelStems`, then the build), so
  * it must not report. `stemOperationId` is left for `settleStemOperationIds`
  * to set over the whole batch.
@@ -1247,7 +1251,11 @@ export function readPathItemEntries(
         );
         continue;
       }
-      warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${label}`);
+      warnUnreadParameterContent(
+        param,
+        `Parameter "${param.name}" (in: ${param.in}) on ${label}`,
+        `the parameter "${param.name}" (in: ${param.in}) of ${label}`,
+      );
       params.push(param);
     }
     const body = resolveRequestBodyRef(op.requestBody, components.requestBodies, label, siblingDocs);
@@ -1860,10 +1868,12 @@ interface MintedPayload {
  * (`PetAdoptedTextCsvPayload`, named the way the body's own
  * `<Stem>Payload` is), and one without is typed as
  * `schemalessRequestContentType` types it. `undefined` when the body
- * declares no media type at all. A body none of whose media types is read
- * as `ref` is reported where the webhook's entry is built
- * (`warnUnreadRequestBody`), not here: the mint runs twice per webhook and
- * the warning fires once.
+ * declares no media type at all: no `content`, an empty map, or a `content`
+ * that is no object, which is no map and is never read by its indexes
+ * (`mediaTypesOf`, #710). A body none of whose media types is read
+ * as `ref`, and a `content` that is no map, are reported where the
+ * webhook's entry is built (`warnUnreadRequestBody`), not here: the mint
+ * runs twice per webhook and the warning fires once.
  */
 function mintPayload(
   body: RequestBodyObject | undefined,
@@ -1871,7 +1881,7 @@ function mintPayload(
   componentSchemas: Record<string, SchemaObject> | undefined,
   reserved: ReservedNames,
 ): MintedPayload | undefined {
-  const content = body?.content;
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(body?.content);
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;

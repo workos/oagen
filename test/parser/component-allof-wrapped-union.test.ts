@@ -538,31 +538,72 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
     },
   );
 
-  it('builds the variant models of two unions in one wrapper, and dispatches by the one the flat spelling dispatches by', async () => {
+  it('reads two unions in one wrapper as the flat spelling reads them: each dispatched and built where nothing says which dispatches, the keyword’s union alone where one does (#718)', async () => {
+    // A second union of inline variants, pinning a property of its own.
+    const shaped = (value: string, own: Record<string, unknown>) =>
+      object({ shape: { type: 'string', enum: [value] }, ...own }, { required: ['shape'] });
+    const sunion = { oneOf: [shaped('round', { radius: integer }), shaped('square', { side: integer })] };
     const byMapping = { discriminator: M, ...munion };
+    const closed = { additionalProperties: false };
     const spellings: Spelling[] = [
-      ['the unions in a wrapper', W(Animal, W(iunion, byMapping)), W(Animal, iunion, byMapping)],
+      ['two pinned unions in a wrapper', W(Animal, W(iunion, sunion)), W(Animal, iunion, sunion)],
+      ['two pinned unions in a closed wrapper', W(Animal, beside(closed, iunion, sunion)), W(Animal, iunion, sunion)],
+      ['the same, the other order', W(Animal, beside(closed, sunion, iunion)), W(Animal, sunion, iunion)],
       [
-        'the unions in a closed wrapper',
-        W(Animal, beside({ additionalProperties: false }, iunion, byMapping)),
-        W(Animal, iunion, byMapping),
+        'a pinned union in each of two closed wrappers',
+        W(Animal, beside(closed, iunion), beside(closed, sunion)),
+        W(Animal, iunion, sunion),
       ],
       [
-        'the unions in a closed wrapper, the other order',
-        W(Animal, beside({ additionalProperties: false }, byMapping, iunion)),
+        'a pinned union beside one with a `mapping`, in a wrapper',
+        W(Animal, W(iunion, byMapping)),
+        W(Animal, iunion, byMapping),
+      ],
+      ['the same in a closed wrapper', W(Animal, beside(closed, iunion, byMapping)), W(Animal, iunion, byMapping)],
+      [
+        'the same in a closed wrapper, the other order',
+        W(Animal, beside(closed, byMapping, iunion)),
         W(Animal, byMapping, iunion),
       ],
       [
-        'a union in each of two closed wrappers',
-        W(Animal, beside({ not: string }, iunion), beside({ not: string }, byMapping)),
+        'the two in a closed wrapper each',
+        W(Animal, beside(closed, iunion), beside(closed, byMapping)),
         W(Animal, iunion, byMapping),
+      ],
+      [
+        'the `mapping` beside `Pet`’s `allOf`, the unions in a closed wrapper',
+        { discriminator: M, ...W(Animal, beside(closed, iunion, munion)) },
+        { discriminator: M, ...W(Animal, iunion, munion) },
+      ],
+      [
+        'the `mapping` beside the closed inner `allOf`',
+        W(Animal, beside({ ...closed, discriminator: M }, iunion, munion)),
+        { discriminator: M, ...W(Animal, iunion, munion) },
+      ],
+      [
+        'the `mapping` beside `Pet`’s `allOf`, one union in a closed wrapper',
+        { discriminator: M, ...W(Animal, iunion, beside(closed, munion)) },
+        { discriminator: M, ...W(Animal, iunion, munion) },
+      ],
+      [
+        'the `mapping` beside `Pet`’s `allOf`, the other union in a closed wrapper',
+        { discriminator: M, ...W(Animal, beside(closed, iunion), munion) },
+        { discriminator: M, ...W(Animal, iunion, munion) },
       ],
     ];
     expect(await readings('3.1.0', spellings)).toMatchInlineSnapshot(`
-      "the unions in a wrapper: Pet extends Animal { id!: string } by kind to bird: Bird, fish: Fish ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }
-      the unions in a closed wrapper: Pet extends Animal { id!: string } by kind to bird: Bird, fish: Fish ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }
-      the unions in a closed wrapper, the other order: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }
-      a union in each of two closed wrappers: Pet extends Animal { id!: string } by kind to bird: Bird, fish: Fish ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }"
+      "two pinned unions in a wrapper: Pet extends Animal { id!: string } by shape to round: PetRound, square: PetSquare ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean } ; PetRound { id!: string, shape!: "round", radius?: integer } ; PetSquare { id!: string, shape!: "square", side?: integer }
+      two pinned unions in a closed wrapper: Pet extends Animal { id!: string } by shape to round: PetRound, square: PetSquare ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean } ; PetRound { id!: string, shape!: "round", radius?: integer } ; PetSquare { id!: string, shape!: "square", side?: integer }
+      the same, the other order: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog ; PetRound { id!: string, shape!: "round", radius?: integer } ; PetSquare { id!: string, shape!: "square", side?: integer } ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }
+      a pinned union in each of two closed wrappers: Pet extends Animal { id!: string } by shape to round: PetRound, square: PetSquare ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean } ; PetRound { id!: string, shape!: "round", radius?: integer } ; PetSquare { id!: string, shape!: "square", side?: integer }
+      a pinned union beside one with a \`mapping\`, in a wrapper: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the same in a closed wrapper: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the same in a closed wrapper, the other order: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the two in a closed wrapper each: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the \`mapping\` beside \`Pet\`’s \`allOf\`, the unions in a closed wrapper: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the \`mapping\` beside the closed inner \`allOf\`: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the \`mapping\` beside \`Pet\`’s \`allOf\`, one union in a closed wrapper: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish
+      the \`mapping\` beside \`Pet\`’s \`allOf\`, the other union in a closed wrapper: Pet extends Animal { id!: string, kind?: enum PetKind, meows?: boolean, barks?: boolean } by kind to bird: Bird, fish: Fish"
     `);
   });
 
@@ -952,4 +993,82 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
       }
     },
   );
+  it('resolves a stop field on the union flattened beside the one a `mapping` dispatches, through the wrappers the two sit in (#718)', async () => {
+    const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+    const byMapping = {
+      propertyName: 'kind',
+      mapping: { cursor: '#/components/schemas/Cursor', page: '#/components/schemas/Page' },
+    };
+    // The keyword goes with the union its `mapping` names; the other is flattened, `has_more` with it.
+    const pages = { oneOf: [ref('Cursor'), ref('Page')] };
+    const counts = { oneOf: [object({ has_more: boolean, a: string }), object({ has_more: boolean, b: string })] };
+    const Base = ref('Base');
+    const closed = { additionalProperties: false };
+    const listPets = (dispatcher: unknown, meta: unknown) => ({
+      openapi: '3.1.0',
+      info: { title: 'repro', version: '1' },
+      paths: {
+        '/pets': {
+          get: {
+            operationId: 'listPets',
+            parameters: [{ name: 'after', in: 'query', schema: string }],
+            responses: { '200': ok(object({ data: { type: 'array', items: string }, meta })) },
+            'x-pagination': { endOfIteration },
+          },
+        },
+      },
+      components: {
+        schemas: {
+          Base: object({ base: string }),
+          Cursor: object({ kind: string, next_after: string }),
+          Page: object({ kind: string, next_page: integer }),
+          MetaDispatcher: dispatcher,
+          Via: W(ref('MetaDispatcher'), object({ trace_id: string })),
+        },
+      },
+    });
+    const flat = { discriminator: byMapping, ...W(Base, pages, counts) };
+    const dispatchers: Array<readonly [label: string, dispatcher: unknown]> = [
+      ['the members written flat', flat],
+      ['both unions in a wrapper', { discriminator: byMapping, ...W(Base, W(pages, counts)) }],
+      ['both unions in a closed wrapper', { discriminator: byMapping, ...W(Base, beside(closed, pages, counts)) }],
+      [
+        'a closed wrapper around each union',
+        { discriminator: byMapping, ...W(Base, beside(closed, pages), beside(closed, counts)) },
+      ],
+      ['every member in a lone wrapper', { discriminator: byMapping, ...W(W(Base, pages, counts)) }],
+      ['the `mapping` on the closed wrapper', W(Base, beside({ ...closed, discriminator: byMapping }, pages, counts))],
+      [
+        'the `mapping` on its union, in a closed wrapper',
+        W(Base, beside(closed, { discriminator: byMapping, ...pages }, counts)),
+      ],
+      [
+        'a lone nullable wrapper around the wrapper',
+        { discriminator: byMapping, ...W({ oneOf: [W(Base, pages, counts), { type: 'null' }] }) },
+      ],
+    ];
+    for (const [site, meta, model] of [
+      ['an inline merge naming the component', W(ref('MetaDispatcher'), object({ trace_id: string })), 'Meta'],
+      ['a component naming it as a base', ref('Via'), 'Via'],
+    ] as const) {
+      const flatSpec = await parseJson(listPets(flat, meta));
+      for (const [label, dispatcher] of dispatchers) {
+        const spec = await parseJson(listPets(dispatcher, meta));
+        const at = `${label}, read by ${site}`;
+        expect(spec, at).toEqual(flatSpec);
+        expect(modelOf(spec, 'MetaDispatcher').discriminator, at).toEqual({
+          property: 'kind',
+          mapping: { cursor: 'Cursor', page: 'Page' },
+        });
+        expect(
+          modelOf(spec, model).fields.map(({ name }) => name),
+          at,
+        ).toEqual(['base', 'has_more', 'a', 'b', 'trace_id']);
+        expect(spec.services.flatMap(({ operations }) => operations)[0]!.pagination?.endOfIteration, at).toEqual(
+          endOfIteration,
+        );
+      }
+    }
+    expect(warnings()).toEqual([]);
+  });
 });

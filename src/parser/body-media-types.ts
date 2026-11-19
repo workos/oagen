@@ -2,6 +2,53 @@ import type { TypeRef } from '../ir/types.js';
 import { mediaTypeEssence } from '../utils/media-type.js';
 
 /**
+ * The media-type map of a `content` — a Parameter, Header, Request Body or
+ * Response Object's — as every reader reads one: the object itself, whose
+ * keys are the media types the site declares, or `undefined` when the site
+ * declares none through it. OpenAPI defines `content` as a map of media
+ * types to Media Type Objects, so one that is absent declares no media
+ * type, and neither does one written as anything but an object — a string,
+ * an array, a number, a boolean or `null`: `content: "json"`, `content:
+ * ['application/json']`, `content: 7`. Such a value is no map at all, and
+ * it is read as an absent `content` is — never by the indexes of a string's
+ * characters or of an array's elements, which `Object.keys` lists as
+ * readily as a map's keys, so that `content: "json"` declared the media
+ * types `0`, `1`, `2` and `3` (#710).
+ *
+ * The one check every reader of a `content` asks before it lists a key:
+ * the parameter and header typing (`selectParameterContent`,
+ * `parameterTyping`), the request body pick and its media types
+ * (`selectRequestBodyContent`, `extractRequestBodyContents`, a webhook's or
+ * a callback's `mintPayload`), the response body pick and its media types
+ * (`primaryBodySchema`, `jsonResponseSchema`, `extractResponseContents`),
+ * the name reservation (`collectOperationConstPrefixes`) and the walk over
+ * the sites the readers type (`readSchemaSites`) — so no reader can list a
+ * media type another does not, and none of them an index.
+ *
+ * Given a `site`, a `content` that is written and is no object is warned
+ * about once, naming the site and the value as JSON (`content of the
+ * request body of createNote is not a map of media types ("json"); reading
+ * no media type from it.`), the way a `parameters` that is no array and a
+ * `responses` that is no object are (`declaredParameterEntries`,
+ * `isResponsesObject`). The site is passed by the one reader that reports
+ * on each `content` — `warnUnreadParameterContent` for a parameter's or a
+ * response header's, `warnUnreadRequestBody` for a request body's,
+ * `extractResponseContents` for a response's — and by no other, so a
+ * `content` several readers visit is reported once.
+ */
+export function mediaTypesOf<M = unknown>(content: unknown, site?: string): Record<string, M> | undefined {
+  if (content === undefined) return undefined;
+  if (typeof content === 'object' && content !== null && !Array.isArray(content)) return content as Record<string, M>;
+  if (site !== undefined) {
+    console.warn(
+      `[oagen] Warning: content of ${site} is not a map of media types (${JSON.stringify(content)}); ` +
+        `reading no media type from it.`,
+    );
+  }
+  return undefined;
+}
+
+/**
  * How the operation reader types a response body by the media type it is
  * declared under: `binary` and `text` without reading its schema, `schema`
  * through the schema it declares (`unknown` when it declares none).

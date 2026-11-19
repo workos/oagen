@@ -954,8 +954,40 @@ export function constraintsEntry(schema: SchemaObject): { constraints?: Constrai
  * are conjoined with this reading on the type and on the field or
  * parameter alike, where the type can carry them (#545 review).
  * `undefined` when no level declares any.
+ *
+ * A type list naming several types (`namesSeveralTypes`) is read as a
+ * whole, and then once more for each per-type copy that is itself such a
+ * reference (`typeListCopies`, `componentReference`), conjoined: the
+ * union the list is typed as carries the list's limits and its variants
+ * none (`typeListVariants`; #711), so what the builder takes off a variant
+ * typed as a component must be read here, for the union and the field
+ * alike, wherever the component is one a copy alone references — the
+ * array copy of `{ type: ['array', 'string'], oneOf: [{ $ref: TagList }, {
+ * type: 'null' }] }`, where the whole is no reference at all, or of `{
+ * type: ['array', 'object'], properties, allOf: [{ $ref: TagList }] }`,
+ * which as a whole is a merge. A copy that is no reference adds nothing:
+ * what it writes the whole writes, and what a primitive copy reads
+ * through a `$ref` member in the member's place (`allOfMemberReadAs`) is
+ * the component's own, as before (#674: `Named | string` carries none of
+ * `Named`'s).
  */
 export function schemaConstraints(
+  schema: SchemaObject,
+  componentSchemas: Record<string, SchemaObject> | undefined,
+): Constraints | undefined {
+  const limits = shapeConstraints(schema, componentSchemas);
+  if (schema.$ref !== undefined || !namesSeveralTypes(schema)) return limits;
+  return typeListCopies(schema).reduce<Constraints | undefined>(
+    (conjoined, copy) =>
+      componentReference(copy, componentSchemas) === undefined
+        ? conjoined
+        : combineConstraints(conjoined, shapeConstraints(copy, componentSchemas)),
+    limits,
+  );
+}
+
+/** `schemaConstraints` of `schema` read as the one shape it is written as: its own levels and, for a reference to an array or primitive component or an alias of an enum component, the entries the reference passes. */
+function shapeConstraints(
   schema: SchemaObject,
   componentSchemas: Record<string, SchemaObject> | undefined,
 ): Constraints | undefined {
@@ -1018,6 +1050,45 @@ export function withTypeConstraints(ref: TypeRef, constraints: Constraints | und
  */
 export function withSchemaConstraints(ref: TypeRef, schema: SchemaObject): TypeRef {
   return withTypeConstraints(ref, schemaConstraints(schema, documentComponentSchemas()));
+}
+
+/**
+ * Take the limits off `ref` and return them: what `withTypeConstraints`
+ * attached, from the node it attaches them to — the `primitive`,
+ * `literal`, `array`, `map` or `union` itself, the `inner` of a `nullable`
+ * wrapper, or the record a reference `resolveSchemaPointers` has yet to
+ * settle keeps for its site (`recordPendingSiteLimits`). A `model` or
+ * `enum` reference carries none. `withTypeConstraints(ref, taken)` puts
+ * them back. The limits of what the type nests — an array's items, a map's
+ * values, a union's variants — are those schemas' own and stay.
+ *
+ * Read where a type is built for a site whose limits belong on another
+ * node: a variant of a type list, the same schema read as one of its
+ * types, whose limits are the union's (`typeListVariants`; #711).
+ */
+function takeTypeConstraints(ref: TypeRef): Constraints | undefined {
+  switch (ref.kind) {
+    case 'primitive':
+    case 'literal':
+    case 'array':
+    case 'map':
+    case 'union': {
+      const { constraints } = ref;
+      delete ref.constraints;
+      return constraints;
+    }
+    case 'nullable':
+      return takeTypeConstraints(ref.inner);
+    case 'model': {
+      if (!isPendingSchemaRef(ref)) return undefined;
+      const limits = pendingSiteLimitsOf(ref);
+      recordPendingSiteLimits(ref, undefined);
+      return limits;
+    }
+    case 'enum':
+      return undefined;
+  }
+  return assertNever(ref);
 }
 
 /**
@@ -1411,93 +1482,128 @@ export function mergeDeclaresNull(schema: SchemaObject): boolean {
 }
 
 /**
- * Whether a schema admits `null`, as the type builder types it — the one
- * reading every reader settles an `allOf`'s `null` by: the vote of each
- * member of an `allOf` merged into one model (`allOfAdmitsNull`, for the
- * type builder, `declaresNull` and a component's model alike) and of each
- * declaration two `allOf` members give one property
+ * What a schema says of `null`, as the vote it casts as a member of an
+ * `allOf` (`nullVote`): it admits `null`, it rejects it, or it abstains —
+ * it says nothing of what an instance is, so it only annotates or limits
+ * the schema it is a member of and has no vote.
+ */
+export type NullVote = 'admits' | 'rejects' | 'abstains';
+
+/**
+ * Whether a schema admits `null`, as the type builder types it
+ * (`nullVote`: `'admits'`) — the one reading every reader settles an
+ * `allOf`'s `null` by: an `allOf` merged into one model (`allOfAdmitsNull`,
+ * for the type builder, `declaresNull` and a component's model alike) and
+ * each declaration two `allOf` members give one property
  * (`conjoinTypedDeclarations`), so the property written by hand as the
  * `allOf` of both and the one the parser conjoins from two members admit
- * `null` alike (#676).
+ * `null` alike (#676). A schema that rejects `null` and one that says
+ * nothing of it (`'abstains'`) both admit none; a reader that must tell
+ * the two apart asks `nullVote`.
+ */
+export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
+  return nullVote(schema, path) === 'admits';
+}
+
+/**
+ * What a schema says of `null`, as the type builder types it: the vote it
+ * casts as a member of an `allOf` (`allOfNullVote`), and the one reading
+ * of "does this schema say what an instance is" every reader of an
+ * `allOf`'s `null` asks.
  *
- * A `$ref` admits what the schema it names admits (`componentSchemaOf`: a
+ * A `$ref` says what the schema it names says (`componentSchemaOf`: a
  * component, or the schema a pointer into one lands on), read by this
- * same rule, and nothing the keywords beside it say: the type builder
- * gives a `$ref` precedence over every
+ * same rule at every hop of a chain of aliases, and nothing the keywords
+ * beside it say: the type builder gives a `$ref` precedence over every
  * sibling, so `{ $ref: Plain, type: ['object', 'null'] }` over a `Plain`
- * that admits none admits none. Any other schema admits `null` when it
- * writes it (`writesNull`): a type list naming `null`, OAS 3.0 `nullable:
- * true` beside a `type`, a schema of nothing but `null` (`isNullSchema`),
- * a `const` of `null`, an `enum:` list naming it, or a `oneOf`/`anyOf`
- * with a `null` variant or the flag that stands for one
- * (`unionFlaggedNullable`), whatever else the union holds — and whatever
- * the schema composes: `{ type: ['object', 'null'], allOf: [{ $ref: A }]
- * }` over an `A` that admits none admits `null`, the schema's own word,
- * as the type builder types it `nullable<A>` and as the same `type`
- * beside a merge wraps the merge. JSON Schema, applying `A` as well, would
- * reject `null` there; the parser has always read a nullable `type` beside
- * an `allOf` as the nullable wrapper around what the `allOf` describes,
- * and two such wrappers conjoin to the same `type` beside both members
- * (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }] }`),
- * which is nullable by that reading. Else it admits
- * `null` through an `allOf` whose every member that types it does
- * (`allOfAdmitsNull`), as JSON Schema applies them all — and a `type` of
- * its own that names no `null` rejects it, whatever the schema composes:
- * `{ type: 'object', allOf: [{ $ref: Owner }] }` over a nullable `Owner`
- * admits none. Everything else admits none: an inline object with no
- * `type` is the object the type builder reads it as, and a schema that
- * declares no type says nothing.
+ * that admits none rejects `null`. So a `$ref` to a component that says
+ * nothing of what an instance is — `Described: { description: 'Any
+ * owner.' }`, `{ required: ['name'] }`, `{ minProperties: 1 }`, `{}`, an
+ * alias of one (`{ $ref: Described }`, `{ allOf: [{ $ref: Described }] }`)
+ * — abstains, as the same keywords written in its place do and as the type
+ * builder types the `$ref` alone (`unknown`), and `{ allOf: [{ $ref: Owner
+ * }, { $ref: Tag }, { $ref: Described }] }` over two nullable components
+ * admits `null` (#715: any `$ref` had a vote, and one to such a component
+ * rejected `null`, since the component writes none, so the `allOf` was the
+ * bare model where `{ description: 'Any owner.' }` written inline left it
+ * nullable). A `$ref` no schema answers is the reference the type builder
+ * types it as, a model that admits none, and rejects `null`.
+ *
+ * Any other schema admits `null` when it writes it (`writesNull`): a type
+ * list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a schema
+ * of nothing but `null` (`isNullSchema`), a `const` of `null`, an `enum:`
+ * list naming it, or a `oneOf`/`anyOf` with a `null` variant or the flag
+ * that stands for one (`unionFlaggedNullable`), whatever else the union
+ * holds — and whatever the schema composes: `{ type: ['object', 'null'],
+ * allOf: [{ $ref: A }] }` over an `A` that admits none admits `null`, the
+ * schema's own word, as the type builder types it `nullable<A>` and as the
+ * same `type` beside a merge wraps the merge. JSON Schema, applying `A` as
+ * well, would reject `null` there; the parser has always read a nullable
+ * `type` beside an `allOf` as the nullable wrapper around what the `allOf`
+ * describes, and two such wrappers conjoin to the same `type` beside both
+ * members (`{ type: ['object', 'null'], allOf: [{ $ref: A }, { $ref: B }]
+ * }`), which is nullable by that reading. Else it says what its `type`
+ * and its `allOf` say (`allOfNullVote`): a `type` of its own that names no
+ * `null` rejects it, whatever the schema composes — `{ type: 'object',
+ * allOf: [{ $ref: Owner }] }` over a nullable `Owner` admits none — and
+ * with no `type` the members of its `allOf` vote, as JSON Schema applies
+ * them all. A schema none of this settles rejects `null` when a keyword of
+ * its own says what an instance is (`typesItself`: an inline object with
+ * no `type` is the object the type builder reads it as) and abstains when
+ * none does: `{ description }`, `{ required }`, `{ minProperties: 1 }`,
+ * `{}`.
  *
  * A schema met again on the path being read (`path`: the schemas above
- * it, not every schema read so far) admits none, which ends a component
+ * it, not every schema read so far) rejects `null`, which ends a component
  * that names itself, through a hop or outright, while a component two
  * members name is read for each — `{ allOf: [{ $ref: A }, { $ref: A }] }`
  * over a nullable `A` admits `null` (the #653 review's round 4: the second
  * `$ref` met `A` in a shared seen set and read it as a cycle).
  *
- * Each schema is read once per document (`nullAdmissions`): what a schema
- * admits does not depend on the path it was reached by. A schema admits
- * `null` only when every schema under it was read to the end and admitted
- * it, so none of them was on the path; and one that does not, because a
- * schema under it was met again on the path, sits on that loop itself and
- * admits none from wherever it is read. So a component many members name
- * is read for the first of them and answered for the rest (#676 review:
- * each reading forgot its answer, so `A1: { allOf: [{ $ref: A0 }, { $ref:
- * A0 }] }`, `A2` the same over `A1`, and so on read `A0` twice per level,
- * a billion times for the thirtieth component).
+ * Each schema is read once per document (`nullVotes`): what a schema says
+ * does not depend on the path it was reached by. The only schemas read
+ * under a schema are the one its `$ref` names and the members of its
+ * `allOf`, and a rejection among them is the schema's own (`allOfNullVote`),
+ * so a schema that reaches itself rejects `null` from wherever it is read,
+ * and no other schema's vote turns on a schema met on the path. So a
+ * component many members name is read for the first of them and answered
+ * for the rest (#676 review: each reading forgot its answer, so `A1: {
+ * allOf: [{ $ref: A0 }, { $ref: A0 }] }`, `A2` the same over `A1`, and so
+ * on read `A0` twice per level, a billion times for the thirtieth
+ * component).
  */
-export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set()): boolean {
-  const settled = nullAdmissions.get(schema);
+export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set()): NullVote {
+  const settled = nullVotes.get(schema);
   if (settled !== undefined) return settled;
-  if (path.has(schema)) return false;
+  if (path.has(schema)) return 'rejects';
   path.add(schema);
-  let admits: boolean;
+  let vote: NullVote;
   try {
     if (schema.$ref !== undefined) {
       const target = componentSchemaOf(schema.$ref);
-      admits = target !== undefined && schemaAdmitsNull(target, path);
+      vote = target === undefined ? 'rejects' : nullVote(target, path);
     } else {
-      admits = writesNull(schema) || allOfAdmitsNull(schema, path);
+      vote = writesNull(schema) ? 'admits' : allOfNullVote(schema, path);
     }
   } finally {
     path.delete(schema);
   }
-  nullAdmissions.set(schema, admits);
-  return admits;
+  nullVotes.set(schema, vote);
+  return vote;
 }
 
 /**
- * Whether each schema read so far admits `null` (`schemaAdmitsNull`), by
- * the schema, which the document owns. The answer follows a `$ref` to the
- * document's components (`componentSchemaOf`), so it is forgotten where
- * they are set or released (`resetNullAdmissions`), as the folded schemas
- * are (`resetFoldedSchemas`).
+ * What each schema read so far says of `null` (`nullVote`), by the schema,
+ * which the document owns. The answer follows a `$ref` to the document's
+ * components (`componentSchemaOf`), so it is forgotten where they are set
+ * or released (`resetNullVotes`), as the folded schemas are
+ * (`resetFoldedSchemas`).
  */
-let nullAdmissions = new WeakMap<SchemaObject, boolean>();
+let nullVotes = new WeakMap<SchemaObject, NullVote>();
 
-/** Forget what every schema admits: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
-function resetNullAdmissions(): void {
-  nullAdmissions = new WeakMap();
+/** Forget what every schema says of `null`: a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
+function resetNullVotes(): void {
+  nullVotes = new WeakMap();
 }
 
 /**
@@ -1534,62 +1640,100 @@ function writesNull(schema: SchemaObject): boolean {
 
 /**
  * Whether a schema that writes no `null` of its own (`writesNull`) admits
- * it through its `allOf` — the one definition of "this `allOf` admits
- * `null`": the schema writes no `type` (one that names no `null` rejects
- * it) and every member that types it admits `null` (`schemaAdmitsNull`), at
- * least one of them, as JSON Schema applies them all. A member that
- * says nothing of what an instance is (`saysType`: `{ description }`, `{
- * required }`, `{ minProperties: 1 }`, and a wrapper around nothing but
- * such members, `{ allOf: [{ description }] }`) only annotates or limits
- * the schema and has no vote, so the nested spelling votes as the flat one
- * does. The members are the schema's as written, with what it writes
- * beside the `allOf` that the readers read as members of it
- * (`foldBesideAllOf`): its own `properties`, an inline object typed
- * `object` that admits none, and a typing `oneOf`/`anyOf`, which votes as a
- * union does. A member that is itself an `allOf` votes through its own
- * members by this same rule and is not spliced open first
- * (`unsplicedAllOf`): spliced, `{ type: 'object', allOf: [{ $ref: Owner }]
- * }` would lose the `type` that rejects `null` (#675 opens it, since no
- * other reader asks its `type`).
+ * it through its `allOf` (`allOfNullVote`: `'admits'`) — the one
+ * definition of "this `allOf` admits `null`": the schema writes no `type`
+ * (one that names no `null` rejects it), no member rejects `null` and at
+ * least one admits it, as JSON Schema applies them all.
  *
  * So `{ allOf: [{ $ref: Owner }, { $ref: Tag }] }` over two nullable
- * components admits `null`, `{ allOf: [{ $ref: Owner }, { type: 'object',
- * properties: { extra } }] }` does not, and neither does `{ allOf: [{
- * $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits none. Read
- * for an `allOf` merged into one model by the type builder
+ * components admits `null`, and so does the same beside a member with no
+ * vote — `{ description }`, or `{ $ref: Described }` to a component that
+ * writes nothing else (#715) — while `{ allOf: [{ $ref: Owner }, { type:
+ * 'object', properties: { extra } }] }` does not, and neither does `{
+ * allOf: [{ $ref: Owner }, { $ref: Plain }] }` over a `Plain` that admits
+ * none. Read for an `allOf` merged into one model by the type builder
  * (`buildTypeRef`), by `declaresNull`, and through it for a component
  * (`isNullableModelComponentEntry`) and the response path (`nullableIf`),
- * and for any `allOf` by `schemaAdmitsNull`. `path` is `schemaAdmitsNull`'s: the
- * schemas above the members.
+ * and for any `allOf` by `nullVote`. `path` is `nullVote`'s: the schemas
+ * above the members.
  */
 function allOfAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> = new Set([schema])): boolean {
-  if (schema.type !== undefined) return false;
-  const voting = (foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []).filter(saysType);
-  return voting.length > 0 && voting.every((member) => schemaAdmitsNull(member, path));
+  return allOfNullVote(schema, path) === 'admits';
 }
 
 /**
- * Whether an `allOf` member says what an instance is, and so has a vote on
- * `null` (`allOfAdmitsNull`): it declares a type by a keyword of its own
- * (`declaresType`), by a `oneOf`/`anyOf` that types it (`unionTypesSchema`),
- * or through a member of its own `allOf` that does, at any depth. A member
- * that is an `allOf` of nothing but annotations and limits — `{ allOf: [{
- * description }] }`, `{ allOf: [] }`, `{ description, allOf: [{
- * minProperties: 1 }] }` — or a union of bare limits (`{ anyOf: [{
- * required: ['a'] }, { maxProperties: 1 }] }`) declares none: every
- * instance it admits, `null` among them, it admits whatever the type, as
- * the members it would be spliced open into do (`spliceNestedAllOf`; #675),
- * which have no vote either. Read on the members as written, where
+ * What a schema that is no `$ref` and writes no `null` of its own
+ * (`writesNull`) says of it (`nullVote`), in this order. A `type` of its
+ * own, which then names no `null`, rejects it. With none, the members of
+ * its `allOf` vote (`membersNullVote`): one rejection rejects, else one
+ * admission admits. With no member that votes, the schema rejects `null`
+ * when a keyword of its own says what an instance is (`typesItself`) and
+ * abstains when none does — `{ description }`, `{ required }`, `{
+ * minProperties: 1 }`, and a wrapper around nothing but members that
+ * abstain (`{ allOf: [{ description }] }`, `{ allOf: [] }`, `{
+ * description, allOf: [{ minProperties: 1 }] }`, `{ allOf: [{ $ref:
+ * Described }] }` over a component that says nothing; #715), which admits
+ * every instance, `null` among them, whatever the type, as the members it
+ * would be spliced open into do (`spliceNestedAllOf`; #675). `path` is
+ * `nullVote`'s: the schemas above the members.
+ */
+function allOfNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote {
+  if (schema.type !== undefined) return 'rejects';
+  const cast = membersNullVote(schema, path);
+  return cast === 'abstains' && typesItself(schema) ? 'rejects' : cast;
+}
+
+/**
+ * The votes of the members of a schema's `allOf` on `null` (`nullVote`),
+ * conjoined as JSON Schema applies them all: `'rejects'` when any member
+ * rejects it, else `'admits'` when any admits it, else `'abstains'` — every
+ * member abstained, or the schema has no `allOf`. A member that abstains
+ * only annotates or limits the schema and changes nothing, so the nested
+ * spelling votes as the flat one does, and a member that is a `$ref` votes
+ * as the schema it names would in its place (#715).
+ *
+ * The members are the schema's as written, with what it writes beside the
+ * `allOf` that the readers read as members of it (`foldBesideAllOf`): its
+ * own `properties`, an inline object typed `object` that rejects `null`,
+ * and a typing `oneOf`/`anyOf`, which votes as a union does. A member that
+ * is itself an `allOf` votes through its own members by this same rule and
+ * is not spliced open first (`unsplicedAllOf`): spliced, `{ type:
+ * 'object', allOf: [{ $ref: Owner }] }` would lose the `type` that rejects
+ * `null` (#675 opens it, since no other reader asks its `type`).
+ */
+function membersNullVote(schema: SchemaObject, path: Set<SchemaObject>): NullVote {
+  let vote: NullVote = 'abstains';
+  for (const member of foldBesideAllOf(unsplicedAllOf(schema)).allOf ?? []) {
+    const cast = nullVote(member, path);
+    if (cast === 'rejects') return 'rejects';
+    if (cast === 'admits') vote = 'admits';
+  }
+  return vote;
+}
+
+/**
+ * Whether a schema that is no `$ref` says what an instance is by a keyword
+ * of its own, its `allOf` apart (`allOfNullVote` asks the members): it
+ * declares a type (`declaresType`: `properties`, an `enum`, a `const`,
+ * `items` that say so themselves, an `additionalProperties` or
+ * `patternProperties` map), or writes a `oneOf`/`anyOf` that types it
+ * (`unionTypesSchema`). A schema of nothing but annotations and limits, or
+ * a union of bare limits (`{ anyOf: [{ required: ['a'] }, { maxProperties:
+ * 1 }] }`), declares none. These are the tests every reader of the schema
+ * asks, so a `$ref` its `items` or a variant of its union hold is a type
+ * to them whatever it names, and the schema votes as the array or the
+ * union the type builder types it as: only a member's own `$ref` is
+ * answered by the schema it names (`nullVote`). Read on the schema as
+ * written, where
  * `declaresType` alone counts any `allOf` or union as a type (#676 review:
  * `{ allOf: [{ $ref: Owner }, { $ref: Tag }, { allOf: [{ description }] }]
  * }` over two nullable components was the bare model for the wrapper's
  * sake, where the same members written flat were nullable).
  */
-function saysType(member: SchemaObject): boolean {
-  const { allOf, oneOf, anyOf, ...own } = member;
+function typesItself(schema: SchemaObject): boolean {
+  const { allOf: _allOf, oneOf, anyOf, ...own } = schema;
   if (declaresType(own)) return true;
-  if ([oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants))) return true;
-  return (allOf ?? []).some(saysType);
+  return [oneOf, anyOf].some((variants) => variants !== undefined && unionTypesSchema(variants));
 }
 
 /**
@@ -1970,7 +2114,7 @@ export function extractSchemas(
   resetInheritedModelRefs();
   resetCombinedDeclarations();
   resetFoldedSchemas();
-  resetNullAdmissions();
+  resetNullVotes();
   resetFoldWarnings();
 
   // Build collision-safe transform if provided. The transform is probed with
@@ -2294,7 +2438,7 @@ export function clearSchemaNameTransform(): void {
   activeDispatcherVariantPlans = new Map();
   resetCombinedDeclarations();
   resetFoldedSchemas();
-  resetNullAdmissions();
+  resetNullVotes();
   markContestedTitles(undefined);
 }
 
@@ -3584,6 +3728,7 @@ let foldedSchemas = new WeakMap<SchemaObject, SchemaObject>();
 /** Forget every folded schema, and every spliced one (`resetSplicedSchemas`): a document's components are being set (`extractSchemas`) or released (`clearSchemaNameTransform`). */
 function resetFoldedSchemas(): void {
   foldedSchemas = new WeakMap();
+  composedDiscriminators = new WeakMap();
   resetSplicedSchemas();
 }
 
@@ -3626,9 +3771,10 @@ function foldBesideAllOf(schema: SchemaObject): SchemaObject {
  * (#334) — since JSON Schema applies every keyword of one schema, so the
  * instance is the base and one (or any) of the variants. A `oneOf` and an
  * `anyOf` written together become two members, and a `discriminator`
- * written beside them goes with the first, so a component reading the
- * member finds it on the union it dispatches
- * (`detectAllOfVariantDiscriminator`). Before, the `allOf` was read alone
+ * written beside them is carried on the first as written
+ * (`besideUnionMembers`): which of the two it goes with is decided by the
+ * schema that composes them (`wrapperDiscriminatorOf`; #718), and an
+ * inline `allOf` dispatches neither. Before, the `allOf` was read alone
  * (`classifyInlineSchema` gives it precedence), so a field, a component
  * and a response body dropped the union while a request body built the
  * union from the variants alone, without the base. Read by
@@ -3671,7 +3817,12 @@ function foldSiblingUnions(schema: SchemaObject): SchemaObject {
  * the `allOf` members they are read as (`foldSiblingUnions`,
  * `componentAllOfMembers`): one member per typing union
  * (`unionTypesSchema`), `oneOf` first, the schema's own `discriminator`
- * carried on the first. Empty for a schema that writes no typing union.
+ * carried on the first, where the document wrote it: the union it is
+ * written with, not yet the union it goes with, which the schema that
+ * composes the members decides over every union they lead to
+ * (`wrapperDiscriminatorOf`, `discriminatedUnion`; #718: carried on the
+ * first, the keyword was the first union's whatever its `mapping` named).
+ * Empty for a schema that writes no typing union.
  * The variant list is the document's own, not a copy, so a decision
  * recorded against it (a dispatcher's variant names, a reported union)
  * reaches every reading. OAS 3.0 `nullable: true` standing for a `null`
@@ -5209,17 +5360,21 @@ function nameInlineObjectVariants(
  * carry them (#545): the union of a multi-type variant, under its nullable
  * wrapper — `{ type: ['object', 'string'], properties, maxLength: 5 }` is
  * `union<Model | string>` with `{ maxLength: 5 }` — as a type list's are
- * the union's; a model reference carries none, the model its own. Attached
- * here, so a named union's variant (`namedUnionEntry`) carries them as an
- * inline union's does (Greptile, #545 review round 3: the inline caller
- * attached them and the named one did not). Each per-type copy of the
- * variant stands for the variant (`derivedCopy`), so a merge the variant
- * carries is the one the extractor builds for it, whichever type it is read
- * as (`materializingMergedAllOfName`; #566 review), and keeps the keywords
- * that apply to an instance of its type, as a type list's copies do
- * everywhere (`typeListCopy`; #616): the `string` member of `{ type:
- * ['object', 'string'], properties }` is `{ type: 'string' }`. A type two
- * members are typed alike as is one member (`dedupeTypeRefs`).
+ * the union's, its members carrying none, whichever level of the variant
+ * writes the limit (`typeListVariants`; #711: `{ type: ['object', 'array'],
+ * properties, allOf: [{ items, minItems: 2 }] }` had `{ minItems: 2 }` on
+ * its array member too); a model reference carries none, the model its
+ * own. Attached here, so a named union's variant (`namedUnionEntry`)
+ * carries them as an inline union's does (Greptile, #545 review round 3:
+ * the inline caller attached them and the named one did not). Each
+ * per-type copy of the variant stands for the variant (`derivedCopy`), so a
+ * merge the variant carries is the one the extractor builds for it,
+ * whichever type it is read as (`materializingMergedAllOfName`; #566
+ * review), and keeps the keywords that apply to an instance of its type, as
+ * a type list's copies do everywhere (`typeListCopy`; #616): the `string`
+ * member of `{ type: ['object', 'string'], properties }` is `{ type:
+ * 'string' }`. A type two members are typed alike as is one member
+ * (`dedupeTypeRefs`).
  */
 function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName: string = modelName): TypeRef {
   const modelRef: ModelRef = { kind: 'model', name: refName };
@@ -5228,8 +5383,9 @@ function inlineVariantTypeRef(variant: SchemaObject, modelName: string, refName:
   const nullable = variant.nullable === true || typeList.includes('null');
   const keys = variantMemberKeys(variant, modelName);
   // The variant's limits are the union's, as a type list's are
-  // (`schemaToTypeRef`; #545), so the other members are built without them.
-  const members = dedupeTypeRefs(
+  // (`schemaToTypeRef`; #545), so the other members carry none, whichever
+  // level of the variant wrote them (`typeListVariants`; #711).
+  const { variants: members } = typeListVariants(
     typeList
       .filter((t) => t !== 'null')
       .flatMap((t) => {
@@ -7195,33 +7351,280 @@ export function unionAxesOf(schema: SchemaObject): SchemaObject[][] {
 }
 
 /**
- * The `discriminator` a schema writes, for one of the unions it carries
- * (`unionAxesOf`): its own keyword for the one union it writes, and, when
- * it writes a `oneOf` beside an `anyOf`, for the first of the two that
- * types the schema (`unionTypesSchema`) and for no other (for each, as it
- * was, where neither types it) — the union
- * `besideUnionMembers` carries it on when the two are folded into members,
- * so a reader that takes the axes off a member as written hands the
- * keyword to the same union as one that reads the fold: `{ oneOf: [{
- * $ref: Cat }, { $ref: Dog }], anyOf: [{ $ref: Owner }, { $ref: Shelter
- * }], discriminator: { propertyName: 'kind', mapping: { cat: Cat, dog: Dog
- * } } }` dispatches its `oneOf` and flattens its `anyOf`, as a member, as
- * the component a `$ref` member names and as the component itself (#680:
- * the member readers handed the keyword to both axes, and one with a
- * `mapping` made the `anyOf` a dispatcher too, its variants' properties
- * read by no one). Read by the member reader and the variant builder
+ * The `discriminator` keyword as a schema writes it for one of the unions
+ * it carries (`unionAxesOf`), before any reader decides which union it
+ * goes with (`axisDiscriminatorOf`): its own keyword for the one union it
+ * writes, and, where it writes a `oneOf` beside an `anyOf`, for each of
+ * the two that types the schema (`unionTypesSchema`) — a union of bare
+ * limits beside a typing one is no union the keyword could dispatch — and
+ * for each, as it was, where neither types it.
+ */
+function writtenDiscriminatorOf(
+  schema: SchemaObject,
+  variants: readonly SchemaObject[],
+): DiscriminatorKeyword | undefined {
+  const { discriminator } = schema;
+  if (discriminator === undefined || schema.oneOf === undefined || schema.anyOf === undefined) return discriminator;
+  const typing = unionAxesOf(schema).filter((axis) => unionTypesSchema(axis));
+  return typing.length === 0 || typing.some((axis) => axis === variants) ? discriminator : undefined;
+}
+
+/**
+ * The union a `discriminator` handed to the readers of a composed schema
+ * goes with, where the schema carries more than the one union the keyword
+ * is written on (`discriminatedUnion`; #718): the variant list of that
+ * union, the document's own array. Keyed by the copy of the keyword the
+ * readers are handed (`forUnion`), never by the document's own object,
+ * which a schema with one union is still read by as written.
+ */
+const discriminatedUnions = new WeakMap<DiscriminatorKeyword, readonly SchemaObject[]>();
+
+/** The copy `forUnion` made of each keyword for each union it was decided to go with, so one decision is one object however often it is asked. */
+const decidedDiscriminators = new WeakMap<
+  DiscriminatorKeyword,
+  WeakMap<readonly SchemaObject[], DiscriminatorKeyword>
+>();
+
+/** `keyword` as the readers of a composed schema are handed it once it is decided that it goes with the union `variants` (`discriminatedUnions`): a copy, sharing the document's `mapping`, the same one each time. */
+function forUnion(keyword: DiscriminatorKeyword, variants: readonly SchemaObject[]): DiscriminatorKeyword {
+  let copies = decidedDiscriminators.get(keyword);
+  if (!copies) decidedDiscriminators.set(keyword, (copies = new WeakMap()));
+  let decided = copies.get(variants);
+  if (!decided) {
+    copies.set(variants, (decided = { ...keyword }));
+    discriminatedUnions.set(decided, variants);
+  }
+  return decided;
+}
+
+/**
+ * Whether `keyword` is one a composed schema decided the union of
+ * (`discriminatedUnions`): every union of that schema is then read by it —
+ * the one it goes with dispatched by it, every other flattened
+ * (`discriminatesUnion`) — whatever keyword is written on the union itself.
+ */
+export function isDecidedDiscriminator(keyword: DiscriminatorKeyword | undefined): boolean {
+  return keyword !== undefined && discriminatedUnions.has(keyword);
+}
+
+/**
+ * Whether the union `variants` may dispatch by `keyword`, or with none by
+ * its pinned consts: false only for a keyword a composed schema decided
+ * goes with another of its unions (`discriminatedUnions`), which says the
+ * component dispatches by that union, so this one is flattened whatever
+ * its variants pin. The first thing the one dispatch decision asks
+ * (`detectAllOfVariantDiscriminator`).
+ */
+function discriminatesUnion(keyword: DiscriminatorKeyword | undefined, variants: readonly SchemaObject[]): boolean {
+  const decided = keyword === undefined ? undefined : discriminatedUnions.get(keyword);
+  return decided === undefined || decided === variants;
+}
+
+/**
+ * The `$ref` a discriminator `mapping` target stands for: the target
+ * itself when it is a `$ref` into `components/schemas` — a component, or
+ * a pointer deeper into one — and the reference to the component a bare
+ * schema name names (`Cat`, which OpenAPI allows in place of the `$ref`;
+ * the test `mappingTargetModelName` makes of one). `undefined` for a
+ * target into another section or another file, which names no schema the
+ * parser follows.
+ */
+function mappingTargetRef(target: unknown): string | undefined {
+  if (typeof target !== 'string') return undefined;
+  if (schemaRefTokens(target) !== undefined) return target;
+  return target.startsWith('#') || target.includes('/') ? undefined : schemaRefOf([target]);
+}
+
+/** The place a schema `$ref` names, in the one spelling every `$ref` to it shares (`schemaRefOf`), or `undefined` for a `$ref` into another section. */
+function refPlace(ref: unknown): string | undefined {
+  const tokens = schemaRefTokens(ref);
+  return tokens === undefined ? undefined : schemaRefOf(tokens);
+}
+
+/**
+ * How much of a union a `discriminator` keyword selects, compared first by
+ * `named`, then by `pinned` (`discriminatedUnion`).
+ *
+ * `named` counts the variants a `mapping` target names: the target and the
+ * variant stand for one schema — the target a `$ref` to the variant's
+ * component (`#/components/schemas/Cat`), the bare name of it (`Cat`), an
+ * alias of it or the component it aliases (`aliasChainOf`, both ways, as
+ * `deferPointerMappingEntries` matches an entry to a member), or a pointer
+ * to the schema the variant is, written inline or as the same pointer —
+ * matched by the place the two references name (`refPlace`), so a `$ref`
+ * no component answers still names itself, and by the schema they land
+ * on. A variant is read as a union's members are (`unionMembers`): one
+ * that wraps a single reference to a model, a nullable wrapper around one
+ * included, is that reference.
+ *
+ * `pinned` counts the variants that pin the keyword's property to a value
+ * the `mapping` lists — an inline variant, which no target can name, is
+ * selected by the value it pins, as it is redirected to that entry's
+ * target in a named union (`mapVariantToDiscriminatorEntry`) — and, with
+ * no `mapping`, every variant when each pins the property, the one way a
+ * keyword with no `mapping` dispatches a union
+ * (`detectAllOfVariantDiscriminator`); none when one does not.
+ */
+function selectedVariants(
+  keyword: DiscriminatorKeyword,
+  variants: readonly SchemaObject[],
+  schemas: Record<string, SchemaObject> | undefined,
+): { named: number; pinned: number } {
+  const members = unionMembers({ oneOf: [...variants] }, NO_INLINE_NAMES, schemas);
+  const pins = members.map((member) => getEffectiveConstPropertyValue(member.resolved, keyword.propertyName, schemas));
+  const mapping = keyword.mapping ?? {};
+  const targets = Object.values(mapping).flatMap((target) => {
+    const ref = mappingTargetRef(target);
+    return ref === undefined ? [] : [aliasChainOf(ref, schemas)];
+  });
+  if (Object.keys(mapping).length === 0) {
+    return { named: 0, pinned: members.length > 0 && pins.every((pin) => pin !== null) ? members.length : 0 };
+  }
+  let named = 0;
+  let pinned = 0;
+  members.forEach((member, index) => {
+    const reference = member.raw.$ref ?? wrappedVariantReference(member.raw, schemas)?.$ref;
+    const along = typeof reference === 'string' ? aliasChainOf(reference, schemas) : [];
+    const places = new Set<string>();
+    const landings = new Set<SchemaObject>([member.raw, member.resolved]);
+    for (const hop of along) {
+      const place = refPlace(hop.ref);
+      if (place !== undefined) places.add(place);
+      if (hop.schema !== undefined) landings.add(hop.schema);
+    }
+    const names = (chain: ReturnType<typeof aliasChainOf>): boolean =>
+      chain.some((hop) => {
+        const place = refPlace(hop.ref);
+        return (place !== undefined && places.has(place)) || (hop.schema !== undefined && landings.has(hop.schema));
+      });
+    if (targets.some(names)) named++;
+    const pin = pins[index];
+    if (pin !== null && pin !== undefined && Object.hasOwn(mapping, pin)) pinned++;
+  });
+  return { named, pinned };
+}
+
+/** Whether `keyword` is a `discriminator` that names its property: an object whose `propertyName` is a string, which the keyword requires. */
+function namesProperty(keyword: DiscriminatorKeyword | undefined): keyword is DiscriminatorKeyword {
+  return typeof keyword === 'object' && keyword !== null && typeof keyword.propertyName === 'string';
+}
+
+/**
+ * Which union a composed schema's `discriminator` goes with (#718) — the
+ * one decision behind every reader of a schema that carries several
+ * unions: the component reader and the variant builder
+ * (`readComponentAllOf`, `discriminatedVariantSchemas`, through
+ * `wrapperDiscriminatorOf`), and the inline merge and the pagination walk
+ * for a union they inherit (`mergeAllOfMembers`, `collectObjectProperties`,
+ * through `axisDiscriminatorOf`).
+ *
+ * `unions` are the unions the schema reads as its own, in reading order,
+ * each with the keyword the document writes for it (`memberUnions`, as
+ * written), and `own` the schema's own keyword, written beside its
+ * `allOf` or beside its unions. A `Model` carries one `discriminator`, so
+ * the schema dispatches by one keyword: the first a union is written
+ * with, else its own. That keyword goes with the union it selects the
+ * most of (`selectedVariants`): the one more of whose variants its
+ * `mapping` names, then the one more of whose variants pin its property
+ * to a value the mapping lists — or, with no `mapping`, the one whose
+ * variants each pin its property. Among unions it selects alike, none of
+ * either included, the union it is written with comes first — the first
+ * of them, `oneOf` before `anyOf`, when it is written beside several —
+ * then the others in reading order. So `{ oneOf: [{ $ref: Pet }, { $ref:
+ * Toy }], anyOf: [{ $ref: Cat }, { $ref: Dog }], discriminator: {
+ * propertyName: 'kind', mapping: { cat: '#/components/schemas/Cat', dog:
+ * '#/components/schemas/Dog' } } }` dispatches its `anyOf`, wherever the
+ * keyword is written: beside the two unions, beside the `allOf` that
+ * holds them as members, or on the `oneOf` member (the issue: the keyword
+ * went to the first typing union, or to every member's union, without its
+ * `mapping` being read, so the `oneOf` was the dispatcher by a mapping
+ * that names none of its variants, and `Pet`'s and `Toy`'s properties were
+ * on no model). `undefined` with no union or no keyword — a keyword that
+ * names no property (`namesProperty`) is none, and decides nothing: every
+ * union is then read with the keyword it is written with, as it was.
+ */
+function discriminatedUnion(
+  unions: readonly MemberUnion[],
+  own: DiscriminatorKeyword | undefined,
+  schemas: Record<string, SchemaObject> | undefined,
+): { keyword: DiscriminatorKeyword; variants: readonly SchemaObject[] } | undefined {
+  const keyword = [...unions.map((union) => union.discriminator), own].find(namesProperty);
+  if (keyword === undefined || unions.length === 0) return undefined;
+  const candidates = [
+    ...unions.filter((union) => union.discriminator === keyword),
+    ...unions.filter((union) => union.discriminator !== keyword),
+  ];
+  let chosen = candidates[0]!;
+  let most = selectedVariants(keyword, chosen.variants, schemas);
+  for (const candidate of candidates.slice(1)) {
+    const selected = selectedVariants(keyword, candidate.variants, schemas);
+    if (selected.named > most.named || (selected.named === most.named && selected.pinned > most.pinned)) {
+      chosen = candidate;
+      most = selected;
+    }
+  }
+  return { keyword, variants: chosen.variants };
+}
+
+/**
+ * The `discriminator` one of the unions a schema carries (`unionAxesOf`)
+ * is read with — the one question every reader of a composed schema's
+ * union asks: the member reader and the variant builder
  * (`readComponentAllOfMember`, `memberUnions`), the inline merge
- * (`mergeAllOfMembers`) and the pagination walk (`collectObjectProperties`).
+ * (`mergeAllOfMembers`) and the pagination walk
+ * (`collectObjectProperties`). `handed` is the keyword the composition
+ * around the schema declares for a union among its members
+ * (`wrapperDiscriminatorOf`), or a nullable wrapper's around the union.
+ *
+ *   - A keyword the composition decided the union of
+ *     (`isDecidedDiscriminator`) is the answer for every union under it,
+ *     whatever the schema writes itself: the union it goes with dispatches
+ *     by it, and every other is flattened (`discriminatesUnion`).
+ *   - Else the schema's own keyword (`writtenDiscriminatorOf`). Written
+ *     beside a `oneOf` and an `anyOf` that both type the schema, it goes
+ *     with one of the unions the two lead to (`discriminatedUnion`: the
+ *     one whose variants its `mapping` names, or with no `mapping` pin its
+ *     property; the first of the two where it selects them alike), and the
+ *     other is handed the decision, so it is flattened: `{ oneOf: [{ $ref:
+ *     Pet }, { $ref: Toy }], anyOf: [{ $ref: Cat }, { $ref: Dog }],
+ *     discriminator: { propertyName: 'kind', mapping: { cat: Cat, dog: Dog
+ *     } } }` dispatches its `anyOf` and flattens its `oneOf`, as a member,
+ *     as the component a `$ref` member names and as the component itself
+ *     (#718: the keyword went to the first typing union whatever its
+ *     `mapping` named; #680: it went to both).
+ *   - Else `handed`, as written.
+ *
+ * A schema its `allOf` composes (`allOfComposesComponent`) is read through
+ * its own members (`readComponentAllOf`), the unions written beside its
+ * `allOf` among them, so they are read with what the schema hands its
+ * members (`wrapperDiscriminatorWithin`): its own composition's decision
+ * where nothing is decided around it. A decision is handed in only to a
+ * wrapper written inline, which is part of the composition that made it
+ * (`composedInlineMember`; #714) — a reader that reaches a component its
+ * `allOf` composes through a `$ref` hands it none, since such a component
+ * is read by its own composition's keyword (`mergeAllOfMembers`,
+ * `collectObjectProperties`).
  */
 export function axisDiscriminatorOf(
   schema: SchemaObject,
   variants: readonly SchemaObject[],
+  handed?: DiscriminatorKeyword,
+  schemas?: Record<string, SchemaObject>,
 ): DiscriminatorKeyword | undefined {
-  if (schema.discriminator === undefined || schema.oneOf === undefined || schema.anyOf === undefined) {
-    return schema.discriminator;
+  if (isDecidedDiscriminator(handed)) return handed;
+  if (allOfComposesComponent(schema)) {
+    const own = wrapperDiscriminatorOf(schema, schemas);
+    if (isDecidedDiscriminator(own)) return own;
   }
-  const first = unionAxesOf(schema).find((axis) => unionTypesSchema(axis));
-  return first === undefined || first === variants ? schema.discriminator : undefined;
+  const written = writtenDiscriminatorOf(schema, variants);
+  if (written === undefined || schema.oneOf === undefined || schema.anyOf === undefined) return written ?? handed;
+  const typing = unionAxesOf(schema).filter((axis) => unionTypesSchema(axis));
+  if (typing.length < 2) return written;
+  const decided = discriminatedUnion(memberUnions(schema, schemas, new Set(), undefined, true), undefined, schemas);
+  // Neither union leads to one a keyword could dispatch — each a nullable
+  // wrapper around no union: the keyword stays with the first, as it was.
+  if (decided === undefined) return typing[0] === variants ? written : handed;
+  return decided.variants === variants ? decided.keyword : forUnion(decided.keyword, decided.variants);
 }
 
 /**
@@ -7434,9 +7837,9 @@ function inheritedRef(name: string): ModelRef {
  * allOf: [{ oneOf: [...] }] }] }`, a lone member; `{ properties: { extra
  * }, allOf: [{ oneOf: [...] }] }`, which says more than its members do —
  * was no model's, where `{ oneOf: [...] }` written as the member
- * dispatches); the `discriminator` written for a union among the members
- * of the `allOf` it sits in goes with it to its own members, where it
- * writes none for them, and so do the axes not to read.
+ * dispatches); what the `allOf` it sits in hands its members for a union
+ * among them goes with it to its own members
+ * (`wrapperDiscriminatorWithin`), and so do the axes not to read.
  * Every member contributes its own `properties` as always-applying
  * and its own `required` — beside a `oneOf`/`anyOf` too, an inline
  * member's or those of the component a `$ref` member names (`Pet: {
@@ -7467,7 +7870,11 @@ function inheritedRef(name: string): ModelRef {
  * (`wrapperDiscriminator`; `detectAllOfVariantDiscriminator`, which reads a
  * `$ref` variant's const from its component): its variants' properties are
  * not read, and the discriminator is returned (the first, when two axes
- * dispatch); otherwise every variant is flattened in as branch-only
+ * dispatch). Which keyword a union is read with is one question
+ * (`axisDiscriminatorOf`): where the composition carries several unions
+ * and a keyword, the keyword goes with one of them and the others are
+ * handed that decision, so they are no dispatchers, whatever their
+ * variants pin (#718). Otherwise every variant is flattened in as branch-only
  * declarations — its properties, those of its `allOf` wrappers and of the
  * unions nested in them, and those of the component a `$ref` variant names
  * (`declareVariant`, the one branch reader the inline merge flattens a
@@ -7520,10 +7927,10 @@ function readComponentAllOfMember(
   // (#429).
   if (allOfComposesComponent(resolved)) {
     // An inline wrapper has no model of its own: the dispatcher among its
-    // members is this model's, found by the `discriminator` written for
-    // them on the `allOf` it sits in where it writes none itself, and the
-    // axes not to read are not read inside it (`composedInlineMember`;
-    // #714). A component's is its own model's.
+    // members is this model's, found by what the `allOf` it sits in hands
+    // on to them (`wrapperDiscriminatorWithin`), and the axes not to read
+    // are not read inside it (`composedInlineMember`; #714). A component's
+    // is its own model's.
     const inline = composedInlineMember(landing) !== undefined;
     const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, inline ? options : {});
     return inline ? found : undefined;
@@ -7557,16 +7964,18 @@ function readComponentAllOfMember(
   let discriminator: AllOfDiscriminator | undefined;
   for (const [index, variants] of axes.entries()) {
     const branch = branches[index];
+    // The keyword this union is read with: the one the composition decided
+    // the union of, else the member's own, else the one handed down.
+    const explicit = axisDiscriminatorOf(resolved, variants, options.wrapperDiscriminator, schemas);
     if (branch) {
       // The member's own `discriminator`, written on the wrapper, goes with
       // the variant (#398 review round 6: the recursion passed the options
       // unchanged, so a mapping on the wrapper never reached the union under
-      // it, which was flattened instead of dispatched) — when this axis is
-      // the one the keyword is written for (`axisDiscriminatorOf`).
-      const wrapperDiscriminator = axisDiscriminatorOf(resolved, variants) ?? options.wrapperDiscriminator;
+      // it, which was flattened instead of dispatched) — as this axis is
+      // read with it (`axisDiscriminatorOf`).
       const wrapped = readComponentAllOfMember(name, branch, schemas, reading, {
         ...options,
-        wrapperDiscriminator,
+        wrapperDiscriminator: explicit,
         origin: origin ?? undefined,
       });
       discriminator ??= wrapped;
@@ -7574,15 +7983,10 @@ function readComponentAllOfMember(
     }
     // A dispatcher: the discriminator is kept instead of the variants'
     // fields — the base members already carry the fields every variant
-    // shares (e.g. EventSchema, where each variant pins `event`). The
-    // member's own keyword is the first typing union's alone when it writes
-    // two (`axisDiscriminatorOf`; #680).
-    const detected = detectAllOfVariantDiscriminator(
-      variants,
-      name,
-      schemas,
-      axisDiscriminatorOf(resolved, variants) ?? options.wrapperDiscriminator,
-    );
+    // shares (e.g. EventSchema, where each variant pins `event`). A union
+    // the composition's keyword does not go with is no dispatcher, whatever
+    // its variants pin, and is flattened below (`axisDiscriminatorOf`; #718).
+    const detected = detectAllOfVariantDiscriminator(variants, name, schemas, explicit);
     if (detected) {
       discriminator ??= detected;
       continue;
@@ -7609,8 +8013,12 @@ function readComponentAllOfMember(
  * beside its `allOf` with no union beside it is the one a union among its
  * members dispatches by (`Pet: { allOf: [{ $ref: Base }, { oneOf: [...] }],
  * discriminator: { propertyName: 'kind' } }`), so it is handed to each
- * member as the wrapper's; one written beside a union goes with that union
- * (`besideUnionMembers`). A schema reached again on the chain declares
+ * member as the wrapper's; one written beside a union is written with that
+ * union (`besideUnionMembers`). Where the members lead to several unions,
+ * the keyword written for any of them is decided to go with one — the
+ * union whose variants its `mapping` names — and every member is handed
+ * that decision, so the other unions are flattened
+ * (`wrapperDiscriminatorOf`; #718). A schema reached again on the chain declares
  * nothing more (`seen`), so a component that names itself, or two members
  * naming one component, terminate. A component written as a bare `$ref`
  * composes its reference alone (`componentAllOfMembers`): a `required` or
@@ -7618,12 +8026,14 @@ function readComponentAllOfMember(
  * annotations is beside any `$ref` (#618 review). `enclosing` is how the
  * member the schema was reached as is read, when that member is an inline
  * `allOf` wrapper among a model's own members (`composedInlineMember`;
- * #714): the wrapper is part of the `allOf` it sits in, so the
- * `discriminator` written for a union among that `allOf`'s members is
- * handed on to the wrapper's own members where the wrapper writes none for
- * them, and the axes the dispatcher base does not read are not read under
- * it either. A component a `$ref` names is read with none: what is written
- * around the reference says nothing of the component's own members.
+ * #714): the wrapper is part of the `allOf` it sits in, so what that
+ * `allOf` hands its members for a union among them is handed on to the
+ * wrapper's own (`wrapperDiscriminatorWithin`: the decision made around
+ * the wrapper, else the wrapper's own keyword, else the one handed on as
+ * written), and the axes the dispatcher base does not read are not read
+ * under it either. A component a `$ref` names is read with none: what is
+ * written around the reference says nothing of the component's own
+ * members.
  */
 function readComponentAllOf(
   name: string,
@@ -7637,7 +8047,7 @@ function readComponentAllOf(
   reading.seen.add(schema);
   reading.root ??= schema;
   let discriminator: AllOfDiscriminator | undefined;
-  const wrapperDiscriminator = wrapperDiscriminatorOf(schema) ?? enclosing.wrapperDiscriminator;
+  const wrapperDiscriminator = wrapperDiscriminatorWithin(schema, enclosing.wrapperDiscriminator, schemas);
   const { skipAxes } = enclosing;
   for (const member of componentAllOfMembers(schema)) {
     discriminator =
@@ -7673,18 +8083,116 @@ function ownRequired(schema: SchemaObject): readonly string[] {
 }
 
 /**
- * The `discriminator` a schema writes beside an `allOf` for a union among
- * the members, when it writes no union of its own beside it — one written
- * beside a union is that union's (`besideUnionMembers`), never another
- * member's. Read by the component readers and the inline merge alike, so a
+ * The `discriminator` a composed schema hands the members it reads
+ * (`componentAllOfMembers`), for a union among them — read by the
+ * component readers, the inline merge and the pagination walk alike, so a
  * reference to the component and the component itself dispatch by it.
+ *
+ * Where the members lead to one union, or to none, it is the keyword the
+ * schema writes beside its `allOf` with no union of its own beside it —
+ * one written beside a union is that union's (`besideUnionMembers`), never
+ * another member's — handed to every member as written, as it was.
+ *
+ * Where they lead to several (`memberUnions`: through a chain of
+ * references, nullable wrappers and inline `allOf` wrappers — which are
+ * part of the `allOf` they sit in, #714 — the unions written beside the
+ * `allOf` or beside each other included), a keyword the document writes for any
+ * of them — beside the `allOf`, beside the unions, or on a member — is
+ * the composition's, and it is decided here which union it goes with
+ * (`discriminatedUnion`: the one whose variants its `mapping` names, or
+ * with no `mapping` pin its property; the one it is written with where
+ * that selects none of another). Every member is handed that decision
+ * (`forUnion`), so the one union dispatches by the keyword and every other
+ * is flattened, never a dispatcher by its pinned consts beside a keyword
+ * that says which union dispatches (`axisDiscriminatorOf`,
+ * `detectAllOfVariantDiscriminator`): `Pick: { allOf: [{ oneOf: [{ $ref:
+ * Pet }, { $ref: Toy }] }, { anyOf: [{ $ref: Cat }, { $ref: Dog }] }],
+ * discriminator: { propertyName: 'kind', mapping: { cat: Cat, dog: Dog } }
+ * }` is `Pick { name?, toy? }` dispatching to `Cat` and `Dog`, as it is
+ * with the keyword on either member and with the two unions written
+ * beside each other (#718: the keyword was handed to every member, and a
+ * `mapping` made each union a dispatcher, so `Pick` dispatched to `Cat`
+ * and `Dog` and carried neither union's properties). A union alone with
+ * the keyword written on a nullable wrapper beside it is handed it too.
+ * Decided once per schema and document (`composedDiscriminators`).
  */
-export function wrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeyword | undefined {
+export function wrapperDiscriminatorOf(
+  schema: SchemaObject,
+  schemas?: Record<string, SchemaObject>,
+): DiscriminatorKeyword | undefined {
   // A `discriminator` beside a `$ref` is not read, as nothing but
   // annotations is beside any `$ref` (#618 review): a bare `$ref` alias
   // dispatches as the component it names does.
   if (schema.$ref !== undefined) return undefined;
+  const memo = composedDiscriminators.get(schema);
+  if (memo && memo.schemas === schemas) return memo.discriminator;
+  const discriminator = composedDiscriminatorOf(schema, schemas);
+  composedDiscriminators.set(schema, { schemas, discriminator });
+  return discriminator;
+}
+
+/**
+ * What `wrapperDiscriminatorOf` answered for each schema of the document
+ * being read, with the component map it was asked with: the decision reads
+ * every member's unions through their references, and every reading of a
+ * composed schema asks it again. Forgotten with the folded schemas
+ * (`resetFoldedSchemas`).
+ */
+let composedDiscriminators = new WeakMap<
+  SchemaObject,
+  { schemas: Record<string, SchemaObject> | undefined; discriminator: DiscriminatorKeyword | undefined }
+>();
+
+/** The `discriminator` a schema writes beside its `allOf` for a union among the members, as written, before anything is decided (`wrapperDiscriminatorOf`): its own keyword when it writes no union of its own beside the `allOf` — one written beside a union is that union's (`besideUnionMembers`). */
+function writtenWrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeyword | undefined {
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
+}
+
+/**
+ * The `discriminator` a composed schema hands its members where the schema
+ * is itself read as a member of an `allOf` — an inline `allOf` wrapper
+ * (`composedInlineMember`), which is part of the `allOf` it sits in
+ * (workos/oagen#714) — and `handed` is what that `allOf` hands it. A
+ * decision made by the composition around the wrapper
+ * (`isDecidedDiscriminator`; #718) was made over every union under it, the
+ * wrapper's included (`memberUnions`), so it is the answer for the
+ * wrapper's members too, whatever the wrapper writes. Else the wrapper's
+ * own (`wrapperDiscriminatorOf`: the keyword it writes for a union among
+ * its members), which is written nearer the union, else `handed` as
+ * written: `Pet: { discriminator, allOf: [{ $ref: Animal }, {
+ * additionalProperties: false, allOf: [{ oneOf: [...] }] }] }` dispatches
+ * the union by `Pet`'s keyword, as it does with the union written as the
+ * member. With nothing handed it is the schema's own, so a component read
+ * as itself, or one a `$ref` names, asks this with none. The one handing-on
+ * every reader of a wrapper makes: the component reader
+ * (`readComponentAllOf`), the variant builder (`memberUnions`), the inline
+ * merge (`mergeAllOfMembers`) and the pagination walk
+ * (`collectObjectProperties`).
+ */
+export function wrapperDiscriminatorWithin(
+  schema: SchemaObject,
+  handed: DiscriminatorKeyword | undefined,
+  schemas?: Record<string, SchemaObject>,
+): DiscriminatorKeyword | undefined {
+  if (isDecidedDiscriminator(handed)) return handed;
+  return wrapperDiscriminatorOf(schema, schemas) ?? handed;
+}
+
+/** What `wrapperDiscriminatorOf` answers for a schema not asked yet (see there). */
+function composedDiscriminatorOf(
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): DiscriminatorKeyword | undefined {
+  const wrapper = writtenWrapperDiscriminatorOf(schema);
+  const unions = componentAllOfMembers(schema).flatMap((member) =>
+    memberUnions(member, schemas, new Set(), undefined, true),
+  );
+  const decided = discriminatedUnion(unions, schema.discriminator, schemas);
+  if (decided === undefined) return wrapper;
+  // One union, written with the keyword it is read by: handed on as written.
+  const [only] = unions;
+  if (unions.length === 1 && (only!.discriminator ?? wrapper) === decided.keyword) return wrapper;
+  return forUnion(decided.keyword, decided.variants);
 }
 
 /**
@@ -8145,6 +8653,16 @@ function readAsWrapped(schema: SchemaObject): SchemaObject | undefined {
  * (a const that gives no name, `''` or `'-'`; workos/oagen#430), or two
  * pinning one value make the union no axis — and the mapping pairs each
  * value with its model. A single const-pinned variant dispatches too.
+ *
+ * `explicit` is the keyword the union is read with (`axisDiscriminatorOf`).
+ * One a composed schema decided goes with another of its unions
+ * (`discriminatesUnion`) makes this union no axis, with a `mapping` or by
+ * its pinned consts alike: the document says which union the component
+ * dispatches by, a `Model` carries one `discriminator`, and the union left
+ * out is flattened, so its variants' properties are fields of the model
+ * (#718: handed a keyword whose `mapping` names another union's variants,
+ * the union was a dispatcher by that mapping, its own variants' properties
+ * on no model).
  */
 function detectAllOfVariantDiscriminator(
   variants: readonly SchemaObject[],
@@ -8152,6 +8670,9 @@ function detectAllOfVariantDiscriminator(
   schemas: Record<string, SchemaObject> | undefined,
   explicit?: DiscriminatorKeyword,
 ): AllOfDiscriminator | null {
+  // A keyword the composition decided goes with another of its unions says
+  // which union dispatches: this one is flattened, whatever it pins (#718).
+  if (!discriminatesUnion(explicit, variants)) return null;
   const members = unionMembers({ oneOf: [...variants] }, NO_INLINE_NAMES, schemas);
   if (members.length === 0) return null;
   const writtenMapping = explicit?.mapping ?? {};
@@ -8351,7 +8872,7 @@ function composedInlineMember(landing: MemberLanding): SchemaObject | undefined 
   return allOfComposesComponent(landing.resolved) ? landing.resolved : undefined;
 }
 
-/** One union a component's `allOf` member carries: the member the member reader reads it on (`member`: the one handed in, or, under an inline `allOf` wrapper, the wrapper's own member that carries it), the schema that writes it, its variants, and the `discriminator` declared for it on the way — the carrier's own, else a nullable wrapper's around it, else the one written on the `allOf` an inline wrapper around it writes. */
+/** One union a component's `allOf` member carries: the member the member reader reads it on (`member`: the one handed in, or, under an inline `allOf` wrapper, the wrapper's own member that carries it), the schema that writes it, its variants, and the `discriminator` it is read with (`axisDiscriminatorOf`) — or, read as written, the one the document writes for it: the carrier's own, else a nullable wrapper's around it, else the one an inline `allOf` wrapper around it writes for its members (`memberUnions`). */
 interface MemberUnion {
   member: SchemaObject;
   carrier: SchemaObject;
@@ -8370,18 +8891,27 @@ interface MemberUnion {
  * for it on the way (the carrier's own, else the wrapper's around it, as
  * the member reader hands a wrapper's down; #398 review round 6: a mapping
  * on the wrapper was forgotten, and the builder flattened what the reader
- * dispatched; the carrier's own going to the first typing union alone
- * when it writes two, `axisDiscriminatorOf`). None for a member that
- * carries none, or a member that names a component whose `allOf` composes
- * it (`allOfComposesComponent`: read as a component composed with `allOf`,
- * whose axes are its own model's, never this one's — a union beside an
- * `allOf` that only annotates or limits the member is an axis, as the
- * member reader reads it, #613, and so is each of a `oneOf` and an `anyOf`
- * written together beside one, #680). An inline `allOf` wrapper
- * (`composedInlineMember`) carries the unions its own members carry, each
- * read the same way and listed under the wrapper's member that carries it
- * (`MemberUnion.member`), with the `discriminator` the wrapper writes for
- * them, else the one handed down to it (workos/oagen#714: none was found
+ * dispatched) — the keyword the union is read with (`axisDiscriminatorOf`,
+ * handed `wrapper`: the decision of the composition the member sits in,
+ * else the carrier's own, which goes with one of the two unions a carrier
+ * writes together, else `wrapper` as written), or, `asWritten`, the
+ * keyword the document writes for it before anything is decided
+ * (`writtenDiscriminatorOf`, else the nullable wrapper's around it), which
+ * is what the decision itself reads (`discriminatedUnion`). None for a
+ * member that carries none, or a member that names a component whose
+ * `allOf` composes it (`allOfComposesComponent`: read as a component
+ * composed with `allOf`, whose axes are its own model's, never this one's
+ * — a union beside an `allOf` that only annotates or limits the member is
+ * an axis, as the member reader reads it, #613, and so is each of a
+ * `oneOf` and an `anyOf` written together beside one, #680). An inline
+ * `allOf` wrapper (`composedInlineMember`) carries the unions its own
+ * members carry, each read the same way and listed under the wrapper's
+ * member that carries it (`MemberUnion.member`), with the keyword the
+ * wrapper hands its members (`wrapperDiscriminatorWithin`: the decision
+ * handed down to it, else its own, else the one handed down as written)
+ * or, `asWritten`, the one it writes for them, else the one written around
+ * it — so the unions under a wrapper are among those the composition
+ * around it decides its keyword over (workos/oagen#714: none was found
  * under a wrapper, so `Pet: { allOf: [{ allOf: [{ oneOf: [cat, dog] }] }]
  * }` built neither `PetCat` nor `PetDog`); a wrapper met again on the walk
  * carries nothing more.
@@ -8403,6 +8933,7 @@ function memberUnions(
   schemas: Record<string, SchemaObject> | undefined,
   seen = new Set<SchemaObject>(),
   wrapper?: DiscriminatorKeyword,
+  asWritten = false,
   reader: SchemaObject = member,
 ): MemberUnion[] {
   const landing = followMemberRefChain(member, schemas, seen);
@@ -8417,8 +8948,12 @@ function memberUnions(
   if (allOfComposesComponent(carrier)) {
     if (composedInlineMember(landing) === undefined || seen.has(carrier)) return [];
     seen.add(carrier);
-    const discriminator = wrapperDiscriminatorOf(carrier) ?? wrapper;
-    return componentAllOfMembers(carrier).flatMap((inner) => memberUnions(inner, schemas, seen, discriminator));
+    const discriminator = asWritten
+      ? (writtenWrapperDiscriminatorOf(carrier) ?? wrapper)
+      : wrapperDiscriminatorWithin(carrier, wrapper, schemas);
+    return componentAllOfMembers(carrier).flatMap((inner) =>
+      memberUnions(inner, schemas, seen, discriminator, asWritten),
+    );
   }
   const axes = unionAxesOf(carrier);
   const branches = axes.map((variants) => nullableAxisBranch(carrier, variants));
@@ -8431,8 +8966,10 @@ function memberUnions(
   const unions: MemberUnion[] = [];
   for (const [index, variants] of axes.entries()) {
     const branch = branches[index];
-    const discriminator = axisDiscriminatorOf(carrier, variants) ?? wrapper;
-    if (branch) unions.push(...memberUnions(branch, schemas, seen, discriminator, reader));
+    const discriminator = asWritten
+      ? (writtenDiscriminatorOf(carrier, variants) ?? wrapper)
+      : axisDiscriminatorOf(carrier, variants, wrapper, schemas);
+    if (branch) unions.push(...memberUnions(branch, schemas, seen, discriminator, asWritten, reader));
     else unions.push({ member: reader, carrier, variants, discriminator });
   }
   return unions;
@@ -8544,7 +9081,7 @@ function discriminatedVariantSchemas(
   // name (`Map`, `Object.fromEntries`), so a base property named
   // `constructor`, `toString` or `__proto__` reaches every variant.
   const members = componentAllOfMembers(schema);
-  const wrapperDiscriminator = wrapperDiscriminatorOf(schema);
+  const wrapperDiscriminator = wrapperDiscriminatorOf(schema, schemas);
   // The variant axis: a member carrying a `oneOf`/`anyOf` — read through a
   // reference chain and a nullable wrapper exactly as `readComponentAllOfMember`
   // reads it (`memberUnions`) — whose variants pin one property to distinct
@@ -8563,10 +9100,9 @@ function discriminatedVariantSchemas(
   // Each member once, a schema object the `allOf` lists twice included.
   for (const m of new Set(members)) {
     const dispatching = new Set<SchemaObject>();
-    for (const { member, variants, discriminator } of memberUnions(m, schemas)) {
+    for (const { member, variants, discriminator } of memberUnions(m, schemas, new Set(), wrapperDiscriminator)) {
       if (dispatching.has(member)) continue;
-      const explicit = discriminator ?? wrapperDiscriminator;
-      if (detectAllOfVariantDiscriminator(variants, fallbackName, schemas, explicit) === null) continue;
+      if (detectAllOfVariantDiscriminator(variants, fallbackName, schemas, discriminator) === null) continue;
       dispatching.add(member);
       axes.push(variants);
     }
@@ -9103,8 +9639,12 @@ export function componentTypeRef(key: string): TypeRef {
  * level down — the outer level's reading replaces the branch's, which it
  * accounts for (a wrapper's keywords conjoin with its branch's, a `$ref`
  * site's with its component's, in the one order `Field.constraints` reads
- * them). So a field's `constraints` and its type's are one reading — for a
- * JSON Pointer `$ref` deeper into a component (#539) once
+ * them). A type list's variants are that site read once per type: the
+ * outer reading is the union's, and what a lower level left on a variant
+ * is taken off it (`typeListVariants`; #711), so `{ type: ['array',
+ * 'string'], allOf: [{ items, minItems: 2 }] }` carries `{ minItems: 2 }`
+ * on the union alone. So a field's `constraints` and its type's are one
+ * reading — for a JSON Pointer `$ref` deeper into a component (#539) once
  * `resolveSchemaPointers` settles the site, which conjoins the pointed
  * schema's limits with the site's on the type and the field or parameter
  * alike (#545 review).
@@ -9546,9 +10086,10 @@ function typeListCopies(schema: SchemaObject): SchemaObject[] {
 /**
  * `variants` with each repeat of an earlier one dropped — a model or enum
  * reference repeated by name, any other type by shape (`stableStringify`,
- * limits and all) — so a union never holds one type twice: the copies of a
- * type list one keyword types alike (`{ type: ['string', 'integer'], enum:
- * ['a', 1] }` is the one enum, not that enum twice; #616).
+ * the limits of what it nests and all) — so a union never holds one type
+ * twice: the copies of a type list one keyword types alike (`{ type:
+ * ['string', 'integer'], enum: ['a', 1] }` is the one enum, not that enum
+ * twice; #616).
  */
 function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
   const seen = new Set<string>();
@@ -9564,11 +10105,59 @@ function dedupeTypeRefs(variants: readonly TypeRef[]): TypeRef[] {
 }
 
 /**
+ * The variants a type list is read as, from the types its per-type copies
+ * were `built` as (`buildTypeRef` on each of `typeListCopies`), and the
+ * limits those types were built with.
+ *
+ * A variant is the list's own schema read as one of its types, so it is
+ * the list's site read again: the site's limits are the union's, read once
+ * from the schema (`schemaConstraints`), and a variant carries none
+ * (`UnionType.constraints`). The builder attaches no limits to the copy
+ * itself, but it re-enters `schemaToTypeRef` wherever a copy is read one
+ * level down, and that level's limits — the site's too, which
+ * `schemaConstraints` reads into the union's from every level — came
+ * back on the variant (#711): a lone `allOf` member's (`{ type: ['array',
+ * 'string'], allOf: [{ items: { type: 'string' }, minItems: 2 }] }` had `{
+ * minItems: 2 }` on the union and on its array variant, where `items` and
+ * `minItems` beside the list, or in two members, left the variant bare),
+ * at any depth (`allOf: [{ allOf: [{ items }, { minItems: 2 }] }]`); the
+ * one typing member's beside members that only limit it; a `$ref`
+ * member's array or primitive component's (`TagList: { items, minItems: 2
+ * }` named by the `allOf`); the one branch's of a nullable `oneOf`/`anyOf`
+ * (`oneOf: [{ items, minItems: 2 }, { type: 'null' }]`); and the copy's
+ * own, re-read under OAS 3.0 `nullable: true` beside the list. So every
+ * limit a variant was built with is taken off it here
+ * (`takeTypeConstraints`), whichever level wrote it and whatever the
+ * variant is — an array, a map, a primitive, a literal, a nested union,
+ * any of them under `nullable` — and only then are the variants compared
+ * (`dedupeTypeRefs`): two copies typed alike but for a limit one of them
+ * read are one variant, as they are when the limit sits beside the list
+ * (`{ type: ['string', 'integer'], allOf: [{ const: 'ab', minLength: 2 }]
+ * }` was the literal twice, once with `{ minLength: 2 }`). What a variant
+ * nests keeps its own limits: an array's items, a map's values, the
+ * variants of a `oneOf`/`anyOf` the copy is typed by.
+ *
+ * `limits` are the ones taken, conjoined (`combineConstraints`), for the
+ * caller whose list collapses to one variant: that variant is the type
+ * itself and no variant of anything, so it carries them as its copy alone
+ * would (`withTypeConstraints`), under the site's reading where the site
+ * has one.
+ */
+function typeListVariants(built: readonly TypeRef[]): { variants: TypeRef[]; limits: Constraints | undefined } {
+  const limits = built.reduce<Constraints | undefined>(
+    (taken, variant) => combineConstraints(taken, takeTypeConstraints(variant)),
+    undefined,
+  );
+  return { variants: dedupeTypeRefs(built), limits };
+}
+
+/**
  * `schemaToTypeRef` without the site's limits: the shape of the type, every
  * nested schema typed through `schemaToTypeRef` itself. A type list naming
  * several types is the union of its per-type copies (`typeListCopies`),
  * never one type twice, a lone copy the type itself (`dedupeTypeRefs`;
- * #616).
+ * #616), and no variant of it carries a limit, whichever level of the
+ * schema writes it (`typeListVariants`; #711).
  */
 function buildTypeRef(
   schema: SchemaObject,
@@ -9633,19 +10222,27 @@ function buildTypeRef(
     // none (Greptile, #616 review: `items: { type: ['object', 'string'],
     // allOf: [{ $ref: Owner }], minProperties: 2 }` is `Owner[]`, as
     // `items: { allOf: [{ $ref: Owner }], minProperties: 2 }` is). The
-    // variants are built without them
-    // (`buildTypeRef`); what they nest — items, values — carries its own.
+    // variants are built without them (`buildTypeRef`) and carry none a
+    // level below the copy wrote either — an `allOf` member's at any depth,
+    // a `$ref` member's component's, a nullable wrapper's branch's: the
+    // site's too, taken off whatever the copy was built as
+    // (`typeListVariants`; #711: `allOf: [{ items, minItems: 2 }]` beside
+    // `['array', 'string']` had `{ minItems: 2 }` on the array variant as
+    // well as on the union); what they nest — items, values — carries its
+    // own. A list that collapses to one variant is that type as its copy
+    // alone is built, limits and all.
     // Each per-type copy stands for the schema it was spread from
     // (`derivedCopy`), so a merge the schema carries (`allOf` beside `type:
     // ['object', 'string']`) is the one the extractor is building for the
     // schema itself (`materializingMergedAllOfName`; #566 review).
     if (nonNullTypes.length > 1) {
-      const variants = dedupeTypeRefs(
+      const { variants, limits } = typeListVariants(
         typeListCopies(schema).map((copy) =>
           buildTypeRef(copy, contextName, parentModelName, siblingProperties, reservedNames),
         ),
       );
-      const ref: TypeRef = variants.length === 1 ? variants[0]! : { kind: 'union', variants };
+      const ref: TypeRef =
+        variants.length === 1 ? withTypeConstraints(variants[0]!, limits) : { kind: 'union', variants };
       return schema.type.includes('null') ? asNullable(ref) : ref;
     }
   }
