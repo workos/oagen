@@ -1482,14 +1482,20 @@ export function extractOperations(
   });
 
   // What the passes read after the operations ask of a name they would
-  // take (`ownBodyNamesOf`): the operations that
-  // mint it from their stem — told by the stand-in reading, made now for an
-  // operation the contest above had no reason to read twice — less the one
-  // that gave it up to another, each with what its own bodies hold under
-  // the name in the IR as it stands.
+  // take (`ownBodyNamesOf`): the operations that mint it from their stem —
+  // told by the stand-in reading, made now for an operation the contest
+  // above had no reason to read twice — less the one that gave it up to
+  // another, each with what its own bodies hold under the name in the IR as
+  // it stands. A name decided before the operations (`declaredNames`) is
+  // its owner's, whatever an operation's stem spells: the operation's own
+  // body is settled against the component by the merge passes, and so is
+  // every other copy — a payload variant the component admits still folds
+  // onto it — so no operation holds it, here as in the contest
+  // (`bodyNamesOf`).
   const ownBodyNames: OwnBodyNames = (name) =>
     rehearse(() => {
       const definitions: OwnBodyDefinition[] = [];
+      if (declaredNames.has(name)) return definitions;
       for (const reading of rehearsed) {
         if (!reading.held.includes(name)) continue;
         if (reading.minted === undefined) {

@@ -1658,6 +1658,87 @@ describe('#712', () => {
         `);
       });
 
+      it('leaves a name a component holds to the component against a payload too: an operation’s stem does not hold it', async () => {
+        // `getPet` mints `GetPetResponse` from its stem, but a component schema holds the
+        // name: `getPet`'s own body is settled against the component by the merge
+        // (`GetPetResponse2`), and so is a callback's variant of that title — one the
+        // component admits still folds onto it, where holding the name for `getPet` would
+        // have renamed it under the callback's stem.
+        const variant = (fields: Record<string, Schema>) => obj({ kind: konst('a'), ...fields });
+        const calling = {
+          '/dogs': {
+            post: {
+              operationId: 'createDog',
+              responses: { '204': { description: 'ok' } },
+              callbacks: {
+                onDog: {
+                  '{$request.body#/url}': {
+                    post: { requestBody: json(obj({ shape: titled() })), responses: { '200': { description: 'ok' } } },
+                  },
+                },
+              },
+            },
+          },
+        };
+        expect(
+          await settled(
+            openapi,
+            { ...getPet(), ...calling },
+            { components: { schemas: { GetPetResponse: variant({ breed: str }) } } },
+          ),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreateDogOnDogPayload { shape?: GetPetResponse | Other }",
+            "GET /pets/{petId} (getPet): none → GetPetResponse2",
+            "GetPetResponse { kind?: "a", breed?: string }",
+            "GetPetResponse2 { name?: string }",
+            "Other { kind?: "b", x?: integer }",
+            "POST /dogs (createDog): none → unknown",
+            "! [oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": its shape differs from component schema "GetPetResponse"",
+          ]
+        `);
+        // A component of a third shape, and a component enum of the name: each inline copy
+        // leaves the name by the merge's own rule, as before.
+        expect(
+          await settled(
+            openapi,
+            { ...getPet(), ...calling },
+            { components: { schemas: { GetPetResponse: obj({ other: str }) } } },
+          ),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreateDogOnDogGetPetResponse { kind?: "a", breed?: string }",
+            "CreateDogOnDogPayload { shape?: CreateDogOnDogGetPetResponse | Other }",
+            "GET /pets/{petId} (getPet): none → GetPetResponse2",
+            "GetPetResponse { other?: string }",
+            "GetPetResponse2 { name?: string }",
+            "Other { kind?: "b", x?: integer }",
+            "POST /dogs (createDog): none → unknown",
+            "! [oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": its shape differs from component schema "GetPetResponse"",
+            "! [oagen] Renamed inline model "GetPetResponse" → "CreateDogOnDogGetPetResponse": its shape differs from component schema "GetPetResponse"",
+          ]
+        `);
+        expect(
+          await settled(
+            openapi,
+            { ...getPet(), ...calling },
+            { components: { schemas: { GetPetResponse: { type: 'string', enum: ['a', 'b'] } } } },
+          ),
+        ).toMatchInlineSnapshot(`
+          [
+            "CreateDogOnDogGetPetResponse { kind?: "a", breed?: string }",
+            "CreateDogOnDogPayload { shape?: CreateDogOnDogGetPetResponse | Other }",
+            "GET /pets/{petId} (getPet): none → GetPetResponse2",
+            "GetPetResponse2 { name?: string }",
+            "Other { kind?: "b", x?: integer }",
+            "POST /dogs (createDog): none → unknown",
+            "enum GetPetResponse [a, b]",
+            "! [oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": enum "GetPetResponse" owns the name",
+            "! [oagen] Renamed inline model "GetPetResponse" → "CreateDogOnDogGetPetResponse": enum "GetPetResponse" owns the name",
+          ]
+        `);
+      });
+
       it('leaves a variant an operation’s own body titles like the body to that operation’s reading, as before', async () => {
         // One operation, one reading: the root and the variant it titles meet inside
         // `getPet`, with that reading's own warning. No other operation is involved.
@@ -1795,6 +1876,24 @@ describe('#712', () => {
         "GetPetResponseOwner { kind?: "a", name?: string }",
         "Other { kind?: "b", x?: integer }",
         "webhook dogCreated: DogCreatedPayload",
+      ]
+    `);
+    // A name a component holds is the component's against a webhook's payload too: the
+    // variant it admits folds onto it, `getPet`'s own body steps for it, as before.
+    expect(
+      await settled('3.1.0', getPet(), {
+        components: { schemas: { GetPetResponse: obj({ kind: konst('a'), breed: str }) } },
+        ...hook(obj({ shape: titled() })),
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "DogCreatedPayload { shape?: GetPetResponse | Other }",
+        "GET /pets/{petId} (getPet): none → GetPetResponse2",
+        "GetPetResponse { kind?: "a", breed?: string }",
+        "GetPetResponse2 { name?: string }",
+        "Other { kind?: "b", x?: integer }",
+        "webhook dogCreated: DogCreatedPayload",
+        "! [oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": its shape differs from component schema "GetPetResponse"",
       ]
     `);
     // A webhook whose response mounts `DogList` types no body: nothing is given up.
