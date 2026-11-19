@@ -56,6 +56,10 @@ const munion = { oneOf: [ref('Bird'), ref('Fish')] };
 const M = { propertyName: 'kind', mapping: { bird: '#/components/schemas/Bird', fish: '#/components/schemas/Fish' } };
 /** A union of inline variants, whose models the component builds (`PetCat`, `PetDog`). */
 const iunion = { oneOf: [tagged('cat', { meows: boolean }), tagged('dog', { barks: boolean })] };
+/** A second union of inline variants, pinning a property of its own (`PetRound`, `PetSquare`). */
+const shaped = (value: string, own: Record<string, unknown>) =>
+  object({ shape: { type: 'string', enum: [value] }, ...own }, { required: ['shape'] });
+const sunion = { oneOf: [shaped('round', { radius: integer }), shaped('square', { side: integer })] };
 /** A union nothing dispatches, flattened into the model. */
 const funion = { oneOf: [object({ a: string }), object({ b: integer })] };
 const text = { description: 'A pet.' };
@@ -276,6 +280,38 @@ const keywordSpellings = (openapi: string): Spelling[] => [
     'a nullable wrapper around the inner `allOf` of two',
     W(Animal, { oneOf: [W(extra, iunion), { type: 'null' }] }),
     W(Animal, extra, iunion),
+  ],
+  // Greptile on #725: what a nullable wrapper's one variant writes binds every variant, as the model.
+  [
+    'a nullable wrapper around a limited inner `allOf`',
+    W(Animal, { oneOf: [beside({ maxProperties: 3 }, iunion), { type: 'null' }] }),
+    W(Animal, { maxProperties: 3 }, iunion),
+  ],
+  [
+    'a nullable wrapper around a limited inner `allOf`, another union beside it',
+    W(Animal, sunion, { oneOf: [beside({ maxProperties: 3 }, iunion), { type: 'null' }] }),
+    W(Animal, sunion, { maxProperties: 3 }, iunion),
+  ],
+  [
+    'a nullable wrapper around a limited union',
+    W(Animal, { oneOf: [{ maxProperties: 3, ...iunion }, { type: 'null' }] }),
+    W(Animal, { maxProperties: 3, ...iunion }),
+  ],
+  [
+    'a nullable wrapper around a limited object, a union beside it',
+    W(Animal, { oneOf: [object({ extra: string }, { maxProperties: 3 }), { type: 'null' }] }, iunion),
+    W(Animal, object({ extra: string }, { maxProperties: 3 }), iunion),
+  ],
+  [
+    'a limited closed wrapper around a nullable wrapper around a limited union',
+    W(
+      Animal,
+      beside(
+        { additionalProperties: false, maxProperties: 5 },
+        { oneOf: [{ maxProperties: 3, ...iunion }, { type: 'null' }] },
+      ),
+    ),
+    W(Animal, { maxProperties: 5 }, { maxProperties: 3, ...iunion }),
   ],
 ];
 
@@ -513,7 +549,12 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
         the union beside the inner \`allOf\`: Pet extends Animal { id!: string, extra?: string } by kind to cat: PetCat, dog: PetDog ; PetCat { id!: string, extra?: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, extra?: string, kind!: "dog", barks?: boolean }
         the union beside the inner \`allOf\`, with its \`discriminator\`: Pet extends Animal { id!: string, extra?: string } by kind to bird: Bird, fish: Fish
         a nullable wrapper around the inner \`allOf\`: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog ; PetCat { id!: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, kind!: "dog", barks?: boolean }
-        a nullable wrapper around the inner \`allOf\` of two: Pet extends Animal { id!: string, extra?: string } by kind to cat: PetCat, dog: PetDog ; PetCat { id!: string, extra?: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, extra?: string, kind!: "dog", barks?: boolean }"
+        a nullable wrapper around the inner \`allOf\` of two: Pet extends Animal { id!: string, extra?: string } by kind to cat: PetCat, dog: PetDog ; PetCat { id!: string, extra?: string, kind!: "cat", meows?: boolean } ; PetDog { id!: string, extra?: string, kind!: "dog", barks?: boolean }
+        a nullable wrapper around a limited inner \`allOf\`: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog {"maxProperties":3} ; PetCat { id!: string, kind!: "cat", meows?: boolean } {"maxProperties":3} ; PetDog { id!: string, kind!: "dog", barks?: boolean } {"maxProperties":3}
+        a nullable wrapper around a limited inner \`allOf\`, another union beside it: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog {"maxProperties":3} ; PetRound { id!: string, shape!: "round", radius?: integer } {"maxProperties":3} ; PetSquare { id!: string, shape!: "square", side?: integer } {"maxProperties":3} ; PetCat { id!: string, kind!: "cat", meows?: boolean } {"maxProperties":3} ; PetDog { id!: string, kind!: "dog", barks?: boolean } {"maxProperties":3}
+        a nullable wrapper around a limited union: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog {"maxProperties":3} ; PetCat { id!: string, kind!: "cat", meows?: boolean } {"maxProperties":3} ; PetDog { id!: string, kind!: "dog", barks?: boolean } {"maxProperties":3}
+        a nullable wrapper around a limited object, a union beside it: Pet extends Animal { id!: string, extra?: string } by kind to cat: PetCat, dog: PetDog {"maxProperties":3} ; PetCat { id!: string, extra?: string, kind!: "cat", meows?: boolean } {"maxProperties":3} ; PetDog { id!: string, extra?: string, kind!: "dog", barks?: boolean } {"maxProperties":3}
+        a limited closed wrapper around a nullable wrapper around a limited union: Pet extends Animal { id!: string } by kind to cat: PetCat, dog: PetDog {"maxProperties":3} ; PetCat { id!: string, kind!: "cat", meows?: boolean } {"maxProperties":3} ; PetDog { id!: string, kind!: "dog", barks?: boolean } {"maxProperties":3}"
       `);
     },
   );
@@ -539,10 +580,6 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
   );
 
   it('reads two unions in one wrapper as the flat spelling reads them: each dispatched and built where nothing says which dispatches, the keyword’s union alone where one does (#718)', async () => {
-    // A second union of inline variants, pinning a property of its own.
-    const shaped = (value: string, own: Record<string, unknown>) =>
-      object({ shape: { type: 'string', enum: [value] }, ...own }, { required: ['shape'] });
-    const sunion = { oneOf: [shaped('round', { radius: integer }), shaped('square', { side: integer })] };
     const byMapping = { discriminator: M, ...munion };
     const closed = { additionalProperties: false };
     const spellings: Spelling[] = [
@@ -721,6 +758,43 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
     `);
     expect(await read('wrapped')).toEqual(plain);
     expect(await read('closed')).toEqual(plain);
+  });
+
+  it('hands the keyword beside `Pet`’s `allOf` through a pointer member, for `Pet` and for a merge that names it', async () => {
+    // Greptile on #725: the merge cleared the keyword past the pointer, so
+    // `Owner.merged` carried the fields of the variants `Pet` dispatches.
+    const schemas = {
+      Holder: object({
+        plain: munion,
+        wrapped: W(munion),
+        closed: beside({ additionalProperties: false }, munion),
+        both: beside({ additionalProperties: false }, extra, munion),
+      }),
+    };
+    const pointer = (property: string) => ({ $ref: `#/components/schemas/Holder/properties/${property}` });
+    const read = async (pet: unknown) => {
+      const spec = await parseJson(document('3.1.0', pet, { schemas, sites: true }));
+      expectMappingsBuilt(spec, JSON.stringify(pet));
+      return ownModels(spec).filter((model) => /^(Pet|OwnerMerged|Puppy)\b/.test(model));
+    };
+    const written = await read({ discriminator: M, ...W(Animal, munion) });
+    expect(written).toMatchInlineSnapshot(`
+      [
+        "Pet extends Animal { id!: string } by kind to bird: Bird, fish: Fish",
+        "Puppy extends Pet { id!: string, age?: integer }",
+        "OwnerMerged { id!: string, note?: string }",
+      ]
+    `);
+    for (const property of ['plain', 'wrapped', 'closed']) {
+      expect(await read({ discriminator: M, ...W(Animal, pointer(property)) }), property).toEqual(written);
+      expect(await read({ discriminator: M, ...W(Animal, W(pointer(property))) }), property).toEqual(written);
+      expect(await read(W(Animal, beside({ discriminator: M }, pointer(property)))), property).toEqual(written);
+    }
+    // A pointer to a wrapper of two members reads as the wrapper written in its place.
+    expect(await read({ discriminator: M, ...W(Animal, pointer('both')) })).toEqual(
+      await read({ discriminator: M, ...W(Animal, beside({ additionalProperties: false }, extra, munion)) }),
+    );
+    expect(warnings()).toEqual([]);
   });
 
   it('ends on a component that names itself inside a wrapper, and on a wrapper that holds itself', async () => {
@@ -957,6 +1031,23 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
         ['a nullable wrapper around the wrapper', { discriminator: byMapping, ...W(Base, nullable(W(pages, x))) }],
         ['a lone nullable wrapper around the wrapper', { discriminator: byMapping, ...W(nullable(W(Base, pages, x))) }],
         ['the `mapping` on the union, in a wrapper', W(Base, W({ discriminator: byMapping, ...pages }, x))],
+        // Greptile on #725: the keyword of a wrapper the walk reads through on its way to the union.
+        [
+          'a closed wrapper around a wrapper that writes the `mapping`',
+          W(Base, beside(closed, beside({ discriminator: byMapping }, pages)), x),
+        ],
+        [
+          'two wrappers around a wrapper that writes the `mapping`',
+          W(Base, beside(closed, W(beside({ discriminator: byMapping }, pages))), x),
+        ],
+        [
+          'a nullable wrapper around a wrapper that writes the `mapping`',
+          W(Base, nullable(beside({ discriminator: byMapping }, pages)), x),
+        ],
+        [
+          'a closed wrapper around a nullable wrapper that writes the `mapping`',
+          W(Base, beside(closed, { discriminator: byMapping, ...nullable(W(pages)) }), x),
+        ],
       ];
       const metas: Array<readonly [site: string, meta: unknown, model: string]> = [
         ['an inline merge naming the component', W(ref('MetaDispatcher'), object({ trace_id: string })), 'Meta'],
