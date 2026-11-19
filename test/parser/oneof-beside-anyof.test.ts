@@ -5,7 +5,12 @@ import * as path from 'node:path';
 import { parseSpec } from '../../src/parser/parse.js';
 import { diffSpecs } from '../../src/differ/diff.js';
 import { diffCommand } from '../../src/cli/diff.js';
-import { axisDiscriminatorOf, besideUnionsCompose, classifyInlineSchema } from '../../src/parser/schemas.js';
+import {
+  axisDiscriminatorOf,
+  besideUnionsCompose,
+  classifyInlineSchema,
+  isDecidedDiscriminator,
+} from '../../src/parser/schemas.js';
 import type { SchemaObject } from '../../src/parser/schemas.js';
 import type { ApiSpec, Model, Operation, TypeRef } from '../../src/ir/types.js';
 
@@ -761,11 +766,15 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
       },
     );
 
-    it('`axisDiscriminatorOf` hands a schema’s keyword to the first typing union alone', () => {
+    it('`axisDiscriminatorOf` hands a schema’s keyword to one typing union alone: the first, where it selects neither more', () => {
       const discriminator = { propertyName: 'kind' };
       const both: SchemaObject = { oneOf: [ref('Cat'), ref('Dog')], anyOf: [ref('Owner')], discriminator };
       expect(axisDiscriminatorOf(both, both.oneOf!)).toBe(discriminator);
-      expect(axisDiscriminatorOf(both, both.anyOf!)).toBeUndefined();
+      // The other union is handed the decision, which flattens it (#718): never the keyword as written.
+      const other = axisDiscriminatorOf(both, both.anyOf!);
+      expect(other).not.toBe(discriminator);
+      expect(isDecidedDiscriminator(other)).toBe(true);
+      expect(isDecidedDiscriminator(axisDiscriminatorOf(both, both.oneOf!))).toBe(false);
       // A `oneOf` of bare limits types nothing: the keyword is the `anyOf`'s.
       const limits: SchemaObject = { oneOf: [{ required: ['a'] }], anyOf: [ref('Cat'), ref('Dog')], discriminator };
       expect(axisDiscriminatorOf(limits, limits.oneOf!)).toBeUndefined();

@@ -515,7 +515,11 @@ export interface Operation {
    * `multipart/form-data; boundary=x`, `text/csv`), so an emitter can offer
    * each verbatim as a `Content-Type`. Present only when the body declares at
    * least one media type — whether or not one of them is read as
-   * `requestBody` — as `responseContentTypes` is on the response side.
+   * `requestBody` — as `responseContentTypes` is on the response side. Only
+   * the keys of a map are media types: a `content` that is no object
+   * (`content: "json"`, `['application/json']`, `null`) declares none, and
+   * the body is read as one that writes no `content`, after a parser
+   * warning — never by the indexes of a string or an array (#710).
    */
   requestBodyContentTypes?: string[];
   /**
@@ -583,6 +587,11 @@ export interface Operation {
    * only when it declares at least one. Like `responseHeaders`, this lifts
    * the primary entry's `contentTypes`, because `successResponses` only
    * exists when an operation declares more than one 2xx or 3xx response.
+   * Only the keys of a map are media types: a `content` that is no object
+   * (`content: "json"`, `['application/json']`, `null`) declares none, on
+   * this and on every other response entry, and the response is read as one
+   * that writes no `content`, after a parser warning — never by the indexes
+   * of a string or an array (#710).
    */
   responseContentTypes?: string[];
   /**
@@ -961,7 +970,11 @@ export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 
  * (`type: ['string', 'integer']`) carries the schema's keywords itself and
  * its variants none: each variant is the same schema read as one of its
  * types, so the limits are read from the union for whichever type the
- * value takes.
+ * value takes. The schema's keywords are the ones written beside the list
+ * and the ones its `allOf` members write, at any depth, alike (#711): `{
+ * type: ['array', 'string'], allOf: [{ items: { type: 'string' },
+ * minItems: 2 }] }` has `{ minItems: 2 }` on the union and nothing on its
+ * array variant, as `items` and `minItems` beside the list have.
  *
  * `oagen diff` compares them on every node that carries them, the type's
  * at every level included, and reports each keyword tightened or loosened
@@ -1023,7 +1036,10 @@ export interface Parameter {
    * one, each matched by media type essence (parameters and case stripped).
    * A `text/plain` entry without a schema types the parameter as a string;
    * a map none of whose media types is read does too, with a parser warning
-   * that names them; a `schema` beside a `content` map wins. Every field of
+   * that names them, and so does a `content` that is no map at all (a
+   * string, an array, a number, a boolean, `null`), which declares no media
+   * type and is read as absent, with a parser warning that names the value
+   * (#710); a `schema` beside a `content` map wins. Every field of
    * this interface that reads "the parameter's schema" reads this schema,
    * so a parameter declared either way is typed by one rule.
    *
@@ -1135,7 +1151,11 @@ export interface Parameter {
    * the map one entry. For a map none of whose media types is read, this is
    * where the media type the document declares the value in is kept: the
    * value is typed as a string and sent as written, so an emitter has
-   * nothing to encode.
+   * nothing to encode. Only the keys of a map are listed: a `content` that
+   * is no object (`content: "json"`, `['application/json']`) declares no
+   * media type, so the parameter carries neither this nor `contentType` —
+   * never the indexes of the string's characters or the array's elements
+   * (#710).
    */
   contentTypes?: string[];
   /**
@@ -1298,7 +1318,9 @@ export interface UnionType {
    * its first variant and nothing here, while `{ anyOf: [...], maxLength:
    * 10 }` has `{ maxLength: 10 }` here. A type list's variants carry none:
    * `{ type: ['string', 'integer'], maxLength: 20, minimum: 1 }` has both
-   * here, to read for whichever type the value takes.
+   * here, to read for whichever type the value takes, and so has `{ type:
+   * ['string', 'integer'], allOf: [{ maxLength: 20, minimum: 1 }] }` — a
+   * limit an `allOf` member writes, at any depth, is the list's (#711).
    */
   constraints?: Constraints;
 }
@@ -1498,7 +1520,27 @@ export interface Model {
    * `fields` does: `Pet: { allOf: [{ $ref: Animal }], properties: {
    * species: { type: 'string' } } }` over `Animal { name?: string,
    * species?: enum [cat, dog] }` has no `bases` and `name` its own, where
-   * `species: { const: 'cat' }` keeps `Animal`. Two bases declaring one
+   * `species: { const: 'cat' }` keeps `Animal`. The fit is read by the
+   * values a type admits, as those two spellings are typed, and is
+   * checked for no other (#713): a parent class in a language whose
+   * member types are nominal (Java, C#, Kotlin, Swift, PHP) takes an
+   * override only with the member's own type, or with a subtype of it
+   * where the language has covariant overrides, and `weight: { type:
+   * 'integer' }` over `Animal { weight?: number }` keeps `Animal`, as an
+   * enum or a pinned value over a `string` does, though a getter
+   * returning `Long` cannot override one returning `Double` and an enum
+   * is no `String`. Such a field is not marked — like one the model
+   * adds, it carries no `inheritedFrom` — so an emitter that writes a
+   * parent class looks up each field without `inheritedFrom` by `name`
+   * among the `fields` of each base's model (complete, so what the base
+   * inherits in turn is among them), compares the two as its language
+   * types them and, where the override would be rejected, either leaves
+   * that base out for the model, writing the fields whose
+   * `inheritedFrom` names it as an emitter that reads neither key does,
+   * or types the member as the base does — the base's declaration admits
+   * every value the model's does — and gives up what the model's narrows
+   * (the tighter type, a nested model's further fields). Two bases
+   * declaring one
    * property differently (`Tagged.tag: string` beside `Kinded.tag: enum
    * [cat, dog]`) keep only those whose declaration the model's field is,
    * or fits — `Tagged` alone, with or without `required: [tag]` on the
@@ -1559,7 +1601,10 @@ export interface Model {
    * or beside the component's own `properties`, whose every variant pins
    * one property to a distinct const — a `$ref` variant's read from its
    * component — or that the document declares a `discriminator:` for, on
-   * the union or on the component itself). Emitters should generate a
+   * the union or on the component itself; a component that composes
+   * several unions dispatches by one, the union whose variants the
+   * keyword's `mapping` names, and carries every other union's variants'
+   * properties as optional fields, #718). Emitters should generate a
    * dispatcher (factory) instead of a regular dataclass. The `property`
    * field is the discriminator key (e.g. "event"), and `mapping` maps each
    * discriminator value to the concrete variant model name (an IR model
@@ -1639,6 +1684,10 @@ export interface Field {
    * field's `type` is still built under this model's name, so an inline
    * object `Animal.meta` declares is `AnimalMeta` on `Animal` and
    * `PetMeta` on `Pet` — the same shape — with `inheritedFrom: Animal`.
+   * A field without it is the model's to write, whether the model adds
+   * it or declares it over a base's field of that name — the two are
+   * told apart only by the base's `fields`, and a parent class has to
+   * compare such a field with the base's (see `Model.bases`).
    * Only on a field of a model that carries `bases`. Provenance, not
    * shape: two fields that differ only here are one shape to the differ
    * and to the fingerprints; `renameModelRefs` repoints it and
