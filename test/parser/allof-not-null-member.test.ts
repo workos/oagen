@@ -639,6 +639,100 @@ describe('#716 an `allOf` member `not: { type: null }` rejects `null`', () => {
         a nullable wrapper around the enum: nullable<Kind> [cat, dog] -> Kind [cat, dog]"
       `);
     });
+
+    it('keeps a component nullable where it writes a nullable `type` beside the vetoing `allOf`, as the same schema inline is', async () => {
+      // Greptile, #726: the enum component read the veto past its own `type`, and was the bare `Kind`.
+      const kind = nullable(openapi, 'string', { enum: ['cat', 'dog', null] });
+      const schemas = { Names: nullable(openapi, 'array', { items: string }), NullableKind: kind };
+      const written: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+        ['an enum under the `allOf`', { ...nullable(openapi, 'string'), allOf: [kind, notNull] }],
+        [
+          'an enum, the `not` beside the `allOf`',
+          { ...nullable(openapi, 'string'), allOf: [kind], not: { type: 'null' } },
+        ],
+        ['an alias of an enum component', { ...nullable(openapi, 'string'), allOf: [ref('NullableKind'), notNull] }],
+        ['an alias of an object component', { ...nullable(openapi, 'object'), allOf: [Owner, notNull] }],
+        ['a merge', { ...nullable(openapi, 'object'), allOf: [Owner, Tag, notNull] }],
+        ['an alias of an array component', { ...nullable(openapi, 'array'), allOf: [ref('Names'), notNull] }],
+        ['a nullable wrapper around the vetoing `allOf`', { oneOf: [{ allOf: [kind, notNull] }, { type: 'null' }] }],
+      ];
+      const lines: string[] = [];
+      for (const [label, schema] of written) {
+        const shape = (type: TypeRef | undefined) => show(type, () => 'named');
+        const component = await parse(ownerDoc(openapi, ref('Thing'), { ...schemas, Thing: schema }));
+        const inline = await parse(ownerDoc(openapi, schema, schemas));
+        // The component and the same schema on the field admit `null` alike.
+        expect(shape(fieldType(component, 'Pet', 'owner')), label).toBe(shape(fieldType(inline, 'Pet', 'owner')));
+        lines.push(`${label}: ${show(fieldType(component, 'Pet', 'owner'))}`);
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "an enum under the \`allOf\`: nullable<Thing>
+        an enum, the \`not\` beside the \`allOf\`: nullable<Thing>
+        an alias of an enum component: nullable<NullableKind>
+        an alias of an object component: nullable<Thing>
+        a merge: nullable<Thing>
+        an alias of an array component: nullable<string[]>
+        a nullable wrapper around the vetoing \`allOf\`: nullable<Thing>"
+      `);
+      // Without a `type` of its own the enum component admits none, at any depth of the wrappers.
+      const bare = await parse(
+        document(openapi, {
+          Vetoed: { allOf: [kind, notNull] },
+          Nested: { allOf: [{ allOf: [kind, notNull] }], default: 'cat' },
+          Pet: { type: 'object', properties: { vetoed: ref('Vetoed'), nested: ref('Nested') } },
+        }),
+      );
+      expect(script(bare)).toBe('vetoed: Vetoed, nested: Nested');
+    });
+
+    it('leaves the members of an enum under a vetoing `allOf`, and their descriptions, as they are written', async () => {
+      // Greptile, #726: the `null` was taken out of the member lists, so a list of descriptions aligned with them by
+      // position described each member by its neighbor's text.
+      const spellings: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+        [
+          'an `enum:` list, `null` first',
+          { enum: [null, 'cat', 'dog'], 'x-enum-descriptions': ['Null', 'Cat', 'Dog'] },
+        ],
+        [
+          'an `enum:` list, `null` in the middle, `x-enumDescriptions`',
+          { enum: ['cat', null, 'dog'], 'x-enumDescriptions': ['Cat', 'Null', 'Dog'] },
+        ],
+        [
+          'a union of consts, `null` first',
+          {
+            oneOf: [{ type: 'null' }, { const: 'cat' }, { const: 'dog' }],
+            'x-enum-descriptions': ['Null', 'Cat', 'Dog'],
+          },
+        ],
+        [
+          'a union of consts beside an `enum:` list',
+          {
+            enum: ['cat', 'dog', null],
+            anyOf: [{ const: 'cat' }, { type: 'null' }, { const: 'dog' }],
+            'x-enum-descriptions': ['Cat', 'Null', 'Dog'],
+          },
+        ],
+        ['descriptions by value', { enum: [null, 'cat', 'dog'], 'x-enum-descriptions': { cat: 'Cat', dog: 'Dog' } }],
+      ];
+      for (const [label, kind] of spellings) {
+        const members = async (owner: unknown, schemas: Record<string, unknown>, name: string) => {
+          const spec = await parse(ownerDoc(openapi, owner, schemas));
+          const values = spec.enums.find((e) => e.name === name)?.values;
+          return `${show(fieldType(spec, 'Pet', 'owner'))} ${values?.map((v) => `${v.value}: ${v.description}`).join(', ')}`;
+        };
+        // As a component, the `not` a member and beside the `allOf`, and written on the field.
+        expect(await members(ref('Kind'), { Kind: { allOf: [kind] } }, 'Kind'), label).toBe(
+          'nullable<Kind> cat: Cat, dog: Dog',
+        );
+        expect(await members(ref('Kind'), { Kind: { allOf: [kind, notNull] } }, 'Kind'), label).toBe(
+          'Kind cat: Cat, dog: Dog',
+        );
+        expect(await members(ref('Kind'), { Kind: { allOf: [kind], not: { type: 'null' } } }, 'Kind'), label).toBe(
+          'Kind cat: Cat, dog: Dog',
+        );
+        expect(await members({ allOf: [kind, notNull] }, {}, 'PetOwner'), label).toBe('PetOwner cat: Cat, dog: Dog');
+      }
+    });
   });
 });
 
