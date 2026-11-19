@@ -48,6 +48,7 @@ import {
 import {
   BINARY_RESPONSE_MEDIA_TYPES,
   TEXT_RESPONSE_MEDIA_TYPES,
+  mediaTypesOf,
   responseBodyReading,
   unreadResponseBodyType,
 } from './body-media-types.js';
@@ -316,7 +317,9 @@ export interface ParameterMediaTypeObject {
  * What a Parameter Object or Header Object types its value with: a
  * `schema`, or a `content` map in its place — per OAS one or the other,
  * never both, and the map holds one entry. `parameterTyping` resolves the
- * schema either way.
+ * schema either way. The type says what OpenAPI defines; a document can
+ * write anything under `content`, so every reader takes the map from
+ * `mediaTypesOf`, which reads one that is no object as absent (#710).
  */
 export interface SchemaOrContent {
   schema?: SchemaObject;
@@ -3656,7 +3659,11 @@ function buildOperation(
   // so a `content` map on it is not reported.
   for (const param of allParams) {
     if (isIdempotencyKeyHeader(param)) continue;
-    warnUnreadParameterContent(param, `Parameter "${param.name}" (in: ${param.in}) on ${opLabel}`);
+    warnUnreadParameterContent(
+      param,
+      `Parameter "${param.name}" (in: ${param.in}) on ${opLabel}`,
+      `the parameter "${param.name}" (in: ${param.in}) of ${opLabel}`,
+    );
   }
 
   // A parameter the spec declares both as `in: query` and as a request-body
@@ -4230,14 +4237,17 @@ export interface SelectedParameterContent {
  * `application/json`, then a `+json` media type — each only with a schema —
  * then `text/plain`. Within one tier the first matching key in document
  * order wins. OAS allows the map one entry, so the order decides only for a
- * document that declares more. `undefined` when there is no map, or none of
- * its media types is read; `warnUnreadParameterContent` reports the latter.
+ * document that declares more. `undefined` when there is no map — none
+ * written, or a `content` that is no object, which declares no media type
+ * (`mediaTypesOf`, #710) — or none of its media types is read;
+ * `warnUnreadParameterContent` reports the last two.
  */
 export function selectParameterContent(
   content: Record<string, ParameterMediaTypeObject> | undefined,
 ): SelectedParameterContent | undefined {
-  if (!content) return undefined;
-  const entries = Object.entries(content);
+  const mediaTypes = mediaTypesOf<ParameterMediaTypeObject>(content);
+  if (!mediaTypes) return undefined;
+  const entries = Object.entries(mediaTypes);
   for (const { matches, schemaRequired } of PARAMETER_CONTENT_MEDIA_TYPES) {
     const match = entries.find(
       ([contentType, media]) => matches(mediaTypeEssence(contentType)) && (!schemaRequired || media?.schema),
@@ -4267,7 +4277,12 @@ export interface ParameterTyping {
  * value a string — when the declaration has neither, when the picked
  * `text/plain` entry declares no schema, or when nothing in the map is read.
  * Every key the map declares comes back as `contentTypes`, read or not, so
- * an unread map keeps the media type it declares the value in.
+ * an unread map keeps the media type it declares the value in. A `content`
+ * that is no object — `content: "json"`, `['application/json']`, `7`,
+ * `true`, `null` — is no map and declares no media type (`mediaTypesOf`),
+ * so the declaration is read as one with neither `schema` nor `content`:
+ * a string, with no `contentTypes` — never the indexes of the string's
+ * characters or the array's elements (#710).
  * A `schema` beside a `content` map wins and the map is not consulted.
  * Every pass that asks what a parameter's schema is reads it through this
  * one resolution: the typing (`extractParams`), the model deferral
@@ -4277,9 +4292,10 @@ export interface ParameterTyping {
  */
 export function parameterTyping(declaration: SchemaOrContent): ParameterTyping {
   if (declaration.schema) return { schema: declaration.schema };
-  const contentTypes = Object.keys(declaration.content ?? {});
+  const content = mediaTypesOf<ParameterMediaTypeObject>(declaration.content);
+  const contentTypes = Object.keys(content ?? {});
   const declared = contentTypes.length > 0 ? { contentTypes } : {};
-  const picked = selectParameterContent(declaration.content);
+  const picked = selectParameterContent(content);
   return picked
     ? { schema: picked.media.schema, media: picked.media, contentType: picked.contentType, ...declared }
     : declared;
@@ -4301,11 +4317,20 @@ export function parameterSchema(declaration: SchemaOrContent): SchemaObject | un
  * passes that re-read the schema stay silent. An empty map declares nothing
  * and is not reported; a map beside a `schema` is not consulted and not
  * reported either.
+ *
+ * A `content` that is no map at all — a string, an array, a number, a
+ * boolean or `null` — declares no media type either, and is reported here
+ * too, in its own sentence, naming `site` and the value as JSON (`content
+ * of the parameter "filter" (in: query) of listNotes is not a map of media
+ * types ("json"); reading no media type from it.`): this is the one reader
+ * that hands `mediaTypesOf` the site, so it is said once per parameter or
+ * header (#710). Beside a `schema` it is not consulted, so not reported.
  */
-export function warnUnreadParameterContent(declaration: SchemaOrContent, subject: string): void {
+export function warnUnreadParameterContent(declaration: SchemaOrContent, subject: string, site: string): void {
   if (declaration.schema) return;
-  const declared = Object.keys(declaration.content ?? {});
-  if (declared.length === 0 || selectParameterContent(declaration.content)) return;
+  const content = mediaTypesOf<ParameterMediaTypeObject>(declaration.content, site);
+  const declared = Object.keys(content ?? {});
+  if (declared.length === 0 || selectParameterContent(content)) return;
   console.warn(
     `[oagen] Warning: ${subject} is typed as a string: none of its content media types (${declared.join(', ')}) ` +
       `is read. A parameter or response header declared with content is read from application/json or a +json ` +
@@ -4700,13 +4725,15 @@ export interface SelectedRequestBodyContent {
  * `application/x-www-form-urlencoded` — each only with a schema — then
  * `application/octet-stream`, then `text/plain`. Within one tier the first
  * matching key in document order wins. `undefined` when the body declares no
- * content, or none of its media types is read; `warnUnreadRequestBody`
- * reports the latter. Every pass that asks what the body is — the body
+ * content — none written, an empty map, or a `content` that is no object,
+ * which declares no media type (`mediaTypesOf`, #710) — or none of its
+ * media types is read; `warnUnreadRequestBody` reports a `content` that is
+ * no object and a map nothing is read from. Every pass that asks what the body is — the body
  * extractor, the body-owned query names, the const prefixes, the body
  * parameter groups, a webhook payload — reads it through this one pick.
  */
 export function selectRequestBodyContent(body: RequestBodyObject | undefined): SelectedRequestBodyContent | undefined {
-  const content = body?.content;
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(body?.content);
   if (!content) return undefined;
   const entries = Object.entries(content);
   for (const { matches, encoding, schemaRequired } of REQUEST_BODY_MEDIA_TYPES) {
@@ -4731,9 +4758,18 @@ export function selectRequestBodyContent(body: RequestBodyObject | undefined): S
  * the const prefixes, the body parameter groups) stay silent — so such a
  * body is reported once, and never silently. A body with no `content`, or an
  * empty map, declares nothing and is not reported.
+ *
+ * A `content` that is no map at all — `content: "json"`, an array, a
+ * number, a boolean, `null` — declares no media type, so the body is
+ * carried in no `requestBodyContents` either: it is read as a body that
+ * writes no `content`, and reported here in its own sentence, naming the
+ * operation or webhook and the value as JSON (`content of the request body
+ * of createNote is not a map of media types ("json"); reading no media type
+ * from it.`). This is the one reader that hands `mediaTypesOf` the site, so
+ * it is said once per body (#710).
  */
 export function warnUnreadRequestBody(body: RequestBodyObject | undefined, label: string): void {
-  const declared = Object.keys(body?.content ?? {});
+  const declared = Object.keys(mediaTypesOf(body?.content, `the request body of ${label}`) ?? {});
   if (declared.length === 0 || selectRequestBodyContent(body)) return;
   console.warn(
     `[oagen] Warning: Request body of ${label} is not read as requestBody: none of its media types ` +
@@ -4910,6 +4946,8 @@ function extractRequestBody(
   ctx: RequestTypingContext,
 ): ExtractedRequestBody {
   const selected = selectRequestBodyContent(body);
+  // Nothing picked: a map none of whose media types is read, or a `content`
+  // that is no map at all (#710) — each reported there, once.
   if (!selected) warnUnreadRequestBody(body, opLabel);
   const primary = selected ? typeRequestBody(selected, op, pathModelBaseName, inlineModels, componentSchemas) : {};
   const contents = extractRequestBodyContents(
@@ -4930,15 +4968,18 @@ function extractRequestBody(
  * for `primaryContentType` (the one the pick read `primaryType` from) carries
  * that very TypeRef; every other entry goes through
  * `typeSecondaryRequestContent`. `undefined` when the body declares no media
- * type at all, so the caller leaves both keys off.
+ * type at all — no `content`, an empty map, or a `content` that is no
+ * object, which is no map (`mediaTypesOf`; `warnUnreadRequestBody` reports
+ * it, #710) — so the caller leaves both keys off.
  */
 function extractRequestBodyContents(
-  content: Record<string, { schema?: SchemaObject }> | undefined,
+  declared: Record<string, { schema?: SchemaObject }> | undefined,
   primaryContentType: string | undefined,
   primaryType: TypeRef | undefined,
   stem: string,
   ctx: RequestTypingContext,
 ): { contentTypes: string[]; contents: RequestBodyContent[] } | undefined {
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(declared);
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;
@@ -6347,7 +6388,11 @@ function extractResponseHeaders(
     // none of whose media types is read leaves the header a string, with a
     // warning — once, here, as the header is typed.
     const schema = parameterSchema(header);
-    warnUnreadParameterContent(header, `Response header "${name}" (${statusCode}) in ${operationLabel}`);
+    warnUnreadParameterContent(
+      header,
+      `Response header "${name}" (${statusCode}) in ${operationLabel}`,
+      `the response header "${name}" (${statusCode}) of ${operationLabel}`,
+    );
     // The layer the header documents itself from: the schema's own keys,
     // with each `allOf` member's that declares no type and so only annotates
     // it folded in — the schema's own winning, then the first member's that
@@ -6964,7 +7009,7 @@ function collectOperationConstPrefixes(
     // path-derived name, and a ref nothing answers gives the operation no
     // body at all — not the `content` written beside it either.
     if ('$ref' in response) continue;
-    for (const media of Object.values(response.content ?? {})) {
+    for (const media of Object.values(mediaTypesOf<{ schema?: SchemaObject }>(response.content) ?? {})) {
       collectConstPrefixes(media?.schema, prefixes, 0);
     }
   }
@@ -7910,10 +7955,20 @@ function contentModelNaming(
  * `mediaTypeNamingOrder`, so keys that derive one model name take it in one
  * order whatever the document's. Returns
  * `undefined` when the response declares no media type at all, so the caller
- * leaves both keys off.
+ * leaves both keys off: no `content`, an empty map, or a `content` that is
+ * no object — a string, an array, a number, a boolean or `null` — which is
+ * no map and is read as absent, never by its indexes (`mediaTypesOf`). Each
+ * response entry that is read comes through here once, so this is the one
+ * reader that hands `mediaTypesOf` the `site` and has such a `content`
+ * reported, once per entry (`content of the 200 response of listNotes is
+ * not a map of media types ("json"); reading no media type from it.`); the
+ * picks that read the same `content` first (`primaryBodySchema`,
+ * `jsonResponseSchema`) and the name rehearsals stay silent (#710).
  */
 function extractResponseContents(
-  content: Record<string, { schema?: SchemaObject }> | undefined,
+  declared: Record<string, { schema?: SchemaObject }> | undefined,
+  /** The response as a diagnostic names it (`the 200 response of listNotes`), for a `content` that is no map (`mediaTypesOf`). */
+  site: string,
   primaryContentType: string | undefined,
   primaryType: TypeRef | undefined,
   naming: ContentModelNaming,
@@ -7921,6 +7976,7 @@ function extractResponseContents(
   /** The definitions the Operation Object keeps for its success entries' secondary bodies (`DeferredInlineType.kept`); given for a 2xx or 3xx entry only. */
   kept?: Map<string, KeptDefinition>,
 ): { contentTypes: string[]; contents: ResponseContent[] } | undefined {
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(declared, site);
   if (!content) return undefined;
   const contentTypes = Object.keys(content);
   if (contentTypes.length === 0) return undefined;
@@ -8089,10 +8145,11 @@ function readFallbackResponse(
   }
   // The bundler leaves `$ref: '#/components/responses/…'` in place, and a
   // Reference Object has no `headers` or `content` of its own to read.
+  const responseSite = `${key} response of ${sink.opLabel}`;
   const resolved = resolveResponseRef<ResponseObject>(
     resp,
     sink.ctx.componentResponses,
-    `${key} response of ${sink.opLabel}`,
+    responseSite,
     sink.ctx.refSiblingDescriptions,
   );
   // A ref whose chain ends on a component that is no object is left out,
@@ -8107,11 +8164,11 @@ function readFallbackResponse(
   // very object once every operation has been read.
   if (range) {
     const entry: RangeResponse = { range };
-    fillFallbackResponse(entry, resolved, range, sink, componentModelName);
+    fillFallbackResponse(entry, resolved, range, sink, componentModelName, responseSite);
     sink.rangeResponses.push(entry);
   } else {
     const entry: DefaultResponse = {};
-    fillFallbackResponse(entry, resolved, undefined, sink, componentModelName);
+    fillFallbackResponse(entry, resolved, undefined, sink, componentModelName, responseSite);
     sink.defaultResponse = entry;
   }
 }
@@ -8146,6 +8203,8 @@ function fillFallbackResponse(
   range: StatusRange | undefined,
   sink: FallbackResponseSink,
   componentModelName: string | undefined,
+  /** The response as `readFallbackResponse` names it, by its key as written (`default response of listNotes`). */
+  responseSite: string,
 ): void {
   const label = range === undefined ? 'Default' : STATUS_RANGE_LABELS[range];
   // The key a `4XX`/`5XX` body is named and qualified by, as a 404's is by
@@ -8169,6 +8228,7 @@ function fillFallbackResponse(
   }
   const contents = extractResponseContents(
     resp.content,
+    `the ${responseSite}`,
     json?.contentType,
     entry.type,
     errorRange === undefined
@@ -8311,12 +8371,14 @@ function typeErrorBody(
  * `extractResponses` reads a 2xx body through this, and
  * `resolvePathModelBaseNames` asks the same question of a component
  * response, so the names it reserves are the ones the operation will mint,
- * whatever media type the body is declared under.
+ * whatever media type the body is declared under. A `content` that is no
+ * object declares no media type (`mediaTypesOf`, #710), so nothing is
+ * picked from it, as from a response that writes none.
  */
 function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema?: SchemaObject; type?: TypeRef } {
   const json = jsonResponseSchema(resp);
   if (json) return { contentType: json.contentType, schema: json.schema };
-  const content = resp.content;
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(resp.content);
   if (!content) return {};
   const keyWithEssence = (essence: string): string | undefined =>
     Object.keys(content).find((contentType) => mediaTypeEssence(contentType) === essence);
@@ -8336,10 +8398,12 @@ function primaryBodySchema(resp: ResponseObject): { contentType?: string; schema
  * under as written: `application/json` first, else a `+json` media type
  * (`application/problem+json` is the usual shape of a `default` error),
  * matched by essence — parameters (`; charset=utf-8`) stripped, case folded.
- * Other media types type nothing, for an error entry as for a fallback.
+ * Other media types type nothing, for an error entry as for a fallback, and
+ * a `content` that is no object declares none (`mediaTypesOf`, #710).
  */
 function jsonResponseSchema(resp: ResponseObject): { contentType: string; schema: SchemaObject } | undefined {
-  const entries = Object.entries(resp.content ?? {}).filter(([, media]) => media?.schema);
+  const content = mediaTypesOf<{ schema?: SchemaObject }>(resp.content);
+  const entries = Object.entries(content ?? {}).filter(([, media]) => media?.schema);
   // The one JSON rule requests and responses share (`isJsonMediaType`):
   // `application/json` itself first, then any `+json` type.
   const match =
@@ -8562,6 +8626,9 @@ function extractResponses(
       continue;
     }
     const code = responseKey.code;
+    // The entry as a diagnostic names it, for a `content` that is no map
+    // (`extractResponseContents`).
+    const responseSite = `the ${statusCode} response of ${opLabel}`;
     // Resolved above for every status code a branch below reads; a 1xx is
     // read as written.
     const resp = resolvedResponses.get(statusCode) ?? rawResponse;
@@ -8655,6 +8722,7 @@ function extractResponses(
       // primary's keep the bare `<Op><MediaType>Response`.
       const contents = extractResponseContents(
         resp.content,
+        responseSite,
         primaryContentType,
         extractedType,
         contentModelNaming(site, 'Response', code, code !== primaryEntry?.code),
@@ -8684,6 +8752,7 @@ function extractResponses(
       const targets: Array<{ type?: TypeRef }> = [];
       const contents = extractResponseContents(
         resp.content,
+        responseSite,
         json?.contentType,
         json && typeFallbackBody(json.schema, componentModelName!, String(code), fallback, targets, componentModelName),
         contentModelNaming(site, 'Response', code),
@@ -8714,6 +8783,7 @@ function extractResponses(
       entry.type = type;
       const contents = extractResponseContents(
         resp.content,
+        responseSite,
         json?.contentType,
         type,
         contentModelNaming(site, 'Error', code),

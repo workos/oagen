@@ -506,7 +506,12 @@ interface FitContext {
  * of that name a base ends with (step 3, #681): it admits no value the
  * base's does not, as far as the IR can tell, so `interface Pet extends
  * Base { own }` compiles and `Base & { own }` types the field as `own`
- * does.
+ * does. Those two spellings are all the fit answers for: it is read by
+ * the values admitted, not by a nominal subtype, so `integer` fits
+ * `number` and an enum fits `string`, which a parent class in a language
+ * with nominal member types does not take as an override (a getter
+ * returning `Long` over one returning `Double`); that spelling is the
+ * emitter's to check, field by field (#713; see `Model.bases`).
  *
  * - The same property: a field the SDK exposes under another name than the
  *   base does (`domainName`, from `fieldHints`) is another one.
