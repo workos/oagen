@@ -13,8 +13,11 @@ import {
   nullVote,
   pinnedDeclarationAdmitsNull,
   schemaAdmitsNull,
+  schemaToTypeRef,
   type SchemaObject,
 } from '../../src/parser/schemas.js';
+import { cloneTypeRef } from '../../src/parser/inline-models.js';
+import { settleDeferredMappingEntries } from '../../src/parser/schema-refs.js';
 import type { ApiSpec, Operation, TypeRef } from '../../src/ir/types.js';
 
 /**
@@ -1462,6 +1465,71 @@ describe('#716 `nullVote` and the readers beside it', () => {
     expect(script(spec)).toBe(
       `under_the_not: PetUnderTheNot, beside_the_not: Level${depth}, in_a_wrapper: nullable<PetInAWrapper>`,
     );
+  });
+
+  it("keeps a deferred discriminator mapping entry with the variant that takes its wrapper's place", async () => {
+    // Greptile, #726: a variant written `oneOf: [<pointer>, { type: 'null' }]` that the mapping names has its
+    // entry deferred against the nullable wrapper. The veto takes the wrapper off the variant, and the entry kept
+    // following the wrapper the union no longer held, so a copy made before the pointers settle carried it as a
+    // target outside the variants.
+    const dog = { $ref: '#/components/schemas/Zoo/properties/dog' };
+    const variant = (kind: string, extra: string): SchemaObject => ({
+      type: 'object',
+      required: ['kind'],
+      properties: { kind: { type: 'string', enum: [kind] }, [extra]: string },
+    });
+    const schemas: Record<string, SchemaObject> = {
+      Cat: variant('cat', 'meow'),
+      Zoo: { type: 'object', properties: { dog: variant('dog', 'bark') } },
+    };
+    const union: SchemaObject = {
+      oneOf: [at('Cat'), { oneOf: [dog, { type: 'null' }] }],
+      discriminator: { propertyName: 'kind', mapping: { cat: '#/components/schemas/Cat', dog: dog.$ref } },
+    };
+    const vetoed: SchemaObject = { allOf: [union], not: { type: 'null' } };
+    within(schemas, () => {
+      for (const [schema, kinds] of [
+        [union, ['model', 'nullable']],
+        [vetoed, ['model', 'model']],
+      ] as const) {
+        const copy = cloneTypeRef(schemaToTypeRef(schema, 'owner', 'Pet'));
+        if (copy.kind !== 'union' || !copy.discriminator) throw new Error('a discriminated union is built');
+        expect(copy.variants.map((member) => member.kind)).toEqual(kinds);
+        // The copy's one deferred entry follows the copy's own second variant, with or without the wrapper.
+        const followed = settleDeferredMappingEntries(copy.discriminator.mapping, () => {});
+        expect(followed.map((reference) => copy.variants.indexOf(reference))).toEqual([1]);
+      }
+    });
+    // End to end the entry is written as the model the pointer settles to, in the union and in every copy of it: a
+    // pointer to the field, and a second webhook sharing the path item.
+    const event = { post: { requestBody: json(vetoed), responses: { '200': { description: 'ok' } } } };
+    const spec = await parse({
+      ...document('3.1.0', {
+        ...schemas,
+        Pet: { type: 'object', properties: { a: vetoed, b: { $ref: '#/components/schemas/Pet/properties/a' } } },
+      }),
+      webhooks: {
+        petSaved: { $ref: '#/components/pathItems/PetEvent' },
+        petSavedAgain: { $ref: '#/components/pathItems/PetEvent' },
+      },
+      components: {
+        schemas: {
+          ...schemas,
+          Pet: { type: 'object', properties: { a: vetoed, b: { $ref: '#/components/schemas/Pet/properties/a' } } },
+        },
+        pathItems: { PetEvent: event },
+      },
+    });
+    const unions = [
+      fieldType(spec, 'Pet', 'a'),
+      fieldType(spec, 'Pet', 'b'),
+      ...(spec.webhooks ?? []).map((webhook) => webhook.requestBody),
+    ];
+    expect(unions).toHaveLength(4);
+    for (const type of unions) {
+      expect(show(type)).toBe('Cat | ZooDog');
+      expect(type?.kind === 'union' ? type.discriminator?.mapping : undefined).toEqual({ cat: 'Cat', dog: 'ZooDog' });
+    }
   });
 
   it('counts no `null` among the values a declaration pins under an `allOf` that vetoes it', async () => {
