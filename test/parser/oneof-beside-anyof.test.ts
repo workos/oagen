@@ -855,6 +855,9 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
         [{ oneOf: prims, anyOf }, true],
         [{ oneOf: [ref('Pet')], anyOf }, true],
         [{ properties: { id: str }, oneOf, anyOf }, true],
+        // One `$ref` each, or a nullable wrapper around one: a `$ref` variant composes whatever the count (#717).
+        [{ oneOf: [ref('Pet')], anyOf: [ref('Owner')] }, true],
+        [{ oneOf: [ref('Pet'), { type: 'null' }], anyOf: [ref('Owner'), { type: 'null' }] }, true],
         // One union, or one that only limits the schema.
         [{ oneOf }, false],
         [{ oneOf, anyOf: [{ required: ['name'] }] }, false],
@@ -862,8 +865,6 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
         [{ oneOf, anyOf: [] }, false],
         // Two that compose no object.
         [{ oneOf: prims, anyOf: prims }, false],
-        [{ oneOf: [ref('Pet')], anyOf: [ref('Owner')] }, false],
-        [{ oneOf: [ref('Pet'), { type: 'null' }], anyOf: [ref('Owner'), { type: 'null' }] }, false],
         [{ oneOf: [{ type: 'array', items: str }], anyOf: [{ type: 'array', items: str }] }, false],
         // A `oneOf` of string consts is decided first.
         [{ oneOf: [{ const: 'a' }, { const: 'b' }], anyOf }, false],
@@ -919,19 +920,32 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
     it('is the reading the oneOf has alone: nothing but the warning changes', async () => {
       const shapes: Array<[string, { oneOf: unknown[]; anyOf: unknown[] }]> = [
         ['primitives', prims],
-        ['one `$ref` each', { oneOf: [ref('Pet')], anyOf: [ref('Owner')] }],
         ['arrays', { oneOf: [{ type: 'array', items: str }], anyOf: [{ type: 'array', items: { type: 'integer' } }] }],
         ['consts', { oneOf: [pinned('a'), pinned('b')], anyOf: [pinned('a'), pinned('c')] }],
         ['consts beside objects', { oneOf: [pinned('a'), pinned('b')], anyOf }],
       ];
+      const at = (s: Doc) => doc({ Pick: s, Holder: object({ pick: s }) });
       for (const [label, unions] of shapes) {
-        const at = (s: Doc) => doc({ Pick: s, Holder: object({ pick: s }) });
         const both = await read(at({ description: 'A pick.', ...unions }));
         const alone = await read(at({ description: 'A pick.', oneOf: unions.oneOf }));
         expect(both.spec, label).toEqual(alone.spec);
         expect(both.warnings, label).toEqual([unread('Pick'), unread('Holder.pick')]);
         expect(alone.warnings, label).toEqual([]);
       }
+      // One `$ref` each is no such pair: each union brings a component, so the two compose (#717: it was
+      // read here as the union of one `(Pet)`, the `anyOf` reported, while `allOf: [{ oneOf: [{ $ref: Pet }]
+      // }, { anyOf: [{ $ref: Owner }] }]` as a component was the model).
+      const refs = { oneOf: [ref('Pet')], anyOf: [ref('Owner')] };
+      const both = await read(at({ description: 'A pick.', ...refs }));
+      const alone = await read(at({ description: 'A pick.', oneOf: refs.oneOf }));
+      expect(model(alone.spec, 'Pick').variants?.map(show)).toEqual(['Pet']);
+      expect(fieldsOf(model(alone.spec, 'Holder'))).toEqual(['pick?: (Pet)']);
+      for (const name of ['Pick', 'HolderPick']) {
+        expect(fieldsOf(model(both.spec, name)), name).toEqual(['name?: string', 'ownerId?: string']);
+        expect(model(both.spec, name).variants, name).toBeUndefined();
+      }
+      expect(fieldsOf(model(both.spec, 'Holder'))).toEqual(['pick?: HolderPick']);
+      expect(both.warnings).toEqual([]);
     });
 
     it('a oneOf of string consts stays the enum beside an anyOf of objects', async () => {
@@ -1139,14 +1153,16 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
           unread: both,
         },
       ],
-      ['one `$ref` each', { oneOf: [ref('Pet')], anyOf: [ref('Owner')], composes: false, unread: both }],
+      // One `$ref` each, with or without `null` beside it: each union brings a component, and the two compose
+      // (#717: they were read as two unions that compose nothing, the `oneOf` alone and the `anyOf` reported).
+      ['one `$ref` each', { oneOf: [ref('Pet')], anyOf: [ref('Owner')], composes: true }],
       [
         'two nullable wrappers',
-        { oneOf: [ref('Pet'), nullVariant], anyOf: [ref('Owner'), nullVariant], composes: false, unread: both },
+        { oneOf: [ref('Pet'), nullVariant], anyOf: [ref('Owner'), nullVariant], composes: true },
       ],
       [
         'one `$ref` each beside OAS 3.0 `nullable: true`',
-        { oneOf: [ref('Pet')], anyOf: [ref('Owner')], extra: { nullable: true }, composes: false, unread: both },
+        { oneOf: [ref('Pet')], anyOf: [ref('Owner')], extra: { nullable: true }, composes: true },
       ],
       [
         'two unions of string consts',
@@ -1683,33 +1699,33 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
           ],
           [
             "one \`$ref\` each",
-            "component: Pick {  } oneOf (Pet)",
+            "component: Pick { name?: string, ownerId?: string }",
             "$ref: Pick",
-            "field: (Pet)",
+            "field: HolderPick",
             "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
+            "model HolderPick { name?: string, ownerId?: string }",
             "model ThroughMerged { id: string, name?: string, ownerId?: string }",
-            "warnings: 2",
           ],
           [
             "two nullable wrappers",
-            "component: Pick {  } oneOf (Pet)",
+            "component: Pick { name?: string, ownerId?: string } bases [Pet, Owner]",
             "$ref: nullable<Pick>",
-            "field: nullable<Pet>",
-            "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pet, Owner]",
+            "field: nullable<HolderPick>",
+            "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
+            "model HolderPick { name?: string, ownerId?: string }",
             "model ThroughMerged { id: string, name?: string, ownerId?: string }",
-            "warnings: 2",
           ],
           [
             "one \`$ref\` each beside OAS 3.0 \`nullable: true\`",
-            "component: Pick {  } oneOf (Pet)",
+            "component: Pick { name?: string, ownerId?: string } bases [Pet, Owner]",
             "$ref: nullable<Pick>",
-            "field: nullable<Pet>",
-            "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pet, Owner]",
+            "field: nullable<HolderPick>",
+            "through a component: Combo { id: string, name?: string, ownerId?: string } bases [Base, Pick]",
             "through an inline allOf: ThroughMerged",
+            "model HolderPick { name?: string, ownerId?: string }",
             "model ThroughMerged { id: string, name?: string, ownerId?: string }",
-            "warnings: 2",
           ],
           [
             "two unions of string consts",
@@ -2452,13 +2468,6 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
       const wrappers: Array<[string, Doc, Doc, string[]]> = [
         // One union: `Alias: { oneOf: [{ $ref: Nest }, null] }`, the nullable alias.
         ['one union', { oneOf: [ref('Nest'), nullVariant] }, {}, ['Base', 'Nest']],
-        // Two that compose nothing: each read as its one variant by a model naming the component.
-        [
-          'two nullable wrappers',
-          { oneOf: [ref('Nest'), nullVariant], anyOf: [ref('Owner'), nullVariant] },
-          {},
-          ['Base', 'Nest', 'Owner'],
-        ],
         // A `required` list the wrapper writes is its own, beside the union or in the annotating member.
         ['a `required` list', { oneOf: [ref('Nest'), nullVariant] }, { required: ['meta'] }, ['Base', 'Pick', 'Nest']],
       ];
@@ -2488,6 +2497,31 @@ describe.each(['3.1.0', '3.0.3'])('#680 a oneOf beside an anyOf (OAS %s)', (open
         expect(diffSpecs(plain.spec, beside.spec).changes, label).toEqual([]);
         expect(diffSpecs(beside.spec, plain.spec).changes, label).toEqual([]);
       }
+      // Two nullable wrappers are no wrapper: each brings a component, so the two compose (#717: they were
+      // two unions that compose nothing, each read as its one variant by a model naming the component, its
+      // bases `Base`, `Nest` and `Owner`). The component is then a model of its own, the base of a model
+      // naming it, and what it inherits is typed under its name, as for any composed component (#680).
+      const at = (Pick: Doc) =>
+        doc({
+          Nest: object({ meta: object({ x: str }) }),
+          Pick,
+          Combo: { allOf: [ref('Base'), ref('Pick')] },
+          Holder: object({ merged: { allOf: [ref('Base'), ref('Pick')] } }),
+        });
+      const written = { oneOf: [ref('Nest'), nullVariant], anyOf: [ref('Owner'), nullVariant] };
+      const plain = await read(at({ description: 'A pick.', ...written }));
+      const beside = await read(at({ allOf: [{ description: 'A pick.' }], ...written }));
+      for (const { spec, warnings } of [plain, beside]) {
+        expect(fieldsOf(model(spec, 'Pick'))).toEqual(['meta?: PickMeta', 'ownerId?: string']);
+        expect(basesOf(model(spec, 'Pick'))).toEqual(['Nest', 'Owner']);
+        expect(basesOf(model(spec, 'Combo'))).toEqual(['Base', 'Pick']);
+        expect(fieldsOf(model(spec, 'HolderMerged'))).toContain('meta?: PickMeta');
+        expect(modelNames(spec)).toContain('PickMeta');
+        expect(warnings).toEqual([]);
+      }
+      expect(beside.spec).toEqual(plain.spec);
+      expect(diffSpecs(plain.spec, beside.spec).changes).toEqual([]);
+      expect(diffSpecs(beside.spec, plain.spec).changes).toEqual([]);
     });
 
     it('a single-resource wrapper is not unwrapped onto the oneOf’s one object with the anyOf dropped', async () => {

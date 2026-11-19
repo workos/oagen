@@ -3610,14 +3610,21 @@ const TYPING_KEYWORDS: readonly string[] = [
  * them spliced open (`splicedAllOfMembers`; #675), so `allOf: [{ allOf: [{
  * $ref: Owner }] }, { allOf: [{ $ref: Tag }] }]` types the schema as
  * `allOf: [{ $ref: Owner }, { $ref: Tag }]` does, and so do several
- * typing members one of which composes an object through an `allOf` of
- * its own that no splice opens (`composesObjectMember`: the merge
- * `readInlineAllOf` reads them as).
+ * typing members one of which is an object the `allOf` conjoins all the
+ * same (`conjoinsObjectMember`, the merge `readInlineAllOf` reads them
+ * as): one that composes an object through an `allOf` of its own that no
+ * splice opens (`composesObjectMember`; #675), or one that names a
+ * component through a union of its own, however many variants the union
+ * holds (`referencesThroughUnion`; #717: a `$ref` variant counted under a
+ * union of two or more alone, so `allOf: [{ oneOf: [{ $ref: Pet }] }, {
+ * oneOf: [{ $ref: Owner }] }]` typed nothing and the schema was
+ * `unknown`, where the same schema as a component was the model of `name`
+ * and `ownerId`).
  */
 function allOfTypesSchema(members: readonly SchemaObject[]): boolean {
   members = splicedAllOfMembers(members).members;
   if (members.some((member) => member.$ref !== undefined || declaresInlineProperties(member))) return true;
-  return allOfTypingMember(members) !== undefined || members.some((member) => composesObjectMember(member));
+  return allOfTypingMember(members) !== undefined || members.some((member) => conjoinsObjectMember(member));
 }
 
 /**
@@ -3912,17 +3919,31 @@ export function composesOwnChain(schema: SchemaObject): boolean {
  * (`constUnionEnumMembers`): the enum (`isEnumComponentSchema`,
  * `inlineEnumSpelling`), or the union of one literal a lone const is
  * inline. And two typing unions that compose no object — two unions of
- * primitives, of arrays or of consts, or each of one `$ref` or a nullable
- * wrapper around one, none of which the readers of an inline `allOf` take
- * for a member that brings properties (`declaresInlineProperties`) — are
+ * primitives, of arrays or of consts, no variant of which is a `$ref` or
+ * declares properties, so that neither is a member the readers of an
+ * inline `allOf` take for one that brings an object
+ * (`declaresInlineProperties`, `referencesThroughUnion`) — are
  * not composed: the `allOf` of the two types nothing, as an `allOf` of two
  * primitives types nothing and leaves the schema to its own keywords, so
  * the schema is typed by its `oneOf`, as it is without the `anyOf`, at
  * every site (the component beside an `allOf` that only annotates it too,
  * which was a model of whatever the component reader flattened), and the
- * `anyOf` is reported (`warnOnUnreadUnion`). Beside an `allOf` that types
- * the schema the unions are members already (`foldSiblingUnions`), and
- * this is not asked.
+ * `anyOf` is reported (`warnOnUnreadUnion`). A `$ref` variant brings its
+ * component however many variants the union holds, so a `oneOf` of one
+ * `$ref` beside an `anyOf` of one composes as two `allOf` members that
+ * each wrap one `$ref` do, and as the same unions of two always did: `{
+ * oneOf: [{ $ref: Pet }], anyOf: [{ $ref: Owner }] }` is the model of
+ * `name` and `ownerId` wherever it is written, with the description
+ * beside the unions or in an `allOf` member, and so is the same pair with
+ * a `null` variant in each, which admits `null` (#717: one `$ref` each,
+ * and a nullable wrapper around one, counted among the unions that
+ * compose nothing — the union of one `(Pet)`, or `nullable<Pet>`, the
+ * `anyOf` reported and never read — while `allOf: [{ oneOf: [{ $ref: Pet
+ * }] }, { anyOf: [{ $ref: Owner }] }]` as a component was the model, as
+ * the component beside an annotating `allOf` had been until #680 read the
+ * pair as composing nothing).
+ * Beside an `allOf` that types the schema the unions are members already
+ * (`foldSiblingUnions`), and this is not asked.
  */
 export function besideUnionsCompose(schema: SchemaObject): boolean {
   if (schema.$ref !== undefined || schema.oneOf === undefined || schema.anyOf === undefined) return false;
@@ -4244,8 +4265,9 @@ export function resetFoldWarnings(): void {
 /**
  * Warn, once per union, when a typing `anyOf` written beside a typing
  * `oneOf` is not read: the two compose nothing (`besideUnionsCompose` —
- * two unions of primitives, of arrays or of consts, or each of one
- * `$ref`), no `allOf` that types the schema takes them as members, and
+ * two unions of primitives, of arrays or of consts, no variant of which
+ * is a `$ref` or declares properties), no `allOf` that types the schema
+ * takes them as members, and
  * the schema is typed by its `oneOf` alone, as it is without the `anyOf`
  * (#680: the `anyOf` was dropped without a word). Called by
  * `schemaToTypeRef` with the context it types the schema under, before the
@@ -10570,7 +10592,7 @@ import {
   annotatingAllOfMembers,
   buildInlineModel,
   collectProperties,
-  composesObjectMember,
+  conjoinsObjectMember,
   declarationKeywords,
   declareProperty,
   declareVariant,

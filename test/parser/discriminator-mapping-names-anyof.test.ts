@@ -802,12 +802,23 @@ describe.each(['3.1.0', '3.0.3'])('#718 a discriminator mapping naming the anyOf
     });
 
     it('two unions that compose nothing: the anyOf is not read (#680), and the keyword stays with the oneOf', async () => {
+      const arrays = (name: string) => [{ type: 'array', items: ref(name) }];
+      const { spec, warnings } = await read(
+        doc({ Pick: { oneOf: arrays('Pet'), anyOf: arrays('Cat'), discriminator: keyword({ cat: at('Cat') }) } }),
+      );
+      expect(model(spec, 'Pick').variants?.map(show)).toEqual(['Pet[]']);
+      expect(model(spec, 'Pick').discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat' } });
+      expect(warnings).toEqual([expect.stringContaining('`anyOf` beside `oneOf` is not read')]);
+    });
+
+    it('one `$ref` each compose (#717), so the keyword goes with the union its `mapping` names', async () => {
+      // Read as two unions that compose nothing before #717: the union of `Pet`, the keyword left with it.
       const { spec, warnings } = await read(
         doc({ Pick: { oneOf: [ref('Pet')], anyOf: [ref('Cat')], discriminator: keyword({ cat: at('Cat') }) } }),
       );
-      expect(model(spec, 'Pick').variants?.map(show)).toEqual(['Pet']);
-      expect(model(spec, 'Pick').discriminator).toEqual({ property: 'kind', mapping: { cat: 'Cat' } });
-      expect(warnings).toEqual([expect.stringContaining('`anyOf` beside `oneOf` is not read')]);
+      expect(model(spec, 'Pick').variants).toBeUndefined();
+      expect(reads(spec, 'Pick')).toBe('{ name?: string } by kind { cat: Cat }');
+      expect(warnings).toEqual([]);
     });
   });
 
