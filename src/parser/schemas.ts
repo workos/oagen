@@ -310,30 +310,6 @@ function isNullableEnumSchema(schema: SchemaObject): boolean {
 }
 
 /**
- * `declaration`, an enum's (`enumComponentDeclaration`), admitting no
- * `null`: without each spelling `isNullableEnumSchema` reads one by — the
- * flag, the `null` a type list names, the `null` its `enum:` list holds,
- * the `null` variants of its `oneOf`/`anyOf` — so no reader of the
- * declaration finds one. For the enum component declared under an `allOf`
- * that vetoes `null` (`allOfVetoesNull`; #716). `declaration` itself when
- * it admits none.
- */
-function withoutEnumNull(declaration: SchemaObject): SchemaObject {
-  if (!isNullableEnumSchema(declaration)) return declaration;
-  const { nullable: _flag, type, ...rest } = declaration;
-  const names = Array.isArray(type) ? type.filter((name) => name !== 'null') : type;
-  const nonNull = (variants: SchemaObject[]): SchemaObject[] => variants.filter((variant) => !isNullSchema(variant));
-  return {
-    ...rest,
-    ...(names !== undefined &&
-      names.length > 0 && { type: Array.isArray(names) && names.length === 1 ? names[0] : names }),
-    ...(Array.isArray(rest.enum) && { enum: nonNullEnumValues(rest.enum) }),
-    ...(rest.oneOf && { oneOf: nonNull(rest.oneOf) }),
-    ...(rest.anyOf && { anyOf: nonNull(rest.anyOf) }),
-  };
-}
-
-/**
  * Whether an `enum:` list written beside a `oneOf`/`anyOf` of consts lets a
  * `null` variant admit `null`. The keywords apply together, so a
  * list that leaves `null` out forbids it whatever the variant says; a schema
@@ -429,12 +405,12 @@ function isEnumComponentSchema(schema: SchemaObject): boolean {
  * and default on the `Enum`, its limits read by a parameter that names it
  * — and the member's own nullability (a `null` member, a type list naming
  * `'null'`, OAS 3.0 `nullable: true` on the member) is the enum's, unless
- * the `allOf` vetoes `null` (`allOfVetoesNull`: `{ not: { type: 'null' }
- * }` beside the member, or written beside the `allOf`), when the enum
- * admits none (`withoutEnumNull`; #716), as the same `allOf` on a field is
- * the bare enum; `nullable: true` beside the `allOf` declares nothing, as
- * beside any schema with neither a `type` nor a `oneOf`/`anyOf`
- * (`unionFlaggedNullable`). Or — for a component written as a nullable
+ * the `allOf` vetoes `null` (`{ not: { type: 'null' } }` beside the
+ * member, or written beside the `allOf`), when the enum admits none
+ * (`enumComponentAdmitsNull`, which reads this declaration as written;
+ * #716), as the same `allOf` on a field is the bare enum; `nullable:
+ * true` beside the `allOf` declares nothing, as beside any schema with
+ * neither a `type` nor a `oneOf`/`anyOf` (`unionFlaggedNullable`). Or — for a component written as a nullable
  * `oneOf`/`anyOf` wrapper the type builder collapses (#606: one non-null
  * variant beside `null` variants, `nullableUnionBranch`) — the branch it
  * collapses to read in turn, carrying what the same wrapper hands a field
@@ -561,11 +537,54 @@ export function enumComponentDeclaration(schema: SchemaObject): SchemaObject | u
   const declaration = enumComponentDeclaration(unwrappedAllOfMember(schema));
   if (declaration === undefined) return undefined;
   // The wrapper layer's `default` — the wrapper's own, then the first
-  // annotating member's — over the member's, as its text is; and the
-  // `null` the member admits taken away where the layer vetoes it
-  // (`allOfVetoesNull`; #716), as the same `allOf` on a field is typed.
-  const vetoed = allOfVetoesNull(schema) ? withoutEnumNull(declaration) : declaration;
-  return withWrapperLayerDefault(vetoed, schema);
+  // annotating member's — over the member's, as its text is.
+  return withWrapperLayerDefault(declaration, schema);
+}
+
+/**
+ * Whether an enum component admits `null`, so that a `$ref` to it is
+ * wrapped in `nullable` (`componentTypeRef`, through
+ * `activeNullableEnumComponentKeys`) and the value it pins admits `null`
+ * beside it (`enumComponentPin`): the schema it declares its members on
+ * admits it (`enumComponentDeclaration`, by the component's rule,
+ * `isNullableEnumSchema`), and no `allOf` the component is read through
+ * vetoes it (`enumNullVetoed`; #716). The declaration is read as written
+ * either way: a veto takes the `null` away and nothing else, so the
+ * members, and the descriptions an `x-enum-descriptions` list aligns with
+ * them by position, are the ones the same component has without the `not`.
+ * False for a component that is no enum.
+ */
+function enumComponentAdmitsNull(schema: SchemaObject): boolean {
+  const declaration = enumComponentDeclaration(schema);
+  return declaration !== undefined && isNullableEnumSchema(declaration) && !enumNullVetoed(schema);
+}
+
+/**
+ * Whether an `allOf` an enum component is read through
+ * (`enumComponentDeclaration`: one read as the member that declares the
+ * members, at any depth) vetoes the `null` that member admits
+ * (`allOfVetoesNull`): `Kind: { allOf: [{ type: ['string', 'null'], enum:
+ * ['cat', 'dog', null] }, { not: { type: 'null' } }] }`, or with the `not`
+ * beside the `allOf`, is the enum `Kind` that admits none, as the same
+ * `allOf` on a field is the bare enum. Read level by level from the
+ * component down, as the type builder reads the same schema, so what a
+ * level says itself stands over a veto below it or beside it: a schema
+ * that declares the members itself (a `not` beside an `enum:` list is not
+ * read), a nullable `oneOf`/`anyOf` wrapper, and a `type` beside the
+ * `allOf` that names `null` (`wrapsOwnType`) — `{ type: ['string',
+ * 'null'], allOf: [{ enum: ['cat', null] }, { not: { type: 'null' } }] }`
+ * is `nullable<Kind>`, as it is `nullable<enum>` on a field (Greptile,
+ * #726: the veto was read past the schema's own `type`, so the component
+ * was the bare `Kind` where the same schema inline stayed nullable).
+ */
+function enumNullVetoed(schema: SchemaObject): boolean {
+  if (schema.$ref || Boolean(schema.enum) || isConstUnionEnumSchema(schema)) return false;
+  if ((nullableUnionBranch(schema) ?? flaggedNullableUnionBranch(schema)) !== undefined) return false;
+  if (!schema.allOf || wrapsOwnType(schema)) return false;
+  if (classifyInlineSchema(schema) !== 'allOf' || readInlineAllOf(schema.allOf, schema) !== 'unwrapped') {
+    return false;
+  }
+  return allOfVetoesNull(schema) || enumNullVetoed(unwrappedAllOfMember(schema));
 }
 
 /**
@@ -1838,7 +1857,7 @@ function leadsBackTo(schema: SchemaObject, host: SchemaObject, seen: Set<SchemaO
  * The one test for every reader of the `null` such an `allOf` takes from
  * its member: the type builder (`buildTypeRef`), `declaresNull`, a
  * component's entry (`isNullableModelComponentEntry`,
- * `enumComponentDeclaration`), the response path (`extractDirectResource`)
+ * `enumComponentAdmitsNull`), the response path (`extractDirectResource`)
  * and the readers of the values a declaration pins (`declarationPin`,
  * `referencedPinnedValues`). An `allOf` merged into one model admits
  * `null` by its members' votes instead (`allOfAdmitsNull`), where the same
@@ -2385,12 +2404,13 @@ export function extractSchemas(
   for (const [name, schema] of Object.entries(schemas)) {
     // An enum component is read on the schema it declares its members on
     // (`enumComponentDeclaration`): through an `allOf` wrapper, the
-    // member's own nullability is the enum's, and the wrapper's OAS 3.0
+    // member's own nullability is the enum's unless the `allOf` vetoes it
+    // (`enumComponentAdmitsNull`; #716), and the wrapper's OAS 3.0
     // `nullable: true` declares nothing.
     const declaration = enumComponentDeclaration(schema);
     if (declaration) {
       activeEnumComponentKeys.add(name);
-      if (isNullableEnumSchema(declaration)) activeNullableEnumComponentKeys.add(name);
+      if (enumComponentAdmitsNull(schema)) activeNullableEnumComponentKeys.add(name);
     } else if (
       // A named union's `null` variant, or the `null` an object component
       // declares on itself or on the component it is an alias of (#615),
@@ -8937,10 +8957,11 @@ function declarationPin(
  * `oneOf`/`anyOf` an `enum:` list beside them leaves
  * (`constUnionEnumMembers`), else the list's entries with `null` set aside
  * (`nonNullEnumValues`), the members `extractEnum` gives the `Enum` — and
- * admits `null` by the component's rule (`isNullableEnumSchema`: the flag,
- * a type list naming `null`, a `null` in the list, or a `null` variant the
- * list does not forbid, on the schema the component declares its members
- * on). So `kind: { $ref: CatKind }` with `CatKind: { enum: ['cat', null] }`
+ * admits `null` by the component's rule (`enumComponentAdmitsNull`: the
+ * flag, a type list naming `null`, a `null` in the list, or a `null`
+ * variant the list does not forbid, on the schema the component declares
+ * its members on, unless an `allOf` it is read through vetoes it; #716).
+ * So `kind: { $ref: CatKind }` with `CatKind: { enum: ['cat', null] }`
  * pins `cat` and admits `null`, the field `nullable<CatKind>` (#678), and
  * the rule is the component's wherever it differs from the same schema
  * written on the property: `CatKind: { enum: ['cat'], nullable: true }` is
@@ -8957,7 +8978,7 @@ function enumComponentPin(component: SchemaObject): WrittenPin | null | undefine
   const values: readonly unknown[] = members ? members.map((member) => member.value) : nonNullEnumValues(listed);
   const [value] = values;
   if (values.length !== 1 || typeof value !== 'string') return null;
-  return { value, admitsNull: isNullableEnumSchema(declaration) };
+  return { value, admitsNull: enumComponentAdmitsNull(component) };
 }
 
 /**
