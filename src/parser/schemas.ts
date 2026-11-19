@@ -7353,7 +7353,7 @@ export function unionAxesOf(schema: SchemaObject): SchemaObject[][] {
 /**
  * The `discriminator` keyword as a schema writes it for one of the unions
  * it carries (`unionAxesOf`), before any reader decides which union it
- * goes with (`axisDiscriminatorOf`): its own keyword for the one union it
+ * goes with (`discriminatedUnion`): its own keyword for the one union it
  * writes, and, where it writes a `oneOf` beside an `anyOf`, for each of
  * the two that types the schema (`unionTypesSchema`) — a union of bare
  * limits beside a typing one is no union the keyword could dispatch — and
@@ -7370,54 +7370,113 @@ function writtenDiscriminatorOf(
 }
 
 /**
- * The union a `discriminator` handed to the readers of a composed schema
- * goes with, where the schema carries more than the one union the keyword
- * is written on (`discriminatedUnion`; #718): the variant list of that
- * union, the document's own array. Keyed by the copy of the keyword the
- * readers are handed (`forUnion`), never by the document's own object,
+ * The `discriminator` a schema's own keyword gives one of its unions where
+ * nothing is decided — what the union was read with before a composed
+ * schema decided which union its keyword goes with (#718), and is read
+ * with still wherever that decision is none (`DecidedDiscriminator.otherwise`):
+ * the schema's keyword for the one union it writes, and, of a `oneOf` and
+ * an `anyOf` written together, for the first that types the schema and
+ * for no other (for each where neither types it; #680).
+ */
+function undecidedDiscriminatorOf(
+  schema: SchemaObject,
+  variants: readonly SchemaObject[],
+): DiscriminatorKeyword | undefined {
+  const { discriminator } = schema;
+  if (discriminator === undefined || schema.oneOf === undefined || schema.anyOf === undefined) return discriminator;
+  const first = unionAxesOf(schema).find((axis) => unionTypesSchema(axis));
+  return first === undefined || first === variants ? discriminator : undefined;
+}
+
+/**
+ * What a composed schema decided about its `discriminator`
+ * (`discriminatedUnion`; #718), as one of its unions is handed it: the
+ * keyword as the document wrote it, the variant list of the union it goes
+ * with (the document's own array), and `otherwise`, the keyword this union
+ * was read with before anything was decided (`undecidedDiscriminatorOf`,
+ * else the one handed down as written). The decision holds where the
+ * keyword dispatches the union it goes with: that union dispatches by it
+ * and every other is flattened. Where the keyword dispatches no union —
+ * it writes no `mapping`, and the variants of the union it goes with do
+ * not each pin its property to a distinct value that names a model — the
+ * decision is none, and each union is read by its `otherwise`, as it was
+ * (`detectAllOfVariantDiscriminator`).
+ */
+interface DecidedDiscriminator {
+  keyword: DiscriminatorKeyword;
+  variants: readonly SchemaObject[];
+  otherwise: DiscriminatorKeyword | undefined;
+}
+
+/**
+ * The decision each `discriminator` handed to the readers of a composed
+ * schema carries (`DecidedDiscriminator`). Keyed by the copy of the keyword
+ * the readers are handed (`forUnion`), never by the document's own object,
  * which a schema with one union is still read by as written.
  */
-const discriminatedUnions = new WeakMap<DiscriminatorKeyword, readonly SchemaObject[]>();
+const discriminatedUnions = new WeakMap<DiscriminatorKeyword, DecidedDiscriminator>();
 
-/** The copy `forUnion` made of each keyword for each union it was decided to go with, so one decision is one object however often it is asked. */
-const decidedDiscriminators = new WeakMap<
-  DiscriminatorKeyword,
-  WeakMap<readonly SchemaObject[], DiscriminatorKeyword>
->();
+/** The copies `forUnion` made of each keyword, so one decision handed to one union is one object however often it is asked. */
+const decidedDiscriminators = new WeakMap<DiscriminatorKeyword, DiscriminatorKeyword[]>();
 
-/** `keyword` as the readers of a composed schema are handed it once it is decided that it goes with the union `variants` (`discriminatedUnions`): a copy, sharing the document's `mapping`, the same one each time. */
-function forUnion(keyword: DiscriminatorKeyword, variants: readonly SchemaObject[]): DiscriminatorKeyword {
+/**
+ * `keyword` as a union of a composed schema is handed it once it is decided
+ * that the keyword goes with the union `variants` (`DecidedDiscriminator`):
+ * a copy, sharing the document's `mapping`, that carries the decision and
+ * what the union it is handed to was read with before (`otherwise`) — the
+ * same copy each time the same is asked.
+ */
+function forUnion(
+  keyword: DiscriminatorKeyword,
+  variants: readonly SchemaObject[],
+  otherwise: DiscriminatorKeyword | undefined,
+): DiscriminatorKeyword {
   let copies = decidedDiscriminators.get(keyword);
-  if (!copies) decidedDiscriminators.set(keyword, (copies = new WeakMap()));
-  let decided = copies.get(variants);
-  if (!decided) {
-    copies.set(variants, (decided = { ...keyword }));
-    discriminatedUnions.set(decided, variants);
+  if (!copies) decidedDiscriminators.set(keyword, (copies = []));
+  for (const copy of copies) {
+    const decision = discriminatedUnions.get(copy);
+    if (decision && decision.variants === variants && decision.otherwise === otherwise) return copy;
   }
+  const decided: DiscriminatorKeyword = { ...keyword };
+  discriminatedUnions.set(decided, { keyword, variants, otherwise });
+  copies.push(decided);
   return decided;
+}
+
+/** The decision `keyword` carries (`DecidedDiscriminator`), or `undefined` for a keyword as the document wrote it, and for none. */
+function decisionOf(keyword: DiscriminatorKeyword | undefined): DecidedDiscriminator | undefined {
+  return keyword === undefined ? undefined : discriminatedUnions.get(keyword);
 }
 
 /**
  * Whether `keyword` is one a composed schema decided the union of
- * (`discriminatedUnions`): every union of that schema is then read by it —
- * the one it goes with dispatched by it, every other flattened
- * (`discriminatesUnion`) — whatever keyword is written on the union itself.
+ * (`DecidedDiscriminator`): every union of that schema is then read by it —
+ * where the keyword dispatches the union it goes with, that one by the
+ * keyword and every other flattened; else each as it was — whatever
+ * keyword is written on the union itself.
  */
 export function isDecidedDiscriminator(keyword: DiscriminatorKeyword | undefined): boolean {
-  return keyword !== undefined && discriminatedUnions.has(keyword);
+  return decisionOf(keyword) !== undefined;
 }
 
 /**
- * Whether the union `variants` may dispatch by `keyword`, or with none by
- * its pinned consts: false only for a keyword a composed schema decided
- * goes with another of its unions (`discriminatedUnions`), which says the
- * component dispatches by that union, so this one is flattened whatever
- * its variants pin. The first thing the one dispatch decision asks
- * (`detectAllOfVariantDiscriminator`).
+ * The keyword handed on past a schema on the way to a union — a `$ref`
+ * followed, a nullable wrapper collapsed — given what was handed on there
+ * before any decision (`was`, of the keyword handed in): the same, under
+ * the decision when `handed` carries one (`DecidedDiscriminator`), so the
+ * union under it is still told which union the keyword goes with, and
+ * still read as it was where that decision is none. For the readers that
+ * walk to a union on their own: the inline merge past a `$ref` that stays
+ * in one component's chain, where nothing was handed on, and the
+ * pagination walk past a nullable wrapper its resolver collapsed, whose
+ * own keyword went with its one variant.
  */
-function discriminatesUnion(keyword: DiscriminatorKeyword | undefined, variants: readonly SchemaObject[]): boolean {
-  const decided = keyword === undefined ? undefined : discriminatedUnions.get(keyword);
-  return decided === undefined || decided === variants;
+export function handedOn(
+  handed: DiscriminatorKeyword | undefined,
+  was: (handed: DiscriminatorKeyword | undefined) => DiscriminatorKeyword | undefined,
+): DiscriminatorKeyword | undefined {
+  const decision = decisionOf(handed);
+  return decision ? forUnion(decision.keyword, decision.variants, was(decision.otherwise)) : was(handed);
 }
 
 /**
@@ -7461,9 +7520,13 @@ function refPlace(ref: unknown): string | undefined {
  * the `mapping` lists — an inline variant, which no target can name, is
  * selected by the value it pins, as it is redirected to that entry's
  * target in a named union (`mapVariantToDiscriminatorEntry`) — and, with
- * no `mapping`, every variant when each pins the property, the one way a
- * keyword with no `mapping` dispatches a union
- * (`detectAllOfVariantDiscriminator`); none when one does not.
+ * no `mapping`, every variant when each pins the property to a value of
+ * its own, the one way a keyword with no `mapping` dispatches a union
+ * (`detectAllOfVariantDiscriminator`); none when one pins nothing or two
+ * pin one value, which no keyword dispatches (Greptile on #723: the
+ * values were not compared, so a union pinning `cat`, `cat` and `dog`
+ * outscored the one pinning `cat` and `dog`, and the keyword went with a
+ * union it cannot dispatch).
  */
 function selectedVariants(
   keyword: DiscriminatorKeyword,
@@ -7478,7 +7541,10 @@ function selectedVariants(
     return ref === undefined ? [] : [aliasChainOf(ref, schemas)];
   });
   if (Object.keys(mapping).length === 0) {
-    return { named: 0, pinned: members.length > 0 && pins.every((pin) => pin !== null) ? members.length : 0 };
+    // Each variant pins the property, and no two pin one value: two that do
+    // make the union no dispatcher (`detectAllOfVariantDiscriminator`).
+    const dispatchable = members.length > 0 && !pins.includes(null) && new Set(pins).size === pins.length;
+    return { named: 0, pinned: dispatchable ? members.length : 0 };
   }
   let named = 0;
   let pinned = 0;
@@ -7527,7 +7593,8 @@ function namesProperty(keyword: DiscriminatorKeyword | undefined): keyword is Di
  * most of (`selectedVariants`): the one more of whose variants its
  * `mapping` names, then the one more of whose variants pin its property
  * to a value the mapping lists — or, with no `mapping`, the one whose
- * variants each pin its property. Among unions it selects alike, none of
+ * variants each pin its property to a value of their own. Among unions it
+ * selects alike, none of
  * either included, the union it is written with comes first — the first
  * of them, `oneOf` before `anyOf`, when it is written beside several —
  * then the others in reading order. So `{ oneOf: [{ $ref: Pet }, { $ref:
@@ -7542,6 +7609,9 @@ function namesProperty(keyword: DiscriminatorKeyword | undefined): keyword is Di
  * on no model). `undefined` with no union or no keyword — a keyword that
  * names no property (`namesProperty`) is none, and decides nothing: every
  * union is then read with the keyword it is written with, as it was.
+ * What is decided here is which union the keyword goes with, not that it
+ * dispatches it: where it dispatches none, the readers read every union
+ * as it was (`DecidedDiscriminator`, `detectAllOfVariantDiscriminator`).
  */
 function discriminatedUnion(
   unions: readonly MemberUnion[],
@@ -7576,34 +7646,44 @@ function discriminatedUnion(
  * around the schema declares for a union among its members
  * (`wrapperDiscriminatorOf`), or a nullable wrapper's around the union.
  *
- *   - A keyword the composition decided the union of
- *     (`isDecidedDiscriminator`) is the answer for every union under it,
- *     whatever the schema writes itself: the union it goes with dispatches
- *     by it, and every other is flattened (`discriminatesUnion`).
- *   - Else the schema's own keyword (`writtenDiscriminatorOf`). Written
- *     beside a `oneOf` and an `anyOf` that both type the schema, it goes
- *     with one of the unions the two lead to (`discriminatedUnion`: the
- *     one whose variants its `mapping` names, or with no `mapping` pin its
- *     property; the first of the two where it selects them alike), and the
- *     other is handed the decision, so it is flattened: `{ oneOf: [{ $ref:
- *     Pet }, { $ref: Toy }], anyOf: [{ $ref: Cat }, { $ref: Dog }],
- *     discriminator: { propertyName: 'kind', mapping: { cat: Cat, dog: Dog
- *     } } }` dispatches its `anyOf` and flattens its `oneOf`, as a member,
- *     as the component a `$ref` member names and as the component itself
- *     (#718: the keyword went to the first typing union whatever its
- *     `mapping` named; #680: it went to both).
+ *   - Where the composition decided which union its keyword goes with
+ *     (`handed` carries the decision, `isDecidedDiscriminator`), every
+ *     union under it is answered that decision, whatever the schema writes
+ *     itself: the union the keyword goes with dispatches by it and every
+ *     other is flattened.
+ *   - Else the schema's own keyword. Written beside a `oneOf` and an
+ *     `anyOf` that both type the schema, it goes with one of the unions
+ *     the two lead to (`discriminatedUnion`: the one whose variants its
+ *     `mapping` names, or with no `mapping` pin its property; the first of
+ *     the two where it selects them alike), and both are answered that
+ *     decision: `{ oneOf: [{ $ref: Pet }, { $ref: Toy }], anyOf: [{ $ref:
+ *     Cat }, { $ref: Dog }], discriminator: { propertyName: 'kind',
+ *     mapping: { cat: Cat, dog: Dog } } }` dispatches its `anyOf` and
+ *     flattens its `oneOf`, as a member, as the component a `$ref` member
+ *     names and as the component itself (#718: the keyword went to the
+ *     first typing union whatever its `mapping` named; #680: it went to
+ *     both).
  *   - Else `handed`, as written.
+ *
+ * A decision is answered with what the union was read with before
+ * anything was decided (`DecidedDiscriminator.otherwise`: the schema's own
+ * keyword, the first typing union's of two, `undecidedDiscriminatorOf`,
+ * else what was handed down), which it is still read with where the
+ * keyword dispatches no union (`detectAllOfVariantDiscriminator`). The
+ * union the keyword stays with, where it was read with it before, is
+ * answered the keyword itself: nothing changed for it.
  *
  * A schema its `allOf` composes (`allOfComposesComponent`) is read through
  * its own members (`readComponentAllOf`), the unions written beside its
  * `allOf` among them, so they are read with what the schema hands its
- * members (`wrapperDiscriminatorWithin`): its own composition's decision
- * where nothing is decided around it. A decision is handed in only to a
- * wrapper written inline, which is part of the composition that made it
+ * members (`wrapperDiscriminatorWithin`): the decision handed in to it,
+ * else its own composition's. A decision is handed in only to a wrapper
+ * written inline, which is part of the composition that made it
  * (`composedInlineMember`; #714) — a reader that reaches a component its
- * `allOf` composes through a `$ref` hands it none, since such a component
- * is read by its own composition's keyword (`mergeAllOfMembers`,
- * `collectObjectProperties`).
+ * `allOf` composes through a `$ref` hands it the keyword as it was before
+ * the decision (`undecided`), since such a component is read by its own
+ * composition's decision, never by one made around the reference
+ * (`mergeAllOfMembers`, `collectObjectProperties`).
  */
 export function axisDiscriminatorOf(
   schema: SchemaObject,
@@ -7611,20 +7691,36 @@ export function axisDiscriminatorOf(
   handed?: DiscriminatorKeyword,
   schemas?: Record<string, SchemaObject>,
 ): DiscriminatorKeyword | undefined {
-  if (isDecidedDiscriminator(handed)) return handed;
-  if (allOfComposesComponent(schema)) {
-    const own = wrapperDiscriminatorOf(schema, schemas);
-    if (isDecidedDiscriminator(own)) return own;
-  }
-  const written = writtenDiscriminatorOf(schema, variants);
-  if (written === undefined || schema.oneOf === undefined || schema.anyOf === undefined) return written ?? handed;
-  const typing = unionAxesOf(schema).filter((axis) => unionTypesSchema(axis));
-  if (typing.length < 2) return written;
-  const decided = discriminatedUnion(memberUnions(schema, schemas, new Set(), undefined, true), undefined, schemas);
-  // Neither union leads to one a keyword could dispatch — each a nullable
-  // wrapper around no union: the keyword stays with the first, as it was.
-  if (decided === undefined) return typing[0] === variants ? written : handed;
-  return decided.variants === variants ? decided.keyword : forUnion(decided.keyword, decided.variants);
+  const handedDecision = decisionOf(handed);
+  // What the union was read with before anything was decided.
+  const before = undecidedDiscriminatorOf(schema, variants) ?? (handedDecision ? handedDecision.otherwise : handed);
+  const decision =
+    handedDecision ??
+    (allOfComposesComponent(schema)
+      ? decisionOf(wrapperDiscriminatorOf(schema, schemas))
+      : ownDecision(schema, schemas));
+  if (decision === undefined) return before;
+  // The union the keyword stays with is read with the keyword, as it was.
+  if (decision.variants === variants && decision.keyword === before) return before;
+  return forUnion(decision.keyword, decision.variants, before);
+}
+
+/**
+ * Which of the two unions a schema writes together its own `discriminator`
+ * goes with (`discriminatedUnion`, over the unions the two lead to), for a
+ * schema no composition around it decided for (`axisDiscriminatorOf`).
+ * None for a schema that writes no keyword, one union, or two of which
+ * fewer than two type it — the keyword is then the one union's, as written
+ * — and where neither union leads to a union a keyword could dispatch,
+ * each a nullable wrapper around no union.
+ */
+function ownDecision(
+  schema: SchemaObject,
+  schemas: Record<string, SchemaObject> | undefined,
+): { keyword: DiscriminatorKeyword; variants: readonly SchemaObject[] } | undefined {
+  if (schema.discriminator === undefined || schema.oneOf === undefined || schema.anyOf === undefined) return undefined;
+  if (unionAxesOf(schema).filter((axis) => unionTypesSchema(axis)).length < 2) return undefined;
+  return discriminatedUnion(memberUnions(schema, schemas, new Set(), undefined, true), undefined, schemas);
 }
 
 /**
@@ -7872,9 +7968,10 @@ function inheritedRef(name: string): ModelRef {
  * not read, and the discriminator is returned (the first, when two axes
  * dispatch). Which keyword a union is read with is one question
  * (`axisDiscriminatorOf`): where the composition carries several unions
- * and a keyword, the keyword goes with one of them and the others are
- * handed that decision, so they are no dispatchers, whatever their
- * variants pin (#718). Otherwise every variant is flattened in as branch-only
+ * and a keyword, the keyword goes with one of them and every union is
+ * handed that decision, so where the keyword dispatches the union it goes
+ * with, the others are no dispatchers, whatever their variants pin
+ * (#718). Otherwise every variant is flattened in as branch-only
  * declarations — its properties, those of its `allOf` wrappers and of the
  * unions nested in them, and those of the component a `$ref` variant names
  * (`declareVariant`, the one branch reader the inline merge flattens a
@@ -8104,8 +8201,10 @@ function ownRequired(schema: SchemaObject): readonly string[] {
  * that selects none of another). Every member is handed that decision
  * (`forUnion`), so the one union dispatches by the keyword and every other
  * is flattened, never a dispatcher by its pinned consts beside a keyword
- * that says which union dispatches (`axisDiscriminatorOf`,
- * `detectAllOfVariantDiscriminator`): `Pick: { allOf: [{ oneOf: [{ $ref:
+ * that dispatches another union (`axisDiscriminatorOf`,
+ * `detectAllOfVariantDiscriminator`; where the keyword dispatches none,
+ * the decision is none and each union is read with the keyword handed it
+ * before, this one as written): `Pick: { allOf: [{ oneOf: [{ $ref:
  * Pet }, { $ref: Toy }] }, { anyOf: [{ $ref: Cat }, { $ref: Dog }] }],
  * discriminator: { propertyName: 'kind', mapping: { cat: Cat, dog: Dog } }
  * }` is `Pick { name?, toy? }` dispatching to `Cat` and `Dog`, as it is
@@ -8145,6 +8244,8 @@ let composedDiscriminators = new WeakMap<
 
 /** The `discriminator` a schema writes beside its `allOf` for a union among the members, as written, before anything is decided (`wrapperDiscriminatorOf`): its own keyword when it writes no union of its own beside the `allOf` — one written beside a union is that union's (`besideUnionMembers`). */
 function writtenWrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeyword | undefined {
+  // Nothing but annotations is read beside a `$ref` (#618 review).
+  if (schema.$ref !== undefined) return undefined;
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
 }
 
@@ -8152,18 +8253,24 @@ function writtenWrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeywo
  * The `discriminator` a composed schema hands its members where the schema
  * is itself read as a member of an `allOf` — an inline `allOf` wrapper
  * (`composedInlineMember`), which is part of the `allOf` it sits in
- * (workos/oagen#714) — and `handed` is what that `allOf` hands it. A
- * decision made by the composition around the wrapper
- * (`isDecidedDiscriminator`; #718) was made over every union under it, the
- * wrapper's included (`memberUnions`), so it is the answer for the
- * wrapper's members too, whatever the wrapper writes. Else the wrapper's
- * own (`wrapperDiscriminatorOf`: the keyword it writes for a union among
- * its members), which is written nearer the union, else `handed` as
- * written: `Pet: { discriminator, allOf: [{ $ref: Animal }, {
- * additionalProperties: false, allOf: [{ oneOf: [...] }] }] }` dispatches
- * the union by `Pet`'s keyword, as it does with the union written as the
- * member. With nothing handed it is the schema's own, so a component read
- * as itself, or one a `$ref` names, asks this with none. The one handing-on
+ * (workos/oagen#714) — and `handed` is what that `allOf` hands it.
+ *
+ *   - A decision made by the composition around the wrapper
+ *     (`isDecidedDiscriminator`; #718) was made over every union under it,
+ *     the wrapper's included (`memberUnions`), so it stands for the
+ *     wrapper's members too, whatever the wrapper writes — each read,
+ *     before the decision, with the keyword the wrapper writes for a union
+ *     among them, else with what was handed on (`handedOn`).
+ *   - Else the wrapper's own (`wrapperDiscriminatorOf`: the keyword it
+ *     writes for a union among its members, or its own composition's
+ *     decision), which is written nearer the union, else `handed` as
+ *     written: `Pet: { discriminator, allOf: [{ $ref: Animal }, {
+ *     additionalProperties: false, allOf: [{ oneOf: [...] }] }] }`
+ *     dispatches the union by `Pet`'s keyword, as it does with the union
+ *     written as the member.
+ *
+ * With nothing handed it is the schema's own, so a component read as
+ * itself, or one a `$ref` names, asks this with none. The one handing-on
  * every reader of a wrapper makes: the component reader
  * (`readComponentAllOf`), the variant builder (`memberUnions`), the inline
  * merge (`mergeAllOfMembers`) and the pagination walk
@@ -8174,8 +8281,23 @@ export function wrapperDiscriminatorWithin(
   handed: DiscriminatorKeyword | undefined,
   schemas?: Record<string, SchemaObject>,
 ): DiscriminatorKeyword | undefined {
-  if (isDecidedDiscriminator(handed)) return handed;
-  return wrapperDiscriminatorOf(schema, schemas) ?? handed;
+  if (isDecidedDiscriminator(handed)) return handedOn(handed, (was) => writtenWrapperDiscriminatorOf(schema) ?? was);
+  return handedOn(wrapperDiscriminatorOf(schema, schemas), (was) => was ?? handed);
+}
+
+/**
+ * `handed` as it was before any decision: the keyword a union under it was
+ * read with before a composition decided which union its keyword goes with
+ * (`DecidedDiscriminator.otherwise`), or `handed` itself where it carries
+ * no decision. What a reader hands a component its own `allOf` composes
+ * when it reaches it through a `$ref`: such a component is read by its own
+ * composition's decision, never by one made around the reference
+ * (`axisDiscriminatorOf`), where a wrapper written inline is part of the
+ * composition that decided (`composedInlineMember`; #714).
+ */
+export function undecided(handed: DiscriminatorKeyword | undefined): DiscriminatorKeyword | undefined {
+  const decision = decisionOf(handed);
+  return decision ? decision.otherwise : handed;
 }
 
 /** What `wrapperDiscriminatorOf` answers for a schema not asked yet (see there). */
@@ -8192,7 +8314,7 @@ function composedDiscriminatorOf(
   // One union, written with the keyword it is read by: handed on as written.
   const [only] = unions;
   if (unions.length === 1 && (only!.discriminator ?? wrapper) === decided.keyword) return wrapper;
-  return forUnion(decided.keyword, decided.variants);
+  return forUnion(decided.keyword, decided.variants, wrapper);
 }
 
 /**
@@ -8655,14 +8777,23 @@ function readAsWrapped(schema: SchemaObject): SchemaObject | undefined {
  * value with its model. A single const-pinned variant dispatches too.
  *
  * `explicit` is the keyword the union is read with (`axisDiscriminatorOf`).
- * One a composed schema decided goes with another of its unions
- * (`discriminatesUnion`) makes this union no axis, with a `mapping` or by
- * its pinned consts alike: the document says which union the component
- * dispatches by, a `Model` carries one `discriminator`, and the union left
- * out is flattened, so its variants' properties are fields of the model
- * (#718: handed a keyword whose `mapping` names another union's variants,
- * the union was a dispatcher by that mapping, its own variants' properties
- * on no model).
+ * One that carries a composed schema's decision (`DecidedDiscriminator`)
+ * is read by it: where the keyword dispatches the union it goes with,
+ * that union dispatches by it and any other is no axis, with a `mapping`
+ * or by its pinned consts alike — the document says which union the
+ * component dispatches by, a `Model` carries one `discriminator`, and the
+ * union left out is flattened, so its variants' properties are fields of
+ * the model (#718: handed a keyword whose `mapping` names another union's
+ * variants, the union was a dispatcher by that mapping, its own variants'
+ * properties on no model). Where the keyword dispatches no union — it
+ * writes no `mapping`, and the variants of the union it goes with do not
+ * each pin its property to a value of their own that names a model — it
+ * decides nothing, and the union is read with the keyword it was read
+ * with before (`otherwise`), so a union that dispatched by its pinned
+ * consts beside a keyword that dispatches nothing still does (Greptile on
+ * #723: the decision stood whether or not the keyword dispatched, and a
+ * `oneOf` pinning `cat`, `cat` and `dog` under `{ propertyName: 'kind' }`
+ * kept the `anyOf` of `Cat` and `Dog` beside it from dispatching).
  */
 function detectAllOfVariantDiscriminator(
   variants: readonly SchemaObject[],
@@ -8670,9 +8801,16 @@ function detectAllOfVariantDiscriminator(
   schemas: Record<string, SchemaObject> | undefined,
   explicit?: DiscriminatorKeyword,
 ): AllOfDiscriminator | null {
-  // A keyword the composition decided goes with another of its unions says
-  // which union dispatches: this one is flattened, whatever it pins (#718).
-  if (!discriminatesUnion(explicit, variants)) return null;
+  const decision = decisionOf(explicit);
+  if (decision !== undefined) {
+    // The keyword dispatches the union it goes with: that union by the
+    // keyword, any other flattened (#718). It dispatches none: nothing is
+    // decided, and this union is read as it was.
+    const dispatched = detectAllOfVariantDiscriminator(decision.variants, fallbackName, schemas, decision.keyword);
+    if (dispatched === null)
+      return detectAllOfVariantDiscriminator(variants, fallbackName, schemas, decision.otherwise);
+    return decision.variants === variants ? dispatched : null;
+  }
   const members = unionMembers({ oneOf: [...variants] }, NO_INLINE_NAMES, schemas);
   if (members.length === 0) return null;
   const writtenMapping = explicit?.mapping ?? {};

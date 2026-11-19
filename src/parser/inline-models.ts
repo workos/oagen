@@ -23,7 +23,7 @@ import {
   allOfComposesComponent,
   composesOwnChain,
   axisDiscriminatorOf,
-  isDecidedDiscriminator,
+  handedOn,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
@@ -4018,24 +4018,24 @@ export function mergeAllOfMembers(
           : { name: resolveSchemaName(key), schema: target };
       // Nothing written beside the `$ref` is read — not a bare alias's
       // `required`, `properties`, `allOf` or union (#618 review, #622) —
-      // as the component reader reads none (`componentAllOfMembers`). A
-      // keyword the composition around the `$ref` decided the union of
+      // as the component reader reads none (`componentAllOfMembers`), and
+      // no keyword is handed on past the `$ref`, as none was. A decision
+      // the composition around the `$ref` made of its keyword
       // (`wrapperDiscriminatorOf`) goes on with a reference that stays
-      // inside the same component's chain, as the component reader hands
-      // it to a `$ref` member's unions: the union it goes with is left to
-      // the component and every other is flattened into the merge, as
-      // both are in the component's own model (#718). A component its own
-      // `allOf` composes is read by its own composition's keyword, never by
-      // one handed in around the reference, as the component reader reads
-      // it (`composedInlineMember`: only a wrapper written inline, or a
-      // pointer to one, is part of the `allOf` it sits in; #714).
+      // inside the same component's chain (`handedOn`), as the component
+      // reader hands it to a `$ref` member's unions: the union the keyword
+      // goes with is left to the component and every other is flattened
+      // into the merge, as both are in the component's own model (#718). A
+      // component its own `allOf` composes is read by its own composition's
+      // decision, never by one made around the reference, as the component
+      // reader reads it (`composedInlineMember`: only a wrapper written
+      // inline, or a pointer to one, is part of the `allOf` it sits in;
+      // #714), so it is handed none.
       const component = key !== undefined && allOfComposesComponent(target);
       visit(
         target,
         owner,
-        owner === origin && !component && isDecidedDiscriminator(wrapperDiscriminator)
-          ? wrapperDiscriminator
-          : undefined,
+        owner === origin && !component ? handedOn(wrapperDiscriminator, () => undefined) : undefined,
       );
       return;
     }

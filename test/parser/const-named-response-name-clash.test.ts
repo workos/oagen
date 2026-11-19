@@ -691,6 +691,63 @@ describe('#712', () => {
         }
       });
 
+      it('reads every definition an operation holds under the name: one copy that is the minting operation’s does not stand for another', async () => {
+        // Greptile, #724: `createDog` returns a variant titled `GetPetResponseOwner` that is
+        // `getPet`'s very `owner` and takes one of that title with other fields. Only the
+        // first was compared, so nothing left the name and the merge kept the larger
+        // request shape for `getPet`'s `owner` too. An operation's bodies are named as one:
+        // both of its copies leave, and are settled between themselves as before.
+        const keeper = getPet(obj({ id: str, owner: obj({ kind: konst('a'), name: str }) }));
+        const createDog = (request: Schema, response: Schema) => ({
+          '/dogs': { post: { operationId: 'createDog', requestBody: json(request), responses: ok(response) } },
+        });
+        const same = obj({ shape: titled('GetPetResponseOwner', { name: str }) });
+        const other = obj({ shape: titled('GetPetResponseOwner', { breed: str, age: int }) });
+        for (const [request, response, counts] of [
+          [other, same, '3 vs 2'],
+          [same, other, '2 vs 3'],
+        ] as const) {
+          expect(await settled(openapi, { ...keeper, ...createDog(request, response) })).toEqual([
+            'CreateDogRequest { shape?: GetPetResponseOwner2 | Other }',
+            'CreateDogResponse { shape?: GetPetResponseOwner2 | Other }',
+            'GET /pets/{petId} (getPet): none → GetPetResponse',
+            'GetPetResponse { id?: string, owner?: GetPetResponseOwner }',
+            'GetPetResponseOwner { kind?: "a", name?: string }',
+            'GetPetResponseOwner2 { kind?: "a", breed?: string, age?: integer }',
+            'Other { kind?: "b", x?: integer }',
+            'POST /dogs (createDog): CreateDogRequest → CreateDogResponse',
+            `! ${note('GetPetResponseOwner', 'GetPetResponseOwner2', 'GET /pets/{petId}')}`,
+            `! [oagen] Warning: Inline model "GetPetResponseOwner2" has more than one definition with different fields or field types (${counts}) — keeping the one with more fields`,
+          ]);
+        }
+        // Both copies the minting operation's very model: one `GetPetResponseOwner`, as before.
+        expect(await settled(openapi, { ...keeper, ...createDog(same, same) })).toEqual([
+          'CreateDogRequest { shape?: GetPetResponseOwner | Other }',
+          'CreateDogResponse { shape?: GetPetResponseOwner | Other }',
+          'GET /pets/{petId} (getPet): none → GetPetResponse',
+          'GetPetResponse { id?: string, owner?: GetPetResponseOwner }',
+          'GetPetResponseOwner { kind?: "a", name?: string }',
+          'Other { kind?: "b", x?: integer }',
+          'POST /dogs (createDog): CreateDogRequest → CreateDogResponse',
+        ]);
+        // The same of an inline enum the two copies carry: the request's members differ.
+        const status = (...values: string[]): Schema => ({ type: 'string', enum: values });
+        const lines = await settled(openapi, {
+          ...getPet(obj({ id: str, owner: obj({ kind: konst('a'), status: status('x', 'y') }) })),
+          ...createDog(
+            obj({ shape: titled('GetPetResponseOwner', { status: status('p', 'q') }) }),
+            obj({ shape: titled('GetPetResponseOwner', { status: status('x', 'y') }) }),
+          ),
+        });
+        expect(lines).toContain('GetPetResponseOwner { kind?: "a", status?: GetPetResponseOwnerStatus }');
+        expect(lines).toContain('enum GetPetResponseOwnerStatus [x, y]');
+        expect(lines).toContain('CreateDogRequest { shape?: GetPetResponseOwner2 | Other }');
+        expect(lines).toContain('CreateDogResponse { shape?: GetPetResponseOwner2 | Other }');
+        expect(lines).toContain(
+          `! ${note('GetPetResponseOwnerStatus', 'GetPetResponseOwnerStatus2', 'GET /pets/{petId}', '', 'enum')}`,
+        );
+      });
+
       it('decides a name after the names its model references: a parent follows its child, and keeps a child that is the operation’s own', async () => {
         // Both nest an `owner`, of two shapes: the child leaves, and so does the parent.
         expect(
@@ -1291,6 +1348,46 @@ describe('#712', () => {
       expect(settle([keeper(status('a', 'b')), modelHolder])).toEqual({
         'get /dogs': [['GetPetStatus', 'GetPetStatus2']],
       });
+    });
+
+    it('reads every definition a body holds under the name, on either side', () => {
+      // The holder's first copy is the keeper's very model; its second is not.
+      const holder = (first: Record<string, TypeRef>, second: Record<string, TypeRef>) =>
+        body(
+          'post /dogs',
+          'CreateDog',
+          [],
+          ['GetPetResponse'],
+          [model('GetPetResponse', first), model('GetPetResponse', second)],
+        );
+      const expected = { 'post /dogs': [['GetPetResponse', 'GetPetResponse2']] };
+      expect(settle([getPetBody(), holder({ name: string }, { breed: string })])).toEqual(expected);
+      expect(settle([getPetBody(), holder({ breed: string }, { name: string })])).toEqual(expected);
+      expect(settle([getPetBody(), holder({ name: string }, { name: string })])).toEqual({});
+      // A keeper that holds two shapes under the name has no one model to be.
+      const keeper = body(
+        'get /pets/{petId}',
+        'GetPet',
+        ['GetPetResponse'],
+        [],
+        [model('GetPetResponse', { name: string }), model('GetPetResponse', { id: string })],
+      );
+      expect(settle([keeper, listDogsBody({ name: string })])).toEqual({
+        'get /dogs': [['GetPetResponse', 'GetPetResponse2']],
+      });
+      // An inline enum of the name beside a model of it, in one body.
+      const mixed = body(
+        'post /dogs',
+        'CreateDog',
+        [],
+        ['GetPetResponse'],
+        [
+          model('GetPetResponse', { name: string }),
+          model('CreateDogRequest', { kind: { kind: 'enum', name: 'GetPetResponse', values: ['a'] } }),
+        ],
+        { documentNames: ['GetPetResponse'] },
+      );
+      expect(settle([getPetBody(), mixed])).toEqual(expected);
     });
 
     it('takes no part without the bodies to compare: a reading that names no definitions gives nothing up', () => {

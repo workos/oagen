@@ -33,7 +33,7 @@
  * takes the next free numbered name (`GetPetResponse2`), one name for every
  * operation that returns it, with a note (`resolveDocumentNames`).
  */
-import type { EnumRef, Model, ModelRef, TypeRef } from '../ir/types.js';
+import type { Model, ModelRef, TypeRef } from '../ir/types.js';
 import { collectModelTypeRefs, renameModelRefs, renameTypeRefModels, walkTypeRef } from '../ir/types.js';
 import { numberedName } from '../utils/naming.js';
 import { shapeWithEnumFlags } from './enum-members.js';
@@ -283,8 +283,13 @@ interface DocumentNameMove {
  * adding an operation elsewhere never renames or retypes it. What the
  * document names so keeps the name only while it is that very model: the
  * same kind, a model or an inline enum, of the same shape
- * (`definitionShape`; the model's own `deprecated` aside, which the merge
- * passes settle between copies of one shape). An `owner` pinned
+ * (`definitionShapes`; the model's own `deprecated` aside, which the merge
+ * passes settle between copies of one shape), in every definition the
+ * operation holds under the name: an operation whose response repeats the
+ * minting operation's model and whose request body holds another under the
+ * same title gives the name up for both, since its bodies are named as one
+ * and the two are then the document's to settle between themselves. An
+ * `owner` pinned
  * `object: get_pet_response_owner` that `getPet` nests and `listDogs`
  * returns is therefore still one `GetPetResponseOwner`, as before. Any
  * other definition leaves the name, in every operation that holds it, for
@@ -350,12 +355,18 @@ function resolveDocumentNames(
     for (const holder of [body, ...keepers]) {
       for (const nested of referencedNames(holder, name)) decide(holder, nested);
     }
-    const shape = definitionShape(body, name);
-    if (shape === undefined || keepers.every((keeper) => definitionShape(keeper, name) === shape)) return;
+    const shapes = definitionShapes(body, name);
+    if (shapes.length === 0) return;
+    // The very model: one shape on this side, and the one shape each keeper holds.
+    const kept = (keeper: OperationBodyNames): boolean => {
+      const own = definitionShapes(keeper, name);
+      return own.length === 1 && own[0] === shapes[0];
+    };
+    if (shapes.length === 1 && keepers.every(kept)) return;
     const moved = moves.get(name);
     moves.set(name, {
       stems: (moved?.stems ?? new Set<string>()).add(body.stem),
-      kind: moved?.kind === 'model' || shape.startsWith('model:') ? 'model' : 'enum',
+      kind: moved?.kind === 'model' || shapes.some((shape) => shape.startsWith('model:')) ? 'model' : 'enum',
       keeper: operationLabelOf(keepers[0]!.key),
     });
     move(body, new Map([[name, setAsideName(name, '')]]));
@@ -368,36 +379,48 @@ function resolveDocumentNames(
 }
 
 /**
- * What `body` holds under `name` as one string, for comparison with another
- * operation's (`resolveDocumentNames`): a model's shape — its fields, each
- * with its type, requiredness, limits and flags, and the model's own limits
- * and union structure, its `deprecated` and its documentation aside
- * (`shapeFingerprint`) — or an inline enum's members as a model's shape
- * reads them, in the order written with each one's deprecation
- * (`shapeWithEnumFlags`), each under its kind, so a model and an enum of
- * one name never compare alike. Undefined when the operation's bodies hold
- * neither.
+ * Every shape `body` holds under `name`, each as one string and once, for
+ * comparison with another operation's (`resolveDocumentNames`): a model's
+ * shape — its fields, each with its type, requiredness, limits and flags,
+ * and the model's own limits and union structure, its `deprecated` and its
+ * documentation aside (`shapeFingerprint`) — or an inline enum's members as
+ * a model's shape reads them, in the order written with each one's
+ * deprecation (`shapeWithEnumFlags`), each under its kind, so a model and
+ * an enum of one name never compare alike. Every definition is read, not
+ * the first: one operation can hold the name twice — a variant so titled in
+ * its request body and another in its response, each minted for its own
+ * site and both moved by one yield (`yieldBodyNames`) — and a copy that is
+ * the minting operation's very model must not stand for one that is not
+ * (Greptile, #724: the response's copy, read first, hid the request's, and
+ * the merge then kept the larger request shape for the minting operation
+ * too). Empty when the operation's bodies hold neither a model nor an enum
+ * of the name.
  */
-function definitionShape(body: OperationBodyNames, name: string): string | undefined {
+function definitionShapes(body: OperationBodyNames, name: string): string[] {
   const { roots, models } = body.definitions!;
-  const model = models.find((candidate) => candidate.name === name);
-  if (model) return `model:${shapeFingerprint(model)}`;
-  const found: EnumRef[] = [];
+  const shapes = new Set<string>();
+  for (const model of models) if (model.name === name) shapes.add(`model:${shapeFingerprint(model)}`);
   for (const ref of [...roots, ...models.flatMap(collectModelTypeRefs)]) {
-    walkTypeRef(ref, { enum: (enumRef) => void (enumRef.values && enumRef.name === name && found.push(enumRef)) });
+    walkTypeRef(ref, {
+      enum: (enumRef) => {
+        if (enumRef.values && enumRef.name === name) shapes.add(`enum:${JSON.stringify(shapeWithEnumFlags(enumRef))}`);
+      },
+    });
   }
-  return found[0] && `enum:${JSON.stringify(shapeWithEnumFlags(found[0]))}`;
+  return [...shapes];
 }
 
-/** Every model and inline enum name the model `body` holds under `name` references, its own aside; none for an enum. */
+/** Every model and inline enum name the models `body` holds under `name` reference, its own aside; none for an enum. */
 function referencedNames(body: OperationBodyNames, name: string): string[] {
-  const model = body.definitions!.models.find((candidate) => candidate.name === name);
   const names = new Set<string>();
-  for (const ref of model ? collectModelTypeRefs(model) : []) {
-    walkTypeRef(ref, {
-      model: (modelRef) => void names.add(modelRef.name),
-      enum: (enumRef) => void (enumRef.values && names.add(enumRef.name)),
-    });
+  for (const model of body.definitions!.models) {
+    if (model.name !== name) continue;
+    for (const ref of collectModelTypeRefs(model)) {
+      walkTypeRef(ref, {
+        model: (modelRef) => void names.add(modelRef.name),
+        enum: (enumRef) => void (enumRef.values && names.add(enumRef.name)),
+      });
+    }
   }
   names.delete(name);
   return [...names];
