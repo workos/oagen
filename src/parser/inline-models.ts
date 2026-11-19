@@ -4030,13 +4030,22 @@ export function mergeAllOfMembers(
       // decision, never by one made around the reference, as the component
       // reader reads it (`composedInlineMember`: only a wrapper written
       // inline, or a pointer to one, is part of the `allOf` it sits in;
-      // #714), so it is handed none.
+      // #714), so it is handed none. A pointer deeper into a component
+      // names a schema and no component, and is read as that schema written
+      // in its place is: what the `allOf` around it hands its members goes
+      // on to it whole, the keyword as written included (Greptile on #725:
+      // it was cleared here as past any `$ref`, so a merge naming `Pet: {
+      // discriminator: { mapping }, allOf: [{ $ref: Base }, { $ref:
+      // '#/components/schemas/Holder/properties/wrapped' }] }` flattened
+      // the variants `Pet` dispatches by that keyword).
       const component = key !== undefined && allOfComposesComponent(target);
-      visit(
-        target,
-        owner,
-        owner === origin && !component ? handedOn(wrapperDiscriminator, () => undefined) : undefined,
-      );
+      const past =
+        key === undefined
+          ? wrapperDiscriminator
+          : owner === origin && !component
+            ? handedOn(wrapperDiscriminator, () => undefined)
+            : undefined;
+      visit(target, owner, past);
       return;
     }
     for (const [key, value] of Object.entries(s.properties ?? {})) {

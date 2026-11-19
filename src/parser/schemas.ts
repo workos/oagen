@@ -9154,23 +9154,39 @@ function extractDiscriminatedAllOfVariantModels(
 /**
  * The limits a member of a discriminated component's `allOf` puts on every
  * variant (`discriminatedVariantSchemas`): everything it writes except the
- * branches of an axis (`axes`, the variant lists the component dispatches).
- * A member with no axis under it (`memberUnions`) binds every variant by
- * all it writes, read through its `allOf` members (`extractConstraints`).
- * The member that carries an axis binds them by the keywords of its own
- * level, an `allOf` member that only annotates or limits it included
- * (`annotatingAllOfMembers`; #613 review: `{ allOf: [{ maxProperties: 3
- * }], oneOf: [cat, dog] }` as a member built `HolderCat` and `HolderDog`
- * without the limit, where `{ maxProperties: 3, oneOf: [...] }` carried it
- * onto both). And an `allOf` wrapper written as the member, with an axis
- * under it (`composedInlineMember`; #714), by its own keywords and by each
- * of its own members', read the same way, so `{ maxProperties: 5,
- * properties: { extra }, allOf: [{ maxProperties: 3, oneOf: [cat, dog] }]
- * }` limits both variants to 3 as the wrapper's parts written as members
- * do. A `$ref` member contributes the keywords written beside the
- * reference only, as everywhere: the schema it names keeps its own
- * limits, a wrapper a pointer lands on included. `walking` ends a wrapper
- * that holds itself.
+ * branches of an axis (`axes`, the variant lists the component dispatches),
+ * read along the way the member reader reads the member to its axis.
+ *
+ *   - A member with no axis under it (`memberUnions`) binds every variant
+ *     by all it writes, read through its `allOf` members
+ *     (`extractConstraints`).
+ *   - The member that carries an axis binds them by the keywords of its own
+ *     level, an `allOf` member that only annotates or limits it included
+ *     (`annotatingAllOfMembers`; #613 review: `{ allOf: [{ maxProperties: 3
+ *     }], oneOf: [cat, dog] }` as a member built `HolderCat` and
+ *     `HolderDog` without the limit, where `{ maxProperties: 3, oneOf:
+ *     [...] }` carried it onto both).
+ *   - A nullable wrapper it writes is its one variant, read as one more
+ *     member (`nullableAxisBranch`, as the member reader reads it): beside
+ *     an object member an instance is never `null`, so what that variant
+ *     writes binds every variant too, the axis under it or beside it — `{
+ *     oneOf: [{ maxProperties: 3, allOf: [{ oneOf: [cat, dog] }] }, { type:
+ *     'null' }] }` limits `PetCat` and `PetDog` to 3, as the model is
+ *     (Greptile on #725: the wrapper was the member that carries the axis,
+ *     read by its own level alone, so the limit reached the model and no
+ *     variant, and the variants of another union beside it lost the limit
+ *     they had while no axis was found under the wrapper).
+ *   - An `allOf` wrapper written as the member, with an axis under it
+ *     (`composedInlineMember`; #714), binds them by its own keywords and by
+ *     each of its own members', read the same way, so `{ maxProperties: 5,
+ *     properties: { extra }, allOf: [{ maxProperties: 3, oneOf: [cat, dog]
+ *     }] }` limits both variants to 3 as the wrapper's parts written as
+ *     members do.
+ *
+ * A `$ref` — a member, or a nullable wrapper's one variant — contributes
+ * the keywords written beside the reference only, as everywhere: the
+ * schema it names keeps its own limits, a wrapper a pointer lands on
+ * included. `walking` ends a wrapper that holds itself.
  */
 function limitsOutsideAxes(
   member: SchemaObject,
@@ -9179,17 +9195,23 @@ function limitsOutsideAxes(
   walking = new Set<SchemaObject>(),
 ): Constraints | undefined {
   if (!memberUnions(member, schemas).some(({ variants }) => axes.has(variants))) return extractConstraints(member);
-  if (member.$ref === undefined && allOfComposesComponent(member) && !walking.has(member)) {
-    walking.add(member);
-    return componentAllOfMembers(member).reduce(
-      (limits, inner) => combineConstraints(limits, limitsOutsideAxes(inner, axes, schemas, walking)),
-      ownConstraints(member),
-    );
-  }
-  return [member, ...annotatingAllOfMembers(member)].reduce<Constraints | undefined>(
+  const ownLevel = [member, ...annotatingAllOfMembers(member)].reduce<Constraints | undefined>(
     (limits, level) => combineConstraints(limits, ownConstraints(level)),
     undefined,
   );
+  if (member.$ref !== undefined || walking.has(member)) return ownLevel;
+  walking.add(member);
+  const outside = (inner: SchemaObject): Constraints | undefined => limitsOutsideAxes(inner, axes, schemas, walking);
+  if (allOfComposesComponent(member)) {
+    return componentAllOfMembers(member).reduce(
+      (limits, inner) => combineConstraints(limits, outside(inner)),
+      ownConstraints(member),
+    );
+  }
+  return unionAxesOf(member).reduce((limits, variants) => {
+    const branch = nullableAxisBranch(member, variants);
+    return branch ? combineConstraints(limits, outside(branch)) : limits;
+  }, ownLevel);
 }
 
 /** A discriminated component's variant axis: its union's variants, and each object variant with the schema its model is built from. */

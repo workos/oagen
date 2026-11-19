@@ -1046,6 +1046,10 @@ export function collectObjectProperties(
     // names a component (`viaComponent`), which is handed nothing.
     let passedOn = wrapperDiscriminator;
     let viaComponent = false;
+    // The keyword the innermost wrapper read through writes for the schema
+    // under it (`writtenNearest`): the one the union the walk ends on was
+    // read with before any decision, nearer than `s`'s own.
+    let writtenNearest: SchemaObject['discriminator'];
     const readThrough = (wrapper: SchemaObject): void => {
       if (wrapper.$ref !== undefined) {
         // What is written around a reference says nothing of the members of
@@ -1054,9 +1058,12 @@ export function collectObjectProperties(
         if (componentKeyOf(wrapper.$ref) === undefined) return;
         passedOn = undefined;
         viaComponent = true;
-      } else if (allOfComposesComponent(wrapper)) {
-        passedOn = wrapperDiscriminatorWithin(wrapper, passedOn, componentSchemas);
-      } else passedOn = handedOn(passedOn, (was) => wrapper.discriminator ?? was);
+        return;
+      }
+      writtenNearest = wrapper.discriminator ?? writtenNearest;
+      passedOn = allOfComposesComponent(wrapper)
+        ? wrapperDiscriminatorWithin(wrapper, passedOn, componentSchemas)
+        : handedOn(passedOn, (was) => wrapper.discriminator ?? was);
     };
     while (depth > 0 && carrier.$ref) {
       if (seenRefs.has(carrier.$ref)) return;
@@ -1115,12 +1122,19 @@ export function collectObjectProperties(
         // The keyword the union is read with, as the model reads it
         // (`axisDiscriminatorOf`): the composition's decision, else the
         // member's own — a member writing both keywords hands it to the
-        // one it goes with — else the one written on a nullable wrapper the
-        // resolver collapsed (`handedOn`), else the one handed down.
+        // one it goes with — else the one written on a wrapper the resolver
+        // read through to reach the union, the nearest to it first
+        // (`handedOn`, `writtenNearest`: a nullable wrapper collapsed onto
+        // its one variant, an `allOf` read as its one member), else the
+        // one handed down. Greptile on #725: only the first wrapper's was
+        // read, so `{ additionalProperties: false, allOf: [{ discriminator:
+        // { mapping }, allOf: [{ oneOf: [...] }] }] }` among a component's
+        // members left the union under it with no keyword, counted as
+        // flattened where the component dispatches it by that `mapping`.
         const handed =
           bare === carrier
             ? wrapperDiscriminator
-            : handedOn(wrapperDiscriminator, (was) => carrier.discriminator ?? was);
+            : handedOn(wrapperDiscriminator, (was) => writtenNearest ?? carrier.discriminator ?? was);
         // A component its own `allOf` composes is read by its own
         // composition's decision, never by one made around the reference
         // that names it (`undecided`); a wrapper written inline is part of
