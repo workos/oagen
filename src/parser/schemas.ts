@@ -7576,7 +7576,13 @@ function namesProperty(keyword: DiscriminatorKeyword | undefined): keyword is Di
  * selects alike, none of
  * either included, the union it is written with comes first — the first
  * of them, `oneOf` before `anyOf`, when it is written beside several —
- * then the others in reading order. So `{ oneOf: [{ $ref: Pet }, { $ref:
+ * then the others in reading order. A union written with another keyword
+ * of its own is taken only where the `mapping` names its variants: what
+ * its variants pin is its own keyword's to read (`{ allOf: [{ oneOf: [...],
+ * discriminator: { propertyName: 'kind' } }, { anyOf: [{ $ref: Cat }, {
+ * $ref: Dog }], discriminator: { propertyName: 'kind', mapping: { feline:
+ * Cat, canine: Dog } } }] }` keeps the `anyOf` dispatching by its own
+ * mapping where the first keyword dispatches nothing). So `{ oneOf: [{ $ref: Pet }, { $ref:
  * Toy }], anyOf: [{ $ref: Cat }, { $ref: Dog }], discriminator: {
  * propertyName: 'kind', mapping: { cat: '#/components/schemas/Cat', dog:
  * '#/components/schemas/Dog' } } }` dispatches its `anyOf`, wherever the
@@ -7607,6 +7613,9 @@ function discriminatedUnion(
   let most = selectedVariants(keyword, chosen.variants, schemas);
   for (const candidate of candidates.slice(1)) {
     const selected = selectedVariants(keyword, candidate.variants, schemas);
+    // A union written with a keyword of its own is taken from it only by a
+    // `mapping` that names its variants, never for what its variants pin.
+    if (selected.named === 0 && candidate.discriminator !== keyword && namesProperty(candidate.discriminator)) continue;
     if (selected.named > most.named || (selected.named === most.named && selected.pinned > most.pinned)) {
       chosen = candidate;
       most = selected;
