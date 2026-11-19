@@ -1340,4 +1340,312 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
       `);
     },
   );
+  // MichaelDeBoey's review of #725, and the matrix around it: the pagination walk sees the fields
+  // the model has. A keyword written around a `$ref` stops at a component its own `allOf`
+  // composes and goes on into anything else, for the model, for a merge that names it and for
+  // the walk alike, since all three ask one helper (`handedPastRef`).
+  describe('an override behind a `$ref` under a keyword resolves exactly where the model carries the field', () => {
+    const closed = { additionalProperties: false };
+    const x = { properties: { x: string } };
+    const Paging = ref('Paging');
+    const Base = ref('Base');
+    const records = { type: 'array', items: string };
+    /** Every way `Paging` holds the union `U`, with the components a spelling of two hops names. */
+    const pagings = (U: unknown): Record<string, Record<string, unknown>> => ({
+      'composed by its `allOf`': { Paging: W(U) },
+      'the union itself': { Paging: U as Record<string, unknown> },
+      'composed, the union beside another member': { Paging: W(U, object({ extra: string })) },
+      'the union beside `properties`': { Paging: { ...object({ extra: string }), ...(U as object) } },
+      'the union beside an `allOf` that types it': { Paging: { ...W(object({ extra: string })), ...(U as object) } },
+      'the union beside an `allOf` that only annotates': {
+        Paging: { ...W({ description: 'Paging.' }), ...(U as object) },
+      },
+      'a bare alias of a composed component': { Paging: ref('Inner'), Inner: W(U) },
+      'a bare alias of the union': { Paging: ref('Inner'), Inner: U },
+      'an `allOf` alias of a composed component': { Paging: W(ref('Inner')), Inner: W(U) },
+      'an `allOf` alias of the union': { Paging: W(ref('Inner')), Inner: U },
+      'a nullable alias of a composed component': { Paging: { oneOf: [ref('Inner'), { type: 'null' }] }, Inner: W(U) },
+      'a nullable alias of the union': { Paging: { oneOf: [ref('Inner'), { type: 'null' }] }, Inner: U },
+      'a nullable alias around an inline wrapper': { Paging: { oneOf: [W(U), { type: 'null' }] } },
+      'two aliases to a composed component': { Paging: ref('Inner'), Inner: ref('Inner2'), Inner2: W(U) },
+      'an alias of a pointer to an inline wrapper': {
+        Paging: { $ref: '#/components/schemas/Holder/properties/w' },
+        Holder: object({ w: W(U) }),
+      },
+    });
+    /** Every place the keyword `D` is written around the `$ref` to `Paging`. */
+    const dispatchers = (D: unknown): Record<string, unknown> => ({
+      'the keyword wrapper in a closed wrapper': W(Base, beside(closed, beside({ discriminator: D }, Paging)), x),
+      'the keyword wrapper as the member': W(Base, beside({ discriminator: D }, Paging), x),
+      'the keyword beside the `allOf`': { discriminator: D, ...W(Base, Paging, x) },
+      'the keyword on a nullable wrapper': W(Base, { discriminator: D, oneOf: [Paging, { type: 'null' }] }, x),
+      'the keyword two wrappers up': W(Base, beside({ discriminator: D }, beside(closed, Paging, x))),
+      'no keyword': W(Base, Paging, x),
+    });
+    const mapping = {
+      propertyName: 'kind',
+      mapping: { cursor: '#/components/schemas/Cursor', page: '#/components/schemas/Page' },
+    };
+    const overrides = {
+      endOfIteration: { override: { endOfIteration: { kind: 'hasMore', path: 'meta.has_more' } }, field: 'has_more' },
+      dataPath: { override: { dataPath: 'meta.records' }, field: 'records' },
+    };
+    /** The sites the path goes through: a component naming `MetaDispatcher` as a base, the component itself, an inline merge naming it. */
+    const sites = {
+      'a base': { schemas: { Via: W(ref('MetaDispatcher'), object({ trace_id: string })) }, meta: ref('Via') },
+      'the component': { schemas: {}, meta: ref('MetaDispatcher') },
+      'an inline merge': { schemas: {}, meta: W(ref('MetaDispatcher'), object({ trace_id: string })) },
+    };
+    const listPets = (
+      openapi: string,
+      {
+        pinned = false,
+        paging,
+        dispatcher,
+        override,
+        site,
+      }: {
+        pinned?: boolean;
+        paging: Record<string, unknown>;
+        dispatcher: unknown;
+        override: Record<string, unknown>;
+        site: { schemas: Record<string, unknown>; meta: unknown };
+      },
+    ) => {
+      const kind = (value: string) => (pinned ? { type: 'string', enum: [value] } : string);
+      return {
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: string }],
+              responses: { '200': ok(object({ data: { type: 'array', items: string }, meta: site.meta })) },
+              'x-pagination': override,
+            },
+          },
+        },
+        components: {
+          schemas: {
+            Base: object({ base: string }),
+            Cursor: object({ kind: kind('cursor'), has_more: boolean, records, next_after: string }),
+            Page: object({ kind: kind('page'), has_more: boolean, records, next_page: integer }),
+            ...paging,
+            MetaDispatcher: dispatcher,
+            ...site.schemas,
+          },
+        },
+      };
+    };
+    /** Whether the override was kept, and whether the model its path goes through carries the field — itself, or on every model it dispatches to. */
+    function readOverride(spec: ApiSpec, siteName: string, overrideName: keyof typeof overrides) {
+      const { field } = overrides[overrideName];
+      const { pagination } = spec.services.flatMap(({ operations }) => operations)[0]!;
+      const kept =
+        overrideName === 'endOfIteration'
+          ? pagination?.endOfIteration !== undefined
+          : pagination?.dataPath === 'meta.records';
+      const model =
+        siteName === 'an inline merge'
+          ? spec.models.find(({ fields }) => fields.some(({ name }) => name === 'trace_id'))
+          : modelOf(spec, siteName === 'a base' ? 'Via' : 'MetaDispatcher');
+      const has = (candidate: Model | undefined) => candidate?.fields.some(({ name }) => name === field) ?? false;
+      const dispatched = Object.values(model?.discriminator?.mapping ?? {}).map((name) => modelOf(spec, name));
+      return { kept, carried: has(model) || (dispatched.length > 0 && dispatched.every(has)) };
+    }
+
+    it.each([
+      ['3.0.3', 'endOfIteration'],
+      ['3.0.3', 'dataPath'],
+      ['3.1.0', 'endOfIteration'],
+      ['3.1.0', 'dataPath'],
+    ] as const)(
+      'for every spelling of `Paging`, of the keyword around the `$ref` and of the site, under OAS %s, for `%s`',
+      async (openapi, overrideName) => {
+        const U = { oneOf: [ref('Cursor'), ref('Page')] };
+        const outcomes = new Map<string, Set<string>>();
+        for (const [pagingName, paging] of Object.entries(pagings(U))) {
+          for (const [dispatcherName, dispatcher] of Object.entries(dispatchers(mapping))) {
+            for (const [siteName, site] of Object.entries(sites)) {
+              const { override } = overrides[overrideName];
+              const spec = await parseJson(listPets(openapi, { paging, dispatcher, override, site }));
+              const { kept, carried } = readOverride(spec, siteName, overrideName);
+              expect(kept, `${pagingName}, ${dispatcherName}, ${overrideName}, read through ${siteName}`).toBe(carried);
+              // The keyword's place decides nothing: one outcome per `Paging` and site, wherever it is written.
+              if (dispatcherName !== 'no keyword') {
+                const key = `${pagingName}, read through ${siteName}`;
+                outcomes.set(key, (outcomes.get(key) ?? new Set()).add(kept ? 'kept' : 'reported'));
+              }
+            }
+          }
+        }
+        expect([...outcomes].filter(([, seen]) => seen.size > 1).map(([key]) => key)).toEqual([]);
+        expect([...outcomes].map(([key, seen]) => `${key}: ${[...seen].join()}`).join('\n')).toMatchInlineSnapshot(`
+          "composed by its \`allOf\`, read through a base: kept
+          composed by its \`allOf\`, read through the component: kept
+          composed by its \`allOf\`, read through an inline merge: kept
+          the union itself, read through a base: reported
+          the union itself, read through the component: kept
+          the union itself, read through an inline merge: reported
+          composed, the union beside another member, read through a base: kept
+          composed, the union beside another member, read through the component: kept
+          composed, the union beside another member, read through an inline merge: kept
+          the union beside \`properties\`, read through a base: reported
+          the union beside \`properties\`, read through the component: kept
+          the union beside \`properties\`, read through an inline merge: reported
+          the union beside an \`allOf\` that types it, read through a base: kept
+          the union beside an \`allOf\` that types it, read through the component: kept
+          the union beside an \`allOf\` that types it, read through an inline merge: kept
+          the union beside an \`allOf\` that only annotates, read through a base: reported
+          the union beside an \`allOf\` that only annotates, read through the component: kept
+          the union beside an \`allOf\` that only annotates, read through an inline merge: reported
+          a bare alias of a composed component, read through a base: kept
+          a bare alias of a composed component, read through the component: kept
+          a bare alias of a composed component, read through an inline merge: kept
+          a bare alias of the union, read through a base: reported
+          a bare alias of the union, read through the component: kept
+          a bare alias of the union, read through an inline merge: reported
+          an \`allOf\` alias of a composed component, read through a base: kept
+          an \`allOf\` alias of a composed component, read through the component: kept
+          an \`allOf\` alias of a composed component, read through an inline merge: kept
+          an \`allOf\` alias of the union, read through a base: kept
+          an \`allOf\` alias of the union, read through the component: kept
+          an \`allOf\` alias of the union, read through an inline merge: kept
+          a nullable alias of a composed component, read through a base: kept
+          a nullable alias of a composed component, read through the component: kept
+          a nullable alias of a composed component, read through an inline merge: kept
+          a nullable alias of the union, read through a base: reported
+          a nullable alias of the union, read through the component: kept
+          a nullable alias of the union, read through an inline merge: reported
+          a nullable alias around an inline wrapper, read through a base: reported
+          a nullable alias around an inline wrapper, read through the component: kept
+          a nullable alias around an inline wrapper, read through an inline merge: reported
+          two aliases to a composed component, read through a base: kept
+          two aliases to a composed component, read through the component: kept
+          two aliases to a composed component, read through an inline merge: kept
+          an alias of a pointer to an inline wrapper, read through a base: kept
+          an alias of a pointer to an inline wrapper, read through the component: kept
+          an alias of a pointer to an inline wrapper, read through an inline merge: kept"
+        `);
+      },
+    );
+
+    it('with `anyOf`, with variants that pin the property, and with a keyword that writes no `mapping`', async () => {
+      const lines: string[] = [];
+      for (const [unionName, U] of [
+        ['oneOf', { oneOf: [ref('Cursor'), ref('Page')] }],
+        ['anyOf', { anyOf: [ref('Cursor'), ref('Page')] }],
+      ] as const) {
+        for (const pinned of [false, true]) {
+          for (const [keywordName, D] of [
+            ['a `mapping`', mapping],
+            ['no `mapping`', { propertyName: 'kind' }],
+          ] as const) {
+            const all = pagings(U);
+            for (const pagingName of [
+              'composed by its `allOf`',
+              'the union itself',
+              'two aliases to a composed component',
+              'a nullable alias of the union',
+            ]) {
+              const seen = new Set<string>();
+              // Michael's three spellings; `dataPath` and the others are read in the matrix above.
+              for (const dispatcherName of [
+                'the keyword wrapper in a closed wrapper',
+                'the keyword wrapper as the member',
+                'the keyword beside the `allOf`',
+              ]) {
+                const dispatcher = dispatchers(D)[dispatcherName];
+                for (const [siteName, site] of Object.entries(sites)) {
+                  const { override } = overrides.endOfIteration;
+                  const spec = await parseJson(
+                    listPets('3.1.0', { pinned, paging: all[pagingName]!, dispatcher, override, site }),
+                  );
+                  const { kept, carried } = readOverride(spec, siteName, 'endOfIteration');
+                  const at = `${unionName}, ${pinned ? 'pinned' : 'unpinned'}, ${keywordName}, ${pagingName}, ${dispatcherName}, ${siteName}`;
+                  expect(kept, at).toBe(carried);
+                  seen.add(`${siteName}: ${kept ? 'kept' : 'reported'}`);
+                }
+              }
+              lines.push(
+                `${unionName}, ${pinned ? 'pinned' : 'unpinned'}, ${keywordName}, \`Paging\` ${pagingName}: ${[...seen].join(', ')}`,
+              );
+            }
+          }
+        }
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "oneOf, unpinned, a \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: kept, the component: kept, an inline merge: kept
+        oneOf, unpinned, a \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        oneOf, unpinned, a \`mapping\`, \`Paging\` two aliases to a composed component: a base: kept, the component: kept, an inline merge: kept
+        oneOf, unpinned, a \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported
+        oneOf, unpinned, no \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: kept, the component: kept, an inline merge: kept
+        oneOf, unpinned, no \`mapping\`, \`Paging\` the union itself: a base: kept, the component: kept, an inline merge: kept
+        oneOf, unpinned, no \`mapping\`, \`Paging\` two aliases to a composed component: a base: kept, the component: kept, an inline merge: kept
+        oneOf, unpinned, no \`mapping\`, \`Paging\` a nullable alias of the union: a base: kept, the component: kept, an inline merge: kept
+        oneOf, pinned, a \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: reported, the component: reported, an inline merge: reported
+        oneOf, pinned, a \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        oneOf, pinned, a \`mapping\`, \`Paging\` two aliases to a composed component: a base: reported, the component: reported, an inline merge: reported
+        oneOf, pinned, a \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported
+        oneOf, pinned, no \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: reported, the component: reported, an inline merge: reported
+        oneOf, pinned, no \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        oneOf, pinned, no \`mapping\`, \`Paging\` two aliases to a composed component: a base: reported, the component: reported, an inline merge: reported
+        oneOf, pinned, no \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported
+        anyOf, unpinned, a \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: kept, the component: kept, an inline merge: kept
+        anyOf, unpinned, a \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        anyOf, unpinned, a \`mapping\`, \`Paging\` two aliases to a composed component: a base: kept, the component: kept, an inline merge: kept
+        anyOf, unpinned, a \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported
+        anyOf, unpinned, no \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: kept, the component: kept, an inline merge: kept
+        anyOf, unpinned, no \`mapping\`, \`Paging\` the union itself: a base: kept, the component: kept, an inline merge: kept
+        anyOf, unpinned, no \`mapping\`, \`Paging\` two aliases to a composed component: a base: kept, the component: kept, an inline merge: kept
+        anyOf, unpinned, no \`mapping\`, \`Paging\` a nullable alias of the union: a base: kept, the component: kept, an inline merge: kept
+        anyOf, pinned, a \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: reported, the component: reported, an inline merge: reported
+        anyOf, pinned, a \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        anyOf, pinned, a \`mapping\`, \`Paging\` two aliases to a composed component: a base: reported, the component: reported, an inline merge: reported
+        anyOf, pinned, a \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported
+        anyOf, pinned, no \`mapping\`, \`Paging\` composed by its \`allOf\`: a base: reported, the component: reported, an inline merge: reported
+        anyOf, pinned, no \`mapping\`, \`Paging\` the union itself: a base: reported, the component: kept, an inline merge: reported
+        anyOf, pinned, no \`mapping\`, \`Paging\` two aliases to a composed component: a base: reported, the component: reported, an inline merge: reported
+        anyOf, pinned, no \`mapping\`, \`Paging\` a nullable alias of the union: a base: reported, the component: kept, an inline merge: reported"
+      `);
+    });
+
+    it('an inline merge naming the component leaves to it the union it dispatches by a keyword written around the `$ref`', async () => {
+      // The merge handed no written keyword past a `$ref` to a named component, so it flattened
+      // the variants `MetaDispatcher` dispatches, and carried `has_more` where the walk, reading
+      // as the model does, reported the path.
+      const U = { oneOf: [ref('Cursor'), ref('Page')] };
+      const { override } = overrides.endOfIteration;
+      const site = sites['an inline merge'];
+      const merged = async (paging: Record<string, unknown>, dispatcher: unknown) => {
+        const spec = await parseJson(listPets('3.1.0', { paging, dispatcher, override, site }));
+        const model = spec.models.find(({ fields }) => fields.some(({ name }) => name === 'trace_id'))!;
+        return `${showModel(modelOf(spec, 'MetaDispatcher'))} ; ${showModel(model)}`;
+      };
+      const lines: string[] = [];
+      for (const [pagingName, paging] of [
+        ['Paging: { oneOf }', pagings(U)['the union itself']!],
+        ['Paging: { allOf: [{ oneOf }] }', pagings(U)['composed by its `allOf`']!],
+      ] as const) {
+        for (const [dispatcherName, dispatcher] of Object.entries(dispatchers(mapping))) {
+          lines.push(`${pagingName}, ${dispatcherName}: ${await merged(paging, dispatcher)}`);
+        }
+      }
+      expect(lines.join('\n')).toMatchInlineSnapshot(`
+        "Paging: { oneOf }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, x?: string } by kind to cursor: Cursor, page: Page ; Meta { base?: string, x?: string, trace_id?: string }
+        Paging: { oneOf }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword wrapper in a closed wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword wrapper as the member: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword beside the \`allOf\`: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword on a nullable wrapper: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, the keyword two wrappers up: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }
+        Paging: { allOf: [{ oneOf }] }, no keyword: MetaDispatcher extends Base, Paging { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string } ; Meta { base?: string, kind?: string, has_more?: boolean, records?: array<string>, next_after?: string, next_page?: integer, x?: string, trace_id?: string }"
+      `);
+    });
+  });
 });

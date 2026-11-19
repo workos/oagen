@@ -7460,16 +7460,13 @@ export function isDecidedDiscriminator(keyword: DiscriminatorKeyword | undefined
 }
 
 /**
- * The keyword handed on past a schema on the way to a union — a `$ref`
- * followed, a nullable wrapper collapsed — given what was handed on there
- * before any decision (`was`, of the keyword handed in): the same, under
- * the decision when `handed` carries one (`DecidedDiscriminator`), so the
- * union under it is still told which union the keyword goes with, and
- * still read as it was where that decision is none. For the readers that
- * walk to a union on their own: the inline merge past a `$ref` that stays
- * in one component's chain, where nothing was handed on, and the
- * pagination walk past a nullable wrapper its resolver collapsed, whose
- * own keyword went with its one variant.
+ * The keyword handed on past a schema on the way to a union, given what
+ * was handed on there before any decision (`was`, of the keyword handed
+ * in): the same, under the decision when `handed` carries one
+ * (`DecidedDiscriminator`), so the union under it is still told which
+ * union the keyword goes with, and still read as it was where that
+ * decision is none. How an `allOf` wrapper hands on what it is handed
+ * (`wrapperDiscriminatorWithin`), for every reader that reads through one.
  */
 export function handedOn(
   handed: DiscriminatorKeyword | undefined,
@@ -7689,10 +7686,9 @@ function discriminatedUnion(
  * else its own composition's. A decision is handed in only to a wrapper
  * written inline, which is part of the composition that made it
  * (`composedInlineMember`; #714) — a reader that reaches a component its
- * `allOf` composes through a `$ref` hands it nothing, since such a
- * component is read by its own composition's keyword, never by one written
- * or decided around the reference, as the component reader reads it
- * (`mergeAllOfMembers`, `collectObjectProperties`).
+ * `allOf` composes through a `$ref` hands it nothing (`handedPastRef`),
+ * since such a component is read by its own composition's keyword, never
+ * by one written or decided around the reference.
  */
 export function axisDiscriminatorOf(
   schema: SchemaObject,
@@ -8031,14 +8027,21 @@ function readComponentAllOfMember(
   // member with no `allOf` is read below whatever else it writes, as it
   // was: a dispatcher it carries beside its own properties is the model's
   // (#429).
+  // What the schema the member lands on is handed for a union under it:
+  // what the member was, unless a `$ref` names a component its own `allOf`
+  // composes (`handedPastRef`).
+  const handed = handedPastRef(options.wrapperDiscriminator, resolved, landing.key !== undefined);
   if (allOfComposesComponent(resolved)) {
     // An inline wrapper has no model of its own: the dispatcher among its
     // members is this model's, found by what the `allOf` it sits in hands
     // on to them (`wrapperDiscriminatorWithin`), and the axes not to read
     // are not read inside it (`composedInlineMember`; #714). A component's
-    // is its own model's.
+    // is its own model's, and it is handed nothing.
     const inline = composedInlineMember(landing) !== undefined;
-    const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, inline ? options : {});
+    const found = readComponentAllOf(name, resolved, schemas, reading, origin ?? undefined, {
+      skipAxes: inline ? options.skipAxes : undefined,
+      wrapperDiscriminator: handed,
+    });
     return inline ? found : undefined;
   }
   // The member's own `properties` and `required` always apply, whether or
@@ -8072,7 +8075,7 @@ function readComponentAllOfMember(
     const branch = branches[index];
     // The keyword this union is read with: the one the composition decided
     // the union of, else the member's own, else the one handed down.
-    const explicit = axisDiscriminatorOf(resolved, variants, options.wrapperDiscriminator, schemas);
+    const explicit = axisDiscriminatorOf(resolved, variants, handed, schemas);
     if (branch) {
       // The member's own `discriminator`, written on the wrapper, goes with
       // the variant (#398 review round 6: the recursion passed the options
@@ -8256,6 +8259,41 @@ function writtenWrapperDiscriminatorOf(schema: SchemaObject): DiscriminatorKeywo
   // Nothing but annotations is read beside a `$ref` (#618 review).
   if (schema.$ref !== undefined) return undefined;
   return besideUnionMembers(schema).length === 0 ? schema.discriminator : undefined;
+}
+
+/**
+ * What the schema a reference lands on is handed of `handed` — what the
+ * `allOf` the reference sits in hands its members for a union among them
+ * (`wrapperDiscriminatorOf`), or a wrapper around the reference writes for
+ * it. Nothing, for a component its own `allOf` composes
+ * (`allOfComposesComponent`; `named`: the chain to it names a component,
+ * `MemberLanding.key`): it has a model of its own, which reads its unions
+ * by its own composition's keyword whatever is written around a reference
+ * to it, so `Paging: { allOf: [{ oneOf: [...] }] }` flattens or dispatches
+ * its union alike under `{ discriminator, allOf: [{ $ref: Paging }] }` and
+ * with no keyword at all. And `handed` itself for anything else, which the
+ * reading model reads as its own: a component that writes the union itself
+ * (`Paging: { oneOf: [...] }`, dispatched by the keyword; #429), a nullable
+ * alias, a bare alias on the way to either, and a schema a pointer names,
+ * which is no component (`composedInlineMember`).
+ *
+ * The one decision of where a keyword stops at a `$ref`, asked by every
+ * reader that follows one: the member reader and the variant builder
+ * (`readComponentAllOfMember`, `memberUnions`), the inline merge
+ * (`mergeAllOfMembers`, for what it hands on past a reference at all) and
+ * the pagination walk (`collectObjectProperties`), so the walk counts a
+ * union as dispatched exactly where the model dispatches it (MichaelDeBoey
+ * on #725: the walk decided it on its own, by what it had reached rather
+ * than by the component it had entered, so a keyword written around a
+ * `$ref` to `Paging: { allOf: [{ oneOf }] }` was carried across, and
+ * `meta.has_more`, which the model carries, was reported).
+ */
+export function handedPastRef(
+  handed: DiscriminatorKeyword | undefined,
+  landing: SchemaObject,
+  named: boolean,
+): DiscriminatorKeyword | undefined {
+  return named && allOfComposesComponent(landing) ? undefined : handed;
 }
 
 /**
@@ -8997,7 +9035,9 @@ function followMemberRefChain(
  * a variant model is built exactly when the model dispatches to it; the
  * limits every variant carries are read around the axes the same way
  * (`limitsOutsideAxes`), and the pagination walk counts a wrapper's
- * members as the node's own (`collectObjectProperties`).
+ * members as the node's own (`collectObjectProperties`). What such a
+ * wrapper is handed, and what a component in its place is not, is one
+ * decision too (`handedPastRef`).
  */
 function composedInlineMember(landing: MemberLanding): SchemaObject | undefined {
   if (!landing.read || landing.key !== undefined) return undefined;
@@ -9077,6 +9117,8 @@ function memberUnions(
   // is written alone (#613), and two unions are the two axes (#680). A
   // component's axes are its own model's; an inline wrapper's members are
   // this model's, and their unions with them (`composedInlineMember`).
+  // What the carrier is handed, by the member reader's rule (`handedPastRef`).
+  wrapper = handedPastRef(wrapper, carrier, landing.key !== undefined);
   if (allOfComposesComponent(carrier)) {
     if (composedInlineMember(landing) === undefined || seen.has(carrier)) return [];
     seen.add(carrier);

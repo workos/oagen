@@ -20,10 +20,9 @@ import {
   admits,
   componentSchemaOf,
   componentUnionDispatches,
-  allOfComposesComponent,
   composesOwnChain,
   axisDiscriminatorOf,
-  handedOn,
+  handedPastRef,
   documentComponentSchemas,
   declaredComponentProperty,
   nonObjectVariantContexts,
@@ -3907,7 +3906,15 @@ function readVariant(
  * to distinct consts, or the document declares a `discriminator` on the
  * union or on the `allOf` wrapper around it, `wrapperDiscriminatorOf`), so
  * the merge carries the base fields the dispatcher model carries and no
- * variant's. Where the component carries several unions and a keyword,
+ * variant's. The keyword reaches the union here exactly where it reaches
+ * it in the component's own model, by the helpers the component reader
+ * asks: through an inline `allOf` wrapper (`wrapperDiscriminatorWithin`),
+ * and past a `$ref` inside the component's chain to anything but a
+ * component its own `allOf` composes (`handedPastRef`) — so `Meta: {
+ * discriminator: { mapping }, allOf: [{ $ref: Base }, { $ref: Paging }] }`
+ * over `Paging: { oneOf: [...] }` dispatches, and a merge naming `Meta`
+ * leaves the union to it (review of #725). Where the component carries
+ * several unions and a keyword,
  * the keyword goes with one of them, as the component's own model reads
  * it (`axisDiscriminatorOf`; #718): that one is left to the component and
  * every other is flattened into the merge. An inline member's union is
@@ -3980,11 +3987,14 @@ export function mergeAllOfMembers(
   // in hands its members for a union among them (`wrapperDiscriminatorOf`:
   // the keyword as written, or the decision which of several unions it goes
   // with), by which an inherited union dispatches as its component's model
-  // does.
+  // does. `viaComponent`: whether a `$ref` on the chain `s` was reached by
+  // names a component, which decides what the schema the chain lands on is
+  // handed (`handedPastRef`).
   const visit = (
     s: SchemaObject,
     origin: MergedProperty['origin'],
     wrapperDiscriminator?: SchemaObject['discriminator'],
+    viaComponent = false,
   ): void => {
     const capacity = origin === null ? 'inline' : 'inherited';
     if (done.inline.has(s) || done[capacity].has(s)) return;
@@ -4018,36 +4028,32 @@ export function mergeAllOfMembers(
           : { name: resolveSchemaName(key), schema: target };
       // Nothing written beside the `$ref` is read — not a bare alias's
       // `required`, `properties`, `allOf` or union (#618 review, #622) —
-      // as the component reader reads none (`componentAllOfMembers`), and
-      // no keyword is handed on past the `$ref`, as none was. A decision
-      // the composition around the `$ref` made of its keyword
-      // (`wrapperDiscriminatorOf`) goes on with a reference that stays
-      // inside the same component's chain (`handedOn`), as the component
-      // reader hands it to a `$ref` member's unions: the union the keyword
-      // goes with is left to the component and every other is flattened
-      // into the merge, as both are in the component's own model (#718). A
-      // component its own `allOf` composes is read by its own composition's
-      // decision, never by one made around the reference, as the component
-      // reader reads it (`composedInlineMember`: only a wrapper written
-      // inline, or a pointer to one, is part of the `allOf` it sits in;
-      // #714), so it is handed none. A pointer deeper into a component
-      // names a schema and no component, and is read as that schema written
-      // in its place is: what the `allOf` around it hands its members goes
-      // on to it whole, the keyword as written included (Greptile on #725:
-      // it was cleared here as past any `$ref`, so a merge naming `Pet: {
-      // discriminator: { mapping }, allOf: [{ $ref: Base }, { $ref:
-      // '#/components/schemas/Holder/properties/wrapped' }] }` flattened
-      // the variants `Pet` dispatches by that keyword).
-      const component = key !== undefined && allOfComposesComponent(target);
-      const past =
-        key === undefined
-          ? wrapperDiscriminator
-          : owner === origin && !component
-            ? handedOn(wrapperDiscriminator, () => undefined)
-            : undefined;
-      visit(target, owner, past);
+      // as the component reader reads none (`componentAllOfMembers`). What
+      // the `allOf` around the `$ref` hands its members for a union among
+      // them goes on with a reference that stays inside the same
+      // component's chain, the keyword as written and the decision alike,
+      // as the component reader hands it to a `$ref` member (#718 for the
+      // decision; MichaelDeBoey's review of #725 for the keyword: it was
+      // cleared past every `$ref`, so a merge naming `Meta: { discriminator:
+      // { mapping }, allOf: [{ $ref: Base }, { $ref: Paging }] }` over
+      // `Paging: { oneOf: [...] }` flattened the variants `Meta` dispatches
+      // by that keyword, and carried a field the pagination walk, reading
+      // as the model does, reported as none of its). A reference that
+      // starts an origin of its own is handed nothing: the keyword is the
+      // merge's, never the component's. What the chain lands on is then
+      // handed it by the reader's own rule (`handedPastRef`, below).
+      visit(target, owner, owner === origin ? wrapperDiscriminator : undefined, viaComponent || key !== undefined);
       return;
     }
+    // What the schema a chain of references lands on is handed, by the
+    // component reader's own rule (`handedPastRef`): nothing for a
+    // component its own `allOf` composes, which is read by its own
+    // composition's keyword (only a wrapper written inline, or one a
+    // pointer names with no component on the way, is part of the `allOf`
+    // it sits in; #714), and what the chain was handed for anything else —
+    // a component that writes the union itself, a nullable alias, a
+    // pointer's schema.
+    wrapperDiscriminator = handedPastRef(wrapperDiscriminator, s, viaComponent);
     for (const [key, value] of Object.entries(s.properties ?? {})) {
       if (value) declareProperty(declared, key, value, origin, false);
     }
