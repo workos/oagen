@@ -1529,6 +1529,19 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * nullable). A `$ref` no schema answers is the reference the type builder
  * types it as, a model that admits none, and rejects `null`.
  *
+ * A member that is no Schema Object abstains (`isSchemaObject`): a JSON
+ * Schema boolean — `true`, which admits every instance as `{}` does, and
+ * `false`, which the readers of an `allOf` read as they read `true`, a
+ * member that gives the merged model no field and no limit, the parser
+ * having no type for a schema that admits nothing — and anything else a
+ * document writes where a schema goes (`null`, a number, a string, a
+ * list). So does a `$ref` to a component that is one (`Anything: true`).
+ * It is answered before anything is asked of it or remembered for it: it
+ * has no keyword to read, and only an object can key the memo (#715
+ * review: every member reached the memo, so `{ allOf: [{ $ref: Owner }, {
+ * $ref: Tag }, true] }` failed the parse where the readers before, which
+ * asked who votes first, read it as nullable).
+ *
  * Any other schema admits `null` when it writes it (`writesNull`): a type
  * list naming `null`, OAS 3.0 `nullable: true` beside a `type`, a schema
  * of nothing but `null` (`isNullSchema`), a `const` of `null`, an `enum:`
@@ -1573,6 +1586,7 @@ export function schemaAdmitsNull(schema: SchemaObject, path: Set<SchemaObject> =
  * component).
  */
 export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set()): NullVote {
+  if (!isSchemaObject(schema)) return 'abstains';
   const settled = nullVotes.get(schema);
   if (settled !== undefined) return settled;
   if (path.has(schema)) return 'rejects';
@@ -1590,6 +1604,19 @@ export function nullVote(schema: SchemaObject, path: Set<SchemaObject> = new Set
   }
   nullVotes.set(schema, vote);
   return vote;
+}
+
+/**
+ * Whether a value written where a schema goes is a Schema Object: a plain
+ * object, the only value with keywords for a reader to ask and the only
+ * one a memo can be keyed by. A JSON Schema boolean (`true`, `false`; OAS
+ * 3.1) is none, and neither is anything else a document may hold there
+ * (`null`, a number, a string, a list). `nullVote` asks it of every schema
+ * it is handed, since the members of an `allOf` and the component a `$ref`
+ * names are whatever the document wrote.
+ */
+function isSchemaObject(value: unknown): value is SchemaObject {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
