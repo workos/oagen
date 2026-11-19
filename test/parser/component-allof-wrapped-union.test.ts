@@ -566,7 +566,7 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
     `);
   });
 
-  it('keeps a `$ref` member to a composed component a base with a model of its own, which keeps its dispatcher', async () => {
+  it('leaves a `$ref` member to a composed component as it was: a base with a model of its own, which keeps its dispatcher', async () => {
     const lines: string[] = [];
     for (const [label, pet, schemas] of [
       ['a `$ref` to a component around the union', W(Animal, ref('Wrapped')), { Wrapped: W(dunion) }],
@@ -576,8 +576,7 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
         W(Animal, beside({ additionalProperties: false }, ref('Wrapped'))),
         { Wrapped: W(dunion) },
       ],
-      ['a `$ref` to a component whose member is the wrapper', W(ref('Base'), extra), { Base: W(Animal, W(dunion)) }],
-      ['a `$ref` to the flat spelling of that component', W(ref('Base'), extra), { Base: W(Animal, dunion) }],
+      ['a `$ref` to a component that dispatches', W(ref('Base'), extra), { Base: W(Animal, dunion) }],
       ['a `$ref` to a plain object carrying the union (#429)', W(Animal, ref('Wrapped')), { Wrapped: dunion }],
     ] as const) {
       const spec = await parseJson(document('3.1.0', pet, { schemas }));
@@ -588,10 +587,26 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
       "a \`$ref\` to a component around the union: Pet extends Animal, Wrapped { id!: string } ; Wrapped {  } by kind to cat: Cat, dog: Dog
       the same \`$ref\`, wrapped: Pet extends Animal, Wrapped { id!: string } ; Wrapped {  } by kind to cat: Cat, dog: Dog
       the same \`$ref\`, in a closed wrapper: Pet extends Animal, Wrapped { id!: string } ; Wrapped {  } by kind to cat: Cat, dog: Dog
-      a \`$ref\` to a component whose member is the wrapper: Pet extends Base { id!: string, extra?: string } ; Base extends Animal { id!: string } by kind to cat: Cat, dog: Dog
-      a \`$ref\` to the flat spelling of that component: Pet extends Base { id!: string, extra?: string } ; Base extends Animal { id!: string } by kind to cat: Cat, dog: Dog
+      a \`$ref\` to a component that dispatches: Pet extends Base { id!: string, extra?: string } ; Base extends Animal { id!: string } by kind to cat: Cat, dog: Dog
       a \`$ref\` to a plain object carrying the union (#429): Pet extends Animal, Wrapped { id!: string } by kind to cat: Cat, dog: Dog ; Wrapped {  } by kind to cat: Cat, dog: Dog"
     `);
+    expect(warnings()).toEqual([]);
+  });
+
+  it('reads a component a `$ref` member names through its own wrappers: it dispatches, and the model naming it carries its base fields', async () => {
+    const read = async (base: unknown) =>
+      ownModels(await parseJson(document('3.1.0', W(ref('Base'), extra), { schemas: { Base: base } })));
+    const flat = await read(W(Animal, dunion));
+    expect(flat).toMatchInlineSnapshot(`
+      [
+        "Pet extends Base { id!: string, extra?: string }",
+        "Base extends Animal { id!: string } by kind to cat: Cat, dog: Dog",
+      ]
+    `);
+    // `Base` was `{ id }` with no dispatch, in each of these spellings.
+    expect(await read(W(Animal, W(dunion)))).toEqual(flat);
+    expect(await read(W(W(Animal, dunion)))).toEqual(flat);
+    expect(await read(W(Animal, beside({ additionalProperties: false }, dunion)))).toEqual(flat);
     expect(warnings()).toEqual([]);
   });
 
