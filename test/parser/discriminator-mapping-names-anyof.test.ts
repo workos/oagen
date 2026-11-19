@@ -810,6 +810,27 @@ describe.each(['3.1.0', '3.0.3'])('#718 a discriminator mapping naming the anyOf
       }
     });
 
+    it('two keywords: a union written with its own is not taken for what its variants pin, and keeps its mapping where the first dispatches nothing', async () => {
+      const own = keyword({ feline: at('Cat'), canine: at('Dog') });
+      // The first keyword writes no mapping and its union pins nothing: it dispatches no union.
+      const { spec } = await read(
+        doc({
+          Pick: {
+            allOf: [
+              { oneOf: petToy, discriminator: keyword() },
+              { anyOf: catDog, discriminator: own },
+            ],
+          },
+        }),
+      );
+      expect(reads(spec, 'Pick')).toBe('{ name?: string, toy?: string } by kind { feline: Cat, canine: Dog }');
+      // Written beside the `allOf`, the first keyword is still not the `anyOf`'s: the union has its own.
+      const beside = await read(
+        doc({ Pick: { allOf: [{ oneOf: petToy }, { anyOf: catDog, discriminator: own }], discriminator: keyword() } }),
+      );
+      expect(reads(beside.spec, 'Pick')).toBe('{ name?: string, toy?: string } by kind { feline: Cat, canine: Dog }');
+    });
+
     it('pagination: a stop field the flattened union’s variants declare resolves behind a merge naming the model, as it does with no mapping', async () => {
       const bool = { type: 'boolean' };
       const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };

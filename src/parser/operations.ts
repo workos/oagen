@@ -1167,8 +1167,8 @@ export function extractOperations(
       // mints from its stem from the ones the document gives (`bodyNamesOf`),
       // where the two can be told apart to any effect: an operation whose
       // stem contains another's or is contained in one (`contested`), and
-      // one that holds a name an operation of another stem holds too, of
-      // which one of their stems is a part (`namesHeldAcrossStems`).
+      // one that holds a name an operation of another stem holds too
+      // (`namesHeldAcrossStems`).
       const shared = namesHeldAcrossStems(
         readings.map(({ built, held }) => ({ stem: built.modelQualifier, names: held })),
       );
@@ -7689,8 +7689,8 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * another operation's, by operation key (`${method} ${path}`), each name
  * with the one the operation's model or inline enum takes instead (#683).
  *
- * Every name the bodies mint carries the stem the operation's models are
- * named from — its `operationId`'s (`operationIdModelBase`) or its
+ * Every name the bodies mint is built on the stem the operation's models
+ * are named from — its `operationId`'s (`operationIdModelBase`) or its
  * path-derived prefix — but the names are concatenations, so two operations
  * can mint one: `createPet` returning a `draft_response` object names it
  * `CreatePetResponseDraftResponse`, the response of
@@ -7724,11 +7724,15 @@ function typeNamesOf({ services, inlineModels }: OperationExtractionResult): str
  * is read once, built on its own, for the names its bodies hold, and those
  * that `contested` names — an operation whose stem contains another's or is
  * contained in one (`stemsInContest`) — or that hold a name an operation of
- * another stem holds too, of which one of their stems is a part
- * (`namesHeldAcrossStems`), once more under a stand-in for the stem, which
- * tells the names an operation mints from the ones the document gives. A
- * document in which no stem contains another and no two operations hold
- * such a name reads each operation that one more time, and nothing else.
+ * another stem holds too (`namesHeldAcrossStems`), once more under a
+ * stand-in for the stem, which tells the names an operation mints from the
+ * ones the document gives. The name itself says nothing of who minted it:
+ * the `owner` of `getList`'s array items is `GetOwner`, the `ListItem`
+ * cleaned out of it (`cleanSchemaName`), and is still `getList`'s own
+ * beside a `listDogs` body pinning `object: get_owner` (Greptile, #724).
+ * A document in which no stem contains another and no two operations of
+ * two stems hold one name reads each operation that one more time, and
+ * nothing else.
  *
  * The number is chosen against every name in play (`taken`, read only once
  * a name is given up, which most documents never see): `updateAnimal`
