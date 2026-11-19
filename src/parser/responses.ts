@@ -35,6 +35,7 @@ import {
   warnOnUnreadUnion,
   withSchemaConstraints,
   withWrapperDocs,
+  withoutVetoedNull,
 } from './schemas.js';
 import { isPendingVariant } from './schema-refs.js';
 import type { EnvelopeCompanion } from './envelope-companion-names.js';
@@ -1212,7 +1213,12 @@ function extractDirectResource(
   }
   if (reading.kind === 'unwrapped') {
     const outer = wrapper ? withWrapperDocs(schema, wrapper) : schema;
-    return extractDirectResource(reading.member, contextName, componentSchemas, settle, outer);
+    const read = extractDirectResource(reading.member, contextName, componentSchemas, settle, outer);
+    // The member's type, without the `null` the `allOf` vetoes
+    // (`withoutVetoedNull`; #716): `{ allOf: [{ type: ['array', 'null'],
+    // items }, { not: { type: 'null' } }] }` is the bare array, as the same
+    // body is on a field.
+    return { ...read, response: withoutVetoedNull(schema, read.response) };
   }
   if (reading.kind === 'merged') {
     const merged = mergeAllOfMembers(schema, componentSchemas);
