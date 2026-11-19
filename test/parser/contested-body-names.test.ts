@@ -1055,11 +1055,13 @@ describe('#683', () => {
         expect(warn).not.toHaveBeenCalled();
       });
 
-      it('leaves a response named from its `object` const beside an operation’s own response of that name to the merge, as before', async () => {
+      it('leaves an operation its own response name beside a response another operation’s `object` const names so (#712)', async () => {
         // `object: get_pet_response` names the response `GetPetResponse`, the name `getPet`
-        // mints from its stem. No stem mints the const's name, so nothing is given up —
-        // whether the operation is `pet`, whose stem the name happens to hold, or `listDogs`
-        // — and the merge keeps the larger definition for both, with its warning.
+        // mints from its stem. No stem mints the const's name, so nothing is given up to a
+        // stem — whether the operation is `pet`, whose stem the name happens to hold, or
+        // `listDogs`. Since #712 the name is `getPet`'s all the same: the merge kept the
+        // larger definition for both, with its warning, and now what the document names so
+        // takes the numbered name, with a note (see const-named-response-name-clash.test.ts).
         for (const [path, operationId] of [
           ['/pets', 'pet'],
           ['/dogs', 'listDogs'],
@@ -1072,10 +1074,11 @@ describe('#683', () => {
             }),
           );
           expect(summary(spec).filter((line) => !line.startsWith('GET'))).toEqual([
-            'GetPetResponse { object: "get_pet_response", a: string }',
+            'GetPetResponse { c: string }',
+            'GetPetResponse2 { object: "get_pet_response", a: string }',
           ]);
           expect(warn.mock.calls.map((call: unknown[]) => call[0])).toEqual([
-            '[oagen] Warning: Inline model "GetPetResponse" has more than one definition with different fields or field types (1 vs 2) — keeping the one with more fields',
+            '[oagen] Renamed inline model "GetPetResponse" → "GetPetResponse2": its shape differs from operation GET /pets/{id}\'s own "GetPetResponse"',
           ]);
         }
       });
