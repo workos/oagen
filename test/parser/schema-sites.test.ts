@@ -978,6 +978,43 @@ const sites: Site[] = [
     reading: 'unread',
     build: (s) => parameter({ name: 'note', in: 'query', content: [{ schema: s }] }),
   },
+  // A `content` that is no map declares no media type, to the readers as to the walk (#710: the readers
+  // typed a media type `0` from each of these, which the walk left out).
+  {
+    label: 'a request body `content` written as an array, which declares no media type',
+    reading: 'unread',
+    build: (s) => post({ requestBody: { content: [{ schema: s }] } }),
+  },
+  {
+    label: 'a `200` response `content` written as an array, which declares no media type',
+    reading: 'unread',
+    build: (s) => get({ responses: { '200': { ...ok, content: [{ schema: s }] } } }),
+  },
+  {
+    label: 'a `404` response `content` written as an array, which declares no media type',
+    reading: 'unread',
+    build: (s) => responses({ '404': { ...ok, content: [{ schema: s }] } }),
+  },
+  {
+    label: 'a `default` response `content` written as an array, which declares no media type',
+    reading: 'unread',
+    build: (s) => responses({ default: { ...ok, content: [{ schema: s }] } }),
+  },
+  {
+    label: 'a response header `content` written as an array, which declares no media type',
+    reading: 'unread',
+    build: (s) => okWith({ 'X-Note': { content: [{ schema: s }] } }),
+  },
+  {
+    label: "a webhook's request body `content` written as an array, which declares no media type",
+    reading: 'unread',
+    build: (s) => webhook({ requestBody: { content: [{ schema: s }] } }),
+  },
+  {
+    label: "a callback's request body `content` written as an array, which declares no media type",
+    reading: 'unread',
+    build: (s) => callback({ requestBody: { content: [{ schema: s }] } }),
+  },
 
   // --- the other methods, and keys that are none -------------------------------------
   ...['put', 'post', 'patch', 'delete', 'head', 'options', 'trace'].map((method): Site => ({
