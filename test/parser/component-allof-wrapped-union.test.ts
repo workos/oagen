@@ -1162,4 +1162,106 @@ describe('#714 a component’s `allOf` member that is an `allOf` around a union 
     }
     expect(warnings()).toEqual([]);
   });
+  it.each(['3.0.3', '3.1.0'])(
+    'hands no keyword across a `$ref` to a component its own `allOf` composes, on the walk as in the model, under OAS %s',
+    async (openapi) => {
+      // Greptile on #725: a keyword written on a wrapper around the `$ref` was carried across it,
+      // so the union `C` flattens counted as dispatched, and a stop field the model has resolved to none.
+      const endOfIteration = { kind: 'hasMore', path: 'meta.has_more' };
+      const byMapping = {
+        propertyName: 'kind',
+        mapping: { cursor: '#/components/schemas/Cursor', page: '#/components/schemas/Page' },
+      };
+      const pages = { oneOf: [ref('Cursor'), ref('Page')] };
+      const base = object({ base: string });
+      const x = object({ x: string });
+      const closed = { additionalProperties: false };
+      const keyed = (...members: unknown[]) => beside({ discriminator: byMapping }, ...members);
+      const pointer = { $ref: '#/components/schemas/Holder/properties/c' };
+      const listPets = (dispatcher: unknown, meta: unknown) => ({
+        openapi,
+        info: { title: 'repro', version: '1' },
+        paths: {
+          '/pets': {
+            get: {
+              operationId: 'listPets',
+              parameters: [{ name: 'after', in: 'query', schema: string }],
+              responses: { '200': ok(object({ data: { type: 'array', items: string }, meta })) },
+              'x-pagination': { endOfIteration },
+            },
+          },
+        },
+        components: {
+          schemas: {
+            Cursor: object({ kind: string, has_more: boolean, next_after: string }),
+            Page: object({ kind: string, has_more: boolean, next_page: integer }),
+            // A component its own `allOf` composes, which flattens its union: no variant pins `kind`.
+            C: W(pages),
+            Holder: object({ c: W(pages) }),
+            Meta: dispatcher,
+            Via: W(ref('Meta'), object({ trace_id: string })),
+          },
+        },
+      });
+      const metas: Array<readonly [site: string, meta: unknown, model: string]> = [
+        ['an inline merge naming the component', W(ref('Meta'), object({ trace_id: string })), 'ListPetsMeta'],
+        ['a component naming it as a base', ref('Via'), 'Via'],
+      ];
+      // The keyword does not reach `C`'s union, wherever it is written around the reference.
+      const flattened: Array<readonly [label: string, dispatcher: unknown]> = [
+        ['the keyword beside the `allOf` that names `C`', { discriminator: byMapping, ...W(base, ref('C')) }],
+        ['the keyword on a wrapper around the `$ref`', W(base, keyed(ref('C')))],
+        ['that wrapper in a closed wrapper', W(base, beside(closed, keyed(ref('C'))))],
+        [
+          'that wrapper around the `$ref` and another member, in a closed wrapper',
+          W(base, beside(closed, keyed(ref('C'), x))),
+        ],
+        [
+          'the keyword on a nullable wrapper around the `$ref`',
+          W(base, { discriminator: byMapping, oneOf: [ref('C'), { type: 'null' }] }),
+        ],
+      ];
+      for (const [site, meta, model] of metas) {
+        for (const [label, dispatcher] of flattened) {
+          warn.mockClear();
+          const spec = await parseJson(listPets(dispatcher, meta));
+          const at = `${label}, read by ${site}`;
+          expect(modelOf(spec, 'Meta').discriminator, at).toBeUndefined();
+          expect(
+            modelOf(spec, model).fields.map(({ name }) => name),
+            at,
+          ).toContain('has_more');
+          expect(spec.services.flatMap(({ operations }) => operations)[0]!.pagination?.endOfIteration, at).toEqual(
+            endOfIteration,
+          );
+          expect(warnings(), at).toEqual([]);
+        }
+        // A pointer in place of the `$ref` names a schema and no component: the wrapper it lands on
+        // is part of the `allOf`, the keyword reaches its union, and `Meta` dispatches.
+        for (const [label, dispatcher] of [
+          ['a pointer in place of the `$ref`', W(base, keyed(pointer))],
+          ['the same in a closed wrapper', W(base, beside(closed, keyed(pointer)))],
+        ] as const) {
+          warn.mockClear();
+          const spec = await parseJson(listPets(dispatcher, meta));
+          const at = `${label}, read by ${site}`;
+          expect(modelOf(spec, 'Meta').discriminator, at).toEqual({
+            property: 'kind',
+            mapping: { cursor: 'Cursor', page: 'Page' },
+          });
+          expect(
+            modelOf(spec, model).fields.map(({ name }) => name),
+            at,
+          ).toEqual(['base', 'trace_id']);
+          expect(
+            spec.services.flatMap(({ operations }) => operations)[0]!.pagination?.endOfIteration,
+            at,
+          ).toBeUndefined();
+          expect(warnings(), at).toEqual([
+            expect.stringContaining('endOfIteration path "meta.has_more" does not resolve to a field'),
+          ]);
+        }
+      }
+    },
+  );
 });
