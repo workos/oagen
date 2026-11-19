@@ -265,6 +265,35 @@ export function pendingNullVetoed(ref: ModelRef): boolean {
 }
 
 /**
+ * `type` as a site that vetoes `null` admits it (`withoutVetoedNull`;
+ * #716): without the `nullable` wrapper it is under, and, where it is a
+ * union, without the wrapper any of its variants is under, at any depth of
+ * unions, since a union admits `null` through every variant that does —
+ * `nullable<string> | integer` is `string | integer`, and `Cat | Dog` over
+ * two nullable components is no `nullable<Cat> | nullable<Dog>` (Greptile,
+ * #726: the wrapper was taken off the type alone, so a union kept the
+ * `null` a variant admits). What a type nests is not the value itself and
+ * keeps its own: an array's items, a map's values, a model's fields. A
+ * reference still pending has no type to take a wrapper off, and is marked
+ * for the pass that settles it (`recordPendingNullVeto`). A union's
+ * variants are rewritten in place: the union is this site's own, built for
+ * it or cloned into it, and stays the object, with the list, that a
+ * discriminator's deferred mapping entries were recorded against.
+ */
+export function withoutNull(type: TypeRef): TypeRef {
+  let bare = type;
+  while (bare.kind === 'nullable') bare = bare.inner;
+  if (bare.kind === 'model' && isPendingSchemaRef(bare)) recordPendingNullVeto(bare, true);
+  if (bare.kind === 'union') {
+    const { variants } = bare;
+    variants.forEach((variant, index) => {
+      variants[index] = withoutNull(variant);
+    });
+  }
+  return bare;
+}
+
+/**
  * The entries of a discriminator `mapping` whose target is a pointer
  * deeper into a component (`#/components/schemas/Zoo/properties/dog`;
  * #539 review, #619), each to be written as the model the schema it

@@ -147,6 +147,7 @@ import {
   pendingNullVetoed,
   pendingSiteLimitsOf,
   recordPendingNullVeto,
+  withoutNull,
   schemaAtPointer,
   schemaRefOf,
   schemaRefTokens,
@@ -977,11 +978,12 @@ class PointerResolver {
     // A site that vetoes `null` — the `allOf` the pointer is read as a
     // member of writes a `not` that admits it (`withoutVetoedNull`; #716) —
     // is typed as the schema the pointer lands on without its `nullable`
-    // wrapper, as the same `allOf` around a `$ref` to a nullable component
-    // is the bare component (Greptile, #726: the veto was read when the
-    // type was built, when a pointer has none yet, and the `null` survived).
-    const admitted = underNullableWrappers(pending as TypeRef);
-    if (vetoed && admitted !== pending) replaceTypeRef(pending, admitted);
+    // wrapper (`withoutNull`), as the same `allOf` around a `$ref` to a
+    // nullable component is the bare component (Greptile, #726: the veto
+    // was read when the type was built, when a pointer has none yet, and
+    // the `null` survived).
+    const admitted = vetoed ? withoutNull(pending as TypeRef) : pending;
+    if (admitted !== pending) replaceTypeRef(pending, admitted);
     // The settled type carries the pointed schema's limits — what the type
     // reached carries, under every nullable wrapper it settled into
     // (`underNullableWrappers`) — conjoined with the site's own, as a `$ref`

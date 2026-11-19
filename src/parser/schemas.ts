@@ -12,11 +12,11 @@ import {
   markPendingSchemaRef,
   pendingSchemaRef,
   pendingSiteLimitsOf,
-  recordPendingNullVeto,
   recordPendingSiteLimits,
   schemaRefOf,
   schemaRefTarget,
   schemaRefTokens,
+  withoutNull,
   type DerivedMappingSource,
 } from './schema-refs.js';
 import {
@@ -757,22 +757,20 @@ function asNullable(ref: TypeRef): TypeRef {
 /**
  * `ref`, the type of the member `schema`'s `allOf` is read as
  * (`allOfReadAsMember`), as the `allOf` admits it: without its `nullable`
- * wrapper when the `allOf` vetoes `null` (`allOfVetoesNull`; #716). A
+ * wrapper, and those of a union's variants (`withoutNull`), when the
+ * `allOf` vetoes `null` (`allOfVetoesNull`; #716). A
  * schema that wraps its own type in `nullable` (`wrapsOwnType`: a type
  * list naming `null` beside the `allOf`) says so itself, before its
  * `allOf` is read, and keeps the member's type as built. A member that is
  * a JSON Pointer `$ref` has no type yet: the reference stays, marked so
- * that the type it is settled to admits no `null` either
- * (`recordPendingNullVeto`; Greptile, #726: a pointer to a nullable schema
- * passed through as it was, and settled to `nullable<…>`). Exported for
+ * that the type it is settled to admits no `null` either (`withoutNull`;
+ * Greptile, #726: a pointer to a nullable schema passed through as it
+ * was, and settled to `nullable<…>`). Exported for
  * the response path, which types a body's unwrapped member itself
  * (`extractDirectResource`).
  */
 export function withoutVetoedNull(schema: SchemaObject, ref: TypeRef): TypeRef {
-  if (wrapsOwnType(schema) || !allOfVetoesNull(schema)) return ref;
-  const bare = ref.kind === 'nullable' ? ref.inner : ref;
-  if (bare.kind === 'model' && isPendingSchemaRef(bare)) recordPendingNullVeto(bare, true);
-  return bare;
+  return wrapsOwnType(schema) || !allOfVetoesNull(schema) ? ref : withoutNull(ref);
 }
 
 /**
