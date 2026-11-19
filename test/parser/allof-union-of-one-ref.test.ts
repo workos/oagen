@@ -354,6 +354,57 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
       expect(referencesThroughUnion(around)).toBe(false);
     });
 
+    it('one object held outside a union and under it is read in both places (Greptile)', () => {
+      // A `transformSpec` hook or a YAML anchor writes one object twice. Read outside the union first, it
+      // was skipped under it, so the member named no component where two copies of the object named one.
+      const shared = ref('Pet') as SchemaObject;
+      const toy = ref('Toy') as SchemaObject;
+      const refs = (member: SchemaObject) => unionReferencesOf(member).map((reference) => reference.$ref);
+      expect(refs({ allOf: [shared], oneOf: [shared] })).toEqual([at('Pet')]);
+      expect(refs({ allOf: [{ ...shared }], oneOf: [{ ...shared }] })).toEqual([at('Pet')]);
+      // In either order of the two keywords, and named once however often the unions hold it.
+      expect(refs({ oneOf: [shared], allOf: [shared] })).toEqual([at('Pet')]);
+      expect(refs({ allOf: [shared, { oneOf: [shared] }], anyOf: [shared] })).toEqual([at('Pet')]);
+      // A wrapper held in both places is read again under the union for the `$ref` it holds.
+      const wrapper: SchemaObject = { allOf: [shared] };
+      expect(refs({ allOf: [wrapper], oneOf: [wrapper] })).toEqual([at('Pet')]);
+      // The same guard for the walk that counts a `$ref` on a branch of two or more variants.
+      expect(declaresInlineProperties({ allOf: [shared, toy], oneOf: [shared, toy] })).toBe(true);
+      expect(declaresInlineProperties({ allOf: [{ ...shared }, { ...toy }], oneOf: [{ ...shared }, { ...toy }] })).toBe(
+        true,
+      );
+      expect(declaresInlineProperties({ allOf: [wrapper], oneOf: [wrapper, { type: 'string' }] })).toBe(true);
+      // Outside a union a `$ref` still declares nothing, however often it is held.
+      expect(declaresInlineProperties({ allOf: [shared, shared] })).toBe(false);
+      expect(refs({ allOf: [shared, shared] })).toEqual([]);
+    });
+
+    it('two declarations of one property conjoin whether the member’s `$ref` is one object or two (Greptile)', async () => {
+      // `owner` declared as `{ allOf: [X], oneOf: [X] }` beside `{ $ref: Tag }`: with one shared `X = { $ref:
+      // Pet }` the conjunction took the first for a member no reader reads and kept it alone, `Tag` lost.
+      const document = doc({
+        Holder: {
+          allOf: [object({ owner: { allOf: [ref('Pet')], oneOf: [ref('Pet')] } }), object({ owner: ref('Tag') })],
+        },
+      });
+      const file = await write(document);
+      const copies = await parseSpec(file);
+      const shared = await parseSpec(file, {
+        transformSpec: (spec) => {
+          const holder = (spec.components as { schemas: Record<string, { allOf: Array<{ properties: Doc }> }> }).schemas
+            .Holder!;
+          const owner = holder.allOf[0]!.properties.owner as { allOf: unknown[]; oneOf: unknown[] };
+          owner.oneOf[0] = owner.allOf[0];
+          return spec;
+        },
+      });
+      for (const spec of [copies, shared]) {
+        expect(fieldsOf(model(spec, 'Holder'))).toEqual(['owner?: HolderOwner']);
+        expect(fieldsOf(model(spec, 'HolderOwner'))).toEqual(['name?: string', 'label?: string']);
+      }
+      expect(shared.models).toEqual(copies.models);
+    });
+
     it('`declaresInlineProperties` is unchanged: a `$ref` under a union of one, or a nullable wrapper, declares none (#555)', () => {
       expect(declaresInlineProperties({ oneOf: [pet] })).toBe(false);
       expect(declaresInlineProperties({ oneOf: [pet, { type: 'null' }] })).toBe(false);
@@ -681,6 +732,46 @@ describe.each(['3.1.0', '3.0.3'])('#717 an allOf member that is a union of one $
       for (const member of [one('Missing'), ref('Missing')]) {
         await expect(read(twins({ allOf: [member, ref('Owner')] }))).rejects.toThrow(/Can't resolve \$ref/);
       }
+    });
+
+    it('a `$ref` no component answers, which only `transformSpec` can write, is weighed as the `$ref` member is', async () => {
+      const missing = () => ({ $ref: '#/components/schemas/Missing' });
+      const parsed = async (schema: (reference: unknown) => unknown) => {
+        warn.mockClear();
+        const spec = await parseSpec(await write(twins({})), {
+          transformSpec: (document) => {
+            const { schemas } = document.components as { schemas: Record<string, { properties: Doc }> };
+            (schemas as Record<string, unknown>).Comp = schema(missing());
+            schemas.Holder!.properties.field = schema(missing());
+            return document;
+          },
+        });
+        return { spec, warnings: warn.mock.calls.map((call: unknown[]) => String(call[0])) };
+      };
+      // It contributes nothing to the merge, and the merge is made all the same.
+      const merged = {
+        component: ['ownerId?: string'],
+        named: 'Comp',
+        field: 'HolderField',
+        inline: ['ownerId?: string'],
+      };
+      const members: Array<(reference: unknown) => unknown> = [
+        (m) => ({ allOf: [{ oneOf: [m] }, ref('Owner')] }),
+        (m) => ({ allOf: [m, ref('Owner')] }),
+        (m) => ({ allOf: [{ oneOf: [m] }, one('Owner')] }),
+        (m) => ({ oneOf: [m], anyOf: [ref('Owner')] }),
+      ];
+      for (const schema of members) {
+        const { spec, warnings } = await parsed(schema);
+        expect(twinReading(spec)).toEqual(merged);
+        expect(warnings).toEqual([]);
+      }
+      // Alone beside a `required` list it declares no properties the list could add to: the member stands.
+      const fieldOf = (spec: ApiSpec) => fieldsOf(model(spec, 'Holder'))[0];
+      expect(fieldOf((await parsed((m) => ({ allOf: [{ oneOf: [m] }], required: ['name'] }))).spec)).toBe(
+        'field?: (Missing)',
+      );
+      expect(fieldOf((await parsed((m) => ({ allOf: [m], required: ['name'] }))).spec)).toBe('field?: Missing');
     });
   });
 

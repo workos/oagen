@@ -2406,6 +2406,33 @@ export interface MergedAllOf {
 }
 
 /**
+ * The guard of a walk over a member's `allOf` members and union variants
+ * that reads a schema in one of two capacities, the second reading all the
+ * first does and more: outside the unions that count a `$ref`, where a
+ * `$ref` declares nothing, and under one, where it counts
+ * (`declaresInlineProperties`: on a branch of two or more variants;
+ * `unionReferencesOf`: under any union). The function it returns says
+ * whether `schema` is to be read in the capacity given, and records it: a
+ * schema is read once in each, and one already read under a union is not
+ * read again outside one, which could find nothing more. So a walk ends on
+ * a schema that holds itself, and one object written in both places is
+ * read in both (Greptile, #717 review: one set for both capacities read
+ * the shared `X = { $ref: Pet }` of `{ allOf: [X], oneOf: [X] }` outside
+ * the union first and skipped it under it, so the member named no
+ * component, where the same member written with two copies of `X` named
+ * `Pet`).
+ */
+function unionWalkGuard(): (schema: SchemaObject, underUnion: boolean) => boolean {
+  const outside = new Set<SchemaObject>();
+  const under = new Set<SchemaObject>();
+  return (schema, underUnion) => {
+    if (under.has(schema) || (!underUnion && outside.has(schema))) return false;
+    (underUnion ? under : outside).add(schema);
+    return true;
+  };
+}
+
+/**
  * Whether a schema declares object properties inline: `properties` of its
  * own, or — through a nested `allOf` member or a `oneOf`/`anyOf` variant —
  * a schema that does. A `$ref` declares none here, whatever its component
@@ -2426,7 +2453,7 @@ export interface MergedAllOf {
  * it does under a union of several, which alone is counted here.
  */
 export function declaresInlineProperties(schema: SchemaObject): boolean {
-  const seen = new Set<SchemaObject>();
+  const enter = unionWalkGuard();
   // `onBranch`: under a variant of a union of two or more non-null
   // variants, where a `$ref` declares what its component declares — the
   // merge flattens the component's properties in (`declareVariant`), so
@@ -2440,8 +2467,7 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
   // `$ref` such a member is read as counts as a `$ref` member's does
   // (`unionReferencesOf`; #717).
   const declares = (s: SchemaObject, onBranch: boolean): boolean => {
-    if (seen.has(s)) return false;
-    seen.add(s);
+    if (!enter(s, onBranch)) return false;
     if (s.$ref) return onBranch;
     if (s.properties) return true;
     if ((s.allOf ?? []).some((sub) => declares(sub, onBranch))) return true;
@@ -2486,14 +2512,17 @@ export function declaresInlineProperties(schema: SchemaObject): boolean {
  * through it `classifyInlineSchema`, `besideUnionsCompose` and the fold —
  * the splice (`splicesIntoAllOf`) and the conjunction of two declarations
  * (`conjoinTypedDeclarations`). A schema met again on the walk names
- * nothing more.
+ * nothing more, in the capacity it was read in (`unionWalkGuard`): one
+ * object the member holds both outside its unions and under one — `{
+ * allOf: [X], oneOf: [X] }` with one `X = { $ref: Pet }`, which a
+ * `transformSpec` hook or a YAML anchor writes — is named by the union, as
+ * two copies of it are.
  */
 export function unionReferencesOf(member: SchemaObject): SchemaObject[] {
-  const seen = new Set<SchemaObject>();
+  const enter = unionWalkGuard();
   const references: SchemaObject[] = [];
   const read = (s: SchemaObject, underUnion: boolean): void => {
-    if (seen.has(s)) return;
-    seen.add(s);
+    if (!enter(s, underUnion)) return;
     if (s.$ref !== undefined) {
       if (underUnion) references.push(s);
       return;
